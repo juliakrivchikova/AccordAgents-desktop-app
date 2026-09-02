@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { access, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 import {
+  claudeModelProbeEnv,
   CliAgentRunner,
   CodexAppServerRunError,
   parseClaudeModelPickerOutput,
   resolveCodexCompactTimeoutMs,
-  runClaudeModelProbeInPty
+  runClaudeModelProbeInPty,
+  runClaudeModelProbeWithExpect
 } from "./cliAgents";
 import { CommandError } from "./command";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
@@ -225,6 +229,188 @@ test("macOS Claude model discovery uses a full-height, system-expect-compatible 
   assert.match(script, /spawn \$env\(ACCORD_AGENTS_CLAUDE_EXECUTABLE\) --safe-mode --no-chrome/);
   assert.doesNotMatch(script, /spawn --/);
   assert.ok(script.indexOf("set stty_init") < script.indexOf("spawn $env"));
+  assert.match(script, /send "\\033"\nafter 250\nsend "\/exit\\r"\nset timeout 2/);
+});
+
+test("Claude model probe environment suppresses prompt history and session persistence", () => {
+  const env = claudeModelProbeEnv({
+    PATH: "/usr/bin",
+    CLAUDE_CODE_SKIP_PROMPT_HISTORY: "0",
+    CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1"
+  });
+
+  assert.deepEqual(env, {
+    PATH: "/usr/bin",
+    CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1"
+  });
+});
+
+test("macOS Claude model discovery passes cwd, safe env, and ignored stdin through its spawn boundary", async () => {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const child = Object.assign(new EventEmitter(), {
+    stdout,
+    stderr,
+    killed: false,
+    exitCode: null as number | null,
+    kill() {
+      this.killed = true;
+      return true;
+    }
+  });
+  let launch: { command: string; args: readonly string[]; options: Record<string, any> } | undefined;
+  const picker = "Select model 1. Default (recommended) ✔ Opus 4.8 2. Fable Fable 5 Enter to set · Esc to cancel";
+
+  const probe = runClaudeModelProbeWithExpect({
+    executable: "/tmp/claude-stub",
+    env: {
+      PATH: "/usr/bin",
+      CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1"
+    },
+    cwd: "/tmp/trusted-repo",
+    expectScript: "exit 0",
+    timeoutMs: 1_000,
+    spawnExpect: ((command: string, args: readonly string[], options: Record<string, any>) => {
+      launch = { command, args, options };
+      queueMicrotask(() => {
+        stdout.write(picker);
+        child.exitCode = 0;
+        child.emit("exit", 0, null);
+      });
+      return child;
+    }) as any
+  });
+
+  assert.deepEqual(parseClaudeModelPickerOutput(await probe).map((model) => model.id), ["fable"]);
+  assert.equal(launch?.command, "expect");
+  assert.deepEqual(launch?.args, ["-c", "exit 0"]);
+  assert.equal(launch?.options.cwd, "/tmp/trusted-repo");
+  assert.deepEqual(launch?.options.stdio, ["ignore", "pipe", "pipe"]);
+  assert.equal(launch?.options.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY, "1");
+  assert.equal("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE" in launch!.options.env, false);
+  assert.equal(launch?.options.env.ACCORD_AGENTS_CLAUDE_EXECUTABLE, "/tmp/claude-stub");
+});
+
+test("macOS Claude model discovery keeps a captured picker when process exit is late", async () => {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let killed = false;
+  const child = Object.assign(new EventEmitter(), {
+    stdout,
+    stderr,
+    killed: false,
+    exitCode: null as number | null,
+    kill() {
+      killed = true;
+      this.killed = true;
+      return true;
+    }
+  });
+  const picker = "Select model 1. Default (recommended) ✔ Opus 4.8 2. Fable Fable 5 Enter to set · Esc to cancel";
+
+  const output = await runClaudeModelProbeWithExpect({
+    executable: "/tmp/claude-stub",
+    env: {},
+    cwd: "/tmp/trusted-repo",
+    expectScript: "set timeout -1",
+    timeoutMs: 20,
+    spawnExpect: (() => {
+      queueMicrotask(() => stdout.write(picker));
+      return child;
+    }) as any
+  });
+
+  assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["fable"]);
+  assert.equal(killed, true);
+});
+
+test("macOS Claude model discovery bounds captured output", async () => {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let killed = false;
+  const child = Object.assign(new EventEmitter(), {
+    stdout,
+    stderr,
+    killed: false,
+    exitCode: null as number | null,
+    kill() {
+      killed = true;
+      this.killed = true;
+      return true;
+    }
+  });
+
+  const probe = runClaudeModelProbeWithExpect({
+    executable: "/tmp/claude-stub",
+    env: {},
+    cwd: "/tmp/trusted-repo",
+    expectScript: "set timeout -1",
+    timeoutMs: 1_000,
+    maxOutputBytes: 16,
+    spawnExpect: (() => {
+      queueMicrotask(() => stdout.write("x".repeat(17)));
+      return child;
+    }) as any
+  });
+
+  await assert.rejects(probe, /exceeded 16 bytes/);
+  assert.equal(killed, true);
+});
+
+test("macOS Claude model discovery executes the generated program through system Expect", { timeout: 10_000 }, async (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("macOS system Expect integration");
+    return;
+  }
+  try {
+    await access("/usr/bin/expect");
+  } catch {
+    t.skip("/usr/bin/expect is unavailable");
+    return;
+  }
+
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-model-probe-"));
+  try {
+    const stubProgram = `
+printf 'STUB_CWD=%s\\r\\n' "$PWD"
+printf 'STUB_SKIP=%s\\r\\n' "\${CLAUDE_CODE_SKIP_PROMPT_HISTORY-unset}"
+printf 'STUB_FORCE=%s\\r\\n' "\${CLAUDE_CODE_FORCE_SESSION_PERSISTENCE-unset}"
+if test -t 0; then printf 'STUB_TTY=yes\\r\\n'; else printf 'STUB_TTY=no\\r\\n'; fi
+printf 'STUB_SIZE=%s\\r\\n' "$(stty size 2>/dev/null)"
+printf 'Claude ready\\r\\n'
+while IFS= read -r line; do
+  case "$line" in
+    *"/model"*) printf 'Select model\\r\\n1. Default (recommended) Opus 4.8\\r\\n2. Fable Fable 5\\r\\nEnter to set - Esc to cancel\\r\\n' ;;
+    *"/exit"*) exit 0 ;;
+  esac
+done
+`;
+
+    const output = await runClaudeModelProbeWithExpect({
+      executable: "/bin/sh",
+      env: {
+        ...process.env,
+        CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1",
+        ACCORD_AGENTS_CLAUDE_STUB_PROGRAM: stubProgram
+      },
+      cwd: fixtureDir,
+      expectCommand: "/usr/bin/expect",
+      expectScript: (makeRunner() as any).claudeModelProbeExpectScript(
+        "-c $env(ACCORD_AGENTS_CLAUDE_STUB_PROGRAM)"
+      ) as string,
+      timeoutMs: 5_000
+    });
+
+    const expectedCwd = await realpath(fixtureDir);
+    assert.match(output, new RegExp(`STUB_CWD=${expectedCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(output, /STUB_SKIP=1/);
+    assert.match(output, /STUB_FORCE=unset/);
+    assert.match(output, /STUB_TTY=yes/);
+    assert.match(output, /STUB_SIZE=40 120/);
+    assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["fable"]);
+  } finally {
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
 });
 
 test("Windows Claude model discovery drives only the non-persistent interactive model picker", async () => {
