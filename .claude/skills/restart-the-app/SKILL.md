@@ -1,90 +1,86 @@
 ---
 name: restart-the-app
 description: >
-  Restart the AccordAgents desktop app so a main-process change goes live. Use
-  whenever a fix needs to be running rather than merely built — after editing
-  anything under src/main, or when User says "рестартуй", "перезапусти",
-  "restart the app". Also use before claiming a change is verified in the live
-  app.
+  Restart the AccordAgents desktop app so a built main-process change goes
+  live. Use after changing src/main, when the user says "restart the app",
+  "рестартуй", or "перезапусти", or before verifying a change through the live
+  Electron surface.
 ---
 
-# Restarting the app that hosts this chat
+# Restart AccordAgents safely
 
-The app being restarted is the one running this conversation. That single fact
-decides everything below.
+The app being restarted may host the current conversation. Schedule exactly
+one delayed restart, let the current reply reach the user, and ensure the new
+Electron process is detached from the agent session.
 
-## The proven way
+## Restart
 
-```bash
-cd /Users/ysvetlichnaya/IdeaProjects/AccordAgents
-npm run build:main                       # main-process changes only take effect from dist
-launchctl remove com.accordagents.restart 2>/dev/null
-launchctl submit -l com.accordagents.restart -- \
-  /Users/ysvetlichnaya/IdeaProjects/AccordAgents/.scratch/restart-app-launchd.sh
-tail -2 .scratch/restart-app.log         # must show "restart requested (launchd) <ts>"
-```
-
-Then send the reply. The script sleeps 25 seconds first, so the message
-announcing the restart reaches User before the app goes down.
-
-## Why launchd, and why the app must leave the job
-
-A plain `nohup ./script &` is killed when the turn ends, so the restart silently
-never happens: on 2026-08-20 the app kept running the old build for three
-exchanges while the reply claimed it had been restarted. `launchctl submit`
-hands the job to launchd, outside the agent's process tree, so it survives.
-
-But that is only half of it, and the other half caused a real outage the same
-day. If the job keeps the app inside its own process tree (`make start` in the
-foreground of the job), the app's life is tied to the agent's session: when the
-turn ended, launchd tore the job down and SIGTERMed the app with it. The app
-died at 12:19 and stayed dead until someone restarted it by hand two hours
-later. The log shows it plainly — `make: *** [start] Terminated: 15` and
-`Electron exited with signal SIGTERM`.
-
-So the job spawns the app in its OWN session and exits immediately. **macOS has
-no `setsid(1)`** — `nohup setsid ...` fails and nothing starts at all — so the
-script forks and calls `os.setsid()` from python3. Verified 2026-08-20: a
-process spawned this way has PPID 1 and survives `launchctl remove` of the job
-that started it.
-
-## Never
-
-- **Never `pkill Electron` broadly.** Other Electron apps run on this machine,
-  and this one hosts the chat. The script matches only this repo's own Electron
-  binary path.
-- **Never restart without building first.** The running process loaded its code
-  at startup; editing `src/` or even rebuilding `dist` changes nothing until the
-  process is replaced.
-- **Never report "restarted" without checking.** See below.
-
-## Verify in the next turn
+Run from the repository root:
 
 ```bash
-ps -eo pid,lstart,command | grep "electron \." | grep -v grep | head -2
+/bin/bash .claude/skills/restart-the-app/scripts/restart-app.sh
 ```
 
-The start time must be later than the moment the restart was requested. If it
-still shows the old time, the restart did not happen — say so plainly instead of
-proceeding as if the fix were live.
+Then send the reply. The helper waits 25 seconds before replacing Electron, so
+the reply can reach the user first.
 
-Also confirm the app is nobody's child, or it will die with the next turn:
+The scheduler builds first and clears the marker if submission fails. The
+pending marker is a safety latch: one submission can perform at most one
+restart. The helper consumes it before touching Electron and removes its own
+launchd job on every exit path. If launchd ever retries the helper, the retry
+must skip the restart because the marker is gone.
+
+## Verify on the next turn
+
+First prove the transient job is gone. A still-loaded job is a failure because
+`launchctl submit` creates an inferred KeepAlive job on this machine:
 
 ```bash
-ps -o pid=,ppid= -p "$(pgrep -f 'electron \.' | head -1)"
+TASK_UID=$(id -u)
+if launchctl print "gui/$TASK_UID/com.accordagents.restart" >/dev/null 2>&1; then
+  echo "ERROR: restart job is still loaded"
+  launchctl remove com.accordagents.restart
+  exit 1
+fi
 ```
 
-PPID must be `1`. Anything else means the app is still inside a process tree
-that gets torn down.
-
-For a main-process change, also confirm the new code is in `dist`:
+Then prove that exactly one current Electron main process exists, started after
+the request and detached from the agent process tree:
 
 ```bash
-grep -c "<some symbol from the change>" dist/main/main/services/<file>.js
+APP_BIN="/Users/ysvetlichnaya/IdeaProjects/AccordAgents/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+APP_PATTERN="^${APP_BIN//./\\.}( |$)"
+APP_PIDS=$(pgrep -f "$APP_PATTERN" || true)
+set -- $APP_PIDS
+if [ "$#" -ne 1 ]; then
+  echo "ERROR: expected one Electron process, found $#"
+  exit 1
+fi
+ps -o pid=,ppid=,lstart=,command= -p "$1"
 ```
+
+There must be exactly one match and its PPID must be `1`. Confirm the real
+renderer through the repo's `electron-desktop-qa` workflow before calling a
+main-process change verified.
+
+## Failure handling
+
+- If the job remains loaded, remove it immediately and do not resubmit it until
+  the cleanup failure is understood.
+- If the app did not return, inspect `.scratch/app.log`; do not claim success or
+  start a second instance against the same user-data directory.
+- Never use a broad `pkill Electron`. The helper matches only this repository's
+  Electron binary.
+- Never restart before a successful build.
+
+## Why the helper detaches Electron
+
+Commands backgrounded directly from an agent turn can die when that turn ends.
+The helper uses launchd only for the delayed handoff, then double-forks Electron
+into its own session so the app is reparented to PID 1 before the transient job
+removes itself.
 
 ## After the restart
 
-The app takes ~30 seconds to build and come back. The first cloud run after a
-restart can still pay one-time costs (a worker address recorded before the
-change, a cold session), so measure from the second run when timing anything.
+The first cloud run after a restart can still pay one-time costs such as a cold
+session or stale worker address. Measure timing from the second run.
