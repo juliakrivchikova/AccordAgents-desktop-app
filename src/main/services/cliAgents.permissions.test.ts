@@ -10,6 +10,7 @@ import {
   CliAgentRunner,
   CodexAppServerRunError,
   parseClaudeModelPickerOutput,
+  resolveClaudeModelProbeCwd,
   resolveCodexCompactTimeoutMs,
   runClaudeModelProbeInPty,
   runClaudeModelProbeWithExpect
@@ -243,6 +244,13 @@ test("Claude model probe environment suppresses prompt history and session persi
     PATH: "/usr/bin",
     CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1"
   });
+});
+
+test("Claude model discovery falls back when the saved repository directory no longer exists", async () => {
+  const deletedDirectory = await mkdtemp(path.join(tmpdir(), "accord-claude-deleted-cwd-"));
+  await rm(deletedDirectory, { recursive: true, force: true });
+
+  assert.equal(await resolveClaudeModelProbeCwd(deletedDirectory), process.cwd());
 });
 
 test("macOS Claude model discovery passes cwd, safe env, and ignored stdin through its spawn boundary", async () => {
@@ -503,6 +511,37 @@ test("Windows Claude model discovery never accepts a folder trust prompt", async
 
   await assert.rejects(probe, /requires this folder to be trusted/);
   assert.deepEqual(writes, []);
+  assert.equal(killed, true);
+});
+
+test("Windows Claude model discovery bounds captured output", async () => {
+  let killed = false;
+  let onData: ((data: string) => void) | undefined;
+
+  const probe = runClaudeModelProbeInPty({
+    executable: "C:\\Program Files\\Claude\\claude.exe",
+    env: { PATH: "C:\\Windows\\System32" },
+    cwd: "C:\\trusted\\repo",
+    timeoutMs: 1_000,
+    initialDelayMs: 0,
+    pickerSettleDelayMs: 0,
+    exitDelayMs: 0,
+    maxOutputBytes: 16,
+    spawnPty: () => {
+      queueMicrotask(() => onData?.("x".repeat(17)));
+      return {
+        write: () => undefined,
+        kill: () => { killed = true; },
+        onData: (listener) => {
+          onData = listener;
+          return { dispose: () => undefined };
+        },
+        onExit: () => ({ dispose: () => undefined })
+      };
+    }
+  });
+
+  await assert.rejects(probe, /exceeded 16 bytes/);
   assert.equal(killed, true);
 });
 

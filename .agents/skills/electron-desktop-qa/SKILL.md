@@ -156,8 +156,29 @@ is also not sufficient under provider session cleanup.
 Verify `launchctl print "gui/$(id -u)/$QA_LABEL"`, the CDP version endpoint,
 and an `AccordAgents` page target before reporting success. A submitted job can
 respawn after its process is closed or killed, so those actions do not stop it.
-Stop a temporary job only with `launchctl remove "$QA_LABEL"`; never use broad
-Electron kills.
+The profile can contain provider state and the launch log is not rotated, so do
+not leave a temporary job running longer than the QA session. Stop it only with
+`launchctl remove "$QA_LABEL"`; never use broad Electron kills. Confirm that
+the exact CDP port is closed, then move the recipe-created profile to Trash:
+
+```bash
+launchctl remove "$QA_LABEL"
+for attempt in 1 2 3 4 5; do
+  curl -fsS --max-time 1 "http://127.0.0.1:$QA_PORT/json/version" >/dev/null 2>&1 || break
+  sleep 1
+done
+if curl -fsS --max-time 1 "http://127.0.0.1:$QA_PORT/json/version" >/dev/null 2>&1; then
+  echo "QA port $QA_PORT is still open; refusing profile cleanup" >&2
+  exit 1
+fi
+case "$QA_DIR" in
+  /private/tmp/accordagents-qa.*) mv -- "$QA_DIR" "$HOME/.Trash/" ;;
+  *) echo "Refusing to move unexpected QA_DIR: $QA_DIR" >&2; exit 1 ;;
+esac
+```
+
+Leave both the job and profile in place when the user asked to keep using the
+instance; run this cleanup only after they say it is no longer needed.
 
 ## Blocked Standard
 

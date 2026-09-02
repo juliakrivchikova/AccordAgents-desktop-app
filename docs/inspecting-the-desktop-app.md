@@ -333,11 +333,28 @@ curl -sS --max-time 2 "http://127.0.0.1:$QA_PORT/json" | \
 Report the label, PID, port, profile directory, and log path. Leave the job
 running when the user asked to use it. Because `launchctl submit` can respawn a
 process after the app is closed or killed, neither action stops the job. For a
-temporary QA job, stop only the exact label and confirm its CDP port is closed:
+temporary QA job, remember that the profile can contain provider state and the
+launch log is not rotated. Stop only the exact label, confirm its CDP port is
+closed, then move the recipe-created profile to Trash:
 
 ```bash
 launchctl remove "$QA_LABEL"
+for attempt in 1 2 3 4 5; do
+  curl -fsS --max-time 1 "http://127.0.0.1:$QA_PORT/json/version" >/dev/null 2>&1 || break
+  sleep 1
+done
+if curl -fsS --max-time 1 "http://127.0.0.1:$QA_PORT/json/version" >/dev/null 2>&1; then
+  echo "QA port $QA_PORT is still open; refusing profile cleanup" >&2
+  exit 1
+fi
+case "$QA_DIR" in
+  /private/tmp/accordagents-qa.*) mv -- "$QA_DIR" "$HOME/.Trash/" ;;
+  *) echo "Refusing to move unexpected QA_DIR: $QA_DIR" >&2; exit 1 ;;
+esac
 ```
+
+Leave both the job and profile in place when the user asked to keep using the
+instance; clean them up only after they say it is no longer needed.
 
 ## Sanity check
 

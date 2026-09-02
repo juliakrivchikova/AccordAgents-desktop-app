@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants, type Dirent } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import type {
@@ -484,6 +484,7 @@ interface ClaudeModelProbePtyOptions {
   initialDelayMs?: number;
   pickerSettleDelayMs?: number;
   exitDelayMs?: number;
+  maxOutputBytes?: number;
 }
 
 interface ClaudeModelProbeExpectOptions {
@@ -599,6 +600,15 @@ export function claudeModelProbeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return probeEnv;
 }
 
+export async function resolveClaudeModelProbeCwd(probeCwd?: string): Promise<string> {
+  const candidate = probeCwd?.trim();
+  if (!candidate) {
+    return process.cwd();
+  }
+  const info = await stat(candidate).catch(() => undefined);
+  return info?.isDirectory() ? candidate : process.cwd();
+}
+
 export function runClaudeModelProbeWithExpect({
   executable,
   env,
@@ -689,10 +699,12 @@ export function runClaudeModelProbeInPty({
   timeoutMs = CLAUDE_WINDOWS_MODEL_PROBE_TIMEOUT_MS,
   initialDelayMs = 1_500,
   pickerSettleDelayMs = 750,
-  exitDelayMs = 250
+  exitDelayMs = 250,
+  maxOutputBytes = CLAUDE_MODEL_PROBE_MAX_OUTPUT_BYTES
 }: ClaudeModelProbePtyOptions): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     let output = "";
+    let capturedBytes = 0;
     let modelCommandScheduled = false;
     let pickerObserved = false;
     let pickerClosed = false;
@@ -757,6 +769,11 @@ export function runClaudeModelProbeInPty({
     timers.add(timeout);
 
     dataSubscription = terminal.onData((data) => {
+      capturedBytes += Buffer.byteLength(data);
+      if (capturedBytes > maxOutputBytes) {
+        finish(new Error(`Claude model picker probe exceeded ${maxOutputBytes} bytes of output.`));
+        return;
+      }
       output += data;
       const plainOutput = stripAnsi(output);
       if (/Quick\s+safety\s+check|Yes,?\s+I\s+trust\s+this\s+folder/i.test(plainOutput)) {
@@ -1296,19 +1313,20 @@ export class CliAgentRunner {
     await ensureLoginShellEnvPrimed();
     const env = commandEnvironment(undefined, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
     const claudeExecutable = await resolveCommandPath("claude", env);
+    const cwd = await resolveClaudeModelProbeCwd(probeCwd);
     if (process.platform === "win32") {
       const spawnPty = this.claudeModelProbePtySpawn ?? (await import("node-pty")).spawn;
       return runClaudeModelProbeInPty({
         executable: claudeExecutable,
         env,
-        cwd: probeCwd?.trim() || process.cwd(),
+        cwd,
         spawnPty
       });
     }
     return runClaudeModelProbeWithExpect({
       executable: claudeExecutable,
       env,
-      cwd: probeCwd?.trim() || process.cwd(),
+      cwd,
       expectScript: this.claudeModelProbeExpectScript(),
       spawnExpect: this.claudeModelProbeExpectSpawn
     });
