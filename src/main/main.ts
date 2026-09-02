@@ -258,7 +258,11 @@ process.on("unhandledRejection", (reason) => {
   recordMainProcessRuntimeError("unhandledRejection", reason);
 });
 
-const cliAgentRunner = new CliAgentRunner(debugLogService, () => settingsService.getManualAgentEnvironment());
+const cliAgentRunner = new CliAgentRunner(
+  debugLogService,
+  () => settingsService.getManualAgentEnvironment(),
+  { electronAppPath: app.getAppPath() }
+);
 void settingsService.getCliAgentRunTimeoutMs()
   .then((timeoutMs) => cliAgentRunner.setRunTimeoutMs(timeoutMs))
   .catch((error) => {
