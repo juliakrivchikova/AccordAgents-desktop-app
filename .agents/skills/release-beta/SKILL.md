@@ -9,17 +9,21 @@ Treat `npm run release:beta` as release orchestration, not dependency installati
 
 ## Non-negotiable gates
 
-- Release only the approved `main` commit. Confirm local and remote `main` match.
+- Release betas from the short-lived `beta` branch, never from `main`. `beta` is cut from
+  `main`, must still contain `main` as an ancestor, and receives only merges from `main` or
+  feature branches - never direct edits. Stable releases still come from `main`.
+- Release only the approved `beta` commit. Confirm local and remote `beta` match, and that
+  `git merge-base --is-ancestor origin/main beta` succeeds.
 - Preserve unrelated user changes. Use a clean isolated clone when the primary checkout is dirty.
 - In an isolated clone, run `npm ci`. Never copy or symlink `node_modules` from another checkout.
 - Use native macOS arm64 Node. Do not release through Rosetta or an x64 Node binary.
 - Run `npm run release:beta` as one uninterrupted workflow. Do not replace it with individual build, tag, or upload commands.
 - Do not report success from typecheck, signing, notarization, or update-feed checks alone. They do not prove the packaged app can resolve runtime modules.
-- Keep the dedicated CLI parity invariant intact: release only reviewed application behavior from `main`; do not introduce release-only product behavior.
+- Keep the dedicated CLI parity invariant intact: release only reviewed application behavior; do not introduce release-only product behavior.
 
 ## 1. Prepare a real clean checkout
 
-1. Record the approved commit and verify remote `main` points to it.
+1. Record the approved commit and verify remote `beta` points to it.
 2. If the active checkout contains staged, unstaged, or untracked user work, leave it untouched and create a temporary clean clone.
 3. Before installing anything, select native arm64 Node and verify it:
 
@@ -65,7 +69,7 @@ Stop the process and remove only the temporary profile created for this check.
 From the same clean checkout, with the same real dependency tree and arm64 Node, run:
 
 ```bash
-npm run release:beta
+npm run release:beta -- --branch beta
 ```
 
 Do not interrupt or manually continue individual subcommands. The release script bumps and pushes the version before building; if it fails, first record the source commit, tag, release state, and exact failed stage. Do not blindly rerun it because that can create another beta version. Reconcile the existing tag and release before any recovery action.
@@ -91,7 +95,7 @@ Report only after every gate passes:
 
 - Released version and tag
 - GitHub Release URL
-- Final remote `main` commit
+- Final remote `beta` commit
 - `npm ci` and dependency-preflight result
 - Typecheck, build, and targeted-test results
 - Local packaged-ASAR inspection and live-launch evidence
