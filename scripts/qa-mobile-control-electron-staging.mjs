@@ -61,9 +61,13 @@ try {
   assert.equal(managedEndpointState.result.value.hasStaticOriginInput, false);
   assert.equal(managedEndpointState.result.value.hasOutboxInput, false);
   assert.equal(managedEndpointState.result.value.hasCustomEndpoints, false);
-  // Revoke and Copy only appear once a pairing exists, so the untouched
-  // settings screen offers Generate alone.
-  assert.deepEqual(managedEndpointState.result.value.actions, ["Generate"]);
+  // Revoke and Copy only appear once a pairing exists. The app keeps the pairing
+  // handle for its session, so a rerun against a live app can legitimately show
+  // them here; Generate is the part that must always be offered.
+  assert.ok(
+    managedEndpointState.result.value.actions.includes("Generate"),
+    `Device Pairing must offer Generate, saw ${JSON.stringify(managedEndpointState.result.value.actions)}`
+  );
   phase("generate QR");
   await clickSelector(desktop, "[data-device-pairing-action='generate']");
   await waitForSelectorPoll(desktop, ".device-pairing-qr img", 120_000);
@@ -91,6 +95,11 @@ try {
   assert.ok(compactKey, "PWA URL must include the relay sealing key fragment.");
   assert.equal(pairingState.result.value.purpose, "phone-control");
   assert.equal(pairingState.result.value.qrReady, true);
+  assert.deepEqual(
+    pairingState.result.value.actionsAfterGenerate,
+    ["Generate", "Revoke", "Copy URL"],
+    "a generated pairing must offer Revoke and Copy URL next to Generate"
+  );
   parsedPwaUrl.searchParams.set("qa", String(Date.now()));
 
   phase("return to chat");

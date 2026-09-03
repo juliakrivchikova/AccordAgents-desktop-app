@@ -12,6 +12,12 @@ import { writeClipboardText } from "../../../shared/clipboard";
 // instead of dying with the component.
 let lastPairing: { result: CreateMobilePairingResult; qrDataUrl?: string } | undefined;
 
+// The handle above outlives every render, so a test that wants the untouched
+// section has to clear it rather than rely on running first.
+export function forgetDevicePairingForTests(): void {
+  lastPairing = undefined;
+}
+
 export function DevicePairingSection(props: {
   mobileControl?: MobileControlSettings;
 }): JSX.Element {

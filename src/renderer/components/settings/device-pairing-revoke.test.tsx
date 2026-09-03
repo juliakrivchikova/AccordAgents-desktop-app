@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { DevicePairingSection } from "./device-pairing-section";
+import { DevicePairingSection, forgetDevicePairingForTests } from "./device-pairing-section";
 import type { MobileControlSettings } from "../../../shared/types";
 
 // The DOM comes from scripts/renderer-jsdom-setup.mjs via `node --import`; it
@@ -60,15 +60,14 @@ async function clickableButton(text: string): Promise<HTMLButtonElement> {
 }
 
 // Before a pairing exists there is nothing to show a code for and nothing to
-// copy or revoke, so the section offers Generate alone. This runs first on
-// purpose: the section remembers the pairing handle for the app session, so a
-// later test would find one already created.
+// copy or revoke, so the section offers Generate alone.
 test("the untouched section shows no QR panel and no copy or revoke", async () => {
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
     createMobilePairing: async () => PAIRING,
     revokeMobilePairing: async () => undefined
   };
 
+  forgetDevicePairingForTests();
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -106,6 +105,7 @@ test("device pairing does not revoke until the confirmation is accepted", async 
     }
   };
 
+  forgetDevicePairingForTests();
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -152,6 +152,7 @@ test("the pairing survives leaving and reopening settings", async () => {
     revokeMobilePairing: async () => undefined
   };
 
+  forgetDevicePairingForTests();
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
