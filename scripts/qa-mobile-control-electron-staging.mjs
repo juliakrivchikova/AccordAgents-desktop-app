@@ -61,7 +61,9 @@ try {
   assert.equal(managedEndpointState.result.value.hasStaticOriginInput, false);
   assert.equal(managedEndpointState.result.value.hasOutboxInput, false);
   assert.equal(managedEndpointState.result.value.hasCustomEndpoints, false);
-  assert.deepEqual(managedEndpointState.result.value.actions, ["Revoke", "Copy URL", "Generate"]);
+  // Revoke and Copy only appear once a pairing exists, so the untouched
+  // settings screen offers Generate alone.
+  assert.deepEqual(managedEndpointState.result.value.actions, ["Generate"]);
   phase("generate QR");
   await clickSelector(desktop, "[data-device-pairing-action='generate']");
   await waitForSelectorPoll(desktop, ".device-pairing-qr img", 120_000);
@@ -72,7 +74,7 @@ try {
     purpose: document.querySelector(".device-pairing-qr")?.dataset.pairingPurpose,
     fingerprint: document.querySelector(".device-pairing-qr code")?.textContent,
     qrReady: Boolean(document.querySelector(".device-pairing-qr img")?.src?.startsWith("data:image/png")),
-    copyButtonText: [...document.querySelectorAll("[data-device-pairing-action]")].map((button) => button.textContent.trim())[0]
+    actionsAfterGenerate: [...document.querySelectorAll("[data-device-pairing-action]")].map((button) => button.textContent.trim())
   }))()`);
   const pwaUrl = pairingState.result.value.mobileUrl;
   const parsedPwaUrl = new URL(pwaUrl);
@@ -495,11 +497,11 @@ async function openDevicePairingSection(client) {
     await dismissChatChoiceIfOpen(client);
     await clickSelector(client, "button[aria-label='Settings']");
     await clickOptionalSelector(client, "[data-testid='settings-nav-general']");
-    if (await waitForOptionalSelector(client, ".device-pairing-qr", 1_500)) {
+    if (await waitForOptionalSelector(client, "[data-device-pairing-action='generate']", 1_500)) {
       return;
     }
   }
-  await waitForSelectorPoll(client, ".device-pairing-qr", 20_000);
+  await waitForSelectorPoll(client, "[data-device-pairing-action='generate']", 20_000);
 }
 
 async function waitForMobileRuntime(client) {

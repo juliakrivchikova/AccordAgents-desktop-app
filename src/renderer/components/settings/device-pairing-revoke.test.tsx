@@ -59,6 +59,42 @@ async function clickableButton(text: string): Promise<HTMLButtonElement> {
   throw new Error(`"${text}" never became clickable`);
 }
 
+// Before a pairing exists there is nothing to show a code for and nothing to
+// copy or revoke, so the section offers Generate alone. This runs first on
+// purpose: the section remembers the pairing handle for the app session, so a
+// later test would find one already created.
+test("the untouched section shows no QR panel and no copy or revoke", async () => {
+  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    createMobilePairing: async () => PAIRING,
+    revokeMobilePairing: async () => undefined
+  };
+
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(<DevicePairingSection mobileControl={MOBILE_CONTROL} />);
+  });
+
+  assert.equal(document.querySelector(".device-pairing-qr"), null, "no empty QR square before generating");
+  assert.equal(buttonByText("Revoke"), undefined, "nothing to revoke yet");
+  assert.equal(buttonByText("Copy URL"), undefined, "nothing to copy yet");
+  assert.ok(buttonByText("Generate"), "Generate is the only action");
+
+  const create = await clickableButton("Generate");
+  await act(async () => {
+    create.click();
+  });
+
+  assert.ok(document.querySelector(".device-pairing-qr"), "the QR panel appears with the pairing");
+  assert.ok(buttonByText("Revoke"), "Revoke appears with the pairing");
+  assert.ok(buttonByText("Copy URL"), "Copy URL appears with the pairing");
+
+  await act(async () => {
+    root.unmount();
+  });
+});
+
 // W-J: revocation is terminal — the mailbox is destroyed and the same link can
 // never be reactivated — so one click must not be enough to fire it.
 test("device pairing does not revoke until the confirmation is accepted", async () => {

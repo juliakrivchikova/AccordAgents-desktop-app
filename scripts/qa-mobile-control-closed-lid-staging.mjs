@@ -353,7 +353,7 @@ async function openDevicePairingSection(client) {
     await dismissChatChoiceIfOpen(client);
     await clickSelector(client, "button[aria-label='Settings']");
     await clickOptionalSelector(client, "[data-testid='settings-nav-general']");
-    if (await waitForOptionalSelector(client, ".device-pairing-qr", 2_500)) {
+    if (await waitForOptionalSelector(client, "[data-device-pairing-action='generate']", 2_500)) {
       return;
     }
   }
@@ -1003,7 +1003,7 @@ async function readDesktopDebugState(client) {
   const result = await client.evaluate(`(() => ({
     title: document.title,
     chatTopBarReady: Boolean(document.querySelector("[data-artifacts-trigger='true']")),
-    devicePairingVisible: Boolean(document.querySelector(".device-pairing-qr")),
+    devicePairingVisible: Boolean(document.querySelector("[data-device-pairing-action='generate']")),
     buttons: [...document.querySelectorAll("button")].map((button) => ({
       text: button.textContent.trim(),
       aria: button.getAttribute("aria-label"),

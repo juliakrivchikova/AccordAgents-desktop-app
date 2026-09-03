@@ -119,6 +119,7 @@ export function DevicePairingSection(props: {
         </div>
         <div className="gen-card-divider" />
         <div className="gen-row gen-row-stack">
+          {showEndpointFields || result ? (
           <div className={`device-pairing-grid${showEndpointFields ? "" : " is-managed"}`}>
             {showEndpointFields ? (
               <div className="device-pairing-fields">
@@ -145,23 +146,26 @@ export function DevicePairingSection(props: {
                 />
               </div>
             ) : null}
-            <div
-              className="device-pairing-qr"
-              aria-live="polite"
-              data-pairing-purpose={result?.package.purpose ?? ""}
-              data-mobile-url={mobileUrl ?? ""}
-              data-expires-at={result?.package.expiresAt ?? ""}
-              data-revoked={status === "revoked" ? "true" : "false"}
-            >
-              {qrDataUrl ? (
-                <img src={qrDataUrl} alt="Mobile control QR" />
-              ) : (
-                <QrCode size={96} aria-hidden />
-              )}
-              {result ? <code>{result.package.fingerprint}</code> : null}
-              {status === "revoked" ? <span className="device-pairing-state">Revoked</span> : null}
-            </div>
+            {result ? (
+              <div
+                className="device-pairing-qr"
+                aria-live="polite"
+                data-pairing-purpose={result.package.purpose ?? ""}
+                data-mobile-url={mobileUrl ?? ""}
+                data-expires-at={result.package.expiresAt ?? ""}
+                data-revoked={status === "revoked" ? "true" : "false"}
+              >
+                {qrDataUrl ? (
+                  <img src={qrDataUrl} alt="Mobile control QR" />
+                ) : (
+                  <QrCode size={96} aria-hidden />
+                )}
+                <code>{result.package.fingerprint}</code>
+                {status === "revoked" ? <span className="device-pairing-state">Revoked</span> : null}
+              </div>
+            ) : null}
           </div>
+          ) : null}
           {error ? <div className="device-pairing-error">{error}</div> : null}
           {confirmingRevoke ? (
             <div className="device-pairing-error">
@@ -169,28 +173,32 @@ export function DevicePairingSection(props: {
             </div>
           ) : null}
           <div className="gen-actions">
-            <button
-              type="button"
-              className="gen-pill gen-pill-danger"
-              data-device-pairing-action="revoke"
-              disabled={!result || status === "busy" || status === "revoked"}
-              onClick={() => void revokePairing()}
-            >
-              <span className="gen-pill-lead"><ShieldX size={16} aria-hidden /></span>
-              <span className="gen-pill-label">{confirmingRevoke ? "Revoke permanently" : "Revoke"}</span>
-            </button>
-            <button
-              type="button"
-              className="gen-pill"
-              data-device-pairing-action="copy"
-              disabled={!mobileUrl || status === "revoked"}
-              onClick={() => void copyMobileUrl()}
-            >
-              <span className="gen-pill-lead">
-                {status === "copied" ? <CheckCircle2 size={16} aria-hidden /> : <Copy size={16} aria-hidden />}
-              </span>
-              <span className="gen-pill-label">{status === "copied" ? "Copied" : "Copy URL"}</span>
-            </button>
+            {result ? (
+              <>
+                <button
+                  type="button"
+                  className="gen-pill gen-pill-danger"
+                  data-device-pairing-action="revoke"
+                  disabled={status === "busy" || status === "revoked"}
+                  onClick={() => void revokePairing()}
+                >
+                  <span className="gen-pill-lead"><ShieldX size={16} aria-hidden /></span>
+                  <span className="gen-pill-label">{confirmingRevoke ? "Revoke permanently" : "Revoke"}</span>
+                </button>
+                <button
+                  type="button"
+                  className="gen-pill"
+                  data-device-pairing-action="copy"
+                  disabled={!mobileUrl || status === "revoked"}
+                  onClick={() => void copyMobileUrl()}
+                >
+                  <span className="gen-pill-lead">
+                    {status === "copied" ? <CheckCircle2 size={16} aria-hidden /> : <Copy size={16} aria-hidden />}
+                  </span>
+                  <span className="gen-pill-label">{status === "copied" ? "Copied" : "Copy URL"}</span>
+                </button>
+              </>
+            ) : null}
             <button
               type="button"
               className="gen-pill"
