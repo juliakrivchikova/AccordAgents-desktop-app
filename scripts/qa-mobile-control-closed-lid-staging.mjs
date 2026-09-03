@@ -53,16 +53,16 @@ try {
   await ensureFreshChatOpen(desktop);
   const desktopConversationId = await waitForSqliteConversationIdByTitle(chatTitle, 30_000);
   await dismissChatChoiceIfOpen(desktop);
-  await closeMobileDialogIfOpen(desktop);
+  await closeSettingsIfOpen(desktop);
 
   phase("generate managed mobile QR");
-  await openMobilePairingDialog(desktop);
-  await clickSelector(desktop, ".chat-mobile-pairing-actions button:last-child");
-  await waitForSelectorPoll(desktop, ".chat-mobile-pairing-qr img", 45_000);
+  await openDevicePairingSection(desktop);
+  await clickSelector(desktop, ".device-pairing-actions button:last-child");
+  await waitForSelectorPoll(desktop, ".device-pairing-qr img", 45_000);
   const pairingState = await desktop.evaluate(`(() => ({
-    mobileUrl: document.querySelector(".chat-mobile-pairing-qr")?.dataset.mobileUrl,
-    fingerprint: document.querySelector(".chat-mobile-pairing-qr code")?.textContent,
-    qrReady: Boolean(document.querySelector(".chat-mobile-pairing-qr img")?.src?.startsWith("data:image/png"))
+    mobileUrl: document.querySelector(".device-pairing-qr")?.dataset.mobileUrl,
+    fingerprint: document.querySelector(".device-pairing-qr code")?.textContent,
+    qrReady: Boolean(document.querySelector(".device-pairing-qr img")?.src?.startsWith("data:image/png"))
   }))()`);
   const pwaUrl = new URL(pairingState.result.value.mobileUrl);
   assert.equal(`${pwaUrl.origin}/`, expectedStaticOrigin);
@@ -72,6 +72,9 @@ try {
   const routeId = pwaUrl.searchParams.get("route");
   assert.ok(routeId, "PWA URL must include stable route id.");
   const mailboxUrl = mailboxEventsUrlFromPwaUrl(pwaUrl);
+
+  phase("return to chat");
+  await closeSettingsIfOpen(desktop);
 
   phase("wait for mailbox runner and policy");
   await waitForMobileRunnerReady(routeId, 120_000, runStartedAt);
@@ -236,7 +239,7 @@ function stopProcessGroup(child, signal) {
 async function ensureFreshChatOpen(client) {
   await waitForSelectorPoll(
     client,
-    ".new-chat-prompt, .sidebar-history-item, button[aria-label='Mobile control'], button[title='Mobile control']",
+    ".new-chat-prompt, .sidebar-history-item, [data-artifacts-trigger='true']",
     30_000
   );
   if (!await hasSelector(client, ".new-chat-prompt")) {
@@ -265,7 +268,7 @@ async function ensureFreshChatOpen(client) {
     tick();
   })`, {}, { timeoutMs: 11_000 });
   await clickSelector(client, ".new-chat-send");
-  await waitForSelectorPoll(client, "button[aria-label='Mobile control'], button[title='Mobile control']", 30_000);
+  await waitForSelectorPoll(client, "[data-artifacts-trigger='true']", 30_000);
   await settleInitialChatAssistant(client);
   await dismissSetupOverlaysIfOpen(client);
 }
@@ -290,7 +293,7 @@ async function openDesktopChatByTitle(client, title) {
     };
     tick();
   })`, {}, { timeoutMs: 16_000 });
-  await waitForSelectorPoll(client, "button[aria-label='Mobile control'], button[title='Mobile control']", 20_000);
+  await waitForSelectorPoll(client, "[data-artifacts-trigger='true']", 20_000);
 }
 
 async function clickNewChat(client) {
@@ -343,24 +346,30 @@ async function setNewChatParticipantRemote(client, handle) {
   }
 }
 
-async function openMobilePairingDialog(client) {
-  await waitForSelectorPoll(client, "button[aria-label='Mobile control'], button[title='Mobile control']", 20_000);
+async function openDevicePairingSection(client) {
+  await waitForSelectorPoll(client, "button[aria-label='Settings']", 20_000);
   for (let attempt = 0; attempt < 4; attempt += 1) {
     await settleInitialChatAssistant(client);
     await dismissChatChoiceIfOpen(client);
-    await clickSelector(client, "button[aria-label='Mobile control'], button[title='Mobile control']");
-    if (await waitForOptionalSelector(client, ".chat-mobile-pairing-dialog", 2_500)) {
+    await clickSelector(client, "button[aria-label='Settings']");
+    await clickOptionalSelector(client, "[data-testid='settings-nav-general']");
+    if (await waitForOptionalSelector(client, ".device-pairing-qr", 2_500)) {
       return;
     }
   }
-  throw new Error("Mobile pairing dialog did not open. " + JSON.stringify(await readDesktopDebugState(client), null, 2));
+  throw new Error("Device Pairing settings did not open. " + JSON.stringify(await readDesktopDebugState(client), null, 2));
 }
 
-async function closeMobileDialogIfOpen(client) {
-  if ((await client.evaluate(`Boolean(document.querySelector(".chat-mobile-pairing-dialog"))`)).result.value) {
-    await clickSelector(client, "button[aria-label='Close mobile control']");
-    await sleep(250);
+async function clickOptionalSelector(client, selector) {
+  const present = await client.evaluate(`Boolean(document.querySelector(${JSON.stringify(selector)}))`);
+  if (present.result.value) {
+    await clickSelector(client, selector);
+    await sleep(150);
   }
+}
+
+async function closeSettingsIfOpen(client) {
+  await clickOptionalSelector(client, "[data-testid='settings-back-to-chats']");
 }
 
 async function settleInitialChatAssistant(client) {
@@ -993,8 +1002,8 @@ async function clickSelector(client, selector, timeoutMs = 10_000) {
 async function readDesktopDebugState(client) {
   const result = await client.evaluate(`(() => ({
     title: document.title,
-    mobileButtonCount: document.querySelectorAll("button[aria-label='Mobile control'], button[title='Mobile control']").length,
-    dialogVisible: Boolean(document.querySelector(".chat-mobile-pairing-dialog")),
+    chatTopBarReady: Boolean(document.querySelector("[data-artifacts-trigger='true']")),
+    devicePairingVisible: Boolean(document.querySelector(".device-pairing-qr")),
     buttons: [...document.querySelectorAll("button")].map((button) => ({
       text: button.textContent.trim(),
       aria: button.getAttribute("aria-label"),

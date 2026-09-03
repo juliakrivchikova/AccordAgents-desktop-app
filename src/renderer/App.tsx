@@ -25,7 +25,6 @@ import { ChatParticipantMenu } from "./components/chat/chat-participant-menu";
 import { useArtifacts } from "./components/artifacts/use-artifacts";
 import { IconButton } from "./components/primitives";
 import { ChatAccordLauncherDialog } from "./components/chat/chat-accord-launcher-dialog";
-import { ChatMobilePairingDialog } from "./components/chat/chat-mobile-pairing-dialog";
 import { NewChatScreen } from "./components/chat/new-chat-screen";
 import { ChatSearchModal } from "./components/search/chat-search-modal";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
@@ -227,11 +226,6 @@ function App(): JSX.Element {
       )}
       {view.activeChatConversation && (
         <>
-          <ChatMobilePairingDialog
-            conversationId={view.activeChatConversation.id}
-            mobileControl={state.settings.mobileControl}
-            disabled={view.conversationRunning}
-          />
           <IconButton
             label="Artifacts"
             icon={FileBox}

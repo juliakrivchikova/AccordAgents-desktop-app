@@ -13,6 +13,7 @@ import type {
   ChatPromptContextMode,
   ChatPromptContextScopeSettings,
   ChatPromptContextSettings,
+  MobileControlSettings,
   ProviderKind,
   ProviderSettings,
   RepoFileOpenAction
@@ -34,6 +35,7 @@ import {
 } from "../../../shared/chatPromptContext";
 import { writeClipboardText, type ClipboardWriteResult } from "../../../shared/clipboard";
 import { AwsWorkerPanel as SharedAwsWorkerPanel } from "./aws-worker-panel";
+import { DevicePairingSection } from "./device-pairing-section";
 import { cliProviderMetadata, deriveAgentReadiness } from "../../../shared/cliReadiness";
 import { isChatProviderKind } from "../../../shared/chatProviders";
 import { AppSelect } from "../primitives";
@@ -65,6 +67,7 @@ export function GeneralSettingsSection(props: {
   chatAutoWatchWakeLimit: number;
   chatPromptContext: ChatPromptContextSettings;
   cloudRuns: CloudRunsSettings;
+  mobileControl?: MobileControlSettings;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
@@ -239,6 +242,8 @@ export function GeneralSettingsSection(props: {
           </div>
         </div>
       </section>
+
+      <DevicePairingSection mobileControl={props.mobileControl} />
 
       <section className="gen-section">
         <h2 className="gen-section-title gen-section-title-solo">Cloud Runs (beta)</h2>

@@ -167,6 +167,7 @@ export function SettingsView(props: {
             chatParticipantRequestPromptMaxChars={props.settings.chatParticipantRequestPromptMaxChars}
             chatAutoWatchWakeLimit={props.settings.chatAutoWatchWakeLimit}
             chatPromptContext={props.settings.chatPromptContext}
+            mobileControl={props.settings.mobileControl}
             updateProvider={props.updateProvider}
             setAssistantProviderKind={props.setAssistantProviderKind}
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}

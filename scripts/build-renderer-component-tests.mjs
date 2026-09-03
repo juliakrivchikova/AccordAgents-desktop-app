@@ -14,7 +14,7 @@ await build({
     "renderer/components/artifacts/artifact-navigation.test.ts",
     "renderer/components/chat/chat-progress-rendering.test.tsx",
     "renderer/components/chat/cli-readiness-setup-panel.test.tsx",
-    "renderer/components/chat/chat-mobile-pairing-revoke.test.tsx",
+    "renderer/components/settings/device-pairing-revoke.test.tsx",
     "renderer/components/settings/aws-worker-panel.test.tsx",
     "renderer/components/search/chat-search-escape.test.tsx",
     "renderer/components/shell/chat-search.test.tsx"

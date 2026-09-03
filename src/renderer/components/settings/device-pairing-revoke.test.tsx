@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { MobilePairingDialogContent } from "./chat-mobile-pairing-dialog";
+import { DevicePairingSection } from "./device-pairing-section";
 import type { MobileControlSettings } from "../../../shared/types";
 
 // The DOM comes from scripts/renderer-jsdom-setup.mjs via `node --import`; it
@@ -43,7 +43,7 @@ function buttonByText(text: string): HTMLButtonElement | undefined {
   ) as HTMLButtonElement | undefined;
 }
 
-// Creating a pairing renders the QR code asynchronously and holds the dialog in
+// Creating a pairing renders the QR code asynchronously and holds the section in
 // its busy state until that resolves, which disables every control. Waiting for
 // the named button to become clickable keeps the test off that race.
 async function clickableButton(text: string): Promise<HTMLButtonElement> {
@@ -61,7 +61,7 @@ async function clickableButton(text: string): Promise<HTMLButtonElement> {
 
 // W-J: revocation is terminal — the mailbox is destroyed and the same link can
 // never be reactivated — so one click must not be enough to fire it.
-test("the pairing dialog does not revoke until the confirmation is accepted", async () => {
+test("device pairing does not revoke until the confirmation is accepted", async () => {
   const revokeCalls: unknown[] = [];
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
     createMobilePairing: async () => PAIRING,
@@ -76,12 +76,7 @@ test("the pairing dialog does not revoke until the confirmation is accepted", as
 
   await act(async () => {
     root.render(
-      <MobilePairingDialogContent
-        conversationId="conversation-1"
-        mobileControl={MOBILE_CONTROL}
-        open
-        onOpenChange={() => undefined}
-      />
+      <DevicePairingSection mobileControl={MOBILE_CONTROL} />
     );
   });
 
@@ -100,7 +95,7 @@ test("the pairing dialog does not revoke until the confirmation is accepted", as
   assert.match(
     document.body.textContent ?? "",
     /cannot be undone/i,
-    "the armed dialog explains that revoking cannot be undone"
+    "the armed control explains that revoking cannot be undone"
   );
 
   await act(async () => {
@@ -110,5 +105,45 @@ test("the pairing dialog does not revoke until the confirmation is accepted", as
 
   await act(async () => {
     root.unmount();
+  });
+});
+
+// Settings unmounts the moment the user leaves the screen. If the pairing handle
+// died with it, a paired phone could never be revoked from the UI again.
+test("the pairing survives leaving and reopening settings", async () => {
+  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    createMobilePairing: async () => PAIRING,
+    revokeMobilePairing: async () => undefined
+  };
+
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(<DevicePairingSection mobileControl={MOBILE_CONTROL} />);
+  });
+
+  const create = await clickableButton("Generate");
+  await act(async () => {
+    create.click();
+  });
+  await clickableButton("Revoke");
+
+  // Leave settings.
+  await act(async () => {
+    root.unmount();
+  });
+
+  const reopened = createRoot(host);
+  await act(async () => {
+    reopened.render(<DevicePairingSection mobileControl={MOBILE_CONTROL} />);
+  });
+
+  const revokeAfterReopen = buttonByText("Revoke");
+  assert.ok(revokeAfterReopen, "the reopened section still offers Revoke");
+  assert.equal(revokeAfterReopen.disabled, false, "Revoke stays usable after reopening settings");
+
+  await act(async () => {
+    reopened.unmount();
   });
 });

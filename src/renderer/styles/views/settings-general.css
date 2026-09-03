@@ -770,3 +770,98 @@
   color: var(--app-danger);
   border-color: var(--app-danger-border);
 }
+
+.device-pairing-card {
+  display: grid;
+  gap: 14px;
+}
+
+.device-pairing-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 180px;
+  align-items: start;
+  gap: 18px;
+}
+
+.device-pairing-grid.is-managed {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+}
+
+.device-pairing-fields {
+  display: grid;
+  gap: 8px;
+}
+
+.device-pairing-fields input {
+  width: 100%;
+}
+
+.device-pairing-qr {
+  display: grid;
+  min-height: 180px;
+  align-content: center;
+  justify-items: center;
+  gap: 10px;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface-subtle);
+  color: var(--app-muted);
+}
+
+.device-pairing-qr img {
+  display: block;
+  width: 156px;
+  height: 156px;
+}
+
+.device-pairing-grid.is-managed .device-pairing-qr {
+  min-height: 296px;
+  width: 296px;
+}
+
+.device-pairing-grid.is-managed .device-pairing-qr img {
+  width: 240px;
+  height: 240px;
+}
+
+.device-pairing-grid.is-managed .device-pairing-qr code {
+  max-width: 240px;
+}
+
+.device-pairing-qr code {
+  max-width: 156px;
+  overflow-wrap: anywhere;
+  color: var(--app-muted);
+  font-size: 10px;
+  line-height: 1.35;
+  text-align: center;
+  white-space: normal;
+}
+
+.device-pairing-state {
+  color: var(--app-danger);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.device-pairing-error {
+  overflow-wrap: anywhere;
+  color: var(--app-danger);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.device-pairing-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 620px) {
+  .device-pairing-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
