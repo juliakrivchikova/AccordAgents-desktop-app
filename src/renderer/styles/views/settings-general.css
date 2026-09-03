@@ -780,7 +780,25 @@
 
 .device-pairing-grid.is-managed {
   grid-template-columns: minmax(0, 1fr);
-  justify-items: start;
+  justify-items: center;
+}
+
+.settings-view .device-pairing-body {
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.settings-view .device-pairing-body .gen-actions {
+  justify-content: center;
+}
+
+.settings-view .device-pairing-body .device-pairing-grid {
+  width: 100%;
+}
+
+.settings-view .device-pairing-generate {
+  min-width: 92px;
 }
 
 .device-pairing-fields {

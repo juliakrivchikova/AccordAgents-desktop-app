@@ -113,7 +113,7 @@ export function DevicePairingSection(props: {
   const generateButton = (
     <button
       type="button"
-      className="gen-pill"
+      className="gen-pill device-pairing-generate"
       data-device-pairing-action="generate"
       disabled={!canCreate}
       onClick={() => void createPairing()}
@@ -136,12 +136,12 @@ export function DevicePairingSection(props: {
               Scan the code with your phone to control this app from it. The pairing covers the whole app, not a single chat.
             </div>
           </div>
-          {expanded ? null : <div className="gen-row-control">{generateButton}</div>}
+          <div className="gen-row-control">{generateButton}</div>
         </div>
         {expanded ? (
           <>
             <div className="gen-card-divider" />
-            <div className="gen-row gen-row-stack">
+            <div className="gen-row device-pairing-body">
               <div className={`device-pairing-grid${showEndpointFields ? "" : " is-managed"}`}>
                 {showEndpointFields ? (
                   <div className="device-pairing-fields">
@@ -220,7 +220,6 @@ export function DevicePairingSection(props: {
                     </button>
                   </>
                 ) : null}
-                {generateButton}
               </div>
             </div>
           </>
