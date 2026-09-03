@@ -72,7 +72,7 @@ try {
   const pairingState = await desktop.evaluate(`(() => ({
     mobileUrl: document.querySelector(".device-pairing-qr")?.dataset.mobileUrl,
     purpose: document.querySelector(".device-pairing-qr")?.dataset.pairingPurpose,
-    fingerprint: document.querySelector(".device-pairing-qr code")?.textContent,
+    fingerprint: new URLSearchParams(new URL(document.querySelector(".device-pairing-qr").dataset.mobileUrl).search).get("cap"),
     qrReady: Boolean(document.querySelector(".device-pairing-qr img")?.src?.startsWith("data:image/png")),
     actionsAfterGenerate: [...document.querySelectorAll("[data-device-pairing-action]")].map((button) => button.textContent.trim())
   }))()`);

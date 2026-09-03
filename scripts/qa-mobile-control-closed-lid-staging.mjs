@@ -61,7 +61,7 @@ try {
   await waitForSelectorPoll(desktop, ".device-pairing-qr img", 45_000);
   const pairingState = await desktop.evaluate(`(() => ({
     mobileUrl: document.querySelector(".device-pairing-qr")?.dataset.mobileUrl,
-    fingerprint: document.querySelector(".device-pairing-qr code")?.textContent,
+    fingerprint: new URLSearchParams(new URL(document.querySelector(".device-pairing-qr").dataset.mobileUrl).search).get("cap"),
     qrReady: Boolean(document.querySelector(".device-pairing-qr img")?.src?.startsWith("data:image/png"))
   }))()`);
   const pwaUrl = new URL(pairingState.result.value.mobileUrl);

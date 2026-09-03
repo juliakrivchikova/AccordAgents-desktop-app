@@ -182,7 +182,6 @@ export function DevicePairingSection(props: {
                     ) : (
                       <QrCode size={96} aria-hidden />
                     )}
-                    <code>{result.package.fingerprint}</code>
                     {status === "revoked" ? <span className="device-pairing-state">Revoked</span> : null}
                   </div>
                 ) : null}

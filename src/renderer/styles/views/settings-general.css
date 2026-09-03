@@ -812,14 +812,8 @@
 
 .device-pairing-qr {
   display: grid;
-  min-height: 180px;
-  align-content: center;
   justify-items: center;
   gap: 10px;
-  overflow: hidden;
-  border: 1px solid var(--app-border);
-  border-radius: var(--radius-control);
-  background: var(--app-surface-subtle);
   color: var(--app-muted);
 }
 
@@ -829,28 +823,9 @@
   height: 156px;
 }
 
-.device-pairing-grid.is-managed .device-pairing-qr {
-  min-height: 296px;
-  width: 296px;
-}
-
 .device-pairing-grid.is-managed .device-pairing-qr img {
   width: 240px;
   height: 240px;
-}
-
-.device-pairing-grid.is-managed .device-pairing-qr code {
-  max-width: 240px;
-}
-
-.device-pairing-qr code {
-  max-width: 156px;
-  overflow-wrap: anywhere;
-  color: var(--app-muted);
-  font-size: 10px;
-  line-height: 1.35;
-  text-align: center;
-  white-space: normal;
 }
 
 .device-pairing-state {
