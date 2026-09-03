@@ -57,7 +57,7 @@ try {
 
   phase("generate managed mobile QR");
   await openDevicePairingSection(desktop);
-  await clickSelector(desktop, ".device-pairing-actions button:last-child");
+  await clickSelector(desktop, "[data-device-pairing-action='generate']");
   await waitForSelectorPoll(desktop, ".device-pairing-qr img", 45_000);
   const pairingState = await desktop.evaluate(`(() => ({
     mobileUrl: document.querySelector(".device-pairing-qr")?.dataset.mobileUrl,

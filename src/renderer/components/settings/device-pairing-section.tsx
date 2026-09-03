@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { CheckCircle2, Copy, Loader2, QrCode, ShieldX } from "lucide-react";
 import QRCode from "qrcode";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { CreateMobilePairingResult, MobileControlSettings } from "../../../shared/types";
@@ -109,81 +108,102 @@ export function DevicePairingSection(props: {
   return (
     <section className="gen-section">
       <h2 className="gen-section-title gen-section-title-solo">Device Pairing</h2>
-      <div className="gen-card device-pairing-card">
-        <div className="gen-row-text">
-          <div className="gen-row-title">Mobile control</div>
-          <div className="gen-row-desc">
-            Scan the code with your phone to control this app from it. The pairing covers the whole app, not a single chat.
+      <div className="gen-card">
+        <div className="gen-row">
+          <div className="gen-row-text">
+            <div className="gen-row-title">Mobile control</div>
+            <div className="gen-row-desc">
+              Scan the code with your phone to control this app from it. The pairing covers the whole app, not a single chat.
+            </div>
           </div>
         </div>
-        <div className={`device-pairing-grid${showEndpointFields ? "" : " is-managed"}`}>
-          {showEndpointFields ? (
-            <div className="device-pairing-fields">
-              <Label htmlFor="mobile-relay-url">Relay WSS URL</Label>
-              <Input
-                id="mobile-relay-url"
-                value={relayUrl}
-                placeholder={defaults?.relayUrl ?? "wss://relay.example.com/v1/relay"}
-                onChange={(event) => setRelayUrl(event.target.value)}
-              />
-              <Label htmlFor="mobile-static-origin">PWA origin</Label>
-              <Input
-                id="mobile-static-origin"
-                value={staticOriginUrl}
-                placeholder={defaults?.staticOriginUrl ?? "https://app.example.com/mobile/"}
-                onChange={(event) => setStaticOriginUrl(event.target.value)}
-              />
-              <Label htmlFor="mobile-outbox-url">Mailbox outbox URL</Label>
-              <Input
-                id="mobile-outbox-url"
-                value={outboxUrl}
-                placeholder={effectiveOutboxUrl || "https://mailbox.example.com/v1/mailbox/events"}
-                onChange={(event) => setOutboxUrl(event.target.value)}
-              />
-              {error ? <div className="device-pairing-error">{error}</div> : null}
+        <div className="gen-card-divider" />
+        <div className="gen-row gen-row-stack">
+          <div className={`device-pairing-grid${showEndpointFields ? "" : " is-managed"}`}>
+            {showEndpointFields ? (
+              <div className="device-pairing-fields">
+                <Label htmlFor="mobile-relay-url">Relay WSS URL</Label>
+                <Input
+                  id="mobile-relay-url"
+                  value={relayUrl}
+                  placeholder={defaults?.relayUrl ?? "wss://relay.example.com/v1/relay"}
+                  onChange={(event) => setRelayUrl(event.target.value)}
+                />
+                <Label htmlFor="mobile-static-origin">PWA origin</Label>
+                <Input
+                  id="mobile-static-origin"
+                  value={staticOriginUrl}
+                  placeholder={defaults?.staticOriginUrl ?? "https://app.example.com/mobile/"}
+                  onChange={(event) => setStaticOriginUrl(event.target.value)}
+                />
+                <Label htmlFor="mobile-outbox-url">Mailbox outbox URL</Label>
+                <Input
+                  id="mobile-outbox-url"
+                  value={outboxUrl}
+                  placeholder={effectiveOutboxUrl || "https://mailbox.example.com/v1/mailbox/events"}
+                  onChange={(event) => setOutboxUrl(event.target.value)}
+                />
+              </div>
+            ) : null}
+            <div
+              className="device-pairing-qr"
+              aria-live="polite"
+              data-pairing-purpose={result?.package.purpose ?? ""}
+              data-mobile-url={mobileUrl ?? ""}
+              data-expires-at={result?.package.expiresAt ?? ""}
+              data-revoked={status === "revoked" ? "true" : "false"}
+            >
+              {qrDataUrl ? (
+                <img src={qrDataUrl} alt="Mobile control QR" />
+              ) : (
+                <QrCode size={96} aria-hidden />
+              )}
+              {result ? <code>{result.package.fingerprint}</code> : null}
+              {status === "revoked" ? <span className="device-pairing-state">Revoked</span> : null}
+            </div>
+          </div>
+          {error ? <div className="device-pairing-error">{error}</div> : null}
+          {confirmingRevoke ? (
+            <div className="device-pairing-error">
+              This cannot be undone. The link stops working for good and the phone has to be paired again.
             </div>
           ) : null}
-          <div
-            className="device-pairing-qr"
-            aria-live="polite"
-            data-pairing-purpose={result?.package.purpose ?? ""}
-            data-mobile-url={mobileUrl ?? ""}
-            data-expires-at={result?.package.expiresAt ?? ""}
-            data-revoked={status === "revoked" ? "true" : "false"}
-          >
-            {qrDataUrl ? (
-              <img src={qrDataUrl} alt="Mobile control QR" />
-            ) : (
-              <QrCode size={96} aria-hidden />
-            )}
-            {result ? <code>{result.package.fingerprint}</code> : null}
-            {status === "revoked" ? <span className="device-pairing-state">Revoked</span> : null}
+          <div className="gen-actions">
+            <button
+              type="button"
+              className="gen-pill gen-pill-danger"
+              data-device-pairing-action="revoke"
+              disabled={!result || status === "busy" || status === "revoked"}
+              onClick={() => void revokePairing()}
+            >
+              <span className="gen-pill-lead"><ShieldX size={16} aria-hidden /></span>
+              <span className="gen-pill-label">{confirmingRevoke ? "Revoke permanently" : "Revoke"}</span>
+            </button>
+            <button
+              type="button"
+              className="gen-pill"
+              data-device-pairing-action="copy"
+              disabled={!mobileUrl || status === "revoked"}
+              onClick={() => void copyMobileUrl()}
+            >
+              <span className="gen-pill-lead">
+                {status === "copied" ? <CheckCircle2 size={16} aria-hidden /> : <Copy size={16} aria-hidden />}
+              </span>
+              <span className="gen-pill-label">{status === "copied" ? "Copied" : "Copy URL"}</span>
+            </button>
+            <button
+              type="button"
+              className="gen-pill"
+              data-device-pairing-action="generate"
+              disabled={!canCreate}
+              onClick={() => void createPairing()}
+            >
+              <span className="gen-pill-lead">
+                {status === "busy" ? <Loader2 className="spin" size={16} aria-hidden /> : <QrCode size={16} aria-hidden />}
+              </span>
+              <span className="gen-pill-label">Generate</span>
+            </button>
           </div>
-        </div>
-        {!showEndpointFields && error ? <div className="device-pairing-error">{error}</div> : null}
-        {confirmingRevoke ? (
-          <div className="device-pairing-error">
-            This cannot be undone. The link stops working for good and the phone has to be paired again.
-          </div>
-        ) : null}
-        <div className="device-pairing-actions">
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={() => void revokePairing()}
-            disabled={!result || status === "busy" || status === "revoked"}
-          >
-            <ShieldX aria-hidden />
-            {confirmingRevoke ? "Revoke permanently" : "Revoke"}
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => void copyMobileUrl()} disabled={!mobileUrl || status === "revoked"}>
-            {status === "copied" ? <CheckCircle2 aria-hidden /> : <Copy aria-hidden />}
-            {status === "copied" ? "Copied" : "Copy URL"}
-          </Button>
-          <Button size="sm" onClick={() => void createPairing()} disabled={!canCreate}>
-            {status === "busy" ? <Loader2 className="spin" aria-hidden /> : <QrCode aria-hidden />}
-            Generate
-          </Button>
         </div>
       </div>
     </section>

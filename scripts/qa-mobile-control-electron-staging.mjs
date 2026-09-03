@@ -53,7 +53,7 @@ try {
     hasOutboxInput: Boolean(document.querySelector("#mobile-outbox-url")),
     hasInvitePerson: document.body.innerText.includes("Invite person"),
     hasCustomEndpoints: document.body.innerText.includes("Custom endpoints"),
-    actions: [...document.querySelectorAll(".device-pairing-actions button")]
+    actions: [...document.querySelectorAll("[data-device-pairing-action]")]
       .map((button) => button.textContent.trim())
   }))()`);
   assert.equal(managedEndpointState.result.value.hasInvitePerson, false);
@@ -63,7 +63,7 @@ try {
   assert.equal(managedEndpointState.result.value.hasCustomEndpoints, false);
   assert.deepEqual(managedEndpointState.result.value.actions, ["Revoke", "Copy URL", "Generate"]);
   phase("generate QR");
-  await clickSelector(desktop, ".device-pairing-actions button:last-child");
+  await clickSelector(desktop, "[data-device-pairing-action='generate']");
   await waitForSelectorPoll(desktop, ".device-pairing-qr img", 120_000);
 
   phase("read pairing state");
@@ -72,7 +72,7 @@ try {
     purpose: document.querySelector(".device-pairing-qr")?.dataset.pairingPurpose,
     fingerprint: document.querySelector(".device-pairing-qr code")?.textContent,
     qrReady: Boolean(document.querySelector(".device-pairing-qr img")?.src?.startsWith("data:image/png")),
-    copyButtonText: [...document.querySelectorAll(".device-pairing-actions button")].map((button) => button.textContent.trim())[0]
+    copyButtonText: [...document.querySelectorAll("[data-device-pairing-action]")].map((button) => button.textContent.trim())[0]
   }))()`);
   const pwaUrl = pairingState.result.value.mobileUrl;
   const parsedPwaUrl = new URL(pwaUrl);

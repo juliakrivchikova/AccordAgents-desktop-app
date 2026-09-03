@@ -771,11 +771,6 @@
   border-color: var(--app-danger-border);
 }
 
-.device-pairing-card {
-  display: grid;
-  gap: 14px;
-}
-
 .device-pairing-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 180px;
@@ -852,12 +847,6 @@
   color: var(--app-danger);
   font-size: 12px;
   line-height: 1.35;
-}
-
-.device-pairing-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
 }
 
 @media (max-width: 620px) {
