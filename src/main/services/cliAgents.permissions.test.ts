@@ -223,6 +223,18 @@ test("parseClaudeModelPickerOutput recognizes a single picker with fragmented bo
   assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["haiku"]);
 });
 
+test("parseClaudeModelPickerOutput ignores numbered settings warning actions", () => {
+  const output = [
+    "Settings Warning",
+    "1. Continue",
+    "2. Fix with Claude",
+    "3. Exit and fix manually",
+    "Enter to confirm · Esc to cancel"
+  ].join("\n");
+
+  assert.deepEqual(parseClaudeModelPickerOutput(output), []);
+});
+
 test("macOS Claude model discovery uses a full-height, system-expect-compatible PTY", () => {
   const script = (makeRunner() as any).claudeModelProbeExpectScript() as string;
 
@@ -230,6 +242,10 @@ test("macOS Claude model discovery uses a full-height, system-expect-compatible 
   assert.match(script, /spawn \$env\(ACCORD_AGENTS_CLAUDE_EXECUTABLE\) --safe-mode --no-chrome/);
   assert.doesNotMatch(script, /spawn --/);
   assert.ok(script.indexOf("set stty_init") < script.indexOf("spawn $env"));
+  assert.match(script, /Settings\.\*Warning/);
+  assert.match(script, /Enter\.\*to\.\*confirm/);
+  assert.match(script, /Transcript\.\*saving\.\*is\.\*off/);
+  assert.match(script, /Enter\.\*to\.\*set\.\*Esc\.\*to\.\*cancel/);
   assert.match(script, /send "\\033"\nafter 250\nsend "\/exit\\r"\nset timeout 2/);
 });
 
@@ -415,6 +431,61 @@ done
     assert.match(output, /STUB_FORCE=unset/);
     assert.match(output, /STUB_TTY=yes/);
     assert.match(output, /STUB_SIZE=40 120/);
+    assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["fable"]);
+  } finally {
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("macOS Claude model discovery continues past settings warnings before opening the picker", { timeout: 10_000 }, async (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("macOS system Expect integration");
+    return;
+  }
+  try {
+    await access("/usr/bin/expect");
+  } catch {
+    t.skip("/usr/bin/expect is unavailable");
+    return;
+  }
+
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-model-warning-"));
+  try {
+    const stubProgram = `
+printf 'Settings Warning\\r\\n'
+printf 'permissions.allow: Invalid permission rule "WebFetch*" was skipped\\r\\n'
+printf '1. Continue\\r\\n2. Fix with Claude\\r\\n3. Exit and fix manually\\r\\n'
+printf 'Enter to confirm - Esc to cancel\\r\\n'
+warning_pending=1
+while IFS= read -r line; do
+  if test "$warning_pending" = 1; then
+    warning_pending=0
+    printf 'Safe mode: all customizations are disabled\\r\\n'
+    printf 'Transcript saving is off\\r\\n'
+    continue
+  fi
+  case "$line" in
+    *"/model"*) printf 'Select model\\r\\n1. Default (recommended) Opus 5\\r\\n2. Fable Fable 5.1\\r\\nEnter to set - Esc to cancel\\r\\n' ;;
+    *"/exit"*) exit 0 ;;
+  esac
+done
+`;
+
+    const output = await runClaudeModelProbeWithExpect({
+      executable: "/bin/sh",
+      env: {
+        ...process.env,
+        ACCORD_AGENTS_CLAUDE_STUB_PROGRAM: stubProgram
+      },
+      cwd: fixtureDir,
+      expectCommand: "/usr/bin/expect",
+      expectScript: (makeRunner() as any).claudeModelProbeExpectScript(
+        "-c $env(ACCORD_AGENTS_CLAUDE_STUB_PROGRAM)"
+      ) as string,
+      timeoutMs: 5_000
+    });
+
+    assert.match(output, /Settings Warning/);
     assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["fable"]);
   } finally {
     await rm(fixtureDir, { recursive: true, force: true });

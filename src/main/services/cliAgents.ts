@@ -538,7 +538,9 @@ export function parseClaudeModelPickerOutput(output: string): ProviderModel[] {
   const lastFooterEnd = pickerFooter >= 0 ? pickerFooter + footerMarker.length : 0;
   const trailingText = text.slice(lastFooterEnd);
   const trailingRows = [...trailingText.matchAll(/\d+\.\s+[A-Za-z]/g)];
-  const trailingRowsStart = trailingRows.length >= 2 && /Esc\s+to\s+cancel/i.test(trailingText)
+  const trailingRowsStart = trailingRows.length >= 2
+    && /Default\s*\(recommended\)/i.test(trailingText)
+    && /Esc\s+to\s+cancel/i.test(trailingText)
     ? lastFooterEnd + (trailingRows[0].index ?? 0)
     : -1;
   // ConPTY exposes terminal redraws as a linear transcript. Read only the
@@ -1355,15 +1357,27 @@ export class CliAgentRunner {
       "set stty_init \"rows 40 columns 120\"",
       "log_user 1",
       `spawn $env(${CLAUDE_EXECUTABLE_ENV}) ${spawnArguments}`,
+      "set saw_settings_warning 0",
       "expect {",
-      "  -re \".\" {}",
+      "  -re \"Settings.*Warning\" {",
+      "    set saw_settings_warning 1",
+      "    exp_continue",
+      "  }",
+      "  -re \"Enter.*to.*confirm\" {",
+      "    if {$saw_settings_warning} {",
+      "      send \"\\r\"",
+      "      set saw_settings_warning 0",
+      "    }",
+      "    exp_continue",
+      "  }",
+      "  -re \"Transcript.*saving.*is.*off\" {}",
       "  timeout { exit 124 }",
       "  eof { exit 1 }",
       "}",
       "after 500",
       "send \"/model\\r\"",
       "expect {",
-      "  -re \"cancel\" {}",
+      "  -re \"Enter.*to.*set.*Esc.*to.*cancel\" {}",
       "  timeout { exit 124 }",
       "  eof { exit 1 }",
       "}",
