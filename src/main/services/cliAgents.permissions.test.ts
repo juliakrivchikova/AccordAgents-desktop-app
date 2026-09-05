@@ -56,6 +56,16 @@ function makeClaudeWarmPendingTurn(overrides: Partial<Record<string, unknown>> =
     messages: [],
     streamedText: "",
     nextTextBlockStartsBlock: false,
+    backgroundTasks: new Map<string, string>(),
+    backgroundTaskLabels: new Map<string, string>(),
+    finishedTaskIds: new Set<string>(),
+    notificationsSinceInit: 0,
+    heldSegments: [],
+    heldResultEvents: [],
+    holds: 0,
+    segmentStreamStart: 0,
+    forceMessageBoundary: false,
+    holdGraceTimer: undefined as NodeJS.Timeout | undefined,
     timer,
     onOutput: undefined,
     resolve: undefined,
@@ -3986,4 +3996,321 @@ test("failed formats CLI timeout content in human-readable time", () => {
 
   assert.equal(result.content, "@sam-codex-qa-lead timed out after 24 hours.");
   assert.match(result.error, /86400000ms/);
+});
+
+// Parity with the dedicated CLI in bidirectional stream-json mode (verified on
+// Claude Code 2.1.257): a `result` while a background task is live is not the
+// end of the turn — the CLI keeps the process alive, resumes the model with the
+// task notification and streams the continuation on the same session.
+test("claude warm turn stays open while a background task runs and appends the CLI's continuation", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeClaudeWarmPendingTurn({
+    onOutput: (event: { kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event),
+    participant,
+    {},
+    undefined,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", name: "Bash", input: { command: "sleep 8; echo done", run_in_background: true } }] } });
+  send({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "t1", task_type: "local_bash", description: "Run the soak" }] });
+  send({ type: "system", subtype: "task_started", task_id: "t1", tool_use_id: "toolu_1", description: "Run the soak", is_backgrounded: true, task_type: "local_bash" });
+  send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "Command running in background with ID: t1" }] } });
+  send({ type: "stream_event", event: { type: "content_block_start", content_block: { type: "text" } } });
+  send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Started the soak" } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Started the soak" }] } });
+  send({ type: "result", subtype: "success", result: "Started the soak", num_turns: 2 });
+
+  assert.equal(resolved.length, 0, "the turn must not finish while the background task is live");
+  const hold = outputs.find((event) => event.kind === "tool" && /Waiting for background work: Run the soak/.test(event.text));
+  assert.ok(hold, "the chat is told what the turn is waiting for");
+  assert.equal(hold?.activityKind, "status");
+  assert.equal(hold?.activityStatus, "started");
+
+  send({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+  send({ type: "system", subtype: "task_notification", task_id: "t1", tool_use_id: "toolu_1", status: "completed", summary: "Background command completed" });
+  send({ type: "system", subtype: "init" });
+  send({ type: "stream_event", event: { type: "content_block_start", content_block: { type: "text" } } });
+  send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "The soak finished: 0 failures." } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "The soak finished: 0 failures." }] } });
+  send({ type: "result", subtype: "success", result: "The soak finished: 0 failures.", num_turns: 1 });
+
+  assert.equal(resolved.length, 1);
+  assert.equal((resolved[0] as { content: string }).content, "Started the soak\n\nThe soak finished: 0 failures.");
+  assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "Started the soak\n\nThe soak finished: 0 failures.");
+  const finished = outputs.find((event) => event.kind === "tool" && /Background task finished: Run the soak/.test(event.text));
+  assert.equal(finished?.activityStatus, "completed");
+});
+
+test("claude warm turn holds again when the continuation starts another background task", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  const pending = makeClaudeWarmPendingTurn({ resolve: (result: unknown) => resolved.push(result) });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event),
+    participant,
+    {},
+    undefined,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ type: "system", subtype: "task_started", task_id: "t1", description: "first", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "one" }] } });
+  send({ type: "result", result: "one" });
+  assert.equal(resolved.length, 0);
+
+  send({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed" });
+  send({ type: "system", subtype: "init" });
+  send({ type: "system", subtype: "task_started", task_id: "t2", description: "second", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "two" }] } });
+  send({ type: "result", result: "two" });
+  assert.equal(resolved.length, 0, "a new background task started by the continuation keeps the turn open");
+
+  send({ type: "system", subtype: "task_notification", task_id: "t2", status: "stopped" });
+  send({ type: "system", subtype: "init" });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "three" }] } });
+  send({ type: "result", result: "three" });
+  assert.equal(resolved.length, 1);
+  assert.equal((resolved[0] as { content: string }).content, "one\n\ntwo\n\nthree");
+});
+
+test("claude warm turn keeps waiting when the task finished before the reply's result", () => {
+  // Verified CLI order for a short task: background_tasks_changed [] and
+  // task_notification arrive while the reply is still streaming, and the CLI
+  // still resumes the model after the result to deliver the notification.
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  const pending = makeClaudeWarmPendingTurn({ resolve: (result: unknown) => resolved.push(result) });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event),
+    participant,
+    {},
+    undefined,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "system", subtype: "task_started", task_id: "t1", description: "quick", is_backgrounded: true });
+  send({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+  send({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed" });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "ACK" }] } });
+  send({ type: "result", result: "ACK" });
+  assert.equal(resolved.length, 0, "a notification the model has not seen yet keeps the turn open");
+  assert.ok(pending.holdGraceTimer, "waiting only for the CLI to resume is bounded by the grace timer");
+
+  send({ type: "system", subtype: "init" });
+  assert.equal(pending.holdGraceTimer, undefined);
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "DONE" }] } });
+  send({ type: "result", result: "DONE" });
+  assert.equal(resolved.length, 1);
+  assert.equal((resolved[0] as { content: string }).content, "ACK\n\nDONE");
+});
+
+test("claude warm hold delivers the held reply when the CLI never resumes", async () => {
+  const runner = makeRunner() as any;
+  runner.claudeBackgroundResumeGraceMs = 20;
+  const resolved: unknown[] = [];
+  let current: any = makeClaudeWarmPendingTurn({ resolve: (result: unknown) => resolved.push(result) });
+  const pending = current;
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const cleanup = (): unknown => { const value = current; current = undefined; return value; };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event),
+    participant,
+    {},
+    undefined,
+    pending,
+    cleanup,
+    fail
+  );
+
+  send({ type: "system", subtype: "task_started", task_id: "t1", description: "soak", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Started" }] } });
+  send({ type: "result", result: "Started" });
+  send({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed" });
+  assert.equal(resolved.length, 0);
+
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(resolved.length, 1);
+  assert.equal((resolved[0] as { content: string }).content, "Started");
+  assert.equal(current, undefined, "the turn was cleaned up by the grace timer");
+});
+
+test("claude warm hold: a failure after the reply settles with the reply and a warning instead of rejecting", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  const rejected: Error[] = [];
+  const pending = makeClaudeWarmPendingTurn({
+    resolve: (result: unknown) => resolved.push(result),
+    reject: (error: Error) => rejected.push(error)
+  });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event),
+    participant,
+    {},
+    undefined,
+    pending,
+    () => pending,
+    fail
+  );
+
+  send({ type: "system", subtype: "task_started", task_id: "t1", description: "deploy", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Deploy started." }] } });
+  send({ type: "result", result: "Deploy started." });
+  assert.equal(resolved.length, 0);
+
+  // What the warm closure does for is_error results, process exit and timeout.
+  const settled = runner.settleClaudeWarmAfterFailure(pending, new Error("claude warm process exited with code 1"), participant, {}, undefined);
+  assert.equal(settled, true);
+  assert.equal(rejected.length, 0);
+  assert.equal(resolved.length, 1);
+  const result = resolved[0] as { ok: boolean; content: string; warnings?: string[] };
+  assert.equal(result.ok, true);
+  assert.equal(result.content, "Deploy started.");
+  assert.match(result.warnings?.[0] ?? "", /background work after it did not finish \(claude warm process exited with code 1\)/);
+
+  // A Stop by the user keeps the reply too, but is not reported as a failure.
+  const stoppedResolved: unknown[] = [];
+  const stopped = makeClaudeWarmPendingTurn({
+    resolve: (value: unknown) => stoppedResolved.push(value),
+    reject: (error: Error) => rejected.push(error),
+    heldSegments: ["Deploy started."],
+    holds: 1
+  });
+  assert.equal(runner.settleClaudeWarmAfterFailure(stopped, new Error("claude warm process was cancelled"), participant, {}, undefined), true);
+  assert.equal((stoppedResolved[0] as { content: string; warnings?: string[] }).content, "Deploy started.");
+  assert.equal((stoppedResolved[0] as { warnings?: string[] }).warnings, undefined);
+
+  // Before any reply was delivered there is nothing to settle with: reject as before.
+  const fresh = makeClaudeWarmPendingTurn({ reject: (error: Error) => rejected.push(error) });
+  assert.equal(runner.settleClaudeWarmAfterFailure(fresh, new Error("boom"), participant, {}, undefined), false);
+});
+
+test("claude warm hold ignores a stale task list and a textless continuation does not repeat the reply", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; text: string; cumulative?: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeClaudeWarmPendingTurn({
+    onOutput: (event: { kind: string; text: string; cumulative?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event),
+    participant,
+    {},
+    undefined,
+    pending,
+    () => pending,
+    fail
+  );
+  const longCommand = `sleep 1; ${"x".repeat(400)}`;
+
+  send({ type: "system", subtype: "task_started", task_id: "t1", description: longCommand, is_backgrounded: true });
+  send({ type: "stream_event", event: { type: "content_block_start", content_block: { type: "text" } } });
+  send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Kicked it off" } } });
+  send({ type: "result" });
+  const hold = outputs.find((event) => event.kind === "tool" && /Waiting for background work/.test(event.text));
+  assert.ok(hold);
+  assert.ok((hold?.text.length ?? 0) < 220, "a model-authored description is bounded in the activity label");
+
+  send({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed" });
+  // A task list ordered after the notification must not resurrect the task.
+  send({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "t1", description: longCommand }] });
+  assert.equal(pending.backgroundTasks.size, 0);
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "result" });
+  assert.equal(resolved.length, 1);
+  assert.equal((resolved[0] as { content: string }).content, "Kicked it off");
+});
+
+test("claude warm events with no pending turn retire the process only for a stray continuation", () => {
+  const runner = makeRunner() as any;
+  const logged: string[] = [];
+  runner.writeDebugLog = async (event: string): Promise<void> => { logged.push(event); };
+  let strayCount = 0;
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event),
+    participant,
+    {},
+    undefined,
+    undefined,
+    () => undefined,
+    fail,
+    () => { strayCount += 1; }
+  );
+
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "late" }] } });
+  send({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+  assert.equal(strayCount, 0);
+  assert.equal(logged.length, 0);
+
+  send({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed" });
+  assert.equal(strayCount, 0);
+  send({ type: "system", subtype: "init" });
+  send({ type: "result", result: "late" });
+  assert.equal(strayCount, 2);
+  assert.deepEqual(logged, [
+    "cli-agent-claude-warm-event-without-turn",
+    "cli-agent-claude-warm-event-without-turn",
+    "cli-agent-claude-warm-event-without-turn"
+  ]);
+});
+
+test("claude warm turn finishes at the result when no background task is live", () => {
+  const runner = makeRunner() as any;
+  const outputs: Array<{ kind: string; text: string }> = [];
+  const resolved: unknown[] = [];
+  const pending = makeClaudeWarmPendingTurn({
+    onOutput: (event: { kind: string; text: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event),
+    participant,
+    {},
+    undefined,
+    pending,
+    () => pending,
+    fail
+  );
+
+  // A foreground subagent is not a background task, and a task that already
+  // finished (the CLI reports an empty live list) must not hold the turn.
+  send({ type: "system", subtype: "task_started", task_id: "fg", description: "Explore", is_backgrounded: false });
+  send({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Done." }] } });
+  send({ type: "result", result: "Done." });
+
+  assert.equal(resolved.length, 1);
+  assert.equal((resolved[0] as { content: string }).content, "Done.");
+  assert.equal(outputs.some((event) => /Waiting for background work/.test(event.text)), false);
 });

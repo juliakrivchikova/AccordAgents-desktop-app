@@ -3,7 +3,9 @@
 > ## GOAL: run this QA from the cloud
 >
 > **Owner:** unassigned — needs a participant with auto-watch or a native `/goal`.
-> A Claude chat turn is one-shot and cannot iterate on its own.
+> A cloud Claude chat turn is one-shot and cannot iterate on its own (a local
+> Claude member does continue through its own background tasks, but a cloud run
+> still launches one CLI process per turn).
 >
 > **Objective:** get most of the scenarios below executed and fixed by cloud
 > members, with the laptop closed.

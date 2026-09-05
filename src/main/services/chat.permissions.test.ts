@@ -5491,11 +5491,13 @@ test("participantPermissionPolicy guides blocked repoRead to request before refu
   assert.match(prompt, /app_permissions_request_change/);
 });
 
-test("Claude prompt includes one-shot execution model on first and resumed turns only", () => {
+test("Claude prompt describes the background-work execution model on first and resumed turns only", () => {
   const { service } = testService();
   const permissions = normalizeChatAgentPermissions(defaultChatAgentPermissions());
-  const promptFor = (kind: ChatProviderKind, includeRoleInstructions: boolean): string => {
-    const participant = chatParticipant(kind);
+  const promptFor = (kind: ChatProviderKind, includeRoleInstructions: boolean, remote = false): string => {
+    const participant = remote
+      ? { ...chatParticipant(kind), remoteExecution: "remote" as const }
+      : chatParticipant(kind);
     const conversation = chatConversation([participant]);
     const session: ChatParticipantSession = {
       participantId: participant.id,
@@ -5532,12 +5534,20 @@ test("Claude prompt includes one-shot execution model on first and resumed turns
 
   for (const prompt of [firstTurn, resumedTurn]) {
     assert.match(prompt, /Claude Code execution model in AccordAgents Chat/);
-    assert.match(prompt, /This chat turn is one-shot/);
-    assert.match(prompt, /Backgrounded Claude work is terminated at turn end/);
-    assert.match(prompt, /Never end a turn by saying you are standing by, waiting, will wait, or will post/);
+    assert.match(prompt, /Your turn ends when you send the final chat message and nothing you started in the background is still running/);
+    assert.match(prompt, /resumed on the same session with the task notification when it finishes/);
+    assert.match(prompt, /never say you are waiting for something that is not a tracked background task/);
+    assert.doesNotMatch(prompt, /This chat turn is one-shot/);
   }
   assert.doesNotMatch(codexTurn, /Claude Code execution model in AccordAgents Chat/);
-  assert.doesNotMatch(codexTurn, /Backgrounded Claude work is terminated at turn end/);
+  assert.doesNotMatch(codexTurn, /resumed on the same session with the task notification/);
+
+  // A cloud run still launches one CLI process per turn and cannot carry a
+  // background continuation, so a remote member keeps the one-shot contract.
+  const remoteTurn = promptFor("claude-code", false, true);
+  assert.match(remoteTurn, /This chat turn is one-shot/);
+  assert.match(remoteTurn, /Backgrounded Claude work is terminated at turn end/);
+  assert.doesNotMatch(remoteTurn, /resumed on the same session with the task notification/);
 });
 
 test("participantPermissionPolicy does not suggest escalation for agent-mode masked shell and workspace grants", () => {

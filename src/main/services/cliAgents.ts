@@ -76,6 +76,13 @@ const MAX_CLI_EVENT_SUMMARIES = 2;
 const CLI_AGENT_COMPACT_TIMEOUT_MS = 5 * 60_000;
 const WARM_AGENT_KILL_GRACE_MS = 1500;
 const WINDOWS_WARM_AGENT_KILL_GRACE_MS = 750;
+// Claude background tasks (Agent/Bash `run_in_background`) on the warm transport.
+// Verified on Claude Code 2.1.257: the CLI resumes the model with the task
+// notification on the same process, and kills its own tasks when stdin closes.
+const CLAUDE_BACKGROUND_TASK_LABEL_MAX_CHARS = 160;
+const CLAUDE_BACKGROUND_RESUME_GRACE_MS = 10_000;
+const CLAUDE_BACKGROUND_CLOSE_GRACE_MS = 3_000;
+const CLAUDE_WARM_CANCELLED_MESSAGE = "claude warm process was cancelled";
 const SESSION_LOG_RETRY_MS = 80;
 const SESSION_LOG_RETRIES = 4;
 const MODEL_CATALOG_CACHE_MS = 5 * 60_000;
@@ -306,6 +313,14 @@ interface WarmAgentEntry {
   queue: Promise<void>;
   idleTimer?: NodeJS.Timeout;
   closed: boolean;
+  /** Set when the process can no longer carry another turn cleanly: a failure,
+   *  timeout or Stop after a reply was already delivered, or a continuation
+   *  that arrived with no turn pending. The next run replaces the process. */
+  unusable?: boolean;
+  /** Claude only: true while the CLI reports background tasks running, so
+   *  shutdown ends stdin first and lets the CLI kill them itself (SIGTERM alone
+   *  leaves their shells running in their own process group). */
+  hasLiveBackgroundWork?: () => boolean;
 }
 
 interface ClaudeWarmPendingTurn {
@@ -313,6 +328,42 @@ interface ClaudeWarmPendingTurn {
   messages: string[];
   streamedText: string;
   nextTextBlockStartsBlock: boolean;
+  /** Background tasks (`Agent`/`Bash` with `run_in_background`) the CLI reports
+   *  as live, keyed by task id. While any remain, a `result` does not finish the
+   *  turn: the CLI resumes the model itself when the task completes and streams
+   *  the continuation on this same process, exactly as the dedicated CLI does. */
+  backgroundTasks: Map<string, string>;
+  /** Descriptions of every background task seen this turn, kept after the task
+   *  leaves the live list so its notification can still be named. */
+  backgroundTaskLabels: Map<string, string>;
+  /** Tasks whose notification already arrived; a stale `background_tasks_changed`
+   *  ordered after it must not resurrect them and re-arm the hold. */
+  finishedTaskIds: Set<string>;
+  /** Notifications the CLI has emitted since it last started a model turn
+   *  (`system/init`). A `result` with one outstanding is not the end of the
+   *  turn: the CLI resumes the model to deliver it, even when the task finished
+   *  while the reply was still being written. */
+  notificationsSinceInit: number;
+  /** Final text of every sub-turn already closed by a held `result`; the reply
+   *  is these segments plus the last one, separated by paragraph breaks. */
+  heldSegments: string[];
+  /** The held `result` events, so permission denials in them are still reported. */
+  heldResultEvents: unknown[];
+  /** Number of `result` events held so far; non-zero means the turn is waiting
+   *  on background work (or on the CLI resuming to deliver its notification). */
+  holds: number;
+  /** Offset into `streamedText` where the current sub-turn's text starts, so a
+   *  continuation without text does not re-emit the previous segment. */
+  segmentStreamStart: number;
+  /** Set after a held `result` so the continuation's first text starts a new
+   *  paragraph instead of being joined to the previous sentence. */
+  forceMessageBoundary: boolean;
+  /** Armed when the hold is waiting only for the CLI to resume (no task still
+   *  running); if no model turn starts in time, the held reply is delivered. */
+  holdGraceTimer?: NodeJS.Timeout;
+  /** The visible "waiting" activity row of the current hold, completed when the
+   *  CLI resumes so it does not stay "started" forever. */
+  holdActivity?: { itemId: string; label: string };
   sessionId?: string;
   model?: string;
   usedTokens?: number;
@@ -920,6 +971,8 @@ export class CliAgentRunner {
   private readonly codexExecutable: string;
   private readonly electronAppPath: string | undefined;
   private readonly warmAgents = new Map<string, WarmAgentEntry>();
+  /** Overridable in tests; see CLAUDE_BACKGROUND_RESUME_GRACE_MS. */
+  private claudeBackgroundResumeGraceMs = CLAUDE_BACKGROUND_RESUME_GRACE_MS;
   private readonly warmUnsupportedLogged = new Set<ParticipantConfig["kind"]>();
   private readonly modelCatalogs = new Map<ChatProviderKind, CachedModelCatalog>();
   private readonly modelCatalogRequests = new Map<ChatProviderKind, Promise<ProviderModelCatalog>>();
@@ -4773,10 +4826,10 @@ export class CliAgentRunner {
     const scopeKey = this.warmAgentScopeKey(warm);
     await this.closeStaleWarmAgents(scopeKey, key);
     let entry = this.warmAgents.get(key);
-    if (!entry || entry.closed || entry.process.exitCode !== null) {
+    if (!entry || entry.closed || entry.unusable || entry.process.exitCode !== null) {
       if (entry) {
         this.warmAgents.delete(key);
-        await this.closeWarmAgent(entry, "stale");
+        await this.closeWarmAgent(entry, entry.unusable ? "stray-continuation" : "stale");
       }
       try {
         await ensureLoginShellEnvPrimed();
@@ -4810,6 +4863,15 @@ export class CliAgentRunner {
         if (result.appMcpClientFailed) {
           this.warmAgents.delete(key);
           await this.closeWarmAgent(entry as WarmAgentEntry, "app-mcp-unavailable");
+          return result;
+        }
+        if (signal?.aborted || (entry as WarmAgentEntry).unusable) {
+          // The turn settled with an already-delivered reply after Stop or a
+          // failure; the process may still carry background work, so retire it
+          // (stdin first, so the CLI shuts that work down) instead of keeping
+          // it warm.
+          this.warmAgents.delete(key);
+          await this.closeWarmAgent(entry as WarmAgentEntry, signal?.aborted ? "aborted" : "unusable-after-reply");
           return result;
         }
         this.scheduleWarmIdleTimer(entry as WarmAgentEntry, warm.idleTimeoutMs);
@@ -4867,12 +4929,15 @@ export class CliAgentRunner {
     let closed = false;
     let pending: ClaudeWarmPendingTurn | undefined;
 
+    let liveBackgroundTasksAtCleanup = 0;
     const cleanupPending = (): ClaudeWarmPendingTurn | undefined => {
       const current = pending;
       if (!current) {
         return undefined;
       }
       clearTimeout(current.timer);
+      this.clearClaudeHoldGraceTimer(current);
+      liveBackgroundTasksAtCleanup = current.backgroundTasks.size;
       if (current.abort) {
         current.abort();
       }
@@ -4882,7 +4947,21 @@ export class CliAgentRunner {
 
     const rejectPending = (error: Error): void => {
       const current = cleanupPending();
-      current?.reject(error);
+      if (!current) {
+        return;
+      }
+      // A failure, timeout or Stop after a reply was already delivered must not
+      // throw that reply away (nor re-run the prompt through the one-shot
+      // fallback): settle with what the user has already seen and retire this
+      // process so the background work it still carries is shut down.
+      if (this.settleClaudeWarmAfterFailure(current, error, participant, options, newSessionId)) {
+        entry.unusable = true;
+        return;
+      }
+      current.reject(error);
+    };
+    const noteStrayContinuation = (): void => {
+      entry.unusable = true;
     };
 
     child.stderr.on("data", (chunk: string) => {
@@ -4901,7 +4980,7 @@ export class CliAgentRunner {
         const line = stdoutBuffer.slice(0, newline).trim();
         stdoutBuffer = stdoutBuffer.slice(newline + 1);
         if (line) {
-          this.handleClaudeWarmLine(line, participant, options, newSessionId, pending, cleanupPending, rejectPending);
+          this.handleClaudeWarmLine(line, participant, options, newSessionId, pending, cleanupPending, rejectPending, noteStrayContinuation);
         }
         newline = stdoutBuffer.indexOf("\n");
       }
@@ -4916,13 +4995,14 @@ export class CliAgentRunner {
       rejectPending(new Error(`claude warm process exited${exitCode === null ? "" : ` with code ${exitCode}`}${stderr ? `: ${stderr}` : ""}`));
     });
 
-    return {
+    const entry: WarmAgentEntry = {
       key,
       scopeKey,
       providerKind: participant.kind,
       process: child,
       queue: Promise.resolve(),
       closed: false,
+      hasLiveBackgroundWork: () => (pending ? pending.backgroundTasks.size : liveBackgroundTasksAtCleanup) > 0,
       run: (
         turnPrompt: string,
         signal?: AbortSignal,
@@ -4944,13 +5024,22 @@ export class CliAgentRunner {
           }, effectiveTimeoutMs);
           timer.unref();
           const abort = (): void => {
-            rejectPending(new Error("claude warm process was cancelled"));
+            rejectPending(new Error(CLAUDE_WARM_CANCELLED_MESSAGE));
           };
           pending = {
             startedAt,
             messages: [],
             streamedText: "",
             nextTextBlockStartsBlock: false,
+            backgroundTasks: new Map(),
+            backgroundTaskLabels: new Map(),
+            finishedTaskIds: new Set(),
+            notificationsSinceInit: 0,
+            heldSegments: [],
+            heldResultEvents: [],
+            holds: 0,
+            segmentStreamStart: 0,
+            forceMessageBoundary: false,
             sessionId: options.sessionId ?? newSessionId,
             model: participant.model,
             timer,
@@ -4974,6 +5063,7 @@ export class CliAgentRunner {
         });
       }
     };
+    return entry;
   }
 
   private claudeLaunchArgs(
@@ -5052,16 +5142,18 @@ export class CliAgentRunner {
     fallbackSessionId: string | undefined,
     pending: ClaudeWarmPendingTurn | undefined,
     cleanupPending: () => ClaudeWarmPendingTurn | undefined,
-    rejectPending: (error: Error) => void
+    rejectPending: (error: Error) => void,
+    noteStrayContinuation?: () => void
   ): void {
-    if (!pending) {
-      return;
-    }
     let event: unknown;
     try {
       event = JSON.parse(line);
     } catch {
       rejectPending(new Error(`claude warm process emitted invalid JSON: ${line.slice(0, 120)}`));
+      return;
+    }
+    if (!pending) {
+      this.noteClaudeWarmEventWithoutTurn(event, participant, noteStrayContinuation);
       return;
     }
     const sessionIdFromEvent = this.findSessionId(event);
@@ -5075,6 +5167,7 @@ export class CliAgentRunner {
       rejectPending(new Error(streamError));
       return;
     }
+    this.trackClaudeBackgroundTasks(event, pending, participant, options, fallbackSessionId, cleanupPending);
     const toolSummary = this.claudeWarmToolSummary(event);
     if (toolSummary) {
       this.emitLiveOutput(pending.onOutput, "tool", `${toolSummary.label}\n`, undefined, {
@@ -5087,7 +5180,12 @@ export class CliAgentRunner {
     }
     const streamDelta = this.extractClaudeStreamEventTextDelta(event);
     if (streamDelta) {
-      if (pending.nextTextBlockStartsBlock) {
+      if (pending.forceMessageBoundary) {
+        const previous = pending.streamedText.trimEnd();
+        pending.streamedText = previous ? `${previous}\n\n` : pending.streamedText;
+        pending.forceMessageBoundary = false;
+        pending.nextTextBlockStartsBlock = false;
+      } else if (pending.nextTextBlockStartsBlock) {
         pending.streamedText = this.textWithAgentMessageBoundary(pending.streamedText, streamDelta);
         pending.nextTextBlockStartsBlock = false;
       }
@@ -5101,21 +5199,52 @@ export class CliAgentRunner {
     if (!this.isClaudeWarmResult(event)) {
       return;
     }
+    const segment = this.claudeWarmSegmentText(pending, event);
+    if (pending.backgroundTasks.size > 0 || pending.notificationsSinceInit > 0) {
+      // Parity with the dedicated CLI: the model's reply is not the end of the
+      // turn while work it started in the background is still running, or while
+      // a task notification is still to be delivered. The CLI keeps the process
+      // alive, resumes the model with the notification and streams that
+      // continuation here, so the turn stays open for it.
+      this.holdClaudeWarmResult(pending, segment, event, participant, options, fallbackSessionId, cleanupPending);
+      return;
+    }
     const current = cleanupPending();
     if (!current) {
       return;
     }
+    this.finishClaudeWarmTurn(current, segment, event, participant, options, fallbackSessionId);
+  }
+
+  private claudeWarmSegmentText(pending: ClaudeWarmPendingTurn, event: unknown): string {
     const resultText = this.extractClaudeWarmResultText(event);
-    const content = resultText ?? (
-      current.messages.length > 0
-        ? this.finalTextFromMessageItems(current.messages)
-        : this.trailingTextBlock(current.streamedText)
-    );
+    if (resultText !== undefined) {
+      return resultText;
+    }
+    if (pending.messages.length > 0) {
+      return this.finalTextFromMessageItems(pending.messages);
+    }
+    return this.trailingTextBlock(pending.streamedText.slice(pending.segmentStreamStart));
+  }
+
+  private finishClaudeWarmTurn(
+    current: ClaudeWarmPendingTurn,
+    segment: string,
+    event: unknown,
+    participant: ParticipantConfig,
+    options: CliAgentRunOptions,
+    fallbackSessionId: string | undefined,
+    warning?: string
+  ): void {
+    const content = [...current.heldSegments, segment]
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .join("\n\n");
     if (!content.trim() && !options.allowEmptyContent) {
       current.reject(new Error("Claude warm process completed without response content."));
       return;
     }
-    const sessionId = this.findSessionId(event) ?? current.sessionId ?? fallbackSessionId;
+    const sessionId = (event === undefined ? undefined : this.findSessionId(event)) ?? current.sessionId ?? fallbackSessionId;
     this.reportSessionId(current.onSessionId, sessionId);
     const contextUsage = buildAgentContextUsage({
       usedTokens: current.usedTokens,
@@ -5123,15 +5252,19 @@ export class CliAgentRunner {
       source: "claude-code",
       model: current.model
     });
-    const result: ParticipantRunResult = this.withClaudePermissionDenialWarning({
+    let result: ParticipantRunResult = {
       participant,
       ok: true,
       content: content.trim(),
       durationMs: Date.now() - current.startedAt,
       sessionId,
       roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined,
-      contextUsage
-    }, event, participant, "warm");
+      contextUsage,
+      ...(warning ? { warnings: [warning] } : {})
+    };
+    for (const raw of [...current.heldResultEvents, ...(event === undefined ? [] : [event])]) {
+      result = this.withClaudePermissionDenialWarning(result, raw, participant, "warm");
+    }
     if (contextUsage || !sessionId) {
       current.resolve(result);
       return;
@@ -5139,6 +5272,43 @@ export class CliAgentRunner {
     void this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
       .then((logUsage) => current.resolve({ ...result, contextUsage: logUsage }))
       .catch(() => current.resolve(result));
+  }
+
+  /** After at least one reply was delivered, a failure (error result, process
+   *  exit, timeout, Stop) settles the turn with that reply plus a warning instead
+   *  of rejecting — rejecting would discard text the user already saw and, for
+   *  non-abort failures, re-run the whole prompt through the one-shot fallback. */
+  private settleClaudeWarmAfterFailure(
+    current: ClaudeWarmPendingTurn,
+    error: Error,
+    participant: ParticipantConfig,
+    options: CliAgentRunOptions,
+    fallbackSessionId: string | undefined
+  ): boolean {
+    if (current.holds === 0 || current.heldSegments.length === 0) {
+      return false;
+    }
+    const message = this.errorText(error);
+    const cancelled = message === CLAUDE_WARM_CANCELLED_MESSAGE;
+    void this.writeDebugLog("cli-agent-claude-background-settled-after-failure", {
+      participantId: participant.id,
+      heldSegments: current.heldSegments.length,
+      liveTasks: current.backgroundTasks.size,
+      cancelled,
+      error: message
+    });
+    // A Stop is the user's own decision and the message is marked stopped
+    // anyway; only an unexpected failure deserves a warning.
+    this.finishClaudeWarmTurn(
+      current,
+      "",
+      undefined,
+      participant,
+      options,
+      fallbackSessionId,
+      cancelled ? undefined : `${participant.label}: the reply was delivered, but the background work after it did not finish (${message}).`
+    );
+    return true;
   }
 
   private handleClaudeOneShotStreamChunk(
@@ -5219,6 +5389,199 @@ export class CliAgentRunner {
 
   private isClaudeWarmResult(event: unknown): boolean {
     return this.stringField(this.asRecord(event) ?? {}, "type") === "result";
+  }
+
+  /** Mirrors the CLI's background-task bookkeeping from its `system` events
+   *  (verified on Claude Code 2.1.257): `init` starts a model turn,
+   *  `task_started` (with `is_backgrounded`) registers a task,
+   *  `background_tasks_changed` is the authoritative list of live tasks, and
+   *  `task_notification` reports one finished (`status` "completed", or
+   *  "stopped" for a killed task). */
+  private trackClaudeBackgroundTasks(
+    event: unknown,
+    pending: ClaudeWarmPendingTurn,
+    participant: ParticipantConfig,
+    options: CliAgentRunOptions,
+    fallbackSessionId: string | undefined,
+    cleanupPending: () => ClaudeWarmPendingTurn | undefined
+  ): void {
+    const record = this.asRecord(event);
+    if (!record || this.stringField(record, "type") !== "system") {
+      return;
+    }
+    const subtype = this.stringField(record, "subtype");
+    if (subtype === "init") {
+      // A model turn started: every notification seen so far has been delivered
+      // to the model, and a held reply is now being continued.
+      pending.notificationsSinceInit = 0;
+      this.clearClaudeHoldGraceTimer(pending);
+      if (pending.holdActivity) {
+        this.emitLiveOutput(pending.onOutput, "tool", `${pending.holdActivity.label}\n`, undefined, {
+          activityKind: "status",
+          activityStatus: "completed",
+          activityItemId: pending.holdActivity.itemId
+        });
+        pending.holdActivity = undefined;
+      }
+      return;
+    }
+    if (subtype === "task_started") {
+      const taskId = this.stringField(record, "task_id");
+      if (taskId && record.is_backgrounded === true && !pending.finishedTaskIds.has(taskId)) {
+        const label = this.claudeBackgroundTaskLabel(this.stringField(record, "description") ?? taskId);
+        pending.backgroundTasks.set(taskId, label);
+        pending.backgroundTaskLabels.set(taskId, label);
+        this.clearClaudeHoldGraceTimer(pending);
+      }
+      return;
+    }
+    if (subtype === "background_tasks_changed") {
+      const live = new Map<string, string>();
+      for (const task of Array.isArray(record.tasks) ? record.tasks : []) {
+        const taskRecord = this.asRecord(task);
+        const taskId = taskRecord ? this.stringField(taskRecord, "task_id") : undefined;
+        if (!taskRecord || !taskId || pending.finishedTaskIds.has(taskId)) {
+          continue;
+        }
+        const label = this.claudeBackgroundTaskLabel(
+          this.stringField(taskRecord, "description") ?? pending.backgroundTaskLabels.get(taskId) ?? taskId
+        );
+        live.set(taskId, label);
+        pending.backgroundTaskLabels.set(taskId, label);
+      }
+      pending.backgroundTasks = live;
+      this.armClaudeHoldGraceTimerIfIdle(pending, participant, options, fallbackSessionId, cleanupPending);
+      return;
+    }
+    if (subtype === "task_notification") {
+      const taskId = this.stringField(record, "task_id");
+      const status = this.stringField(record, "status") ?? "stopped";
+      const description = (taskId ? pending.backgroundTaskLabels.get(taskId) : undefined)
+        ?? this.claudeBackgroundTaskLabel(this.stringField(record, "summary") ?? taskId ?? "background task");
+      if (taskId) {
+        pending.backgroundTasks.delete(taskId);
+        pending.finishedTaskIds.add(taskId);
+      }
+      pending.notificationsSinceInit += 1;
+      const completed = status === "completed";
+      this.emitLiveOutput(pending.onOutput, "tool", `Background task ${completed ? "finished" : status}: ${description}\n`, undefined, {
+        activityKind: "status",
+        activityStatus: completed ? "completed" : "failed"
+      });
+      this.armClaudeHoldGraceTimerIfIdle(pending, participant, options, fallbackSessionId, cleanupPending);
+    }
+  }
+
+  private holdClaudeWarmResult(
+    pending: ClaudeWarmPendingTurn,
+    segment: string,
+    event: unknown,
+    participant: ParticipantConfig,
+    options: CliAgentRunOptions,
+    fallbackSessionId: string | undefined,
+    cleanupPending: () => ClaudeWarmPendingTurn | undefined
+  ): void {
+    if (segment.trim()) {
+      pending.heldSegments.push(segment.trim());
+    }
+    pending.heldResultEvents.push(event);
+    pending.holds += 1;
+    pending.messages = [];
+    pending.forceMessageBoundary = true;
+    pending.segmentStreamStart = pending.streamedText.length;
+    const tasks = Array.from(pending.backgroundTasks.values());
+    const label = tasks.length > 0
+      ? `Waiting for background work: ${tasks.join("; ")}`
+      : "Waiting for the background task result";
+    pending.holdActivity = { itemId: `claude-background-wait-${pending.holds}`, label };
+    this.emitLiveOutput(pending.onOutput, "tool", `${label}\n`, undefined, {
+      activityKind: "status",
+      activityStatus: "started",
+      activityItemId: pending.holdActivity.itemId
+    });
+    void this.writeDebugLog("cli-agent-claude-background-hold", {
+      participantId: participant.id,
+      holds: pending.holds,
+      heldSegments: pending.heldSegments.length,
+      liveTasks: tasks.length,
+      pendingNotifications: pending.notificationsSinceInit
+    });
+    this.armClaudeHoldGraceTimerIfIdle(pending, participant, options, fallbackSessionId, cleanupPending);
+  }
+
+  /** While a hold waits only for the CLI to resume (no task still running), a
+   *  model turn normally starts within milliseconds. If none does, deliver the
+   *  held reply rather than keeping the turn open until the run timeout. */
+  private armClaudeHoldGraceTimerIfIdle(
+    pending: ClaudeWarmPendingTurn,
+    participant: ParticipantConfig,
+    options: CliAgentRunOptions,
+    fallbackSessionId: string | undefined,
+    cleanupPending: () => ClaudeWarmPendingTurn | undefined
+  ): void {
+    if (pending.holds === 0 || pending.backgroundTasks.size > 0) {
+      return;
+    }
+    this.clearClaudeHoldGraceTimer(pending);
+    pending.holdGraceTimer = setTimeout(() => {
+      pending.holdGraceTimer = undefined;
+      const current = cleanupPending();
+      if (!current) {
+        return;
+      }
+      void this.writeDebugLog("cli-agent-claude-background-resume-timeout", {
+        participantId: participant.id,
+        holds: current.holds,
+        graceMs: this.claudeBackgroundResumeGraceMs
+      });
+      this.finishClaudeWarmTurn(current, "", undefined, participant, options, fallbackSessionId);
+    }, this.claudeBackgroundResumeGraceMs);
+    pending.holdGraceTimer.unref();
+  }
+
+  private clearClaudeHoldGraceTimer(pending: ClaudeWarmPendingTurn): void {
+    if (pending.holdGraceTimer) {
+      clearTimeout(pending.holdGraceTimer);
+      pending.holdGraceTimer = undefined;
+    }
+  }
+
+  /** Task descriptions are model-authored (for a Bash task, the raw command);
+   *  keep the visible label one line and bounded. */
+  private claudeBackgroundTaskLabel(text: string): string {
+    const collapsed = text.replace(/\s+/g, " ").trim();
+    return collapsed.length > CLAUDE_BACKGROUND_TASK_LABEL_MAX_CHARS
+      ? `${collapsed.slice(0, CLAUDE_BACKGROUND_TASK_LABEL_MAX_CHARS - 1)}…`
+      : collapsed;
+  }
+
+  /** An event that arrives with no turn pending is dropped, as before. A model
+   *  turn starting on its own (`init`) means the CLI is continuing something
+   *  this runner no longer tracks, so the process is retired before the next
+   *  run rather than letting that continuation be read as the next reply. */
+  private noteClaudeWarmEventWithoutTurn(
+    event: unknown,
+    participant: ParticipantConfig,
+    noteStrayContinuation: (() => void) | undefined
+  ): void {
+    const record = this.asRecord(event);
+    if (!record) {
+      return;
+    }
+    const type = this.stringField(record, "type");
+    const subtype = this.stringField(record, "subtype");
+    const stray = type === "result" || (type === "system" && (subtype === "init" || subtype === "task_notification"));
+    if (!stray) {
+      return;
+    }
+    if (type === "result" || subtype === "init") {
+      noteStrayContinuation?.();
+    }
+    void this.writeDebugLog("cli-agent-claude-warm-event-without-turn", {
+      participantId: participant.id,
+      type,
+      subtype
+    });
   }
 
   private claudeWarmStreamError(event: unknown): string | undefined {
@@ -5394,6 +5757,20 @@ export class CliAgentRunner {
     }
   }
 
+  private waitForProcessClose(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs);
+      timer.unref();
+      child.once("close", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
   private async closeWarmAgent(entry: WarmAgentEntry, reason: string): Promise<void> {
     if (entry.closed) {
       return;
@@ -5414,6 +5791,19 @@ export class CliAgentRunner {
         entry.process.stdin.end();
       } catch {
         // The provider may have already closed stdin; escalation remains below.
+      }
+    } else if (entry.hasLiveBackgroundWork?.()) {
+      // Claude kills its own background tasks when stdin closes; SIGTERM alone
+      // leaves their shells running in their own process group. End stdin, give
+      // the CLI a moment to shut them down, then escalate as usual.
+      try {
+        entry.process.stdin.end();
+      } catch {
+        // Already closed; escalation below still applies.
+      }
+      await this.waitForProcessClose(entry.process, CLAUDE_BACKGROUND_CLOSE_GRACE_MS);
+      if (entry.process.exitCode === null && entry.process.signalCode === null) {
+        terminateProcess(entry.process, "SIGTERM", true);
       }
     } else {
       // Preserve the established macOS/POSIX shutdown behavior exactly.

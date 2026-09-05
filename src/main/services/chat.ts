@@ -7131,7 +7131,11 @@ export class ChatService {
       this.updateParticipantContextUsage(conversation, participant.id, result.contextUsage);
       pendingMessage.content = result.content;
       if (signal?.aborted) {
-        this.markParticipantMessageStoppedByUser(pendingMessage, participant);
+        // A Stop that lands while the turn waits on background work still has
+        // the reply the member already delivered; keep it, as the CLI does.
+        this.markParticipantMessageStoppedByUser(pendingMessage, participant, {
+          preserveContent: result.ok && result.content.trim().length > 0
+        });
       } else {
         pendingMessage.status = result.ok ? "done" : "error";
       }
@@ -7434,7 +7438,7 @@ export class ChatService {
     const behaviorRulesBlock = options.includeRoleInstructions
       ? ""
       : this.behaviorRuleReinforcementSection(session);
-    const claudeExecutionModelBlock = this.claudeExecutionModelPromptSection(session);
+    const claudeExecutionModelBlock = this.claudeExecutionModelPromptSection(session, participant);
     const currentRequestBlock = [
       this.currentChatRequestLine(triggerMessage, continuation),
       "Write your next message in this chat."
@@ -7476,16 +7480,27 @@ export class ChatService {
     };
   }
 
-  private claudeExecutionModelPromptSection(session: ChatParticipantSession): string {
+  private claudeExecutionModelPromptSection(session: ChatParticipantSession, participant: ChatParticipant): string {
     if (session.participantKind !== "claude-code") {
       return "";
     }
+    if (this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) === "remote") {
+      // Cloud runs still launch one CLI process per turn (remoteRuns.ts) and
+      // cannot carry a background continuation; keep that contract honest.
+      return [
+        "Claude Code execution model in AccordAgents Chat:",
+        "- This chat turn is one-shot. After you send the final chat message, AccordAgents marks you Idle and does not notify, callback, or auto-resume you for background Bash jobs, Claude `Agent`/`Task` subagents, or other provider-native terminal background work.",
+        "- Backgrounded Claude work is terminated at turn end, not kept running silently.",
+        "- Complete any started work before replying. If the work cannot be completed in this turn, report the concrete partial result or blocker and ask User for the next message to continue.",
+        "- Never end a turn by saying you are standing by, waiting, will wait, or will post when background work finishes."
+      ].join("\n");
+    }
     return [
       "Claude Code execution model in AccordAgents Chat:",
-      "- This chat turn is one-shot. After you send the final chat message, AccordAgents marks you Idle and does not notify, callback, or auto-resume you for background Bash jobs, Claude `Agent`/`Task` subagents, or other provider-native terminal background work.",
-      "- Backgrounded Claude work is terminated at turn end, not kept running silently.",
-      "- Complete any started work before replying. If the work cannot be completed in this turn, report the concrete partial result or blocker and ask User for the next message to continue.",
-      "- Never end a turn by saying you are standing by, waiting, will wait, or will post when background work finishes."
+      "- Your turn ends when you send the final chat message and nothing you started in the background is still running.",
+      "- Background Bash jobs and background `Agent`/`Task` subagents keep running after your message, as in the Claude Code CLI: the turn stays active, the chat shows the pending background work, and you are resumed on the same session with the task notification when it finishes. What you write after the notification is appended to the same reply.",
+      "- Stop by User cancels the turn and ends that background work.",
+      "- If work cannot be completed in this turn and nothing is running in the background, report the concrete partial result or blocker and ask User for the next message to continue; never say you are waiting for something that is not a tracked background task."
     ].join("\n");
   }
 
