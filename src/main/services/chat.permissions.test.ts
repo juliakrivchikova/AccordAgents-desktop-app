@@ -2266,6 +2266,55 @@ test("running participant cancellation preserves output in one stopped bubble", 
   ), false);
 });
 
+test("running participant cancellation preserves a successful reply returned after Stop", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined, runOptions: any) => {
+      runOptions.onOutput?.({ kind: "text", text: "Reply already delivered.", cumulative: "Reply already delivered." });
+      markStarted();
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) {
+          resolve();
+          return;
+        }
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return {
+        participant: runParticipant,
+        ok: true,
+        content: "Reply already delivered.",
+        durationMs: 1
+      };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({
+    conversationId: conversation.id,
+    runId: "send-run-successful-stop",
+    content: `@${participant.handle} start background work`
+  });
+  await started;
+  const pending = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "participant" && message.status === "pending"
+  );
+  assert.ok(pending?.metadata?.runId);
+
+  assert.equal(service.cancelRun(pending.metadata.runId), true);
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.id === pending.id && message.metadata?.terminalReason === "user-stopped"
+  ));
+
+  const stopped = storage.current.messages.find((message: ChatMessage) => message.id === pending.id);
+  assert.equal(stopped?.status, "error");
+  assert.equal(stopped?.metadata?.terminalReason, "user-stopped");
+  assert.equal(stopped?.content, "Reply already delivered.");
+});
+
 test("stored participant stop preserves nonblank pending and diagnostic content", () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);

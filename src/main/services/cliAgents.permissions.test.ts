@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { access, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -3199,6 +3199,104 @@ async function assertFixtureProcessStops(pid: number): Promise<void> {
   assert.equal(testProcessExists(pid), false, `provider descendant ${pid} survived warm-agent shutdown`);
 }
 
+test("Claude public warm-run path stops live background work and starts a fresh process", { timeout: 10_000 }, async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-background-warm-"));
+  const claudePath = path.join(fixtureDir, "claude-fixture");
+  const processCountFile = path.join(fixtureDir, "process-count.txt");
+  const processPidsFile = path.join(fixtureDir, "process-pids.txt");
+  const helperPidFile = path.join(fixtureDir, "helper.pid");
+  const stdinClosedMarker = path.join(fixtureDir, "stdin-closed.marker");
+  await writeFile(claudePath, `#!/usr/bin/env node
+const { appendFileSync, existsSync, readFileSync, writeFileSync } = require("node:fs");
+const { spawn } = require("node:child_process");
+const readline = require("node:readline");
+const countFile = ${JSON.stringify(processCountFile)};
+const count = existsSync(countFile) ? Number(readFileSync(countFile, "utf8")) + 1 : 1;
+writeFileSync(countFile, String(count));
+appendFileSync(${JSON.stringify(processPidsFile)}, String(process.pid) + "\\n");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+let helper;
+const input = readline.createInterface({ input: process.stdin });
+input.on("close", () => {
+  writeFileSync(${JSON.stringify(stdinClosedMarker)}, "closed");
+  if (!helper) process.exit(0);
+  helper.once("close", () => process.exit(0));
+  helper.kill("SIGTERM");
+  setTimeout(() => process.exit(0), 250).unref();
+});
+input.on("line", () => {
+  send({ type: "system", subtype: "init", session_id: "fixture-session-" + count });
+  if (count === 1) {
+    helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    writeFileSync(${JSON.stringify(helperPidFile)}, String(helper.pid));
+    send({ type: "system", subtype: "task_started", task_id: "task-1", description: "fixture background task", is_backgrounded: true });
+    send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Started." } } });
+    send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Started." }] } });
+    send({ type: "result", subtype: "success", result: "Started." });
+    return;
+  }
+  send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Fresh response." } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Fresh response." }] } });
+  send({ type: "result", subtype: "success", result: "Fresh response." });
+});
+`, "utf8");
+  await chmod(claudePath, 0o755);
+
+  const runner = makeRunner() as any;
+  runner.providerExecutableForRun = async () => claudePath;
+  const participant = { id: "claude-background", kind: "claude-code", label: "Claude" };
+  const warm = {
+    conversationId: "conversation-background",
+    participantId: participant.id,
+    contextKey: "context-background",
+    idleTimeoutMs: 60_000
+  };
+  const controller = new AbortController();
+  let markHeld!: () => void;
+  const held = new Promise<void>((resolve) => { markHeld = resolve; });
+  let helperPid: number | undefined;
+  try {
+    const firstRun = runner.run(participant, "Start work.", fixtureDir, undefined, "chat", controller.signal, {
+      agentMode: "default",
+      warm,
+      onOutput: (event: { activityStatus?: string; text: string }) => {
+        if (event.activityStatus === "started" && /Waiting for background work/.test(event.text)) {
+          markHeld();
+        }
+      }
+    });
+    await held;
+    helperPid = Number.parseInt((await readFile(helperPidFile, "utf8")).trim(), 10);
+    const stoppedAt = Date.now();
+    controller.abort(new Error("Stopped by user."));
+    const first = await firstRun;
+    assert.equal(first.ok, true, JSON.stringify(first));
+    assert.equal(first.content, "Started.");
+    assert.ok(Date.now() - stoppedAt < 1_000, "graceful stdin shutdown must not wait for a second close timeout");
+    assert.equal(await readFile(stdinClosedMarker, "utf8"), "closed");
+    await assertFixtureProcessStops(helperPid);
+
+    const second = await runner.run(participant, "Start fresh.", fixtureDir, undefined, "chat", undefined, {
+      agentMode: "default",
+      warm
+    });
+    assert.equal(second.ok, true, JSON.stringify(second));
+    assert.equal(second.content, "Fresh response.");
+    const processPids = (await readFile(processPidsFile, "utf8")).trim().split(/\r?\n/).map(Number);
+    assert.equal(processPids.length, 2);
+    assert.notEqual(processPids[0], processPids[1]);
+  } finally {
+    await runner.shutdownWarmAgents();
+    if (helperPid && testProcessExists(helperPid)) {
+      process.kill(helperPid, "SIGKILL");
+    }
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 test("Codex ignores cross-thread resolution and retires approval when its item completes", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-retire-approval-"));
   const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
@@ -4004,7 +4102,7 @@ test("failed formats CLI timeout content in human-readable time", () => {
 // task notification and streams the continuation on the same session.
 test("claude warm turn stays open while a background task runs and appends the CLI's continuation", () => {
   const runner = makeRunner() as any;
-  const outputs: Array<{ kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string }> = [];
+  const outputs: Array<{ kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string; activityItemId?: string }> = [];
   const resolved: unknown[] = [];
   const pending = makeClaudeWarmPendingTurn({
     onOutput: (event: { kind: string; text: string; cumulative?: string; activityKind?: string; activityStatus?: string }) => outputs.push(event),
@@ -4041,6 +4139,8 @@ test("claude warm turn stays open while a background task runs and appends the C
   send({ type: "system", subtype: "background_tasks_changed", tasks: [] });
   send({ type: "system", subtype: "task_notification", task_id: "t1", tool_use_id: "toolu_1", status: "completed", summary: "Background command completed" });
   send({ type: "system", subtype: "init" });
+  const completedHold = outputs.find((event) => event.activityItemId === hold?.activityItemId && event.activityStatus === "completed");
+  assert.ok(completedHold, "the waiting activity is completed when Claude resumes");
   send({ type: "stream_event", event: { type: "content_block_start", content_block: { type: "text" } } });
   send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "The soak finished: 0 failures." } } });
   send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "The soak finished: 0 failures." }] } });
@@ -4051,6 +4151,34 @@ test("claude warm turn stays open while a background task runs and appends the C
   assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "Started the soak\n\nThe soak finished: 0 failures.");
   const finished = outputs.find((event) => event.kind === "tool" && /Background task finished: Run the soak/.test(event.text));
   assert.equal(finished?.activityStatus, "completed");
+});
+
+test("claude warm turn waits for every overlapping background task", () => {
+  const runner = makeRunner() as any;
+  const resolved: unknown[] = [];
+  const pending = makeClaudeWarmPendingTurn({ resolve: (result: unknown) => resolved.push(result) });
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event), participant, {}, undefined, pending, () => pending, fail
+  );
+
+  send({ type: "system", subtype: "task_started", task_id: "t1", description: "first", is_backgrounded: true });
+  send({ type: "system", subtype: "task_started", task_id: "t2", description: "second", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Both started." }] } });
+  send({ type: "result", result: "Both started." });
+  assert.equal(resolved.length, 0);
+
+  send({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed" });
+  assert.equal(pending.backgroundTasks.size, 1);
+  assert.equal(resolved.length, 0, "the second live task keeps the turn open");
+
+  send({ type: "system", subtype: "task_notification", task_id: "t2", status: "completed" });
+  send({ type: "system", subtype: "init" });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Both finished." }] } });
+  send({ type: "result", result: "Both finished." });
+  assert.equal(resolved.length, 1);
+  assert.equal((resolved[0] as { content: string }).content, "Both started.\n\nBoth finished.");
 });
 
 test("claude warm turn holds again when the continuation starts another background task", () => {
@@ -4128,8 +4256,12 @@ test("claude warm turn keeps waiting when the task finished before the reply's r
 test("claude warm hold delivers the held reply when the CLI never resumes", async () => {
   const runner = makeRunner() as any;
   runner.claudeBackgroundResumeGraceMs = 20;
+  const outputs: Array<{ activityStatus?: string; activityItemId?: string }> = [];
   const resolved: unknown[] = [];
-  let current: any = makeClaudeWarmPendingTurn({ resolve: (result: unknown) => resolved.push(result) });
+  let current: any = makeClaudeWarmPendingTurn({
+    onOutput: (event: { activityStatus?: string; activityItemId?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
   const pending = current;
   const participant = { id: "p1", label: "Agent", kind: "claude-code" };
   const cleanup = (): unknown => { const value = current; current = undefined; return value; };
@@ -4154,13 +4286,16 @@ test("claude warm hold delivers the held reply when the CLI never resumes", asyn
   assert.equal(resolved.length, 1);
   assert.equal((resolved[0] as { content: string }).content, "Started");
   assert.equal(current, undefined, "the turn was cleaned up by the grace timer");
+  assert.ok(outputs.some((event) => event.activityItemId === "claude-background-wait-1" && event.activityStatus === "completed"));
 });
 
 test("claude warm hold: a failure after the reply settles with the reply and a warning instead of rejecting", () => {
   const runner = makeRunner() as any;
+  const outputs: Array<{ activityStatus?: string; activityItemId?: string }> = [];
   const resolved: unknown[] = [];
   const rejected: Error[] = [];
   const pending = makeClaudeWarmPendingTurn({
+    onOutput: (event: { activityStatus?: string; activityItemId?: string }) => outputs.push(event),
     resolve: (result: unknown) => resolved.push(result),
     reject: (error: Error) => rejected.push(error)
   });
@@ -4190,6 +4325,7 @@ test("claude warm hold: a failure after the reply settles with the reply and a w
   assert.equal(result.ok, true);
   assert.equal(result.content, "Deploy started.");
   assert.match(result.warnings?.[0] ?? "", /background work after it did not finish \(claude warm process exited with code 1\)/);
+  assert.ok(outputs.some((event) => event.activityItemId === "claude-background-wait-1" && event.activityStatus === "failed"));
 
   // A Stop by the user keeps the reply too, but is not reported as a failure.
   const stoppedResolved: unknown[] = [];

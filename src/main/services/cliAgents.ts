@@ -5234,8 +5234,10 @@ export class CliAgentRunner {
     participant: ParticipantConfig,
     options: CliAgentRunOptions,
     fallbackSessionId: string | undefined,
-    warning?: string
+    warning?: string,
+    holdActivityStatus: "completed" | "failed" = "completed"
   ): void {
+    this.finishClaudeHoldActivity(current, holdActivityStatus);
     const content = [...current.heldSegments, segment]
       .map((part) => part.trim())
       .filter(Boolean)
@@ -5306,7 +5308,8 @@ export class CliAgentRunner {
       participant,
       options,
       fallbackSessionId,
-      cancelled ? undefined : `${participant.label}: the reply was delivered, but the background work after it did not finish (${message}).`
+      cancelled ? undefined : `${participant.label}: the reply was delivered, but the background work after it did not finish (${message}).`,
+      "failed"
     );
     return true;
   }
@@ -5415,14 +5418,7 @@ export class CliAgentRunner {
       // to the model, and a held reply is now being continued.
       pending.notificationsSinceInit = 0;
       this.clearClaudeHoldGraceTimer(pending);
-      if (pending.holdActivity) {
-        this.emitLiveOutput(pending.onOutput, "tool", `${pending.holdActivity.label}\n`, undefined, {
-          activityKind: "status",
-          activityStatus: "completed",
-          activityItemId: pending.holdActivity.itemId
-        });
-        pending.holdActivity = undefined;
-      }
+      this.finishClaudeHoldActivity(pending, "completed");
       return;
     }
     if (subtype === "task_started") {
@@ -5544,6 +5540,21 @@ export class CliAgentRunner {
       clearTimeout(pending.holdGraceTimer);
       pending.holdGraceTimer = undefined;
     }
+  }
+
+  private finishClaudeHoldActivity(
+    pending: ClaudeWarmPendingTurn,
+    status: "completed" | "failed"
+  ): void {
+    if (!pending.holdActivity) {
+      return;
+    }
+    this.emitLiveOutput(pending.onOutput, "tool", `${pending.holdActivity.label}\n`, undefined, {
+      activityKind: "status",
+      activityStatus: status,
+      activityItemId: pending.holdActivity.itemId
+    });
+    pending.holdActivity = undefined;
   }
 
   /** Task descriptions are model-authored (for a Bash task, the raw command);
@@ -5802,9 +5813,10 @@ export class CliAgentRunner {
         // Already closed; escalation below still applies.
       }
       await this.waitForProcessClose(entry.process, CLAUDE_BACKGROUND_CLOSE_GRACE_MS);
-      if (entry.process.exitCode === null && entry.process.signalCode === null) {
-        terminateProcess(entry.process, "SIGTERM", true);
+      if (entry.process.exitCode !== null || entry.process.signalCode !== null) {
+        return;
       }
+      terminateProcess(entry.process, "SIGTERM", true);
     } else {
       // Preserve the established macOS/POSIX shutdown behavior exactly.
       terminateProcess(entry.process, "SIGTERM", true);
