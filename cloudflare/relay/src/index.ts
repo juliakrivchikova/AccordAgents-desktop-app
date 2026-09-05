@@ -26,7 +26,7 @@ type MailboxAlarmSchedule = {
   pushAt?: number;
 };
 
-type RelayRole = "desktop" | "phone";
+type RelayRole = "desktop" | "phone" | "machine";
 
 interface MailboxEvent {
   eventId: string;
@@ -122,7 +122,12 @@ interface RelayPeerAttachment {
   rendezvousId: string;
   role: RelayRole;
   capability: string;
+  /** Device id inside the room; desktop and phone default to their role name
+   *  so the two-party pairing keeps its exact wire behavior. */
+  deviceId: string;
 }
+
+const DEVICE_TAG_PREFIX = "did:";
 
 // W-F(a): the room uses the WebSocket hibernation API. Sockets are accepted
 // through the DurableObjectState with the role as a tag and the pairing
@@ -150,7 +155,8 @@ export class RelayRoom extends DurableObject<Env> {
     const rendezvousId = url.searchParams.get("rid") ?? "";
     const role = url.searchParams.get("role") ?? "";
     const capability = url.searchParams.get("cap") ?? "";
-    if (!rendezvousId || !capability || !isRelayRole(role)) {
+    const deviceId = isRelayRole(role) ? resolveRelayDeviceId(role, url.searchParams.get("did") ?? "") : "";
+    if (!rendezvousId || !capability || !isRelayRole(role) || !deviceId) {
       return websocketCloseResponse(1008, "invalid relay pairing request");
     }
 
@@ -173,8 +179,8 @@ export class RelayRoom extends DurableObject<Env> {
     // Nothing pings these sockets from the client side, so one whose remote
     // silently vanished still reads as OPEN. The connection that just
     // arrived is the one that is provably alive — seat it and dismiss every
-    // previous holder of the role.
-    for (const previous of this.ctx.getWebSockets(role)) {
+    // previous holder of the device id.
+    for (const previous of this.ctx.getWebSockets(DEVICE_TAG_PREFIX + deviceId)) {
       try {
         previous.close(4001, "replaced by newer connection");
       } catch {
@@ -182,22 +188,30 @@ export class RelayRoom extends DurableObject<Env> {
       }
     }
 
-    this.ctx.acceptWebSocket(server, [role]);
-    server.serializeAttachment({ rendezvousId, role, capability } satisfies RelayPeerAttachment);
+    this.ctx.acceptWebSocket(server, [role, DEVICE_TAG_PREFIX + deviceId]);
+    const attachment: RelayPeerAttachment = { rendezvousId, role, capability, deviceId };
+    server.serializeAttachment(attachment);
 
-    const peer = this.peerFor(role);
-    if (peer && !this.trySend(peer, JSON.stringify({
-      type: "relay.peer-connected",
-      role,
-      rendezvousId
-    }))) {
-      this.dropUnreachable(peer);
+    for (const other of this.announceTargets(attachment, server)) {
+      if (!this.trySend(other, JSON.stringify({
+        type: "relay.peer-connected",
+        role,
+        rendezvousId,
+        deviceId
+      }))) {
+        this.dropUnreachable(other);
+      }
     }
     this.trySend(server, JSON.stringify({
       type: "relay.ready",
       role,
       rendezvousId,
-      peerConnected: Boolean(this.peerFor(role))
+      deviceId,
+      peerConnected: Boolean(this.legacyPeerFor(attachment, server)),
+      peers: this.openPeers(server).map((socket) => {
+        const other = this.attachmentOf(socket);
+        return { deviceId: other?.deviceId ?? "", role: other?.role ?? "" };
+      }).filter((peer) => peer.deviceId)
     }));
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -217,13 +231,15 @@ export class RelayRoom extends DurableObject<Env> {
       socket.close(1009, "relay frame exceeds provider floor");
       return;
     }
-    if (!isSealedRelayFrame(data)) {
+    const target = sealedRelayFrameTarget(data);
+    if (target === undefined) {
       socket.close(1008, "invalid sealed relay frame");
       return;
     }
-    const peer = this.peerFor(attachment.role);
+    const peer = target === null ? this.legacyPeerFor(attachment, socket) : this.openPeerByDeviceId(target, socket);
+    const notConnected = JSON.stringify({ type: "relay.error", code: "peer-not-connected", ...(target === null ? {} : { to: target }) });
     if (!peer) {
-      this.trySend(socket, JSON.stringify({ type: "relay.error", code: "peer-not-connected" }));
+      this.trySend(socket, notConnected);
       return;
     }
     if (!this.trySend(peer, data)) {
@@ -231,7 +247,7 @@ export class RelayRoom extends DurableObject<Env> {
       // claiming otherwise, and answer the sender now instead of letting it
       // wait out an ack timeout on a frame that went nowhere.
       this.dropUnreachable(peer);
-      this.trySend(socket, JSON.stringify({ type: "relay.error", code: "peer-not-connected" }));
+      this.trySend(socket, notConnected);
     }
   }
 
@@ -244,30 +260,48 @@ export class RelayRoom extends DurableObject<Env> {
   }
 
   /** A replaced socket also lands here when it finally closes, so the seat
-   *  may already belong to a newer connection of the same role — announce
-   *  the role leaving only when no other open socket still holds it. */
+   *  may already belong to a newer connection of the same device id —
+   *  announce the device leaving only when no other open socket still holds
+   *  it. */
   private announceRoleGone(socket: WebSocket): void {
     const attachment = this.attachmentOf(socket);
     if (!attachment) {
       return;
     }
-    const stillSeated = this.ctx.getWebSockets(attachment.role)
+    const stillSeated = this.ctx.getWebSockets(DEVICE_TAG_PREFIX + attachment.deviceId)
       .some((candidate) => candidate !== socket && isOpen(candidate));
     if (stillSeated) {
       return;
     }
-    const peer = this.peerFor(attachment.role);
-    if (peer) {
-      this.trySend(peer, JSON.stringify({
+    for (const other of this.announceTargets(attachment, socket)) {
+      this.trySend(other, JSON.stringify({
         type: "relay.peer-disconnected",
         role: attachment.role,
-        rendezvousId: attachment.rendezvousId
+        rendezvousId: attachment.rendezvousId,
+        deviceId: attachment.deviceId
       }));
     }
   }
 
-  private peerFor(role: RelayRole): WebSocket | undefined {
-    return this.ctx.getWebSockets(otherRelayRole(role)).find((socket) => isOpen(socket));
+  private openPeers(self: WebSocket): WebSocket[] {
+    return this.ctx.getWebSockets().filter((socket) => socket !== self && isOpen(socket) && Boolean(this.attachmentOf(socket)));
+  }
+
+  private openPeerByDeviceId(deviceId: string, self: WebSocket): WebSocket | undefined {
+    return this.ctx.getWebSockets(DEVICE_TAG_PREFIX + deviceId).find((socket) => socket !== self && isOpen(socket));
+  }
+
+  /** Legacy counterpart of an untargeted frame: desktop <-> phone. A machine
+   *  has no legacy counterpart; its "peerConnected" means a desktop is present. */
+  private legacyPeerFor(attachment: RelayPeerAttachment, self: WebSocket): WebSocket | undefined {
+    const wanted: RelayRole = attachment.role === "desktop" ? "phone" : "desktop";
+    return this.ctx.getWebSockets(wanted).find((socket) => socket !== self && isOpen(socket));
+  }
+
+  /** Who learns that a device joined or left: every other open peer, except
+   *  that phones are not told about machines until they learn them. */
+  private announceTargets(attachment: RelayPeerAttachment, self: WebSocket): WebSocket[] {
+    return this.openPeers(self).filter((socket) => !(attachment.role === "machine" && this.attachmentOf(socket)?.role === "phone"));
   }
 
   private attachmentOf(socket: WebSocket): RelayPeerAttachment | undefined {
@@ -917,11 +951,15 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 function isRelayRole(value: string): value is RelayRole {
-  return value === "desktop" || value === "phone";
+  return value === "desktop" || value === "phone" || value === "machine";
 }
 
-function otherRelayRole(role: RelayRole): RelayRole {
-  return role === "desktop" ? "phone" : "desktop";
+function resolveRelayDeviceId(role: RelayRole, deviceId: string): string {
+  const trimmed = deviceId.trim();
+  if (trimmed) {
+    return trimmed;
+  }
+  return role === "desktop" || role === "phone" ? role : "";
 }
 
 function isOpen(socket: WebSocket | undefined): socket is WebSocket {
@@ -935,9 +973,11 @@ function relayFrameBytes(data: string | ArrayBuffer): number {
   return data.byteLength;
 }
 
-function isSealedRelayFrame(data: string | ArrayBuffer): boolean {
+/** undefined = not a sealed relay frame; null = valid untargeted frame;
+ *  string = valid frame targeted at that device id. */
+function sealedRelayFrameTarget(data: string | ArrayBuffer): string | null | undefined {
   if (typeof data !== "string") {
-    return false;
+    return undefined;
   }
   try {
     const parsed = JSON.parse(data) as Partial<{
@@ -946,14 +986,22 @@ function isSealedRelayFrame(data: string | ArrayBuffer): boolean {
       logicalMessageId: unknown;
       frameId: unknown;
       ciphertextChunk: unknown;
+      to: unknown;
     }>;
-    return parsed.protocol === "accord-relay-v1" &&
+    const valid = parsed.protocol === "accord-relay-v1" &&
       typeof parsed.streamId === "string" &&
       typeof parsed.logicalMessageId === "string" &&
       typeof parsed.frameId === "string" &&
       typeof parsed.ciphertextChunk === "string";
+    if (!valid) {
+      return undefined;
+    }
+    if (parsed.to === undefined) {
+      return null;
+    }
+    return typeof parsed.to === "string" && parsed.to.trim() ? parsed.to.trim() : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 

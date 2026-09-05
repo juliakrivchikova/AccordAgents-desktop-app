@@ -382,3 +382,60 @@ function mailboxEvent(overrides = {}) {
   };
   return event;
 }
+
+// Machines transport: the Durable Object room addresses any number of
+// devices; targeted frames reach one device, untargeted frames keep the
+// legacy desktop <-> phone path, and phones are not told about machines.
+test("Cloudflare Durable Object relay addresses machines by device id", async () => {
+  const worker = await startWranglerRelay();
+  try {
+    const desktop = await openRelaySocket(worker.wsUrl, { rid: "rv-cloudflare-machines", role: "desktop", cap: "PAIRING-FINGERPRINT" });
+    const desktopReady = JSON.parse(await nextData(desktop));
+    assert.equal(desktopReady.type, "relay.ready");
+    assert.equal(desktopReady.deviceId, "desktop");
+
+    const phone = await openRelaySocket(worker.wsUrl, { rid: "rv-cloudflare-machines", role: "phone", cap: "PAIRING-FINGERPRINT" });
+    const phoneReady = JSON.parse(await nextData(phone));
+    assert.equal(phoneReady.peerConnected, true);
+    assert.deepEqual(JSON.parse(await nextData(desktop)), { type: "relay.peer-connected", role: "phone", rendezvousId: "rv-cloudflare-machines", deviceId: "phone" });
+
+    const machineJoined = nextData(desktop);
+    const machine = await openRelaySocket(worker.wsUrl, { rid: "rv-cloudflare-machines", role: "machine", cap: "PAIRING-FINGERPRINT", did: "device-m1" });
+    const machineReady = JSON.parse(await nextData(machine));
+    assert.equal(machineReady.deviceId, "device-m1");
+    assert.equal(machineReady.peerConnected, true);
+    assert.deepEqual(machineReady.peers.map((peer) => peer.deviceId).sort(), ["desktop", "phone"]);
+    assert.deepEqual(JSON.parse(await machineJoined), { type: "relay.peer-connected", role: "machine", rendezvousId: "rv-cloudflare-machines", deviceId: "device-m1" });
+
+    const toDesktop = nextSealedFrame(desktop);
+    const machineFrame = sealedFrame({ logicalMessageId: "m-1", ciphertextChunk: "sealed-from-machine", to: "desktop" });
+    machine.send(JSON.stringify(machineFrame));
+    assert.deepEqual(await toDesktop, machineFrame);
+
+    const toMachine = nextSealedFrame(machine);
+    const desktopFrame = sealedFrame({ logicalMessageId: "d-1", ciphertextChunk: "sealed-to-machine", to: "device-m1" });
+    desktop.send(JSON.stringify(desktopFrame));
+    assert.deepEqual(await toMachine, desktopFrame);
+
+    const toPhone = nextSealedFrame(phone);
+    const legacyFrame = sealedFrame({ logicalMessageId: "d-2", ciphertextChunk: "sealed-legacy" });
+    desktop.send(JSON.stringify(legacyFrame));
+    assert.deepEqual(await toPhone, legacyFrame);
+
+    const missing = nextData(desktop);
+    desktop.send(JSON.stringify(sealedFrame({ logicalMessageId: "d-3", ciphertextChunk: "nowhere", to: "device-absent" })));
+    assert.deepEqual(JSON.parse(await missing), { type: "relay.error", code: "peer-not-connected", to: "device-absent" });
+
+    const machineGone = nextData(desktop);
+    machine.close();
+    assert.deepEqual(JSON.parse(await machineGone), { type: "relay.peer-disconnected", role: "machine", rendezvousId: "rv-cloudflare-machines", deviceId: "device-m1" });
+
+    const rejected = await openRelaySocket(worker.wsUrl, { rid: "rv-cloudflare-machines", role: "machine", cap: "PAIRING-FINGERPRINT" });
+    assert.deepEqual(await closeEvent(rejected), { code: 1008, reason: "invalid relay pairing request" });
+
+    phone.close();
+    desktop.close();
+  } finally {
+    await worker.close();
+  }
+});

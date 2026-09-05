@@ -8,7 +8,18 @@ import {
   type RelayChunkFrame
 } from "../../shared/relayProtocol";
 
-export type RelayTunnelRole = "desktop" | "phone";
+export type RelayTunnelRole = "desktop" | "phone" | "machine";
+
+export interface RelayTunnelPeer {
+  deviceId: string;
+  role: string;
+}
+
+export type RelayTunnelPeerEvent =
+  | { type: "ready"; deviceId: string; peerConnected: boolean; peers: RelayTunnelPeer[] }
+  | { type: "peer-connected"; peer: RelayTunnelPeer }
+  | { type: "peer-disconnected"; peer: RelayTunnelPeer }
+  | { type: "peer-not-connected"; to?: string };
 
 export type RelayTunnelState =
   | "idle"
@@ -23,6 +34,9 @@ export interface RelayTunnelClientOptions {
   role: RelayTunnelRole;
   capability: string;
   streamId: string;
+  /** Device id inside the room; required for machines, defaults to the role
+   *  name for desktop and phone (legacy two-party wire behavior). */
+  deviceId?: string;
   manifest?: RelayCapabilityManifest;
   reconnectDelayMs?: number;
 }
@@ -35,6 +49,7 @@ export interface RelayTunnelMessage {
 interface RelayTunnelEvents {
   message: [RelayTunnelMessage];
   state: [RelayTunnelState];
+  peer: [RelayTunnelPeerEvent];
   error: [Error];
 }
 
@@ -110,15 +125,21 @@ export class RelayTunnelClient {
     logicalMessageId: string;
     ciphertext: string;
     cursor?: string;
+    /** Target device id; omit for the legacy desktop <-> phone forwarding. */
+    to?: string;
   }): Promise<RelayChunkFrame[]> {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       throw new Error("Relay tunnel is not connected.");
+    }
+    if (this.options.role === "machine" && !request.to?.trim()) {
+      throw new Error("A machine must target a device id on every relay message.");
     }
     const frames = chunkRelayCiphertext({
       streamId: this.options.streamId,
       logicalMessageId: request.logicalMessageId,
       ciphertext: request.ciphertext,
       cursor: request.cursor ?? this.cursor,
+      to: request.to,
       manifest: this.manifest
     });
     for (const frame of frames) {
@@ -222,7 +243,55 @@ export class RelayTunnelClient {
     }
     if (isRelayFrame(parsed)) {
       this.handleFrame(parsed);
+      return;
     }
+    this.handleControlMessage(parsed);
+  }
+
+  private handleControlMessage(parsed: unknown): void {
+    if (!parsed || typeof parsed !== "object") {
+      return;
+    }
+    const message = parsed as { type?: unknown; deviceId?: unknown; role?: unknown; peerConnected?: unknown; peers?: unknown; code?: unknown; to?: unknown };
+    const peerOf = (): RelayTunnelPeer => ({
+      deviceId: typeof message.deviceId === "string" ? message.deviceId : "",
+      role: typeof message.role === "string" ? message.role : ""
+    });
+    if (message.type === "relay.ready") {
+      const peers = Array.isArray(message.peers)
+        ? message.peers.filter((peer): peer is RelayTunnelPeer =>
+          Boolean(peer) && typeof (peer as RelayTunnelPeer).deviceId === "string" && typeof (peer as RelayTunnelPeer).role === "string")
+        : [];
+      this.emitter.emit("peer", {
+        type: "ready",
+        deviceId: typeof message.deviceId === "string" ? message.deviceId : this.deviceId(),
+        peerConnected: message.peerConnected === true,
+        peers
+      } satisfies RelayTunnelPeerEvent);
+      return;
+    }
+    if (message.type === "relay.peer-connected") {
+      this.emitter.emit("peer", { type: "peer-connected", peer: peerOf() } satisfies RelayTunnelPeerEvent);
+      return;
+    }
+    if (message.type === "relay.peer-disconnected") {
+      this.emitter.emit("peer", { type: "peer-disconnected", peer: peerOf() } satisfies RelayTunnelPeerEvent);
+      return;
+    }
+    if (message.type === "relay.error" && message.code === "peer-not-connected") {
+      this.emitter.emit("peer", {
+        type: "peer-not-connected",
+        ...(typeof message.to === "string" ? { to: message.to } : {})
+      } satisfies RelayTunnelPeerEvent);
+    }
+  }
+
+  deviceId(): string {
+    const explicit = this.options.deviceId?.trim();
+    if (explicit) {
+      return explicit;
+    }
+    return this.options.role === "machine" ? "" : this.options.role;
   }
 
   private handleFrame(frame: RelayChunkFrame): void {
@@ -254,6 +323,12 @@ export class RelayTunnelClient {
     url.searchParams.set("rid", this.options.rendezvousId);
     url.searchParams.set("role", this.options.role);
     url.searchParams.set("cap", this.options.capability);
+    const deviceId = this.options.deviceId?.trim();
+    if (deviceId) {
+      url.searchParams.set("did", deviceId);
+    } else if (this.options.role === "machine") {
+      throw new Error("A machine relay connection requires a deviceId.");
+    }
     return url.toString();
   }
 

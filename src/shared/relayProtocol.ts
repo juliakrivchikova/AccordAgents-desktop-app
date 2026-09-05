@@ -18,6 +18,9 @@ export interface RelayChunkFrame {
   frameIndex: number;
   frameCount: number;
   cursor?: string;
+  /** Target device id inside the room. Absent = legacy desktop <-> phone
+   *  forwarding; machines always target (machines transport, contract §5). */
+  to?: string;
   ciphertextChunk: string;
 }
 
@@ -149,6 +152,7 @@ export function chunkRelayCiphertext(request: {
   ciphertext: string;
   manifest?: RelayCapabilityManifest;
   cursor?: string;
+  to?: string;
 }): RelayChunkFrame[] {
   const manifest = request.manifest ?? PUSHER_SIZED_RELAY_FLOOR;
   assertRelayCapabilityManifest(manifest);
@@ -172,6 +176,7 @@ export function chunkRelayCiphertext(request: {
       frameIndex: index,
       frameCount: chunks.length,
       ...(request.cursor ? { cursor: request.cursor } : {}),
+      ...(request.to?.trim() ? { to: request.to.trim() } : {}),
       ciphertextChunk: chunk
     };
     const frameBytes = utf8ByteLength(JSON.stringify(frame));

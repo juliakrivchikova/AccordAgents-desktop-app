@@ -218,3 +218,72 @@ test("RelayTunnelClient widens the reconnect gap while the relay refuses", async
   assert.ok(gaps[2] > gaps[1] * 1.2, `gap 3 must outgrow gap 2: ${JSON.stringify(gaps)}`);
   assert.ok(gaps[3] > gaps[2] * 1.2, `gap 4 must outgrow gap 3: ${JSON.stringify(gaps)}`);
 });
+
+test("RelayTunnelClient targets machines by device id and reports peers", async () => {
+  const { RelayTunnelClient } = await import("../dist/main/main/services/relayTunnelClient.js");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  try {
+    const desktop = new RelayTunnelClient({
+      relayUrl: address.url,
+      rendezvousId: "pair-client-m",
+      role: "desktop",
+      capability: "cap-client-m",
+      streamId: "stream-client-m"
+    });
+    const machine = new RelayTunnelClient({
+      relayUrl: address.url,
+      rendezvousId: "pair-client-m",
+      role: "machine",
+      deviceId: "device-m1",
+      capability: "cap-client-m",
+      streamId: "stream-client-m"
+    });
+    const peerEvents = [];
+    desktop.on("peer", (event) => peerEvents.push(event));
+    const machinePeerEvents = [];
+    machine.on("peer", (event) => machinePeerEvents.push(event));
+
+    await desktop.connect();
+    await machine.connect();
+    await waitFor(() => peerEvents.some((event) => event.type === "peer-connected" && event.peer.deviceId === "device-m1"));
+    await waitFor(() => machinePeerEvents.some((event) => event.type === "ready"));
+    assert.deepEqual(machinePeerEvents.find((event) => event.type === "ready").peers, [{ deviceId: "desktop", role: "desktop" }]);
+
+    await assert.rejects(machine.sendCiphertext({ logicalMessageId: "m-0", ciphertext: "x" }), /must target a device id/);
+
+    const received = nextMessage(desktop);
+    await machine.sendCiphertext({ logicalMessageId: "m-1", ciphertext: "sealed-from-machine", to: "desktop" });
+    assert.deepEqual(await received, { logicalMessageId: "m-1", ciphertext: "sealed-from-machine" });
+
+    const receivedByMachine = nextMessage(machine);
+    await desktop.sendCiphertext({ logicalMessageId: "d-1", ciphertext: "sealed-to-machine", to: "device-m1" });
+    assert.deepEqual(await receivedByMachine, { logicalMessageId: "d-1", ciphertext: "sealed-to-machine" });
+
+    await desktop.sendCiphertext({ logicalMessageId: "d-2", ciphertext: "nowhere", to: "device-absent" });
+    await waitFor(() => peerEvents.some((event) => event.type === "peer-not-connected" && event.to === "device-absent"));
+
+    desktop.close();
+    machine.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+function waitFor(predicate, timeoutMs = 5_000) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const tick = () => {
+      if (predicate()) {
+        resolve();
+        return;
+      }
+      if (Date.now() - started > timeoutMs) {
+        reject(new Error("waitFor timed out"));
+        return;
+      }
+      setTimeout(tick, 20);
+    };
+    tick();
+  });
+}
