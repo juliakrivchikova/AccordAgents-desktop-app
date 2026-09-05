@@ -72,3 +72,13 @@ test("restore never moves the clock backwards", () => {
   assert.deepEqual(clock.current(), { wallMs: 500, counter: 3, originId: "device-a" });
   assert.deepEqual(parseHlcKey(clock.tick()), { wallMs: 500, counter: 4, originId: "device-a" });
 });
+
+test("compareLogicalTsValues keeps same-family string order and puts the HLC era after legacy values", () => {
+  const { compareLogicalTsValues } = require("../../shared/hlc") as typeof import("../../shared/hlc");
+  assert.equal(compareLogicalTsValues("0000000000000002:device:scope", "0000000000000003:device:scope"), -1);
+  assert.equal(compareLogicalTsValues("0000000000000003:device:scope", "0000000000000002:device:scope"), 1);
+  assert.equal(compareLogicalTsValues("hlc:0000000000001:000000:a", "hlc:0000000000001:000001:a"), -1);
+  assert.equal(compareLogicalTsValues("hlc:0000000000001:000000:a", "0000000000000099:device:scope"), 1);
+  assert.equal(compareLogicalTsValues("0000000000000099:device:scope", "hlc:0000000000001:000000:a"), -1);
+  assert.equal(compareLogicalTsValues("x", "x"), 0);
+});

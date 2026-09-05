@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { app } from "electron";
+import { userDataPath } from "../platform";
 import { runCommand } from "./command";
 import type {
   ChatEventAppendResult,
@@ -311,7 +311,7 @@ export class StorageService {
   private chatSearchIndexReady = false;
 
   constructor(options: StorageServiceOptions = {}) {
-    this.dbPath = options.dbPath ?? path.join(app.getPath("userData"), "accordagents.sqlite3");
+    this.dbPath = options.dbPath ?? path.join(userDataPath(), "accordagents.sqlite3");
     this.sqliteExecutable = options.sqliteExecutable ?? "sqlite3";
   }
 

@@ -3,7 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { app } from "electron";
+import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
 import type {
   AgentContextUsage,
@@ -1284,7 +1284,7 @@ export class ChatService {
   }
 
   private chatUserDataPath(): string {
-    return app?.getPath?.("userData") ?? path.join(tmpdir(), `accordagents-tests-${process.pid}`);
+    return hasConfiguredHostPlatform() ? userDataPath() : path.join(tmpdir(), `accordagents-tests-${process.pid}`);
   }
 
   async dismissConversationWarnings(request: DismissConversationWarningsRequest): Promise<Conversation | undefined> {
@@ -15793,7 +15793,7 @@ export class ChatService {
   }
 
   private async ensureHistoryFiles(conversation: Conversation): Promise<string> {
-    const dir = path.join(app.getPath("userData"), "chats", conversation.id);
+    const dir = path.join(userDataPath(), "chats", conversation.id);
     await mkdir(dir, { recursive: true });
     const markdown = this.historyMarkdown(conversation);
     await Promise.all([
@@ -15807,7 +15807,7 @@ export class ChatService {
     conversationId: string,
     actor?: Pick<ChatAppMcpActor, "historyMarkdownPath" | "historyJsonPath">
   ): { markdownPath: string; jsonPath: string } {
-    const dir = path.join(app.getPath("userData"), "chats", conversationId);
+    const dir = path.join(userDataPath(), "chats", conversationId);
     return {
       markdownPath: actor?.historyMarkdownPath ?? path.join(dir, "history.md"),
       jsonPath: actor?.historyJsonPath ?? path.join(dir, "history.json")
@@ -16950,7 +16950,7 @@ export class ChatService {
     if (!/^attachments\/[A-Za-z0-9-]+\.(?:png|jpg|webp)$/.test(storageKey)) {
       throw new Error("Attachment storage key is invalid.");
     }
-    return path.join(app.getPath("userData"), "chats", conversationId, storageKey);
+    return path.join(userDataPath(), "chats", conversationId, storageKey);
   }
 
   private isStoredChatImageAttachment(value: unknown): value is ChatImageAttachment {

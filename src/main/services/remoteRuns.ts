@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { app } from "electron";
+import { userDataPath } from "../platform";
 import type {
   ChatAgentMode,
   ChatAgentPermissions,
@@ -736,7 +736,7 @@ export class RemoteRunService {
     private readonly chat: Pick<ChatService, "applyRemoteRunReplayRecord" | "onAppToolApprovalDecision" | "getRemoteRunCursorSeq">,
     options: RemoteRunServiceOptions = {}
   ) {
-    this.spoolRoot = options.spoolRoot ?? path.join(app.getPath("userData"), "remote-runs");
+    this.spoolRoot = options.spoolRoot ?? path.join(userDataPath(), "remote-runs");
     this.applyLimit = Math.max(1, Math.floor(options.applyLimit ?? DEFAULT_APPLY_LIMIT));
     this.codexExecutor = options.codexExecutor ?? defaultRemoteCodexExecutor;
     this.detachedWorkerTransport = options.detachedWorkerTransport ?? new SshDetachedWorkerTransport();

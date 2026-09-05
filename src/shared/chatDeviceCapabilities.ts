@@ -1,5 +1,5 @@
 import type { ChatEventEnvelope } from "./chatEvents";
-import { compareLogicalOrder, logicalOrderKey } from "./hlc";
+import { compareLogicalOrder, compareLogicalTsValues } from "./hlc";
 import type { MobilePairingCapability } from "./mobilePairing";
 
 export type ChatDeviceCapabilityEventKind =
@@ -112,7 +112,7 @@ function isEventAfterRevocation(event: ChatEventEnvelope, revocation: ChatDevice
   if (!revocation.effectiveAfterLogicalTs) {
     return true;
   }
-  return logicalOrderKey(event) > revocation.effectiveAfterLogicalTs;
+  return compareLogicalTsValues(event.logicalTs, revocation.effectiveAfterLogicalTs) > 0;
 }
 
 function compareCapabilityEvents(left: ChatEventEnvelope, right: ChatEventEnvelope): number {
@@ -133,7 +133,7 @@ function compareOptionalLogicalTs(left: string | undefined, right: string | unde
   if (!right) {
     return 1;
   }
-  return left.localeCompare(right);
+  return compareLogicalTsValues(left, right);
 }
 
 function isGrantPayload(value: unknown): value is ChatDeviceCapabilityGrantPayload {

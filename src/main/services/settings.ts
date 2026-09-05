@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { app, safeStorage } from "electron";
+import { hostPlatform, userDataPath } from "../platform";
 import type {
   StoredMobilePairedDevice,
   StoredPendingMailboxRevocation,
@@ -1748,10 +1748,10 @@ export class SettingsService {
   private assistantProviderMutation: Promise<void> = Promise.resolve();
 
   constructor() {
-    this.settingsPath = path.join(app.getPath("userData"), "settings.json");
-    this.remoteSessionCleanupPath = path.join(app.getPath("userData"), "remote-session-cleanup.json");
-    this.mobilePairedDevicesPath = path.join(app.getPath("userData"), "mobile-paired-devices.json");
-    this.pendingMailboxRevocationsPath = path.join(app.getPath("userData"), "pending-mailbox-revocations.json");
+    this.settingsPath = path.join(userDataPath(), "settings.json");
+    this.remoteSessionCleanupPath = path.join(userDataPath(), "remote-session-cleanup.json");
+    this.mobilePairedDevicesPath = path.join(userDataPath(), "mobile-paired-devices.json");
+    this.pendingMailboxRevocationsPath = path.join(userDataPath(), "pending-mailbox-revocations.json");
   }
 
   async getPublicSettings(): Promise<AppSettings> {
@@ -2898,7 +2898,7 @@ export class SettingsService {
   private encodeAgentEnvironmentValue(value: string): { encryptedValue: string; protection: AgentEnvironmentValueProtection } {
     if (this.safeStorageEncryptionAvailable()) {
       return {
-        encryptedValue: safeStorage.encryptString(value).toString("base64"),
+        encryptedValue: hostPlatform().secrets.encryptString(value).toString("base64"),
         protection: "os-encrypted"
       };
     }
@@ -2915,7 +2915,7 @@ export class SettingsService {
         if (!this.safeStorageEncryptionAvailable()) {
           return undefined;
         }
-        return safeStorage.decryptString(buffer);
+        return hostPlatform().secrets.decryptString(buffer);
       }
       return buffer.toString("utf8");
     } catch {
@@ -2935,7 +2935,7 @@ export class SettingsService {
   }
 
   private safeStorageEncryptionAvailable(): boolean {
-    return Boolean(safeStorage?.isEncryptionAvailable?.());
+    return hostPlatform().secrets.isEncryptionAvailable();
   }
 
   private async withRemoteSessionCleanupMutation<T>(action: () => Promise<T>): Promise<T> {
@@ -3121,8 +3121,8 @@ export class SettingsService {
   async saveAwsWorkerCredentials(credentials: AwsWorkerCredentials): Promise<void> {
     const stored = await this.readStored();
     const json = JSON.stringify(credentials);
-    stored.encryptedAwsCredentials = safeStorage.isEncryptionAvailable()
-      ? safeStorage.encryptString(json).toString("base64")
+    stored.encryptedAwsCredentials = hostPlatform().secrets.isEncryptionAvailable()
+      ? hostPlatform().secrets.encryptString(json).toString("base64")
       : Buffer.from(json, "utf8").toString("base64");
     stored.awsWorkerRegion = credentials.region;
     stored.cloudRunsMode = "aws";
@@ -3136,8 +3136,8 @@ export class SettingsService {
     }
     try {
       const buffer = Buffer.from(stored.encryptedAwsCredentials, "base64");
-      const json = safeStorage.isEncryptionAvailable()
-        ? safeStorage.decryptString(buffer)
+      const json = hostPlatform().secrets.isEncryptionAvailable()
+        ? hostPlatform().secrets.decryptString(buffer)
         : buffer.toString("utf8");
       const parsed = JSON.parse(json) as Partial<AwsWorkerCredentials>;
       if (parsed.accessKeyId && parsed.secretAccessKey && parsed.region) {
@@ -3158,8 +3158,8 @@ export class SettingsService {
   async saveAwsWorkerConnection(credentials: AwsWorkerCredentials, handle: AwsWorkerHandleInfo): Promise<void> {
     const stored = await this.readStored();
     const json = JSON.stringify(credentials);
-    stored.encryptedAwsCredentials = safeStorage.isEncryptionAvailable()
-      ? safeStorage.encryptString(json).toString("base64")
+    stored.encryptedAwsCredentials = hostPlatform().secrets.isEncryptionAvailable()
+      ? hostPlatform().secrets.encryptString(json).toString("base64")
       : Buffer.from(json, "utf8").toString("base64");
     stored.awsWorkerRegion = credentials.region;
     stored.awsWorkerHandle = handle;

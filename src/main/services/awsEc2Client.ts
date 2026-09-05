@@ -2,7 +2,7 @@
 // from awsWorkerLifecycle.ts so the lifecycle state machine stays SDK-free and
 // unit-testable; this module is the thin adapter over @aws-sdk/client-ec2 and
 // the local key/IP tooling.
-import { app } from "electron";
+import { userDataPath } from "../platform";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import {
   EC2Client,
@@ -546,17 +546,17 @@ function mapInstanceState(name: string | undefined): AwsWorkerInstanceState {
 // half is imported to EC2, the private half stays local and drives SSH.
 export async function generateAwsWorkerKeyMaterial(options: { rotate?: boolean } = {}): Promise<AwsWorkerKeyMaterial> {
   return generateOrLoadAwsWorkerKeyMaterial({
-    keyDir: awsWorkerKeyDir(app.getPath("userData")),
+    keyDir: awsWorkerKeyDir(userDataPath()),
     rotate: options.rotate
   });
 }
 
 export async function deleteGeneratedAwsWorkerKeyMaterial(keyName: string): Promise<void> {
-  await deleteAwsWorkerKeyMaterial(awsWorkerKeyDir(app.getPath("userData")), keyName);
+  await deleteAwsWorkerKeyMaterial(awsWorkerKeyDir(userDataPath()), keyName);
 }
 
 export function resolveAwsWorkerPrivateKeyPath(keyName: string): string {
-  return awsWorkerPrivateKeyPath(awsWorkerKeyDir(app.getPath("userData")), keyName);
+  return awsWorkerPrivateKeyPath(awsWorkerKeyDir(userDataPath()), keyName);
 }
 
 export async function resolveCurrentPublicIp(): Promise<string> {

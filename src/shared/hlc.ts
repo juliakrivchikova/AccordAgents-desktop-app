@@ -74,6 +74,21 @@ export function logicalOrderKey(event: HlcEventLike): string {
   return event.logicalTs;
 }
 
+/**
+ * Compares two bare logicalTs strings (no event context, e.g. a revocation
+ * threshold against an event's timestamp). Values of the same family compare
+ * as strings; an HLC key always sorts after a legacy or unknown value, because
+ * the HLC era starts after every legacy timestamp a machine could have written.
+ */
+export function compareLogicalTsValues(left: string, right: string): number {
+  const leftHlc = HLC_PATTERN.test(left);
+  const rightHlc = HLC_PATTERN.test(right);
+  if (leftHlc !== rightHlc) {
+    return leftHlc ? 1 : -1;
+  }
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 export function compareLogicalOrder(left: HlcEventLike, right: HlcEventLike): number {
   const leftKey = logicalOrderKey(left);
   const rightKey = logicalOrderKey(right);
