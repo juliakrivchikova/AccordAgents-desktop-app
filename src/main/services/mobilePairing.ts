@@ -5,7 +5,8 @@ import {
   MOBILE_PAIRING_VERSION,
   mobilePairingPwaUrl,
   mobilePairingPayloadForQr,
-  type MobilePairingPackage
+  type MobilePairingPackage,
+  type MobilePairingPurpose
 } from "../../shared/mobilePairing";
 import { stableJson } from "../../shared/stableJson";
 import { mailboxScopeIdForSealKey } from "./mailboxAccess";
@@ -33,7 +34,7 @@ export class MobilePairingService {
     const identity = await this.eventLog.getOrCreateDeviceIdentity();
     const createdAtDate = this.now();
     const createdAt = createdAtDate.toISOString();
-    const expiresAt = new Date(createdAtDate.getTime() + pairingTtlMs(request.ttlMinutes)).toISOString();
+    const expiresAt = new Date(createdAtDate.getTime() + pairingTtlMs(request.ttlMinutes, purpose)).toISOString();
     const issuer = {
       originId: identity.originId,
       keyId: identity.keyId,
@@ -42,7 +43,7 @@ export class MobilePairingService {
     const stableRoutingId = `route-${sha256Hex(stableJson(issuer)).slice(0, 32)}`;
     const relaySealKeyBase64 = randomBytes(32).toString("base64url");
     const scopedOutboxUrl = scopedOutboxUrlForSealKey(outboxUrl, relaySealKeyBase64);
-    const capability = purpose === "phone-control" ? {
+    const capability = purpose !== "person-invite" ? {
       scope: "device" as const,
       canRead: true,
       canWrite: true,
@@ -105,10 +106,13 @@ function scopedOutboxUrlForSealKey(value: string | undefined, relaySealKeyBase64
   return parsed.toString();
 }
 
-function pairingTtlMs(ttlMinutes: number | undefined): number {
+function pairingTtlMs(ttlMinutes: number | undefined, purpose: MobilePairingPurpose = "phone-control"): number {
+  // A machine enrollment is installed once and revoked by removing the
+  // machine, so it is not bound by the short phone-link window.
+  const maxMinutes = purpose === "machine-host" ? Number.MAX_SAFE_INTEGER : MAX_PAIRING_TTL_MINUTES;
   const minutes = ttlMinutes === undefined
     ? DEFAULT_PAIRING_TTL_MINUTES
-    : Math.max(1, Math.min(MAX_PAIRING_TTL_MINUTES, Math.floor(ttlMinutes)));
+    : Math.max(1, Math.min(maxMinutes, Math.floor(ttlMinutes)));
   return minutes * 60 * 1000;
 }
 
@@ -118,10 +122,17 @@ function normalizedOptionalUrl(value: string | undefined, protocols: string[], l
     return undefined;
   }
   const parsed = new URL(trimmed);
-  if (!protocols.includes(parsed.protocol)) {
+  // A relay on this computer (wrangler dev, the reference relay) speaks plain
+  // ws:; anything that leaves the machine must be wss:.
+  const loopbackPlainWs = parsed.protocol === "ws:" && protocols.includes("wss:") && isLoopbackHost(parsed.hostname);
+  if (!protocols.includes(parsed.protocol) && !loopbackPlainWs) {
     throw new Error(`${label} must use ${protocols.join(" or ")}.`);
   }
   return parsed.toString();
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]" || hostname === "::1";
 }
 
 function pairingFingerprint(value: unknown): string {

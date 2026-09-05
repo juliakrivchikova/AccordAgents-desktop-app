@@ -629,6 +629,30 @@ interface RemoteRunTerminalizationResult {
   autoResumeRequestMessageIds: string[];
 }
 
+/** Machines transport: runs one participant turn on the participant's home
+ *  machine. The desktop owns the pending bubble and applies the returned
+ *  messages exactly as it would for a local turn. */
+export interface MachineTurnDispatchRequest {
+  conversation: Conversation;
+  participant: ChatParticipant;
+  triggerMessage: ChatMessage;
+  runId: string;
+  pendingMessageId: string;
+  signal?: AbortSignal;
+  progress?: ProgressCallback;
+}
+
+export interface MachineTurnDispatchResult {
+  status: "completed" | "interrupted" | "failed";
+  messages: ChatMessage[];
+  warnings: string[];
+  error?: string;
+}
+
+export interface MachineTurnDispatcher {
+  runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult>;
+}
+
 interface RemoteRunStarter {
   startDetachedRun(request: RemoteRunDetachedStartRequest): Promise<RemoteDetachedRunState>;
   pollDetachedRun(request: RemoteRunDetachedPollRequest): Promise<RemoteDetachedRunState>;
@@ -724,6 +748,7 @@ export class ChatService {
   private readonly appInstanceId = randomUUID();
   private runOwnerHeartbeatTimer?: NodeJS.Timeout;
   private remoteRuns?: RemoteRunStarter;
+  private machineLink?: MachineTurnDispatcher;
   private remoteRunCoordinator?: RemoteRunCoordinatorControl;
   private cloudRunAws?: CloudRunAwsResolver;
   private cloudRunDoctor?: CloudRunDoctorProbe;
@@ -757,6 +782,13 @@ export class ChatService {
       return { env: {}, version: "" };
     }
     return settings.getManualAgentEnvironment();
+  }
+
+  /** Machines transport: participants whose home is an enrolled machine run
+   *  there through the machine link; the desktop keeps the pending bubble,
+   *  progress, and the final messages exactly as for a local participant. */
+  setMachineLink(link: MachineTurnDispatcher | undefined): void {
+    this.machineLink = link;
   }
 
   setRemoteRunService(remoteRuns: RemoteRunStarter): void {
@@ -6448,6 +6480,9 @@ export class ChatService {
     warnings: string[],
     options: {
       targetRunIds?: ReadonlyMap<string, string>;
+      /** Machines transport: a machine hosting a turn reuses the pending
+       *  message id the desktop created, so both copies name the same bubble. */
+      pendingMessageIds?: ReadonlyMap<string, string>;
       onTargetRunBegun?: (participantId: string, runId: string) => Promise<void> | void;
     } = {}
   ): Promise<void> {
@@ -6528,6 +6563,10 @@ export class ChatService {
           },
           "pending"
         );
+        const pendingMessageIdOverride = options.pendingMessageIds?.get(participant.id);
+        if (pendingMessageIdOverride) {
+          pendingMessage.id = pendingMessageIdOverride;
+        }
         this.setTargetRunPendingMessageId(targetRunId, pendingMessage.id);
         // Register the run as active before persisting the pending bubble, and keep the
         // persist inside the try so endChatRun always balances beginChatRun. Otherwise a
@@ -6546,14 +6585,20 @@ export class ChatService {
             this.queueSnapshot(conversation);
           });
           reservationHandedOff = true;
-          const messages = await this.runParticipantTurnSerialized(conversation, participant, triggerMessage, targetRunId, targetController.signal, progress, {
-            warnings,
-            promptConversation: turnSnapshot,
-            workspacePath,
-            promptContextScope: this.promptContextScopeForTrigger(triggerMessage),
-            existingPendingMessage: pendingMessage,
-            turnReservation
-          });
+          const messages = participant.homeMachineId && this.machineLink
+            ? await this.runParticipantTurnOnMachine(conversation, participant, triggerMessage, targetRunId, targetController.signal, progress, {
+                warnings,
+                pendingMessage,
+                turnReservation
+              })
+            : await this.runParticipantTurnSerialized(conversation, participant, triggerMessage, targetRunId, targetController.signal, progress, {
+                warnings,
+                promptConversation: turnSnapshot,
+                workspacePath,
+                promptContextScope: this.promptContextScopeForTrigger(triggerMessage),
+                existingPendingMessage: pendingMessage,
+                turnReservation
+              });
           if (targetController.signal.aborted) {
             await this.discardStoppedTargetRun(conversation, targetRunId, participant, pendingMessage.id);
           } else {
@@ -6585,6 +6630,100 @@ export class ChatService {
       })
     );
     await this.ensureHistoryFiles(conversation);
+  }
+
+  /** Machines transport, desktop side: the participant's home machine runs the
+   *  turn; the desktop waits for it under the same per-participant reservation
+   *  and cancellation rules as a local turn. Progress arrives through the same
+   *  callback; the returned messages are appended by the caller. */
+  private async runParticipantTurnOnMachine(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    triggerMessage: ChatMessage,
+    runId: string,
+    signal: AbortSignal | undefined,
+    progress: ProgressCallback | undefined,
+    options: {
+      warnings: string[];
+      pendingMessage: ChatMessage;
+      turnReservation: ParticipantTurnReservation;
+    }
+  ): Promise<ChatMessage[]> {
+    const link = this.machineLink;
+    if (!link) {
+      throw new Error(`@${participant.handle} is hosted on a machine, but the machine link is not available.`);
+    }
+    let turnController: { signal: AbortSignal; cleanup: () => void } | undefined;
+    try {
+      turnController = this.ensureChatTurnController(conversation, participant, runId, signal);
+      await this.waitForParticipantTurnReservation(options.turnReservation, turnController.signal);
+      if (turnController.signal.aborted) {
+        throw new Error("Chat run cancelled.");
+      }
+      const result = await link.runTurn({
+        conversation,
+        participant,
+        triggerMessage,
+        runId,
+        pendingMessageId: options.pendingMessage.id,
+        signal: turnController.signal,
+        progress
+      });
+      for (const warning of result.warnings) {
+        if (!options.warnings.includes(warning)) {
+          options.warnings.push(warning);
+        }
+      }
+      if (result.status === "failed") {
+        throw new Error(result.error ?? `@${participant.handle} failed on its machine.`);
+      }
+      if (result.status === "interrupted" || turnController.signal.aborted) {
+        return [];
+      }
+      return result.messages;
+    } finally {
+      options.turnReservation.release();
+      turnController?.cleanup();
+    }
+  }
+
+  /** Machines transport, machine side: runs one participant turn for a message
+   *  that already exists in this machine's copy of the conversation, reusing
+   *  the run id and pending message id the desktop chose. Returns the
+   *  participant's messages for that run. */
+  async runMachineHostedTurn(
+    request: { conversationId: string; participantId: string; messageId: string; runId: string; pendingMessageId: string },
+    signal?: AbortSignal,
+    progress?: ProgressCallback
+  ): Promise<{ messages: ChatMessage[]; warnings: string[] }> {
+    const conversation = await this.requireChat(request.conversationId);
+    const participant = this.chatParticipants(conversation).find((item) => item.id === request.participantId);
+    if (!participant) {
+      throw new Error("Machine-hosted turn participant was not found in this machine's copy of the chat.");
+    }
+    const triggerMessage = conversation.messages.find((message) => message.id === request.messageId);
+    if (!triggerMessage) {
+      throw new Error("Machine-hosted turn message was not found in this machine's copy of the chat.");
+    }
+    const warnings: string[] = [];
+    await this.runParticipantBatch(
+      conversation,
+      [participant],
+      triggerMessage,
+      request.runId,
+      signal,
+      progress,
+      warnings,
+      {
+        targetRunIds: new Map([[participant.id, request.runId]]),
+        pendingMessageIds: new Map([[participant.id, request.pendingMessageId]])
+      }
+    );
+    const refreshed = await this.requireChat(request.conversationId);
+    const messages = refreshed.messages.filter((message) =>
+      message.participantId === participant.id && message.metadata?.runId === request.runId && message.status !== "pending"
+    );
+    return { messages, warnings };
   }
 
   private async discardStoppedTargetRun(
@@ -10572,6 +10711,7 @@ export class ChatService {
         agentMode: normalizeChatAgentMode(item.agentMode),
         permissions: this.normalizeParticipantPermissionsForRole(role, item.permissions, item.permissions === undefined),
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(item.remoteExecution),
+        homeMachineId: item.homeMachineId || undefined,
         skipToolchainPreflight: item.skipToolchainPreflight === true,
         autoWatch
       };
@@ -10884,6 +11024,7 @@ export class ChatService {
       reasoningEffort: participant.reasoningEffort,
       agentMode: normalizeChatAgentMode(participant.agentMode),
       remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
+      homeMachineId: participant.homeMachineId || undefined,
       skipToolchainPreflight: participant.skipToolchainPreflight === true,
       autoWatch: participant.autoWatch === true
     };
@@ -11500,6 +11641,9 @@ export class ChatService {
           agentMode: overrides && "agentMode" in overrides ? normalizeChatAgentMode(overrides.agentMode) : preset.agentMode,
           permissions: overrides && "permissions" in overrides ? overrides.permissions : preset.permissions,
           remoteExecution: overrides && "remoteExecution" in overrides ? overrides.remoteExecution : preset.remoteExecution,
+          homeMachineId: overrides && "homeMachineId" in overrides
+            ? (typeof overrides.homeMachineId === "string" && overrides.homeMachineId.trim() ? overrides.homeMachineId.trim() : undefined)
+            : preset.homeMachineId,
           skipToolchainPreflight: overrides && "skipToolchainPreflight" in overrides ? overrides.skipToolchainPreflight : preset.skipToolchainPreflight,
           autoWatch: overrides && "autoWatch" in overrides ? overrides.autoWatch : preset.autoWatchEnabled
         };

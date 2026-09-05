@@ -1,6 +1,9 @@
 export const MOBILE_PAIRING_VERSION = 1;
 
-export type MobilePairingPurpose = "phone-control" | "person-invite";
+/** phone-control: a phone drives this desktop; person-invite: another person
+ *  joins one conversation; machine-host: a machine that hosts participants
+ *  (machines transport) enrolls with this desktop. */
+export type MobilePairingPurpose = "phone-control" | "person-invite" | "machine-host";
 
 export interface MobilePairingIssuer {
   originId: string;
@@ -203,7 +206,7 @@ export function assertMobilePairingPackage(value: unknown, now?: Date): asserts 
   if (value.version !== MOBILE_PAIRING_VERSION) {
     throw new Error("Unsupported mobile pairing package version.");
   }
-  if (value.purpose !== "phone-control" && value.purpose !== "person-invite") {
+  if (value.purpose !== "phone-control" && value.purpose !== "person-invite" && value.purpose !== "machine-host") {
     throw new Error("Mobile pairing package purpose is invalid.");
   }
   assertRecord(value.issuer, "Mobile pairing issuer");
@@ -286,7 +289,11 @@ function normalizedOptionalEnvironmentUrl(value: string | undefined, protocol: "
   }
   try {
     const parsed = new URL(trimmed);
-    return parsed.protocol === protocol ? parsed.toString() : undefined;
+    // A relay on this computer (wrangler dev, the reference relay) speaks
+    // plain ws:; anything that leaves the machine must be wss:.
+    const loopbackPlainWs = protocol === "wss:" && parsed.protocol === "ws:" &&
+      (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "[::1]");
+    return parsed.protocol === protocol || loopbackPlainWs ? parsed.toString() : undefined;
   } catch {
     return undefined;
   }

@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
+  CreateMachineRequest,
+  CreateMachineResult,
+  MachineEnrollmentRequest,
+  MachineListResult,
+  RemoveMachineRequest
+} from "../shared/machineLink";
+import type {
   AppBridge,
   AddChatParticipantRequest,
   AgentDetectionRequest,
@@ -200,6 +207,15 @@ const bridge: AppBridge = {
   withdrawArtifactDraft: (request: WithdrawArtifactDraftRequest) => ipcRenderer.invoke("artifacts:drafts:withdraw", request),
   updateArtifactDraftRoster: (request: UpdateArtifactDraftRosterRequest) => ipcRenderer.invoke("artifacts:drafts:set-roster", request),
   publishArtifact: (request: PublishArtifactRequest) => ipcRenderer.invoke("artifacts:publish", request),
+  listMachines: (): Promise<MachineListResult> => ipcRenderer.invoke("machines:list"),
+  createMachine: (request: CreateMachineRequest): Promise<CreateMachineResult> => ipcRenderer.invoke("machines:create", request),
+  removeMachine: (request: RemoveMachineRequest): Promise<MachineListResult> => ipcRenderer.invoke("machines:remove", request),
+  machineEnrollment: (request: MachineEnrollmentRequest): Promise<CreateMachineResult> => ipcRenderer.invoke("machines:enrollment", request),
+  onMachinesUpdated: (callback: (result: MachineListResult) => void) => {
+    const listener = (_event: unknown, result: MachineListResult): void => callback(result);
+    ipcRenderer.on("machines:updated", listener);
+    return () => ipcRenderer.off("machines:updated", listener);
+  },
   onArtifactsUpdated: (callback: (event: ArtifactsUpdatedEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: ArtifactsUpdatedEvent) => callback(payload);
     ipcRenderer.on("artifacts:updated", listener);

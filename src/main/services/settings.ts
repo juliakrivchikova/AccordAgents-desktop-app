@@ -2,6 +2,8 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { hostPlatform, userDataPath } from "../platform";
+import type { MachineRecord, MachineSettingsSnapshot } from "../../shared/machineLink";
+import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type {
   StoredMobilePairedDevice,
   StoredPendingMailboxRevocation,
@@ -135,6 +137,10 @@ interface StoredSettings {
   chatParticipantConfigs?: ChatParticipantConfig[];
   chatParticipantSeedState?: ChatParticipantSeedState;
   remoteSessionCleanupTombstones?: RemoteSessionCleanupTombstone[];
+  /** Enrolled machines (machines transport). The pairing packages carry the
+   *  relay seal keys and are stored sealed, keyed by MachineRecord.pairingKey. */
+  machines?: MachineRecord[];
+  encryptedMachinePairings?: string;
 }
 
 function isRemoteSessionCleanupReason(value: unknown): value is RemoteSessionCleanupTombstone["reason"] {
@@ -2347,6 +2353,7 @@ export class SettingsService {
       agentMode: normalizeChatAgentMode(update.agentMode),
       permissions: normalizeChatAgentPermissions(update.permissions),
       remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
+      homeMachineId: typeof update.homeMachineId === "string" && update.homeMachineId.trim() ? update.homeMachineId.trim() : undefined,
       skipToolchainPreflight: update.skipToolchainPreflight === true,
       autoWatchEnabled: this.autoWatchEnabledForRole(role, update.autoWatchEnabled),
       updatedAt: now
@@ -3165,6 +3172,152 @@ export class SettingsService {
     stored.awsWorkerHandle = handle;
     stored.cloudRunsMode = "aws";
     await this.writeStored(stored);
+  }
+
+  // Machines transport: enrolled machines and their sealed pairing packages.
+  async listMachines(): Promise<MachineRecord[]> {
+    const stored = await this.readStored();
+    return (stored.machines ?? []).map((machine) => ({ ...machine }));
+  }
+
+  async saveMachine(record: MachineRecord, pairing?: MobilePairingPackage): Promise<MachineRecord[]> {
+    const stored = await this.readStored();
+    const machines = (stored.machines ?? []).filter((machine) => machine.id !== record.id);
+    machines.push({ ...record });
+    stored.machines = machines;
+    if (pairing) {
+      const pairings = this.readMachinePairings(stored);
+      pairings[record.pairingKey] = pairing;
+      stored.encryptedMachinePairings = this.sealJson(JSON.stringify(pairings));
+    }
+    await this.writeStored(stored);
+    return machines.map((machine) => ({ ...machine }));
+  }
+
+  async removeMachine(id: string): Promise<MachineRecord[]> {
+    const stored = await this.readStored();
+    const removed = (stored.machines ?? []).find((machine) => machine.id === id);
+    stored.machines = (stored.machines ?? []).filter((machine) => machine.id !== id);
+    if (removed) {
+      const pairings = this.readMachinePairings(stored);
+      delete pairings[removed.pairingKey];
+      stored.encryptedMachinePairings = this.sealJson(JSON.stringify(pairings));
+    }
+    await this.writeStored(stored);
+    return (stored.machines ?? []).map((machine) => ({ ...machine }));
+  }
+
+  async getMachinePairing(pairingKey: string): Promise<MobilePairingPackage | undefined> {
+    const stored = await this.readStored();
+    return this.readMachinePairings(stored)[pairingKey];
+  }
+
+  /** What a machine needs to run participants exactly like this desktop:
+   *  roles, rules, saved prompts, participant presets, prompt-context and
+   *  limit settings, and the agent environment values. Provider API keys, AWS
+   *  credentials, cloud-run and machine records never leave this desktop. */
+  async exportMachineSettingsSnapshot(): Promise<MachineSettingsSnapshot> {
+    const stored = await this.readStored();
+    const {
+      providers: _providers,
+      encryptedAwsCredentials: _aws,
+      awsWorkerHandle: _handle,
+      awsWorkerRegion: _region,
+      awsWorkerOperation: _operation,
+      awsWorkerProvisioningToken: _token,
+      awsWorkerSpecAcceptance: _spec,
+      awsWorkerVolumeExpansion: _volume,
+      cloudRuns: _cloudRuns,
+      cloudRunsMode: _cloudRunsMode,
+      cloudRunsDeviceId: _cloudRunsDeviceId,
+      agentEnvironment: _agentEnvironment,
+      machines: _machines,
+      encryptedMachinePairings: _pairings,
+      remoteSessionCleanupTombstones: _tombstones,
+      lastRepoPath: _lastRepoPath,
+      ...shareable
+    } = stored;
+    const environment = await this.getManualAgentEnvironment();
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      settingsJson: JSON.stringify(shareable),
+      agentEnvironment: Object.entries(environment.env)
+        .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+        .map(([key, value]) => ({ key, value }))
+    };
+  }
+
+  /** Applies a desktop snapshot on a machine: shareable settings replace the
+   *  machine's copy, environment values are stored with the machine's own
+   *  secret store, and everything the machine owns (its records, providers)
+   *  is kept. */
+  async importMachineSettingsSnapshot(snapshot: MachineSettingsSnapshot): Promise<void> {
+    if (!snapshot || snapshot.version !== 1 || typeof snapshot.settingsJson !== "string") {
+      throw new Error("Machine settings snapshot is invalid.");
+    }
+    const incoming = JSON.parse(snapshot.settingsJson) as Partial<StoredSettings>;
+    const stored = await this.readStored();
+    const next: StoredSettings = {
+      ...stored,
+      ...incoming,
+      providers: stored.providers,
+      encryptedAwsCredentials: stored.encryptedAwsCredentials,
+      awsWorkerHandle: stored.awsWorkerHandle,
+      awsWorkerRegion: stored.awsWorkerRegion,
+      cloudRuns: stored.cloudRuns,
+      cloudRunsMode: stored.cloudRunsMode,
+      cloudRunsDeviceId: stored.cloudRunsDeviceId,
+      agentEnvironment: stored.agentEnvironment,
+      machines: stored.machines,
+      encryptedMachinePairings: stored.encryptedMachinePairings,
+      remoteSessionCleanupTombstones: stored.remoteSessionCleanupTombstones,
+      lastRepoPath: stored.lastRepoPath
+    };
+    await this.writeStored(next);
+    const existing = new Set((stored.agentEnvironment?.variables ?? []).map((variable) => variable.key));
+    const incomingKeys = new Set<string>();
+    for (const entry of snapshot.agentEnvironment ?? []) {
+      if (!entry || typeof entry.key !== "string" || typeof entry.value !== "string") {
+        continue;
+      }
+      incomingKeys.add(entry.key);
+      try {
+        await this.saveAgentEnvironmentVariable({ key: entry.key, value: entry.value, enabled: true });
+      } catch {
+        // A key this machine's policy refuses stays absent; the desktop keeps it.
+      }
+    }
+    for (const key of existing) {
+      if (!incomingKeys.has(key)) {
+        await this.deleteAgentEnvironmentVariable(key).catch(() => undefined);
+      }
+    }
+  }
+
+  private readMachinePairings(stored: StoredSettings): Record<string, MobilePairingPackage> {
+    if (!stored.encryptedMachinePairings) {
+      return {};
+    }
+    try {
+      const parsed = JSON.parse(this.openJson(stored.encryptedMachinePairings)) as Record<string, MobilePairingPackage>;
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private sealJson(json: string): string {
+    const secrets = hostPlatform().secrets;
+    return secrets.isEncryptionAvailable()
+      ? secrets.encryptString(json).toString("base64")
+      : Buffer.from(json, "utf8").toString("base64");
+  }
+
+  private openJson(sealed: string): string {
+    const buffer = Buffer.from(sealed, "base64");
+    const secrets = hostPlatform().secrets;
+    return secrets.isEncryptionAvailable() ? secrets.decryptString(buffer) : buffer.toString("utf8");
   }
 
   async getCloudRunsDeviceId(): Promise<string> {

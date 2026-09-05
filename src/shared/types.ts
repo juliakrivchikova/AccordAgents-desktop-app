@@ -1,5 +1,12 @@
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import type {
+  CreateMachineRequest,
+  CreateMachineResult,
+  MachineEnrollmentRequest,
+  MachineListResult,
+  RemoveMachineRequest
+} from "./machineLink";
+import type {
   CreateMobilePairingRequest,
   CreateMobilePairingResult,
   MobileControlSettings,
@@ -720,6 +727,9 @@ export interface ChatParticipant {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  /** Machine that hosts this participant's sessions (machines transport).
+   *  Absent = this desktop. */
+  homeMachineId?: string;
   skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
@@ -1029,6 +1039,7 @@ export interface ChatRosterCurrentParticipant {
   permissions?: ChatAgentPermissions;
   manageRolesParticipants?: ChatManageRolesParticipantsResolution;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  homeMachineId?: string;
   skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
@@ -1388,6 +1399,9 @@ export interface ChatParticipantConfig {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  /** Machine that hosts this participant's sessions (machines transport).
+   *  Absent = this desktop. */
+  homeMachineId?: string;
   skipToolchainPreflight?: boolean;
   autoWatchEnabled?: boolean;
   updatedAt: string;
@@ -1405,6 +1419,7 @@ export interface ChatParticipantConfigUpdate {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  homeMachineId?: string;
   skipToolchainPreflight?: boolean;
   autoWatchEnabled?: boolean;
 }
@@ -1421,6 +1436,7 @@ export interface ChatParticipantInput {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  homeMachineId?: string;
   skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
@@ -2660,6 +2676,12 @@ export interface AppBridge {
   updateArtifactDraftRoster(request: UpdateArtifactDraftRosterRequest): Promise<ArtifactResult<CollectingArtifactReadResult>>;
   publishArtifact(request: PublishArtifactRequest): Promise<ArtifactResult<PublishedArtifactReadResult>>;
   onArtifactsUpdated(callback: (event: ArtifactsUpdatedEvent) => void): () => void;
+  // Machines transport: machines that host participants.
+  listMachines(): Promise<MachineListResult>;
+  createMachine(request: CreateMachineRequest): Promise<CreateMachineResult>;
+  removeMachine(request: RemoveMachineRequest): Promise<MachineListResult>;
+  machineEnrollment(request: MachineEnrollmentRequest): Promise<CreateMachineResult>;
+  onMachinesUpdated(callback: (result: MachineListResult) => void): () => void;
   onReviewProgress(callback: (progress: ReviewProgress) => void): () => void;
   onConversationUpdated(callback: (conversation: ConversationUpdate) => void): () => void;
 }

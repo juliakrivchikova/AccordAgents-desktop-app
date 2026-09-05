@@ -93,6 +93,8 @@ import { ChatEventLogService } from "./services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "./services/chatEventMirror";
 import { ChatService } from "./services/chat";
 import { MobilePairingService } from "./services/mobilePairing";
+import { MachineLinkService } from "./services/machineLink";
+import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, RemoveMachineRequest } from "../shared/machineLink";
 import { MobileProgressEnvelopeTracker } from "./services/mobileProgressEnvelopeTracker";
 import {
   MobileRelayControlService,
@@ -277,6 +279,8 @@ const MOBILE_MAILBOX_POLL_INTERVAL_MS = 2_500;
 const MOBILE_MAILBOX_OWNER_ACTION_BACKOFF_MS = 5 * 60_000;
 const MOBILE_EVENT_EXECUTION_CLAIM_TTL_MS = 45_000;
 const mobileRelayControls = new Map<string, MobileRelayControlService>();
+// Machines transport: enrolled machines that host participants.
+let machineLinkService: MachineLinkService | undefined;
 const mobileMailboxPollers = new Map<string, NodeJS.Timeout>();
 const mobilePairingsByKey = new Map<string, MobilePairingPackage>();
 // W1 arrival cursors, per pairing. Persisted with paired devices so a restart
@@ -305,6 +309,7 @@ const chatService = new ChatService(storageService, settingsService, cliAgentRun
     control.pushConversationSnapshot(conversation);
   }
   void publishMobileRunnerPoliciesForConversation(conversation);
+  void machineLinkService?.replicateConversation(conversation).catch(() => undefined);
 }, userSkillsService, (progress) => emitReviewProgress(progress), chatEventMirrorService, (conversation, messages) => {
   // W-C: an interrupted run's recovered terminals are the only thing that will
   // ever tell a paired phone that run is over.
@@ -1050,6 +1055,17 @@ function acceptsMobileOutboxEnvelopeForPairing(pairing: MobilePairingPackage, ev
     void noteMobilePairingClaimed(pairing);
   }
   return withinWindow;
+}
+
+// A machine enrollment is durable: it is installed once on the machine and
+// revoked by removing the machine, not by a clock.
+const MACHINE_ENROLLMENT_TTL_MINUTES = 60 * 24 * 365 * 10;
+
+async function machineListResult(): Promise<MachineListResult> {
+  return {
+    machines: await settingsService.listMachines(),
+    status: machineLinkService?.status() ?? []
+  };
 }
 
 function mobilePairingKey(pairing: MobilePairingPackage): string {
@@ -2370,6 +2386,60 @@ function registerIpc(): void {
       (progress) => emitReviewProgress(progress)
     );
   });
+  ipcMain.handle("machines:list", async (): Promise<MachineListResult> => machineListResult());
+  ipcMain.handle("machines:create", async (_event, request: CreateMachineRequest): Promise<CreateMachineResult> => {
+    const name = typeof request?.name === "string" ? request.name.trim() : "";
+    if (!name) {
+      throw new Error("A machine needs a name.");
+    }
+    const settings = await settingsService.getPublicSettings();
+    // A machine needs only the relay room; the phone's mailbox and static
+    // origin are not part of a machine enrollment.
+    const pairing = await mobilePairingService.createPairing({
+      purpose: "machine-host",
+      ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES,
+      relayUrl: settings.mobileControl.defaults.relayUrl
+    });
+    if (!pairing.package.relayUrl) {
+      throw new Error("Machines need a relay URL; set the mobile control relay in Settings first.");
+    }
+    const record = {
+      id: randomUUID(),
+      name,
+      deviceId: "",
+      pairingKey: pairing.package.rendezvousId,
+      createdAt: new Date().toISOString()
+    };
+    await settingsService.saveMachine(record, pairing.package);
+    await machineLinkService?.connectMachine(record).catch((error) => {
+      void debugLogService.write("machine-link.connect.error", { machineId: record.id, message: error instanceof Error ? error.message : String(error) });
+    });
+    void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
+    return { machine: record, enrollmentJson: JSON.stringify(pairing.package, null, 2) };
+  });
+  ipcMain.handle("machines:remove", async (_event, request: RemoveMachineRequest): Promise<MachineListResult> => {
+    const id = typeof request?.id === "string" ? request.id.trim() : "";
+    if (!id) {
+      throw new Error("Machine id is required.");
+    }
+    await machineLinkService?.disconnectMachine(id);
+    await settingsService.removeMachine(id);
+    const result = await machineListResult();
+    sendToMainWindow("machines:updated", result);
+    return result;
+  });
+  ipcMain.handle("machines:enrollment", async (_event, request: MachineEnrollmentRequest): Promise<CreateMachineResult> => {
+    const id = typeof request?.id === "string" ? request.id.trim() : "";
+    const machine = (await settingsService.listMachines()).find((item) => item.id === id);
+    if (!machine) {
+      throw new Error("Machine not found.");
+    }
+    const pairing = await settingsService.getMachinePairing(machine.pairingKey);
+    if (!pairing) {
+      throw new Error("The machine's enrollment is missing; remove and add the machine again.");
+    }
+    return { machine, enrollmentJson: JSON.stringify(pairing, null, 2) };
+  });
   ipcMain.handle("mobile:create-pairing", async (_event, request: CreateMobilePairingRequest) => {
     const settings = await settingsService.getPublicSettings();
     const result = await mobilePairingService.createPairing(
@@ -2698,6 +2768,22 @@ void app.whenReady().then(async () => {
   bootstrapAppUpdater(debugLogService, betaUpdates);
   await appMcpService.start();
   await storageService.init();
+  try {
+    const desktopIdentity = await chatEventLogService.getOrCreateDeviceIdentity();
+    machineLinkService = new MachineLinkService(settingsService, debugLogService, {
+      appVersion: app.getVersion(),
+      desktopDeviceId: desktopIdentity.originId
+    });
+    machineLinkService.onStatus(() => {
+      void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
+    });
+    chatService.setMachineLink(machineLinkService);
+    void machineLinkService.start().catch((error) => {
+      void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });
+    });
+  } catch (error) {
+    void debugLogService.write("machine-link.init.error", { message: error instanceof Error ? error.message : String(error) });
+  }
   // Deliberately not awaited: each paired phone reconnects through the relay
   // with its own connect timeout, and blocking here left the app with no
   // window at all while the relay was slow or unreachable.
