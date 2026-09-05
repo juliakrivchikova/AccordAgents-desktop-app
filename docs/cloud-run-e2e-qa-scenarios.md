@@ -46,6 +46,8 @@
 > - Cloud QA validates the **Linux** build. Say so in every report.
 > - Stop the AWS worker when unattended; a CLI-started worker has no idle timer.
 
+> Rows marked **REBASED** were rewritten on 2026-09-06 to the machines transport (accord resolution "Cloud transport cutover", artifact a6f1e5ad, v4): the old mechanism assertion is retired and the row states the behavior the cutover must prove. Until the cutover ships, the app still behaves as the pre-rebase rows described.
+
 
 Branch: `drew/serverless-shared-chat` (verified at `a26aed2`). Every code claim below was checked against this branch, not against `main` and not against the artifact version of this list, which predated Drew's Claude cloud-run work landing.
 
@@ -161,7 +163,7 @@ Your ask: global skills should work in the cloud the way they work locally.
 | CR-03 | Warm session expiry | Idle >30 min, then send. Relaunches cleanly. | CODE-OK |
 | CR-04 | **Submit ack lost → no double execution** | Drop the reply to `submitTurn`. Exactly one process, one event stream, one final message. | REAL-WORK — the failure ladder ends in `launch()`, which bypasses the supervisor's runId dedup |
 | CR-05 | Launch ack under slow boot | Does not fail on launch-ack (60 s window). | CODE-OK |
-| CR-06 | Poll inside the completion window | Finishes `completed` with the final message, not a synthesized `failed`. | CODE-OK — fixed by `d761a7f`; regression-guard it |
+| CR-06 | Completion / replay race without polling | The turn's completion event and a duplicate or late delivery of the same events yield exactly one final message; never a synthesized `failed`. | REBASED — machines transport (resolution §4 Delivery); the polling-window assertion is retired with the poll coordinator |
 | CR-07 | Resume in a non-git directory | Resumes after a desktop restart; argv has `--skip-git-repo-check` and no `--ephemeral`. | CODE-OK |
 | CR-08 | Resume miss | Reply prefixed *"The previous Codex session could not be resumed…"*; session id cleared; turn completes. | CODE-OK |
 | CR-09 | Startup reconnect beats `clearInterruptedRuns` | Quit mid-run, relaunch: reconnecting and polled, not cleared. | CODE-OK |
@@ -171,13 +173,13 @@ Your ask: global skills should work in the cloud the way they work locally.
 | CR-13 | Per-machine auth | On-box `codex login --device-auth` coexists with a live Mac session; neither revokes the other. **Negative:** nothing ever copies `auth.json` to a worker. | CODE-OK |
 | CR-14 | Device auth survives a blackout | URL printed, 30 s blackout, restore, complete in the browser: login still completes. | SMALL-FIX — `ServerAliveInterval=8/CountMax=3` tears down the quiet approval window (`cloudRunDoctor.ts:370`) |
 | CR-15 | Device auth drop before output | Retries silently; does not invalidate a code already in use. | CODE-OK |
-| CR-16 | stdin does not hang | `< /dev/null` present. | CODE-OK |
+| CR-16 | stdin is the control channel | The resident bidirectional session keeps stdin open for turns, steer, and interrupt; no `< /dev/null`. | REBASED — obsolete under resident stream-json sessions; see `docs/machines/01-native-control-probes.md` |
 | CR-17 | Preflight on a lossy link | One dropped SSH must not fail the run before launch. | SMALL-FIX — preflight is the one setup SSH not wrapped in `runWithSshRetries` |
 | CR-18 | Preflight cache invalidation | Install a missing tool via in-app setup; next run proceeds **without an app restart**. | SMALL-FIX — instance-lifetime cache with no invalidation |
 | CR-19 | Advisory vs required | Required blocks with a named reason; advisory warns and proceeds. | CODE-OK |
 | CR-20 | Run location lock | Confirm the lock after the first run is intended product behavior, not a trap. | CODE-OK |
 | CR-21 | Attachments on a remote run | Behavior must be explicit and visible. Today images are silently skipped. | SMALL-FIX |
-| CR-22 | Native `/goal` + remote | Rejected with the specific message. | CODE-OK |
+| CR-22 | Native `/goal` on a cloud machine | Works exactly as for a local participant (same app-server session primitives). | REBASED — the old "rejected with a specific message" outcome is a parity defect under the resolution (§1.9); must pass, not be rejected |
 | CR-23 | Multi-day detached run, desktop offline | >8 days: the box refreshes its own token and keeps working. **Never proven.** | REAL-WORK (soak) — the core of the lid-closed promise |
 | CR-24 | Two remote members concurrently | Both run; distinct run ids; no cross-attribution; both finalize. | CODE-OK |
 | CR-25 | `remoteCwd` points at the mirror repo | The agent runs inside the synced repo, not the run metadata dir. | CODE-OK — Drew fixed this; regression-guard it |
@@ -219,7 +221,7 @@ New on this branch. Nothing here is QA-proven beyond Drew's single live PASS, an
 | W-09 | Idle stop with lease renewal failing | Run not silently killed; no stop with live work; the lease expires rather than pinning the box up forever. | SMALL-FIX |
 | W-10 | **`authorize-stop` retry is idempotent** | A retry after a lost reply is recognized as the same request — no orphan drain lease bouncing real turns for 30 s and skipping idle-stop. | SMALL-FIX |
 | W-11 | **App closed with a run in flight** | Defined behavior. The idle timer currently dies with the Electron process; on relaunch it must be re-scheduled and must not stop an in-flight run. | REAL-WORK — the timer must not live only in the desktop |
-| W-12 | Phone paired → box stays up | Idle-stop holds a reference while the phone is paired or ownership is remote. | CODE-OK — verify against `hostProviderCapabilities.ts` |
+| W-12 | Phone wakes a stopped machine | Idle stop is unchanged (run-count based); the phone starts a stopped machine itself with the scoped AWS key received at pairing; the relay never sees keys. | REBASED — Rule 3 of the resolution; the previous CODE-OK claim ("idle-stop holds a reference while the phone is paired") was false: the idle logic only counts runs |
 | W-13 | Spec mismatch decision | `keep` / `grow-disk` / `recreate` with staleness checks; no silent resize. | CODE-OK |
 | W-14 | Disk exhaustion message | rsync ENOSPC → the actionable message, not a raw rsync error. | CODE-OK — confirmed live |
 | W-15 | **Desired vs Actual disk** | Settings shows both, warns when a change is unapplied, `Refresh status` only refreshes, and the primary CTA is `Apply disk resize to 20 GB`. | CODE-OK — Drew implemented; unverified end to end |
@@ -371,8 +373,8 @@ made realistically tall.
 | PM-25 | Attachment read denied | The tool message keeps its image, warns cleanly, creates no batch. | CODE-OK |
 | PM-26 | Card isolation | An unrelated choice card beside a pending approval: each control affects only its own card; finished outcomes stay compact. | CODE-OK |
 | PM-27 | Survives app relaunch | Still answerable, or terminal with a stated reason. | CODE-OK |
-| PM-28 | Remote permission before a session id | Fails with the specific message rather than hanging. | CODE-OK |
-| PM-29 | **Remote permission round trip end to end** | A cloud member requests a permission, the decision is written to `decisions.jsonl` over SSH, and the run resumes. | CODE-OK — the one approval path the worker relay does support; verify with the lid closed |
+| PM-28 | Permission request identity on a machine | Every request is bound to provider request id, logical session id, turn id, and executor generation; a request that cannot be bound fails closed with a specific message rather than hanging. | REBASED — the "before a session id" case was a remote-runner artifact; resident sessions always have a session |
+| PM-29 | **Cloud permission round trip end to end** | A participant on a cloud machine requests a permission; the request reaches every device as an event; the decision returns as an event; the native request is answered exactly once on the machine and the turn continues in the same process. Verify with the lid closed and from the phone. | REBASED — native pending-request test (resolution §2.4); the `decisions.jsonl` over SSH path is deleted at cutover |
 
 ---
 
