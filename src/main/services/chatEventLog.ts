@@ -8,6 +8,7 @@ import {
   verify
 } from "node:crypto";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import { HybridLogicalClock, parseHlcKey, logicalOrderKey } from "../../shared/hlc";
 import { stableJson } from "../../shared/stableJson";
 import type {
   ChatEventDeviceIdentityRecord,
@@ -32,12 +33,30 @@ const LOCAL_APPEND_RETRY_LIMIT = 3;
 export class ChatEventLogService {
   private deviceIdentity?: ChatEventDeviceIdentityRecord;
   private deviceIdentityLoad?: Promise<ChatEventDeviceIdentityRecord>;
+  private clock?: HybridLogicalClock;
   private readonly localAppendQueues = new Map<string, Promise<void>>();
 
   constructor(
     private readonly storage: StorageService,
     private readonly now: () => Date = () => new Date()
   ) {}
+
+  /** Advances this machine's hybrid logical clock past events received from
+   *  other origins, so nothing emitted here can sort before what was seen. */
+  async observeReceivedEvents(events: ChatEventEnvelope[]): Promise<void> {
+    const clock = await this.getClock();
+    for (const event of events) {
+      clock.observe(event);
+    }
+  }
+
+  private async getClock(): Promise<HybridLogicalClock> {
+    const identity = await this.getOrCreateDeviceIdentity();
+    if (!this.clock) {
+      this.clock = new HybridLogicalClock(identity.originId, () => this.now().getTime());
+    }
+    return this.clock;
+  }
 
   async getOrCreateDeviceIdentity(): Promise<ChatEventDeviceIdentityRecord> {
     if (this.deviceIdentity) {
@@ -73,12 +92,24 @@ export class ChatEventLogService {
     identity: ChatEventDeviceIdentityRecord,
     request: CreateLocalChatEventRequest<Payload>
   ): Promise<SignedChatEventAppendResult<Payload>> {
+    const clock = await this.getClock();
     for (let attempt = 0; attempt < LOCAL_APPEND_RETRY_LIMIT; attempt += 1) {
       const basis = await this.storage.getChatEventSequenceBasis(identity.originId, request.logScopeId);
+      if (basis.latestLogicalTs) {
+        const restored = parseHlcKey(logicalOrderKey({
+          logicalTs: basis.latestLogicalTs,
+          originId: identity.originId,
+          originSeq: basis.originSeq - 1
+        }));
+        if (restored) {
+          clock.restore(restored);
+        }
+      }
       const event = createSignedChatEvent(identity, {
         ...request,
         originSeq: basis.originSeq,
         prevHash: basis.prevHash,
+        logicalTs: clock.tick(),
         createdAt: this.now().toISOString()
       });
       const result = await this.storage.appendChatEvent(event);
@@ -130,12 +161,15 @@ export function createSignedChatEvent<Payload>(
     originSeq: number;
     prevHash?: string;
     createdAt: string;
+    /** Hybrid logical clock key minted by the emitting machine. Callers that
+     *  do not run a clock get the legacy per-origin timestamp. */
+    logicalTs?: string;
   }
 ): ChatEventEnvelope<Payload> {
   assertCreateEventRequest(request);
   const payloadHash = `sha256:${sha256Hex(stableJson(request.payload))}`;
   const eventId = request.eventId ?? randomUUID();
-  const logicalTs = logicalTimestamp(request.originSeq, identity.originId, request.logScopeId);
+  const logicalTs = request.logicalTs ?? logicalTimestamp(request.originSeq, identity.originId, request.logScopeId);
   const unsigned = {
     eventId,
     conversationId: request.conversationId,

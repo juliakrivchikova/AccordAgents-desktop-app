@@ -1,4 +1,5 @@
 import type { ChatEventEnvelope } from "./chatEvents";
+import { compareLogicalOrder, logicalOrderKey } from "./hlc";
 import type { MobilePairingCapability } from "./mobilePairing";
 
 export type ChatDeviceCapabilityEventKind =
@@ -111,11 +112,11 @@ function isEventAfterRevocation(event: ChatEventEnvelope, revocation: ChatDevice
   if (!revocation.effectiveAfterLogicalTs) {
     return true;
   }
-  return event.logicalTs > revocation.effectiveAfterLogicalTs;
+  return logicalOrderKey(event) > revocation.effectiveAfterLogicalTs;
 }
 
 function compareCapabilityEvents(left: ChatEventEnvelope, right: ChatEventEnvelope): number {
-  return left.logicalTs.localeCompare(right.logicalTs) ||
+  return compareLogicalOrder(left, right) ||
     left.originId.localeCompare(right.originId) ||
     left.logScopeId.localeCompare(right.logScopeId) ||
     left.originSeq - right.originSeq ||

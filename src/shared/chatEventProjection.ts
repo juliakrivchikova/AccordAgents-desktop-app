@@ -1,4 +1,5 @@
 import type { ChatEventEnvelope } from "./chatEvents";
+import { compareLogicalOrder } from "./hlc";
 import type { ChatMessage, Conversation } from "./types";
 
 export type ChatConversationEventKind =
@@ -182,7 +183,7 @@ function visibleContiguousEvents(events: ChatEventEnvelope[]): {
 }
 
 function compareEventsForProjection(left: ChatEventEnvelope, right: ChatEventEnvelope): number {
-  return left.logicalTs.localeCompare(right.logicalTs) ||
+  return compareLogicalOrder(left, right) ||
     left.originId.localeCompare(right.originId) ||
     left.logScopeId.localeCompare(right.logScopeId) ||
     left.originSeq - right.originSeq ||

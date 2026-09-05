@@ -129,6 +129,9 @@ export interface ChatEventDeviceIdentityRecord {
 export interface ChatEventSequenceBasis {
   originSeq: number;
   prevHash?: string;
+  /** logicalTs of the latest local event in this origin/scope; restores the
+   *  hybrid logical clock after a restart. */
+  latestLogicalTs?: string;
 }
 
 /** One message as it is about to be written, with the hash used to decide
@@ -1657,9 +1660,9 @@ export class StorageService {
     if (!originId.trim() || !logScopeId.trim()) {
       throw new Error("Chat event sequence basis requires originId and logScopeId.");
     }
-    const rows = await this.queryJson<{ originSeq?: number | string | null; eventHash?: string | null }>(
+    const rows = await this.queryJson<{ originSeq?: number | string | null; eventHash?: string | null; logicalTs?: string | null }>(
       `
-        select origin_seq as originSeq, event_hash as eventHash
+        select origin_seq as originSeq, event_hash as eventHash, logical_ts as logicalTs
         from chat_events
         where origin_id = ${sqlString(originId)}
           and log_scope_id = ${sqlString(logScopeId)}
@@ -1679,7 +1682,8 @@ export class StorageService {
     }
     return {
       originSeq: latestSeq + 1,
-      prevHash: typeof latest.eventHash === "string" && latest.eventHash.trim() ? latest.eventHash : undefined
+      prevHash: typeof latest.eventHash === "string" && latest.eventHash.trim() ? latest.eventHash : undefined,
+      latestLogicalTs: typeof latest.logicalTs === "string" && latest.logicalTs.trim() ? latest.logicalTs : undefined
     };
   }
 
