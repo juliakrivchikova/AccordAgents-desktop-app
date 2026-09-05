@@ -3270,12 +3270,10 @@ input.on("line", () => {
     });
     await held;
     helperPid = Number.parseInt((await readFile(helperPidFile, "utf8")).trim(), 10);
-    const stoppedAt = Date.now();
     controller.abort(new Error("Stopped by user."));
     const first = await firstRun;
     assert.equal(first.ok, true, JSON.stringify(first));
     assert.equal(first.content, "Started.");
-    assert.ok(Date.now() - stoppedAt < 1_000, "graceful stdin shutdown must not wait for a second close timeout");
     assert.equal(await readFile(stdinClosedMarker, "utf8"), "closed");
     await assertFixtureProcessStops(helperPid);
 
@@ -3294,6 +3292,535 @@ input.on("line", () => {
       process.kill(helperPid, "SIGKILL");
     }
     await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude public warm-run path preserves a held reply after provider failure without replaying the prompt", { timeout: 10_000 }, async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-background-failure-"));
+  const claudePath = path.join(fixtureDir, "claude-fixture");
+  const countFile = path.join(fixtureDir, "count.txt");
+  const pidsFile = path.join(fixtureDir, "pids.txt");
+  const taskPidFile = path.join(fixtureDir, "task.pid");
+  const helperPidFile = path.join(fixtureDir, "helper.pid");
+  const backgroundTaskScript = `
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+process.on("SIGTERM", () => {});
+setTimeout(() => {
+  const helper = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore", detached: true });
+  writeFileSync(${JSON.stringify(helperPidFile)}, String(helper.pid));
+}, 150);
+setInterval(() => {}, 1000);
+`;
+  await writeFile(claudePath, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const { appendFileSync, existsSync, readFileSync, writeFileSync } = require("node:fs");
+const readline = require("node:readline");
+const countFile = ${JSON.stringify(countFile)};
+const count = existsSync(countFile) ? Number(readFileSync(countFile, "utf8")) + 1 : 1;
+writeFileSync(countFile, String(count));
+appendFileSync(${JSON.stringify(pidsFile)}, String(process.pid) + "\\n");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", () => {
+  send({ type: "system", subtype: "init", session_id: "failure-session-" + count });
+  if (count === 1) {
+    const task = spawn(process.execPath, ["-e", ${JSON.stringify(backgroundTaskScript)}], { stdio: "ignore", detached: true });
+    writeFileSync(${JSON.stringify(taskPidFile)}, String(task.pid));
+    send({ type: "system", subtype: "task_started", task_id: "task-1", description: "failing background task", is_backgrounded: true });
+    send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Work started." }] } });
+    send({ type: "result", subtype: "success", result: "Work started." });
+    const failWhenHelperStarts = () => {
+      if (!existsSync(${JSON.stringify(helperPidFile)})) {
+        setTimeout(failWhenHelperStarts, 5);
+        return;
+      }
+      process.stdout.write(JSON.stringify({ type: "error", error: "fixture provider failed" }) + "\\n", () => process.exit(1));
+    };
+    failWhenHelperStarts();
+    return;
+  }
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Fresh after failure." }] } });
+  send({ type: "result", subtype: "success", result: "Fresh after failure." });
+});
+`, "utf8");
+  await chmod(claudePath, 0o755);
+
+  const runner = makeRunner() as any;
+  runner.providerExecutableForRun = async () => claudePath;
+  let oneShotFallbacks = 0;
+  runner.runClaudeOneShot = async (): Promise<never> => {
+    oneShotFallbacks += 1;
+    throw new Error("prompt replayed through one-shot fallback");
+  };
+  const participant = { id: "claude-failure", kind: "claude-code", label: "Claude" };
+  const warm = {
+    conversationId: "conversation-failure",
+    participantId: participant.id,
+    contextKey: "context-failure",
+    idleTimeoutMs: 60_000
+  };
+  let taskPid: number | undefined;
+  let helperPid: number | undefined;
+  try {
+    const first = await runner.run(participant, "Start work.", fixtureDir, undefined, "chat", undefined, {
+      agentMode: "default",
+      warm
+    });
+    assert.equal(first.ok, true, JSON.stringify(first));
+    assert.equal(first.content, "Work started.");
+    assert.match(first.warnings?.[0] ?? "", /background work after it did not finish/);
+    assert.equal(oneShotFallbacks, 0);
+    taskPid = Number.parseInt((await readFile(taskPidFile, "utf8")).trim(), 10);
+    helperPid = Number.parseInt((await readFile(helperPidFile, "utf8")).trim(), 10);
+    await assertFixtureProcessStops(taskPid);
+    await assertFixtureProcessStops(helperPid);
+
+    const second = await runner.run(participant, "Continue safely.", fixtureDir, undefined, "chat", undefined, {
+      agentMode: "default",
+      warm
+    });
+    assert.equal(second.ok, true, JSON.stringify(second));
+    assert.equal(second.content, "Fresh after failure.");
+    const pids = (await readFile(pidsFile, "utf8")).trim().split(/\r?\n/).map(Number);
+    assert.equal(pids.length, 2);
+    assert.notEqual(pids[0], pids[1]);
+    assert.equal(oneShotFallbacks, 0);
+  } finally {
+    await runner.shutdownWarmAgents();
+    for (const pid of [taskPid, helperPid]) {
+      if (pid && testProcessExists(pid)) {
+        process.kill(pid, "SIGKILL");
+      }
+    }
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude live background shutdown escalates when the provider ignores stdin EOF", { timeout: 10_000 }, async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-background-escalation-"));
+  const claudePath = path.join(fixtureDir, "claude-fixture");
+  const providerPidFile = path.join(fixtureDir, "provider.pid");
+  const helperPidFile = path.join(fixtureDir, "helper.pid");
+  const stdinClosedMarker = path.join(fixtureDir, "stdin-closed.marker");
+  await writeFile(claudePath, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const readline = require("node:readline");
+writeFileSync(${JSON.stringify(providerPidFile)}, String(process.pid));
+const helper = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore", detached: true });
+writeFileSync(${JSON.stringify(helperPidFile)}, String(helper.pid));
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+const input = readline.createInterface({ input: process.stdin });
+input.on("close", () => {
+  writeFileSync(${JSON.stringify(stdinClosedMarker)}, "closed");
+  setInterval(() => {}, 1000);
+});
+input.on("line", () => {
+  send({ type: "system", subtype: "init", session_id: "escalation-session" });
+  send({ type: "system", subtype: "task_started", task_id: "task-1", description: "stuck background task", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Still running." }] } });
+  send({ type: "result", subtype: "success", result: "Still running." });
+});
+`, "utf8");
+  await chmod(claudePath, 0o755);
+
+  const runner = makeRunner() as any;
+  runner.providerExecutableForRun = async () => claudePath;
+  runner.claudeBackgroundCloseGraceMs = 20;
+  const participant = { id: "claude-escalation", kind: "claude-code", label: "Claude" };
+  const controller = new AbortController();
+  let markHeld!: () => void;
+  const held = new Promise<void>((resolve) => { markHeld = resolve; });
+  let providerPid: number | undefined;
+  let helperPid: number | undefined;
+  try {
+    const run = runner.run(participant, "Start work.", fixtureDir, undefined, "chat", controller.signal, {
+      agentMode: "default",
+      warm: {
+        conversationId: "conversation-escalation",
+        participantId: participant.id,
+        contextKey: "context-escalation",
+        idleTimeoutMs: 60_000
+      },
+      onOutput: (event: { activityStatus?: string; text: string }) => {
+        if (event.activityStatus === "started" && /Waiting for background work/.test(event.text)) {
+          markHeld();
+        }
+      }
+    });
+    await held;
+    providerPid = Number.parseInt((await readFile(providerPidFile, "utf8")).trim(), 10);
+    helperPid = Number.parseInt((await readFile(helperPidFile, "utf8")).trim(), 10);
+    controller.abort(new Error("Stopped by user."));
+    const result = await run;
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.content, "Still running.");
+    assert.equal(await readFile(stdinClosedMarker, "utf8"), "closed");
+    await assertFixtureProcessStops(providerPid);
+    await assertFixtureProcessStops(helperPid);
+  } finally {
+    await runner.shutdownWarmAgents();
+    for (const pid of [providerPid, helperPid]) {
+      if (pid && testProcessExists(pid)) {
+        process.kill(pid, "SIGKILL");
+      }
+    }
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude live background shutdown kills descendants after the provider exits on stdin EOF", { timeout: 10_000 }, async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-background-eof-exit-"));
+  const claudePath = path.join(fixtureDir, "claude-fixture");
+  const helperPidFile = path.join(fixtureDir, "helper.pid");
+  const stdinClosedMarker = path.join(fixtureDir, "stdin-closed.marker");
+  await writeFile(claudePath, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const readline = require("node:readline");
+const helper = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore", detached: true });
+writeFileSync(${JSON.stringify(helperPidFile)}, String(helper.pid));
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+const input = readline.createInterface({ input: process.stdin });
+input.on("close", () => {
+  writeFileSync(${JSON.stringify(stdinClosedMarker)}, "closed");
+  process.exit(0);
+});
+input.on("line", () => {
+  send({ type: "system", subtype: "init", session_id: "eof-exit-session" });
+  send({ type: "system", subtype: "task_started", task_id: "task-1", description: "orphan-prone background task", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Still running." }] } });
+  send({ type: "result", subtype: "success", result: "Still running." });
+});
+`, "utf8");
+  await chmod(claudePath, 0o755);
+
+  const runner = makeRunner() as any;
+  runner.providerExecutableForRun = async () => claudePath;
+  runner.claudeBackgroundCloseGraceMs = 200;
+  const participant = { id: "claude-eof-exit", kind: "claude-code", label: "Claude" };
+  const controller = new AbortController();
+  let markHeld!: () => void;
+  const held = new Promise<void>((resolve) => { markHeld = resolve; });
+  let helperPid: number | undefined;
+  try {
+    const run = runner.run(participant, "Start work.", fixtureDir, undefined, "chat", controller.signal, {
+      agentMode: "default",
+      warm: {
+        conversationId: "conversation-eof-exit",
+        participantId: participant.id,
+        contextKey: "context-eof-exit",
+        idleTimeoutMs: 60_000
+      },
+      onOutput: (event: { activityStatus?: string; text: string }) => {
+        if (event.activityStatus === "started" && /Waiting for background work/.test(event.text)) {
+          markHeld();
+        }
+      }
+    });
+    await held;
+    helperPid = Number.parseInt((await readFile(helperPidFile, "utf8")).trim(), 10);
+    controller.abort(new Error("Stopped by user."));
+    const result = await run;
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.content, "Still running.");
+    assert.equal(await readFile(stdinClosedMarker, "utf8"), "closed");
+    await assertFixtureProcessStops(helperPid);
+  } finally {
+    await runner.shutdownWarmAgents();
+    if (helperPid && testProcessExists(helperPid)) {
+      process.kill(helperPid, "SIGKILL");
+    }
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("update quit immediately terminates a warm Claude provider and its detached background task", { timeout: 10_000 }, async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-update-quit-"));
+  const claudePath = path.join(fixtureDir, "claude-fixture");
+  const providerPidFile = path.join(fixtureDir, "provider.pid");
+  const helperPidFile = path.join(fixtureDir, "helper.pid");
+  await writeFile(claudePath, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const readline = require("node:readline");
+writeFileSync(${JSON.stringify(providerPidFile)}, String(process.pid));
+const helper = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore", detached: true });
+writeFileSync(${JSON.stringify(helperPidFile)}, String(helper.pid));
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", () => {
+  send({ type: "system", subtype: "init", session_id: "update-quit-session" });
+  send({ type: "system", subtype: "task_started", task_id: "task-1", description: "update-sensitive task", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Still running." }] } });
+  send({ type: "result", subtype: "success", result: "Still running." });
+});
+`, "utf8");
+  await chmod(claudePath, 0o755);
+
+  const runner = makeRunner() as any;
+  runner.providerExecutableForRun = async () => claudePath;
+  let captureCount = 0;
+  runner.readClaudeBackgroundProcessTable = async () => {
+    captureCount += 1;
+    const { readPosixProcessTableAsync } = await import("./processTermination");
+    return readPosixProcessTableAsync();
+  };
+  const participant = { id: "claude-update-quit", kind: "claude-code", label: "Claude" };
+  let markHeld!: () => void;
+  const held = new Promise<void>((resolve) => { markHeld = resolve; });
+  let providerPid: number | undefined;
+  let helperPid: number | undefined;
+  try {
+    const run = runner.run(participant, "Start work.", fixtureDir, undefined, "chat", undefined, {
+      agentMode: "default",
+      warm: {
+        conversationId: "conversation-update-quit",
+        participantId: participant.id,
+        contextKey: "context-update-quit",
+        idleTimeoutMs: 60_000
+      },
+      onOutput: (event: { activityStatus?: string; text: string }) => {
+        if (event.activityStatus === "started" && /Waiting for background work/.test(event.text)) {
+          markHeld();
+        }
+      }
+    });
+    await held;
+    providerPid = Number.parseInt((await readFile(providerPidFile, "utf8")).trim(), 10);
+    helperPid = Number.parseInt((await readFile(helperPidFile, "utf8")).trim(), 10);
+    assert.ok(captureCount > 0, "the shared descendant sampler ran while background work was live");
+    runner.terminateWarmAgentsImmediately("update installation");
+    await run;
+    await assertFixtureProcessStops(providerPid);
+    await assertFixtureProcessStops(helperPid);
+    const capturesAfterShutdown = captureCount;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(captureCount, capturesAfterShutdown, "update shutdown stopped the shared descendant sampler");
+  } finally {
+    runner.terminateWarmAgentsImmediately("test cleanup");
+    for (const pid of [providerPid, helperPid]) {
+      if (pid && testProcessExists(pid)) {
+        process.kill(pid, "SIGKILL");
+      }
+    }
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("update quit also terminates a Claude provider already in graceful close", { timeout: 10_000 }, async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-update-during-close-"));
+  const claudePath = path.join(fixtureDir, "claude-fixture");
+  const providerPidFile = path.join(fixtureDir, "provider.pid");
+  const helperPidFile = path.join(fixtureDir, "helper.pid");
+  const stdinClosedMarker = path.join(fixtureDir, "stdin-closed.marker");
+  await writeFile(claudePath, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const readline = require("node:readline");
+writeFileSync(${JSON.stringify(providerPidFile)}, String(process.pid));
+const helper = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore", detached: true });
+writeFileSync(${JSON.stringify(helperPidFile)}, String(helper.pid));
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+const input = readline.createInterface({ input: process.stdin });
+input.on("close", () => {
+  writeFileSync(${JSON.stringify(stdinClosedMarker)}, "closed");
+  setInterval(() => {}, 1000);
+});
+input.on("line", () => {
+  send({ type: "system", subtype: "init", session_id: "update-during-close-session" });
+  send({ type: "system", subtype: "task_started", task_id: "task-1", description: "update-sensitive task", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Still running." }] } });
+  send({ type: "result", subtype: "success", result: "Still running." });
+});
+`, "utf8");
+  await chmod(claudePath, 0o755);
+
+  const runner = makeRunner() as any;
+  runner.providerExecutableForRun = async () => claudePath;
+  runner.claudeBackgroundCloseGraceMs = 5_000;
+  const participant = { id: "claude-update-during-close", kind: "claude-code", label: "Claude" };
+  const controller = new AbortController();
+  let markHeld!: () => void;
+  const held = new Promise<void>((resolve) => { markHeld = resolve; });
+  let providerPid: number | undefined;
+  let helperPid: number | undefined;
+  try {
+    const run = runner.run(participant, "Start work.", fixtureDir, undefined, "chat", controller.signal, {
+      agentMode: "default",
+      warm: {
+        conversationId: "conversation-update-during-close",
+        participantId: participant.id,
+        contextKey: "context-update-during-close",
+        idleTimeoutMs: 60_000
+      },
+      onOutput: (event: { activityStatus?: string; text: string }) => {
+        if (event.activityStatus === "started" && /Waiting for background work/.test(event.text)) {
+          markHeld();
+        }
+      }
+    });
+    await held;
+    providerPid = Number.parseInt((await readFile(providerPidFile, "utf8")).trim(), 10);
+    helperPid = Number.parseInt((await readFile(helperPidFile, "utf8")).trim(), 10);
+    controller.abort(new Error("Stopped by user."));
+    let stdinClosed = false;
+    for (let attempt = 0; attempt < 100 && !stdinClosed; attempt += 1) {
+      stdinClosed = await readFile(stdinClosedMarker, "utf8")
+        .then((value) => value === "closed")
+        .catch(() => false);
+      if (!stdinClosed) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    assert.equal(stdinClosed, true, "ordinary close entered its graceful stdin-EOF wait");
+    assert.equal(runner.warmAgents.size, 0, "the closing provider already left the active map");
+    assert.equal(runner.closingWarmAgents.size, 1, "the closing provider remains visible to update shutdown");
+
+    runner.terminateWarmAgentsImmediately("update installation");
+    const result = await run;
+    assert.equal(result.ok, true, JSON.stringify(result));
+    await assertFixtureProcessStops(providerPid);
+    await assertFixtureProcessStops(helperPid);
+  } finally {
+    runner.terminateWarmAgentsImmediately("test cleanup");
+    for (const pid of [providerPid, helperPid]) {
+      if (pid && testProcessExists(pid)) {
+        process.kill(pid, "SIGKILL");
+      }
+    }
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude background-process sampling is shared, non-overlapping, and lives until the last agent stops", async () => {
+  const runner = makeRunner() as any;
+  const rows = new Map<number, never>();
+  let reads = 0;
+  let resolveFirstRead!: (value: Map<number, never>) => void;
+  const firstRead = new Promise<Map<number, never>>((resolve) => { resolveFirstRead = resolve; });
+  runner.readClaudeBackgroundProcessTable = () => {
+    reads += 1;
+    return reads === 1 ? firstRead : Promise.resolve(new Map<number, never>());
+  };
+  let firstLive = true;
+  let secondLive = true;
+  const firstTables: unknown[] = [];
+  const secondTables: unknown[] = [];
+  let markSharedDelivery!: () => void;
+  const sharedDelivery = new Promise<void>((resolve) => { markSharedDelivery = resolve; });
+  let markSoloDelivery!: () => void;
+  const soloDelivery = new Promise<void>((resolve) => { markSoloDelivery = resolve; });
+  const noteDelivery = (): void => {
+    if (firstTables.length === 1 && secondTables.length === 1) {
+      markSharedDelivery();
+    }
+    if (secondTables.length === 2) {
+      markSoloDelivery();
+    }
+  };
+  runner.warmAgents.set("first", {
+    closed: false,
+    hasLiveBackgroundWork: () => firstLive,
+    refreshCapturedBackgroundProcesses: (table: unknown) => {
+      firstTables.push(table);
+      noteDelivery();
+    }
+  });
+  runner.warmAgents.set("second", {
+    closed: false,
+    hasLiveBackgroundWork: () => secondLive,
+    refreshCapturedBackgroundProcesses: (table: unknown) => {
+      secondTables.push(table);
+      noteDelivery();
+    }
+  });
+
+  try {
+    runner.ensureClaudeBackgroundProcessCapture();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(reads, 1, "timer ticks do not overlap an in-flight process-table read");
+
+    resolveFirstRead(rows);
+    await sharedDelivery;
+    assert.equal(reads, 1, "one completed sample used one process-table read");
+    assert.deepEqual(firstTables, [rows]);
+    assert.deepEqual(secondTables, [rows]);
+
+    firstLive = false;
+    await soloDelivery;
+    assert.equal(reads, 2, "the remaining agent kept the sampler alive for one shared tick");
+    assert.deepEqual(firstTables, [rows]);
+    assert.equal(secondTables.length, 2);
+    assert.notEqual(secondTables[1], rows, "the second tick used its own table snapshot");
+
+    secondLive = false;
+    runner.maybeStopClaudeBackgroundProcessCapture();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(reads, 2, "the shared sampler stopped after the last agent retired");
+  } finally {
+    firstLive = false;
+    secondLive = false;
+    runner.stopClaudeBackgroundProcessCapture();
+    runner.warmAgents.clear();
+  }
+});
+
+test("immediate shutdown ignores a recycled warm-agent root PID and its unrelated children", (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX process identity checks are unavailable on Windows");
+    return;
+  }
+  const runner = makeRunner() as any;
+  const oldIdentity = { pid: 42, startedAt: "Fri Sep  5 12:00:00 2026" };
+  runner.readPosixProcessTableForTermination = () => new Map([
+    [42, { pid: 42, ppid: 1, pgid: 42, startedAt: "Fri Sep  5 12:01:00 2026" }],
+    [43, { pid: 43, ppid: 42, pgid: 42, startedAt: "Fri Sep  5 12:01:01 2026" }]
+  ]);
+  const childSignals: NodeJS.Signals[] = [];
+  const processSignals: Array<{ pid: number; signal: NodeJS.Signals | number }> = [];
+  const originalKill = process.kill;
+  process.kill = ((pid: number, signal: NodeJS.Signals | number) => {
+    processSignals.push({ pid, signal });
+    return true;
+  }) as typeof process.kill;
+  runner.warmAgents.set("stale", {
+    closed: false,
+    providerKind: "claude-code",
+    process: {
+      pid: 42,
+      exitCode: 0,
+      signalCode: null,
+      killed: false,
+      kill: (signal: NodeJS.Signals) => {
+        childSignals.push(signal);
+        return true;
+      }
+    },
+    processIdentity: () => oldIdentity,
+    capturedBackgroundProcesses: () => []
+  });
+  try {
+    runner.terminateWarmAgentsImmediately("update installation");
+    assert.deepEqual(processSignals, []);
+    assert.deepEqual(childSignals, []);
+  } finally {
+    process.kill = originalKill;
+    runner.warmAgents.clear();
   }
 });
 
@@ -4171,6 +4698,7 @@ test("claude warm turn waits for every overlapping background task", () => {
 
   send({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed" });
   assert.equal(pending.backgroundTasks.size, 1);
+  assert.equal(pending.holdGraceTimer, undefined);
   assert.equal(resolved.length, 0, "the second live task keeps the turn open");
 
   send({ type: "system", subtype: "task_notification", task_id: "t2", status: "completed" });

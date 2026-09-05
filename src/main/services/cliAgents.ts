@@ -41,7 +41,19 @@ import {
   type CommandEnvironmentOptions
 } from "./command";
 import { CliReadinessService } from "./cliReadiness";
-import { terminateProcess } from "./processTermination";
+import {
+  capturePosixDescendants,
+  capturePosixDescendantsFromTable,
+  capturePosixProcessIdentity,
+  hasLiveCapturedPosixProcesses,
+  readPosixProcessTableAsync,
+  readPosixProcessTableSync,
+  terminateCapturedPosixProcesses,
+  terminateProcess,
+  terminateProcessTreeIfRunning,
+  type CapturedPosixProcess,
+  type PosixProcessRow
+} from "./processTermination";
 import {
   buildCodexExecInvocation,
   createCodexLineHandler,
@@ -76,6 +88,8 @@ const MAX_CLI_EVENT_SUMMARIES = 2;
 const CLI_AGENT_COMPACT_TIMEOUT_MS = 5 * 60_000;
 const WARM_AGENT_KILL_GRACE_MS = 1500;
 const WINDOWS_WARM_AGENT_KILL_GRACE_MS = 750;
+const CLAUDE_BACKGROUND_PROCESS_CAPTURE_INTERVAL_MS = 100;
+
 // Claude background tasks (Agent/Bash `run_in_background`) on the warm transport.
 // Verified on Claude Code 2.1.257: the CLI resumes the model with the task
 // notification on the same process, and kills its own tasks when stdin closes.
@@ -321,6 +335,12 @@ interface WarmAgentEntry {
    *  shutdown ends stdin first and lets the CLI kill them itself (SIGTERM alone
    *  leaves their shells running in their own process group). */
   hasLiveBackgroundWork?: () => boolean;
+  /** Claude only: stable identities captured while background tasks were live,
+   *  retained across an unexpected provider exit so reparented work can still
+   *  be terminated without risking a recycled PID. */
+  capturedBackgroundProcesses?: () => CapturedPosixProcess[];
+  refreshCapturedBackgroundProcesses?: (rows: Map<number, PosixProcessRow>) => void;
+  processIdentity?: () => CapturedPosixProcess | undefined;
 }
 
 interface ClaudeWarmPendingTurn {
@@ -971,8 +991,17 @@ export class CliAgentRunner {
   private readonly codexExecutable: string;
   private readonly electronAppPath: string | undefined;
   private readonly warmAgents = new Map<string, WarmAgentEntry>();
+  private readonly closingWarmAgents = new Map<WarmAgentEntry, Promise<void>>();
+  private claudeBackgroundCaptureTimer?: NodeJS.Timeout;
+  private claudeBackgroundCaptureRunning = false;
+  /** Overridable in tests so sampler shutdown can be observed without polling OS state. */
+  private readClaudeBackgroundProcessTable = readPosixProcessTableAsync;
+  /** Overridable in tests so stale root PID handling can be verified safely. */
+  private readPosixProcessTableForTermination = readPosixProcessTableSync;
   /** Overridable in tests; see CLAUDE_BACKGROUND_RESUME_GRACE_MS. */
   private claudeBackgroundResumeGraceMs = CLAUDE_BACKGROUND_RESUME_GRACE_MS;
+  /** Overridable in tests; see CLAUDE_BACKGROUND_CLOSE_GRACE_MS. */
+  private claudeBackgroundCloseGraceMs = CLAUDE_BACKGROUND_CLOSE_GRACE_MS;
   private readonly warmUnsupportedLogged = new Set<ParticipantConfig["kind"]>();
   private readonly modelCatalogs = new Map<ChatProviderKind, CachedModelCatalog>();
   private readonly modelCatalogRequests = new Map<ChatProviderKind, Promise<ProviderModelCatalog>>();
@@ -1153,8 +1182,35 @@ export class CliAgentRunner {
 
   async shutdownWarmAgents(): Promise<void> {
     const entries = Array.from(this.warmAgents.values());
+    const closing = Array.from(this.closingWarmAgents.values());
     this.warmAgents.clear();
-    await Promise.all(entries.map((entry) => this.closeWarmAgent(entry, "shutdown")));
+    this.stopClaudeBackgroundProcessCapture();
+    await Promise.all([
+      ...closing,
+      ...entries.map((entry) => this.closeWarmAgent(entry, "shutdown"))
+    ]);
+  }
+
+  terminateWarmAgentsImmediately(reason = "immediate shutdown"): void {
+    const entries = new Set([
+      ...this.warmAgents.values(),
+      ...this.closingWarmAgents.keys()
+    ]);
+    this.warmAgents.clear();
+    this.stopClaudeBackgroundProcessCapture();
+    for (const entry of entries) {
+      if (!entry.closed) {
+        entry.closed = true;
+        void this.writeDebugLog("cli-agent-warm-closed", {
+          providerKind: entry.providerKind,
+          reason
+        });
+      }
+      this.clearWarmIdleTimer(entry);
+      const descendants = this.capturedWarmAgentDescendants(entry);
+      terminateCapturedPosixProcesses(descendants, "SIGKILL", this.readPosixProcessTableForTermination);
+      this.terminateWarmAgentRoot(entry, "SIGKILL");
+    }
   }
 
   async contextUsageForSession(
@@ -2556,10 +2612,12 @@ export class CliAgentRunner {
     const child = spawnCommand(codexExecutable, ["app-server", "--listen", "stdio://"], {
       cwd: repoPath,
       env: commandEnvironment(this.agentRunEnv(options)),
+      detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"]
     });
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
+    const processIdentity = capturePosixProcessIdentity(child.pid, this.readPosixProcessTableForTermination);
 
     let stdoutBuffer = "";
     let stderrBuffer = "";
@@ -3305,6 +3363,7 @@ export class CliAgentRunner {
       scopeKey,
       providerKind: participant.kind,
       process: child,
+      processIdentity: () => processIdentity,
       queue: Promise.resolve(),
       closed: false,
       compact: async (
@@ -4919,15 +4978,50 @@ export class CliAgentRunner {
     const child = spawnCommand(claudeExecutable, args, {
       cwd: repoPath,
       env: commandEnvironment(this.agentRunEnv(options), CLAUDE_CODE_COMMAND_ENV_OPTIONS),
+      detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"]
     });
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
+    let processIdentity = capturePosixProcessIdentity(child.pid, this.readPosixProcessTableForTermination);
 
     let stdoutBuffer = "";
     let stderr = "";
     let closed = false;
     let pending: ClaudeWarmPendingTurn | undefined;
+    const capturedBackgroundProcesses = new Map<string, CapturedPosixProcess>();
+
+    const captureBackgroundProcesses = (rows: Map<number, PosixProcessRow>): void => {
+      if (!processIdentity && child.exitCode === null && !child.killed) {
+        const row = child.pid ? rows.get(child.pid) : undefined;
+        processIdentity = row ? { pid: row.pid, startedAt: row.startedAt } : undefined;
+      }
+      const identities = capturePosixDescendantsFromTable(
+        processIdentity?.pid,
+        rows,
+        Array.from(capturedBackgroundProcesses.values()),
+        processIdentity
+      );
+      capturedBackgroundProcesses.clear();
+      for (const identity of identities) {
+        capturedBackgroundProcesses.set(`${identity.pid}:${identity.startedAt}`, identity);
+      }
+    };
+
+    const refreshCapturedBackgroundProcesses = (): void => {
+      if (!pending) {
+        if (liveBackgroundTasksAtCleanup === 0) {
+          capturedBackgroundProcesses.clear();
+        }
+        return;
+      }
+      if (pending.backgroundTasks.size === 0) {
+        capturedBackgroundProcesses.clear();
+        this.maybeStopClaudeBackgroundProcessCapture();
+        return;
+      }
+      this.ensureClaudeBackgroundProcessCapture();
+    };
 
     let liveBackgroundTasksAtCleanup = 0;
     const cleanupPending = (): ClaudeWarmPendingTurn | undefined => {
@@ -4981,6 +5075,7 @@ export class CliAgentRunner {
         stdoutBuffer = stdoutBuffer.slice(newline + 1);
         if (line) {
           this.handleClaudeWarmLine(line, participant, options, newSessionId, pending, cleanupPending, rejectPending, noteStrayContinuation);
+          refreshCapturedBackgroundProcesses();
         }
         newline = stdoutBuffer.indexOf("\n");
       }
@@ -5000,9 +5095,12 @@ export class CliAgentRunner {
       scopeKey,
       providerKind: participant.kind,
       process: child,
+      processIdentity: () => processIdentity,
       queue: Promise.resolve(),
       closed: false,
       hasLiveBackgroundWork: () => (pending ? pending.backgroundTasks.size : liveBackgroundTasksAtCleanup) > 0,
+      capturedBackgroundProcesses: () => Array.from(capturedBackgroundProcesses.values()),
+      refreshCapturedBackgroundProcesses: captureBackgroundProcesses,
       run: (
         turnPrompt: string,
         signal?: AbortSignal,
@@ -5782,22 +5880,51 @@ export class CliAgentRunner {
     });
   }
 
-  private async closeWarmAgent(entry: WarmAgentEntry, reason: string): Promise<void> {
+  private closeWarmAgent(entry: WarmAgentEntry, reason: string): Promise<void> {
+    const existingClose = this.closingWarmAgents.get(entry);
+    if (existingClose) {
+      return existingClose;
+    }
     if (entry.closed) {
-      return;
+      return Promise.resolve();
     }
     entry.closed = true;
     this.clearWarmIdleTimer(entry);
+    this.maybeStopClaudeBackgroundProcessCapture();
     void this.writeDebugLog("cli-agent-warm-closed", {
       providerKind: entry.providerKind,
       reason
     });
-    if (entry.process.exitCode !== null || entry.process.signalCode !== null || entry.process.killed) {
+    const close = this.closeWarmAgentProcess(entry).finally(() => {
+      this.closingWarmAgents.delete(entry);
+    });
+    this.closingWarmAgents.set(entry, close);
+    return close;
+  }
+
+  private async closeWarmAgentProcess(entry: WarmAgentEntry): Promise<void> {
+    if (entry.process.exitCode !== null || entry.process.signalCode !== null) {
+      // A detached Claude process can exit while provider-owned background work
+      // remains in its process group. With no live group leader left to close
+      // stdin gracefully, terminate that recorded work immediately.
+      if (entry.hasLiveBackgroundWork?.()) {
+        terminateCapturedPosixProcesses(
+          this.capturedWarmAgentDescendants(entry),
+          "SIGKILL",
+          this.readPosixProcessTableForTermination
+        );
+        this.terminateWarmAgentRoot(entry, "SIGKILL");
+      }
       return;
     }
     if (process.platform === "win32") {
-      // Closing stdin lets JSONL/app-server CLIs finish their current write and
-      // persist session state before the process-tree kill below is required.
+      // taskkill must enumerate the tree while its root still exists; waiting
+      // for stdin EOF can reparent a helper first. This synchronous forced tree
+      // kill also completes before an updater-driven app exit can return.
+      if (entry.hasLiveBackgroundWork?.()) {
+        this.terminateWarmAgentRoot(entry, "SIGKILL");
+        return;
+      }
       try {
         entry.process.stdin.end();
       } catch {
@@ -5805,26 +5932,67 @@ export class CliAgentRunner {
       }
     } else if (entry.hasLiveBackgroundWork?.()) {
       // Claude kills its own background tasks when stdin closes; SIGTERM alone
-      // leaves their shells running in their own process group. End stdin, give
-      // the CLI a moment to shut them down, then escalate as usual.
+      // may leave their shells running in separate process groups. Snapshot the
+      // provider-owned tree before EOF reparents any survivors, then escalate
+      // those exact process identities if Claude does not clean them up.
+      const capturedBackgroundProcesses = this.capturedWarmAgentDescendants(entry);
       try {
         entry.process.stdin.end();
       } catch {
         // Already closed; escalation below still applies.
       }
-      await this.waitForProcessClose(entry.process, CLAUDE_BACKGROUND_CLOSE_GRACE_MS);
+      await this.waitForProcessClose(entry.process, this.claudeBackgroundCloseGraceMs);
       if (entry.process.exitCode !== null || entry.process.signalCode !== null) {
+        // The provider may exit on stdin EOF without cleaning up a task that
+        // ignores its own graceful shutdown. Finish every process identity
+        // captured before EOF, including tasks in a separate process group.
+        if (entry.hasLiveBackgroundWork?.()) {
+          terminateCapturedPosixProcesses(
+            capturedBackgroundProcesses,
+            "SIGKILL",
+            this.readPosixProcessTableForTermination
+          );
+          this.terminateWarmAgentRoot(entry, "SIGKILL");
+        }
         return;
       }
-      terminateProcess(entry.process, "SIGTERM", true);
+      terminateCapturedPosixProcesses(
+        capturedBackgroundProcesses,
+        "SIGTERM",
+        this.readPosixProcessTableForTermination
+      );
+      this.terminateWarmAgentRoot(entry, "SIGTERM");
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          terminateCapturedPosixProcesses(
+            capturedBackgroundProcesses,
+            "SIGKILL",
+            this.readPosixProcessTableForTermination
+          );
+          this.terminateWarmAgentRoot(entry, "SIGKILL");
+          resolve();
+        }, WARM_AGENT_KILL_GRACE_MS);
+        timer.unref();
+        entry.process.once("close", () => {
+          if (hasLiveCapturedPosixProcesses(
+            capturedBackgroundProcesses,
+            this.readPosixProcessTableForTermination
+          )) {
+            return;
+          }
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      return;
     } else {
       // Preserve the established macOS/POSIX shutdown behavior exactly.
-      terminateProcess(entry.process, "SIGTERM", true);
+      this.terminateWarmAgentRoot(entry, "SIGTERM");
     }
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         if (entry.process.exitCode === null && entry.process.signalCode === null) {
-          terminateProcess(entry.process, "SIGKILL", true);
+          this.terminateWarmAgentRoot(entry, "SIGKILL");
         }
         resolve();
       }, process.platform === "win32" ? WINDOWS_WARM_AGENT_KILL_GRACE_MS : WARM_AGENT_KILL_GRACE_MS);
@@ -5834,6 +6002,83 @@ export class CliAgentRunner {
         resolve();
       });
     });
+  }
+
+  private capturedWarmAgentDescendants(entry: WarmAgentEntry): CapturedPosixProcess[] {
+    const rootIdentity = entry.processIdentity?.();
+    return capturePosixDescendants(
+      rootIdentity?.pid,
+      entry.capturedBackgroundProcesses?.() ?? [],
+      rootIdentity,
+      this.readPosixProcessTableForTermination
+    );
+  }
+
+  private terminateWarmAgentRoot(entry: WarmAgentEntry, signal: NodeJS.Signals): void {
+    if (process.platform === "win32") {
+      terminateProcessTreeIfRunning(entry.process, signal);
+      return;
+    }
+    const identity = entry.processIdentity?.();
+    if (identity) {
+      terminateCapturedPosixProcesses([identity], signal, this.readPosixProcessTableForTermination);
+      return;
+    }
+    if (entry.process.exitCode === null && entry.process.signalCode === null) {
+      entry.process.kill(signal);
+    }
+  }
+
+  private ensureClaudeBackgroundProcessCapture(): void {
+    if (this.claudeBackgroundCaptureTimer) {
+      return;
+    }
+    const capture = (): void => {
+      if (this.claudeBackgroundCaptureRunning) {
+        return;
+      }
+      const entries = Array.from(this.warmAgents.values()).filter((entry) => (
+        !entry.closed && entry.hasLiveBackgroundWork?.() && entry.refreshCapturedBackgroundProcesses
+      ));
+      if (entries.length === 0) {
+        this.stopClaudeBackgroundProcessCapture();
+        return;
+      }
+      this.claudeBackgroundCaptureRunning = true;
+      void this.readClaudeBackgroundProcessTable()
+        .then((rows) => {
+          if (!rows) {
+            return;
+          }
+          for (const entry of entries) {
+            if (!entry.closed && entry.hasLiveBackgroundWork?.()) {
+              entry.refreshCapturedBackgroundProcesses?.(rows);
+            }
+          }
+        })
+        .finally(() => {
+          this.claudeBackgroundCaptureRunning = false;
+        });
+    };
+    capture();
+    this.claudeBackgroundCaptureTimer = setInterval(capture, CLAUDE_BACKGROUND_PROCESS_CAPTURE_INTERVAL_MS);
+    this.claudeBackgroundCaptureTimer.unref();
+  }
+
+  private maybeStopClaudeBackgroundProcessCapture(): void {
+    const hasLiveBackgroundWork = Array.from(this.warmAgents.values()).some((entry) => (
+      !entry.closed && entry.hasLiveBackgroundWork?.()
+    ));
+    if (!hasLiveBackgroundWork) {
+      this.stopClaudeBackgroundProcessCapture();
+    }
+  }
+
+  private stopClaudeBackgroundProcessCapture(): void {
+    if (this.claudeBackgroundCaptureTimer) {
+      clearInterval(this.claudeBackgroundCaptureTimer);
+      this.claudeBackgroundCaptureTimer = undefined;
+    }
   }
 
   private createLineHandler(onLine: (line: string) => void): (chunk: string) => void {

@@ -3035,6 +3035,10 @@ app.on("window-all-closed", () => {
 
 autoUpdater.on("before-quit-for-update", () => {
   quittingForUpdate = true;
+  // The updater cannot await the normal graceful quit gate. Kill warm CLI
+  // process trees synchronously so detached background work cannot outlive the
+  // app and keep mutating the repository during installation.
+  cliAgentRunner.terminateWarmAgentsImmediately("update installation");
 });
 
 app.on("before-quit", (event) => {
