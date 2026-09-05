@@ -15,7 +15,7 @@ import { ParticipantRuntimeControls } from "./chat-participant-runtime-controls"
 import { chatCliProviderLabel, normalizeChatRunLocation, type ChatParticipantRuntimeOverride } from "./chat-participant-drafts";
 import { RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-roster-status";
 
-type ParticipantRuntimePatch = Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">;
+type ParticipantRuntimePatch = Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">;
 
 export function ChatParticipantRosterRow(props: {
   participant: ChatParticipant;
@@ -150,6 +150,7 @@ export function ChatParticipantSelectableRosterRow(props: {
     agentMode: runtimeOverride.agentMode ?? props.participant.agentMode,
     permissions: runtimeOverride.permissions ?? props.participant.permissions,
     remoteExecution: normalizeChatRunLocation(runtimeOverride.remoteExecution ?? props.remoteExecution ?? props.participant.remoteExecution),
+    homeMachineId: "homeMachineId" in runtimeOverride ? runtimeOverride.homeMachineId : props.participant.homeMachineId,
     skipToolchainPreflight: runtimeOverride.skipToolchainPreflight ?? props.participant.skipToolchainPreflight,
     autoWatch: runtimeOverride.autoWatch ?? props.participant.autoWatchEnabled
   };

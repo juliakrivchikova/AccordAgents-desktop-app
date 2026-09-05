@@ -852,3 +852,64 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Machines (machines transport): enrolled computers that host members. */
+.machines-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.machines-add input {
+  width: 180px;
+}
+
+.machines-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.machines-row + .machines-row {
+  border-top: 1px solid var(--border);
+}
+
+.machines-row-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.machines-state {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+.machines-state.is-connected {
+  color: var(--foreground);
+}
+
+.machines-row-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.machines-enrollment .gen-row-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.machines-enrollment-json {
+  margin-top: 8px;
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--foreground);
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}

@@ -19,6 +19,7 @@ import {
   ChatParticipantSpecRow
 } from "../chat/chat-participant-config-panel";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
+import type { MachineRecord } from "../../../shared/machineLink";
 import { CHAT_AGENT_MODE_OPTIONS, CHAT_RUN_LOCATION_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatCliProviderLabel, chatProviderSupportsCloudRun, normalizeChatRunLocation, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 import {
@@ -51,6 +52,22 @@ export function ParticipantEditorDialog(props: {
     [participant?.id, props.settings.chatParticipantConfigs]
   );
   const [draft, setDraft] = useState<ChatParticipantDraft>(() => initialDraft(props.settings, participant, existingHandles));
+  // Machines transport: enrolled computers a member can live on.
+  const [machines, setMachines] = useState<MachineRecord[]>([]);
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    let cancelled = false;
+    void window.consensus.listMachines().then((result) => {
+      if (!cancelled) {
+        setMachines(result.machines);
+      }
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -204,11 +221,11 @@ export function ParticipantEditorDialog(props: {
             />
             {chatProviderSupportsCloudRun(draft.kind) && (
               <ChatParticipantInlineSelectRow
-                label="Run location"
-                value={normalizeChatRunLocation(draft.remoteExecution) === "remote" ? "Remote" : "Local"}
-                current={normalizeChatRunLocation(draft.remoteExecution)}
-                options={CHAT_RUN_LOCATION_OPTIONS}
-                onSelect={(value) => patchDraft({ remoteExecution: normalizeChatRunLocation(value) })}
+                label="Machine"
+                value={machineSelectionLabel(draft, machines)}
+                current={machineSelectionValue(draft)}
+                options={machineSelectionOptions(machines)}
+                onSelect={(value) => patchDraft(machineSelectionPatch(value))}
               />
             )}
             <ChatParticipantInlineModelRow
@@ -323,4 +340,39 @@ export function ParticipantEditorDialog(props: {
     )}
     </>
   );
+}
+
+// Machines transport: the "Machine" row offers this computer, the legacy
+// remote worker (until the cutover removes it), and every enrolled machine.
+const THIS_COMPUTER_VALUE = "local";
+const LEGACY_REMOTE_VALUE = "remote";
+const MACHINE_VALUE_PREFIX = "machine:";
+
+function machineSelectionValue(draft: ChatParticipantDraft): string {
+  if (draft.homeMachineId) {
+    return `${MACHINE_VALUE_PREFIX}${draft.homeMachineId}`;
+  }
+  return normalizeChatRunLocation(draft.remoteExecution) === "remote" ? LEGACY_REMOTE_VALUE : THIS_COMPUTER_VALUE;
+}
+
+function machineSelectionLabel(draft: ChatParticipantDraft, machines: MachineRecord[]): string {
+  if (draft.homeMachineId) {
+    return machines.find((machine) => machine.id === draft.homeMachineId)?.name ?? "Machine (removed)";
+  }
+  return normalizeChatRunLocation(draft.remoteExecution) === "remote" ? "Remote worker" : "This computer";
+}
+
+function machineSelectionOptions(machines: MachineRecord[]): Array<{ value: string; label: string }> {
+  return [
+    { value: THIS_COMPUTER_VALUE, label: "This computer" },
+    ...machines.map((machine) => ({ value: `${MACHINE_VALUE_PREFIX}${machine.id}`, label: machine.name })),
+    ...CHAT_RUN_LOCATION_OPTIONS.filter((option) => option.value === "remote").map(() => ({ value: LEGACY_REMOTE_VALUE, label: "Remote worker" }))
+  ];
+}
+
+function machineSelectionPatch(value: string): Partial<ChatParticipantDraft> {
+  if (value.startsWith(MACHINE_VALUE_PREFIX)) {
+    return { homeMachineId: value.slice(MACHINE_VALUE_PREFIX.length), remoteExecution: "local" };
+  }
+  return { homeMachineId: undefined, remoteExecution: normalizeChatRunLocation(value) };
 }

@@ -1461,6 +1461,7 @@ export interface UpdateChatParticipantRuntimeRequest {
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
+  homeMachineId?: string;
   skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }

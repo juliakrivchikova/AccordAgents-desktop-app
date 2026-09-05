@@ -1392,6 +1392,14 @@ export class ChatService {
       ) {
         throw new Error("Run location is locked after the member has run. Remove and re-add the member to change it.");
       }
+      // Machines transport: the member's sessions live on its home machine, so
+      // the home is fixed once the member has run in this chat.
+      const nextHomeMachineId = Object.prototype.hasOwnProperty.call(request, "homeMachineId")
+        ? (typeof request.homeMachineId === "string" && request.homeMachineId.trim() ? request.homeMachineId.trim() : undefined)
+        : target.homeMachineId;
+      if ((nextHomeMachineId ?? "") !== (target.homeMachineId ?? "") && this.chatParticipantHasRun(conversation, target.id)) {
+        throw new Error("The machine is locked after the member has run. Remove and re-add the member to change it.");
+      }
       const autoWatchRequested = Object.prototype.hasOwnProperty.call(request, "autoWatch");
       const autoWatchChanged = autoWatchRequested && (request.autoWatch === true) !== (target.autoWatch === true);
       if (
@@ -1412,6 +1420,7 @@ export class ChatService {
           ? normalizeChatAgentPermissions(request.permissions)
           : target.permissions,
         remoteExecution: nextRemoteExecution,
+        homeMachineId: nextHomeMachineId,
         skipToolchainPreflight: Object.prototype.hasOwnProperty.call(request, "skipToolchainPreflight")
           ? request.skipToolchainPreflight === true
           : target.skipToolchainPreflight,

@@ -699,9 +699,10 @@ function ParticipantPicker(props: {
     props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
   }
 
-  function updateRuntime(participant: ChatParticipantConfig, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">): void {
+  function updateRuntime(participant: ChatParticipantConfig, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">): void {
     const runtimeOverride: ChatParticipantRuntimeOverride = {
       model: patch.model,
+      homeMachineId: patch.homeMachineId,
       reasoningEffort: patch.reasoningEffort,
       agentMode: patch.agentMode,
       permissions: patch.permissions,

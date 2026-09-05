@@ -36,6 +36,7 @@ import {
 import { writeClipboardText, type ClipboardWriteResult } from "../../../shared/clipboard";
 import { AwsWorkerPanel as SharedAwsWorkerPanel } from "./aws-worker-panel";
 import { DevicePairingSection } from "./device-pairing-section";
+import { MachinesSection } from "./machines-section";
 import { cliProviderMetadata, deriveAgentReadiness } from "../../../shared/cliReadiness";
 import { isChatProviderKind } from "../../../shared/chatProviders";
 import { AppSelect } from "../primitives";
@@ -244,6 +245,8 @@ export function GeneralSettingsSection(props: {
       </section>
 
       <DevicePairingSection mobileControl={props.mobileControl} />
+
+      <MachinesSection />
 
       <section className="gen-section">
         <h2 className="gen-section-title gen-section-title-solo">Cloud Runs (beta)</h2>
