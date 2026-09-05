@@ -145,9 +145,9 @@ Both release repositories must be public before `update.electronjs.org` can
 discover new releases. The source repository and release repositories are
 separate; release artifacts are never published to the source repository.
 
-Run releases from the source repo's release branch, normally `main`, with a
-clean worktree. The active GitHub CLI account must have write access to
-the target release repository:
+Run stable releases from `main` and beta releases from `beta`, with a clean
+worktree. Each release command enforces its source branch automatically. The
+active GitHub CLI account must have write access to the target release repository:
 
 ```bash
 gh auth switch --user <your-github-username>

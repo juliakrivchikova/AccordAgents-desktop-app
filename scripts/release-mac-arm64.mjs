@@ -30,7 +30,6 @@ Creates a macOS arm64 release:
 Options:
   --repo owner/repo              Public GitHub release repo. Defaults to RELEASE_REPO, package.json config.releaseRepo for stable,
                                  or package.json config.betaReleaseRepo for beta.
-  --branch name                  Source branch to release from. Defaults to origin HEAD, usually main.
   --draft                        Create a draft GitHub Release. Auto-update check is skipped.
   --prerelease                   Mark the GitHub Release as a prerelease. Auto-update check is skipped.
   --skip-update-check            Do not query update.electronjs.org after upload.
@@ -142,7 +141,6 @@ function parseArgs() {
   const options = {
     target: "current",
     releaseRepo: envReleaseRepo,
-    sourceBranch: process.env.RELEASE_BRANCH || "",
     draft: false,
     prerelease: false,
     skipUpdateCheck: false,
@@ -165,15 +163,6 @@ function parseArgs() {
     }
     if (arg.startsWith("--repo=")) {
       options.releaseRepo = parseRequiredGitHubRepo(arg.slice("--repo=".length), "--repo");
-      continue;
-    }
-    if (arg === "--branch") {
-      options.sourceBranch = readOptionValue(args, index, arg);
-      index += 1;
-      continue;
-    }
-    if (arg.startsWith("--branch=")) {
-      options.sourceBranch = arg.slice("--branch=".length);
       continue;
     }
     if (arg === "--draft") {
@@ -232,27 +221,6 @@ function requireCommand(command, args = ["--version"]) {
   if (!commandSucceeds(command, args)) {
     fail(`Required command is unavailable or failed: ${command}`);
   }
-}
-
-function originDefaultBranch() {
-  try {
-    const localHead = run("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).trim();
-    if (localHead.startsWith("origin/")) {
-      return localHead.slice("origin/".length);
-    }
-  } catch {
-    // Fall through to remote inspection.
-  }
-  try {
-    const remote = run("git", ["remote", "show", "origin"]);
-    const match = remote.match(/HEAD branch:\s*(\S+)/);
-    if (match) {
-      return match[1];
-    }
-  } catch {
-    // Fall through to main.
-  }
-  return "main";
 }
 
 function ensureCleanWorktree() {
@@ -533,7 +501,7 @@ async function checkUpdateEndpoint(options, version, fromVersion, releaseRepoIsP
 }
 
 const options = parseArgs();
-const sourceBranch = options.sourceBranch || originDefaultBranch();
+const sourceBranch = options.target === "beta" ? "beta" : "main";
 
 if (options.dryRun) {
   const fromVersion = currentVersion();

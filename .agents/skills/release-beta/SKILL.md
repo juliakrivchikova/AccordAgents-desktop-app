@@ -69,7 +69,7 @@ Stop the process and remove only the temporary profile created for this check.
 From the same clean checkout, with the same real dependency tree and arm64 Node, run:
 
 ```bash
-npm run release:beta -- --branch beta
+npm run release:beta
 ```
 
 Do not interrupt or manually continue individual subcommands. The release script bumps and pushes the version before building; if it fails, first record the source commit, tag, release state, and exact failed stage. Do not blindly rerun it because that can create another beta version. Reconcile the existing tag and release before any recovery action.
