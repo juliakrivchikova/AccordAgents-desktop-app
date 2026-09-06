@@ -223,10 +223,27 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     assert.match(failTurn.error, /provider exploded/);
     failTurn.acknowledge?.();
 
+    // When a machine asks for a copy again, the desktop serves its current state.
+    const loadable = new Map([["conv-1", conversation]]);
+    link.setConversationLoader(async (id) => loadable.get(id));
+
+    // A regular delta that cannot be stored after the first copy makes the copy incomplete:
+    // the next turn fails honestly and the copy is requested again.
+    conversation.messages.push({ id: "msg-edit", role: "user", content: "edited instruction", createdAt: new Date().toISOString(), status: "done" });
+    failNextApplyContaining = "msg-edit";
+    const staleTurn = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-stale", pendingMessageId: "pending-stale" });
+    assert.equal(staleTurn.status, "failed", "a turn on a copy with an unstored delta fails instead of running on stale rows");
+    assert.match(staleTurn.error, /not complete/);
+    staleTurn.acknowledge?.();
+    await waitFor(() => machineStore.get("conv-1")?.messages.some((message) => message.id === "msg-edit"), 10_000);
+    const repairedTurn = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-repaired", pendingMessageId: "pending-repaired" });
+    assert.equal(repairedTurn.status, "completed");
+    repairedTurn.acknowledge?.();
+
     // A batch of the first copy that cannot be stored on the machine makes it ask for the copy again;
     // the completed copy never echoes back and the retry stores everything.
     const bigger = { ...big, id: "conv-bigger", messages: big.messages.map((message) => ({ ...message, id: message.id.replace("big-", "bigger-") })) };
-    link.setConversationLoader(async (id) => (id === "conv-bigger" ? bigger : conversation));
+    loadable.set("conv-bigger", bigger);
     failNextApplyContaining = "bigger-200";
     const biggerEchoes = [];
     const stopBiggerEcho = link.onConversationBackDelta((delta) => { if (delta.conversationId === "conv-bigger") biggerEchoes.push(delta); });
@@ -274,7 +291,8 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     await host2.start();
     const lost = await lostTurn;
     assert.equal(lost.status, "failed");
-    assert.match(lost.error, /restarted/);
+    assert.match(lost.error, /does not know this run/);
+    assert.ok(logs.some((entry) => entry.event === "machine-link.turn.queried" && entry.payload?.runId === "run-lost"), "the lost turn was asked about, not closed by process order");
 
     // A stop held for a run the (restarted) machine does not know is answered
     // "unknown": the desktop drops the held stop and reports it unconfirmed.

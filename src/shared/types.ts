@@ -1219,6 +1219,9 @@ export interface ChatMessageMetadata {
    *  machine has not confirmed it yet (shown honestly instead of "stopped");
    *  kept apart from the content so delivered text is never overwritten. */
   stopPending?: { machineName: string; at: string };
+  /** Machines transport: the outcome already folded into this bubble, so a
+   *  redelivered result of the same run is applied once. */
+  machineOutcome?: { runId: string; status: string };
   threadId?: string;
   parentMessageId?: string;
   chatThreadRootId?: string;

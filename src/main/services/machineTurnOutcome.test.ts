@@ -56,6 +56,20 @@ test("an unconfirmed stop is marked as such, not as stopped by user", () => {
   assert.match(target.content, /machine restarted/);
 });
 
+test("a redelivered result of the same run is applied once", () => {
+  const target = bubble({ content: "text" });
+  foldMachineTurnResult(target, "bot", "run-1", { status: "failed", messages: [], error: "provider exited" });
+  const once = target.content;
+  foldMachineTurnResult(target, "bot", "run-1", { status: "failed", messages: [], error: "provider exited" });
+  assert.equal(target.content, once);
+  const stop = bubble({ content: "text" });
+  foldMachineTurnResult(stop, "bot", "run-1", { status: "unconfirmed", messages: [], error: "gone" });
+  const stopOnce = stop.content;
+  foldMachineTurnResult(stop, "bot", "run-1", { status: "unconfirmed", messages: [], error: "gone" });
+  assert.equal(stop.content, stopOnce);
+  assert.equal((stop.content.match(/Stop not confirmed/g) ?? []).length, 1);
+});
+
 test("the instance counter advances past both the stored value and the clock, and is not published on any file error", () => {
   let stored = JSON.stringify({ sequence: 1000 });
   const io = { read: () => stored, write: (content: string) => { stored = content; }, now: () => 100 };

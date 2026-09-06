@@ -179,6 +179,17 @@ export interface MachineApprovalResultBody {
   policies?: ChatAppToolApprovalPolicy[];
 }
 
+/** Desktop -> machine: does this runtime still hold this run (running, or a
+ *  result waiting in its outbox)? Answered with machine.turn.unknown when
+ *  not; silence otherwise (progress or the result follows). Sent after a
+ *  hello for every turn the desktop still waits on, so lost turns are
+ *  closed without guessing at process order. */
+export interface MachineTurnQueryBody {
+  type: "machine.turn.query";
+  conversationId: string;
+  runId: string;
+}
+
 /** Machine -> desktop: a stop (or any command) named a run this runtime does
  *  not know: it is not running here and no result is waiting. Whether its
  *  processes are gone is not verified (a restarted runtime does not know). */
@@ -236,6 +247,7 @@ export type MachineLinkMessage =
   | MachineApprovalResultBody
   | MachineTurnFinishedAckBody
   | MachineTurnUnknownBody
+  | MachineTurnQueryBody
   | MachineConversationSyncDoneBody
   | MachineConversationResyncBody
   | MachineChoiceAnswerBody;
@@ -259,6 +271,7 @@ const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.approval.result",
   "machine.turn.finished.ack",
   "machine.turn.unknown",
+  "machine.turn.query",
   "machine.conversation.sync.done",
   "machine.conversation.resync",
   "machine.choice.answer"

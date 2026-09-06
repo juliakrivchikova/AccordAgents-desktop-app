@@ -89,6 +89,9 @@ export class MachineHostService {
   /** Why the outbox is not on disk right now (write failed / unreadable);
    *  travels in hello so the desktop can show it. */
   private outboxError?: string;
+  /** Outbox entries of an unexpected shape: kept (and written back into the
+   *  outbox file) until they have been archived for recovery. */
+  private rejectedOutboxEntries: unknown[] = [];
   private outboxRetryTimer?: ReturnType<typeof setTimeout>;
   private inbound: Promise<void> = Promise.resolve();
   /** Outbound sends leave in call order (progress before the finished result). */
@@ -306,6 +309,9 @@ export class MachineHostService {
         await this.options.onSettingsImported?.();
         return;
       case "machine.conversation.sync":
+        // A fresh copy starts clean: a previous copy's failure is forgotten
+        // (the retry budget is not).
+        this.failedSync.delete(body.conversation.id);
         this.syncing.add(body.conversation.id);
         await this.applyConversationSync(body.conversation);
         return;
@@ -315,15 +321,7 @@ export class MachineHostService {
           // and comparing against it would send stale rows back. Ask again,
           // a bounded number of times; a copy that keeps failing stays
           // incomplete (turns on it fail honestly) instead of looping.
-          const attempts = (this.resyncAttempts.get(body.conversationId) ?? 0) + 1;
-          this.resyncAttempts.set(body.conversationId, attempts);
-          if (attempts > MAX_RESYNC_ATTEMPTS) {
-            void this.debugLogs.write("machine-host.sync.gave-up", { conversationId: body.conversationId, attempts });
-            return;
-          }
-          this.failedSync.delete(body.conversationId);
-          void this.debugLogs.write("machine-host.sync.resync", { conversationId: body.conversationId, attempt: attempts });
-          await this.send({ type: "machine.conversation.resync", conversationId: body.conversationId }).catch(() => undefined);
+          await this.requestResync(body.conversationId);
           return;
         }
         this.resyncAttempts.delete(body.conversationId);
@@ -359,6 +357,11 @@ export class MachineHostService {
           return;
         }
         void this.runTurn(body);
+        return;
+      case "machine.turn.query":
+        if (!this.activeTurns.has(body.runId) && !this.pendingTerminals.has(body.runId)) {
+          await this.send({ type: "machine.turn.unknown", conversationId: body.conversationId, runId: body.runId }).catch(() => undefined);
+        }
         return;
       case "machine.turn.cancel": {
         const controller = this.activeTurns.get(body.runId);
@@ -520,15 +523,32 @@ export class MachineHostService {
       // the batch's stamps are reverted, and a first copy in progress is
       // asked for again when its sync.done arrives.
       this.restoreInventory(delta.conversationId, previousStamps);
-      if (this.syncing.has(delta.conversationId)) {
-        this.failedSync.add(delta.conversationId);
-      }
       void this.debugLogs.write("machine-host.sync.batch-failed", { conversationId: delta.conversationId, stage: "delta", messages: delta.messages.length, message: errorMessage(error) });
+      // The copy is incomplete from now on, whether or not a first copy was
+      // in progress: turns on it fail until a fresh copy completes. Outside
+      // a first copy there is no sync.done to trigger the request, so it is
+      // made here (same bounded budget).
+      this.failedSync.add(delta.conversationId);
+      if (!this.syncing.has(delta.conversationId)) {
+        this.syncing.add(delta.conversationId);
+        await this.requestResync(delta.conversationId);
+      }
       return;
     }
     if (missing) {
       void this.debugLogs.write("machine-host.conversation.delta-without-copy", { conversationId: delta.conversationId });
     }
+  }
+
+  private async requestResync(conversationId: string): Promise<void> {
+    const attempts = (this.resyncAttempts.get(conversationId) ?? 0) + 1;
+    this.resyncAttempts.set(conversationId, attempts);
+    if (attempts > MAX_RESYNC_ATTEMPTS) {
+      void this.debugLogs.write("machine-host.sync.gave-up", { conversationId, attempts });
+      return;
+    }
+    void this.debugLogs.write("machine-host.sync.resync", { conversationId, attempt: attempts });
+    await this.send({ type: "machine.conversation.resync", conversationId }).catch(() => undefined);
   }
 
   private restoreInventory(conversationId: string, previous: Map<string, string | undefined>): void {
@@ -697,14 +717,10 @@ export class MachineHostService {
         }
       }
       if (rejected.length > 0) {
-        // Kept for recovery, never silently dropped.
-        const kept = `${file}.rejected-${Date.now()}.json`;
-        try {
-          writeFileSync(kept, JSON.stringify(rejected), "utf8");
-        } catch {
-          // Best effort; the log below still names the count.
-        }
-        void this.debugLogs.write("machine-host.outbox.entries-rejected", { file, count: rejected.length, keptAt: kept });
+        // Kept for recovery, never silently dropped: archived, and until
+        // the archive is written they travel back into the outbox file.
+        this.rejectedOutboxEntries = rejected;
+        this.archiveRejectedEntries();
       }
     } catch (error) {
       // Damaged outbox: keep the file for inspection instead of overwriting it.
@@ -733,8 +749,9 @@ export class MachineHostService {
     }
     try {
       mkdirSync(path.dirname(file), { recursive: true });
+      this.archiveRejectedEntries();
       const temp = `${file}.${process.pid}.tmp`;
-      writeFileSync(temp, JSON.stringify([...this.pendingTerminals.values()]), "utf8");
+      writeFileSync(temp, JSON.stringify([...this.pendingTerminals.values(), ...this.rejectedOutboxEntries]), "utf8");
       renameSync(temp, file);
       if (this.outboxError) {
         this.outboxError = undefined;
@@ -760,6 +777,21 @@ export class MachineHostService {
         this.outboxRetryTimer.unref?.();
       }
       return false;
+    }
+  }
+
+  private archiveRejectedEntries(): void {
+    const file = this.options.outboxPath;
+    if (!file || this.rejectedOutboxEntries.length === 0) {
+      return;
+    }
+    const kept = `${file}.rejected-${Date.now()}.json`;
+    try {
+      writeFileSync(kept, JSON.stringify(this.rejectedOutboxEntries), "utf8");
+      void this.debugLogs.write("machine-host.outbox.entries-rejected", { file, count: this.rejectedOutboxEntries.length, keptAt: kept });
+      this.rejectedOutboxEntries = [];
+    } catch (error) {
+      void this.debugLogs.write("machine-host.outbox.archive-error", { file, count: this.rejectedOutboxEntries.length, message: errorMessage(error) });
     }
   }
 

@@ -6780,6 +6780,10 @@ export class ChatService {
       }
     };
     let dispatchResult: MachineTurnDispatchResult | undefined;
+    // Set once the machine's result has been folded, stored and acknowledged:
+    // a failure raised after that (the run failed on its machine) leaves the
+    // bubble as folded and is never stored or acknowledged a second time.
+    let terminalHandled = false;
     try {
       const result = await link.runTurn({
         conversation,
@@ -6831,6 +6835,7 @@ export class ChatService {
         }
       }
       await storeOutcomeAndAcknowledge(result, others);
+      terminalHandled = true;
       if (status === "failed") {
         throw new Error(result.error ?? `@${participant.handle} failed on its machine.`);
       }
@@ -6839,6 +6844,9 @@ export class ChatService {
       }
       return [pendingMessage, ...others];
     } catch (error) {
+      if (terminalHandled) {
+        throw error;
+      }
       clearStopPending();
       if (!signal?.aborted) {
         pendingMessage.status = "error";
@@ -6980,6 +6988,7 @@ export class ChatService {
     runId: string;
     status: "completed" | "interrupted" | "failed" | "unconfirmed";
     messages: ChatMessage[];
+    warnings?: string[];
     error?: string;
     machineName: string;
   }): Promise<void> {
@@ -7011,6 +7020,10 @@ export class ChatService {
         }
       }
       conversation.messages.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      // The run's CLI warnings reach the chat exactly as a live turn's would.
+      for (const warning of request.warnings ?? []) {
+        this.addConversationWarning(conversation, warning);
+      }
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
     });

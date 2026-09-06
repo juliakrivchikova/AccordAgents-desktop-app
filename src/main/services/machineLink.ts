@@ -58,6 +58,7 @@ export interface MachineLateTerminalEvent {
   runId: string;
   status: "completed" | "interrupted" | "failed" | "unconfirmed";
   messages: ChatMessage[];
+  warnings: string[];
   error?: string;
 }
 
@@ -90,6 +91,8 @@ interface MachineConnection {
   replicationQueued: Map<string, Conversation>;
   /** Approval decisions waiting for the machine's outcome. */
   pendingApprovals: Map<string, { resolve: () => void; reject: (error: Error) => void }>;
+  /** run id → conversation id for turns this desktop waits on. */
+  pendingTurnConversations: Map<string, string>;
   /** Inbound messages are decrypted and applied strictly in arrival order. */
   inbound: Promise<void>;
   /** Start time of the newest runtime instance seen; a late hello from an
@@ -270,6 +273,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       persist: Promise.resolve(),
       replicationQueued: new Map(),
       pendingApprovals: new Map(),
+      pendingTurnConversations: new Map(),
       inbound: Promise.resolve()
     };
     this.connections.set(record.id, connection);
@@ -421,6 +425,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     const result = new Promise<MachineTurnDispatchResult>((resolve) => {
       connection.pendingTurns.set(request.runId, { resolve, progress: request.progress, instanceId: connection.record.lastHello?.instanceId });
     });
+    connection.pendingTurnConversations.set(request.runId, request.conversation.id);
     const timeout = setTimeout(() => {
       const pending = connection.pendingTurns.get(request.runId);
       if (pending) {
@@ -461,6 +466,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       return { status: "failed", messages: [], warnings: [], error: errorMessage(error) };
     } finally {
       connection.pendingTurns.delete(request.runId);
+      connection.pendingTurnConversations.delete(request.runId);
       clearTimeout(timeout);
       if (stopGrace) {
         clearTimeout(stopGrace);
@@ -638,12 +644,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   private async handleHello(connection: MachineConnection, hello: MachineHelloBody): Promise<void> {
     // A hello from an instance older than one already seen (the old process
-    // saying goodbye late) must not reconcile anything. The machine's
-    // on-disk start counter orders instances; the wall clock is only a
-    // fallback for machines that do not send one.
+    // saying goodbye late) is ignored, but only when both hellos carry the
+    // machine's on-disk start counter; without a reliable counter nothing
+    // is inferred from clocks, and no hello is refused. Lost turns are
+    // closed by asking the machine (machine.turn.query), never by ordering.
     const stale = typeof hello.instanceSequence === "number" && typeof connection.latestInstanceSequence === "number"
-      ? hello.instanceSequence < connection.latestInstanceSequence
-      : Boolean(hello.instanceStartedAt && connection.latestInstanceStartedAt && hello.instanceStartedAt < connection.latestInstanceStartedAt);
+      && hello.instanceSequence < connection.latestInstanceSequence;
     if (stale) {
       void this.debugLogs.write("machine-link.hello.stale-instance", { machineId: connection.record.id, instanceId: hello.instanceId, instanceSequence: hello.instanceSequence, instanceStartedAt: hello.instanceStartedAt });
       return;
@@ -681,39 +687,22 @@ export class MachineLinkService implements MachineTurnDispatcher {
       void this.debugLogs.write("machine-link.stop.redelivered", { machineId: connection.record.id, runId });
       await this.send(connection, { type: "machine.turn.cancel", conversationId, runId }).catch(() => undefined);
     }
-    // A turn is lost only when the runtime that received it is gone (a new
-    // instance id) and the result is not in that runtime's outbox. A hello
-    // from the same instance proves nothing about a turn dispatched a moment
-    // ago, so it is left alone.
-    const instanceId = hello.instanceId;
-    if (!instanceId) {
-      return;
-    }
-    const held = new Set(hello.pendingTerminalRunIds ?? []);
-    let cancelsChanged = false;
-    for (const [runId, pending] of [...connection.pendingTurns.entries()]) {
-      if (!pending.instanceId || pending.instanceId === instanceId || held.has(runId)) {
+    // Turns this desktop still waits on that the machine did not list as
+    // running or waiting in its outbox: ask the machine. A runtime that does
+    // not hold the run answers machine.turn.unknown and the turn is closed
+    // then; one that does hold it stays silent and the result follows. No
+    // turn is ever closed from process order or clocks.
+    const listed = new Set([...(hello.activeRunIds ?? []), ...(hello.pendingTerminalRunIds ?? [])]);
+    for (const runId of connection.pendingTurns.keys()) {
+      if (listed.has(runId)) {
         continue;
       }
-      connection.pendingTurns.delete(runId);
-      const stopped = connection.pendingCancels.delete(runId);
-      cancelsChanged = cancelsChanged || stopped;
-      void this.debugLogs.write("machine-link.turn.lost-on-restart", { machineId: connection.record.id, runId, stopped });
-      // Rule 2: "stopped" is shown only when the machine confirmed the
-      // process is gone; a restart confirms nothing.
-      pending.resolve({
-        status: "failed",
-        messages: [],
-        warnings: [],
-        error: stopped
-          ? `Machine ${connection.record.name} restarted before confirming the stop; whether the run's processes are gone is not verified.`
-          : `Machine ${connection.record.name} restarted before this turn finished.`
-      });
-    }
-    // Held stops stay until the machine answers them (finished, or
-    // machine.turn.unknown when it cannot confirm anything about the run).
-    if (cancelsChanged) {
-      this.persistCancels(connection);
+      const conversationId = connection.pendingCancels.get(runId) ?? connection.pendingTurnConversations.get(runId);
+      if (!conversationId) {
+        continue;
+      }
+      void this.debugLogs.write("machine-link.turn.queried", { machineId: connection.record.id, runId });
+      await this.send(connection, { type: "machine.turn.query", conversationId, runId }).catch(() => undefined);
     }
   }
 
@@ -744,6 +733,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         runId: body.runId,
         status: body.status,
         messages: body.messages,
+        warnings: body.warnings,
         ...(body.error ? { error: body.error } : {})
       })
         .then(acknowledge)
@@ -768,7 +758,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
     const pending = connection.pendingTurns.get(body.runId);
     const held = connection.pendingCancels.has(body.runId);
     void this.debugLogs.write("machine-link.turn.unknown", { machineId: connection.record.id, runId: body.runId, pending: Boolean(pending), held });
-    const detail = `Machine ${connection.record.name} does not know this run any more; whether its processes are gone is not verified.`;
+    const detail = held
+      ? `Machine ${connection.record.name} does not know this run any more; whether its processes are gone is not verified.`
+      : `Machine ${connection.record.name} does not know this run any more (it restarted or lost it before finishing).`;
     const dropHeldStop = (): void => {
       if (connection.pendingCancels.delete(body.runId)) {
         this.persistCancels(connection);
@@ -777,15 +769,15 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (pending) {
       connection.pendingTurns.delete(body.runId);
       // The live path stores the outcome and calls acknowledge; the held
-      // stop goes with it.
-      pending.resolve({ status: "unconfirmed", messages: [], warnings: [], error: detail, acknowledge: dropHeldStop });
+      // stop goes with it. Without a stop this is a lost run, not a stop.
+      pending.resolve({ status: held ? "unconfirmed" : "failed", messages: [], warnings: [], error: detail, acknowledge: dropHeldStop });
       return;
     }
     if (held) {
       // This desktop restarted since the stop was held: the chat gets the
       // outcome first, and the held stop is dropped only once it is stored.
       try {
-        await this.emitLateTerminal({ machineId: connection.record.id, machineName: connection.record.name, conversationId: body.conversationId, runId: body.runId, status: "unconfirmed", messages: [], error: detail });
+        await this.emitLateTerminal({ machineId: connection.record.id, machineName: connection.record.name, conversationId: body.conversationId, runId: body.runId, status: "unconfirmed", messages: [], warnings: [], error: detail });
       } catch (error) {
         void this.debugLogs.write("machine-link.turn.late-store-error", { machineId: connection.record.id, runId: body.runId, message: errorMessage(error) });
         return;

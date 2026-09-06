@@ -32,8 +32,16 @@ export function markStopUnconfirmed(message: ChatMessage, handle: string, reason
   message.status = "error";
   const detail = reason?.trim() ? ` ${reason.trim()}` : "";
   const note = `Stop not confirmed for @${handle}: the machine did not confirm the run is gone.${detail}`;
-  message.content = message.content.trim() ? `${message.content}\n\n${note}` : note;
+  message.content = appendNoteOnce(message.content, note);
   message.metadata = { ...message.metadata, terminalReason: "stop-unconfirmed" };
+}
+
+/** A diagnostic line is added once; a redelivered outcome never repeats it. */
+function appendNoteOnce(content: string, note: string): string {
+  if (content.includes(note)) {
+    return content;
+  }
+  return content.trim() ? `${content}\n\n${note}` : note;
 }
 
 /** Folds a machine's result into the desktop's bubble for every status:
@@ -49,6 +57,11 @@ export function foldMachineTurnResult(
 ): ChatMessage[] {
   const reply = result.messages.find((message) => message.id === bubble.id);
   const others = result.messages.filter((message) => message.id !== bubble.id);
+  const applied = bubble.metadata?.machineOutcome;
+  if (applied && applied.runId === runId && applied.status === result.status) {
+    // The same result again (a redelivery): the bubble already carries it.
+    return others;
+  }
   if (reply) {
     if (reply.content.trim() || !bubble.content.trim()) {
       bubble.content = reply.content;
@@ -59,6 +72,7 @@ export function foldMachineTurnResult(
     delete metadata.stopPending;
     bubble.metadata = metadata;
   }
+  bubble.metadata = { ...bubble.metadata, machineOutcome: { runId, status: result.status } };
   switch (result.status) {
     case "completed":
       if (reply) {
@@ -77,8 +91,7 @@ export function foldMachineTurnResult(
     case "failed": {
       bubble.status = "error";
       const detail = result.error?.trim() ? `: ${result.error.trim()}` : ".";
-      const note = `@${handle} failed on its machine${detail}`;
-      bubble.content = bubble.content.trim() ? `${bubble.content}\n\n${note}` : note;
+      bubble.content = appendNoteOnce(bubble.content, `@${handle} failed on its machine${detail}`);
       return others;
     }
     default:
