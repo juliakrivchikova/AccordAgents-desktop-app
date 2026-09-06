@@ -41,6 +41,7 @@ function probeOutput(overrides: Record<string, string | undefined> = {}, release
     home: "/home/ubuntu",
     "install-root": "/home/ubuntu/accordagents-machine",
     "user-data": "/home/ubuntu/.accordagents/machine",
+    "service-name": "accordagents-machine",
     node: "v22.11.0",
     sqlite3: "ok",
     git: "ok",
@@ -82,6 +83,8 @@ interface Harness {
   progress: MachineInstallSnapshot[];
   logged: Array<Record<string, unknown>>;
   syncedUp: string[];
+  doctorCalls: Array<{ call: string; options?: { requiredProviderKind?: string } }>;
+  waitedVersion: () => string | undefined;
 }
 
 function harness(options: {
@@ -101,6 +104,8 @@ function harness(options: {
   const logged: Array<Record<string, unknown>> = [];
   const syncedUp: string[] = [];
   let probeCalls = 0;
+  const doctorCalls: Array<{ call: string; options?: { requiredProviderKind?: string } }> = [];
+  let waitedForVersion: string | undefined;
   const bundleDir = options.bundleDir ?? bundleFixture();
   const activeReleaseAfter = releaseName(readMachineBundle(bundleDir));
   const report = options.doctor ?? { ok: true, message: "Machine ready.", checks: [] };
@@ -110,9 +115,19 @@ function harness(options: {
       async saveMachineInstall(record) { records.set(record.machineId, record); },
       async listMachineInstalls() { return [...records.values()]; }
     },
-    doctor: { async diagnose() { return report; }, async setup() { return report; } },
+    doctor: {
+      async diagnose(_settings, doctorOptions) { doctorCalls.push({ call: "diagnose", options: doctorOptions }); return report; },
+      async setup(_settings, onProgress, doctorOptions) {
+        doctorCalls.push({ call: "setup", options: doctorOptions });
+        onProgress?.({ stage: "codex-auth", message: "Approve the Codex sign-in on the machine…", authUrl: "https://auth.example/device", authCode: "ABCD-1234" });
+        return options.doctor ?? { ok: true, message: "Machine ready.", checks: [] };
+      }
+    },
     getEnrollmentJson: async () => ENROLLMENT,
-    waitForConnected: async () => options.connected !== false,
+    waitForConnected: async (_machineId, _timeoutMs, expectAppVersion) => {
+      waitedForVersion = expectAppVersion;
+      return options.connected !== false;
+    },
     bundleDir,
     machineName: async () => "cloud-box",
     now: () => new Date("2026-09-07T00:00:00.000Z"),
@@ -144,7 +159,7 @@ function harness(options: {
       async syncDown() { throw new Error("syncDown must never run during a machine install."); }
     }
   });
-  return { service, calls, uploads, records, progress, logged, syncedUp };
+  return { service, calls, uploads, records, progress, logged, syncedUp, doctorCalls, waitedVersion: () => waitedForVersion };
 }
 
 // ---- parsers --------------------------------------------------------------
@@ -220,6 +235,16 @@ test("the mirror probe separates uncommitted work from participant worktrees", (
   assert.equal(parseMachineMirrorProbe("path=/x\nstate=absent\n").state, "absent");
 });
 
+test("a deployment outside the default directory gets its own data directory and unit", () => {
+  const script = machineProbeScript({ installRoot: "~/accordagents-installer-qa" });
+  assert.ok(script.includes('ROOT="$HOME/accordagents-installer-qa"'));
+  assert.ok(script.includes('UD_DEFAULT="$HOME/.accordagents/$NAME"'));
+  assert.ok(script.includes('SVC_DEFAULT="$NAME"'));
+  // Two deployments sharing one user-data directory would be two executors.
+  assert.ok(script.includes("accordagents-machine) UD_DEFAULT=\"$HOME/.accordagents/machine\""));
+  assert.throws(() => machineProbeScript({ installRoot: "/tmp/x; rm -rf /" }), /may only contain/);
+});
+
 test("the systemd unit carries HOME, the login PATH and a graceful stop", () => {
   const unit = machineServiceUnit({
     layout: LAYOUT, machineName: "cloud-box", home: "/home/ubuntu", user: "ubuntu",
@@ -289,6 +314,7 @@ test("install walks the visible phases and ends connected", async () => {
   assert.equal(h.uploads.length, 1);
   assert.ok(h.uploads[0].remoteDir.includes("/releases/1.4.0-"));
   assert.deepEqual(result.snapshot.completed.includes("verify"), true);
+  assert.equal(h.waitedVersion(), "1.4.0", "the hello must be required to report the new version");
 });
 
 test("even a first install proves nothing is running before it switches version", async () => {
@@ -328,6 +354,37 @@ test("a machine that cannot compile node-pty fails with a message that says so",
   assert.ok(!h.calls.some((call) => call.script.includes("mv -Tf")), "nothing may be switched");
 });
 
+test("a deployment in its own directory gets its own unit, not the default one", async () => {
+  // Regression: passing the default service name into the probe overrode the
+  // name the machine derives, so a second deployment on one box installed
+  // itself over the first deployment's unit.
+  const h = harness();
+  await h.service.install({
+    machineId: "m1", operationId: "op-root", target: TARGET, installRoot: "~/accordagents-installer-qa"
+  });
+  const probeCall = h.calls.find((call) => call.script.includes("printf 'home=%s"));
+  assert.ok(probeCall);
+  assert.ok(!probeCall.script.includes("SVC='accordagents-machine'"), "the probe must not force the default unit name");
+  assert.ok(probeCall.script.includes('SVC="$SVC_DEFAULT"'));
+  assert.ok(probeCall.script.includes('ROOT="$HOME/accordagents-installer-qa"'));
+});
+
+test("the chosen provider must be installed and signed in on the machine itself", async () => {
+  const h = harness({ doctor: { ok: false, message: "Codex is not signed in on the machine.", checks: [] } });
+  const seen: Array<{ authUrl?: string; authCode?: string }> = [];
+  const result = await h.service.install(
+    { machineId: "m1", operationId: "op-auth", target: TARGET, requiredProvider: "codex-cli" },
+    (snapshot) => { if (snapshot.authUrl) seen.push({ authUrl: snapshot.authUrl, authCode: snapshot.authCode }); }
+  );
+  assert.deepEqual(h.doctorCalls.map((call) => call.options?.requiredProviderKind), ["codex-cli", "codex-cli"]);
+  // The sign-in happens ON the machine: the desktop only relays the URL and
+  // code, and never copies a credential of its own.
+  assert.deepEqual(seen, [{ authUrl: "https://auth.example/device", authCode: "ABCD-1234" }]);
+  assert.equal(result.snapshot.phase, "error");
+  assert.equal(result.snapshot.recovery?.kind, "nothing-changed");
+  assert.equal(h.uploads.length, 0);
+});
+
 test("the enrollment travels on stdin and never reaches a command line or a log", async () => {
   const h = harness();
   await h.service.install({ machineId: "m1", operationId: "op1", target: TARGET });
@@ -353,17 +410,37 @@ test("an upgrade that cannot prove the old runtime is gone replaces nothing", as
       "runtime-pids": "4210",
       "supervisor-pids": "4300"
     }, ["1.3.0-old"]),
-    drain: "service-state=active\nruntime-pids=4210\nsupervisor-pids=4300\nprovider-pids=4400\ndrained=no\n"
+    // Observed on a real machine: the unit stops, and only then does the
+    // drain find a process this install owns that will not exit.
+    drain: "service-state=inactive\nruntime-pids=4210\nsupervisor-pids=4300\nprovider-pids=4400\ndrained=no\n"
   });
   const result = await h.service.upgrade({ machineId: "m1", operationId: "op2", target: TARGET });
   assert.equal(result.snapshot.phase, "needs-attention");
   assert.equal(result.snapshot.recovery?.kind, "manual-drain-required");
   assert.deepEqual(result.snapshot.recovery?.blockingPids, [4210, 4300, 4400]);
   assert.equal(result.snapshot.recovery?.activeVersion, "1.3.0");
+  // The drain stopped the unit before it found the stray process. Saying "the
+  // machine keeps working" there would be a lie: it is down, on purpose.
+  assert.match(result.snapshot.recovery?.detail ?? "", /has deliberately NOT been started again/);
+  assert.match(result.snapshot.recovery?.detail ?? "", /hosts no members until that is resolved/);
   assert.ok(!h.calls.some((call) => call.script.includes("mv -Tf")), "the release must not be switched");
   assert.ok(!h.calls.some((call) => call.script.includes("daemon-reload")), "the service must not be rewritten");
   assert.equal(result.record.installedVersion, "1.3.0");
   assert.ok(!result.snapshot.completed.includes("drain"));
+});
+
+test("a refused drain on a machine that is still running says so instead", async () => {
+  const h = harness({
+    probe: probeOutput({
+      state: JSON.stringify({ version: "1.3.0", digest: "old" }),
+      "active-release": "1.3.0-old", enrollment: "present", "service-scope": "system", "service-state": "active",
+      "runtime-pids": "4210"
+    }, ["1.3.0-old"]),
+    drain: "service-state=active\nruntime-pids=4210\ndrained=no\n"
+  });
+  const result = await h.service.upgrade({ machineId: "m1", operationId: "op-drain2", target: TARGET });
+  assert.equal(result.snapshot.recovery?.kind, "manual-drain-required");
+  assert.match(result.snapshot.recovery?.detail ?? "", /The runtime is still running\./);
 });
 
 test("an upgrade that does not connect is rolled back to the previous release", async () => {

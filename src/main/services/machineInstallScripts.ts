@@ -119,29 +119,57 @@ function systemctl(scope: MachineServiceScope): string {
  * already installed, which unit runs it, and which processes belong to it.
  * `installRoot` is optional so the very first probe can discover `$HOME`.
  */
+/** Rejects an install root that could not be a safe shell path or a systemd
+ *  unit name. A `~/` prefix is expanded by the script, not by us. */
+export function machineInstallRootExpression(installRoot?: string): string {
+  const raw = installRoot?.trim();
+  if (!raw) {
+    return `ROOT="$HOME/${DEFAULT_MACHINE_INSTALL_DIRNAME}"`;
+  }
+  if (!/^[~/]?[A-Za-z0-9._/-]*$/.test(raw)) {
+    throw new Error("The install directory may only contain letters, digits, dot, dash, underscore and slash.");
+  }
+  if (raw.startsWith("~/")) {
+    return `ROOT="$HOME/${raw.slice(2).replace(/\/+$/, "")}"`;
+  }
+  if (!raw.startsWith("/")) {
+    return `ROOT="$HOME/${raw.replace(/\/+$/, "")}"`;
+  }
+  return `ROOT=${shellQuotePosix(raw.replace(/\/+$/, ""))}`;
+}
+
+/**
+ * Reads the machine before anything is changed: tool versions, what is
+ * already installed, which unit runs it, and which processes belong to it.
+ *
+ * The machine also decides the data directory and unit name, so there is one
+ * source of truth for them. A deployment in a directory other than the default
+ * gets its OWN data directory and unit: two deployments sharing one user-data
+ * directory would be two executors for the same participant session, which is
+ * exactly what the transport forbids.
+ */
 export function machineProbeScript(options: {
   installRoot?: string;
   userDataDir?: string;
   serviceName?: string;
 }): string {
-  const serviceName = options.serviceName ?? DEFAULT_MACHINE_SERVICE_NAME;
-  const rootExpression = options.installRoot
-    ? `ROOT=${shellQuotePosix(options.installRoot)}`
-    : `ROOT="$HOME/${DEFAULT_MACHINE_INSTALL_DIRNAME}"`;
-  const userDataExpression = options.userDataDir
-    ? `UD=${shellQuotePosix(options.userDataDir)}`
-    : `UD="$HOME/${DEFAULT_MACHINE_USER_DATA_SUFFIX}"`;
   const scan = scanProcessesFunction('"$ROOT"', '"ACCORDAGENTS_USER_DATA_DIR=$UD"');
-  const svc = shellQuotePosix(`${serviceName}.service`);
   return [
     PREAMBLE,
-    rootExpression,
-    userDataExpression,
+    machineInstallRootExpression(options.installRoot),
+    `NAME="$(basename "$ROOT")"`,
+    `case "$NAME" in`,
+    `  ${DEFAULT_MACHINE_INSTALL_DIRNAME}) UD_DEFAULT="$HOME/${DEFAULT_MACHINE_USER_DATA_SUFFIX}"; SVC_DEFAULT=${shellQuotePosix(DEFAULT_MACHINE_SERVICE_NAME)} ;;`,
+    `  *) UD_DEFAULT="$HOME/.accordagents/$NAME"; SVC_DEFAULT="$NAME" ;;`,
+    `esac`,
+    options.userDataDir ? `UD=${shellQuotePosix(options.userDataDir.replace(/\/+$/, ""))}` : `UD="$UD_DEFAULT"`,
+    options.serviceName ? `SVC=${shellQuotePosix(options.serviceName)}` : `SVC="$SVC_DEFAULT"`,
     PROCESS_HELPERS,
     scan,
     `printf 'home=%s\\n' "$HOME"`,
     `printf 'install-root=%s\\n' "$ROOT"`,
     `printf 'user-data=%s\\n' "$UD"`,
+    `printf 'service-name=%s\\n' "$SVC"`,
     `if command -v node >/dev/null 2>&1; then printf 'node=%s\\n' "$(node --version 2>/dev/null)"; else printf 'node=missing\\n'; fi`,
     `for t in sqlite3 git rsync npm; do`,
     `  if command -v "$t" >/dev/null 2>&1; then printf '%s=ok\\n' "$t"; else printf '%s=missing\\n' "$t"; fi`,
@@ -157,10 +185,10 @@ export function machineProbeScript(options: {
     `if [ -d "$ROOT/releases" ]; then for d in "$ROOT/releases"/*; do [ -d "$d" ] && printf 'release=%s\\n' "$(basename "$d")"; done; fi`,
     `if [ -f "$ROOT/enrollment.json" ]; then printf 'enrollment=present\\n'; else printf 'enrollment=absent\\n'; fi`,
     `if command -v systemctl >/dev/null 2>&1; then`,
-    `  if systemctl cat ${svc} >/dev/null 2>&1; then`,
-    `    printf 'service-scope=system\\n'; printf 'service-state=%s\\n' "$(systemctl is-active ${svc} 2>/dev/null || true)"`,
-    `  elif systemctl --user cat ${svc} >/dev/null 2>&1; then`,
-    `    printf 'service-scope=user\\n'; printf 'service-state=%s\\n' "$(systemctl --user is-active ${svc} 2>/dev/null || true)"`,
+    `  if systemctl cat "$SVC.service" >/dev/null 2>&1; then`,
+    `    printf 'service-scope=system\\n'; printf 'service-state=%s\\n' "$(systemctl is-active "$SVC.service" 2>/dev/null || true)"`,
+    `  elif systemctl --user cat "$SVC.service" >/dev/null 2>&1; then`,
+    `    printf 'service-scope=user\\n'; printf 'service-state=%s\\n' "$(systemctl --user is-active "$SVC.service" 2>/dev/null || true)"`,
     `  else printf 'service-state=absent\\n'; fi`,
     `fi`,
     `scan_processes`,
@@ -174,6 +202,7 @@ export interface ParsedMachineProbe extends MachineRuntimeProbe {
   home: string;
   installRoot: string;
   userDataDir: string;
+  serviceName: string;
   loginPath?: string;
   nodePath?: string;
   hasNpm: boolean;
@@ -211,6 +240,7 @@ export function parseMachineProbe(stdout: string): ParsedMachineProbe {
     home: values.get("home") ?? "",
     installRoot: values.get("install-root") ?? "",
     userDataDir: values.get("user-data") ?? "",
+    serviceName: values.get("service-name") ?? DEFAULT_MACHINE_SERVICE_NAME,
     nodeVersion: node && node !== "missing" ? node : undefined,
     hasSqlite3: values.get("sqlite3") === "ok",
     hasGit: values.get("git") === "ok",
@@ -456,6 +486,7 @@ export function parseMachineDrainReport(stdout: string): MachineDrainReport {
       : undefined;
   return {
     drained,
+    serviceState: probe.serviceState,
     runtimePids: probe.runtimePids,
     supervisorPids: probe.supervisorPids,
     providerPids: probe.providerPids,

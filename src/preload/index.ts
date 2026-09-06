@@ -7,6 +7,17 @@ import type {
   RemoveMachineRequest
 } from "../shared/machineLink";
 import type {
+  MachineInstallRecord,
+  MachineInstallRequest,
+  MachineInstallResult,
+  MachineInstallSnapshot,
+  MachineMirrorBootstrapRequest,
+  MachineMirrorBootstrapResult,
+  MachineRuntimeProbe,
+  MachineSshTarget,
+  MachineUpgradeRequest
+} from "../shared/machineInstall";
+import type {
   AppBridge,
   AddChatParticipantRequest,
   AgentDetectionRequest,
@@ -211,6 +222,18 @@ const bridge: AppBridge = {
   createMachine: (request: CreateMachineRequest): Promise<CreateMachineResult> => ipcRenderer.invoke("machines:create", request),
   removeMachine: (request: RemoveMachineRequest): Promise<MachineListResult> => ipcRenderer.invoke("machines:remove", request),
   machineEnrollment: (request: MachineEnrollmentRequest): Promise<CreateMachineResult> => ipcRenderer.invoke("machines:enrollment", request),
+  probeMachineInstall: (request: { machineId: string; target: MachineSshTarget }): Promise<MachineRuntimeProbe> =>
+    ipcRenderer.invoke("machines:install-probe", request),
+  installMachine: (request: MachineInstallRequest): Promise<MachineInstallResult> => ipcRenderer.invoke("machines:install", request),
+  upgradeMachine: (request: MachineUpgradeRequest): Promise<MachineInstallResult> => ipcRenderer.invoke("machines:upgrade", request),
+  bootstrapMachineProjectMirror: (request: MachineMirrorBootstrapRequest): Promise<MachineMirrorBootstrapResult> =>
+    ipcRenderer.invoke("machines:bootstrap-mirror", request),
+  listMachineInstalls: (): Promise<MachineInstallRecord[]> => ipcRenderer.invoke("machines:install-list"),
+  onMachineInstallProgress: (callback: (snapshot: MachineInstallSnapshot) => void) => {
+    const listener = (_event: unknown, snapshot: MachineInstallSnapshot): void => callback(snapshot);
+    ipcRenderer.on("machines:install-progress", listener);
+    return () => ipcRenderer.off("machines:install-progress", listener);
+  },
   onMachinesUpdated: (callback: (result: MachineListResult) => void) => {
     const listener = (_event: unknown, result: MachineListResult): void => callback(result);
     ipcRenderer.on("machines:updated", listener);

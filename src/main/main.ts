@@ -94,7 +94,18 @@ import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "./service
 import { ChatService } from "./services/chat";
 import { MobilePairingService } from "./services/mobilePairing";
 import { MachineLinkService } from "./services/machineLink";
+import { MachineInstallerService } from "./services/machineInstaller";
 import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, RemoveMachineRequest } from "../shared/machineLink";
+import type {
+  MachineInstallRecord,
+  MachineInstallRequest,
+  MachineInstallResult,
+  MachineMirrorBootstrapRequest,
+  MachineMirrorBootstrapResult,
+  MachineRuntimeProbe,
+  MachineSshTarget,
+  MachineUpgradeRequest
+} from "../shared/machineInstall";
 import { MobileProgressEnvelopeTracker } from "./services/mobileProgressEnvelopeTracker";
 import {
   MobileRelayControlService,
@@ -355,6 +366,33 @@ const cloudRunAwsService = new CloudRunAwsService(settingsService, {
 });
 const awsWorkerSetupService = new AwsWorkerSetupService(cloudRunAwsService, cloudRunDoctorService, settingsService);
 void awsWorkerSetupService.recoverInterruptedOperation();
+// Machines transport: the ONLY SSH path to a machine. Installing, upgrading
+// and the one-time project mirror; never a message, a turn or a Stop.
+function requireMachineLink(): MachineLinkService {
+  if (!machineLinkService) {
+    throw new Error("Machines are not ready yet; try again in a moment.");
+  }
+  return machineLinkService;
+}
+function machineRuntimeBundleDir(): string {
+  // Overridable so a QA run can install a specific build, and so a packaged
+  // app can be pointed at a bundle that does not ship inside the asar.
+  const override = process.env.ACCORDAGENTS_MACHINE_BUNDLE_DIR?.trim();
+  return override || path.join(app.getAppPath(), "dist", "machine");
+}
+const machineInstallerService = new MachineInstallerService({
+  store: settingsService,
+  doctor: cloudRunDoctorService,
+  getEnrollmentJson: (machineId) => requireMachineLink().enrollmentJson(machineId),
+  waitForConnected: (machineId, timeoutMs, expectAppVersion) =>
+    requireMachineLink().waitForConnected(machineId, timeoutMs, expectAppVersion),
+  bundleDir: machineRuntimeBundleDir,
+  machineName: async (machineId) => (await settingsService.listMachines()).find((machine) => machine.id === machineId)?.name,
+  logger: (event, payload) => {
+    void debugLogService.write(event, payload);
+  }
+});
+void machineInstallerService.recoverInterruptedOperation();
 chatService.setCloudRunAwsService(cloudRunAwsService);
 chatService.setCloudRunDoctorService(cloudRunDoctorService);
 const remoteRunCoordinator = new RemoteRunCoordinator(remoteRunService, chatService, settingsService, debugLogService);
@@ -1060,6 +1098,29 @@ function acceptsMobileOutboxEnvelopeForPairing(pairing: MobilePairingPackage, ev
 // A machine enrollment is durable: it is installed once on the machine and
 // revoked by removing the machine, not by a clock.
 const MACHINE_ENROLLMENT_TTL_MINUTES = 60 * 24 * 365 * 10;
+
+function assertMachineId(value: unknown): string {
+  const id = typeof value === "string" ? value.trim() : "";
+  if (!id) {
+    throw new Error("Machine id is required.");
+  }
+  return id;
+}
+
+function assertMachineSshTarget(value: unknown): MachineSshTarget {
+  const target = value && typeof value === "object" ? value as Partial<MachineSshTarget> : {};
+  const host = typeof target.host === "string" ? target.host.trim() : "";
+  if (!host) {
+    throw new Error("The machine needs an address to reach it for setup.");
+  }
+  return {
+    host,
+    user: typeof target.user === "string" && target.user.trim() ? target.user.trim() : undefined,
+    port: typeof target.port === "number" && Number.isFinite(target.port) ? Math.floor(target.port) : undefined,
+    identityFile: typeof target.identityFile === "string" && target.identityFile.trim() ? target.identityFile.trim() : undefined,
+    hostKeyAlias: typeof target.hostKeyAlias === "string" && target.hostKeyAlias.trim() ? target.hostKeyAlias.trim() : undefined
+  };
+}
 
 async function machineListResult(): Promise<MachineListResult> {
   return {
@@ -2436,6 +2497,39 @@ function registerIpc(): void {
     sendToMainWindow("machines:updated", result);
     return result;
   });
+  ipcMain.handle("machines:install-probe", async (_event, request: { machineId: string; target: MachineSshTarget }): Promise<MachineRuntimeProbe> => {
+    return machineInstallerService.probe(assertMachineSshTarget(request?.target));
+  });
+  ipcMain.handle("machines:install", async (_event, request: MachineInstallRequest): Promise<MachineInstallResult> => {
+    return machineInstallerService.install(
+      { ...request, machineId: assertMachineId(request?.machineId), target: assertMachineSshTarget(request?.target) },
+      (snapshot) => sendToMainWindow("machines:install-progress", snapshot)
+    ).then(async (result) => {
+      sendToMainWindow("machines:updated", await machineListResult());
+      return result;
+    });
+  });
+  ipcMain.handle("machines:upgrade", async (_event, request: MachineUpgradeRequest): Promise<MachineInstallResult> => {
+    return machineInstallerService.upgrade(
+      { ...request, machineId: assertMachineId(request?.machineId), target: assertMachineSshTarget(request?.target) },
+      (snapshot) => sendToMainWindow("machines:install-progress", snapshot)
+    ).then(async (result) => {
+      sendToMainWindow("machines:updated", await machineListResult());
+      return result;
+    });
+  });
+  ipcMain.handle("machines:bootstrap-mirror", async (_event, request: MachineMirrorBootstrapRequest): Promise<MachineMirrorBootstrapResult> => {
+    // Defaults to the project the app currently has open, so the Machines
+    // screen does not need its own project picker.
+    const localPath = (typeof request?.localPath === "string" ? request.localPath.trim() : "")
+      || (await settingsService.getPublicSettings()).lastRepoPath?.trim()
+      || "";
+    if (!localPath) {
+      throw new Error("Open a project first; there is nothing to put on the machine.");
+    }
+    return machineInstallerService.bootstrapProjectMirror({ machineId: assertMachineId(request?.machineId), localPath });
+  });
+  ipcMain.handle("machines:install-list", async (): Promise<MachineInstallRecord[]> => settingsService.listMachineInstalls());
   ipcMain.handle("machines:enrollment", async (_event, request: MachineEnrollmentRequest): Promise<CreateMachineResult> => {
     const id = typeof request?.id === "string" ? request.id.trim() : "";
     const machine = (await settingsService.listMachines()).find((item) => item.id === id);

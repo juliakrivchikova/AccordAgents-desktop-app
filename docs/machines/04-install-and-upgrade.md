@@ -13,6 +13,19 @@ setup path. `scripts/machine-install-transport-guard.test.mjs` fails the build
 if `chat.ts`, `machineLink.ts`, `machineHost.ts`, `machineApprovalExecutor.ts`
 or the machine runtime entrypoint ever imports it.
 
+## Where it lives
+
+Settings → General → **Machines** → a machine row → **Set up** (or **Upgrade**).
+The panel takes the address, user, SSH key file, which provider the members on
+this machine will use, and an optional install directory; it then shows the
+steps below as a checklist, and **Put project on machine** does the one-time
+mirror bootstrap.
+
+`MachineInstallerService` is wired in `src/main/main.ts` and reached through
+`machines:install`, `machines:upgrade`, `machines:install-probe`,
+`machines:bootstrap-mirror` and `machines:install-list`, with progress pushed on
+`machines:install-progress`.
+
 ## What the User sees
 
 One phase at a time, in this order, each with a message the Machines settings
@@ -29,7 +42,7 @@ section can show verbatim:
 | `activate` | `current` is repointed at the new release and `install-state.json` records it. |
 | `service` | The systemd unit is written and enabled. |
 | `starting` | The unit is started. |
-| `verify` | The desktop waits for the machine to connect **over the relay**, then reads back which release it is actually running. Not "systemd says it started", and not "something answered". |
+| `verify` | The desktop waits for a hello that arrives **after** the restart and reports the new version, then reads back which release the machine actually runs. Not "systemd says it started", and not "something answered". |
 | `ready` | Done. |
 
 Terminal failures are `error` (nothing was attempted or nothing changed) and
@@ -37,6 +50,19 @@ Terminal failures are `error` (nothing was attempted or nothing changed) and
 carries a `recovery` block naming what is true on the machine right now:
 `nothing-changed`, `old-runtime-still-installed`, `rolled-back`,
 `new-runtime-installed-not-started`, or `manual-drain-required`.
+
+## One deployment, one data directory, one unit
+
+The install directory decides the rest. `~/accordagents-machine` keeps the
+documented defaults (`~/.accordagents/machine`, unit `accordagents-machine`);
+any other directory gets `~/.accordagents/<name>` and the unit `<name>`. The
+machine computes this in the probe, so the desktop and the machine cannot
+disagree about it.
+
+That is not tidiness. Two deployments sharing one user-data directory are two
+executors for the same participant session, and a second install under the
+default unit name would take over the first one's service. Both happened during
+QA before this was fixed.
 
 ## Layout on the machine
 
@@ -150,65 +176,75 @@ the machine record.
 
 ## What is verified, and what is not
 
-Verified: 30 focused cases (`machineInstaller.test.js` and the transport/shell
-guard) covering the phase order, the drain running before the switch even on a
-first install, the enrollment never reaching a command line or a log, a refused
-drain replacing nothing, rollback after a failed connect and after a connect on
-the old release, an upgrade keeping its pairing, the no-op re-install, the
+### Real machine, real relay, real UI — 2026-09-06/07
+
+Driven through the Settings → Machines panel of an isolated Electron instance
+(own profile, CDP port 9236) against the User's EC2 (`i-0943b28f7231ab93c`,
+Ubuntu 24.04, Linux x64, Node 22.23.1, systemd 255) over the public relay
+`wss://relay.accordagents.com/v1/relay`. Codex was already signed in on the
+machine as `ubuntu`; nothing was copied from the desktop. A separate install
+root (`~/accordagents-installer-qa`), data directory and unit were used, and the
+existing `~/accordagents-machine` deployment, `~/.accordagents/machine-qa` and
+every repository, worktree and uncommitted file on the box were left untouched
+(verified before and after).
+
+| # | Scenario | Result |
+|---|---|---|
+| 1 | Install from nothing | `ready` in 16 s. Unit `accordagents-installer-qa.service` active, `enrollment.json` mode 600, own data directory created, hello reported `1.10.4-beta.2`. |
+| 2 | Upgrade blocked by a process this install owns that will not exit | 213 s, `needs-attention` / `manual-drain-required`, blocking pid reported, `current` and `install-state.json` unchanged, the staged release unused. |
+| 3 | Upgrade `1.10.4-beta.2` → `1.10.5-qa.2` | `ready` in 16 s. Hello reported the **new** version, both releases kept, enrollment and machine data preserved (`machine-outbox.json` survived). |
+| 4 | Upgrade to a build that exits on start | 197 s, rolled back to `1.10.5-qa.2`, machine connected again, journal tail shown, broken release kept but not active. |
+| 5 | Project mirror: bootstrap, then dirty, then clean | `created`; after uncommitted edits `refused` with both changes intact and a participant-created `git worktree` untouched; after committing on the machine `reused`, nothing copied, the machine's own commit still there. |
+| 6 | Desktop killed during `verify` of an upgrade | After restart: `needs-attention` / `new-runtime-installed-not-started`, retryable, nothing resumed automatically, the machine exactly where it was left. |
+| 7 | Downgrade | Refused with the versions named; nothing on the machine changed. |
+| 8 | Forward upgrade over the broken build | `ready` in 16 s; the machine recovered from a crash-looping release. |
+| 9 | Preflight with "Provider to sign in: Codex CLI" | Passed; the machine was already signed in. |
+
+Screenshots: `screenshots/qa-machine-install-ready.png`,
+`screenshots/qa-machine-installer-settings.png`.
+
+Two defects were found by this QA and fixed here, neither of which the unit
+tests could have caught, because they fed the installer canned probe output:
+
+1. The probe was told to use the default unit name, so a deployment in its own
+   directory installed itself as `accordagents-machine.service` — the exact
+   collision the derived layout exists to prevent.
+2. After a refused drain the message said "the machine keeps working". The drain
+   stops the unit before it discovers the stray process, so the machine was in
+   fact down. It now says that, and says why it is deliberately not restarted.
+
+### Focused checks
+
+31 cases in `machineInstaller.test.js` plus the transport/shell guard: the phase
+order, the drain running before the switch even on a first install, the derived
+unit name, the enrollment never reaching a command line or a log, a refused
+drain replacing nothing (machine up and machine down), rollback after a failed
+connect and after a connect on the old release, the required-provider check and
+the sign-in hand-off, an upgrade keeping its pairing, the no-op re-install, the
 Node-20 refusal, the node-pty/build-tools failure message, the version fence
-including betas, log redaction, interrupted-setup recovery, and the three
-mirror outcomes. Every generated script is parsed by a real `bash -n`, including with
-a hostile path containing a quote — that guard already caught one broken script
-(`journalctl` continuation lines). The probe was executed by a real shell and
-its output parsed back.
+including betas, log redaction, interrupted-setup recovery, and the three mirror
+outcomes. Every generated script is parsed by a real `bash -n`, including with a
+hostile path containing a quote.
 
-**Not verified yet, and needed before this is called done:** a real install and
-a real upgrade against a real Linux machine, end to end through the Settings
-UI, including a live drain of a Codex session and a rollback. That needs an
-EC2 instance; the shared one (`i-0943b28f7231ab93c`) is stopped and reserved
-for Drew's QA. `systemd`, `/proc`-based process ownership and passwordless
-`sudo` cannot be exercised on macOS at all, and no unit test substitutes for
-them.
+### Not verified
 
-## Integration still to be done (deliberately not in this branch)
+- The interactive provider sign-in hand-off. The machine was already signed in,
+  and signing Codex out on the shared box would have destroyed another
+  engineer's authentication. The desktop's relaying of the URL and code is
+  covered by a focused test, not by a real device-auth round trip.
+- A user-scope (`systemctl --user`) install: this machine has passwordless
+  sudo, so every real run took the system-unit path.
+- Windows and macOS as machine targets. This is Linux only.
 
-The service is complete and tested but not wired: `main.ts`,
-`src/shared/types.ts`, the preload bridge, `package.json` and the Machines UI
-are all files another engineer is editing right now. The exact patch is:
+## Still open
 
-1. **`src/shared/types.ts`** — re-export from `./machineInstall` and add to
-   `AppBridge`:
-   ```ts
-   installMachine(request: MachineInstallRequest): Promise<MachineInstallResult>;
-   upgradeMachine(request: MachineUpgradeRequest): Promise<MachineInstallResult>;
-   probeMachineInstall(request: { machineId: string; target: MachineSshTarget }): Promise<MachineRuntimeProbe>;
-   bootstrapMachineProjectMirror(request: MachineMirrorBootstrapRequest): Promise<MachineMirrorBootstrapResult>;
-   onMachineInstallProgress(callback: (snapshot: MachineInstallSnapshot) => void): () => void;
-   ```
-2. **`src/main/main.ts`** — construct once, next to `AwsWorkerSetupService`:
-   ```ts
-   const machineInstaller = new MachineInstallerService({
-     store: settingsService,
-     doctor: cloudRunDoctorService,
-     getEnrollmentJson: (id) => machineLinkService.enrollmentJson(id),
-     waitForConnected: (id, timeoutMs) => machineLinkService.waitForConnected(id, timeoutMs),
-     bundleDir: path.join(app.getAppPath(), "dist", "machine"),
-     machineName: async (id) => (await settingsService.listMachines()).find((m) => m.id === id)?.name,
-     logger: (event, payload) => void debugLogService.write(event, payload)
-   });
-   void machineInstaller.recoverInterruptedOperation();
-   ```
-   `SettingsService` already implements `MachineInstallStore`. `MachineLinkService`
-   needs the two small methods above — `enrollmentJson(machineId)` returning the
-   stored pairing package as JSON, and `waitForConnected(machineId, timeoutMs)`
-   resolving `true` on the next hello from that machine.
-   Handlers stream progress on a `machines:install-progress` channel.
-3. **`package.json`** — add
-   `"test:machine-install": "npm run build:main && node --test dist/main/main/services/machineInstaller.test.js scripts/machine-install-transport-guard.test.mjs"`,
-   and append both files to `test:machines`.
-4. **Machines settings section** — an "Install / Upgrade" action per machine
-   that collects the SSH target, renders `MACHINE_INSTALL_PHASE_ORDER` as a
-   checklist against `snapshot.completed`, shows `authUrl`/`authCode` during
-   `preflight`, and shows `recovery.detail` with a Retry on a terminal failure.
-   Packaged builds ship no `dist/machine`; `readMachineBundle` throws a clear
-   message, and the packaging step needs to include the bundle before this ships.
+- Packaged builds ship no `dist/machine`. `readMachineBundle` fails with a clear
+  message and `ACCORDAGENTS_MACHINE_BUNDLE_DIR` overrides the location, but the
+  packaging step must include the bundle before this ships to a user.
+- A crash-looping release restarts every 3 s for the whole three-minute connect
+  window (56 restarts observed) before the rollback. It is bounded and it
+  recovers, but a start limit is worth considering.
+- The provider selector defaults to "Do not check", which preserves the previous
+  behaviour exactly. Whether it should default to Codex — so a machine that
+  cannot host anything is caught at setup rather than at the first turn — is a
+  product decision for the User, not one to make here.

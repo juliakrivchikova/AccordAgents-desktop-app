@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
-import { Copy, Loader2, Plus, Server, Trash2 } from "lucide-react";
+import { Copy, Loader2, Plus, Server, Settings2, Trash2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { CreateMachineResult, MachineLinkStatus, MachineListResult, MachineRecord } from "../../../shared/machineLink";
+import type { MachineInstallRecord } from "../../../shared/machineInstall";
 import { writeClipboardText } from "../../../shared/clipboard";
+import { MachineSetupPanel } from "./machine-setup-panel";
 
 /**
  * Machines transport: computers that run the app without a window and host
@@ -18,6 +20,12 @@ export function MachinesSection(): JSX.Element {
   const [error, setError] = useState<string | undefined>();
   const [enrollment, setEnrollment] = useState<CreateMachineResult | undefined>();
   const [copied, setCopied] = useState(false);
+  const [installs, setInstalls] = useState<MachineInstallRecord[]>([]);
+  const [setupFor, setSetupFor] = useState<string | undefined>();
+
+  const refreshInstalls = (): void => {
+    void window.consensus.listMachineInstalls().then(setInstalls).catch(() => undefined);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -33,10 +41,19 @@ export function MachinesSection(): JSX.Element {
         setError(listError instanceof Error ? listError.message : String(listError));
       }
     });
+    void window.consensus.listMachineInstalls().then((records) => {
+      if (!cancelled) setInstalls(records);
+    }).catch(() => undefined);
     const off = window.consensus.onMachinesUpdated(apply);
+    const offInstall = window.consensus.onMachineInstallProgress(() => {
+      void window.consensus.listMachineInstalls().then((records) => {
+        if (!cancelled) setInstalls(records);
+      }).catch(() => undefined);
+    });
     return () => {
       cancelled = true;
       off();
+      offInstall();
     };
   }, []);
 
@@ -101,6 +118,7 @@ export function MachinesSection(): JSX.Element {
   }
 
   const statusById = new Map(status.map((item) => [item.machineId, item]));
+  const installById = new Map(installs.map((item) => [item.machineId, item]));
 
   return (
     <section className="gen-section" data-testid="machines-section">
@@ -147,6 +165,7 @@ export function MachinesSection(): JSX.Element {
             <ul className="machines-list" data-testid="machines-list">
               {machines.map((machine) => {
                 const live = statusById.get(machine.id);
+                const install = installById.get(machine.id);
                 const connected = live?.connected === true;
                 return (
                   <li key={machine.id} className="gen-row machines-row" data-testid="machine-row" data-connected={connected ? "true" : "false"}>
@@ -162,9 +181,32 @@ export function MachinesSection(): JSX.Element {
                           ? `${live.lastHello.machineName} · ${live.lastHello.platform} · app ${live.lastHello.appVersion}`
                           : "Waiting for the machine runtime to connect."}
                         {machine.lastSeenAt ? ` Last seen ${new Date(machine.lastSeenAt).toLocaleString()}.` : ""}
+                        {install?.installedVersion
+                          ? ` Runtime ${install.installedVersion} installed from this desktop.`
+                          : install
+                            ? " Set up from this desktop is unfinished."
+                            : ""}
                       </div>
+                      {setupFor === machine.id ? (
+                        <MachineSetupPanel
+                          machineId={machine.id}
+                          machineName={machine.name}
+                          install={install}
+                          onDone={refreshInstalls}
+                        />
+                      ) : null}
                     </div>
                     <div className="gen-row-control machines-row-actions">
+                      <button
+                        type="button"
+                        className="gen-pill"
+                        data-testid="machine-setup-toggle"
+                        aria-expanded={setupFor === machine.id}
+                        onClick={() => setSetupFor((current) => (current === machine.id ? undefined : machine.id))}
+                      >
+                        <span className="gen-pill-lead"><Settings2 size={14} aria-hidden /></span>
+                        <span className="gen-pill-label">{install?.installedVersion ? "Upgrade" : "Set up"}</span>
+                      </button>
                       <button type="button" className="gen-pill" onClick={() => void showEnrollment(machine)} data-testid="machine-show-enrollment">
                         <span className="gen-pill-label">Enrollment</span>
                       </button>

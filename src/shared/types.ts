@@ -7,6 +7,29 @@ import type {
   RemoveMachineRequest
 } from "./machineLink";
 import type {
+  MachineInstallRecord,
+  MachineInstallRequest,
+  MachineInstallResult,
+  MachineInstallSnapshot,
+  MachineMirrorBootstrapRequest,
+  MachineMirrorBootstrapResult,
+  MachineRuntimeProbe,
+  MachineSshTarget,
+  MachineUpgradeRequest
+} from "./machineInstall";
+
+export type {
+  MachineInstallRecord,
+  MachineInstallRequest,
+  MachineInstallResult,
+  MachineInstallSnapshot,
+  MachineMirrorBootstrapRequest,
+  MachineMirrorBootstrapResult,
+  MachineRuntimeProbe,
+  MachineSshTarget,
+  MachineUpgradeRequest
+} from "./machineInstall";
+import type {
   CreateMobilePairingRequest,
   CreateMobilePairingResult,
   MobileControlSettings,
@@ -2708,6 +2731,14 @@ export interface AppBridge {
   removeMachine(request: RemoveMachineRequest): Promise<MachineListResult>;
   machineEnrollment(request: MachineEnrollmentRequest): Promise<CreateMachineResult>;
   onMachinesUpdated(callback: (result: MachineListResult) => void): () => void;
+  // Machines transport: installing and upgrading the runtime on a machine.
+  // This is the only SSH path to a machine; messaging always uses the relay.
+  probeMachineInstall(request: { machineId: string; target: MachineSshTarget }): Promise<MachineRuntimeProbe>;
+  installMachine(request: MachineInstallRequest): Promise<MachineInstallResult>;
+  upgradeMachine(request: MachineUpgradeRequest): Promise<MachineInstallResult>;
+  bootstrapMachineProjectMirror(request: MachineMirrorBootstrapRequest): Promise<MachineMirrorBootstrapResult>;
+  listMachineInstalls(): Promise<MachineInstallRecord[]>;
+  onMachineInstallProgress(callback: (snapshot: MachineInstallSnapshot) => void): () => void;
   onReviewProgress(callback: (progress: ReviewProgress) => void): () => void;
   onConversationUpdated(callback: (conversation: ConversationUpdate) => void): () => void;
 }

@@ -168,6 +168,8 @@ export interface MachineRuntimeProbe {
 
 export interface MachineDrainReport {
   drained: boolean;
+  /** What the service manager reports after the drain attempt. */
+  serviceState?: string;
   runtimePids: number[];
   supervisorPids: number[];
   providerPids: number[];

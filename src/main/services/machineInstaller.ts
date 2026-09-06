@@ -127,10 +127,14 @@ export interface MachineInstallerOptions {
   doctor: MachineDoctor;
   /** Enrollment package for a machine, as Settings > Machines mints it. */
   getEnrollmentJson: (machineId: string) => Promise<string>;
-  /** Resolves when the machine's relay link reports it connected. */
-  waitForConnected: (machineId: string, timeoutMs: number) => Promise<boolean>;
-  /** Where `npm run build:machine` put the bundle. */
-  bundleDir: string;
+  /** Resolves on the next hello from the machine that arrives AFTER the call
+   *  started, reporting `expectAppVersion` when one is given. A link that is
+   *  merely open does not count: after a restart it can still be the old
+   *  process. */
+  waitForConnected: (machineId: string, timeoutMs: number, expectAppVersion?: string) => Promise<boolean>;
+  /** Where `npm run build:machine` put the bundle. Resolved per operation, so
+   *  rebuilding the bundle does not need an app restart. */
+  bundleDir: string | (() => string);
   machineName?: (machineId: string) => Promise<string | undefined>;
   sshExec?: MachineSshExec;
   uploadBundle?: MachineBundleUpload;
@@ -313,10 +317,14 @@ export class MachineInstallerService {
         if (check.status === "warn") warnings.push(`${check.id}: ${check.detail ?? "warning"}`);
       }
 
+      // Only what the caller actually asked for. Passing the default service
+      // name here would override the name the machine derives from the install
+      // directory, and a second deployment would take over the first one's
+      // unit — the collision this derivation exists to prevent.
       const probe = await this.probe(request.target, {
         installRoot: request.installRoot,
         userDataDir: request.userDataDir,
-        serviceName: request.serviceName ?? DEFAULT_MACHINE_SERVICE_NAME
+        serviceName: request.serviceName
       });
       const missing = missingRequirements(probe);
       if (missing.length) {
@@ -326,10 +334,12 @@ export class MachineInstallerService {
         });
       }
 
+      // The machine resolved `~`, the data directory and the unit name in the
+      // probe, so both sides agree on exactly one layout.
       const layout = machineInstallLayout({
-        installRoot: request.installRoot ?? probe.installRoot ?? `${probe.home}/${DEFAULT_MACHINE_INSTALL_DIRNAME}`,
-        userDataDir: request.userDataDir ?? probe.userDataDir ?? `${probe.home}/${DEFAULT_MACHINE_USER_DATA_SUFFIX}`,
-        serviceName: request.serviceName ?? DEFAULT_MACHINE_SERVICE_NAME,
+        installRoot: probe.installRoot || `${probe.home}/${DEFAULT_MACHINE_INSTALL_DIRNAME}`,
+        userDataDir: probe.userDataDir || `${probe.home}/${DEFAULT_MACHINE_USER_DATA_SUFFIX}`,
+        serviceName: probe.serviceName || DEFAULT_MACHINE_SERVICE_NAME,
         serviceScope: probe.serviceScope ?? (probe.hasPasswordlessSudo ? "system" : "user")
       });
       record = {
@@ -344,7 +354,9 @@ export class MachineInstallerService {
 
       // 2. The bundle this desktop would install.
       await emit("bundle", "Reading the runtime bundle…");
-      const bundle = readMachineBundle(this.options.bundleDir);
+      const bundle = readMachineBundle(
+        typeof this.options.bundleDir === "function" ? this.options.bundleDir() : this.options.bundleDir
+      );
       stagedVersion = bundle.version;
       const fence = versionFence(kind, probe, bundle, request.allowDowngrade === true);
       if (fence) {
@@ -434,10 +446,14 @@ export class MachineInstallerService {
             kind: "manual-drain-required",
             detail: [
               drain.detail,
-              `Version ${probe.installedVersion ?? "(unknown)"} is still the one running and the machine keeps working.`,
-              `The new files are staged in ${layout.releasesDir}/${release} and are not in use.`,
-              "Replacing the runtime while the old one still owns a provider process would run the same member twice,",
-              "so the upgrade stopped here. Stop the remaining processes on the machine and retry."
+              `Nothing was replaced: ${probe.installedVersion ?? "the installed version"} is still the one the machine would run,`,
+              `and the new files are staged in ${layout.releasesDir}/${release} without being used.`,
+              drain.serviceState === "active"
+                ? "The runtime is still running."
+                : "The runtime was stopped for the upgrade and has deliberately NOT been started again:"
+                  + " something this installation owns is still alive, and starting a second runtime beside it"
+                  + " would run the same member twice. The machine hosts no members until that is resolved.",
+              "Stop the processes listed below on the machine, then retry — the retry re-checks before changing anything."
             ].filter(Boolean).join(" "),
             activeVersion: probe.installedVersion,
             blockingPids: blocking
@@ -488,7 +504,7 @@ export class MachineInstallerService {
       // 7. The machine is installed when it says hello over the relay, not
       //    when systemd says the unit started.
       await emit("verify", "Waiting for the machine to connect…");
-      const connected = await this.options.waitForConnected(request.machineId, CONNECT_TIMEOUT_MS);
+      const connected = await this.options.waitForConnected(request.machineId, CONNECT_TIMEOUT_MS, bundle.version);
       // A connection alone is not proof: a unit that failed to restart can
       // leave an older process connected. Read back which release the machine
       // actually runs before calling this done.

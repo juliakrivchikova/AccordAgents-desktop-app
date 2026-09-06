@@ -426,6 +426,51 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return Boolean(this.connections.get(machineId)?.machineDeviceId);
   }
 
+  /** The enrollment package for a machine, as the installer writes it to the
+   *  machine. It carries the relay seal key, so it is read on demand and never
+   *  held anywhere else. */
+  async enrollmentJson(machineId: string): Promise<string> {
+    const record = (await this.settings.listMachines()).find((machine) => machine.id === machineId);
+    if (!record) {
+      throw new Error("Machine not found.");
+    }
+    const pairing = await this.settings.getMachinePairing(record.pairingKey);
+    if (!pairing) {
+      throw new Error("The machine's enrollment is missing; remove and add the machine again.");
+    }
+    return JSON.stringify(pairing, null, 2);
+  }
+
+  /** Resolves on the next hello from this machine that arrives after the call
+   *  started — never on a connection that was already open. With
+   *  `expectAppVersion` it also requires that hello to report that version, so
+   *  an upgrade is only "done" once the NEW runtime greeted the desktop. */
+  waitForConnected(machineId: string, timeoutMs: number, expectAppVersion?: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.emitter.off("hello", onHello);
+        resolve(value);
+      };
+      const onHello = (event: { machineId: string; appVersion?: string }): void => {
+        if (event.machineId !== machineId) return;
+        if (expectAppVersion && event.appVersion !== expectAppVersion) {
+          void this.debugLogs.write("machine-link.wait.version-mismatch", {
+            machineId, expected: expectAppVersion, reported: event.appVersion ?? ""
+          });
+          return;
+        }
+        finish(true);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      timer.unref?.();
+      this.emitter.on("hello", onHello);
+    });
+  }
+
   async cancelMachineRun(request: { machineId: string; conversationId: string; runId: string; onStopPending?: (machineName: string) => Promise<void> }): Promise<void> {
     const connection = this.connections.get(request.machineId);
     if (!connection) {
@@ -912,6 +957,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
     connection.settingsSynced = true;
     connection.eventChannel?.start();
     this.emitStatus();
+    // Machine setup waits for a hello that arrives AFTER it restarted the
+    // runtime, and checks the version it reports: a live connection alone can
+    // still be the old process that never went away.
+    this.emitter.emit("hello", { machineId: connection.record.id, appVersion: hello.appVersion, deviceId: hello.deviceId });
     await this.reconcileAfterHello(connection, hello);
   }
 

@@ -920,3 +920,120 @@
   font-size: 12px;
   color: var(--app-muted);
 }
+
+/* Machine setup: installing and upgrading the runtime over SSH. */
+.machine-setup {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--muted);
+}
+
+.machine-setup-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.machine-setup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.machine-setup-field-wide {
+  grid-column: span 2;
+}
+
+.machine-setup-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.machine-setup-progress {
+  margin-top: 12px;
+}
+
+.machine-setup-steps {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.machine-setup-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.machine-setup-step.is-done,
+.machine-setup-step.is-current {
+  color: var(--foreground);
+}
+
+.machine-setup-step-mark {
+  display: inline-flex;
+  width: 14px;
+  justify-content: center;
+}
+
+.machine-setup-message {
+  font-size: 13px;
+  color: var(--foreground);
+}
+
+.machine-setup-note {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--app-muted);
+}
+
+.machine-setup-recovery {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--foreground);
+}
+
+.machine-setup-log {
+  margin-top: 6px;
+  max-height: 160px;
+  overflow: auto;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  color: var(--app-muted);
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+@media (max-width: 620px) {
+  .machine-setup-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .machine-setup-field-wide {
+    grid-column: span 1;
+  }
+}
+
+.machine-setup-select {
+  height: 32px;
+  padding: 0 8px;
+  font-size: 13px;
+  color: var(--foreground);
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
