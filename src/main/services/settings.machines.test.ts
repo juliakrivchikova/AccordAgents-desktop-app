@@ -115,3 +115,48 @@ test("machine export refuses an unreadable enabled secret instead of deleting it
     assert.deepEqual((await service.exportMachineSettingsSnapshot()).agentEnvironment, []);
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });
+
+test("a machine's install record never travels to a machine and dies with the machine", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-install-"));
+  const file = path.join(dir, "settings.json");
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir }));
+  const instance = (): SettingsService => {
+    const service = new SettingsService();
+    (service as any).settingsPath = file;
+    return service;
+  };
+  try {
+    await instance().saveMachine({
+      id: "machine-1", name: "Cloud box", deviceId: "", pairingKey: "pairing-1",
+      createdAt: "2026-09-06T00:00:00.000Z"
+    });
+    await instance().saveMachineInstall({
+      machineId: "machine-1",
+      target: { host: "198.51.100.10", user: "ubuntu", identityFile: "/Users/me/.ssh/accord.pem" },
+      installRoot: "/home/ubuntu/accordagents-machine",
+      userDataDir: "/home/ubuntu/.accordagents/machine",
+      serviceName: "accordagents-machine",
+      serviceScope: "system",
+      installedVersion: "1.10.4"
+    });
+    assert.equal((await instance().getMachineInstall("machine-1"))?.installedVersion, "1.10.4");
+
+    // The snapshot a machine receives must not carry this desktop's way in.
+    const snapshot = await instance().exportMachineSettingsSnapshot();
+    assert.ok(!snapshot.settingsJson.includes("machineInstalls"));
+    assert.ok(!snapshot.settingsJson.includes("198.51.100.10"));
+    assert.ok(!snapshot.settingsJson.includes("accord.pem"));
+
+    // Applying a snapshot on a machine must not wipe that machine's own records.
+    const receiver = instance();
+    await receiver.importMachineSettingsSnapshot(snapshot);
+    assert.equal((await instance().getMachineInstall("machine-1"))?.installedVersion, "1.10.4");
+
+    // Removing the machine removes the access record with it.
+    await instance().removeMachine("machine-1");
+    assert.equal(await instance().getMachineInstall("machine-1"), undefined);
+    assert.ok(!(await readFile(file, "utf8")).includes("198.51.100.10"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

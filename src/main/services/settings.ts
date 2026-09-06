@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { hostPlatform, userDataPath } from "../platform";
 import type { MachineRecord, MachineSettingsSnapshot } from "../../shared/machineLink";
+import type { MachineInstallRecord } from "../../shared/machineInstall";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type {
   StoredMobilePairedDevice,
@@ -141,6 +142,10 @@ interface StoredSettings {
    *  relay seal keys and are stored sealed, keyed by MachineRecord.pairingKey. */
   machines?: MachineRecord[];
   encryptedMachinePairings?: string;
+  /** How each machine was installed from THIS desktop (SSH access, install
+   *  root, service, installed version). Never travels to a machine: it carries
+   *  this desktop's way in. */
+  machineInstalls?: MachineInstallRecord[];
 }
 
 function isRemoteSessionCleanupReason(value: unknown): value is RemoteSessionCleanupTombstone["reason"] {
@@ -2779,10 +2784,29 @@ export class SettingsService {
         settings.remoteSessionCleanupTombstones
       ),
       machines: this.normalizeMachines(settings.machines),
+      machineInstalls: this.normalizeMachineInstalls(settings.machineInstalls),
       encryptedMachinePairings: typeof settings.encryptedMachinePairings === "string" && settings.encryptedMachinePairings.trim()
         ? settings.encryptedMachinePairings
         : undefined
     };
+  }
+
+  private normalizeMachineInstalls(value: unknown): MachineInstallRecord[] | undefined {
+    if (!Array.isArray(value)) {
+      return undefined;
+    }
+    const records = value.flatMap((entry): MachineInstallRecord[] => {
+      if (!entry || typeof entry !== "object") {
+        return [];
+      }
+      const record = entry as Partial<MachineInstallRecord>;
+      const host = record.target && typeof record.target === "object" ? record.target.host : undefined;
+      if (typeof record.machineId !== "string" || !record.machineId.trim() || typeof host !== "string" || !host.trim()) {
+        return [];
+      }
+      return [{ ...record, machineId: record.machineId.trim() } as MachineInstallRecord];
+    });
+    return records.length > 0 ? records : undefined;
   }
 
   private normalizeMachines(value: unknown): MachineRecord[] | undefined {
@@ -3274,6 +3298,9 @@ export class SettingsService {
     const stored = await this.readStored();
     const removed = (stored.machines ?? []).find((machine) => machine.id === id);
     stored.machines = (stored.machines ?? []).filter((machine) => machine.id !== id);
+    // A removed machine must not leave this desktop's way into it behind.
+    const installs = (stored.machineInstalls ?? []).filter((record) => record.machineId !== id);
+    stored.machineInstalls = installs.length ? installs : undefined;
     if (removed) {
       const pairings = this.readMachinePairings(stored);
       delete pairings[removed.pairingKey];
@@ -3281,6 +3308,35 @@ export class SettingsService {
     }
     await this.writeStored(stored);
     return (stored.machines ?? []).map((machine) => ({ ...machine }));
+  }
+
+  /** Machine install records (machines transport, install/upgrade). Kept next
+   *  to the machine records but deliberately outside the settings snapshot a
+   *  machine receives. */
+  async listMachineInstalls(): Promise<MachineInstallRecord[]> {
+    const stored = await this.readStored();
+    return (stored.machineInstalls ?? []).map((record) => ({ ...record }));
+  }
+
+  async getMachineInstall(machineId: string): Promise<MachineInstallRecord | undefined> {
+    const stored = await this.readStored();
+    const found = (stored.machineInstalls ?? []).find((record) => record.machineId === machineId);
+    return found ? { ...found } : undefined;
+  }
+
+  async saveMachineInstall(record: MachineInstallRecord): Promise<void> {
+    const stored = await this.readStored();
+    const records = (stored.machineInstalls ?? []).filter((entry) => entry.machineId !== record.machineId);
+    records.push({ ...record });
+    stored.machineInstalls = records;
+    await this.writeStored(stored);
+  }
+
+  async removeMachineInstall(machineId: string): Promise<void> {
+    const stored = await this.readStored();
+    const records = (stored.machineInstalls ?? []).filter((entry) => entry.machineId !== machineId);
+    stored.machineInstalls = records.length ? records : undefined;
+    await this.writeStored(stored);
   }
 
   async getMachinePairing(pairingKey: string): Promise<MobilePairingPackage | undefined> {
@@ -3309,6 +3365,7 @@ export class SettingsService {
       cloudRunsDeviceId: _cloudRunsDeviceId,
       agentEnvironment: _agentEnvironment,
       machines: _machines,
+      machineInstalls: _machineInstalls,
       encryptedMachinePairings: _pairings,
       remoteSessionCleanupTombstones: _tombstones,
       lastRepoPath: _lastRepoPath,
@@ -3368,6 +3425,7 @@ export class SettingsService {
       cloudRunsDeviceId: stored.cloudRunsDeviceId,
       agentEnvironment: { variables },
       machines: stored.machines,
+      machineInstalls: stored.machineInstalls,
       encryptedMachinePairings: stored.encryptedMachinePairings,
       remoteSessionCleanupTombstones: stored.remoteSessionCleanupTombstones,
       lastRepoPath: stored.lastRepoPath

@@ -690,13 +690,13 @@ export function buildMirrorUpSyncRsyncArgs(params: {
 
 // rsync tokenizes the -e value with shell-like quoting; single-quote any token
 // that is not plainly safe (identity files with spaces, etc.).
-function rsyncRshCommand(sshArgs: string[]): string {
+export function rsyncRshCommand(sshArgs: string[]): string {
   return ["ssh", ...sshArgs]
     .map((part) => (/^[A-Za-z0-9._/=@:-]+$/.test(part) ? part : shellQuotePosix(part)))
     .join(" ");
 }
 
 // The remote side of an rsync path is word-split by the remote shell.
-function escapeRemoteRsyncPath(remotePath: string): string {
+export function escapeRemoteRsyncPath(remotePath: string): string {
   return remotePath.replace(/([ \t'"\\])/g, "\\$1");
 }
