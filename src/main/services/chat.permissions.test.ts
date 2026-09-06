@@ -9564,6 +9564,22 @@ test("recoverStaleChatRun leaves a pending message whose run is still live", () 
   assert.equal(pending.metadata?.staleRunRecovery, undefined);
 });
 
+test("recoverStaleChatRun leaves a pending bubble of a machine-hosted member alone", () => {
+  // A member whose home is a machine runs there; a resume the machine started
+  // itself (after an approval) has a run id this desktop never registered.
+  const participant = { ...chatParticipant("claude-code"), homeMachineId: "machine-1" };
+  const conversation = chatConversation([participant]);
+  conversation.messages.push(pendingParticipantMessage(participant, "pending-machine", "machine-run"));
+  const { service } = testService({ conversation });
+
+  const changed = (service as any).recoverStaleChatRun(conversation);
+
+  assert.equal(changed, false);
+  const pending = conversation.messages.find((message: any) => message.id === "pending-machine")!;
+  assert.equal(pending.status, "pending");
+  assert.equal(pending.metadata?.staleRunRecovery, undefined);
+});
+
 test("a swept placeholder is marked, and a late result repairs it preserving reactions", async () => {
   const participant = chatParticipant("codex-cli");
   const runId = "dead-run";

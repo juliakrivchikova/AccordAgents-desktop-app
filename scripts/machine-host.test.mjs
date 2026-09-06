@@ -140,3 +140,15 @@ test("the machine's hello lists turns waiting for a copy as active", async () =>
   assert.ok(hello.activeRunIds.includes("run-listed"));
   host.close();
 });
+
+test("a desktop sweep never overrides an outcome the machine produced", async () => {
+  const { mergeReplicatedMessages } = await import("../dist/main/main/services/machineHost.js");
+  const done = { id: "bubble", role: "participant", participantId: "p1", content: "The page title is Example Domain.", createdAt: "2026-09-06T09:04:38.000Z", status: "done", metadata: { runId: "run-x" } };
+  const swept = { ...done, content: "Interrupted before completion.", status: "error", metadata: { runId: "run-x", staleRunRecovery: { runId: "run-x", at: "2026-09-06T09:04:38.002Z" } } };
+  const merged = mergeReplicatedMessages([done], [swept]);
+  assert.equal(merged[0].status, "done");
+  assert.equal(merged[0].content, "The page title is Example Domain.");
+  // A genuine later edit by the desktop (no sweep marker) still wins.
+  const edited = { ...done, content: "edited on the desktop", metadata: { runId: "run-x" } };
+  assert.equal(mergeReplicatedMessages([done], [edited])[0].content, "edited on the desktop");
+});

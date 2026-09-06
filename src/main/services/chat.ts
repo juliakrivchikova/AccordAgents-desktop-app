@@ -18340,6 +18340,14 @@ export class ChatService {
     if (typeof runId !== "string" || !runId) {
       return false;
     }
+    // Machines transport: a member whose home is a machine runs there, and
+    // the machine owns every outcome of its runs (including runs it started
+    // itself, such as a resume after an approval, which this desktop never
+    // registered). Its pending bubbles are never swept here; the machine's
+    // result, or its answer to a query, finishes them.
+    if (message.participantId && this.chatParticipants(conversation).some((participant) => participant.id === message.participantId && participant.homeMachineId)) {
+      return true;
+    }
     if (this.isNonTerminalRemoteRun(conversation.metadata, runId)) {
       return true;
     }

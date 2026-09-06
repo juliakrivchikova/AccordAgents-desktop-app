@@ -912,6 +912,12 @@ export function mergeReplicatedMessages(own: ChatMessage[], incoming: ChatMessag
     if (current && current.status !== "pending" && message.status === "pending") {
       continue;
     }
+    // A desktop that swept a bubble as "interrupted" (its stale-run sweep
+    // found no live run for it) never overrides an outcome this machine
+    // already produced for that bubble: the machine ran it and knows.
+    if (current && current.status !== "pending" && message.metadata?.staleRunRecovery) {
+      continue;
+    }
     byId.set(message.id, message);
   }
   for (const id of removedIds) {
