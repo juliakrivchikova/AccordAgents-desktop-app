@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { hostPlatform, userDataPath } from "../platform";
@@ -2691,7 +2691,13 @@ export class SettingsService {
     const serialized = `${JSON.stringify(settings, null, 2)}\n`;
     const write = this.storedWriteQueue.then(async () => {
       await mkdir(path.dirname(this.settingsPath), { recursive: true });
-      await writeFile(this.settingsPath, serialized, "utf8");
+      const temporary = `${this.settingsPath}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, serialized, { encoding: "utf8", mode: 0o600 });
+        await rename(temporary, this.settingsPath);
+      } finally {
+        await rm(temporary, { force: true }).catch(() => undefined);
+      }
     });
     this.storedWriteQueue = write.catch(() => undefined);
     await write;
@@ -2778,10 +2784,29 @@ export class SettingsService {
         pairingKey: record.pairingKey.trim(),
         createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date(0).toISOString(),
         ...(typeof record.lastSeenAt === "string" ? { lastSeenAt: record.lastSeenAt } : {}),
+        pendingRuns: this.normalizeMachineRunRecords(record.pendingRuns),
+        pendingCancels: this.normalizeMachineRunRecords(record.pendingCancels),
         ...(record.lastHello && typeof record.lastHello === "object" ? { lastHello: record.lastHello } : {})
       }];
     });
     return machines.length > 0 ? machines : undefined;
+  }
+
+  private normalizeMachineRunRecords(value: unknown): Array<{ runId: string; conversationId: string }> {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    const records = new Map<string, { runId: string; conversationId: string }>();
+    for (const entry of value) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      const { runId, conversationId } = entry as Record<string, unknown>;
+      if (typeof runId === "string" && runId.trim() && typeof conversationId === "string" && conversationId.trim()) {
+        records.set(runId.trim(), { runId: runId.trim(), conversationId: conversationId.trim() });
+      }
+    }
+    return [...records.values()];
   }
 
   private normalizeChatProviderKind(value: unknown): ChatProviderKind | undefined {
@@ -3245,8 +3270,9 @@ export class SettingsService {
 
   /** What a machine needs to run participants exactly like this desktop:
    *  roles, rules, saved prompts, participant presets, prompt-context and
-   *  limit settings, and the agent environment values. Provider API keys, AWS
-   *  credentials, cloud-run and machine records never leave this desktop. */
+   *  limit settings, and the manually configured agent environment values.
+   *  Dedicated provider/AWS credentials and machine records are excluded;
+   *  secrets explicitly configured in agent environment variables travel. */
   async exportMachineSettingsSnapshot(): Promise<MachineSettingsSnapshot> {
     const stored = await this.readStored();
     const {

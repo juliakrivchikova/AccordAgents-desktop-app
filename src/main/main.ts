@@ -2806,6 +2806,7 @@ void app.whenReady().then(async () => {
         warnings: event.warnings,
         error: event.error,
         finishedAt: event.finishedAt,
+        receiptId: event.receiptId,
         machineName: event.machineName
       })
     );

@@ -9595,6 +9595,59 @@ test("inside a machine runtime its own members' bubbles are swept like local one
   assert.equal(conversation.messages.find((message: any) => message.id === "pending-other")!.status, "pending");
 });
 
+test("Stop routes an unregistered machine resume to its owner and keeps its text while waiting", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1" };
+  const conversation = chatConversation([participant]);
+  const pending = pendingParticipantMessage(participant, "pending-native-resume", "native-resume");
+  pending.content = "Already streamed text";
+  conversation.messages.push(pending);
+  const { service, storage } = testService({ conversation });
+  const calls: string[] = [];
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("Stop must not start a turn"); },
+    cancelMachineRun: async (request) => {
+      calls.push(`${request.machineId}/${request.conversationId}/${request.runId}`);
+      await request.onStopPending?.("Cloud machine");
+    }
+  });
+  assert.equal(await (service as any).cancelStoredRun("native-resume"), true);
+  await (service as any).waitForQueuedSave(conversation.id);
+  assert.deepEqual(calls, [`machine-1/${conversation.id}/native-resume`]);
+  const stored = storage.current.messages.find((message: ChatMessage) => message.id === pending.id);
+  assert.equal(stored.status, "pending");
+  assert.equal(stored.content, pending.content);
+  assert.equal(stored.metadata.stopPending.machineName, "Cloud machine");
+  assert.equal(stored.metadata.staleRunRecovery, undefined);
+});
+
+test("a native resume publishes its outcome after the caller appends final messages", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const runId = "native-settlement";
+  conversation.messages.push(pendingParticipantMessage(participant, "native-result", runId));
+  const { service } = testService({ conversation });
+  const internal = service as any;
+  await internal.beginChatRun(conversation, runId);
+  const controller = new AbortController();
+  internal.registerTargetRun(runId, controller, { conversationId: conversation.id, participantId: participant.id, participantHandle: participant.handle });
+  let result: Promise<{ messages: ChatMessage[]; warnings: string[] }> | undefined;
+  let published = false;
+  service.onParticipantRunSettled((run) => { result = service.settledParticipantRunResult(run).then((value) => { published = true; return value; }); });
+  internal.unregisterTargetRun(runId, controller);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(published, false, "controller release is earlier than the caller's final append");
+  await internal.withChatMutation(conversation, () => {
+    const message = conversation.messages.find((item) => item.id === "native-result")!;
+    message.status = "done";
+    message.content = "final result appended by the resume caller";
+    internal.queueSnapshot(conversation);
+  });
+  await internal.endChatRun(conversation, runId);
+  const outcome = await result!;
+  assert.equal(outcome.messages[0].status, "done");
+  assert.equal(outcome.messages[0].content, "final result appended by the resume caller");
+});
+
 test("a swept placeholder is marked, and a late result repairs it preserving reactions", async () => {
   const participant = chatParticipant("codex-cli");
   const runId = "dead-run";
@@ -12420,6 +12473,15 @@ function participantRequestApproval(
     ...approvalPatch
   };
 }
+
+test("a late machine result is not acknowledged when its chat is absent", async () => {
+  const service = Object.create(ChatService.prototype) as ChatService;
+  Object.assign(service, { storage: { getConversation: async () => undefined } });
+  await assert.rejects(service.applyMachineLateTerminal({
+    conversationId: "missing-chat", runId: "run-1", status: "completed",
+    messages: [], machineName: "Box"
+  }), /has not been stored/);
+});
 
 function participantManagerActor(conversationId: string, participant: ChatParticipant): {
   conversationId: string;

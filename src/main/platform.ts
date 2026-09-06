@@ -155,7 +155,12 @@ export function createHeadlessPlatform(options: HeadlessPlatformOptions = {}): H
   const userDataDir = path.resolve(
     options.userDataDir ?? process.env.ACCORDAGENTS_USER_DATA_DIR?.trim() ?? path.join(os.homedir(), ".accordagents", "machine")
   );
-  const appPath = options.appPath ?? process.env.ACCORDAGENTS_APP_PATH?.trim() ?? path.resolve(__dirname, "..", "..", "..");
+  // The standalone machine bundle ships beside package.json; compiled desktop
+  // modules live three directories below the repository/package root.
+  const defaultAppPath = existsSync(path.join(__dirname, "package.json"))
+    ? __dirname
+    : path.resolve(__dirname, "..", "..", "..");
+  const appPath = options.appPath ?? process.env.ACCORDAGENTS_APP_PATH?.trim() ?? defaultAppPath;
   const appVersion = options.appVersion ?? readPackageVersion(appPath);
   let key: Buffer | undefined;
   const loadKey = (): Buffer => {

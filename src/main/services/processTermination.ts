@@ -12,19 +12,20 @@ export interface CapturedPosixProcess {
 export interface PosixProcessRow extends CapturedPosixProcess {
   ppid: number;
   pgid: number;
+  state?: string;
 }
 
 export type PosixProcessTableReader = () => Map<number, PosixProcessRow> | undefined;
 
 const POSIX_PS_PATH = "/bin/ps";
-const POSIX_PS_ARGS = ["-axo", "pid=,ppid=,pgid=,lstart="];
+const POSIX_PS_ARGS = ["-axo", "pid=,ppid=,pgid=,stat=,lstart="];
 const POSIX_PS_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 const POSIX_PS_TIMEOUT_MS = 1_000;
 
 function parsePosixProcessTable(output: string): Map<number, PosixProcessRow> {
   const rows = new Map<number, PosixProcessRow>();
   for (const line of output.split(/\r?\n/)) {
-    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/);
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/);
     if (!match) {
       continue;
     }
@@ -33,7 +34,8 @@ function parsePosixProcessTable(output: string): Map<number, PosixProcessRow> {
       pid,
       ppid: Number.parseInt(match[2], 10),
       pgid: Number.parseInt(match[3], 10),
-      startedAt: match[4]
+      state: match[4],
+      startedAt: match[5]
     });
   }
   return rows;
@@ -150,7 +152,10 @@ export function hasLiveCapturedPosixProcesses(
   if (!rows) {
     return true;
   }
-  return captured.some((identity) => rows.get(identity.pid)?.startedAt === identity.startedAt);
+  return captured.some((identity) => {
+    const row = rows.get(identity.pid);
+    return row?.startedAt === identity.startedAt && !row.state?.startsWith("Z");
+  });
 }
 
 export function terminateCapturedPosixProcesses(
@@ -168,7 +173,7 @@ export function terminateCapturedPosixProcesses(
   const signaledGroups = new Set<number>();
   for (const identity of captured) {
     const current = rows.get(identity.pid);
-    if (!current || current.startedAt !== identity.startedAt) {
+    if (!current || current.startedAt !== identity.startedAt || current.state?.startsWith("Z")) {
       continue;
     }
     try {

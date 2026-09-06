@@ -16,9 +16,21 @@ test("machine link replicates settings and conversations, runs a turn, streams p
   try {
     const pairing = machinePairing(address.url);
     const record = { id: "machine-1", name: "Test box", deviceId: "", pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
+    let rejectRunRecord;
+    let holdRunRecord;
+    let releaseRunRecord;
     const desktopSettings = {
       listMachines: async () => [record],
-      saveMachine: async (next) => { Object.assign(record, next); return [record]; },
+      saveMachine: async (next) => {
+        if (rejectRunRecord && next.pendingRuns?.some((run) => run.runId === rejectRunRecord)) {
+          throw new Error("ENOSPC: cannot store the run intent");
+        }
+        if (holdRunRecord && next.pendingRuns?.some((run) => run.runId === holdRunRecord)) {
+          holdRunRecord = undefined;
+          await new Promise((resolve) => { releaseRunRecord = resolve; });
+        }
+        Object.assign(record, next); return [record];
+      },
       removeMachine: async () => [],
       getMachinePairing: async (key) => (key === pairing.rendezvousId ? pairing : undefined),
       exportMachineSettingsSnapshot: async () => {
@@ -105,6 +117,22 @@ test("machine link replicates settings and conversations, runs a turn, streams p
       findings: []
     };
     const progressSeen = [];
+    rejectRunRecord = "run-no-store";
+    const refused = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: rejectRunRecord, pendingMessageId: "pending-no-store" });
+    assert.equal(refused.status, "failed");
+    assert.match(refused.error, /ENOSPC/);
+    assert.ok(!hostRuns.some((run) => run.runId === rejectRunRecord), "a failed intent write must never start a provider turn");
+    rejectRunRecord = undefined;
+    holdRunRecord = "run-cancel-before-store";
+    const preparingController = new AbortController();
+    const preparing = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: holdRunRecord, pendingMessageId: "pending-before-store", signal: preparingController.signal });
+    await waitFor(() => typeof releaseRunRecord === "function", 5_000);
+    assert.ok(!hostRuns.some((run) => run.runId === "run-cancel-before-store"));
+    preparingController.abort();
+    releaseRunRecord();
+    assert.equal((await preparing).status, "interrupted");
+    assert.ok(!hostRuns.some((run) => run.runId === "run-cancel-before-store"));
+    assert.ok(!(record.pendingRuns ?? []).some((run) => run.runId === "run-cancel-before-store"));
     const result = await link.runTurn({
       conversation, participant, triggerMessage: conversation.messages[0], runId: "run-1", pendingMessageId: "pending-1",
       progress: (progress) => progressSeen.push(progress)
@@ -147,7 +175,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     assert.equal(second.status, "completed");
     second.acknowledge?.();
     assert.ok(machineStore.get("conv-1").messages.some((message) => message.id === "msg-2"));
-    assert.equal(importedSnapshots.length, 3, "settings travel with every turn request");
+    assert.equal(importedSnapshots.length, 5, "settings travel with every turn preparation, including a failed or cancelled intent write");
 
     // Cancel: the desktop aborts, the machine's turn signal fires, the result is interrupted.
     conversation.messages.push({ id: "msg-long", role: "user", content: "slow", createdAt: new Date().toISOString(), status: "done" });
@@ -363,6 +391,79 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     throw error;
   } finally {
     await relay.close();
+  }
+});
+
+test("outgoing commands preserve order and Stop fences dispatch even when a write fails", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { openMobileRelayPayload } = await import("../dist/main/main/services/mobileRelaySealing.js");
+  const pairing = machinePairing("ws://unused/v1/relay");
+  const record = { id: "machine-fence", name: "Fence box", pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
+  const writes = [];
+  let onWrite = async () => undefined;
+  let onSave = () => undefined;
+  const client = {
+    on() {}, connect: async () => undefined, close() {},
+    sendCiphertext: async ({ ciphertext }) => {
+      const envelope = await openMobileRelayPayload(ciphertext, pairing.relaySealKeyBase64);
+      writes.push(envelope.body);
+      await onWrite(envelope.body);
+    }
+  };
+  const link = new MachineLinkService({
+    listMachines: async () => [record], getMachinePairing: async () => pairing,
+    saveMachine: async (next) => { Object.assign(record, next); onSave(next); return [record]; },
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
+  }, { write: async () => undefined }, { appVersion: "test", desktopDeviceId: "desktop-fence", createClient: () => client });
+  await link.start();
+  const connection = link.connections.get(record.id);
+  connection.machineDeviceId = "machine-device";
+  try {
+    let releaseWrite;
+    onWrite = async () => { await new Promise((resolve) => { releaseWrite = resolve; }); };
+    const first = link.send(connection, { type: "machine.settings.sync", snapshot: { version: 1, exportedAt: "", settingsJson: "x".repeat(2_000_000), agentEnvironment: [] } });
+    await waitFor(() => Boolean(releaseWrite), 5_000);
+    const second = link.send(connection, { type: "machine.hello.request", desktopDeviceId: "desktop-fence" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(writes.length, 1, "a later small command cannot overtake an unfinished large write");
+    onWrite = async () => undefined;
+    releaseWrite();
+    await Promise.all([first, second]);
+    assert.deepEqual(writes.map((body) => body.type), ["machine.settings.sync", "machine.hello.request"]);
+
+    const participant = { id: "p", handle: "bot", roleConfigId: "r", kind: "codex-cli", homeMachineId: record.id };
+    const triggerMessage = { id: "m", role: "user", content: "test", createdAt: new Date().toISOString() };
+    const conversation = { id: "c", kind: "chat", title: "", createdAt: "", updatedAt: "", messages: [triggerMessage], metadata: { participants: [participant] }, findings: [] };
+    let releaseQueue;
+    onSave = (next) => {
+      if (next.pendingRuns?.some((run) => run.runId === "queued") && !releaseQueue) {
+        connection.outbound = new Promise((resolve) => { releaseQueue = resolve; });
+      }
+    };
+    const queuedStop = new AbortController();
+    const queued = link.runTurn({ conversation, participant, triggerMessage, runId: "queued", pendingMessageId: "pq", signal: queuedStop.signal });
+    await waitFor(() => Boolean(releaseQueue), 5_000);
+    queuedStop.abort();
+    releaseQueue();
+    assert.equal((await queued).status, "interrupted");
+    assert.ok(!writes.some((body) => body.type === "machine.turn.request" && body.runId === "queued"));
+    assert.ok(!record.pendingRuns.some((run) => run.runId === "queued"));
+
+    onSave = () => undefined;
+    const ambiguousStop = new AbortController();
+    onWrite = async (body) => {
+      if (body.type === "machine.turn.request") {
+        ambiguousStop.abort();
+        throw new Error("write failed after the frame may have left");
+      }
+    };
+    const ambiguous = await link.runTurn({ conversation, participant, triggerMessage, runId: "ambiguous", pendingMessageId: "pa", signal: ambiguousStop.signal });
+    assert.equal(ambiguous.status, "failed");
+    await waitFor(() => writes.some((body) => body.type === "machine.turn.cancel" && body.runId === "ambiguous"), 5_000);
+    assert.ok(record.pendingCancels.some((run) => run.runId === "ambiguous"), "an ambiguous dispatch retains Stop until the machine confirms");
+    assert.deepEqual(writes.filter((body) => body.runId === "ambiguous").map((body) => body.type), ["machine.turn.request", "machine.turn.cancel"]);
+  } finally {
+    link.close();
   }
 });
 

@@ -3047,6 +3047,71 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   }
 });
 
+test("Codex Stop waits for a detached command even after the provider exits", { timeout: 10_000 }, async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX detached process identity test");
+    return;
+  }
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-stop-detached-"));
+  const helperPidFile = path.join(fixtureDir, "helper.pid");
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") send({ id: message.id, result: {} });
+  if (message.method === "thread/start") send({ id: message.id, result: { thread: { id: "thread-detached" } } });
+  if (message.method === "turn/interrupt") process.exit(0);
+  if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-detached" } } });
+    const helper = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); process.send('ready')"], {
+      detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"]
+    });
+    helper.on("message", () => {
+      writeFileSync(${JSON.stringify(helperPidFile)}, String(helper.pid));
+      send({ id: "ready", method: "item/commandExecution/requestApproval", params: {
+        threadId: "thread-detached", turnId: "turn-detached", itemId: "detached-command", startedAtMs: 1,
+        environmentId: null, command: "fixture", cwd: process.cwd(), availableDecisions: ["accept", "decline"]
+      } });
+    });
+  }
+});
+`);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const controller = new AbortController();
+  let ready!: () => void;
+  const seen = new Promise<void>((resolve) => { ready = resolve; });
+  let helperPid: number | undefined;
+  try {
+    const run = runner.runCodexAppServerWarmOrOneShot(
+      { id: "codex-detached", kind: "codex-cli", label: "Codex" }, "Wait.", fixtureDir,
+      undefined, "chat", controller.signal, {
+        agentMode: "auto",
+        warm: { conversationId: "detached", participantId: "codex-detached", contextKey: "detached" },
+        onCodexServerRequest: (request: { signal: AbortSignal }) => {
+          ready();
+          return new Promise((_resolve, reject) => {
+            request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+          });
+        }
+      }
+    );
+    await seen;
+    helperPid = Number((await readFile(helperPidFile, "utf8")).trim());
+    assert.equal(testProcessExists(helperPid), true);
+    controller.abort(new Error("Stopped by user."));
+    const result = await run;
+    assert.equal(result.ok, false);
+    assert.equal(testProcessExists(helperPid), false, "Stop must not finish while a captured command survives");
+  } finally {
+    await runner.shutdownWarmAgents();
+    if (helperPid && testProcessExists(helperPid)) process.kill(helperPid, "SIGKILL");
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 test("Windows warm-agent shutdown terminates provider descendants", async (t) => {
   if (process.platform !== "win32") {
     t.skip("taskkill process-tree behavior is only available on Windows");

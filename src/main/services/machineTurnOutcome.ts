@@ -17,6 +17,7 @@ export interface MachineTurnOutcomeInput {
   /** The machine's own finish time of this result; absent for outcomes the
    *  desktop produced itself (a timeout, a lost run). */
   finishedAt?: string;
+  receiptId?: string;
 }
 
 /** Marks a member bubble as stopped by the User (the machine confirmed the
@@ -61,7 +62,12 @@ export function foldMachineTurnResult(
   const reply = result.messages.find((message) => message.id === bubble.id);
   const others = result.messages.filter((message) => message.id !== bubble.id);
   const applied = bubble.metadata?.machineOutcome;
-  if (applied && applied.runId === runId && applied.status === result.status && applied.finishedAt !== undefined && applied.finishedAt === result.finishedAt) {
+  if (applied?.runId === runId && applied.finishedAt && !result.finishedAt) {
+    // A restored dispatch intent can receive "unknown" after the actual
+    // result was already stored and acknowledged. Recovery cannot erase it.
+    return others;
+  }
+  if (applied && applied.runId === runId && applied.status === result.status && applied.finishedAt !== undefined && applied.finishedAt === result.finishedAt && applied.receiptId === result.receiptId) {
     // The very same result again (a redelivery): the bubble already carries
     // it. A different result of the same run (a real terminal after a
     // provisional desktop-side outcome) is folded.
@@ -77,7 +83,8 @@ export function foldMachineTurnResult(
     delete metadata.stopPending;
     bubble.metadata = metadata;
   }
-  bubble.metadata = { ...bubble.metadata, machineOutcome: { runId, status: result.status, ...(result.finishedAt ? { finishedAt: result.finishedAt } : {}) } };
+  bubble.metadata = { ...bubble.metadata, machineOutcome: { runId, status: result.status, ...(result.finishedAt ? { finishedAt: result.finishedAt } : {}), ...(result.receiptId ? { receiptId: result.receiptId } : {}) } };
+  delete bubble.metadata.stopPending;
   switch (result.status) {
     case "completed":
       if (reply) {
@@ -155,6 +162,7 @@ export function isStoredTerminal(entry: unknown): entry is MachineTurnFinishedBo
     Array.isArray(record.messages) && record.messages.every(isStoredMessage) &&
     Array.isArray(record.warnings) && record.warnings.every((warning) => typeof warning === "string") &&
     typeof record.finishedAt === "string" &&
+    (record.receiptId === undefined || (typeof record.receiptId === "string" && record.receiptId.length > 0)) &&
     (record.error === undefined || typeof record.error === "string");
 }
 

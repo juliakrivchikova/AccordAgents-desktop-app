@@ -40,6 +40,15 @@ test("an interrupted result keeps the machine's partial text and the run's other
   assert.deepEqual(others.map((message) => message.id), ["note-2"]);
 });
 
+test("distinct native results with the same run and finish time are not mistaken for redelivery", () => {
+  const target = bubble();
+  const finishedAt = "2026-09-06T00:00:05.000Z";
+  foldMachineTurnResult(target, "bot", "run-1", { status: "completed", messages: [reply("first")], finishedAt, receiptId: "receipt-1" });
+  foldMachineTurnResult(target, "bot", "run-1", { status: "completed", messages: [reply("second")], finishedAt, receiptId: "receipt-2" });
+  assert.equal(target.content, "second");
+  assert.equal(target.metadata?.machineOutcome?.receiptId, "receipt-2");
+});
+
 test("a failed result keeps the delivered text and records the failure, never as a stop", () => {
   const target = bubble({ content: "streamed so far" });
   foldMachineTurnResult(target, "bot", "run-1", { status: "failed", messages: [], error: "provider exited" });
@@ -75,6 +84,22 @@ test("a redelivered result of the same run is applied once, a real result replac
   foldMachineTurnResult(stop, "bot", "run-1", { status: "unconfirmed", messages: [], error: "gone" });
   assert.equal(stop.content, stopOnce);
   assert.equal((stop.content.match(/Stop not confirmed/g) ?? []).length, 1);
+});
+
+test("recovery cannot replace a stored terminal with a provisional unknown outcome", () => {
+  const target = bubble();
+  foldMachineTurnResult(target, "bot", "run-1", { status: "completed", messages: [reply("confirmed reply")], finishedAt: "2026-09-06T00:00:05.000Z" });
+  const stored = structuredClone(target);
+  foldMachineTurnResult(target, "bot", "run-1", { status: "unconfirmed", messages: [], error: "machine does not know this run" });
+  assert.deepEqual(target, stored);
+});
+
+test("outcomes without a reply clear the waiting-for-stop badge", () => {
+  for (const status of ["failed", "interrupted", "unconfirmed"] as const) {
+    const target = bubble();
+    foldMachineTurnResult(target, "bot", "run-1", { status, messages: [], error: "gone" });
+    assert.equal(target.metadata?.stopPending, undefined);
+  }
 });
 
 test("the instance counter advances past both the stored value and the clock, and is not published on any file error", () => {

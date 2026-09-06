@@ -1223,7 +1223,7 @@ export interface ChatMessageMetadata {
    *  (identified by the machine's finishedAt), so a redelivery of the same
    *  result is applied once while a real result still replaces a provisional
    *  desktop-side outcome such as a timeout. */
-  machineOutcome?: { runId: string; status: string; finishedAt?: string };
+  machineOutcome?: { runId: string; status: string; finishedAt?: string; receiptId?: string };
   threadId?: string;
   parentMessageId?: string;
   chatThreadRootId?: string;

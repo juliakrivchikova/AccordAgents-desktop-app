@@ -2617,7 +2617,16 @@ export class CliAgentRunner {
     });
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    const processIdentity = capturePosixProcessIdentity(child.pid, this.readPosixProcessTableForTermination);
+    let processIdentity = capturePosixProcessIdentity(child.pid, this.readPosixProcessTableForTermination);
+    let capturedProcesses: CapturedPosixProcess[] = [];
+    const captureBeforeInterrupt = (): boolean => {
+      if (process.platform === "win32") return true;
+      const rows = this.readPosixProcessTableForTermination();
+      if (!rows) return false;
+      processIdentity ??= capturePosixProcessIdentity(child.pid, () => rows);
+      capturedProcesses = capturePosixDescendantsFromTable(child.pid, rows, capturedProcesses, processIdentity);
+      return true;
+    };
 
     let stdoutBuffer = "";
     let stderrBuffer = "";
@@ -3364,6 +3373,7 @@ export class CliAgentRunner {
       providerKind: participant.kind,
       process: child,
       processIdentity: () => processIdentity,
+      capturedBackgroundProcesses: () => capturedProcesses,
       queue: Promise.resolve(),
       closed: false,
       compact: async (
@@ -3491,6 +3501,9 @@ export class CliAgentRunner {
           if (!current) {
             return;
           }
+          // Native interruption can reparent a detached command before the
+          // app-server exits. Retain its identity while the tree still exists.
+          const capturedBeforeInterrupt = captureBeforeInterrupt();
           void cancelPendingInboundApprovals(current, "Stopped by user.")
             .catch((error) => {
               void this.debugLogs?.write("cli.codex-app-server.stop-refusal-write-failed", {
@@ -3500,7 +3513,7 @@ export class CliAgentRunner {
               });
             });
           rejectPendingGuardianApprovals(new Error("Stopped by user."));
-          if (current.turnId) {
+          if (current.turnId && capturedBeforeInterrupt) {
             void sendRequest("turn/interrupt", { threadId: current.threadId, turnId: current.turnId }).catch(() => undefined);
           }
           rejectPendingTurn(new Error("codex app-server turn was cancelled"));
@@ -5903,6 +5916,10 @@ export class CliAgentRunner {
   }
 
   private async closeWarmAgentProcess(entry: WarmAgentEntry): Promise<void> {
+    if (entry.providerKind === "codex-cli" && process.platform !== "win32") {
+      await this.closeCodexProcessTree(entry);
+      return;
+    }
     if (entry.process.exitCode !== null || entry.process.signalCode !== null) {
       // A detached Claude process can exit while provider-owned background work
       // remains in its process group. With no live group leader left to close
@@ -6012,6 +6029,42 @@ export class CliAgentRunner {
       rootIdentity,
       this.readPosixProcessTableForTermination
     );
+  }
+
+  private async closeCodexProcessTree(entry: WarmAgentEntry): Promise<void> {
+    let captured = this.capturedWarmAgentDescendants(entry);
+    let root = entry.processIdentity?.();
+    const startedAt = Date.now();
+    let escalated = false;
+    let signaled = false;
+    // A root close event is insufficient: detached children may still be alive.
+    // Keep the turn pending until their identities disappear, including after
+    // SIGKILL; never acknowledge Stop merely because a signal was sent.
+    while (true) {
+      const rows = await readPosixProcessTableAsync();
+      if (rows) {
+        const rootAlive = entry.process.exitCode === null && entry.process.signalCode === null;
+        if (rootAlive) root ??= capturePosixProcessIdentity(entry.process.pid, () => rows);
+        captured = capturePosixDescendantsFromTable(root?.pid, rows, captured, root);
+        if (!rootAlive && !hasLiveCapturedPosixProcesses(captured, () => rows)) {
+          return;
+        }
+        if (!signaled) {
+          signaled = true;
+          terminateCapturedPosixProcesses(captured, "SIGTERM", () => rows);
+          this.terminateWarmAgentRoot(entry, "SIGTERM");
+        }
+        if (Date.now() - startedAt >= WARM_AGENT_KILL_GRACE_MS) {
+          if (!escalated) {
+            escalated = true;
+            void this.writeDebugLog("cli.codex-stop.escalating", { capturedProcessCount: captured.length });
+          }
+          terminateCapturedPosixProcesses(captured, "SIGKILL", () => rows);
+          this.terminateWarmAgentRoot(entry, "SIGKILL");
+        }
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
   }
 
   private terminateWarmAgentRoot(entry: WarmAgentEntry, signal: NodeJS.Signals): void {

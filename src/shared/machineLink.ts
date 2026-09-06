@@ -118,6 +118,8 @@ export interface MachineTurnProgressBody {
 
 export interface MachineTurnFinishedBody {
   type: "machine.turn.finished";
+  /** Identifies this immutable result, including native continuations of a run. */
+  receiptId?: string;
   conversationId: string;
   runId: string;
   participantId: string;
@@ -231,6 +233,8 @@ export interface MachineTurnFinishedAckBody {
   type: "machine.turn.finished.ack";
   conversationId: string;
   runId: string;
+  receiptId?: string;
+  finishedAt: string;
 }
 
 export interface MachineChoiceAnswerBody {

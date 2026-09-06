@@ -100,6 +100,14 @@ test("POSIX process-group termination falls back to the direct child", (t) => {
   assert.deepEqual(childSignals, ["SIGTERM"]);
 });
 
+test("a captured zombie has finished execution even before its parent reaps it", () => {
+  const identity = { pid: 42, startedAt: "Fri Sep  5 12:00:00 2026" };
+  const rows = new Map<number, PosixProcessRow>([[42, { ...identity, ppid: 1, pgid: 42, state: "Z" }]]);
+  assert.equal(hasLiveCapturedPosixProcesses([identity], () => rows), false);
+  rows.set(42, { ...rows.get(42)!, state: "S" });
+  assert.equal(hasLiveCapturedPosixProcesses([identity], () => rows), true);
+});
+
 test("captured POSIX identity checks refuse a recycled PID and signal a matching group", (t) => {
   if (process.platform === "win32") {
     t.skip("POSIX process identity checks are unavailable on Windows");

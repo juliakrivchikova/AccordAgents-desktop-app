@@ -658,6 +658,7 @@ export interface MachineTurnDispatchResult {
   /** The machine's finish time of this result (absent for outcomes the
    *  desktop produced itself). */
   finishedAt?: string;
+  receiptId?: string;
   /** Called once the desktop has stored the result; the machine keeps it
    *  until then. */
   acknowledge?: () => void;
@@ -665,6 +666,7 @@ export interface MachineTurnDispatchResult {
 
 export interface MachineTurnDispatcher {
   runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult>;
+  cancelMachineRun?(request: { machineId: string; conversationId: string; runId: string; onStopPending?: (machineName: string) => Promise<void> }): Promise<void>;
   /** Forwards the desktop's decision on an approval raised on a machine. */
   respondToMachineApproval?(request: {
     machineId: string;
@@ -675,6 +677,14 @@ export interface MachineTurnDispatcher {
     draftOverride?: ChatAppToolApprovalRequest;
     codexDecisionId?: string;
   }): Promise<void>;
+}
+
+export interface ChatParticipantRun {
+  runId: string;
+  conversationId: string;
+  participantId: string;
+  participantHandle: string;
+  aborted?: boolean;
 }
 
 interface RemoteRunStarter {
@@ -738,6 +748,40 @@ export class ChatService {
   private readonly saveOutcomes = new Map<string, Promise<boolean>>();
   /** Set inside a machine runtime: the desktop's record id for this machine. */
   private hostMachineId?: string;
+  private readonly participantRunSettledListeners = new Set<(run: ChatParticipantRun) => Promise<void> | void>();
+  private readonly participantRunCompletionWaiters = new Map<string, Set<() => void>>();
+
+  activeParticipantRuns(): ChatParticipantRun[] {
+    return [...this.chatRunMeta.entries()].map(([runId, meta]) => ({ runId, ...meta }));
+  }
+
+  onParticipantRunSettled(listener: (run: ChatParticipantRun) => Promise<void> | void): () => void {
+    this.participantRunSettledListeners.add(listener);
+    return () => { this.participantRunSettledListeners.delete(listener); };
+  }
+
+  async settledParticipantRunResult(run: ChatParticipantRun): Promise<{ messages: ChatMessage[]; warnings: string[] }> {
+    // A native resume releases its provider controller before its caller
+    // appends the returned messages. endChatRun is the end of that lifecycle.
+    if (this.activeRunIds.has(run.runId)) {
+      await new Promise<void>((resolve) => {
+        const waiters = this.participantRunCompletionWaiters.get(run.runId) ?? new Set<() => void>();
+        waiters.add(resolve);
+        this.participantRunCompletionWaiters.set(run.runId, waiters);
+      });
+    }
+    if (!(await this.waitForQueuedSaveResult(run.conversationId))) {
+      throw new Error("The run's final messages could not be stored.");
+    }
+    const conversation = await this.storage.getConversation(run.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      throw new Error("The run's chat is unavailable.");
+    }
+    return {
+      messages: conversation.messages.filter((message) => message.metadata?.runId === run.runId),
+      warnings: Array.isArray(conversation.metadata.warnings) ? conversation.metadata.warnings.filter((warning): warning is string => typeof warning === "string") : []
+    };
+  }
 
   /** Machines transport, machine side: members whose home is this id are
    *  this runtime's own (swept, resumed, and run here like local ones). */
@@ -6837,7 +6881,7 @@ export class ChatService {
       // contributes its text and the run's other messages, and the whole
       // result is stored before the machine is told to drop it.
       const status = result.status === "failed" && signal?.aborted ? "unconfirmed" : result.status;
-      const others = foldMachineTurnResult(pendingMessage, participant.handle, runId, { status, messages: result.messages, error: result.error, finishedAt: result.finishedAt });
+      const others = foldMachineTurnResult(pendingMessage, participant.handle, runId, { status, messages: result.messages, error: result.error, finishedAt: result.finishedAt, receiptId: result.receiptId });
       for (const bubble of bubbleObjects()) {
         if (bubble !== pendingMessage) {
           bubble.content = pendingMessage.content;
@@ -7002,11 +7046,12 @@ export class ChatService {
     warnings?: string[];
     error?: string;
     finishedAt?: string;
+    receiptId?: string;
     machineName: string;
   }): Promise<void> {
     const conversation = await this.storage.getConversation(request.conversationId);
     if (!conversation || conversation.kind !== "chat") {
-      return;
+      throw new Error(`The chat for the result from machine ${request.machineName} is unavailable; the result has not been stored.`);
     }
     await this.withChatMutation(conversation, async () => {
       const bubble = conversation.messages.find((message) => message.role === "participant" && message.metadata?.runId === request.runId);
@@ -7014,7 +7059,7 @@ export class ChatService {
       if (bubble) {
         const participant = this.chatParticipants(conversation).find((item) => item.id === bubble.participantId);
         const handle = participant?.handle ?? bubble.participantLabel?.replace(/^@/, "") ?? "member";
-        others = foldMachineTurnResult(bubble, handle, request.runId, { status: request.status, messages: request.messages, error: request.error, finishedAt: request.finishedAt });
+        others = foldMachineTurnResult(bubble, handle, request.runId, { status: request.status, messages: request.messages, error: request.error, finishedAt: request.finishedAt, receiptId: request.receiptId });
         this.recordLastMessageByParticipant(conversation, bubble);
       }
       for (const incoming of others) {
@@ -14671,9 +14716,8 @@ export class ChatService {
       return {
         signal: parentSignal,
         cleanup: () => {
-          this.chatRunMeta.delete(runId);
-          this.appSendMessageCountsByRun.delete(runId);
-          this.appSendMessageImageBytesByRun.delete(runId);
+          // The parent registration owns this controller and its metadata;
+          // its final unregister announces the settled run exactly once.
         }
       };
     }
@@ -18869,6 +18913,23 @@ export class ChatService {
       const activeRunIds = readActiveRunIds(conversation.metadata);
       const handles = this.remoteRunHandleByRun(conversation.metadata.remoteRunHandles);
       const handle = handles[targetRunId];
+      const pending = conversation.messages.find((message) => message.role === "participant" && message.status === "pending" && message.metadata?.runId === targetRunId);
+      const participant = pending && this.chatParticipants(conversation).find((member) => member.id === pending.participantId);
+      if (pending && participant?.homeMachineId && participant.homeMachineId !== this.hostMachineId && this.machineLink?.cancelMachineRun) {
+        await this.machineLink.cancelMachineRun({
+          machineId: participant.homeMachineId, conversationId: conversation.id, runId: targetRunId,
+          onStopPending: async (machineName) => {
+            await this.withChatMutation(conversation, async () => {
+              const bubble = conversation.messages.find((message) => message.id === pending.id);
+              if (bubble?.status === "pending") {
+                bubble.metadata = { ...bubble.metadata, stopPending: { machineName, at: new Date().toISOString() } };
+                this.queueSnapshot(conversation);
+              }
+            });
+          }
+        });
+        return true;
+      }
       if (!activeRunIds.includes(targetRunId) && this.chatRunId(conversation) !== targetRunId && !handle) {
         continue;
       }
@@ -19073,12 +19134,25 @@ export class ChatService {
   }
 
   private unregisterTargetRun(runId: string, controller?: AbortController): void {
+    const meta = this.chatRunMeta.get(runId);
+    const aborted = controller?.signal.aborted ?? this.firstChatRunController(runId)?.signal.aborted;
     if (!this.unregisterRunController(runId, controller)) {
       return;
     }
     this.chatRunMeta.delete(runId);
     this.appSendMessageCountsByRun.delete(runId);
     this.appSendMessageImageBytesByRun.delete(runId);
+    if (meta) {
+      for (const listener of this.participantRunSettledListeners) {
+        try {
+          void Promise.resolve(listener({ runId, ...meta, aborted })).catch((error) => {
+            void this.debugLogs.write("chat.run.settled-listener.error", { runId, message: error instanceof Error ? error.message : String(error) });
+          });
+        } catch (error) {
+          void this.debugLogs.write("chat.run.settled-listener.error", { runId, message: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    }
   }
 
   private unregisterRunController(runId: string, controller?: AbortController): boolean {
@@ -19183,6 +19257,13 @@ export class ChatService {
     } finally {
       if (!keepRemoteActive) {
         this.forgetActiveChatRun(conversation.id, runId);
+        if (!this.activeRunIds.has(runId)) {
+          const waiters = this.participantRunCompletionWaiters.get(runId);
+          this.participantRunCompletionWaiters.delete(runId);
+          for (const resolve of waiters ?? []) {
+            resolve();
+          }
+        }
         if (!this.chatHasLiveWork(conversation.id)) {
           this.scheduleAutoWatchEvaluation(conversation.id, "run-idle");
         }

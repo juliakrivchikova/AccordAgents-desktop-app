@@ -145,13 +145,62 @@ test("a desktop sweep never overrides an outcome the machine produced", async ()
   const { mergeReplicatedMessages } = await import("../dist/main/main/services/machineHost.js");
   const done = { id: "bubble", role: "participant", participantId: "p1", content: "The page title is Example Domain.", createdAt: "2026-09-06T09:04:38.000Z", status: "done", metadata: { runId: "run-x" } };
   const swept = { ...done, content: "Interrupted before completion.", status: "error", metadata: { runId: "run-x", staleRunRecovery: { runId: "run-x", at: "2026-09-06T09:04:38.002Z" } } };
-  const merged = mergeReplicatedMessages([done], [swept]);
+  const owned = new Set(["p1"]);
+  const merged = mergeReplicatedMessages([done], [swept], [], owned);
   assert.equal(merged[0].status, "done");
   assert.equal(merged[0].content, "The page title is Example Domain.");
   // The same holds for a bubble the machine is still filling in.
   const partial = { ...done, content: "half", status: "pending" };
-  assert.equal(mergeReplicatedMessages([partial], [swept])[0].status, "pending");
+  assert.equal(mergeReplicatedMessages([partial], [swept], [], owned)[0].status, "pending");
+  // The desktop is authoritative for its local member: its genuine recovery
+  // must reach the machine's replica rather than leave a permanent pending row.
+  assert.equal(mergeReplicatedMessages([partial], [swept], [], new Set(["other-member"]))[0].status, "error");
   // A genuine later edit by the desktop (no sweep marker) still wins.
   const edited = { ...done, content: "edited on the desktop", metadata: { runId: "run-x" } };
   assert.equal(mergeReplicatedMessages([done], [edited])[0].content, "edited on the desktop");
+});
+
+test("a ChatService native resume is listed, stopped and delivered through the host's result outbox", async () => {
+  const { ChatService } = await import("../dist/main/main/services/chat.js");
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const logs = { write: async () => undefined };
+  const chat = Object.create(ChatService.prototype);
+  Object.assign(chat, {
+    chatRunMeta: new Map(), chatRunControllers: new Map(), activeConversationRunIds: new Map(),
+    remoteRunHandlesByRun: new Map(), participantRunSettledListeners: new Set(),
+    appSendMessageCountsByRun: new Map(), appSendMessageImageBytesByRun: new Map(), debugLogs: logs,
+    settledParticipantRunResult: async () => ({ messages: [{ id: "native-bubble", role: "participant", participantId: "p1", status: "error", content: "partial", createdAt: new Date().toISOString(), metadata: { runId: "native-resume", terminalReason: "user-stopped" } }], warnings: [] })
+  });
+  const host = new MachineHostService(chat, {}, {}, logs, { pairing: pairing(), deviceId: "device-machine-1", appVersion: "test", createClient: () => client });
+  const controller = new AbortController();
+  chat.registerTargetRun("native-resume", controller, { conversationId: "native-chat", participantId: "p1", participantHandle: "bot" });
+  await host.start();
+  client.emit("peer", { type: "ready", peers: [{ role: "desktop", deviceId: "device-desktop" }] });
+  await settle();
+  let bodies = await sentBodies(client);
+  assert.ok(bodies.find((body) => body.type === "machine.hello").activeRunIds.includes("native-resume"));
+  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.query", conversationId: "native-chat", runId: "native-resume" }) });
+  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.cancel", conversationId: "native-chat", runId: "native-resume" }) });
+  await settle();
+  assert.equal(controller.signal.aborted, true, "Stop reaches the actual ChatService controller");
+  bodies = await sentBodies(client);
+  assert.equal(bodies.filter((body) => body.type === "machine.turn.unknown").length, 0);
+  assert.equal(bodies.filter((body) => body.type === "machine.turn.finished").length, 0, "abort is not completion");
+  chat.unregisterTargetRun("native-resume", controller);
+  await settle();
+  bodies = await sentBodies(client);
+  const terminal = bodies.find((body) => body.type === "machine.turn.finished");
+  assert.equal(terminal.status, "interrupted");
+  assert.equal(terminal.messages[0].content, "partial");
+  assert.ok(host.pendingTerminals.has("native-resume"), "result stays until the desktop acknowledges its saved copy");
+  const newer = { ...terminal, receiptId: "newer-receipt", messages: [{ ...terminal.messages[0], content: "new result" }] };
+  host.pendingTerminals.set("native-resume", newer);
+  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.finished.ack", conversationId: "native-chat", runId: "native-resume", receiptId: terminal.receiptId, finishedAt: terminal.finishedAt }) });
+  await settle();
+  assert.equal(host.pendingTerminals.get("native-resume"), newer, "an old ACK cannot remove a newer result, even with an equal finish timestamp");
+  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.finished.ack", conversationId: "native-chat", runId: "native-resume", receiptId: newer.receiptId, finishedAt: newer.finishedAt }) });
+  await settle();
+  assert.equal(host.pendingTerminals.has("native-resume"), false);
+  host.close();
 });

@@ -394,10 +394,11 @@ test("Cloudflare Durable Object relay addresses machines by device id", async ()
     assert.equal(desktopReady.type, "relay.ready");
     assert.equal(desktopReady.deviceId, "desktop");
 
+    const phoneJoined = nextData(desktop);
     const phone = await openRelaySocket(worker.wsUrl, { rid: "rv-cloudflare-machines", role: "phone", cap: "PAIRING-FINGERPRINT" });
     const phoneReady = JSON.parse(await nextData(phone));
     assert.equal(phoneReady.peerConnected, true);
-    assert.deepEqual(JSON.parse(await nextData(desktop)), { type: "relay.peer-connected", role: "phone", rendezvousId: "rv-cloudflare-machines", deviceId: "phone" });
+    assert.deepEqual(JSON.parse(await phoneJoined), { type: "relay.peer-connected", role: "phone", rendezvousId: "rv-cloudflare-machines", deviceId: "phone" });
 
     const machineJoined = nextData(desktop);
     const machine = await openRelaySocket(worker.wsUrl, { rid: "rv-cloudflare-machines", role: "machine", cap: "PAIRING-FINGERPRINT", did: "device-m1" });
