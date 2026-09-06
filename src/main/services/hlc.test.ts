@@ -28,6 +28,13 @@ test("tick advances monotonically even when the wall clock goes backwards", () =
   assert.deepEqual(parseHlcKey(third), { wallMs: 1_000, counter: 2, originId: "device-a" });
 });
 
+test("clock exhaustion refuses to mint a key that cannot be restored after restart", () => {
+  const clock = new HybridLogicalClock("device-a", () => 0);
+  clock.restore({ wallMs: 9_999_999_999_999, counter: 999_999 });
+  assert.throws(() => clock.tick(), /wallMs must fit/);
+  assert.throws(() => formatHlcKey({ wallMs: 10_000_000_000_000, counter: 0, originId: "a" }), /wallMs must fit/);
+});
+
 test("observe moves the clock past every received event", () => {
   let now = 1_000;
   const local = new HybridLogicalClock("device-a", () => now);

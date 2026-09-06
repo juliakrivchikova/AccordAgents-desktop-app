@@ -6,6 +6,7 @@ import test from "node:test";
 import { foldChatConversationEvents } from "../../shared/chatEventProjection";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ChatMessage, Conversation } from "../../shared/types";
+import { logicalOrderKey } from "../../shared/hlc";
 import { ChatEventLogService } from "./chatEventLog";
 import {
   CHAT_CONVERSATION_PROJECTION_KEY,
@@ -148,6 +149,14 @@ test("ChatService imports canonical mailbox message.created events through the m
     assert.equal(conversation?.messages.filter((item) => item.id === participantMessage.id).length, 1);
     assert.equal(conversation?.updatedAt, "2026-08-06T00:00:05.000Z");
     assert.deepEqual(events.map((item) => item.eventId), ["mailbox-message-event-1"]);
+    // Production ingress writes through StorageService, not an explicit
+    // ChatEventLog.observe hook. Its receive floor must survive a restart.
+    const restartedStorage = new StorageService({ dbPath: (storage as any).dbPath });
+    const afterReceive = await new ChatEventLogService(restartedStorage, fixedClock()).appendLocalEvent({
+      conversationId: "another-chat", logScopeId: "another-chat", kind: "message.created",
+      payload: { message: message("after-receive", "after receive", "2026-08-06T00:00:00.000Z") }
+    });
+    assert.ok(afterReceive.event.logicalTs > logicalOrderKey(event));
   } finally {
     await cleanup();
   }

@@ -33,6 +33,7 @@ import { clearChatRunMetadata, clearParticipantCompactions, readParticipantCompa
 import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import { sanitizeConversationWarnings } from "../../shared/warnings";
+import { formatHlcKey, logicalOrderKey, parseHlcKey, type HlcParts } from "../../shared/hlc";
 
 const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
 const MAX_MESSAGE_PAGE_LIMIT = 200;
@@ -46,6 +47,7 @@ export const PREVIOUS_STORAGE_SCHEMA_VERSION = 1;
 export const STORAGE_SCHEMA_VERSION_META_KEY = "storage-schema-version";
 export const CHAT_EVENT_PROJECTION_VERSION = 1;
 const CHAT_EVENT_DEVICE_IDENTITY_META_KEY = "chat-event-device-identity-v1";
+const CHAT_EVENT_CLOCK_META_KEY = "chat-event-clock-v1";
 const INFERRED_REQUEST_THREAD_MIGRATION_KEY = "inferred-participant-request-threads-v1";
 const CHAT_SEARCH_INDEX_META_KEY = "chat-search-index-version";
 const CHAT_SEARCH_INDEX_VERSION = 2;
@@ -309,6 +311,7 @@ export class StorageService {
   private readonly sqliteExecutable: string;
   private initialized = false;
   private chatSearchIndexReady = false;
+  private chatEventClockBootstrap?: Promise<void>;
 
   constructor(options: StorageServiceOptions = {}) {
     this.dbPath = options.dbPath ?? path.join(userDataPath(), "accordagents.sqlite3");
@@ -1480,16 +1483,28 @@ export class StorageService {
     if (events.length === 0) {
       return [];
     }
-    const envelopeJsonByEventId = new Map<string, string>();
+    const envelopeJsons: string[] = [];
+    const eventIdCounts = new Map<string, number>();
     const receivedAt = new Date().toISOString();
     const valuesSql = events.map((event) => {
       this.assertValidChatEventEnvelope(event);
       const envelopeJson = JSON.stringify(event);
-      envelopeJsonByEventId.set(event.eventId, envelopeJson);
+      envelopeJsons.push(envelopeJson);
+      eventIdCounts.set(event.eventId, (eventIdCounts.get(event.eventId) ?? 0) + 1);
       return this.chatEventInsertValuesSql(event, envelopeJson, receivedAt);
     }).join(",\n");
+    // Every ingress (including the phone mailbox) persists the receive clock
+    // with the accepted event. A crash cannot leave an event ahead of the clock.
+    await this.getChatEventClock();
+    const clockCandidates = events.flatMap((event) => {
+      const clock = parseHlcKey(logicalOrderKey(event));
+      return clock ? [`(${sqlString(event.eventId)}, ${sqlString(event.eventHash)}, ${sqlString(event.logicalTs)}, ${sqlString(formatHlcKey({ ...clock, originId: "clock" }))})`] : [];
+    });
     const inserted = await this.queryJson<{ eventId: string }>(
       `
+        pragma synchronous = full;
+        pragma fullfsync = on;
+        begin immediate;
         insert or ignore into chat_events (
           event_id,
           conversation_id,
@@ -1509,19 +1524,30 @@ export class StorageService {
         )
         values ${valuesSql}
         returning event_id as eventId;
+        ${clockCandidates.length === 0 ? "" : `
+          with candidates(event_id, event_hash, logical_ts, clock_key) as (values ${clockCandidates.join(",")})
+          update schema_meta set value = max(value, coalesce((
+            select max(c.clock_key) from candidates c join chat_events e
+              on e.event_id = c.event_id and e.event_hash = c.event_hash and e.logical_ts = c.logical_ts
+          ), value)) where key = ${sqlString(CHAT_EVENT_CLOCK_META_KEY)};
+        `}
+        commit;
       `
     );
     const insertedIds = new Set(inserted.map((row) => row.eventId));
     const results: ChatEventAppendResult[] = [];
-    for (const event of events) {
-      if (insertedIds.has(event.eventId)) {
+    const reportedInserts = new Set<string>();
+    for (const [index, event] of events.entries()) {
+      if (insertedIds.has(event.eventId) && eventIdCounts.get(event.eventId) === 1) {
         results.push({ status: "appended", eventId: event.eventId });
         continue;
       }
-      const envelopeJson = envelopeJsonByEventId.get(event.eventId) ?? JSON.stringify(event);
+      const envelopeJson = envelopeJsons[index];
       const conflict = await this.readChatEventConflictRecord(event);
       if (conflict?.source === "event-id" && conflict.envelopeJson === envelopeJson) {
-        results.push({ status: "duplicate", eventId: event.eventId });
+        const status = insertedIds.has(event.eventId) && !reportedInserts.has(event.eventId) ? "appended" : "duplicate";
+        reportedInserts.add(event.eventId);
+        results.push({ status, eventId: event.eventId });
         continue;
       }
       results.push({
@@ -1532,6 +1558,69 @@ export class StorageService {
       });
     }
     return results;
+  }
+
+  /** Global across chats and origins. Only accepted events advance this floor;
+   * local minting must tick strictly after it, including after a restart. */
+  async getChatEventClock(): Promise<HlcParts> {
+    await this.init();
+    const readClock = () => this.queryJson<{ value: string }>(
+      `select value from schema_meta where key = ${sqlString(CHAT_EVENT_CLOCK_META_KEY)} limit 1;`
+    );
+    let rows = await readClock();
+    if (rows.length === 0) {
+      // Startup can ingest several scopes at once. Share the one-time scan
+      // rather than reading the entire old log for each first event.
+      if (!this.chatEventClockBootstrap) {
+        this.chatEventClockBootstrap = this.bootstrapChatEventClock().catch((error) => {
+          this.chatEventClockBootstrap = undefined;
+          throw error;
+        });
+      }
+      await this.chatEventClockBootstrap;
+      rows = await readClock();
+    }
+    const value = rows[0]?.value;
+    const clock = value === undefined ? undefined : parseHlcKey(value);
+    if (!clock || clock.originId !== "clock") {
+      throw new Error("Stored chat event clock is unreadable; refusing to reset event order.");
+    }
+    return clock;
+  }
+
+  private async bootstrapChatEventClock(): Promise<void> {
+    let clockKey = formatHlcKey({ wallMs: 0, counter: 0, originId: "clock" });
+    let afterRowId = 0;
+    const lastRowId = (await this.queryJson<{ lastRowId: number }>(
+      "select coalesce(max(rowid), 0) as lastRowId from chat_events;"
+    ))[0].lastRowId;
+    // One-time upgrade reads bounded headers, never transfers conversation
+    // snapshots or event payloads into Node. Legacy clocks need createdAt.
+    for (;;) {
+      const rows = await this.queryJson<{
+        rowId: number; logicalTs: string; originId: string; originSeq: number; createdAt?: string;
+      }>(`
+        select rowid as rowId, logical_ts as logicalTs, origin_id as originId, origin_seq as originSeq,
+          case when logical_ts not like 'hlc:%' then json_extract(envelope_json, '$.createdAt') end as createdAt
+        from chat_events where rowid > ${afterRowId} and rowid <= ${lastRowId} order by rowid limit 500;
+      `);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        const clock = parseHlcKey(logicalOrderKey(row));
+        if (clock) {
+          const candidate = formatHlcKey({ ...clock, originId: "clock" });
+          if (candidate > clockKey) clockKey = candidate;
+        }
+      }
+      afterRowId = rows[rows.length - 1].rowId;
+    }
+    // Another instance may have initialized/advanced the clock during the scan.
+    await this.runSql(`
+      pragma synchronous = full;
+      pragma fullfsync = on;
+      insert into schema_meta(key, value) values (${sqlString(CHAT_EVENT_CLOCK_META_KEY)}, ${sqlString(clockKey)})
+      on conflict(key) do update set value = max(value, excluded.value);
+    `);
   }
 
   async listChatEvents(conversationId: string, logScopeId: string): Promise<ChatEventEnvelope[]> {

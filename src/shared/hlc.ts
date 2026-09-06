@@ -31,8 +31,8 @@ export interface HlcEventLike {
 }
 
 export function formatHlcKey(parts: HlcParts): string {
-  if (!Number.isSafeInteger(parts.wallMs) || parts.wallMs < 0) {
-    throw new Error("HLC wallMs must be a non-negative safe integer.");
+  if (!Number.isSafeInteger(parts.wallMs) || parts.wallMs < 0 || parts.wallMs >= 10 ** WALL_DIGITS) {
+    throw new Error(`HLC wallMs must fit in ${WALL_DIGITS} digits.`);
   }
   if (!Number.isSafeInteger(parts.counter) || parts.counter < 0 || parts.counter >= COUNTER_LIMIT) {
     throw new Error(`HLC counter must be in [0, ${COUNTER_LIMIT}).`);

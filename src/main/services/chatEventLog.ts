@@ -8,7 +8,7 @@ import {
   verify
 } from "node:crypto";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import { HybridLogicalClock, parseHlcKey, logicalOrderKey } from "../../shared/hlc";
+import { HybridLogicalClock } from "../../shared/hlc";
 import { stableJson } from "../../shared/stableJson";
 import type {
   ChatEventDeviceIdentityRecord,
@@ -40,15 +40,6 @@ export class ChatEventLogService {
     private readonly storage: StorageService,
     private readonly now: () => Date = () => new Date()
   ) {}
-
-  /** Advances this machine's hybrid logical clock past events received from
-   *  other origins, so nothing emitted here can sort before what was seen. */
-  async observeReceivedEvents(events: ChatEventEnvelope[]): Promise<void> {
-    const clock = await this.getClock();
-    for (const event of events) {
-      clock.observe(event);
-    }
-  }
 
   private async getClock(): Promise<HybridLogicalClock> {
     const identity = await this.getOrCreateDeviceIdentity();
@@ -85,7 +76,7 @@ export class ChatEventLogService {
 
   async appendLocalEvent<Payload>(request: CreateLocalChatEventRequest<Payload>): Promise<SignedChatEventAppendResult<Payload>> {
     const identity = await this.getOrCreateDeviceIdentity();
-    return this.enqueueLocalAppend(identity.originId, request.logScopeId, () => this.appendLocalEventWithIdentity(identity, request));
+    return this.enqueueLocalAppend(identity.originId, () => this.appendLocalEventWithIdentity(identity, request));
   }
 
   private async appendLocalEventWithIdentity<Payload>(
@@ -95,16 +86,7 @@ export class ChatEventLogService {
     const clock = await this.getClock();
     for (let attempt = 0; attempt < LOCAL_APPEND_RETRY_LIMIT; attempt += 1) {
       const basis = await this.storage.getChatEventSequenceBasis(identity.originId, request.logScopeId);
-      if (basis.latestLogicalTs) {
-        const restored = parseHlcKey(logicalOrderKey({
-          logicalTs: basis.latestLogicalTs,
-          originId: identity.originId,
-          originSeq: basis.originSeq - 1
-        }));
-        if (restored) {
-          clock.restore(restored);
-        }
-      }
+      clock.restore(await this.storage.getChatEventClock());
       const event = createSignedChatEvent(identity, {
         ...request,
         originSeq: basis.originSeq,
@@ -125,10 +107,9 @@ export class ChatEventLogService {
 
   private enqueueLocalAppend<Payload>(
     originId: string,
-    logScopeId: string,
     append: () => Promise<SignedChatEventAppendResult<Payload>>
   ): Promise<SignedChatEventAppendResult<Payload>> {
-    const queueKey = `${originId}\0${logScopeId}`;
+    const queueKey = originId;
     const previous = this.localAppendQueues.get(queueKey) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(append);
     const tail = next.then(() => undefined, () => undefined);

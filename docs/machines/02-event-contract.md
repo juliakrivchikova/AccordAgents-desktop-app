@@ -31,6 +31,40 @@ hlc:<wallMs 13 digits>:<counter 6 digits>:<originId>
 
 **Per-origin contiguity** is kept: an origin's events are applied only in `originSeq` order; a missing sequence is a gap (`ChatEventVisibleScopeGap`), events after it are held, and repair is requested (§5). Forks (two events with the same `originSeq` from one origin) are rejected as today.
 
+Implementation checkpoint (2026-09-06): `StorageService.appendChatEvents` now
+persists the global accepted-event clock floor in the same SQLite transaction as
+the events, including phone mailbox ingress. Rejected conflicts do not advance
+it; duplicate delivery retains the original timestamp. `ChatEventLogService`
+restores that floor before every local mint and ticks strictly after it, across
+chats and process restarts. This lazily performs receive advancement at the next
+mint. The one-time upgrade reads at most 500 event headers per batch, including
+legacy `createdAt`, without transferring payloads into Node; ongoing writes add
+one small clock row, independent of chat size. Corrupt clock state refuses new
+events instead of silently resetting their order. This covers the signed event
+log; the direct machine-link protocol still needs conversion to durable events
+and the PWA still needs its IndexedDB clock/outbox.
+
+Measured on the current user database (read-only): 58,976 event rows in a
+3,671,216,128-byte database; the actual upgrade query took 19.1 s, transferred
+13.75 MB of headers in batches no larger than 117,001 bytes, and transferred no
+message bodies. Concurrent first receives share that upgrade pass. It is a
+one-time cost, not work on each snapshot; large-chat replication costs are
+unchanged by this clock change. The clock is stored only in the machine's local
+SQLite `schema_meta`; existing signed envelopes keep their current sealed
+mailbox destinations.
+
+Event commits and clock initialization request SQLite `synchronous=FULL` and
+`fullfsync=ON`; the normal conversation-save setting is unchanged. `NORMAL`
+in WAL mode can lose a committed transaction on power loss, so it cannot back
+an event that has already been published ([SQLite's durability contract](https://www.sqlite.org/pragma.html#pragma_synchronous)).
+The 84-test storage suite covers failed clock writes rolling back the event,
+restart into another chat, legacy upgrade, concurrent first receives, corrupt
+clock refusal, overflow, and conflicting duplicate IDs within one batch.
+Real Electron + the published PWA in an isolated browser profile + the public
+relay + a separate Mac machine runtime passed before and after an Electron
+restart: one user message and one completed machine reply on both surfaces.
+This browser check does not replace the physical-phone cutover gate.
+
 ## 3. Event kinds
 
 Existing kinds stay (`message.created`, `message.updated`, `conversation.metadata.updated`, `device.capability.granted|revoked`, legacy import kinds). New kinds, all in the same envelope:
