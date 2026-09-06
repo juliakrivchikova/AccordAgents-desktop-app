@@ -27,10 +27,32 @@ Two consequences worth stating plainly:
   attempts at the same defect each get the same treatment as the first. That is
   where the skipping usually happens.
 
+## Verify the affected lifecycle
+
+Before editing, trace the affected path from the user action to its final result.
+Keep a compact map in the working context: states and transitions, who owns each
+state, and where data is applied, persisted, acknowledged or sent outside the app.
+Read the connected callers and consumers, including unchanged code.
+
+For each new state or mechanism, identify its interactions with existing
+transitions and verify the applicable cases: cancellation before and during work,
+failure before and after persistence, duplicate or delayed delivery, reconnect,
+and restart. Choose cases from the actual path; do not invent irrelevant work.
+Exercise the coordinating path across its real boundaries; focused fault-injection
+tests support real end-to-end QA, and a helper test alone does not prove the caller.
+
+If a finding recurs in the same path, stop patching individual symptoms: re-read
+the whole affected path, identify shared failure causes, and check sibling
+transitions before the next fix. Then rerun earlier regressions and the cases
+introduced by the fix. Keep edits within the authorized scope.
+
+In review and completion notes, distinguish verified cases, failures, and cases
+not checked; report remaining gaps without claiming the path is fully verified.
+
 ## Workflow
 
 1. Read `docs/parity-requirements.md` and the repository instructions. Confirm the user-visible requirement and acceptance criteria; ask the user only when a missing product decision would materially change behavior.
-2. Inspect the current data flow, ownership boundaries, working tree, and existing tests. Preserve unrelated user changes.
+2. Inspect the current data flow, ownership boundaries, working tree, and existing tests. Apply the lifecycle check above and preserve unrelated user changes.
 3. Implement the smallest correct change that satisfies every acceptance criterion. Cover the happy path, empty or missing data, retries, stale state, concurrency, and relevant upstream failures.
 4. Add focused regression tests, then run the relevant targeted suites, `make typecheck`, and `make build`. Fix failures caused by the change.
 5. Invoke the gstack `/review` skill on the full diff. Address every valid finding, add regression coverage where appropriate, and rerun affected verification. Do not treat source inspection or the implementation author's summary as review.

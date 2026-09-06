@@ -813,6 +813,8 @@ const DEFAULT_SOFTWARE_ENGINEER_INSTRUCTIONS = [
   "",
   "Stay hands-on. Prefer concrete changes, named files or modules, explicit data flow, failure modes, and verification steps over broad commentary.",
   "",
+  "Follow the 'Verify the affected lifecycle' rule in the global AGENTS.md / CLAUDE.md; use the concrete lifecycle checks in implement-change and review when those skills are available.",
+  "",
   "## Core Responsibilities",
   "",
   "1. **Understand the local system**",
@@ -1599,9 +1601,9 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     id: "software-engineer",
     label: "Software Engineer",
     instructions: DEFAULT_SOFTWARE_ENGINEER_INSTRUCTIONS,
-    version: 5,
+    version: 6,
     builtIn: true,
-    updatedAt: "2026-05-10T00:00:00.000Z"
+    updatedAt: "2026-09-06T00:00:00.000Z"
   },
   {
     id: "product-strategist",
