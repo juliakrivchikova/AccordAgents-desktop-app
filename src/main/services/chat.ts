@@ -6594,20 +6594,14 @@ export class ChatService {
             this.queueSnapshot(conversation);
           });
           reservationHandedOff = true;
-          const messages = participant.homeMachineId && this.machineLink
-            ? await this.runParticipantTurnOnMachine(conversation, participant, triggerMessage, targetRunId, targetController.signal, progress, {
-                warnings,
-                pendingMessage,
-                turnReservation
-              })
-            : await this.runParticipantTurnSerialized(conversation, participant, triggerMessage, targetRunId, targetController.signal, progress, {
-                warnings,
-                promptConversation: turnSnapshot,
-                workspacePath,
-                promptContextScope: this.promptContextScopeForTrigger(triggerMessage),
-                existingPendingMessage: pendingMessage,
-                turnReservation
-              });
+          const messages = await this.runParticipantTurnSerialized(conversation, participant, triggerMessage, targetRunId, targetController.signal, progress, {
+            warnings,
+            promptConversation: turnSnapshot,
+            workspacePath,
+            promptContextScope: this.promptContextScopeForTrigger(triggerMessage),
+            existingPendingMessage: pendingMessage,
+            turnReservation
+          });
           if (targetController.signal.aborted) {
             await this.discardStoppedTargetRun(conversation, targetRunId, participant, pendingMessage.id);
           } else {
@@ -6654,28 +6648,56 @@ export class ChatService {
     progress: ProgressCallback | undefined,
     options: {
       warnings: string[];
-      pendingMessage: ChatMessage;
-      turnReservation: ParticipantTurnReservation;
+      existingPendingMessage?: ChatMessage;
+      continuation?: boolean;
+      turnSegmentId: string;
     }
   ): Promise<ChatMessage[]> {
     const link = this.machineLink;
     if (!link) {
       throw new Error(`@${participant.handle} is hosted on a machine, but the machine link is not available.`);
     }
-    let turnController: { signal: AbortSignal; cleanup: () => void } | undefined;
+    // The desktop owns the pending bubble exactly as for a local turn; a
+    // pre-created bubble (batch path) is reused, otherwise one is created here
+    // and finalized below (continuation and resume paths).
+    let pendingMessage: ChatMessage;
+    const ownsPendingMessage = !options.existingPendingMessage;
+    if (options.existingPendingMessage) {
+      pendingMessage = options.existingPendingMessage;
+    } else {
+      pendingMessage = this.message(
+        "participant",
+        "",
+        { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
+        {
+          threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
+          parentMessageId: triggerMessage.id,
+          chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
+          sourceMessageId: triggerMessage.id,
+          requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
+          approvedContinuation: options.continuation || undefined,
+          runId,
+          turnSegmentId: options.turnSegmentId
+        },
+        "pending"
+      );
+      this.setTargetRunPendingMessageId(runId, pendingMessage.id);
+      await this.withChatMutation(conversation, async () => {
+        this.resolveSupersededParticipantInteractions(conversation, participant.id, pendingMessage.id);
+        conversation.messages.push(pendingMessage);
+        this.recordLastMessageByParticipant(conversation, pendingMessage);
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+    }
     try {
-      turnController = this.ensureChatTurnController(conversation, participant, runId, signal);
-      await this.waitForParticipantTurnReservation(options.turnReservation, turnController.signal);
-      if (turnController.signal.aborted) {
-        throw new Error("Chat run cancelled.");
-      }
       const result = await link.runTurn({
         conversation,
         participant,
         triggerMessage,
         runId,
-        pendingMessageId: options.pendingMessage.id,
-        signal: turnController.signal,
+        pendingMessageId: pendingMessage.id,
+        signal,
         progress
       });
       for (const warning of result.warnings) {
@@ -6686,13 +6708,35 @@ export class ChatService {
       if (result.status === "failed") {
         throw new Error(result.error ?? `@${participant.handle} failed on its machine.`);
       }
-      if (result.status === "interrupted" || turnController.signal.aborted) {
-        return [];
+      if (result.status === "interrupted" || signal?.aborted) {
+        this.markParticipantMessageStoppedByUser(pendingMessage, participant, { preserveContent: true });
+        return ownsPendingMessage ? [pendingMessage] : [];
       }
-      return result.messages;
+      // The machine's copy of the bubble carries the reply; fold it into the
+      // desktop's bubble so ids stay identical on both machines.
+      const reply = result.messages.find((message) => message.id === pendingMessage.id);
+      const others = result.messages.filter((message) => message.id !== pendingMessage.id);
+      if (reply) {
+        pendingMessage.content = reply.content;
+        pendingMessage.status = reply.status ?? "done";
+        pendingMessage.metadata = { ...pendingMessage.metadata, ...reply.metadata, runId };
+      } else {
+        pendingMessage.status = "error";
+        pendingMessage.content = `@${participant.handle} finished on its machine without a reply.`;
+      }
+      return [pendingMessage, ...others];
+    } catch (error) {
+      if (!signal?.aborted) {
+        pendingMessage.status = "error";
+        pendingMessage.content = this.failedPrecreatedPendingMessageContent(participant, error);
+      } else {
+        this.markParticipantMessageStoppedByUser(pendingMessage, participant, { preserveContent: true });
+      }
+      throw error;
     } finally {
-      options.turnReservation.release();
-      turnController?.cleanup();
+      if (ownsPendingMessage && !signal?.aborted) {
+        await this.finalizePendingParticipantMessage(conversation, participant, pendingMessage);
+      }
     }
   }
 
@@ -13891,6 +13935,17 @@ export class ChatService {
       await this.waitForParticipantTurnReservation(reservation, turnController.signal);
       if (turnController.signal.aborted) {
         throw new Error("Chat run cancelled.");
+      }
+      // Machines transport: every path that runs a member's turn (first turn,
+      // continuations, request runners, resumes) goes through here, so a member
+      // whose home is a machine is dispatched there from exactly one place.
+      if (participant.homeMachineId && this.machineLink) {
+        return await this.runParticipantTurnOnMachine(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
+          warnings: options.warnings,
+          existingPendingMessage: options.existingPendingMessage,
+          continuation: options.continuation,
+          turnSegmentId
+        });
       }
       return await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
         ...options,
