@@ -140,7 +140,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       hostRef?.noteConversationSnapshot(conversation);
     },
     userSkillsService,
-    undefined,
+    (progress) => hostRef?.noteNativeProgress(progress),
     chatEventMirrorService
   );
   wireChatAppToolHandlers(appMcpService, chatService);
@@ -166,6 +166,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   await appMcpService.start();
   await storageService.init();
   const identity = await chatEventLogService.getOrCreateDeviceIdentity();
+  await storageService.machineProgress().recoverLocal(identity.originId);
 
   const host = new MachineHostService(chatService, storageService, settingsService, debugLogService, {
     pairing: enrollment,

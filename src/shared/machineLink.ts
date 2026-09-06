@@ -12,6 +12,7 @@
 
 import type {
   ChatAppToolApprovalRequest, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "./types";
+import type { MachineProgressFrame } from "./machineProgress";
 
 export const MACHINE_LINK_PROTOCOL = "accord-machine-link-v1";
 
@@ -277,6 +278,7 @@ export type MachineLinkMessage =
   | MachineTurnRequestBody
   | MachineTurnCancelBody
   | MachineTurnProgressBody
+  | MachineProgressFrame
   | MachineTurnStartedBody
   | MachineTurnFinishedBody
   | MachineConversationBackDeltaBody
@@ -302,7 +304,8 @@ export function isMachineReplicationMessage(body: MachineLinkMessage): boolean {
 export function isMachineDurableMessage(body: MachineLinkMessage): boolean {
   return isMachineReplicationMessage(body) || body.type === "machine.turn.finished" || body.type === "machine.turn.finished.ack" ||
     body.type === "machine.turn.request" || body.type === "machine.turn.cancel" || body.type === "machine.settings.sealed" || body.type === "machine.turn.started" ||
-    body.type === "machine.approval.requested" || body.type === "machine.approval.updated" || body.type === "machine.approval.decision" || body.type === "machine.approval.result";
+    body.type === "machine.approval.requested" || body.type === "machine.approval.updated" || body.type === "machine.approval.decision" || body.type === "machine.approval.result" ||
+    body.type === "machine.turn.progress.delta";
 }
 
 export function machineCommandId(runId: string): string { return `machine-command:${runId}`; }
@@ -318,6 +321,7 @@ const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.turn.request",
   "machine.turn.cancel",
   "machine.turn.progress",
+  "machine.turn.progress.delta",
   "machine.turn.started",
   "machine.turn.finished",
   "machine.conversation.backdelta",

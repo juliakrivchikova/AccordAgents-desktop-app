@@ -39,6 +39,8 @@ import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { isMachineDurableMessage } from "../../shared/machineLink";
 import { NativeProcessUnavailableError } from "./nativeProcess";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import { machineProgressEventId } from "../../shared/machineProgress";
+import { MachineProgressSender } from "./machineProgressSender";
 import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
 import { readPosixProcessTableAsync } from "./processTermination";
 import { verifyNativeExecutorGone } from "./nativeExecutorRecovery";
@@ -113,6 +115,8 @@ export class MachineHostService {
   /** Why the outbox is not on disk right now (write failed / unreadable);
    *  travels in hello so the desktop can show it. */
   private outboxError?: string;
+  private readonly progressSenders = new Map<string, MachineProgressSender>();
+  private readonly progressErrors = new Map<string, string>();
   /** Outbox entries of an unexpected shape: kept (and written back into the
    *  outbox file) until they have been archived for recovery. */
   private rejectedOutboxEntries: unknown[] = [];
@@ -181,7 +185,8 @@ export class MachineHostService {
         const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
         if (!isMachineLinkEnvelope(envelope) || !isMachineDurableMessage(envelope.body) ||
             envelope.body.type === "machine.conversation.backdelta" || envelope.body.type === "machine.turn.finished" || envelope.body.type === "machine.turn.started" ||
-            envelope.body.type === "machine.approval.requested" || envelope.body.type === "machine.approval.updated" || envelope.body.type === "machine.approval.result") {
+            envelope.body.type === "machine.approval.requested" || envelope.body.type === "machine.approval.updated" || envelope.body.type === "machine.approval.result" ||
+            envelope.body.type === "machine.turn.progress.delta") {
           throw new Error("Unexpected machine replication event.");
         }
         const conversationId = envelope.body.type === "machine.conversation.sync" ? envelope.body.conversation.id : "conversationId" in envelope.body ? envelope.body.conversationId : "";
@@ -264,6 +269,7 @@ export class MachineHostService {
 
   close(): void {
     this.closed = true;
+    for (const sender of this.progressSenders.values()) sender.close();
     this.eventChannel.close();
     this.unsubscribeRunSettled?.();
     if (this.commandRetry) clearTimeout(this.commandRetry);
@@ -297,6 +303,7 @@ export class MachineHostService {
     for (const run of this.settlingRuns.values()) await this.finishNativeRun(run);
     await this.flushPendingTerminals();
     await this.outbound;
+    if ([...this.progressSenders.values()].some(sender => sender.hasPending())) throw new Error("The machine's progress has not been stored; shutdown is not complete.");
     if (this.settlingRuns.size || !this.persistOutbox()) throw new Error("The machine's final results have not been stored; shutdown is not complete.");
     this.close();
   }
@@ -422,7 +429,7 @@ export class MachineHostService {
       instanceId: this.instanceId,
       instanceStartedAt: this.instanceStartedAt,
       ...(typeof this.instanceSequence === "number" ? { instanceSequence: this.instanceSequence } : {}),
-      ...(this.outboxError ? { outboxError: this.outboxError } : {})
+      ...((this.outboxError || this.progressErrors.size) ? { outboxError: [this.outboxError, ...this.progressErrors.values()].filter(Boolean).join("; ") } : {})
     });
   }
 
@@ -826,6 +833,9 @@ export class MachineHostService {
       await this.flushPendingTerminals();
       return;
     }
+    const messages = await this.options.eventStorage.machineProgress().retainPartialForOutcome({
+      runId: request.runId, participantId: request.participantId, status, messages: []
+    });
     this.pendingTerminals.set(request.runId, {
       type: "machine.turn.finished",
       receiptId: command?.commandId ?? randomUUID(),
@@ -833,7 +843,7 @@ export class MachineHostService {
       runId: request.runId,
       participantId: request.participantId,
       status,
-      messages: [],
+      messages,
       warnings: [],
       ...(error ? { error } : {}),
       finishedAt: this.now().toISOString()
@@ -1052,7 +1062,7 @@ export class MachineHostService {
     const controller = new AbortController();
     this.activeTurns.set(request.runId, controller);
     const progress = (update: ReviewProgress): void => {
-      void this.send({ type: "machine.turn.progress", conversationId: request.conversationId, runId: request.runId, progress: update }).catch(() => undefined);
+      this.noteProgress(request.conversationId, update);
     };
     let terminal: MachineTurnFinishedBody;
     try {
@@ -1300,11 +1310,46 @@ export class MachineHostService {
     return run;
   }
 
+  /** Covers native continuations whose run was created by ChatService rather
+   * than a desktop dispatch (for example a permission continuation). */
+  noteNativeProgress(progress: ReviewProgress): void {
+    const sender = this.progressSenders.get(progress.runId);
+    if (sender) { sender.note(progress); return; }
+    const run = this.chat.activeParticipantRuns?.().find(item => item.runId === progress.runId);
+    if (run) this.noteProgress(run.conversationId, progress);
+  }
+
+  private noteProgress(conversationId: string, progress: ReviewProgress): void {
+    if (this.closed) return;
+    let sender = this.progressSenders.get(progress.runId);
+    if (!sender) {
+      sender = new MachineProgressSender({
+        conversationId,
+        publish: frame => this.eventChannel.publish({ conversationId, kind: frame.type, payload: frame,
+          eventId: machineProgressEventId(frame), scope: `terminal:${frame.runId}` }),
+        stored: (event, frame) => this.options.eventStorage.machineProgress().apply(event, frame),
+        onError: error => {
+          this.progressErrors.set(progress.runId, `Progress is not stored: ${errorMessage(error)}`);
+          void this.debugLogs.write("machine-host.progress.not-stored", { runId: progress.runId, message: errorMessage(error) });
+          this.announceOutboxState();
+        },
+        onRecovered: () => {
+          this.progressErrors.delete(progress.runId);
+          this.announceOutboxState();
+          void this.flushPendingTerminals();
+        }
+      });
+      this.progressSenders.set(progress.runId, sender);
+    }
+    sender.note(progress);
+  }
+
   private async sendNow(body: MachineLinkMessage): Promise<void> {
     if (this.closed) {
       return;
     }
     if (isMachineDurableMessage(body)) {
+      if (body.type === "machine.turn.finished") await this.progressSenders.get(body.runId)?.finish();
       const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : "conversationId" in body ? body.conversationId : "";
       const published = await this.eventChannel.publish({ conversationId, kind: body.type, payload: body,
         ...(body.type === "machine.approval.requested" || body.type === "machine.approval.updated" ? { scope: `approval:${body.approval.id}` } : {}),
@@ -1314,6 +1359,10 @@ export class MachineHostService {
       if (body.type === "machine.turn.finished") await this.options.eventStorage.nativeCommands().recordOutcome(body.runId, published.eventId);
       if (body.type === "machine.turn.finished" && body.receiptId === machineCommandId(body.runId) && await this.options.eventStorage.nativeCommands().forRun(body.runId)) {
         await this.options.eventStorage.nativeCommands().finish(machineCommandId(body.runId));
+      }
+      if (body.type === "machine.turn.finished") {
+        await this.options.eventStorage.machineProgress().close(body.runId);
+        this.progressSenders.delete(body.runId);
       }
       return;
     }

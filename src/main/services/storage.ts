@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { userDataPath } from "../platform";
-import { runCommand } from "./command";
+import { SqliteSession } from "./sqliteSession";
 import type {
   ChatEventAppendResult,
   ChatEventEnvelope,
@@ -38,6 +38,7 @@ import type { DeviceEventAppendOptions } from "../../shared/deviceEventDelivery"
 import { DEVICE_EVENT_SCHEMA_SQL, DeviceEventStorage, deviceEventAppendSql } from "./deviceEventStorage";
 import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEventBlobStorage";
 import { NATIVE_COMMAND_SCHEMA_SQL, NativeCommandStore } from "./nativeCommandStore";
+import { MACHINE_PROGRESS_SCHEMA, MachineProgressStore } from "./machineProgressStore";
 
 const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
 const MAX_MESSAGE_PAGE_LIMIT = 200;
@@ -310,6 +311,8 @@ export interface StoredChatSearchQueryResult {
 }
 
 export class StorageService {
+  private sqliteSession?: SqliteSession;
+  private machineProgressStore?: MachineProgressStore;
   private savedMessageStateCache: Map<string, SavedMessageState> | undefined;
   private readonly dbPath: string;
   private readonly sqliteExecutable: string;
@@ -395,6 +398,7 @@ export class StorageService {
       ${DEVICE_EVENT_SCHEMA_SQL}
       ${DEVICE_EVENT_BLOB_SCHEMA_SQL}
       ${NATIVE_COMMAND_SCHEMA_SQL}
+      ${MACHINE_PROGRESS_SCHEMA}
     `);
     await this.pruneStaleRunCancelRequests();
     await this.ensureColumn("conversations", "body_json", "text");
@@ -622,6 +626,7 @@ export class StorageService {
     }
     conversation.metadata = clearLegacyAccordState(conversation.metadata);
     sanitizeConversationWarnings(conversation);
+    conversation.messages = await this.machineProgress().overlay(id, conversation.messages);
     return conversation;
   }
 
@@ -707,9 +712,9 @@ export class StorageService {
       `select count(*) as totalMessages from conversation_messages where conversation_id = ${sqlString(request.conversationId)};`
     );
     return {
-      messages: selectedRows.map((row) =>
+      messages: await this.machineProgress().overlay(request.conversationId, selectedRows.map((row) =>
         parseHexJson<ChatMessage>(row.payloadHex, `conversation message ${request.conversationId}:${row.sequence}`)
-      ),
+      )),
       oldestSequence: selectedRows[0]?.sequence,
       newestSequence: selectedRows[selectedRows.length - 1]?.sequence,
       hasMoreBefore: rows.length > limit,
@@ -1494,6 +1499,13 @@ export class StorageService {
 
   nativeCommands(): NativeCommandStore {
     return new NativeCommandStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
+  }
+
+  machineProgress(): MachineProgressStore {
+    return this.machineProgressStore ??= new MachineProgressStore({
+      init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql),
+      hydrate: payload => this.deviceEventBlobs().hydrate(payload)
+    });
   }
 
   deviceEventBlobs(): DeviceEventBlobStorage {
@@ -2312,50 +2324,20 @@ export class StorageService {
   }
 
   private async queryJson<T>(sql: string): Promise<T[]> {
-    const result = await runCommand(this.sqliteExecutable ?? "sqlite3", this.sqliteArgs(["-json", this.dbPath]), {
-      input: sql,
-      timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
-      primeLoginShellEnv: false
-    });
-    const text = result.stdout.trim();
+    const text = (await this.databaseSession().run(sql, "json", SQLITE_COMMAND_TIMEOUT_MS)).trim();
     return text ? (JSON.parse(text) as T[]) : [];
   }
 
   private async queryText(sql: string): Promise<string> {
-    const result = await runCommand(this.sqliteExecutable ?? "sqlite3", this.sqliteArgs(["-batch", "-noheader", this.dbPath]), {
-      input: sql,
-      timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
-      primeLoginShellEnv: false
-    });
-    return result.stdout.trim();
+    return (await this.databaseSession().run(sql, "list", SQLITE_COMMAND_TIMEOUT_MS)).trim();
   }
 
   private async runSql(sql: string, timeoutMs = SQLITE_COMMAND_TIMEOUT_MS): Promise<void> {
-    await runCommand(this.sqliteExecutable ?? "sqlite3", this.sqliteArgs([this.dbPath]), {
-      input: sql,
-      timeoutMs,
-      primeLoginShellEnv: false
-    });
+    await this.databaseSession().run(sql, "list", timeoutMs);
   }
 
-  private sqliteArgs(args: string[]): string[] {
-    return [
-      "-cmd",
-      `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`,
-      // Without this the sqlite3 CLI carries on after a failed statement and
-      // COMMITs whatever the rest of the batch managed to write. Verified: a
-      // three-insert transaction whose middle statement violates a unique
-      // constraint leaves two rows on disk, exit code 1 and all. Every write
-      // here is a batch inside one transaction, so that is a half-applied
-      // conversation, visible to every reader until the next save. `.bail on`
-      // makes the CLI stop at the error with the transaction still open, so it
-      // rolls back and nothing is committed. Harmless for queries.
-      "-cmd",
-      ".bail on",
-      "-cmd",
-      "pragma synchronous = normal;",
-      ...args
-    ];
+  private databaseSession(): SqliteSession {
+    return this.sqliteSession ??= new SqliteSession(this.sqliteExecutable ?? "sqlite3", this.dbPath, SQLITE_BUSY_TIMEOUT_MS);
   }
 }
 

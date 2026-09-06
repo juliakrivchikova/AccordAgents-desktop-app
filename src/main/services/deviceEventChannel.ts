@@ -40,6 +40,10 @@ export class DeviceEventChannel {
   private receivePending = true;
   private readonly lastSent = new Map<string, { at: number; attempts: number }>();
   private readonly requestedGaps = new Map<string, number>();
+  // Live-room and mailbox copies commonly overlap. Cache only identities and
+  // receipts already committed to SQLite, never uncommitted application state.
+  private readonly received = new Map<string, { hash: string; receipt?: DeviceEventReceipt; ackAt?: number }>();
+  private readonly acknowledged = new Map<string, string>();
 
   constructor(private readonly options: DeviceEventChannelOptions) {
     const hash = createHash("sha256").update(Buffer.from(options.peerPublicKeyDerBase64, "base64")).digest("hex");
@@ -103,19 +107,35 @@ export class DeviceEventChannel {
               !verifySignedChatEvent(event, this.options.peerPublicKeyDerBase64)) {
             throw new Error("Device event signature or channel scope is invalid.");
           }
+          const remembered = this.received.get(event.eventId);
+          if (remembered && remembered.hash !== event.eventHash) throw new Error(`Conflicting device event ${event.eventId}.`);
+          if (remembered?.receipt) {
+            // Explicit repair bypasses the short duplicate-ACK debounce. The
+            // durable receipt remains available after any process restart.
+            if (value.deliveryId || remembered.ackAt === undefined || performance.now() - remembered.ackAt >= 1000) {
+              await this.repeatReceipt(remembered.receipt);
+            }
+            return;
+          }
+          if (remembered) break; // Stored but unapplied: retry the domain below.
           const stored = await this.options.storage.appendChatEvent(event, {
             ingress: { deviceId: value.from, channelId: this.options.channelId }
           });
           if (stored.status === "conflict") throw new Error(`Conflicting device event ${event.eventId}.`);
           const receipt = await this.options.storage.deviceEvents().receipt(event.eventId);
+          remember(this.received, event.eventId, { hash: event.eventHash, receipt });
           if (receipt) await this.repeatReceipt(receipt);
           break;
         }
-        case "ack":
+        case "ack": {
+          const fingerprint = JSON.stringify(value.receipt);
+          if (this.acknowledged.get(value.receipt.eventId) === fingerprint) return;
           if (await this.options.storage.deviceEvents().acknowledge(value.from, value.receipt)) {
             this.lastSent.delete(value.receipt.eventId);
+            remember(this.acknowledged, value.receipt.eventId, fingerprint);
           }
           return;
+        }
         case "resend":
           for (const event of await this.options.storage.deviceEvents().repair(this.options.channelId, value.from, value.gap)) {
             await this.sendEvent(event, value.requestId);
@@ -155,7 +175,9 @@ export class DeviceEventChannel {
   confirmApplied(event: ChatEventEnvelope, outcome: DeviceEventApplyOutcome = "applied"): Promise<void> {
     return this.enqueue(async () => {
       const receipt = await this.options.storage.deviceEvents().markApplied(event, outcome, new Date().toISOString());
+      remember(this.received, event.eventId, { hash: event.eventHash, receipt });
       await this.sendControl(this.packet({ type: "ack", receipt }));
+      this.received.get(event.eventId)!.ackAt = performance.now();
       this.receivePending = true;
       this.scheduleFlush();
     });
@@ -235,7 +257,9 @@ export class DeviceEventChannel {
           const outcome = await this.options.apply(event, payload);
           if (outcome === "deferred") { deferred = true; held.add(event.eventId); continue; }
           const receipt = await this.options.storage.deviceEvents().markApplied(event, outcome, new Date().toISOString());
+          remember(this.received, event.eventId, { hash: event.eventHash, receipt });
           await this.sendControl(this.packet({ type: "ack", receipt }));
+          this.received.get(event.eventId)!.ackAt = performance.now();
         } catch (error) {
           // A missing chat, full disk, or pending domain owner holds this
           // stream; other conversations on the same device can still apply.
@@ -306,9 +330,19 @@ export class DeviceEventChannel {
     // The previous ACK can have expired in the relay. Keep this new attempt
     // before posting it, so a failed POST plus receiver restart cannot lose it.
     await this.options.storage.deviceEvents().retainReceiptForRedelivery(receipt.eventId);
-    try { await this.sendControl(this.packet({ type: "ack", receipt, deliveryId: randomUUID() })); }
+    try {
+      await this.sendControl(this.packet({ type: "ack", receipt, deliveryId: randomUUID() }));
+      const remembered = this.received.get(receipt.eventId);
+      if (remembered) remembered.ackAt = performance.now();
+    }
     catch (error) { this.report(error); } // The receipt outbox retries independently.
   }
 }
 
 type DistributeBody<T> = T extends DeviceEventPacket ? Omit<T, "protocol" | "from" | "to"> : never;
+
+function remember<T>(entries: Map<string, T>, key: string, value: T): void {
+  entries.delete(key);
+  entries.set(key, value);
+  if (entries.size > 2048) entries.delete(entries.keys().next().value!);
+}

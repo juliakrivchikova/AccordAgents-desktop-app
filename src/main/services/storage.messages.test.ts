@@ -471,21 +471,18 @@ test("init refuses a database written by a newer storage schema before migration
   }
 });
 
-test("sqlite invocations bail on the first error and install the timeout and synchronous pragmas", () => {
+test("SQLite operations roll back at the first error and install fresh timeout and synchronous pragmas", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-sql-boundaries-"));
   const storage = Object.create(StorageService.prototype) as any;
-
-  // `.bail on` is load-bearing, not cosmetic: without it the CLI continues past
-  // a failed statement and commits the rest of the transaction.
-  assert.deepEqual(storage.sqliteArgs(["database.sqlite3", "select 1;"]), [
-    "-cmd",
-    ".timeout 30000",
-    "-cmd",
-    ".bail on",
-    "-cmd",
-    "pragma synchronous = normal;",
-    "database.sqlite3",
-    "select 1;"
-  ]);
+  storage.dbPath = path.join(directory, "state.sqlite3");
+  storage.sqliteExecutable = SQLITE_EXECUTABLE;
+  try {
+    await storage.runSql("create table entries(id integer primary key); insert into entries values(1);");
+    await assert.rejects(storage.runSql("begin; insert into entries values(2); insert into entries values(1); commit;"));
+    assert.deepEqual(await storage.queryJson("select id from entries;"), [{ id: 1 }]);
+    assert.deepEqual(await storage.queryJson("select timeout, synchronous from pragma_busy_timeout, pragma_synchronous;"),
+      [{ timeout: 30000, synchronous: 1 }]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("queryJson and queryText stream SQL larger than the process argument limit", async () => {

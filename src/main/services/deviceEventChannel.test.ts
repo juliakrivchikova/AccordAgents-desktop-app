@@ -160,6 +160,35 @@ test("a failing projection in one chat does not prevent another chat's durable a
   } finally { await pair.cleanup(); }
 });
 
+test("overlapping live and mailbox copies reuse durable receipts without rewriting every duplicate", async () => {
+  const pair = await devices();
+  try {
+    const event = await pair.a.publish({ conversationId: "chat", kind: "message.created", payload: { text: "stream chunk" } });
+    await pair.a.flush();
+    const packet = pair.sentA.find(packet => packet.type === "event")!;
+    await pair.b.receive(packet);
+    const receipt = pair.sentB.find(packet => packet.type === "ack")!;
+    await pair.a.receive(receipt);
+    await pair.sqlB(`create trigger forbid_duplicate_event before insert on chat_events
+      begin select raise(abort, 'unexpected duplicate event write'); end;`);
+    await (pair.storageA as any).runSql(`create trigger forbid_duplicate_ack before update on device_event_outbox
+      begin select raise(abort, 'unexpected duplicate ACK write'); end;`);
+    for (let i = 0; i < 25; i++) { await pair.b.receive(packet); await pair.a.receive(receipt); }
+    assert.deepEqual(pair.applied, [event.eventId]);
+    // A repair requested after a lost ACK still gets a fresh receipt even
+    // inside the ordinary duplicate debounce window.
+    const beforeRepair = pair.sentB.filter(packet => packet.type === "ack").length;
+    await pair.b.receive({ ...packet, deliveryId: "explicit-repair" });
+    assert.equal(pair.sentB.filter(packet => packet.type === "ack").length, beforeRepair + 1);
+    assert.deepEqual(pair.applied, [event.eventId]);
+    await pair.sqlB("drop trigger forbid_duplicate_event;");
+    pair.reopenReceiver();
+    await pair.b.receive(packet);
+    assert.deepEqual(pair.applied, [event.eventId], "restart rebuilds the receipt from SQLite without reapplying");
+    if (packet.type === "event") await assert.rejects(pair.b.receive({ ...packet, event: { ...packet.event, payload: { text: "forged" } } }), /signature/);
+  } finally { await pair.cleanup(); }
+});
+
 async function devices() {
   const directory = await mkdtemp(path.join(tmpdir(), "accord-device-channel-"));
   const pathA = path.join(directory, "a.sqlite3");

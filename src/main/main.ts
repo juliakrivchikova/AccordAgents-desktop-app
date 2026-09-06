@@ -2813,6 +2813,7 @@ void app.whenReady().then(async () => {
       })
     );
     machineLinkService.onRunStarted((event) => chatService.applyMachineRunStarted(event));
+    machineLinkService.onProgress(emitReviewProgress);
     machineLinkService.onLateTerminal((event) =>
       chatService.applyMachineLateTerminal({
         conversationId: event.conversationId,

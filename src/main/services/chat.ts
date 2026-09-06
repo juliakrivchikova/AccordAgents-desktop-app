@@ -387,6 +387,7 @@ function chatDeliveryPolicyOptions() {
 }
 const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 2_000_000;
 const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
+const CHAT_PROGRESS_FLUSH_INTERVAL_MS = 100;
 const CHAT_ACTIVITY_DETAIL_MAX_CHARS = 4_000;
 // A hard transport ceiling, not a truncation point. The send path rejects over-limit content
 // with an explicit error and never shortens it, so the canonical /accord message keeps the
@@ -19834,7 +19835,7 @@ export class ChatService {
       if (finished || pendingTimer) {
         return;
       }
-      const throttleMs = this.agentProgressFlushIntervalMs(cumulative.length);
+      const throttleMs = CHAT_PROGRESS_FLUSH_INTERVAL_MS;
       const elapsed = Date.now() - lastFlush;
       if (elapsed >= throttleMs) {
         flush();
@@ -19866,7 +19867,8 @@ export class ChatService {
       }
       activity = nextActivity;
       dirty = true;
-      scheduleFlush();
+      // Tool/status transitions are observable states, not replaceable text.
+      flush();
     };
 
     const beginAttempt = (): void => {
@@ -19892,6 +19894,9 @@ export class ChatService {
         clearTimeout(pendingTimer);
         pendingTimer = undefined;
       }
+      // Retain the final text/tool snapshot before the finished marker clears
+      // live rendering; the machine channel must not lose the last short burst.
+      flush();
       finished = true;
       if (!progress) {
         return;
@@ -19917,16 +19922,6 @@ export class ChatService {
         omittedActivityEventCount: activity.omittedCount
       })
     };
-  }
-
-  private agentProgressFlushIntervalMs(cumulativeLength: number): number {
-    if (cumulativeLength >= 1_000_000) {
-      return 2_000;
-    }
-    if (cumulativeLength >= 256_000) {
-      return 1_000;
-    }
-    return 250;
   }
 
   private processingTranscriptFromContent(

@@ -142,6 +142,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private readonly approvalListeners: Array<(event: MachineApprovalEvent) => Promise<void> | void> = [];
   private readonly lateTerminalListeners: Array<(event: MachineLateTerminalEvent) => Promise<void> | void> = [];
   private readonly runStartedListeners: Array<(event: { conversationId: string; runId: string }) => Promise<void> | void> = [];
+  private readonly progressListeners: Array<(progress: ReviewProgress) => void> = [];
   private readonly backDeltaListeners: Array<(delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void> = [];
   private conversationLoader?: (conversationId: string) => Promise<Conversation | undefined>;
   private readonly connections = new Map<string, MachineConnection>();
@@ -164,6 +165,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
   onRunStarted(listener: (event: { conversationId: string; runId: string }) => Promise<void> | void): () => void {
     this.runStartedListeners.push(listener);
     return () => { const index = this.runStartedListeners.indexOf(listener); if (index >= 0) this.runStartedListeners.splice(index, 1); };
+  }
+
+  onProgress(listener: (progress: ReviewProgress) => void): () => void {
+    this.progressListeners.push(listener);
+    return () => { const index = this.progressListeners.indexOf(listener); if (index >= 0) this.progressListeners.splice(index, 1); };
   }
 
   /** Conversation changes made on a machine (approval cards, requests). The
@@ -824,7 +830,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         apply: async (event, body) => {
           const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
           if (!isMachineLinkEnvelope(envelope) || !["machine.conversation.backdelta", "machine.turn.finished", "machine.turn.started",
-            "machine.approval.requested", "machine.approval.updated", "machine.approval.result"].includes(envelope.body.type) ||
+            "machine.approval.requested", "machine.approval.updated", "machine.approval.result", "machine.turn.progress.delta"].includes(envelope.body.type) ||
               !("conversationId" in envelope.body) ||
               event.kind !== envelope.body.type || event.conversationId !== envelope.body.conversationId) {
             throw new Error("Unexpected machine replication event.");
@@ -835,6 +841,15 @@ export class MachineLinkService implements MachineTurnDispatcher {
           }
           if (envelope.body.type === "machine.turn.started") {
             await Promise.all(this.runStartedListeners.map(listener => listener(envelope.body as { conversationId: string; runId: string })));
+            return "applied";
+          }
+          if (envelope.body.type === "machine.turn.progress.delta") {
+            const progress = await this.options.eventStorage.machineProgress().apply(event, envelope.body);
+            if (progress) {
+              const callback = connection.pendingTurns.get(progress.runId)?.progress;
+              if (callback) callback(progress);
+              else for (const listener of this.progressListeners) listener(progress);
+            }
             return "applied";
           }
           await this.handleBody(connection, envelope.body);
@@ -932,10 +947,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   private async finishTurn(connection: MachineConnection, body: MachineTurnFinishedBody, onStored?: () => Promise<void>): Promise<boolean> {
+    const messages = await this.options.eventStorage.machineProgress().retainPartialForOutcome(body);
     // The machine keeps the result until this acknowledgement arrives, and
     // it is sent only once the result has been stored on this desktop; a
     // held stop for the run is dropped at the same moment, never before.
     const acknowledge = async (): Promise<void> => {
+      await this.options.eventStorage.machineProgress().close(body.runId);
       const held = connection.pendingCancels.get(body.runId);
       const remembered = connection.pendingRuns.get(body.runId);
       const changed = connection.pendingCancels.delete(body.runId);
@@ -960,7 +977,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       // turn would (reply, stop, failure), stored before it is acknowledged.
       void this.debugLogs.write("machine-link.turn.finished-late", { machineId: connection.record.id, runId: body.runId, status: body.status, messages: body.messages.length });
       const known = connection.replicated.get(body.conversationId);
-      for (const message of body.messages) {
+      for (const message of messages) {
         known?.set(message.id, messageStamp(message));
       }
       await this.emitLateTerminal({
@@ -969,7 +986,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         conversationId: body.conversationId,
         runId: body.runId,
         status: body.status,
-        messages: body.messages,
+        messages,
         warnings: body.warnings,
         finishedAt: body.finishedAt,
         receiptId: body.receiptId,
@@ -981,7 +998,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     connection.pendingTurns.delete(body.runId);
     pending.resolve({
       status: body.status,
-      messages: body.messages,
+      messages,
       warnings: body.warnings,
       error: body.error,
       finishedAt: body.finishedAt,

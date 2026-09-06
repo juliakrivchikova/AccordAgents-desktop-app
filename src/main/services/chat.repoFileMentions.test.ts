@@ -1340,6 +1340,7 @@ test("clearInterruptedRuns does not mark local pending turns interrupted at stor
   };
   let saved = false;
   const storage = Object.create(StorageService.prototype) as any;
+  storage.machineProgress = () => ({ overlay: async (_id: string, messages: ChatMessage[]) => messages });
   storage.queryJson = async (sql: string) => {
     if (sql.includes("from conversation_messages")) {
       return conversation.messages.map((message, sequence) => ({
@@ -1396,6 +1397,7 @@ test("clearInterruptedRuns preserves active remote run handles without warning",
   };
   let saved: Conversation | undefined;
   const storage = Object.create(StorageService.prototype) as any;
+  storage.machineProgress = () => ({ overlay: async (_id: string, messages: ChatMessage[]) => messages });
   storage.queryJson = async (sql: string) => {
     if (sql.includes("from conversation_messages")) {
       return conversation.messages.map((message, sequence) => ({

@@ -12,7 +12,7 @@ Every message is sealed with the pairing's key inside the machine's own relay ro
 | desktop → machine | `machine.hello.ack`, `machine.settings.sync` | after hello; the settings snapshot (roles, rules, saved prompts, member presets, limits, agent environment values) also travels with every turn request |
 | desktop → machine | `machine.conversation.sync` / `machine.conversation.delta` | the first time a chat reaches the machine: the conversation shell, then its messages in bounded batches (at most 150 messages / ~1.5 MB of JSON per relay message, single oversized messages and metadata still require fragmentation to meet the relay's 10 MiB limit); changed messages afterwards, batched the same way. The machine keeps its own `participantSessions`, `activeRunIds`, `running`, `runId`, `pendingAppToolApprovals`; approval policies are the union of both sides. A fresh copy after a reconnect never erases messages the machine produced meanwhile, and the machine's inventory of what the desktop holds is kept across syncs, so a reconnect does not send the whole history back. |
 | desktop → machine | `machine.turn.request` | the member's home is this machine: run this member for this message, with the desktop's run id and pending message id. Settings sync and replication precede it; a Stop that lands during that preparation means the request is never sent. |
-| machine → desktop | `machine.turn.progress`, `machine.turn.finished` | streamed progress and the finished messages (same ids on both sides), sent in order. The machine keeps a finished turn in its outbox (`machine-outbox.json` under its user data, so it survives a restart of the runtime) and resends it on every hello until the desktop answers `machine.turn.finished.ack`. Whatever the status (reply, stopped, failed, stop not confirmed), the machine's copy of the bubble contributes its text and the run's other messages, live or late: a desktop that finds no pending turn for it (restart) folds the result into the chat the same way before acknowledging. |
+| machine → desktop | `machine.turn.progress.delta`, `machine.turn.finished` | streamed progress and the finished messages (same ids on both sides), sent in order. The machine keeps a finished turn in its outbox (`machine-outbox.json` under its user data, so it survives a restart of the runtime) and resends it on every hello until the desktop answers `machine.turn.finished.ack`. Whatever the status (reply, stopped, failed, stop not confirmed), the machine's copy of the bubble contributes its text and the run's other messages, live or late: a desktop that finds no pending turn for it (restart) folds the result into the chat the same way before acknowledging. |
 | desktop → machine | `machine.turn.finished.ack` | sent only after the outcome (reply, stop, unconfirmed stop, failure) has been written to the desktop's SQLite; a failed write sends no ack and the machine keeps the result |
 | desktop → machine | `machine.conversation.sync.done` | the first copy (shell + every batch) has been sent in full; only now does the machine compare its own rows against what the desktop holds, so a restarted machine with a full database sends back only rows it made itself. A batch the machine could not store reverts its inventory entries and marks the copy incomplete, during the first copy or later: the machine answers `machine.conversation.resync` (at most three times per chat; a fresh copy resets the failure but not the budget), and a turn requested while a copy that failed is incomplete fails honestly instead of running on stale rows; a turn that arrives while a copy is still being received waits for the copy and runs once it is complete; while it waits it counts as held (listed in hello, never "unknown"), and a Stop removes it and reports a confirmed interruption, so the copy completing never starts a stopped turn. A repeated hello on an intact connection does not reset the desktop inventory; a disconnect or a machine restart does, so the next replication can send a full copy |
 | machine → desktop | `machine.conversation.resync` | a batch of the first copy could not be stored; the desktop sends the whole copy again from its current state |
@@ -296,14 +296,14 @@ events now fragment. In the isolated QA profile a retained command body was at
 most 99,459 bytes (settings ciphertext included), a settings update 98,658 bytes,
 and started/Stop bodies 173/133 bytes; these are QA settings, not a new measurement
 of the User's catalogue. Their large bodies use the same fragments and bounded
-SQLite stdin path, rather than one CLI argument or relay frame. Direct progress
-still needs conversion; approval control is covered below.
+SQLite stdin path, rather than one CLI argument or relay frame. Progress and
+approval control are covered below.
 
 Bodies, fragments, event headers, delivery receipts and inventory stay in the
 endpoints' local SQLite; only sealed packets reach the User's relay buffer.
 The new history has no garbage collection yet, and repeated growing snapshots
-can accumulate substantial history; progress coalescing and measured retention
-pressure remain cutover work. The 24-hour relay cost measurement is still open.
+can accumulate substantial history; measured retention pressure and history
+garbage collection remain cutover work. The 24-hour relay cost measurement is still open.
 
 ## Durable approval decisions (2026-09-06)
 
@@ -389,6 +389,53 @@ In an isolated real Electron instance, User created and signed v1, saved a
 concurrent edit then produced a stale-base response, and the UI retry saved the
 typed text and note intact while preserving the original v1 signature.
 
+## Durable streaming and SQLite throughput (2026-09-06)
+
+Machine progress now uses signed text/activity deltas in the same per-run stream
+as the terminal. Text coalesces at 100 ms; observed tool/status transitions are
+retained. The sender retries an identical failed frame before later frames and
+holds the terminal until all preceding progress is stored. A SQLite projection
+stores only frame references; loading a pending message reconstructs its partial
+answer without updating every conversation/message row for each token. Startup
+replays locally authored events committed before a projection failure, and a
+crash outcome retains that partial output beside its diagnostic. It does not
+invent a completed reply or replay the native command.
+
+Storage reuses a `sqlite3` process through stdin/stdout, opening a fresh database
+connection for each operation and closing it before reporting success. Temporary
+tables, PRAGMA state and uncommitted transactions cannot leak into the next
+operation; `.bail on` rolls back a failed batch. A timeout kills the process and
+rejects without retrying an operation whose commit is uncertain. The process
+exits after one idle second or parent-pipe closure. Applied-event/ACK caches are
+bounded to 2,048 identities and never stand in for a successful SQLite commit.
+
+The size regression uses a 14,000-row, roughly 41-MB chat and database triggers
+that forbid rewriting its conversation/message rows during progress. A 1-MiB
+answer in 256 chunks produces under 1.3 MB of delta JSON, versus over 130 MB of
+cumulative snapshots; even a blocked writer queues under 1.5 MB of deltas while
+preserving 256 distinct activity changes. Frame bodies and references remain in
+the owning and receiving machines' SQLite/blob stores; only sealed packets reach
+the relay/mailbox. SQL goes through pipes, never a growing command argument.
+History retention/GC and representative relay billing remain cutover work.
+
+Real isolated Electron + native Codex + public-relay verification on macOS:
+a desktop restart during streaming retained the received prefix, and a later
+machine SIGKILL between event commit and projection commit retained 4,794
+characters with an honest failed outcome and no automatic rerun. Stop confirmed
+interruption, retained 3,353 characters in the existing processing transcript,
+and a following request completed through session resume. The measured 80-line,
+12,287-character answer produced 660 frames / 1,194,233 bytes of event-envelope
+JSON; average creation-to-application delay was 732 ms, maximum 2,276 ms, and the
+terminal took 2,525 ms. This is a material improvement over the initial 195-second
+backlog, not proof of end-to-end latency parity or of Linux/phone behavior.
+
+Checks: storage 87/87, machines/relay 63/63, final progress/SQLite/channel 15/15,
+and final host/link 12/12. The broad permissions run had 863 passes, 8 skips and
+one four-second fixture-startup failure under load; that shutdown case passed
+in an isolated rerun. Real Claude streaming is unverified while its quota is
+unavailable. These checks complete this streaming slice, not the whole signed
+machines transition or its final release gate.
+
 ## Where the machine keeps data
 
 Under the user-data directory: `accordagents.sqlite3` (its copy of the chats it hosts, artifacts, chat events), `settings.json` (the desktop's shareable settings plus the machine's own records), `machine-secrets.key` (0600; seals the machine's secrets), `machine-outbox.json` (finished turns not yet acknowledged by the desktop; an unreadable file is never overwritten, a damaged one is set aside as `.corrupt-<time>` and, if it cannot be moved or copied aside, is left untouched and reported instead of being overwritten, entries with an unexpected shape are archived in `.rejected-<time>.json` and, until that archive is written, carried back into the outbox file so a later write never discards them; a failed write is retried every 30 s and reported in the machine's hello, which the Machines settings show as a warning), `machine-instance.json` (start counter, advanced atomically; when it cannot be read or written the machine publishes no sequence and the desktop falls back to the start time), `chats/<id>/` (history files the CLIs read), `debug-logs/`.
@@ -401,7 +448,7 @@ Under the user-data directory: `accordagents.sqlite3` (its copy of the chats it 
 
 - User choices (`User choice:` blocks) raised by a member on a machine reach the desktop as ordinary messages; the answer travels back as the next user message, which is the same round trip a local member gets. Nothing else is forwarded for them yet.
 - A machine-hosted member's requests to other members run on the machine's copy; routing them to the other members' home machines follows the event contract (`docs/machines/02-event-contract.md`).
-- Conversation copies/deltas, native command admission/Stop, settings, approvals and terminal outcomes now use durable delivery and accepted-event clock observation; progress still needs conversion, followed by the PWA's IndexedDB clock/outbox and chat-wide event projections.
+- Conversation copies/deltas, native command admission/Stop, settings, approvals, progress and terminal outcomes now use durable delivery and accepted-event clock observation; the PWA's IndexedDB clock/outbox and chat-wide event projections remain.
 - The doctor/setup flow does not yet install the runtime over SSH; the steps above are manual until it does.
 - The machine-owned three-hour AWS idle stop and scoped phone wake still need implementation and verification; the desktop timer does not protect against the desktop dying. The current manual QA deployment is not an always-on production installation.
 - The legacy worker path and the cloud-only prompt branch remain until the cutover commit removes them.

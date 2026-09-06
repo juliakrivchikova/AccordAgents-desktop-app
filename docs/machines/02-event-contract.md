@@ -133,8 +133,15 @@ effect claim after validation and before applying it. Delivery retries never
 repeat that effect, and a lost execution receipt is reported as uncertain.
 The source stores the matching result before acknowledging it.
 
-This is not the complete event-contract cutover: progress still
-requires conversion; PWA IndexedDB outbox,
+Machine progress now uses signed `machine.turn.progress.delta` events with
+per-run sequence/parent identities, text suffix replacements and activity-row
+changes. Only text snapshots coalesce; observed tool transitions and the final
+short burst precede the terminal. The local projection stores event references
+and overlays pending messages on reads, so a desktop restart does not erase
+already stored partial output. A machine recovers its published local frames
+before native-run recovery; received frames still follow channel gap rules.
+
+This is not the complete event-contract cutover: PWA IndexedDB outbox,
 canonical chat-wide roster fan-out, pure conflict projections, artifact event
 delivery and superseded-revision navigation, pressure UI and history/blob garbage
 collection remain. Artifact storage now binds signatures to immutable revision

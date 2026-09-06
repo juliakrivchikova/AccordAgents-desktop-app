@@ -44,6 +44,7 @@ import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 import { preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
 import type {
   AgentHealth,
+  ReviewProgress,
   AppSettings,
   ChatAgentActivityEvent,
   ChatAppToolApproval,
@@ -554,13 +555,10 @@ test("agent progress sink coalesces rapid text updates and flushes the latest pa
   sink.beginAttempt();
   sink.emit({ kind: "text", text: "A", cumulative: "A" });
   sink.emit({ kind: "text", text: "B", cumulative: "AB" });
-  await new Promise((resolve) => setTimeout(resolve, 120));
-
   assert.equal(progressItems.at(-1)?.partialContent, undefined);
-
-  await new Promise((resolve) => setTimeout(resolve, 180));
-
+  await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(progressItems.at(-1)?.partialContent, "AB");
+  sink.finish();
 });
 
 test("agent progress sink emits finish immediately and suppresses pending flushes", async () => {
@@ -583,11 +581,26 @@ test("agent progress sink emits finish immediately and suppresses pending flushe
   sink.finish();
 
   assert.equal(progressItems.at(-1)?.state, "finished");
+  assert.equal(progressItems.at(-2)?.partialContent, "A", "the final short burst precedes the finished marker");
 
   const countAfterFinish = progressItems.length;
   await new Promise((resolve) => setTimeout(resolve, 300));
 
   assert.equal(progressItems.length, countAfterFinish);
+});
+
+test("agent progress sink preserves immediate tool start and completion between text flushes", () => {
+  const service = testService().service as any;
+  const observed: string[] = [];
+  const sink = service.createAgentProgressSink("run-tool", (update: ReviewProgress) => {
+    const status = update.agentProgress?.activityEvents?.at(-1)?.status;
+    if (status) observed.push(status);
+  }, chatParticipant("codex-cli"), "message-tool");
+  sink.beginAttempt();
+  sink.emit({ kind: "tool", text: "Command", activityKind: "command", activityItemId: "command-1", activityStatus: "started" });
+  sink.emit({ kind: "tool", text: "Command", activityKind: "command", activityItemId: "command-1", activityStatus: "completed" });
+  assert.deepEqual(observed, ["started", "completed"]);
+  sink.finish();
 });
 
 test("run owner heartbeat timer clears when final active run is forgotten", () => {
