@@ -5,8 +5,9 @@ import path from "node:path";
 import test from "node:test";
 import { ArtifactService } from "./artifacts";
 import { ArtifactStore } from "./artifactStore";
+import { artifactRevision, ARTIFACT_REVISION_SCHEMA } from "./artifactRevisions";
 import type { ArtifactDraftRecord, ArtifactOperationRecord } from "./artifactStore";
-import { runCommand } from "./command";
+import { CommandError, runCommand } from "./command";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import { parseMarkdownInline } from "../../shared/markdownInline";
 import { unifiedLineDiff } from "../../shared/artifactDiff";
@@ -16,6 +17,62 @@ const CONVERSATION_ID = "chat-1";
 const MEMBERS = ["user", "gera", "codex", "drew"];
 const NOW_FOR_LEGACY = "2026-07-13T12:00:00.000Z";
 const SQLITE_EXECUTABLE = resolveSqliteExecutable({ appPath: process.cwd() });
+
+test("a maximum-size artifact is written over stdin and signatures never embed its body", async () => {
+  const h = await harness();
+  try {
+    const content = "'".repeat(512 * 1024);
+    const created = expectPublished(expectOk(await h.service.create("gera", { conversationId: CONVERSATION_ID,
+      name: "Maximum payload", content, requiredSigners: ["user"] })));
+    assert.equal(created.version.content, content);
+    expectOk(await h.service.sign("user", { conversationId: CONVERSATION_ID, artifactId: created.summary.id,
+      versionEventId: created.version.versionEventId, contentHash: created.version.contentHash }));
+    const signatures = await h.store.listSignatures(created.summary.id);
+    assert.ok(Buffer.byteLength(JSON.stringify(signatures)) < 1024);
+    const reread = await attach(h.dbPath).store.getVersion(created.summary.id, 1);
+    assert.equal(reread?.contentHash, created.version.contentHash);
+    assert.equal(reread?.content, content);
+  } finally { await h.cleanup(); }
+});
+
+test("competing offline v2 revisions retain their own signatures when display numbers are reprojected", async () => {
+  const h = await harness();
+  try {
+    const first = expectPublished(expectOk(await h.service.create("gera", { conversationId: CONVERSATION_ID,
+      name: "Offline revisions", content: "base", requiredSigners: ["user", "drew"] })));
+    const second = expectPublished(expectOk(await h.service.revise("gera", { conversationId: CONVERSATION_ID,
+      artifactId: first.summary.id, baseVersion: 1, content: "Signed offline text" })));
+    const signed = { conversationId: CONVERSATION_ID, artifactId: first.summary.id, version: 2,
+      versionEventId: second.version.versionEventId, contentHash: second.version.contentHash };
+    expectOk(await h.service.sign("user", signed));
+    expectOk(await h.service.sign("drew", signed));
+    const competing = artifactRevision({ artifactId: first.summary.id, version: 2, content: "Earlier-ordered competing text",
+      author: "gera", baseVersionEventId: first.version.versionEventId, createdAt: new Date().toISOString() }, "competing-version-event");
+    await h.store.retainRevision(competing);
+    await assert.rejects(h.store.projectVersions(first.summary.id, [competing.versionEventId, first.version.versionEventId]), /ancestry/);
+    await h.store.projectVersions(first.summary.id, [first.version.versionEventId, competing.versionEventId]);
+    const after = expectPublished(expectOk(await h.service.read("user", { conversationId: CONVERSATION_ID, artifactId: first.summary.id })));
+    assert.equal(after.version.version, 2);
+    assert.equal(after.version.content, competing.content);
+    assert.equal(after.version.signatures.length, 0);
+    assert.equal(after.summary.approval.state, "unsigned");
+    const retained = await h.store.getRevision(first.summary.id, second.version.versionEventId);
+    assert.equal(retained?.content, "Signed offline text");
+    assert.equal(retained?.superseded, true);
+    const signatures = await h.store.listSignatures(first.summary.id);
+    assert.deepEqual(signatures.map(s => s.signer).sort(), ["drew", "user"]);
+    assert.ok(signatures.every(s => s.versionEventId === second.version.versionEventId && s.contentHash === second.version.contentHash));
+    expectError(await h.service.sign("user", signed), "stale_version");
+    expectError(await h.service.revise("gera", { conversationId: CONVERSATION_ID, artifactId: first.summary.id,
+      baseVersion: 2, baseVersionEventId: second.version.versionEventId, baseContentHash: second.version.contentHash,
+      content: "Edit of the old offline revision" }), "stale_version");
+    await h.store.projectVersions(first.summary.id, [first.version.versionEventId, second.version.versionEventId]);
+    const restored = expectPublished(expectOk(await attach(h.dbPath).service.read("user", { conversationId: CONVERSATION_ID, artifactId: first.summary.id })));
+    assert.equal(restored.summary.approval.state, "approved");
+    assert.equal(restored.version.signatures.length, 2);
+    await assert.rejects(h.store.retainRevision({ ...competing, content: "changed underneath the same hash" }), /immutable hash/);
+  } finally { await h.cleanup(); }
+});
 
 interface Harness {
   dbPath: string;
@@ -1251,6 +1308,7 @@ test("store guards reject stale-roster and post-publication draft writes", async
       operationId: "guard:submit"
     }));
     assert.equal((await h.store.getById(collecting.summary.id))?.updatedAt, submitted.updatedAt);
+    const beforePublish = (await h.store.getById(collecting.summary.id))!;
     expectOk(await h.service.publish("gera", {
       conversationId: CONVERSATION_ID,
       artifactId: collecting.summary.id,
@@ -1259,6 +1317,16 @@ test("store guards reject stale-roster and post-publication draft writes", async
       sources: [{ draftId: submitted.id, disposition: "considered" }],
       operationId: "guard:publish"
     }));
+    const sources = await h.store.listVersionSources(collecting.summary.id, 1);
+    const rejectedEventId = "guard:losing-publication";
+    assert.equal(await h.store.publishFirstVersion(beforePublish,
+      { artifactId: collecting.summary.id, version: 1, content: "losing v1", author: "gera", createdAt: submitted.updatedAt },
+      sources, [], operationForArtifact("guard:losing-publish", collecting.summary.id, "publish_v1", "losing"),
+      eventRecord(rejectedEventId, collecting.summary.id, "published", submitted.updatedAt)), false);
+    const residue = await runCommand(SQLITE_EXECUTABLE, [h.dbPath], {
+      input: `select count(*) from artifact_bound_sources where version_event_id = '${rejectedEventId}';`, primeLoginShellEnv: false
+    });
+    assert.equal(residue.stdout.trim(), "0");
     const lateDraft = draftRecord("guard-late", collecting.summary.id, "too late");
     assert.equal(
       await h.store.saveDraft(lateDraft, 0, updated.summary.draftRosterRevision, operationRecord("guard:save:late", lateDraft)),
@@ -1412,10 +1480,21 @@ test("legacy published artifacts migrate without changing v1 read or signing beh
         insert into artifact_versions values (
           'legacy-id', 1, 'legacy body', 'gera', null, '${NOW_FOR_LEGACY}'
         );
+        insert into artifact_signatures values ('legacy-id', 1, 'user', '${NOW_FOR_LEGACY}');
       `,
       primeLoginShellEnv: false
     });
+    await runCommand(SQLITE_EXECUTABLE, [dbPath], { input: `${ARTIFACT_REVISION_SCHEMA}
+      create trigger migration_disk_full before insert on artifact_bound_signatures begin select raise(abort, 'SQLITE_FULL'); end;`, primeLoginShellEnv: false });
     const migrated = attach(dbPath);
+    await assert.rejects(migrated.store.init(), error => error instanceof CommandError && /SQLITE_FULL/.test(error.result.stderr));
+    const legacyResult = JSON.stringify({ artifactId: "legacy-id", value: { lifecycle: "published", version: {
+      version: 1, content: "legacy body", author: "gera", createdAt: NOW_FOR_LEGACY, signatures: []
+    }, history: [] } });
+    await runCommand(SQLITE_EXECUTABLE, [dbPath], { input: `
+      drop trigger migration_disk_full;
+      insert into artifact_operations(conversation_id, artifact_id, actor, operation_kind, operation_id, request_hash, result_json, created_at, applied)
+        values ('${CONVERSATION_ID}', 'legacy-id', 'gera', 'publish_v1', 'legacy-publish', 'legacy-hash', '${legacyResult}', '${NOW_FOR_LEGACY}', 1);`, primeLoginShellEnv: false });
     const read = expectPublished(expectOk(await migrated.service.read("user", {
       conversationId: CONVERSATION_ID,
       artifactId: "legacy-id"
@@ -1423,11 +1502,21 @@ test("legacy published artifacts migrate without changing v1 read or signing beh
     assert.equal(read.summary.lifecycle, "published");
     assert.equal(read.summary.headVersion, 1);
     assert.equal(read.version.content, "legacy body");
+    assert.equal(read.version.signatures[0].signedAt, NOW_FOR_LEGACY);
+    assert.equal(read.version.signatures[0].versionEventId, read.version.versionEventId);
+    assert.equal(read.version.signatures[0].contentHash, read.version.contentHash);
+    const replay = await migrated.store.getOperation(CONVERSATION_ID, "gera", "publish_v1", "legacy-publish");
+    assert.equal(JSON.parse(replay!.resultJson).value.version.versionEventId, read.version.versionEventId);
+    assert.equal(JSON.parse(replay!.resultJson).value.version.contentHash, read.version.contentHash);
     const signed = expectOk(await migrated.service.sign("user", {
       conversationId: CONVERSATION_ID,
       artifactId: "legacy-id"
     }));
     assert.equal(signed.approval.state, "approved");
+    await assert.rejects(runCommand(SQLITE_EXECUTABLE, ["-bail", dbPath], {
+      input: `insert into artifact_versions values ('legacy-id', 2, 'old app write', 'gera', null, '${NOW_FOR_LEGACY}');`,
+      primeLoginShellEnv: false
+    }), error => error instanceof CommandError && /upgrade AccordAgents/.test(error.result.stderr));
     await new ArtifactStore(dbPath, SQLITE_EXECUTABLE).init();
   } finally {
     await rm(dir, { recursive: true, force: true });

@@ -2319,10 +2319,14 @@ export type ArtifactDraftAudiencePolicyByAuthor = Record<string, ArtifactDraftAu
 export interface ArtifactSignature {
   signer: string;
   signedAt: string;
+  versionEventId?: string;
+  contentHash?: string;
 }
 
 export interface ArtifactVersionMeta {
   version: number;
+  versionEventId: string;
+  contentHash: string;
   author: string;
   note?: string;
   createdAt: string;
@@ -2494,6 +2498,8 @@ export interface ReviseArtifactRequest {
   artifactId?: string;
   name?: string;
   baseVersion: number;
+  baseVersionEventId?: string;
+  baseContentHash?: string;
   content: string;
   note?: string;
 }
@@ -2510,6 +2516,8 @@ export interface SignArtifactRequest {
   artifactId?: string;
   name?: string;
   version?: number;
+  versionEventId?: string;
+  contentHash?: string;
 }
 
 export interface UpdateArtifactAccessRequest {

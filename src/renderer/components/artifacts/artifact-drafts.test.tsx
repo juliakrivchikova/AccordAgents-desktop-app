@@ -17,6 +17,8 @@ import { artifactSummaryStatusLabel } from "../../../shared/artifacts";
 import { loadArtifactDetail } from "./artifact-detail-loader";
 import { AccessArtifactForm } from "./artifact-forms";
 import { ArtifactVersionSelector } from "./artifact-version-selector";
+import { ArtifactDetailView } from "./artifact-detail";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 const NOW = "2026-07-13T12:00:00.000Z";
 
@@ -35,8 +37,8 @@ test("one selector contains every version and draft with author labels", () => {
     selectedVersion={5}
     headVersion={5}
     history={[
-      { version: 1, author: "owner", createdAt: NOW, signatures: [] },
-      { version: 5, author: "owner", createdAt: NOW, signatures: [] }
+      { version: 1, versionEventId: "fixture-version-1", contentHash: "1".repeat(64), author: "owner", createdAt: NOW, signatures: [] },
+      { version: 5, versionEventId: "fixture-version-5", contentHash: "5".repeat(64), author: "owner", createdAt: NOW, signatures: [] }
     ]}
     drafts={[publishedDraft()]}
     onShowVersion={(version) => selected.push(version)}
@@ -58,8 +60,8 @@ test("selector marks the head version current while viewing history", () => {
     selectedVersion={1}
     headVersion={5}
     history={[
-      { version: 1, author: "owner", createdAt: NOW, signatures: [] },
-      { version: 5, author: "owner", createdAt: NOW, signatures: [] }
+      { version: 1, versionEventId: "fixture-version-1", contentHash: "1".repeat(64), author: "owner", createdAt: NOW, signatures: [] },
+      { version: 5, versionEventId: "fixture-version-5", contentHash: "5".repeat(64), author: "owner", createdAt: NOW, signatures: [] }
     ]}
     drafts={[]}
     onShowVersion={() => undefined}
@@ -131,6 +133,32 @@ test("inline revision keeps notes and does not reset typed content from detail r
   assert.match(surfaceSource, /artifact-version-note/);
   assert.doesNotMatch(detailSource, /useEffect\(\(\) => \{\s*setContent\(props\.initialContent\);?\s*\}/s);
   assert.doesNotMatch(detailSource, /<div className="artifact-version-note">/);
+});
+
+test("retrying a stale revision preserves the edit and note when its base identity advances", () => {
+  const noop = (): void => undefined;
+  const saved: Array<[string, string | undefined]> = [];
+  const detail = publishedDetail("retry-artifact", "Retry", "original", false);
+  const props: Parameters<typeof ArtifactDetailView>[0] = {
+    detail, drafts: [], mode: "revise", busy: false, canEdit: true, canSign: false, alreadySigned: false,
+    reviseBase: 1, showDiff: false, renaming: false, renameValue: "", onRenameValueChange: noop,
+    onStartRename: noop, onCancelRename: noop, onSubmitRename: noop, onStartRevise: noop,
+    onSubmitRevise: (content, note) => { saved.push([content, note]); }, onCancelForm: noop, onSign: noop,
+    onShowVersion: noop, onShowDiffChange: noop, onRetryDrafts: noop
+  };
+  const render = (next: typeof props): JSX.Element => <TooltipProvider><ArtifactDetailView {...next} /></TooltipProvider>;
+  const renderer = create(render(props));
+  act(() => {
+    renderer.root.findByProps({ id: "artifact-revise-content" }).props.onChange({ target: { value: "my unsaved edit" } });
+    renderer.root.findByProps({ "aria-label": "Revision note" }).props.onChange({ target: { value: "my note" } });
+  });
+  const refreshed = { ...detail, summary: { ...detail.summary, headVersion: 2 },
+    version: { ...detail.version, version: 2, versionEventId: "new-base", content: "other writer" } };
+  act(() => renderer.update(render({ ...props, detail: refreshed, reviseBase: 2 })));
+  assert.equal(renderer.root.findByProps({ id: "artifact-revise-content" }).props.value, "my unsaved edit");
+  act(() => renderer.root.findByProps({ "aria-label": "Save as v3" }).props.onClick());
+  assert.deepEqual(saved, [["my unsaved edit", "my note"]]);
+  act(() => renderer.unmount());
 });
 
 test("access popover restores owner, signer, label updates and rolls back failed write toggles", async () => {
@@ -248,8 +276,8 @@ test("newer revisions still load the initial draft archive", async () => {
   detail.summary.submittedDraftCount = 2;
   detail.version.version = 5;
   detail.history = [
-    { version: 1, author: "owner", createdAt: NOW, signatures: [] },
-    { version: 5, author: "owner", createdAt: NOW, signatures: [] }
+    { version: 1, versionEventId: "fixture-version-1", contentHash: "1".repeat(64), author: "owner", createdAt: NOW, signatures: [] },
+    { version: 5, versionEventId: "fixture-version-5", contentHash: "5".repeat(64), author: "owner", createdAt: NOW, signatures: [] }
   ];
   let archiveReads = 0;
   let drafts: ArtifactDraftView[] = [];
@@ -453,7 +481,7 @@ function publishedDetail(
       updatedAt: NOW,
       approval: { state: "none-required", requiredSigners: [], signedCurrent: [] }
     },
-    version: { version: 1, author: "user", content, createdAt: NOW, signatures: [] },
+    version: { version: 1, versionEventId: "fixture-content-version-1", contentHash: "1".repeat(64), author: "user", content, createdAt: NOW, signatures: [] },
     history: [],
     sources: withSources ? [{
       draftId: "draft-a",

@@ -192,7 +192,7 @@ export function ArtifactDetailView(props: {
           </>
         ) : props.mode === "revise" ? (
           <ArtifactRevisionSurface
-            key={`revise-${detail.summary.id}-${props.reviseBase}`}
+            key={`revise-${detail.summary.id}`}
             baseVersion={props.reviseBase}
             initialContent={detail.version.version === detail.summary.headVersion ? detail.version.content : ""}
             busy={props.busy}

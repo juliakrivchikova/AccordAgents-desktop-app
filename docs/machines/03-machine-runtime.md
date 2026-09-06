@@ -346,6 +346,49 @@ large-chat cost. Approval bodies/receipts remain on user machines in SQLite;
 only sealed packets reach the relay buffer. This does not solve history GC or
 the outstanding representative relay-cost measurement.
 
+## Artifact revision identity (2026-09-06)
+
+Artifact bodies now live in immutable `artifact_revisions` rows, identified by
+the version event id and SHA-256 of the exact UTF-8 content. Display numbers
+live in a separate projection; signatures and draft provenance bind to the
+immutable identity. Re-projecting one of two competing v2 revisions retains
+the other body and its signatures, without counting them toward the winner.
+Projection validates revision ancestry and never executes an external action.
+
+The desktop signs using the identity/hash it displayed and submits revisions
+with the base identity/hash it read. A stale base is rejected, including when
+the displayed number stayed the same. Retrying on the new base preserves the
+user's typed text and revision note; successful edits refresh the version list.
+App MCP accepts the same identity guards. Numeric-only legacy callers still
+resolve the requested version at apply time; universal artifact event emission
+must carry the resolved immutable identity, not re-resolve it on another peer.
+
+Legacy migration copies one version per read, then atomically binds signatures,
+sources and cached publication responses. Failure leaves the migration
+restartable; a completion marker prevents a second migrating process from
+re-binding old signatures after projection. Old tables remain for recovery,
+but their version/signature INSERT/UPDATE paths are fenced against old binaries.
+This is not downgrade support: cutover still requires the verified application
+drain and database backup before a new binary opens user data.
+
+The current User chat contains two published artifacts and five versions:
+132,622 bytes of content in total, with a largest version of 34,491 bytes.
+This is that chat's measurement, not a whole-installation census. Legacy bodies
+temporarily occupy both old and new local SQLite tables. A version remains
+limited to 512 KiB; SQL, including escaped bodies, now goes through stdin rather
+than an operating-system argument. The tested signature list is under 1 KiB
+and does not embed the body or conversation. This step adds no relay payload;
+artifact event fan-out, losing-revision UI and conflict replay are still open.
+
+Verification for this storage step: 75 service/MCP/chat-rename cases, the 17-tool
+terminology guard and 20 artifact renderer/navigation cases pass. Fault cases
+cover migration write failure/retry, concurrent migration/publication/revision,
+old-writer rejection and two offline v2 identities with accumulating signatures.
+In an isolated real Electron instance, User created and signed v1, saved a
+512-KiB unsigned v2, restarted the app and read both identities unchanged; a
+concurrent edit then produced a stale-base response, and the UI retry saved the
+typed text and note intact while preserving the original v1 signature.
+
 ## Where the machine keeps data
 
 Under the user-data directory: `accordagents.sqlite3` (its copy of the chats it hosts, artifacts, chat events), `settings.json` (the desktop's shareable settings plus the machine's own records), `machine-secrets.key` (0600; seals the machine's secrets), `machine-outbox.json` (finished turns not yet acknowledged by the desktop; an unreadable file is never overwritten, a damaged one is set aside as `.corrupt-<time>` and, if it cannot be moved or copied aside, is left untouched and reported instead of being overwritten, entries with an unexpected shape are archived in `.rejected-<time>.json` and, until that archive is written, carried back into the outbox file so a later write never discards them; a failed write is retried every 30 s and reported in the machine's hello, which the Machines settings show as a warning), `machine-instance.json` (start counter, advanced atomically; when it cannot be read or written the machine publishes no sequence and the desktop falls back to the start time), `chats/<id>/` (history files the CLIs read), `debug-logs/`.

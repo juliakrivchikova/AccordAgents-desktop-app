@@ -147,12 +147,14 @@ export class ArtifactService {
     const summary = this.summaryFromRecord(record, signatures.filter((signature) => signature.version === record.headVersion));
     const versionContent: ArtifactVersionContent = {
       version: versionRecord.version,
+      versionEventId: versionRecord.versionEventId,
+      contentHash: versionRecord.contentHash,
       author: versionRecord.author,
       note: versionRecord.note,
       createdAt: versionRecord.createdAt,
       signatures: signatures
-        .filter((signature) => signature.version === versionRecord.version)
-        .map((signature) => ({ signer: signature.signer, signedAt: signature.signedAt })),
+        .filter((signature) => signature.versionEventId === versionRecord.versionEventId && signature.contentHash === versionRecord.contentHash)
+        .map((signature) => ({ signer: signature.signer, signedAt: signature.signedAt, versionEventId: signature.versionEventId, contentHash: signature.contentHash })),
       content: versionRecord.content
     };
     const sources = await this.deps.store.listVersionSources(record.id, versionRecord.version);
@@ -162,12 +164,14 @@ export class ArtifactService {
     const metas = await this.deps.store.listVersionMetas(record.id);
     const history: ArtifactVersionMeta[] = metas.map((meta) => ({
       version: meta.version,
+      versionEventId: meta.versionEventId,
+      contentHash: meta.contentHash,
       author: meta.author,
       note: meta.note,
       createdAt: meta.createdAt,
       signatures: signatures
-        .filter((signature) => signature.version === meta.version)
-        .map((signature) => ({ signer: signature.signer, signedAt: signature.signedAt }))
+        .filter((signature) => signature.versionEventId === meta.versionEventId && signature.contentHash === meta.contentHash)
+        .map((signature) => ({ signer: signature.signer, signedAt: signature.signedAt, versionEventId: signature.versionEventId, contentHash: signature.contentHash }))
     }));
     return ok({ lifecycle: "published", summary, version: versionContent, history, sources });
   }
@@ -447,6 +451,11 @@ export class ArtifactService {
       if (baseVersion !== record.headVersion) {
         return this.staleVersionError(record, baseVersion);
       }
+      const baseRevision = await this.deps.store.getVersion(record.id, baseVersion);
+      if (!baseRevision || (request.baseVersionEventId !== undefined && request.baseVersionEventId !== baseRevision.versionEventId) ||
+          (request.baseContentHash !== undefined && request.baseContentHash !== baseRevision.contentHash)) {
+        return this.staleVersionError(record, baseVersion);
+      }
       const now = this.now();
       const note = normalizeNote(request.note);
       const nextVersion = record.headVersion + 1;
@@ -461,6 +470,7 @@ export class ArtifactService {
         {
           artifactId: record.id,
           version: nextVersion,
+          baseVersionEventId: baseRevision.versionEventId,
           content: request.content,
           author: actor,
           note,
@@ -572,10 +582,14 @@ export class ArtifactService {
       }
       const now = this.now();
       const existingSignatures = await this.deps.store.listSignatures(record.id);
+      if ((request.versionEventId !== undefined && request.versionEventId !== versionRecord.versionEventId) ||
+          (request.contentHash !== undefined && request.contentHash !== versionRecord.contentHash)) {
+        return fail<ArtifactSummary>({ code: "stale_version", message: "The displayed artifact version now refers to different content; read it again before signing." });
+      }
       const projected = computeArtifactApproval(
         record.requiredSigners,
         [...existingSignatures
-          .filter((signature) => signature.version === version)
+          .filter((signature) => signature.versionEventId === versionRecord.versionEventId && signature.contentHash === versionRecord.contentHash)
           .map((signature) => ({ signer: signature.signer, signedAt: signature.signedAt })),
         { signer: actor, signedAt: now }]
       );
@@ -593,6 +607,8 @@ export class ArtifactService {
         {
           artifactId: record.id,
           version,
+          versionEventId: versionRecord.versionEventId,
+          contentHash: versionRecord.contentHash,
           signer: actor,
           signedAt: now
         },
@@ -1476,11 +1492,20 @@ export class ArtifactService {
         requiredSigners,
         updatedAt: now
       };
+      const event = this.event(
+        artifact,
+        actor,
+        "published",
+        `${artifactMemberLabel(actor)} published ${artifactReference(artifact.id, artifact.name)} · v1`,
+        now
+      );
       const storedValue: PublishedArtifactReadResult = {
         lifecycle: "published",
         summary: this.summaryFromRecord(publishedRecord, []),
         version: {
           version: 1,
+          versionEventId: event.id,
+          contentHash: createHash("sha256").update(request.content).digest("hex"),
           author: actor,
           note,
           createdAt: now,
@@ -1498,13 +1523,6 @@ export class ArtifactService {
         { artifactId: artifact.id, value: storedValue },
         now,
         artifact.id
-      );
-      const event = this.event(
-        artifact,
-        actor,
-        "published",
-        `${artifactMemberLabel(actor)} published ${artifactReference(artifact.id, artifact.name)} · v1`,
-        now
       );
       const accepted = await this.deps.store.publishFirstVersion(
         artifact,
@@ -1782,19 +1800,21 @@ export class ArtifactService {
   private async staleVersionError(record: ArtifactRecord, baseVersion: number): Promise<ArtifactResult<ArtifactReadResult>> {
     const head = await this.deps.store.getVersion(record.id, record.headVersion);
     const signatures = head
-      ? (await this.deps.store.listSignatures(record.id)).filter((signature) => signature.version === head.version)
+      ? (await this.deps.store.listSignatures(record.id)).filter((signature) => signature.versionEventId === head.versionEventId && signature.contentHash === head.contentHash)
       : [];
     return fail({
       code: "stale_version",
-      message: `Your edit was based on v${baseVersion}, but "${record.name}" is now at v${record.headVersion}. Nothing was saved. Re-apply your change on top of the current version and revise again with baseVersion ${record.headVersion}.`,
+      message: `The base revision of your edit (v${baseVersion}) has changed. "${record.name}" is now at v${record.headVersion}. Nothing was saved. Read the current revision and re-apply your change using its version identity and content hash.`,
       currentVersion: record.headVersion,
       current: head
         ? {
             version: head.version,
+            versionEventId: head.versionEventId,
+            contentHash: head.contentHash,
             author: head.author,
             note: head.note,
             createdAt: head.createdAt,
-            signatures: signatures.map((signature) => ({ signer: signature.signer, signedAt: signature.signedAt })),
+            signatures: signatures.map((signature) => ({ signer: signature.signer, signedAt: signature.signedAt, versionEventId: signature.versionEventId, contentHash: signature.contentHash })),
             content: head.content
           }
         : undefined

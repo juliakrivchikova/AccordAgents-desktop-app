@@ -205,6 +205,8 @@ export function createArtifactToolDispatcher(artifactService: ArtifactService): 
           conversationId,
           ...ref,
           baseVersion: artifactToolNumber(args.baseVersion),
+          baseVersionEventId: artifactToolString(args.baseVersionEventId),
+          baseContentHash: artifactToolString(args.baseContentHash),
           content: typeof args.content === "string" ? args.content : "",
           note: artifactToolString(args.note)
         });
@@ -218,7 +220,9 @@ export function createArtifactToolDispatcher(artifactService: ArtifactService): 
         return artifactService.sign(member, {
           conversationId,
           ...ref,
-          version: artifactToolOptionalNumber(args.version)
+          version: artifactToolOptionalNumber(args.version),
+          versionEventId: artifactToolString(args.versionEventId),
+          contentHash: artifactToolString(args.contentHash)
         });
       case APP_ARTIFACT_SET_ACCESS_TOOL:
         return artifactService.updateAccess(member, {

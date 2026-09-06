@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
+import ts from "typescript";
 
 const forbidden = [
   { label: "Accord", pattern: /\baccord\b/i },
@@ -44,6 +45,7 @@ test("generic artifact surfaces contain no workflow-specific terminology", () =>
   const wholeFiles = [
     "src/main/services/artifacts.ts",
     "src/main/services/artifactStore.ts",
+    "src/main/services/artifactRevisions.ts",
     "src/main/services/artifactToolRequest.ts",
     "src/shared/artifacts.ts",
     "src/main/services/artifacts.test.ts",
@@ -64,14 +66,16 @@ test("generic artifact surfaces contain no workflow-specific terminology", () =>
     assertGeneric(path, source(path));
   }
 
-  assertGeneric(
-    "src/main/services/appMcp.ts#artifactToolDefinitions",
-    between(
-      "src/main/services/appMcp.ts",
-      "// Definitions for the artifact tools every chat participant gets.",
-      "export interface AppMcpActor"
-    )
-  );
+  const contractsPath = "src/shared/appMcpToolContracts.ts";
+  const parsed = ts.createSourceFile(contractsPath, source(contractsPath), ts.ScriptTarget.Latest, true);
+  const contracts = parsed.statements.filter(ts.isVariableStatement)
+    .flatMap(statement => statement.declarationList.declarations)
+    .find(declaration => declaration.name.getText(parsed) === "APP_MCP_TOOL_CONTRACTS")?.initializer;
+  assert.ok(contracts && ts.isArrayLiteralExpression(contracts), "App tool contracts must be inspected from their current source");
+  const artifactContracts = contracts.elements.filter(element => ts.isObjectLiteralExpression(element) && element.properties.some(property =>
+    ts.isPropertyAssignment(property) && property.name.getText(parsed) === "name" && /^APP_ARTIFACT_/.test(property.initializer.getText(parsed))));
+  assert.equal(artifactContracts.length, 17, "Every artifact tool must remain in the terminology check");
+  for (const contract of artifactContracts) assertGeneric(contractsPath, contract.getText(parsed));
   assertGeneric(
     "src/shared/types.ts#artifactContracts",
     between(
@@ -96,12 +100,11 @@ test("generic artifact surfaces contain no workflow-specific terminology", () =>
       "  onReviewProgress: (callback:"
     )
   );
+  const dispatchSource = source("src/main/appToolWiring.ts");
+  const dispatchStart = dispatchSource.indexOf("export function createArtifactToolDispatcher");
+  assert.notEqual(dispatchStart, -1, "Artifact dispatch must remain in the terminology check");
   assertGeneric(
-    "src/main/main.ts#artifactDispatch",
-    between(
-      "src/main/main.ts",
-      "function artifactToolNumber(value: unknown)",
-      "function appSkillsSourceRoot()"
-    )
+    "src/main/appToolWiring.ts#artifactDispatch",
+    dispatchSource.slice(dispatchStart)
   );
 });

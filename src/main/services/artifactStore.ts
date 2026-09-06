@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { runCommand } from "./command";
+import { artifactRevision, migrateArtifactRevisions, revisionInsertSql, revisionProjectionInsertSql, type ArtifactRevision } from "./artifactRevisions";
 
 // SQLite persistence for artifacts. Deliberately independent from conversation
 // payload storage: artifacts must survive chat compaction, agent session loss,
@@ -80,6 +81,9 @@ export interface ArtifactEventRecord {
 export interface ArtifactVersionRecord {
   artifactId: string;
   version: number;
+  versionEventId?: string;
+  contentHash?: string;
+  baseVersionEventId?: string;
   content: string;
   author: string;
   note?: string;
@@ -89,6 +93,8 @@ export interface ArtifactVersionRecord {
 export interface ArtifactVersionMetaRecord {
   artifactId: string;
   version: number;
+  versionEventId: string;
+  contentHash: string;
   author: string;
   note?: string;
   createdAt: string;
@@ -96,7 +102,9 @@ export interface ArtifactVersionMetaRecord {
 
 export interface ArtifactSignatureRecord {
   artifactId: string;
-  version: number;
+  version?: number;
+  versionEventId: string;
+  contentHash: string;
   signer: string;
   signedAt: string;
 }
@@ -339,6 +347,7 @@ export class ArtifactStore {
       );
       commit;
     `);
+    await migrateArtifactRevisions({ query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
   }
 
   private async ensureArtifactColumn(name: string, sql: string): Promise<void> {
@@ -367,6 +376,7 @@ export class ArtifactStore {
     event?: ArtifactEventRecord
   ): Promise<boolean> {
     await this.init();
+    const revision = artifactRevision(firstVersion, event?.id);
     const output = await this.queryText(`
       begin immediate;
       insert into artifacts (
@@ -396,15 +406,8 @@ export class ArtifactStore {
         select 1 from artifact_conversation_tombstones
         where conversation_id = ${sqlString(record.conversationId)}
       );
-      insert into artifact_versions (artifact_id, version, content, author, note, created_at)
-      select
-        ${sqlString(firstVersion.artifactId)},
-        ${Math.floor(firstVersion.version)},
-        ${sqlString(firstVersion.content)},
-        ${sqlString(firstVersion.author)},
-        ${sqlString(firstVersion.note)},
-        ${sqlString(firstVersion.createdAt)}
-      where exists (select 1 from artifacts where id = ${sqlString(record.id)});
+      ${revisionInsertSql(revision, `exists (select 1 from artifacts where id = ${sqlString(record.id)})`)}
+      ${revisionProjectionInsertSql(revision)}
       ${event ? `
         insert into artifact_event_outbox (
           id, conversation_id, artifact_id, kind, actor, content, created_at, delivered_at
@@ -506,41 +509,99 @@ export class ArtifactStore {
     return rows.map((row) => this.recordFromRow(row));
   }
 
-  async getVersion(artifactId: string, version: number): Promise<ArtifactVersionRecord | undefined> {
+  async getVersion(artifactId: string, version: number): Promise<ArtifactRevision | undefined> {
     await this.init();
-    const rows = await this.queryJson<ArtifactVersionRecord & { note: string | null }>(
+    const rows = await this.queryJson<ArtifactRevision & { note: string | null }>(
       `
-        select artifact_id as artifactId, version, content, author, note, created_at as createdAt
-        from artifact_versions
-        where artifact_id = ${sqlString(artifactId)} and version = ${Math.floor(version)}
+        select r.artifact_id as artifactId, p.version, r.version_event_id as versionEventId, r.content_hash as contentHash, r.base_version_event_id as baseVersionEventId,
+          r.content, r.author, r.note, r.created_at as createdAt
+        from artifact_revisions r join artifact_version_projection p on p.version_event_id = r.version_event_id
+        where r.artifact_id = ${sqlString(artifactId)} and p.version = ${Math.floor(version)}
         limit 1;
       `
     );
     const row = rows[0];
-    return row ? { ...row, note: row.note ?? undefined } : undefined;
+    return row ? artifactRevision({ ...row, note: row.note ?? undefined }) : undefined;
   }
 
   async listVersionMetas(artifactId: string): Promise<ArtifactVersionMetaRecord[]> {
     await this.init();
     const rows = await this.queryJson<ArtifactVersionMetaRecord & { note: string | null }>(
       `
-        select artifact_id as artifactId, version, author, note, created_at as createdAt
-        from artifact_versions
-        where artifact_id = ${sqlString(artifactId)}
-        order by version asc;
+        select r.artifact_id as artifactId, p.version, r.version_event_id as versionEventId, r.content_hash as contentHash,
+          r.author, r.note, r.created_at as createdAt
+        from artifact_revisions r join artifact_version_projection p on p.version_event_id = r.version_event_id
+        where r.artifact_id = ${sqlString(artifactId)} order by p.version asc;
       `
     );
     return rows.map((row) => ({ ...row, note: row.note ?? undefined }));
+  }
+
+  /** An immutable revision remains readable even when it loses its displayed
+   * number during projection. Its signatures continue to name this identity. */
+  async getRevision(artifactId: string, versionEventId: string): Promise<(ArtifactRevision & { superseded: boolean }) | undefined> {
+    await this.init();
+    const rows = await this.queryJson<ArtifactRevision & { superseded: number; note: string | null }>(`
+      select r.artifact_id as artifactId, coalesce(p.version, r.original_version) as version,
+        r.version_event_id as versionEventId, r.content_hash as contentHash, r.base_version_event_id as baseVersionEventId, r.content, r.author, r.note,
+        r.created_at as createdAt, p.version is null as superseded
+      from artifact_revisions r left join artifact_version_projection p on p.version_event_id = r.version_event_id
+      where r.artifact_id = ${sqlString(artifactId)} and r.version_event_id = ${sqlString(versionEventId)};`);
+    const row = rows[0];
+    return row ? { ...artifactRevision({ ...row, note: row.note ?? undefined }), superseded: Boolean(row.superseded) } : undefined;
+  }
+
+  async retainRevision(record: ArtifactRevision): Promise<void> {
+    await this.init();
+    const revision = artifactRevision(record);
+    if (!Number.isSafeInteger(record.version) || record.version < 1) throw new Error("Invalid artifact revision number.");
+    await this.runSql(`begin immediate;
+      create temp table revision_guard(valid integer check(valid = 1));
+      insert into revision_guard select case when exists(select 1 from artifacts where id = ${sqlString(record.artifactId)})
+        and ${record.version === 1 ? `${sqlString(record.baseVersionEventId)} is null` : `exists(select 1 from artifact_revisions where artifact_id = ${sqlString(record.artifactId)} and version_event_id = ${sqlString(record.baseVersionEventId)} and original_version = ${record.version - 1})`}
+        then 1 else 0 end;
+      ${revisionInsertSql(revision, `exists(select 1 from artifacts where id = ${sqlString(record.artifactId)}) and not exists(select 1 from artifact_revisions where version_event_id = ${sqlString(record.versionEventId)})`)}
+      commit;`);
+    const stored = await this.getRevision(record.artifactId, record.versionEventId);
+    if (!stored || stored.contentHash !== revision.contentHash || stored.author !== record.author ||
+        (stored.note ?? null) !== (record.note ?? null) || (stored.baseVersionEventId ?? null) !== (record.baseVersionEventId ?? null) || stored.createdAt !== record.createdAt) {
+      throw new Error("Conflicting immutable artifact revision.");
+    }
+  }
+
+  /** Projection only: replacing display numbers cannot rewrite contents,
+   * signatures, draft sources, or execute a native action. */
+  async projectVersions(artifactId: string, versionEventIds: string[]): Promise<void> {
+    await this.init();
+    if (!versionEventIds.length || new Set(versionEventIds).size !== versionEventIds.length) throw new Error("Artifact projection needs distinct revision identities.");
+    const predicate = `artifact_id = ${sqlString(artifactId)}`;
+    const known = await this.queryJson<{ id: string; parent: string | null }>(`select version_event_id as id, base_version_event_id as parent from artifact_revisions where ${predicate} and version_event_id in (${versionEventIds.map(sqlString).join(",")});`);
+    if (known.length !== versionEventIds.length) throw new Error("An artifact projection refers to an unknown revision.");
+    const parents = new Map(known.map(row => [row.id, row.parent]));
+    if (versionEventIds.some((id, index) => parents.get(id) !== (versionEventIds[index - 1] ?? null))) {
+      throw new Error("An artifact projection must preserve its revision ancestry.");
+    }
+    await this.runSql(`begin immediate;
+      create temp table projection_guard(valid integer check(valid = 1));
+      insert into projection_guard select case when exists(select 1 from artifacts where id = ${sqlString(artifactId)})
+        and (select count(*) from artifact_revisions where ${predicate} and version_event_id in (${versionEventIds.map(sqlString).join(",")})) = ${versionEventIds.length}
+        then 1 else 0 end;
+      delete from artifact_version_projection where ${predicate};
+      ${versionEventIds.map((id, index) => `insert into artifact_version_projection(artifact_id, version, version_event_id)
+        select artifact_id, ${index + 1}, version_event_id from artifact_revisions where ${predicate} and version_event_id = ${sqlString(id)};`).join("\n")}
+      update artifacts set head_version = ${versionEventIds.length} where id = ${sqlString(artifactId)};
+      commit;`);
   }
 
   async listSignatures(artifactId: string): Promise<ArtifactSignatureRecord[]> {
     await this.init();
     return this.queryJson<ArtifactSignatureRecord>(
       `
-        select artifact_id as artifactId, version, signer, signed_at as signedAt
-        from artifact_signatures
-        where artifact_id = ${sqlString(artifactId)}
-        order by version asc, signed_at asc;
+        select s.artifact_id as artifactId, p.version, s.version_event_id as versionEventId, s.content_hash as contentHash,
+          s.signer, s.signed_at as signedAt
+        from artifact_bound_signatures s join artifact_revisions r on r.version_event_id = s.version_event_id and r.content_hash = s.content_hash
+        left join artifact_version_projection p on p.artifact_id = s.artifact_id and p.version_event_id = s.version_event_id
+        where s.artifact_id = ${sqlString(artifactId)} order by p.version asc, s.signed_at asc;
       `
     );
   }
@@ -549,9 +610,11 @@ export class ArtifactStore {
     await this.init();
     const rows = await this.queryJson<ArtifactSignatureRecord>(
       `
-        select s.artifact_id as artifactId, s.version, s.signer, s.signed_at as signedAt
-        from artifact_signatures s
-        join artifacts a on a.id = s.artifact_id and a.head_version = s.version
+        select s.artifact_id as artifactId, p.version, s.version_event_id as versionEventId, s.content_hash as contentHash, s.signer, s.signed_at as signedAt
+        from artifact_bound_signatures s
+        join artifact_version_projection p on p.artifact_id = s.artifact_id and p.version_event_id = s.version_event_id
+        join artifact_revisions r on r.version_event_id = s.version_event_id and r.content_hash = s.content_hash
+        join artifacts a on a.id = s.artifact_id and a.head_version = p.version
         where a.conversation_id = ${sqlString(conversationId)}
         order by s.signed_at asc;
       `
@@ -578,16 +641,18 @@ export class ArtifactStore {
   ): Promise<boolean> {
     await this.init();
     const id = sqlString(record.artifactId);
+    const base = await this.getVersion(record.artifactId, expectedHeadVersion);
+    if (!base || (record.baseVersionEventId && record.baseVersionEventId !== base.versionEventId)) return false;
+    const revision = artifactRevision({ ...record, baseVersionEventId: base.versionEventId }, event?.id);
     const expected = Math.floor(expectedHeadVersion);
     const version = Math.floor(record.version);
     const output = await this.queryText(`
       begin immediate;
-      insert into artifact_versions (artifact_id, version, content, author, note, created_at)
-      select ${id}, ${version}, ${sqlString(record.content)}, ${sqlString(record.author)}, ${sqlString(record.note)}, ${sqlString(record.createdAt)}
-      where (select head_version from artifacts where id = ${id}) = ${expected};
+      ${revisionInsertSql(revision, `(select head_version from artifacts where id = ${id}) = ${expected} and exists(select 1 from artifact_version_projection where artifact_id = ${id} and version = ${expected} and version_event_id = ${sqlString(base.versionEventId)})`)}
+      ${revisionProjectionInsertSql(revision)}
       update artifacts
       set head_version = ${version}, updated_at = ${sqlString(record.createdAt)}
-      where id = ${id} and head_version = ${expected};
+      where id = ${id} and head_version = ${expected} and exists(select 1 from artifact_version_projection where artifact_id = ${id} and version_event_id = ${sqlString(revision.versionEventId)});
       ${event ? `
         insert into artifact_event_outbox (
           id, conversation_id, artifact_id, kind, actor, content, created_at, delivered_at
@@ -646,13 +711,17 @@ export class ArtifactStore {
     await this.init();
     const output = await this.queryText(`
       begin immediate;
-      insert or ignore into artifact_signatures (artifact_id, version, signer, signed_at)
-      values (
-        ${sqlString(record.artifactId)},
-        ${Math.floor(record.version)},
-        ${sqlString(record.signer)},
-        ${sqlString(record.signedAt)}
-      );
+      create temp table signature_guard(valid integer check(valid = 1));
+      insert into signature_guard select case when exists(
+        select 1 from artifact_revisions r join artifacts a on a.id = r.artifact_id
+        where r.artifact_id = ${sqlString(record.artifactId)} and r.version_event_id = ${sqlString(record.versionEventId)}
+          and r.content_hash = ${sqlString(record.contentHash)} and a.archived_at is null
+          and exists(select 1 from json_each(a.required_signers_json) where value = ${sqlString(record.signer)})
+      ) then 1 else 0 end;
+      insert or ignore into artifact_bound_signatures (artifact_id, version_event_id, content_hash, signer, signed_at)
+      select artifact_id, version_event_id, content_hash, ${sqlString(record.signer)}, ${sqlString(record.signedAt)}
+      from artifact_revisions where artifact_id = ${sqlString(record.artifactId)}
+        and version_event_id = ${sqlString(record.versionEventId)} and content_hash = ${sqlString(record.contentHash)};
       ${event ? `
         insert into artifact_event_outbox (
           id, conversation_id, artifact_id, kind, actor, content, created_at, delivered_at
@@ -1020,6 +1089,7 @@ export class ArtifactStore {
     event: ArtifactEventRecord
   ): Promise<boolean> {
     await this.init();
+    const revision = artifactRevision(version, event.id);
     const requiredChecks = artifact.requiredDraftAuthors.map((author) => {
       const sourceIds = sources
         .filter((candidate) => candidate.author === author && candidate.disposition === "considered")
@@ -1045,12 +1115,12 @@ export class ArtifactStore {
       )
     `).join("\n");
     const sourceInserts = sources.map((source) => `
-      insert into artifact_version_sources (
-        artifact_id, version, draft_id, author, submitted_at,
+      insert into artifact_bound_sources (
+        artifact_id, version_event_id, draft_id, author, submitted_at,
         content_hash, disposition, exclusion_rationale
       )
       select
-        ${sqlString(source.artifactId)}, ${Math.floor(source.version)}, draft.id,
+        ${sqlString(source.artifactId)}, ${sqlString(revision.versionEventId)}, draft.id,
         draft.author, draft.submitted_at, ${sqlString(source.contentHash)},
         ${sqlString(source.disposition)}, ${sqlString(source.exclusionRationale)}
       from artifact_drafts draft
@@ -1061,18 +1131,14 @@ export class ArtifactStore {
         and draft.submitted_at = ${sqlString(source.submittedAt)}
         and draft.state in ('submitted', 'superseded', 'withdrawn')
         and exists (
-          select 1 from artifact_versions
-          where artifact_id = ${sqlString(artifact.id)} and version = 1
+          select 1 from artifact_version_projection
+          where artifact_id = ${sqlString(artifact.id)} and version = 1 and version_event_id = ${sqlString(revision.versionEventId)}
         );
     `).join("\n");
     await this.runSql(`
       begin immediate;
       ${this.insertOperationSql(operation)}
-      insert into artifact_versions (artifact_id, version, content, author, note, created_at)
-      select
-        ${sqlString(version.artifactId)}, 1, ${sqlString(version.content)}, ${sqlString(version.author)},
-        ${sqlString(version.note)}, ${sqlString(version.createdAt)}
-      where ${this.operationPendingSql(operation)}
+      ${revisionInsertSql(revision, `${this.operationPendingSql(operation)}
         and exists (
           select 1 from artifacts
           where id = ${sqlString(artifact.id)}
@@ -1081,7 +1147,8 @@ export class ArtifactStore {
             and draft_roster_revision = ${Math.floor(artifact.draftRosterRevision)}
             ${requiredChecks}
             ${sourceChecks}
-        );
+        )`)}
+      ${revisionProjectionInsertSql(revision)}
       ${sourceInserts}
       update artifacts
       set
@@ -1094,8 +1161,8 @@ export class ArtifactStore {
         and head_version = 0
         and ${this.operationPendingSql(operation)}
         and exists (
-          select 1 from artifact_versions
-          where artifact_id = ${sqlString(artifact.id)} and version = 1
+          select 1 from artifact_version_projection
+          where artifact_id = ${sqlString(artifact.id)} and version = 1 and version_event_id = ${sqlString(revision.versionEventId)}
         );
       insert into artifact_event_outbox (
         id, conversation_id, artifact_id, kind, actor, content, created_at, delivered_at
@@ -1122,17 +1189,13 @@ export class ArtifactStore {
     await this.init();
     const rows = await this.queryJson<ArtifactVersionSourceRow>(`
       select
-        artifact_id as artifactId,
-        version,
-        draft_id as draftId,
-        author,
-        submitted_at as submittedAt,
-        content_hash as contentHash,
-        disposition,
-        exclusion_rationale as exclusionRationale
-      from artifact_version_sources
-      where artifact_id = ${sqlString(artifactId)} and version = ${Math.floor(version)}
-      order by submitted_at asc, draft_id asc;
+        s.artifact_id as artifactId, p.version,
+        s.draft_id as draftId, s.author, s.submitted_at as submittedAt,
+        s.content_hash as contentHash, s.disposition, s.exclusion_rationale as exclusionRationale
+      from artifact_bound_sources s join artifact_version_projection p
+        on p.artifact_id = s.artifact_id and p.version_event_id = s.version_event_id
+      where s.artifact_id = ${sqlString(artifactId)} and p.version = ${Math.floor(version)}
+      order by s.submitted_at asc, s.draft_id asc;
     `);
     return rows.map((row) => ({ ...row, exclusionRationale: row.exclusionRationale ?? undefined }));
   }
@@ -1181,6 +1244,10 @@ export class ArtifactStore {
       insert or ignore into artifact_conversation_tombstones (conversation_id, deleted_at)
       values (${sqlString(conversationId)}, ${sqlString(new Date().toISOString())});
       delete from artifact_version_sources where artifact_id in ${artifacts};
+      delete from artifact_bound_sources where artifact_id in ${artifacts};
+      delete from artifact_bound_signatures where artifact_id in ${artifacts};
+      delete from artifact_version_projection where artifact_id in ${artifacts};
+      delete from artifact_revisions where artifact_id in ${artifacts};
       delete from artifact_signatures where artifact_id in ${artifacts};
       delete from artifact_versions where artifact_id in ${artifacts};
       delete from artifact_drafts where artifact_id in ${artifacts};
@@ -1292,7 +1359,8 @@ export class ArtifactStore {
   }
 
   private async queryJson<T>(sql: string): Promise<T[]> {
-    const result = await runCommand(this.sqliteExecutable, this.sqliteArgs(["-json", this.dbPath, sql]), {
+    const result = await runCommand(this.sqliteExecutable, this.sqliteArgs(["-json", this.dbPath]), {
+      input: sql,
       timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
       primeLoginShellEnv: false
     });
@@ -1301,7 +1369,8 @@ export class ArtifactStore {
   }
 
   private async queryText(sql: string): Promise<string> {
-    const result = await runCommand(this.sqliteExecutable, this.sqliteArgs(["-batch", "-noheader", this.dbPath, sql]), {
+    const result = await runCommand(this.sqliteExecutable, this.sqliteArgs(["-batch", "-noheader", this.dbPath]), {
+      input: sql,
       timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
       primeLoginShellEnv: false
     });
@@ -1322,6 +1391,6 @@ export class ArtifactStore {
     // insert failed, making an apparently rejected mutation partially durable.
     // Bail closes the connection with the transaction still open, so SQLite
     // rolls the whole transaction back.
-    return ["-bail", "-cmd", `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`, ...args];
+    return ["-bail", "-cmd", `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`, "-cmd", "pragma synchronous = FULL;", ...args];
   }
 }

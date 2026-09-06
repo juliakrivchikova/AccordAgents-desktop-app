@@ -37,6 +37,7 @@ export function ArtifactsPanel(props: {
   const [draftError, setDraftError] = useState<ArtifactError | undefined>(undefined);
   const [viewVersion, setViewVersion] = useState<number | undefined>(undefined);
   const [reviseBase, setReviseBase] = useState(1);
+  const [reviseIdentity, setReviseIdentity] = useState<{ versionEventId: string; contentHash: string }>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ArtifactError | undefined>(undefined);
   const [staleCurrent, setStaleCurrent] = useState<ArtifactVersionContent | undefined>(undefined);
@@ -181,12 +182,14 @@ export function ArtifactsPanel(props: {
       }
       setViewVersion(undefined);
       setReviseBase(head.summary.headVersion);
+      setReviseIdentity(head.version);
       clearTransient();
       setAccessOpen(false);
       setMode("revise");
       return;
     }
     setReviseBase(detail.summary.headVersion);
+    setReviseIdentity(detail.version);
     clearTransient();
     setAccessOpen(false);
     setMode("revise");
@@ -199,6 +202,8 @@ export function ArtifactsPanel(props: {
       conversationId: props.conversationId,
       artifactId: detail.summary.id,
       baseVersion: reviseBase,
+      baseVersionEventId: reviseIdentity?.versionEventId,
+      baseContentHash: reviseIdentity?.contentHash,
       content,
       note
     }));
@@ -209,6 +214,7 @@ export function ArtifactsPanel(props: {
       setCompare(undefined);
       compareGeneration.current += 1;
       setDetail(value);
+      void loadDetail(value.summary.id);
     }
   }
   async function submitRename(): Promise<void> {
@@ -232,7 +238,9 @@ export function ArtifactsPanel(props: {
     const value = await run(() => window.consensus.signArtifact({
       conversationId: props.conversationId,
       artifactId: detail.summary.id,
-      version: detail.version.version
+      version: detail.version.version,
+      versionEventId: detail.version.versionEventId,
+      contentHash: detail.version.contentHash
     }));
     if (value) {
       void loadDetail(detail.summary.id, viewVersion);
@@ -421,6 +429,7 @@ export function ArtifactsPanel(props: {
                 className="artifact-secondary-action"
                 onClick={() => {
                   setReviseBase(staleCurrent.version);
+                  setReviseIdentity(staleCurrent);
                   setError(undefined);
                 }}
               >

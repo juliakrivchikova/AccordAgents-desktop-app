@@ -987,6 +987,14 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
             "minimum": 1,
             "description": "The version this edit was based on (optimistic concurrency guard)."
           },
+          "baseVersionEventId": {
+            "type": "string",
+            "description": "Immutable version identity returned when reading the base revision."
+          },
+          "baseContentHash": {
+            "type": "string",
+            "description": "SHA-256 hash of the base revision you read; guards against renumbered offline revisions."
+          },
           "content": {
             "type": "string",
             "description": "Complete new content for the next version."
@@ -1068,6 +1076,14 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
             "type": "integer",
             "minimum": 1,
             "description": "Version to sign. Defaults to the current version."
+          },
+          "versionEventId": {
+            "type": "string",
+            "description": "Immutable version identity returned by app_artifact_read. Send it with contentHash to bind approval to the text you reviewed."
+          },
+          "contentHash": {
+            "type": "string",
+            "description": "SHA-256 content hash returned by app_artifact_read; a mismatch rejects the signature."
           }
         }
       },

@@ -135,8 +135,11 @@ The source stores the matching result before acknowledging it.
 
 This is not the complete event-contract cutover: progress still
 requires conversion; PWA IndexedDB outbox,
-canonical chat-wide roster fan-out, pure conflict projections, hash-bound
-artifact signatures, pressure UI and history/blob garbage collection remain.
+canonical chat-wide roster fan-out, pure conflict projections, artifact event
+delivery and superseded-revision navigation, pressure UI and history/blob garbage
+collection remain. Artifact storage now binds signatures to immutable revision
+identities and content hashes; this does not yet connect artifact mutations to
+the multi-peer event projector.
 The retained history and blob fragments currently stay in local SQLite after
 ACK for origin repair. Replication inventory and partial-copy barriers also
 survive machine restart. No relay deployment is needed for these changes.
