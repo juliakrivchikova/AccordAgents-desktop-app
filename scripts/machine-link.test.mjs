@@ -30,12 +30,16 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const importedSnapshots = [];
     const hostRuns = [];
     const approvalRequests = [];
+    let failNextApplyContaining;
     let releaseLongTurn;
     const hostChat = {
       runMachineHostedTurn: async (request, signal, progress) => {
         hostRuns.push(request);
         // A large progress frame right before a small finished result: the desktop must apply them in order.
         progress?.({ runId: request.runId, phase: "debate", message: "working " + "x".repeat(request.messageId === "msg-1" ? 2_000_000 : 10), createdAt: new Date().toISOString() });
+        if (request.messageId === "msg-fail") {
+          throw new Error("provider exploded");
+        }
         if (request.messageId === "msg-long" || request.messageId === "msg-away") {
           await new Promise((resolve) => { releaseLongTurn = resolve; signal?.addEventListener("abort", resolve, { once: true }); });
           if (signal?.aborted) {
@@ -48,7 +52,14 @@ test("machine link replicates settings and conversations, runs a turn, streams p
         return { messages: [reply], warnings: ["w1"] };
       },
       cancelRun: () => true,
-      applyReplicatedConversation: async (id, merge) => { const next = merge(machineStore.get(id)); if (next) machineStore.set(id, next); },
+      applyReplicatedConversation: async (id, merge) => {
+        const next = merge(machineStore.get(id));
+        if (next && failNextApplyContaining && next.messages.some((message) => message.id === failNextApplyContaining)) {
+          failNextApplyContaining = undefined;
+          throw new Error("SQLITE_FULL: disk is full");
+        }
+        if (next) machineStore.set(id, next);
+      },
       respondToAppToolApproval: async (request) => {
         approvalRequests.push(request);
         if (request.approvalId === "approval-bad") {
@@ -175,7 +186,11 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     assert.deepEqual(echoedReplicated, [], "replicated messages must not come back as a back delta");
     stopEchoListener();
 
-    // A reply finished while the desktop was away is delivered on reconnect.
+    // A reply finished while the desktop was away is delivered on reconnect,
+    // stored through the late-terminal listener, and acknowledged only then.
+    const lateTerminals = [];
+    let lateStoreDelay = 0;
+    link.onLateTerminal(async (event) => { await new Promise((resolve) => setTimeout(resolve, lateStoreDelay)); lateTerminals.push({ ...event, storedAt: Date.now() }); });
     const backdeltas = [];
     link.onConversationBackDelta((delta) => backdeltas.push(delta));
     conversation.messages.push({ id: "msg-away", role: "user", content: "away", createdAt: new Date().toISOString(), status: "done" });
@@ -187,8 +202,48 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     await waitFor(() => logs.some((entry) => entry.event === "machine-host.desktop.away"), 5_000);
     releaseLongTurn();
     await waitFor(() => logs.some((entry) => entry.event === "machine-host.terminal.retry-later"), 5_000);
+    lateStoreDelay = 150;
     await link.connectMachine(record);
-    await waitFor(() => backdeltas.some((delta) => delta.messages.some((message) => message.id === "pending-away")), 5_000);
+    await waitFor(() => lateTerminals.some((event) => event.runId === "run-away" && event.status === "completed"), 5_000);
+    const awayEvent = lateTerminals.find((event) => event.runId === "run-away");
+    assert.ok(awayEvent.messages.some((message) => message.id === "pending-away"));
+    await waitFor(() => logs.some((entry) => entry.event === "machine-host.terminal.acked" && entry.payload?.runId === "run-away"), 5_000);
+    const ackedAt = Date.parse(logs.find((entry) => entry.event === "machine-host.terminal.acked" && entry.payload?.runId === "run-away").payload?.at ?? "") || Date.now();
+    assert.ok(ackedAt >= awayEvent.storedAt, "the ack follows the stored late result");
+    lateStoreDelay = 0;
+
+    // A turn that fails while the desktop is away is stored as a failure on reconnect, not acknowledged silently.
+    conversation.messages.push({ id: "msg-fail", role: "user", content: "boom", createdAt: new Date().toISOString(), status: "done" });
+    await link.disconnectMachine("machine-1");
+    await waitFor(() => logs.some((entry) => entry.event === "machine-host.desktop.away"), 5_000);
+    await link.connectMachine(record);
+    await waitFor(() => link.status()[0]?.connected === true, 5_000);
+    const failTurn = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-fail", pendingMessageId: "pending-fail" });
+    assert.equal(failTurn.status, "failed");
+    assert.match(failTurn.error, /provider exploded/);
+    failTurn.acknowledge?.();
+
+    // A batch of the first copy that cannot be stored on the machine makes it ask for the copy again;
+    // the completed copy never echoes back and the retry stores everything.
+    const bigger = { ...big, id: "conv-bigger", messages: big.messages.map((message) => ({ ...message, id: message.id.replace("big-", "bigger-") })) };
+    link.setConversationLoader(async (id) => (id === "conv-bigger" ? bigger : conversation));
+    failNextApplyContaining = "bigger-200";
+    const biggerEchoes = [];
+    const stopBiggerEcho = link.onConversationBackDelta((delta) => { if (delta.conversationId === "conv-bigger") biggerEchoes.push(delta); });
+    const biggerResult = await link.runTurn({ conversation: bigger, participant, triggerMessage: bigger.messages[399], runId: "run-bigger", pendingMessageId: "pending-bigger" });
+    assert.equal(biggerResult.status, "failed", "a turn requested while the copy is incomplete fails honestly");
+    assert.match(biggerResult.error, /not complete/);
+    biggerResult.acknowledge?.();
+    await waitFor(() => logs.filter((entry) => entry.event === "machine-host.message" && entry.payload?.type === "machine.conversation.sync.done" && entry.payload?.conversationId === "conv-bigger").length >= 2, 10_000);
+    assert.ok(logs.some((entry) => entry.event === "machine-link.resync" && entry.payload?.conversationId === "conv-bigger"));
+    await waitFor(() => machineStore.get("conv-bigger")?.messages.length === 400, 5_000);
+    const retried = await link.runTurn({ conversation: bigger, participant, triggerMessage: bigger.messages[399], runId: "run-bigger-2", pendingMessageId: "pending-bigger-2" });
+    assert.equal(retried.status, "completed");
+    retried.acknowledge?.();
+    host.noteConversationSnapshot(machineStore.get("conv-bigger"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual(biggerEchoes.flatMap((delta) => delta.messages.map((message) => message.id)).filter((id) => id.startsWith("bigger-")), []);
+    stopBiggerEcho();
 
     // Rule 2: a Stop while the machine is unreachable is held and shown as
     // waiting, delivered when the machine is back, and confirmed only then.
@@ -212,7 +267,9 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     await waitFor(() => typeof releaseLongTurn === "function", 5_000);
     host.close();
     const host2 = new MachineHostService(hostChat, hostStorage, hostSettings, debugLogs, {
-      pairing, deviceId: "device-machine-1", machineName: "test-box", appVersion: "test", detectProviders: async () => [], reconnectDelayMs: 50
+      pairing, deviceId: "device-machine-1", machineName: "test-box", appVersion: "test", detectProviders: async () => [], reconnectDelayMs: 50,
+      // An outbox that cannot be written: results stay in memory and the desktop is told.
+      outboxPath: "/dev/null/machine-outbox.json"
     });
     await host2.start();
     const lost = await lostTurn;
@@ -229,7 +286,10 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     unknownController.abort();
     const unknown = await unknownTurn;
     assert.equal(unknown.status, "unconfirmed");
+    unknown.acknowledge?.();
     await waitFor(() => (record.pendingCancels ?? []).length === 0, 5_000);
+    // The failed outbox write is visible on the desktop as a machine warning.
+    await waitFor(() => /outbox/.test(link.status()[0]?.warning ?? ""), 5_000);
     host2.close();
 
     link.close();

@@ -53,8 +53,12 @@ export interface MachineHelloBody {
    *  arrives late is ignored by the desktop. */
   instanceStartedAt?: string;
   /** Monotonic start counter kept by the machine on disk; preferred over the
-   *  wall-clock start time for ordering instances. */
+   *  wall-clock start time for ordering instances. Absent when the machine
+   *  could not read or advance it reliably. */
   instanceSequence?: number;
+  /** Set when the machine cannot keep its outbox on disk: results are held
+   *  in memory only and would not survive a restart of the runtime. */
+  outboxError?: string;
 }
 
 export interface MachineHelloAckBody {
@@ -184,6 +188,13 @@ export interface MachineTurnUnknownBody {
   runId: string;
 }
 
+/** Machine -> desktop: a batch of the first copy could not be stored; the
+ *  desktop sends the whole copy again. */
+export interface MachineConversationResyncBody {
+  type: "machine.conversation.resync";
+  conversationId: string;
+}
+
 /** Desktop -> machine: the first copy of a chat (shell plus every batch) has
  *  been sent in full; the machine may now compare its own rows against what
  *  the desktop holds. */
@@ -226,6 +237,7 @@ export type MachineLinkMessage =
   | MachineTurnFinishedAckBody
   | MachineTurnUnknownBody
   | MachineConversationSyncDoneBody
+  | MachineConversationResyncBody
   | MachineChoiceAnswerBody;
 
 export type MachineLinkMessageType = MachineLinkMessage["type"];
@@ -248,6 +260,7 @@ const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.turn.finished.ack",
   "machine.turn.unknown",
   "machine.conversation.sync.done",
+  "machine.conversation.resync",
   "machine.choice.answer"
 ]);
 
@@ -273,6 +286,9 @@ export interface MachineLinkStatus {
   deviceId?: string;
   lastSeenAt?: string;
   lastHello?: MachineRecord["lastHello"];
+  /** A condition on the machine the User should know about (for example an
+   *  outbox that cannot be written). */
+  warning?: string;
 }
 
 export interface MachineListResult {

@@ -26,6 +26,7 @@ import type { AgentHealth, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatM
 import type { ChatService } from "./chat";
 import type { DebugLogService } from "./debugLogs";
 import { messageBatches, messageStamp } from "./machineLink";
+import { advanceInstanceSequence, isStoredTerminal } from "./machineTurnOutcome";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
 import { RelayTunnelClient } from "./relayTunnelClient";
 import type { SettingsService } from "./settings";
@@ -52,6 +53,10 @@ export interface MachineHostOptions {
  *  its own provider sessions, run bookkeeping, and the approvals its members
  *  raised (the desktop shows those and sends decisions back). */
 const MACHINE_OWNED_METADATA_KEYS = ["participantSessions", "activeRunIds", "running", "runId", "pendingAppToolApprovals"] as const;
+/** How soon a failed outbox write is tried again. */
+const OUTBOX_RETRY_MS = 30_000;
+/** How many times an incomplete first copy is requested again. */
+const MAX_RESYNC_ATTEMPTS = 3;
 
 export class MachineHostService {
   private readonly client: RelayTunnelClient;
@@ -66,15 +71,25 @@ export class MachineHostService {
   /** Changes when this runtime starts: the desktop tells a restart from a reconnect by it. */
   private readonly instanceId = randomUUID();
   private readonly instanceStartedAt = new Date().toISOString();
-  /** Monotonic start counter kept next to the outbox (falls back to the
-   *  clock when there is no outbox path). */
-  private readonly instanceSequence: number;
+  /** Monotonic start counter kept next to the outbox; undefined when it
+   *  could not be read or advanced reliably (never published then). */
+  private readonly instanceSequence?: number;
   /** Conversations whose first copy (shell + batches) is still arriving:
    *  own rows are compared against the desktop's only once it is complete. */
   private readonly syncing = new Set<string>();
+  /** Conversations with a batch of the first copy that could not be stored;
+   *  the copy is requested again instead of being declared complete. */
+  private readonly failedSync = new Set<string>();
+  /** How many times the first copy was requested again per conversation;
+   *  a copy that keeps failing (a full disk) is not requested forever. */
+  private readonly resyncAttempts = new Map<string, number>();
   /** True when the outbox file exists but could not be read: it is then
    *  never overwritten, so a result on disk is not lost to a bad read. */
   private outboxUnreadable = false;
+  /** Why the outbox is not on disk right now (write failed / unreadable);
+   *  travels in hello so the desktop can show it. */
+  private outboxError?: string;
+  private outboxRetryTimer?: ReturnType<typeof setTimeout>;
   private inbound: Promise<void> = Promise.resolve();
   /** Outbound sends leave in call order (progress before the finished result). */
   private outbound: Promise<void> = Promise.resolve();
@@ -95,7 +110,11 @@ export class MachineHostService {
     private readonly options: MachineHostOptions
   ) {
     this.now = options.now ?? (() => new Date());
-    this.instanceSequence = this.nextInstanceSequence();
+    const sequence = this.nextInstanceSequence();
+    this.instanceSequence = sequence.sequence;
+    if (sequence.error) {
+      void this.debugLogs.write("machine-host.instance.unavailable", { message: sequence.error });
+    }
     this.loadOutbox();
     const pairing = options.pairing;
     if (!pairing.relayUrl) {
@@ -145,6 +164,10 @@ export class MachineHostService {
 
   close(): void {
     this.closed = true;
+    if (this.outboxRetryTimer) {
+      clearTimeout(this.outboxRetryTimer);
+      this.outboxRetryTimer = undefined;
+    }
     for (const controller of this.activeTurns.values()) {
       controller.abort();
     }
@@ -251,7 +274,8 @@ export class MachineHostService {
       pendingTerminalRunIds: [...this.pendingTerminals.keys()],
       instanceId: this.instanceId,
       instanceStartedAt: this.instanceStartedAt,
-      instanceSequence: this.instanceSequence
+      ...(typeof this.instanceSequence === "number" ? { instanceSequence: this.instanceSequence } : {}),
+      ...(this.outboxError ? { outboxError: this.outboxError } : {})
     });
   }
 
@@ -286,6 +310,23 @@ export class MachineHostService {
         await this.applyConversationSync(body.conversation);
         return;
       case "machine.conversation.sync.done": {
+        if (this.failedSync.has(body.conversationId)) {
+          // A batch of this copy was not stored: the copy is not complete,
+          // and comparing against it would send stale rows back. Ask again,
+          // a bounded number of times; a copy that keeps failing stays
+          // incomplete (turns on it fail honestly) instead of looping.
+          const attempts = (this.resyncAttempts.get(body.conversationId) ?? 0) + 1;
+          this.resyncAttempts.set(body.conversationId, attempts);
+          if (attempts > MAX_RESYNC_ATTEMPTS) {
+            void this.debugLogs.write("machine-host.sync.gave-up", { conversationId: body.conversationId, attempts });
+            return;
+          }
+          this.failedSync.delete(body.conversationId);
+          void this.debugLogs.write("machine-host.sync.resync", { conversationId: body.conversationId, attempt: attempts });
+          await this.send({ type: "machine.conversation.resync", conversationId: body.conversationId }).catch(() => undefined);
+          return;
+        }
+        this.resyncAttempts.delete(body.conversationId);
         this.syncing.delete(body.conversationId);
         // Everything the desktop holds is registered now: rows this machine
         // made on its own (offline replies) travel back, nothing else does.
@@ -299,6 +340,24 @@ export class MachineHostService {
         await this.applyConversationDelta(body);
         return;
       case "machine.turn.request":
+        if (this.syncing.has(body.conversationId) || this.failedSync.has(body.conversationId)) {
+          // The copy of this chat is not complete here; an honest failure
+          // beats running a member against half a chat.
+          this.pendingTerminals.set(body.runId, {
+            type: "machine.turn.finished",
+            conversationId: body.conversationId,
+            runId: body.runId,
+            participantId: body.participantId,
+            status: "failed",
+            messages: [],
+            warnings: [],
+            error: "This machine's copy of the chat is not complete yet (a sync batch could not be stored); try again once it has synced.",
+            finishedAt: this.now().toISOString()
+          });
+          this.persistOutbox();
+          await this.flushPendingTerminals();
+          return;
+        }
         void this.runTurn(body);
         return;
       case "machine.turn.cancel": {
@@ -316,7 +375,7 @@ export class MachineHostService {
       case "machine.turn.finished.ack":
         if (this.pendingTerminals.delete(body.runId)) {
           this.persistOutbox();
-          void this.debugLogs.write("machine-host.terminal.acked", { runId: body.runId });
+          void this.debugLogs.write("machine-host.terminal.acked", { runId: body.runId, at: this.now().toISOString() });
         }
         return;
       case "machine.approval.decision": {
@@ -397,15 +456,21 @@ export class MachineHostService {
     }
   }
 
-  private rememberDesktopMessages(conversationId: string, messages: ChatMessage[], removedIds: string[] = []): void {
+  /** Registers what the desktop holds; returns the previous stamps of the
+   *  touched ids so a failed apply can put the inventory back. */
+  private rememberDesktopMessages(conversationId: string, messages: ChatMessage[], removedIds: string[] = []): Map<string, string | undefined> {
     const known = this.knownMessages.get(conversationId) ?? new Map<string, string>();
+    const previous = new Map<string, string | undefined>();
     for (const message of messages) {
+      previous.set(message.id, known.get(message.id));
       known.set(message.id, messageStamp(message));
     }
     for (const id of removedIds) {
+      previous.set(id, known.get(id));
       known.delete(id);
     }
     this.knownMessages.set(conversationId, known);
+    return previous;
   }
 
   private async applyConversationSync(incoming: Conversation): Promise<void> {
@@ -414,7 +479,19 @@ export class MachineHostService {
     // what the desktop holds is kept across syncs: a fresh copy after a
     // reconnect arrives as a shell plus batches, and a shell must not make
     // every stored row look new.
-    this.rememberDesktopMessages(incoming.id, incoming.messages);
+    const previousStamps = this.rememberDesktopMessages(incoming.id, incoming.messages);
+    try {
+      await this.applyConversationShell(incoming);
+    } catch (error) {
+      this.restoreInventory(incoming.id, previousStamps);
+      this.failedSync.add(incoming.id);
+      void this.debugLogs.write("machine-host.sync.batch-failed", { conversationId: incoming.id, stage: "shell", message: errorMessage(error) });
+      return;
+    }
+    void this.debugLogs.write("machine-host.conversation.synced", { conversationId: incoming.id, messages: incoming.messages.length });
+  }
+
+  private async applyConversationShell(incoming: Conversation): Promise<void> {
     await this.chat.applyReplicatedConversation(incoming.id, (existing) => {
       const metadata = existing ? this.mergeMetadata(existing, incoming.metadata) : this.stripMachineOwned(incoming.metadata);
       // A fresh copy after a reconnect must not erase what this machine
@@ -423,23 +500,48 @@ export class MachineHostService {
       const messages = mergeReplicatedMessages(existing?.messages ?? [], incoming.messages);
       return { ...incoming, messages, metadata };
     });
-    void this.debugLogs.write("machine-host.conversation.synced", { conversationId: incoming.id, messages: incoming.messages.length });
   }
 
   private async applyConversationDelta(delta: MachineConversationDeltaBody): Promise<void> {
-    this.rememberDesktopMessages(delta.conversationId, delta.messages, delta.removedMessageIds ?? []);
+    const previousStamps = this.rememberDesktopMessages(delta.conversationId, delta.messages, delta.removedMessageIds ?? []);
     let missing = false;
-    await this.chat.applyReplicatedConversation(delta.conversationId, (existing) => {
-      if (!existing) {
-        missing = true;
-        return undefined;
+    try {
+      await this.chat.applyReplicatedConversation(delta.conversationId, (existing) => {
+        if (!existing) {
+          missing = true;
+          return undefined;
+        }
+        const messages = mergeReplicatedMessages(existing.messages, delta.messages, delta.removedMessageIds ?? []);
+        const metadata = delta.metadata ? this.mergeMetadata(existing, delta.metadata) : existing.metadata;
+        return { ...existing, messages, metadata, updatedAt: delta.updatedAt };
+      });
+    } catch (error) {
+      // The inventory must describe what is stored, not what was attempted:
+      // the batch's stamps are reverted, and a first copy in progress is
+      // asked for again when its sync.done arrives.
+      this.restoreInventory(delta.conversationId, previousStamps);
+      if (this.syncing.has(delta.conversationId)) {
+        this.failedSync.add(delta.conversationId);
       }
-      const messages = mergeReplicatedMessages(existing.messages, delta.messages, delta.removedMessageIds ?? []);
-      const metadata = delta.metadata ? this.mergeMetadata(existing, delta.metadata) : existing.metadata;
-      return { ...existing, messages, metadata, updatedAt: delta.updatedAt };
-    });
+      void this.debugLogs.write("machine-host.sync.batch-failed", { conversationId: delta.conversationId, stage: "delta", messages: delta.messages.length, message: errorMessage(error) });
+      return;
+    }
     if (missing) {
       void this.debugLogs.write("machine-host.conversation.delta-without-copy", { conversationId: delta.conversationId });
+    }
+  }
+
+  private restoreInventory(conversationId: string, previous: Map<string, string | undefined>): void {
+    const known = this.knownMessages.get(conversationId);
+    if (!known) {
+      return;
+    }
+    for (const [id, stamp] of previous) {
+      if (stamp === undefined) {
+        known.delete(id);
+      } else {
+        known.set(id, stamp);
+      }
     }
   }
 
@@ -544,31 +646,22 @@ export class MachineHostService {
     }
   }
 
-  private nextInstanceSequence(): number {
+  private nextInstanceSequence(): { sequence?: number; error?: string } {
     const outbox = this.options.outboxPath;
     if (!outbox) {
-      return Date.now();
+      return { sequence: Date.now() };
     }
     const file = path.join(path.dirname(outbox), "machine-instance.json");
-    let previous = 0;
-    try {
-      const parsed = JSON.parse(readFileSync(file, "utf8")) as { sequence?: unknown };
-      if (typeof parsed.sequence === "number" && Number.isFinite(parsed.sequence)) {
-        previous = parsed.sequence;
-      }
-    } catch {
-      // First start, or unreadable: the clock keeps the order monotonic
-      // across the gap without a stored value.
-      previous = Math.max(previous, Date.now());
-    }
-    const next = Math.max(previous + 1, Date.now());
-    try {
-      mkdirSync(path.dirname(file), { recursive: true });
-      writeFileSync(file, JSON.stringify({ sequence: next }), "utf8");
-    } catch (error) {
-      void this.debugLogs.write("machine-host.instance.write-error", { message: errorMessage(error) });
-    }
-    return next;
+    return advanceInstanceSequence({
+      read: () => readFileSync(file, "utf8"),
+      write: (content) => {
+        mkdirSync(path.dirname(file), { recursive: true });
+        const temp = `${file}.${process.pid}.tmp`;
+        writeFileSync(temp, content, "utf8");
+        renameSync(temp, file);
+      },
+      now: () => Date.now()
+    });
   }
 
   private loadOutbox(): void {
@@ -586,6 +679,7 @@ export class MachineHostService {
       }
       // Present but unreadable (permissions, I/O): never overwrite it.
       this.outboxUnreadable = true;
+      this.outboxError = `the outbox on disk could not be read: ${errorMessage(error)}`;
       void this.debugLogs.write("machine-host.outbox.read-error", { file, message: errorMessage(error) });
       return;
     }
@@ -594,12 +688,23 @@ export class MachineHostService {
       if (!Array.isArray(parsed)) {
         throw new Error("outbox is not a list");
       }
+      const rejected: unknown[] = [];
       for (const entry of parsed) {
         if (isStoredTerminal(entry)) {
           this.pendingTerminals.set(entry.runId, entry);
         } else {
-          void this.debugLogs.write("machine-host.outbox.entry-skipped", { file });
+          rejected.push(entry);
         }
+      }
+      if (rejected.length > 0) {
+        // Kept for recovery, never silently dropped.
+        const kept = `${file}.rejected-${Date.now()}.json`;
+        try {
+          writeFileSync(kept, JSON.stringify(rejected), "utf8");
+        } catch {
+          // Best effort; the log below still names the count.
+        }
+        void this.debugLogs.write("machine-host.outbox.entries-rejected", { file, count: rejected.length, keptAt: kept });
       }
     } catch (error) {
       // Damaged outbox: keep the file for inspection instead of overwriting it.
@@ -613,22 +718,55 @@ export class MachineHostService {
     }
   }
 
-  private persistOutbox(): void {
+  /** Writes the outbox; false when the results are held in memory only.
+   *  A failed write is retried on a timer and reported to the desktop in
+   *  the next hello, so a result that would not survive a restart of this
+   *  runtime is never a silent condition. */
+  private persistOutbox(): boolean {
     const file = this.options.outboxPath;
     if (!file) {
-      return;
+      return true;
     }
     if (this.outboxUnreadable) {
       void this.debugLogs.write("machine-host.outbox.write-skipped", { file, reason: "the existing outbox could not be read; not overwriting it" });
-      return;
+      return false;
     }
     try {
       mkdirSync(path.dirname(file), { recursive: true });
       const temp = `${file}.${process.pid}.tmp`;
       writeFileSync(temp, JSON.stringify([...this.pendingTerminals.values()]), "utf8");
       renameSync(temp, file);
+      if (this.outboxError) {
+        this.outboxError = undefined;
+        void this.debugLogs.write("machine-host.outbox.recovered", { file });
+        this.announceOutboxState();
+      }
+      return true;
     } catch (error) {
-      void this.debugLogs.write("machine-host.outbox.write-error", { message: errorMessage(error) });
+      const message = errorMessage(error);
+      const first = !this.outboxError;
+      this.outboxError = `the outbox could not be written (${message}); ${this.pendingTerminals.size} result(s) are held in memory only`;
+      void this.debugLogs.write("machine-host.outbox.write-error", { file, message, pendingTerminals: this.pendingTerminals.size });
+      if (first) {
+        this.announceOutboxState();
+      }
+      if (!this.outboxRetryTimer && !this.closed) {
+        this.outboxRetryTimer = setTimeout(() => {
+          this.outboxRetryTimer = undefined;
+          if (this.pendingTerminals.size > 0 || this.outboxError) {
+            this.persistOutbox();
+          }
+        }, OUTBOX_RETRY_MS);
+        this.outboxRetryTimer.unref?.();
+      }
+      return false;
+    }
+  }
+
+  /** The desktop learns about the outbox state through hello. */
+  private announceOutboxState(): void {
+    if (this.desktopDeviceId && !this.closed) {
+      void this.sendHello().catch(() => undefined);
     }
   }
 
@@ -655,21 +793,6 @@ export class MachineHostService {
     const ciphertext = await sealMobileRelayPayload(envelope, this.options.pairing.relaySealKeyBase64);
     await this.client.sendCiphertext({ logicalMessageId: envelope.messageId, ciphertext, to });
   }
-}
-
-function isStoredTerminal(entry: unknown): entry is MachineTurnFinishedBody {
-  if (!entry || typeof entry !== "object") {
-    return false;
-  }
-  const record = entry as Partial<MachineTurnFinishedBody>;
-  return record.type === "machine.turn.finished" &&
-    typeof record.runId === "string" &&
-    typeof record.conversationId === "string" &&
-    typeof record.participantId === "string" &&
-    typeof record.status === "string" &&
-    Array.isArray(record.messages) &&
-    Array.isArray(record.warnings) &&
-    typeof record.finishedAt === "string";
 }
 
 export function machineMessagesForRun(conversation: Conversation, participantId: string, runId: string): ChatMessage[] {

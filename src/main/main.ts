@@ -2797,15 +2797,17 @@ void app.whenReady().then(async () => {
         throw error;
       })
     );
-    machineLinkService.onRunOutcome((event) =>
-      chatService.applyMachineRunOutcome({
+    machineLinkService.onLateTerminal((event) =>
+      chatService.applyMachineLateTerminal({
         conversationId: event.conversationId,
         runId: event.runId,
-        outcome: event.outcome,
-        machineName: event.machineName,
-        detail: event.detail
+        status: event.status,
+        messages: event.messages,
+        error: event.error,
+        machineName: event.machineName
       })
     );
+    machineLinkService.setConversationLoader((conversationId) => storageService.getConversation(conversationId));
     chatService.setMachineLink(machineLinkService);
     void machineLinkService.start().catch((error) => {
       void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });

@@ -214,6 +214,7 @@ import {
   withParticipantCompactionsForRunRemoved
 } from "../../shared/chatRunState";
 import { INTERRUPTED_RUN_WARNING, sanitizeWarningList, sanitizeWarningText } from "../../shared/warnings";
+import { foldMachineTurnResult, markStopUnconfirmed, markStoppedByUser } from "./machineTurnOutcome";
 import { normalizeAutoChatTitle, normalizeManualChatTitle, sanitizeAutoChatTitleSuggestion } from "../../shared/chatTitles";
 import {
   agentReadinessReason,
@@ -6817,34 +6818,25 @@ export class ChatService {
           options.warnings.push(warning);
         }
       }
-      if (result.status === "unconfirmed" || (result.status === "failed" && signal?.aborted)) {
-        // Rule 2: the machine never confirmed the run is gone; this is not a
-        // stop, and the batch path keeps this outcome as it is.
-        this.markParticipantMessageStopUnconfirmed(pendingMessage, participant, result.error);
-        await storeOutcomeAndAcknowledge(result);
-        return ownsPendingMessage ? [pendingMessage] : [];
-      }
-      if (result.status === "failed") {
-        throw new Error(result.error ?? `@${participant.handle} failed on its machine.`);
-      }
-      if (result.status === "interrupted") {
-        this.markParticipantMessageStoppedByUser(pendingMessage, participant, { preserveContent: true });
-        await storeOutcomeAndAcknowledge(result);
-        return ownsPendingMessage ? [pendingMessage] : [];
-      }
-      // The machine's copy of the bubble carries the reply; fold it into the
-      // desktop's bubble so ids stay identical on both machines.
-      const reply = result.messages.find((message) => message.id === pendingMessage.id);
-      const others = result.messages.filter((message) => message.id !== pendingMessage.id);
-      if (reply) {
-        pendingMessage.content = reply.content;
-        pendingMessage.status = reply.status ?? "done";
-        pendingMessage.metadata = { ...pendingMessage.metadata, ...reply.metadata, runId };
-      } else {
-        pendingMessage.status = "error";
-        pendingMessage.content = `@${participant.handle} finished on its machine without a reply.`;
+      // Whatever the outcome, the machine's copy of the bubble (same id)
+      // contributes its text and the run's other messages, and the whole
+      // result is stored before the machine is told to drop it.
+      const status = result.status === "failed" && signal?.aborted ? "unconfirmed" : result.status;
+      const others = foldMachineTurnResult(pendingMessage, participant.handle, runId, { status, messages: result.messages, error: result.error });
+      for (const bubble of bubbleObjects()) {
+        if (bubble !== pendingMessage) {
+          bubble.content = pendingMessage.content;
+          bubble.status = pendingMessage.status;
+          bubble.metadata = pendingMessage.metadata;
+        }
       }
       await storeOutcomeAndAcknowledge(result, others);
+      if (status === "failed") {
+        throw new Error(result.error ?? `@${participant.handle} failed on its machine.`);
+      }
+      if (status === "interrupted" || status === "unconfirmed") {
+        return ownsPendingMessage ? [pendingMessage, ...others] : others;
+      }
       return [pendingMessage, ...others];
     } catch (error) {
       clearStopPending();
@@ -6978,32 +6970,52 @@ export class ChatService {
     });
   }
 
-  /** Machines transport, desktop side: the outcome of a stop for a run this
-   *  desktop no longer tracks (it restarted meanwhile). "stopped" only when
-   *  the machine confirmed the run is gone; "unconfirmed" otherwise (Rule 2). */
-  async applyMachineRunOutcome(request: { conversationId: string; runId: string; outcome: "stopped" | "unconfirmed"; machineName: string; detail?: string }): Promise<void> {
+  /** Machines transport, desktop side: a turn result (any status) for a run
+   *  this desktop no longer tracks, because it restarted meanwhile. The
+   *  bubble is folded exactly as for a live turn, the run's other messages
+   *  are inserted, and the result counts as applied only once stored; the
+   *  caller acknowledges to the machine (and drops a held stop) after that. */
+  async applyMachineLateTerminal(request: {
+    conversationId: string;
+    runId: string;
+    status: "completed" | "interrupted" | "failed" | "unconfirmed";
+    messages: ChatMessage[];
+    error?: string;
+    machineName: string;
+  }): Promise<void> {
     const conversation = await this.storage.getConversation(request.conversationId);
     if (!conversation || conversation.kind !== "chat") {
       return;
     }
     await this.withChatMutation(conversation, async () => {
       const bubble = conversation.messages.find((message) => message.role === "participant" && message.metadata?.runId === request.runId);
-      if (!bubble) {
-        return;
+      let others = request.messages;
+      if (bubble) {
+        const participant = this.chatParticipants(conversation).find((item) => item.id === bubble.participantId);
+        const handle = participant?.handle ?? bubble.participantLabel?.replace(/^@/, "") ?? "member";
+        others = foldMachineTurnResult(bubble, handle, request.runId, { status: request.status, messages: request.messages, error: request.error });
+        this.recordLastMessageByParticipant(conversation, bubble);
       }
-      const participant = this.chatParticipants(conversation).find((item) => item.id === bubble.participantId);
-      const handle = participant?.handle ?? bubble.participantLabel?.replace(/^@/, "") ?? "member";
-      const stub = { handle } as ChatParticipant;
-      if (request.outcome === "stopped") {
-        this.markParticipantMessageStoppedByUser(bubble, stub, { preserveContent: true });
-      } else {
-        this.markParticipantMessageStopUnconfirmed(bubble, stub, request.detail ?? `Machine ${request.machineName} does not know this run any more.`);
+      for (const incoming of others) {
+        const index = conversation.messages.findIndex((message) => message.id === incoming.id);
+        if (index >= 0) {
+          if (conversation.messages[index].status !== "pending" && incoming.status === "pending") {
+            continue;
+          }
+          conversation.messages[index] = incoming;
+        } else {
+          conversation.messages.push(incoming);
+        }
+        if (incoming.role === "participant") {
+          this.recordLastMessageByParticipant(conversation, incoming);
+        }
       }
+      conversation.messages.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
     });
     if (!(await this.waitForQueuedSaveResult(request.conversationId))) {
-      throw new Error("The stop outcome could not be stored in this desktop's chat.");
+      throw new Error(`The result from machine ${request.machineName} could not be stored in this desktop's chat.`);
     }
   }
 
@@ -7796,28 +7808,13 @@ export class ChatService {
     participant: ChatParticipant,
     options: { preserveContent?: boolean } = {}
   ): void {
-    message.status = "error";
-    if (!options.preserveContent || !message.content.trim()) {
-      message.content = `@${participant.handle} stopped by user.`;
-    }
-    message.metadata = {
-      ...message.metadata,
-      terminalReason: "user-stopped"
-    };
+    markStoppedByUser(message, participant.handle, options);
   }
 
   /** Rule 2 (docs/parity-requirements.md): a Stop the member's machine never
    *  confirmed is shown as exactly that, never as "stopped by user". */
   private markParticipantMessageStopUnconfirmed(message: ChatMessage, participant: ChatParticipant, reason?: string): void {
-    message.status = "error";
-    const detail = reason?.trim() ? ` ${reason.trim()}` : "";
-    message.content = message.content.trim()
-      ? `${message.content}\n\nStop not confirmed for @${participant.handle}: the machine did not confirm the run is gone.${detail}`
-      : `Stop not confirmed for @${participant.handle}: the machine did not confirm the run is gone.${detail}`;
-    message.metadata = {
-      ...message.metadata,
-      terminalReason: "stop-unconfirmed"
-    };
+    markStopUnconfirmed(message, participant.handle, reason);
   }
 
   private async finalizePendingParticipantMessage(

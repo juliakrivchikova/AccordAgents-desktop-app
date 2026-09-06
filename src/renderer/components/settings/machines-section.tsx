@@ -155,6 +155,7 @@ export function MachinesSection(): JSX.Element {
                         <Server size={14} aria-hidden />
                         <span>{machine.name}</span>
                         <span className={`machines-state${connected ? " is-connected" : ""}`}>{connected ? "Connected" : "Not connected"}</span>
+                        {live?.warning && <span className="machines-warning" role="status">{live.warning}</span>}
                       </div>
                       <div className="gen-row-desc">
                         {live?.lastHello
