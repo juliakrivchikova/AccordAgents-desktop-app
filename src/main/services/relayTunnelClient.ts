@@ -87,6 +87,9 @@ export class RelayTunnelClient {
   // cap; a successful open resets it. A fixed delay hammered the relay once a
   // second for as long as an outage lasted.
   private reconnectAttempts = 0;
+  /** Bumped by every connect() and close(); a dial attempt or its failure
+   *  handler that belongs to an older generation must not act. */
+  private connectGeneration = 0;
 
   constructor(private readonly options: RelayTunnelClientOptions) {
     this.manifest = options.manifest ?? PUSHER_SIZED_RELAY_FLOOR;
@@ -107,11 +110,13 @@ export class RelayTunnelClient {
 
   async connect(): Promise<void> {
     this.closed = false;
+    this.connectGeneration += 1;
     await this.openSocket("connecting");
   }
 
   close(): void {
     this.closed = true;
+    this.connectGeneration += 1;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
@@ -160,6 +165,13 @@ export class RelayTunnelClient {
       let settled = false;
       socket.on("open", () => {
         settled = true;
+        if (this.socket !== socket) {
+          // A newer dial replaced this one while it was connecting: it must
+          // not seat itself at the relay next to the live socket.
+          socket.close(1000, "superseded by a newer connection");
+          resolve();
+          return;
+        }
         this.reconnectAttempts = 0;
         this.setState("connected");
         resolve();
@@ -230,12 +242,18 @@ export class RelayTunnelClient {
     const delay = Math.min(this.reconnectDelayMs * factor, this.reconnectDelayMs * 60);
     const jittered = delay * (0.75 + Math.random() * 0.5);
     this.reconnectAttempts = Math.min(this.reconnectAttempts + 1, 8);
+    const generation = this.connectGeneration;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
-      if (this.closed) {
+      if (this.closed || generation !== this.connectGeneration) {
         return;
       }
       this.openSocket("tunnel-reconnecting").catch((error) => {
+        // A failure of an attempt the client has already moved on from (a
+        // close()/connect() happened meanwhile) must not dial again.
+        if (generation !== this.connectGeneration) {
+          return;
+        }
         this.emitError(error);
         this.scheduleReconnect();
       });

@@ -277,7 +277,7 @@ export class MachineHostService {
       appVersion: this.options.appVersion,
       platform: `${process.platform}-${process.arch}`,
       providers,
-      activeRunIds: [...this.activeTurns.keys()],
+      activeRunIds: [...this.activeTurns.keys(), ...this.queuedRunIds()],
       pendingTerminalRunIds: [...this.pendingTerminals.keys()],
       instanceId: this.instanceId,
       instanceStartedAt: this.instanceStartedAt,
@@ -364,11 +364,19 @@ export class MachineHostService {
         void this.runTurn(body);
         return;
       case "machine.turn.query":
-        if (!this.activeTurns.has(body.runId) && !this.pendingTerminals.has(body.runId)) {
+        if (!this.activeTurns.has(body.runId) && !this.pendingTerminals.has(body.runId) && !this.isQueuedRun(body.runId)) {
           await this.send({ type: "machine.turn.unknown", conversationId: body.conversationId, runId: body.runId }).catch(() => undefined);
         }
         return;
       case "machine.turn.cancel": {
+        const queued = this.takeQueuedRun(body.runId);
+        if (queued) {
+          // Stopped before it ever started: nothing ran, so this is a
+          // confirmed interruption, and the copy's completion must not
+          // start it later.
+          await this.finishQueuedTurn(queued, "interrupted");
+          return;
+        }
         const controller = this.activeTurns.get(body.runId);
         if (!controller && !this.pendingTerminals.has(body.runId)) {
           // Not running here and no result waiting: this runtime cannot
@@ -562,19 +570,47 @@ export class MachineHostService {
   }
 
   private async failTurnOnIncompleteCopy(request: MachineTurnRequestBody): Promise<void> {
+    await this.finishQueuedTurn(request, "failed", "This machine's copy of the chat is not complete yet (a sync batch could not be stored); try again once it has synced.");
+  }
+
+  /** A turn that never started (stopped while waiting for the copy, or the
+   *  copy failed) still gets a stored, acknowledged result. */
+  private async finishQueuedTurn(request: MachineTurnRequestBody, status: "interrupted" | "failed", error?: string): Promise<void> {
     this.pendingTerminals.set(request.runId, {
       type: "machine.turn.finished",
       conversationId: request.conversationId,
       runId: request.runId,
       participantId: request.participantId,
-      status: "failed",
+      status,
       messages: [],
       warnings: [],
-      error: "This machine's copy of the chat is not complete yet (a sync batch could not be stored); try again once it has synced.",
+      ...(error ? { error } : {}),
       finishedAt: this.now().toISOString()
     });
     this.persistOutbox();
     await this.flushPendingTerminals();
+  }
+
+  private queuedRunIds(): string[] {
+    return [...this.turnsAwaitingCopy.values()].flat().map((request) => request.runId);
+  }
+
+  private isQueuedRun(runId: string): boolean {
+    return this.queuedRunIds().includes(runId);
+  }
+
+  private takeQueuedRun(runId: string): MachineTurnRequestBody | undefined {
+    for (const [conversationId, waiting] of this.turnsAwaitingCopy.entries()) {
+      const index = waiting.findIndex((request) => request.runId === runId);
+      if (index >= 0) {
+        const [request] = waiting.splice(index, 1);
+        if (waiting.length === 0) {
+          this.turnsAwaitingCopy.delete(conversationId);
+        }
+        return request;
+      }
+    }
+    return undefined;
   }
 
   private restoreInventory(conversationId: string, previous: Map<string, string | undefined>): void {

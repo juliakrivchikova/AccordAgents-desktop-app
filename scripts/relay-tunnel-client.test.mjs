@@ -251,6 +251,42 @@ test("RelayTunnelClient does not dial again for a socket it already replaced", a
   }
 });
 
+test("RelayTunnelClient does not dial again for a reconnect attempt it already abandoned", async () => {
+  const { RelayTunnelClient } = await import("../dist/main/main/services/relayTunnelClient.js");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  try {
+    const machine = new RelayTunnelClient({
+      relayUrl: address.url,
+      rendezvousId: "pair-abandoned-1",
+      role: "machine",
+      deviceId: "did-machine-2",
+      capability: "cap-abandoned-1",
+      streamId: "stream-abandoned-1",
+      reconnectDelayMs: 20
+    });
+    const errors = [];
+    let connectedTransitions = 0;
+    machine.on("error", (error) => errors.push(error.message));
+    machine.on("state", (state) => { if (state === "connected") connectedTransitions += 1; });
+    await machine.connect();
+    // The relay drops the socket; the client schedules an automatic dial.
+    machine.forceSocketCloseForTests();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // Before that dial completes, the owner closes and reconnects explicitly:
+    // the abandoned attempt (and its failure handler) must not dial again.
+    machine.close();
+    await machine.connect();
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(machine.currentState(), "connected");
+    assert.deepEqual(errors.filter((message) => message.includes("4001")), [], "no eviction after an abandoned attempt");
+    assert.equal(connectedTransitions, 2, "exactly the initial connection and the explicit reconnect");
+    machine.close();
+  } finally {
+    await relay.close();
+  }
+});
+
 test("RelayTunnelClient targets machines by device id and reports peers", async () => {
   const { RelayTunnelClient } = await import("../dist/main/main/services/relayTunnelClient.js");
   const relay = createReferenceRelayServer();

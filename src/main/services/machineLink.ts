@@ -448,6 +448,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
         return interrupted;
       }
       await this.replicateTo(connection, request.conversation);
+      // A copy queued meanwhile (a machine asked for the chat again, a restart
+      // cleared the inventory) must have left before the request follows it.
+      await this.settleReplication(connection, request.conversation.id);
       if (request.signal?.aborted) {
         return interrupted;
       }
@@ -500,6 +503,19 @@ export class MachineLinkService implements MachineTurnDispatcher {
     });
     connection.replication.set(conversation.id, next.then(() => undefined, () => undefined));
     return next;
+  }
+
+  private async settleReplication(connection: MachineConnection, conversationId: string): Promise<void> {
+    for (let round = 0; round < 8; round += 1) {
+      const chain = connection.replication.get(conversationId);
+      if (!chain) {
+        return;
+      }
+      await chain;
+      if (connection.replication.get(conversationId) === chain) {
+        return;
+      }
+    }
   }
 
   /** Rule 2: stops waiting for a machine are part of its record, so a
@@ -670,7 +686,13 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
     connection.machineDeviceId = hello.deviceId;
     connection.settingsSynced = false;
-    connection.replicated.clear();
+    // The machine's inventory of what it holds lives in its process: after
+    // a restart (new instance id) every chat is copied afresh; after a mere
+    // reconnect nothing is, so a network blip does not re-send 40 MB.
+    const previousInstance = connection.record.lastHello?.instanceId;
+    if (!hello.instanceId || !previousInstance || hello.instanceId !== previousInstance) {
+      connection.replicated.clear();
+    }
     const { type: _type, ...rest } = hello;
     connection.record = {
       ...connection.record,
