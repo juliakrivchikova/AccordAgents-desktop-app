@@ -131,9 +131,79 @@ slice, not the full cutover: physical-phone QA, Claude quota-dependent QA, durab
 delivery of all events, process recovery after a runtime crash and the remaining
 event-contract work are still required.
 
+## Durable conversation and outcome delivery (2026-09-06)
+
+The conversation sync/delta/backdelta and finished/finished-ack rows in the table
+above now use `DeviceEventChannel` and the pairing's sealed mailbox as well as
+the live room. New enrollment requires and registers that mailbox. Native turn
+commands, progress, settings and approval RPCs still use the direct sealed link;
+that remaining conversion is required before cutover. The terminal file outbox
+is retained until its receipt is applied; SQLite additionally retains its signed
+event and fragments, including the desktop's acknowledgement, across disconnect.
+No native action is replayed by this delivery layer.
+
+Failed durable copy batches retry their retained event rather than automatically
+sending a full copy three times. A restarted machine restores the partial-copy
+barrier and inventory before connecting, so previously applied batches are not
+mistaken for offline replies. Legacy direct-wire test paths still exercise their
+older bounded resync behavior. A late terminal clears only its run's metadata
+before publishing the snapshot, preserving other concurrent runs and keeping
+the sidebar and saved chat consistent.
+
+The real QA driver `qa-machine-mailbox-return.cjs` uses an isolated Electron
+profile and a separate native Codex runtime against the published public relay:
+it closes the controller during an actual Python command, waits for the relay
+to accept the completed outcome, stops that QA machine, then restarts only the
+controller. It checks the returned answer, saved run state and retained intents;
+with `QA_NEW_CHAT=1` it also checks the visible sidebar has stopped spinning.
+`QA_RESUME_MARKER` resumes observation of an already executed probe; it never
+replays its command. This Mac check does not replace Linux or physical-phone QA.
+
+The fresh-chat public-relay probe passed with marker
+`BUFFERED_REPLY_70f528c21c6747079a6fd8fa064261be`; screenshot
+`screenshots/qa-machine-mailbox-return.png` was inspected. It also exposed and
+fixed a startup race: a delayed initial sidebar list could overwrite a newer
+pushed terminal state. Summary refreshes now preserve updates received since
+their read began, and an older refresh cannot overwrite a newer refresh.
+
+Verification for this delivery slice: 51 machine tests, 84 storage tests,
+856 permission/cancellation tests (8 platform skips), 24 snapshot/update tests,
+and the targeted chat-action renderer tests passed; typecheck, production build,
+color and unused/orphan checks passed. The repository-wide line-count guard
+still fails on pre-existing oversized renderer files, including the two touched
+action hooks (previously 638 and 599 lines); unrelated file splitting is not
+part of this change. Review covered persistence, receipt loss, apply failure,
+fragment repair, restarts, ownership and the full changed data path. Full
+transition acceptance remains open as listed below and in the event contract.
+
 ## Cost on a large chat
 
-Every conversation snapshot on the desktop triggers a replication pass for the chats a machine hosts. A pass compares every message against what the machine holds; the per-message hash is cached per message object, and snapshots that arrive while a pass is running collapse into one more pass. Using a synthetic 14 000-row fixture matching the previously measured User-chat scale (~41 MB JSON), the first copy was 94 batches and approximately 55 MB sealed; a cold stamp pass took 103 ms, a warm pass with shared unchanged message objects had median 0.51 ms / p95 1.07 ms. This is a fixture measurement, not a new read of the User's chat. Disconnect clears the desktop's inventory, so a subsequent copy can incur the full transfer again. A single message or metadata larger than the relay's 10 MiB logical limit is not split yet.
+Every conversation snapshot on the desktop triggers a replication pass for the
+chats a machine hosts; unchanged message objects cache their hashes and queued
+snapshots coalesce. The new durable channel was measured with 14,000 synthetic
+rows / 42,047,781 bytes of message JSON: 94 batches, 281 mailbox POSTs,
+75,153,690 bytes of sealed HTTP bodies, maximum 700,124 bytes per POST. Fragment
+base64 inside the sealed envelope explains the extra encoding overhead compared
+with the earlier direct-link measurement (~55 MB). Local encoding, SQLite
+persistence and a fake successful HTTP sink took 10.45 s; this is not network
+latency. Cold stamps took 72.7 ms; warm shared-object passes had median 0.30 ms /
+p95 0.70 ms. A later full copy can still repeat this cost when the desktop's
+volatile replication inventory is lost; the machine's incoming inventory persists.
+
+A fresh read-only measurement of the User's actual database found the largest
+chat by message bytes had 329 rows / 3,483,428 bytes, with a 333,527-byte largest
+message; the largest conversation shell was 750,744 bytes. No content left the
+computer for that measurement. The 14,000-row case is a historical scale fixture,
+not a claim about today's largest chat. A separate public-mailbox probe carried
+13,920,011 raw bytes in 36 fragments, maximum 700,218 bytes per POST, and applied
+once after sender exit. Single large messages and metadata in the converted
+events now fragment; direct settings/progress/control still need conversion.
+
+Bodies, fragments, event headers, delivery receipts and inventory stay in the
+endpoints' local SQLite; only sealed packets reach the User's relay buffer.
+The new history has no garbage collection yet, and repeated growing snapshots
+can accumulate substantial history; progress coalescing and measured retention
+pressure remain cutover work. The 24-hour relay cost measurement is still open.
 
 ## Where the machine keeps data
 
@@ -147,8 +217,7 @@ Under the user-data directory: `accordagents.sqlite3` (its copy of the chats it 
 
 - User choices (`User choice:` blocks) raised by a member on a machine reach the desktop as ordinary messages; the answer travels back as the next user message, which is the same round trip a local member gets. Nothing else is forwarded for them yet.
 - A machine-hosted member's requests to other members run on the machine's copy; routing them to the other members' home machines follows the event contract (`docs/machines/02-event-contract.md`).
-- Delivery of a finished turn is retried until the desktop is back; delivery of every other event is not yet acknowledged (the outbox/ack of the event contract is the next slice).
-- Inbound replicated messages are not yet observed by the hybrid logical clock on the receiving side.
+- Conversation copies/deltas and terminal outcomes now use durable delivery and accepted-event clock observation; native commands, approval RPCs, settings and progress still need conversion, followed by the PWA's IndexedDB clock/outbox and chat-wide event projections.
 - The doctor/setup flow does not yet install the runtime over SSH; the steps above are manual until it does.
 - The machine-owned three-hour AWS idle stop and scoped phone wake still need implementation and verification; the desktop timer does not protect against the desktop dying. The current manual QA deployment is not an always-on production installation.
 - The legacy worker path and the cloud-only prompt branch remain until the cutover commit removes them.

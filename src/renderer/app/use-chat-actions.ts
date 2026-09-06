@@ -277,8 +277,12 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         next.delete(conversationId);
         return next;
       });
-      const { [conversationId]: _removedRevision, ...remainingRevisions } = state.activityRevisionByConversationRef.current;
-      state.activityRevisionByConversationRef.current = remainingRevisions;
+      // Keep a revision tombstone until outstanding list reads finish, so an
+      // older refresh cannot put the deleted chat back into the sidebar.
+      state.activityRevisionByConversationRef.current = {
+        ...state.activityRevisionByConversationRef.current,
+        [conversationId]: (state.activityRevisionByConversationRef.current[conversationId] ?? 0) + 1
+      };
       const { [conversationId]: _removedLastViewed, ...remainingLastViewed } = state.lastViewedAtRef.current;
       state.lastViewedAtRef.current = remainingLastViewed;
       persistLastViewedAt(remainingLastViewed);
@@ -513,10 +517,9 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     state.setError(undefined);
     try {
       const saved = await window.consensus.respondToChatAppToolApproval({ conversationId: state.conversation.id, approvalId, approve, scope, draftOverride, codexDecisionId });
-      const [nextSettings, nextSummaries] = await Promise.all([window.consensus.getSettings(), window.consensus.listConversations()]);
+      const [nextSettings] = await Promise.all([window.consensus.getSettings(), conversationActions.refreshConversations()]);
       state.setSettings(nextSettings);
       if (saved) state.setConversation(saved);
-      state.setSummaries(nextSummaries);
     } catch (caught) {
       state.setError(errorText(caught));
     }

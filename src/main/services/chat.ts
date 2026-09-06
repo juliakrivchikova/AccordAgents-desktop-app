@@ -210,6 +210,7 @@ import {
   readActiveRunIds,
   readActiveRunParticipants,
   readParticipantCompactions,
+  withActiveRunIdRemoved,
   withParticipantCompactionStarted,
   withParticipantCompactionsForRunRemoved
 } from "../../shared/chatRunState";
@@ -661,7 +662,7 @@ export interface MachineTurnDispatchResult {
   receiptId?: string;
   /** Called once the desktop has stored the result; the machine keeps it
    *  until then. */
-  acknowledge?: () => void;
+  acknowledge?: () => void | Promise<void>;
 }
 
 export interface MachineTurnDispatcher {
@@ -6829,7 +6830,12 @@ export class ChatService {
       });
       const stored = await this.waitForQueuedSaveResult(conversation.id);
       if (stored) {
-        result.acknowledge?.();
+        try { await result.acknowledge?.(); }
+        catch (error) {
+          // The provider outcome is already safely stored. An outbox/receipt
+          // failure must retry delivery, never turn that outcome into failure.
+          void this.debugLogs.write("chat.machine-turn.ack-pending", { conversationId: conversation.id, runId, message: error instanceof Error ? error.message : String(error) });
+        }
       } else {
         void this.debugLogs.write("chat.machine-turn.not-stored", { conversationId: conversation.id, runId, status: result.status });
       }
@@ -7081,6 +7087,25 @@ export class ChatService {
       for (const warning of request.warnings ?? []) {
         this.addConversationWarning(conversation, warning);
       }
+      // A late result has no local run's finally block to clear its status.
+      // Publish and store that same final state, preserving other machines'
+      // concurrent runs rather than relying on a later storage read to sweep it.
+      const active = readActiveRunIds(conversation.metadata);
+      const compatibilityRunId = conversation.metadata.runId;
+      if (conversation.metadata.running && typeof compatibilityRunId === "string" && !active.includes(compatibilityRunId)) active.push(compatibilityRunId);
+      conversation.metadata = withActiveRunIdRemoved({ ...conversation.metadata, activeRunIds: active }, request.runId);
+      const owners = { ...this.chatRunOwners(conversation.metadata) };
+      delete owners[request.runId];
+      if (Object.keys(owners).length) conversation.metadata[ACTIVE_RUN_OWNERS_KEY] = owners;
+      else delete conversation.metadata[ACTIVE_RUN_OWNERS_KEY];
+      if (conversation.metadata.runId === request.runId) {
+        const remaining = readActiveRunIds(conversation.metadata);
+        if (remaining.length) conversation.metadata.runId = remaining[0];
+        else delete conversation.metadata.runId;
+      }
+      if ((this.backgroundRunnerCounts.get(conversation.id) ?? 0) > 0) conversation.metadata.running = true;
+      conversation.metadata = withParticipantCompactionsForRunRemoved(conversation.metadata, request.runId);
+      conversation.metadata = this.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, request.runId);
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
     });

@@ -49,7 +49,7 @@
     "test:mobile-control": "npm run build:main && node --test --test-timeout 120000 dist/main/main/services/mobilePairing.test.js dist/main/main/services/mailboxAccess.test.js dist/main/main/services/mobileRelayControl.test.js dist/main/main/services/mobileMailboxRunner.test.js dist/main/main/services/mobileMailboxOutbox.test.js dist/main/main/services/chatDeviceCapabilities.test.js dist/main/main/services/mobilePush.test.js dist/main/main/services/mobileProgressEnvelopeTracker.test.js && npm run test:mobile-shell",
     "test:mailbox": "npm run build:main && node --test dist/main/main/services/mailboxSyncClient.test.js dist/main/main/services/mailboxSyncService.test.js && node --test scripts/mailbox-reference-server.test.mjs",
     "test:leases": "npm run build:main && node --test dist/main/main/services/chatExecutionLeases.test.js dist/main/main/services/chat.executionLeases.test.js dist/main/main/services/hostProviderCapabilities.test.js",
-    "test:machines": "npm run build:main && node --test --test-force-exit dist/main/main/services/settings.machines.test.js dist/main/main/services/machineTurnOutcome.test.js scripts/machine-host.test.mjs scripts/machine-link.test.mjs scripts/relay-reference-server.test.mjs scripts/relay-tunnel-client.test.mjs",
+    "test:machines": "npm run build:main && node --test --test-force-exit dist/main/main/services/settings.machines.test.js dist/main/main/services/machineTurnOutcome.test.js scripts/machine-host.test.mjs scripts/machine-link.test.mjs scripts/relay-reference-server.test.mjs scripts/relay-tunnel-client.test.mjs dist/main/main/services/deviceEventStorage.test.js dist/main/main/services/deviceEventChannel.test.js dist/main/main/services/deviceEventMailbox.test.js",
     "test:artifacts": "npm run build:main && node --test dist/main/main/services/artifacts.test.js dist/main/main/services/appMcp.artifacts.test.js dist/main/main/services/chat.rename.test.js && node --test scripts/artifact-boundary-guard.test.mjs",
     "test:activity": "npm run build:main && node --test dist/main/main/services/activityItemState.test.js dist/main/main/services/chatActivity.test.js dist/main/main/services/chatActivityFocus.test.js dist/main/main/services/storage.activity.test.js && node --test scripts/activity-focus-contract.test.mjs",
     "test:chat-search": "npm run build:main && npm run build:renderer-tests && node --test dist/main/main/services/chatSearch.test.js dist/renderer-tests/renderer/components/shell/chat-search.test.mjs && node --test --test-force-exit --import ./scripts/renderer-jsdom-setup.mjs dist/renderer-tests/renderer/components/search/chat-search-escape.test.mjs",
@@ -85,7 +85,8 @@
     "bump:minor": "node scripts/bump-version.mjs minor",
     "bump:major": "node scripts/bump-version.mjs major",
     "tag-release": "node scripts/tag-release.mjs",
-    "test:worker-relay": "npm run build:main && node --test scripts/worker-relay-chat-read.test.mjs"
+    "test:worker-relay": "npm run build:main && node --test scripts/worker-relay-chat-read.test.mjs",
+    "test:device-events": "npm run build:main && node --test dist/main/main/services/deviceEventStorage.test.js dist/main/main/services/deviceEventChannel.test.js dist/main/main/services/deviceEventMailbox.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-ec2": "^3.1079.0",

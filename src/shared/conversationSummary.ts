@@ -1,4 +1,23 @@
-import type { ConversationSummaryChatParticipant } from "./types";
+import type { ConversationSummary, ConversationSummaryChatParticipant } from "./types";
+
+/** An async list read can finish after a newer pushed outcome. Preserve any
+ * chat changed since that read began, including additions, archive and removal. */
+export function reconcileConversationSummaryRefresh(
+  current: ConversationSummary[], incoming: ConversationSummary[],
+  revisionsAtStart: Record<string, number>, revisionsNow: Record<string, number>
+): ConversationSummary[] {
+  const changed = (id: string): boolean => (revisionsNow[id] ?? 0) !== (revisionsAtStart[id] ?? 0);
+  const currentById = new Map(current.map(summary => [summary.id, summary]));
+  const result: ConversationSummary[] = [];
+  const seen = new Set<string>();
+  for (const summary of incoming) {
+    seen.add(summary.id);
+    const accepted = changed(summary.id) ? currentById.get(summary.id) : summary;
+    if (accepted) result.push(accepted);
+  }
+  for (const summary of current) if (!seen.has(summary.id) && changed(summary.id)) result.push(summary);
+  return result;
+}
 
 export function normalizeConversationSummaryChatParticipants(value: unknown): ConversationSummaryChatParticipant[] | undefined {
   const parsed = parseParticipantList(value);

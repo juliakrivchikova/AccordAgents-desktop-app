@@ -34,6 +34,9 @@ import { normalizeInferredParticipantRequestThreads as normalizeInferredParticip
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import { sanitizeConversationWarnings } from "../../shared/warnings";
 import { formatHlcKey, logicalOrderKey, parseHlcKey, type HlcParts } from "../../shared/hlc";
+import type { DeviceEventAppendOptions } from "../../shared/deviceEventDelivery";
+import { DEVICE_EVENT_SCHEMA_SQL, DeviceEventStorage, deviceEventAppendSql } from "./deviceEventStorage";
+import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEventBlobStorage";
 
 const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
 const MAX_MESSAGE_PAGE_LIMIT = 200;
@@ -388,10 +391,15 @@ export class StorageService {
         updated_at text not null,
         primary key (conversation_id, projection_key)
       );
+      ${DEVICE_EVENT_SCHEMA_SQL}
+      ${DEVICE_EVENT_BLOB_SCHEMA_SQL}
     `);
     await this.pruneStaleRunCancelRequests();
     await this.ensureColumn("conversations", "body_json", "text");
     await this.ensureColumn("conversations", "save_token", "text");
+    await this.ensureColumn("device_event_inbox", "ack_delivered_at", "text");
+    await this.runSql(`create index if not exists idx_device_event_receipts_pending
+      on device_event_inbox(channel_id, device_id) where applied_at is not null and ack_delivered_at is null;`);
     await this.backfillConversationBodiesAndMessages();
     await this.backUpBeforeSchemaUpgrade();
     await this.setSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY, String(SUPPORTED_STORAGE_SCHEMA_VERSION));
@@ -1474,11 +1482,27 @@ export class StorageService {
     return observed === token;
   }
 
-  async appendChatEvent(event: ChatEventEnvelope): Promise<ChatEventAppendResult> {
-    return (await this.appendChatEvents([event]))[0];
+  deviceEvents(): DeviceEventStorage {
+    return new DeviceEventStorage({
+      init: () => this.init(),
+      query: <T>(sql: string) => this.queryJson<T>(sql),
+      execute: (sql: string) => this.runSql(sql)
+    });
   }
 
-  async appendChatEvents(events: ChatEventEnvelope[]): Promise<ChatEventAppendResult[]> {
+  deviceEventBlobs(): DeviceEventBlobStorage {
+    return new DeviceEventBlobStorage({
+      init: () => this.init(),
+      query: <T>(sql: string) => this.queryJson<T>(sql),
+      execute: (sql: string) => this.runSql(sql)
+    });
+  }
+
+  async appendChatEvent(event: ChatEventEnvelope, delivery: DeviceEventAppendOptions = {}): Promise<ChatEventAppendResult> {
+    return (await this.appendChatEvents([event], delivery))[0];
+  }
+
+  async appendChatEvents(events: ChatEventEnvelope[], delivery: DeviceEventAppendOptions = {}): Promise<ChatEventAppendResult[]> {
     await this.init();
     if (events.length === 0) {
       return [];
@@ -1500,6 +1524,7 @@ export class StorageService {
       const clock = parseHlcKey(logicalOrderKey(event));
       return clock ? [`(${sqlString(event.eventId)}, ${sqlString(event.eventHash)}, ${sqlString(event.logicalTs)}, ${sqlString(formatHlcKey({ ...clock, originId: "clock" }))})`] : [];
     });
+    const deliverySql = deviceEventAppendSql(events, delivery);
     const inserted = await this.queryJson<{ eventId: string }>(
       `
         pragma synchronous = full;
@@ -1531,6 +1556,7 @@ export class StorageService {
               on e.event_id = c.event_id and e.event_hash = c.event_hash and e.logical_ts = c.logical_ts
           ), value)) where key = ${sqlString(CHAT_EVENT_CLOCK_META_KEY)};
         `}
+        ${deliverySql}
         commit;
       `
     );
@@ -1635,6 +1661,14 @@ export class StorageService {
       `
     );
     return rows.map((row) => parseHexJson<ChatEventEnvelope>(row.envelopeHex, `chat event ${conversationId}:${logScopeId}`));
+  }
+
+  async getChatEvent(eventId: string): Promise<ChatEventEnvelope | undefined> {
+    await this.init();
+    const rows = await this.queryJson<{ envelopeHex: string }>(
+      `select hex(envelope_json) as envelopeHex from chat_events where event_id = ${sqlString(eventId)} limit 1;`
+    );
+    return rows[0] ? parseHexJson<ChatEventEnvelope>(rows[0].envelopeHex, `chat event ${eventId}`) : undefined;
   }
 
   async hasChatEvent(conversationId: string, eventId: string): Promise<boolean> {

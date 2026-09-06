@@ -8,7 +8,24 @@ import {
   fullListMessagePageInfo,
   messagePageAfterUpdate
 } from "./conversationUpdates";
-import type { ChatActivityItem, ChatMessage, Conversation, ConversationUpdate } from "./types";
+import type { ChatActivityItem, ChatMessage, Conversation, ConversationSummary, ConversationUpdate } from "./types";
+import { reconcileConversationSummaryRefresh } from "./conversationSummary";
+
+test("a startup or approval refresh cannot overwrite newer pushed chat outcomes or archive state", () => {
+  const summary = (id: string, patch: Partial<ConversationSummary> = {}): ConversationSummary => ({
+    id, title: id, kind: "chat", createdAt: "2026-09-06T00:00:00Z", updatedAt: "2026-09-06T00:00:00Z", ...patch
+  });
+  const result = reconcileConversationSummaryRefresh(
+    [summary("done", { running: false }), summary("archived", { archived: true }), summary("new"), summary("unchanged")],
+    [summary("done", { running: true }), summary("archived", { archived: false }), summary("deleted"), summary("unchanged", { title: "fresh title" })],
+    { done: 1 }, { done: 2, archived: 1, deleted: 1, new: 1 }
+  );
+  assert.equal(result.find(item => item.id === "done")?.running, false);
+  assert.equal(result.find(item => item.id === "archived")?.archived, true);
+  assert.ok(result.some(item => item.id === "new"));
+  assert.ok(!result.some(item => item.id === "deleted"));
+  assert.equal(result.find(item => item.id === "unchanged")?.title, "fresh title");
+});
 
 function message(id: string, content: string, index: number): ChatMessage {
   return {

@@ -1,0 +1,314 @@
+import { createHash, randomUUID } from "node:crypto";
+import { DEVICE_EVENT_CHANNEL_PROTOCOL, isDeviceEventPacket, type DeviceEventPacket } from "../../shared/deviceEventChannel";
+import { DEVICE_EVENT_INLINE_BYTES, isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
+import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import type { DeviceEventApplyOutcome, DeviceEventGap, DeviceEventReceipt } from "../../shared/deviceEventDelivery";
+import { DeviceEventProjectionPendingError } from "../../shared/deviceEventDelivery";
+import type { MobilePairingPackage } from "../../shared/mobilePairing";
+import { ChatEventLogService, verifySignedChatEvent } from "./chatEventLog";
+import type { StorageService } from "./storage";
+import { DeviceEventMailbox } from "./deviceEventMailbox";
+import { DeviceEventBlobIncompleteError } from "./deviceEventBlobStorage";
+
+interface DeviceEventChannelOptions {
+  storage: StorageService;
+  eventLog: ChatEventLogService;
+  channelId: string;
+  localDeviceId: string;
+  peerDeviceId: string;
+  peerPublicKeyDerBase64: string;
+  pairing?: MobilePairingPackage;
+  isPeerConnected?: () => boolean;
+  /** Seals before sending over the live room, or the same sealed mailbox. */
+  send(packet: DeviceEventPacket): Promise<void>;
+  /** Domain owner persists before returning. Native effects must be guarded
+   * by durable command receipts; a process crash may replay an unapplied event. */
+  apply(event: ChatEventEnvelope, payload: unknown): Promise<DeviceEventApplyOutcome | "deferred">;
+  onError(error: Error): void;
+}
+
+/** A durable device channel, independent of desktop/phone/machine roles.
+ * Presence is separate. Events retain their signed identity across live, mailbox,
+ * reconnect and repair paths; transport writes never delete retained events. */
+export class DeviceEventChannel {
+  private readonly mailbox?: DeviceEventMailbox;
+  private inbound: Promise<void> = Promise.resolve();
+  private flushing?: Promise<void>;
+  private flushRequested = false;
+  private retry?: ReturnType<typeof setTimeout>;
+  private stopped = false;
+  private receivePending = true;
+  private readonly lastSent = new Map<string, { at: number; attempts: number }>();
+  private readonly requestedGaps = new Map<string, number>();
+
+  constructor(private readonly options: DeviceEventChannelOptions) {
+    const hash = createHash("sha256").update(Buffer.from(options.peerPublicKeyDerBase64, "base64")).digest("hex");
+    if (options.peerDeviceId !== `device-${hash.slice(0, 32)}`) {
+      throw new Error("Device event peer identity does not match its enrolled signing key.");
+    }
+    if (options.pairing?.outboxUrl) {
+      this.mailbox = new DeviceEventMailbox({
+        storage: options.storage, pairing: options.pairing,
+        localDeviceId: options.localDeviceId, peerDeviceId: options.peerDeviceId,
+        receive: (packet) => this.receive(packet), onError: options.onError
+      });
+    }
+  }
+
+  async publish(request: { conversationId: string; kind: string; payload: unknown; eventId?: string; scope?: string }): Promise<ChatEventEnvelope> {
+    if (this.stopped) throw new Error("Device event channel is closed.");
+    const payload = await this.options.storage.deviceEventBlobs().prepare(request.payload);
+    const result = await this.options.eventLog.appendLocalEvent({
+      ...request,
+      // Separate streams permit Stop to bypass bulk copy traffic. They still
+      // use the same HLC, immutable event log and gap rules.
+      logScopeId: this.scope(request.conversationId, request.scope ?? "actions"),
+      payload,
+      recipients: [{ deviceId: this.options.peerDeviceId, channelId: this.options.channelId }]
+    });
+    this.scheduleFlush();
+    return result.event;
+  }
+
+  start(): void {
+    this.stopped = false;
+    this.mailbox?.start();
+    this.scheduleFlush();
+    void this.enqueue(() => this.drain()).catch((error) => this.report(error));
+  }
+
+  close(): void {
+    this.stopped = true;
+    this.mailbox?.close();
+    if (this.retry) clearTimeout(this.retry);
+    this.retry = undefined;
+  }
+
+  receive(value: unknown): Promise<void> {
+    return this.enqueue(async () => {
+      if (this.stopped) return;
+      if (!isDeviceEventPacket(value) || value.from !== this.options.peerDeviceId || value.to !== this.options.localDeviceId) {
+        throw new Error("Device event packet is not addressed to this enrolled channel.");
+      }
+      switch (value.type) {
+        case "fragment":
+          this.receivePending = true;
+          await this.options.storage.deviceEventBlobs().store(value.fragment);
+          break;
+        case "event": {
+          this.receivePending = true;
+          const event = value.event;
+          if (!event || Buffer.byteLength(JSON.stringify(event), "utf8") > DEVICE_EVENT_INLINE_BYTES * 2 || event.originId !== value.from ||
+              !event.logScopeId.startsWith(`device:${this.options.channelId}:`) ||
+              !verifySignedChatEvent(event, this.options.peerPublicKeyDerBase64)) {
+            throw new Error("Device event signature or channel scope is invalid.");
+          }
+          const stored = await this.options.storage.appendChatEvent(event, {
+            ingress: { deviceId: value.from, channelId: this.options.channelId }
+          });
+          if (stored.status === "conflict") throw new Error(`Conflicting device event ${event.eventId}.`);
+          const receipt = await this.options.storage.deviceEvents().receipt(event.eventId);
+          if (receipt) await this.repeatReceipt(receipt);
+          break;
+        }
+        case "ack":
+          if (await this.options.storage.deviceEvents().acknowledge(value.from, value.receipt)) {
+            this.lastSent.delete(value.receipt.eventId);
+          }
+          return;
+        case "resend":
+          for (const event of await this.options.storage.deviceEvents().repair(this.options.channelId, value.from, value.gap)) {
+            await this.sendEvent(event, value.requestId);
+          }
+          return;
+        case "probe":
+          if (!Array.isArray(value.events) || value.events.length > 100) throw new Error("Invalid device event receipt probe.");
+          for (const header of value.events) {
+            if (!header || header.originId !== value.from || typeof header.eventId !== "string" ||
+                typeof header.eventHash !== "string" || typeof header.logScopeId !== "string" ||
+                !header.logScopeId.startsWith(`device:${this.options.channelId}:`) || !Number.isSafeInteger(header.originSeq) || header.originSeq < 1) {
+              throw new Error("Invalid device event receipt probe identity.");
+            }
+            const receipt = await this.options.storage.deviceEvents().receipt(header.eventId);
+            if (receipt) {
+              if (receipt.eventHash !== header.eventHash) throw new Error("Conflicting device receipt probe.");
+              await this.repeatReceipt(receipt);
+            } else if (!await this.options.storage.getChatEvent(header.eventId)) {
+              await this.sendControl(this.packet({ type: "resend", requestId: randomUUID(), gap: {
+                originId: header.originId, logScopeId: header.logScopeId, fromSeq: header.originSeq, toSeq: header.originSeq
+              } }));
+            }
+          }
+          this.receivePending = true;
+          break;
+      }
+      // The event/fragment is on disk already. Domain failure is retried
+      // independently, so one bad chat cannot pin a mailbox cursor forever.
+      try { await this.drain(); }
+      catch (error) { throw new DeviceEventProjectionPendingError(error); }
+    });
+  }
+
+  /** A domain owner can finish asynchronously (for example ChatService saves
+   * a live terminal after its dispatch promise resolves). Unrelated ingress
+   * must remain runnable while that save is pending or failing. */
+  confirmApplied(event: ChatEventEnvelope, outcome: DeviceEventApplyOutcome = "applied"): Promise<void> {
+    return this.enqueue(async () => {
+      const receipt = await this.options.storage.deviceEvents().markApplied(event, outcome, new Date().toISOString());
+      await this.sendControl(this.packet({ type: "ack", receipt }));
+      this.receivePending = true;
+      this.scheduleFlush();
+    });
+  }
+
+  async flush(): Promise<void> {
+    this.flushRequested = true;
+    if (this.flushing) return this.flushing;
+    const run = (async () => {
+      do {
+        this.flushRequested = false;
+        await this.flushPending();
+      } while (this.flushRequested && !this.stopped);
+    })();
+    this.flushing = run;
+    try { await run; } finally { if (this.flushing === run) this.flushing = undefined; }
+  }
+
+  private async flushPending(): Promise<void> {
+    if (this.options.isPeerConnected?.() === false) return;
+    let cursor = 0;
+    while (!this.stopped) {
+      const page = await this.options.storage.deviceEvents().listPending(this.options.channelId, cursor, this.options.peerDeviceId);
+      if (!page.length) return;
+      for (const entry of page) {
+        if (this.stopped) return;
+        const previous = this.lastSent.get(entry.event.eventId);
+        const delay = previous ? Math.min(5_000 * 2 ** previous.attempts, 300_000) : 0;
+        if (!previous || performance.now() - previous.at >= delay) {
+          await this.sendEvent(entry.event);
+          this.lastSent.set(entry.event.eventId, { at: performance.now(), attempts: Math.min((previous?.attempts ?? -1) + 1, 6) });
+        }
+        cursor = entry.rowId;
+      }
+    }
+  }
+
+  private async sendEvent(event: ChatEventEnvelope, deliveryId?: string): Promise<void> {
+    if (isDeviceEventBlobReference(event.payload)) {
+      for (let index = 0; index < event.payload.fragments; index += 1) {
+        if (this.stopped) return;
+        const fragment = await this.options.storage.deviceEventBlobs().fragment(event.payload, index);
+        if (!fragment) throw new Error(`Missing retained device event fragment ${index}.`);
+        const packet = this.packet({ type: "fragment", fragment, ...(deliveryId ? { deliveryId } : {}) });
+        if (deliveryId) await this.sendControl(packet); else await this.options.send(packet);
+      }
+    }
+    if (!this.stopped) {
+      const packet = this.packet({ type: "event", event, ...(deliveryId ? { deliveryId } : {}) });
+      if (deliveryId) await this.sendControl(packet); else await this.options.send(packet);
+    }
+  }
+
+  private async drain(): Promise<void> {
+    const missingBodies = new Map<string, DeviceEventGap>();
+    const held = new Set<string>();
+    let applyError: unknown;
+    let deferred = false;
+    while (!this.stopped) {
+      const ready = await this.options.storage.deviceEvents().ready(this.options.channelId, this.options.peerDeviceId, [...held]);
+      if (!ready.length) break;
+      for (const event of ready) {
+        try {
+          let payload: unknown;
+          try { payload = await this.options.storage.deviceEventBlobs().hydrate(event.payload); }
+          catch (error) {
+            if (error instanceof DeviceEventBlobIncompleteError) {
+              // A manifest may outlive its fragments in the temporary mailbox.
+              // Request this exact event (and dependencies) from retained origin
+              // history even though its sequence number itself is not missing.
+              missingBodies.set(event.eventId, { originId: event.originId, logScopeId: event.logScopeId, fromSeq: event.originSeq, toSeq: event.originSeq });
+              held.add(event.eventId);
+              continue;
+            }
+            throw error;
+          }
+          const outcome = await this.options.apply(event, payload);
+          if (outcome === "deferred") { deferred = true; held.add(event.eventId); continue; }
+          const receipt = await this.options.storage.deviceEvents().markApplied(event, outcome, new Date().toISOString());
+          await this.sendControl(this.packet({ type: "ack", receipt }));
+        } catch (error) {
+          // A missing chat, full disk, or pending domain owner holds this
+          // stream; other conversations on the same device can still apply.
+          held.add(event.eventId);
+          applyError ??= error;
+        }
+      }
+    }
+    const gaps = [...missingBodies.values(), ...await this.options.storage.deviceEvents().gaps(this.options.channelId, this.options.peerDeviceId)];
+    this.receivePending = deferred || applyError !== undefined || gaps.length > 0;
+    const activeRequests = new Set(gaps.map((gap) => JSON.stringify(gap)));
+    for (const key of this.requestedGaps.keys()) if (!activeRequests.has(key)) this.requestedGaps.delete(key);
+    for (const gap of gaps) {
+      const key = JSON.stringify(gap);
+      const previous = this.requestedGaps.get(key);
+      if (previous !== undefined && performance.now() - previous < 5_000) continue;
+      await this.sendControl(this.packet({ type: "resend", gap, requestId: randomUUID() }));
+      this.requestedGaps.set(key, performance.now());
+    }
+    if (applyError !== undefined) throw applyError;
+  }
+
+  private scope(conversationId: string, scope: string): string {
+    return `device:${this.options.channelId}:${JSON.stringify([conversationId, scope])}`;
+  }
+
+  private packet(body: DistributeBody<DeviceEventPacket>): DeviceEventPacket {
+    return { protocol: DEVICE_EVENT_CHANNEL_PROTOCOL, from: this.options.localDeviceId, to: this.options.peerDeviceId, ...body };
+  }
+
+  private enqueue(task: () => Promise<void>): Promise<void> {
+    const next = this.inbound.then(task);
+    this.inbound = next.catch(() => undefined);
+    return next;
+  }
+
+  private scheduleFlush(): void {
+    if (this.stopped) return;
+    if (this.retry) clearTimeout(this.retry);
+    this.retry = setTimeout(() => {
+      this.retry = undefined;
+      void Promise.allSettled([this.flush(), this.mailbox?.flush(), this.receivePending ? this.enqueue(() => this.drain()) : undefined]).then((results) => {
+        for (const result of results) if (result.status === "rejected") this.report(result.reason);
+      }).finally(() => {
+        if (!this.stopped && !this.retry) {
+          this.retry = setTimeout(() => { this.retry = undefined; this.scheduleFlush(); }, 5_000);
+          this.retry.unref?.();
+        }
+      });
+    }, 0);
+    this.retry.unref?.();
+  }
+
+  private report(error: unknown): void {
+    this.options.onError(error instanceof Error ? error : new Error(String(error)));
+  }
+
+  private async sendControl(packet: DeviceEventPacket): Promise<void> {
+    const writes: Promise<void>[] = this.options.isPeerConnected?.() === false ? [] : [this.options.send(packet)];
+    if (this.mailbox) writes.push(this.mailbox.sendPacket(packet));
+    if (!writes.length) throw new Error("The enrolled peer is unreachable.");
+    // A slow HTTP mailbox cannot stall the live-room apply queue. Promise.any
+    // observes failures in both paths while resolving on the first success.
+    await Promise.any(writes);
+  }
+
+  private async repeatReceipt(receipt: DeviceEventReceipt): Promise<void> {
+    // The previous ACK can have expired in the relay. Keep this new attempt
+    // before posting it, so a failed POST plus receiver restart cannot lose it.
+    await this.options.storage.deviceEvents().retainReceiptForRedelivery(receipt.eventId);
+    try { await this.sendControl(this.packet({ type: "ack", receipt, deliveryId: randomUUID() })); }
+    catch (error) { this.report(error); } // The receipt outbox retries independently.
+  }
+}
+
+type DistributeBody<T> = T extends DeviceEventPacket ? Omit<T, "protocol" | "from" | "to"> : never;

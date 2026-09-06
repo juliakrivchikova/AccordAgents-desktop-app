@@ -12483,6 +12483,29 @@ test("a late machine result is not acknowledged when its chat is absent", async 
   }), /has not been stored/);
 });
 
+test("late machine terminals publish the saved idle state and preserve other concurrent runs", async () => {
+  for (const status of ["completed", "failed", "interrupted", "unconfirmed"] as const) {
+    for (const concurrent of [false, true]) {
+      const participant = chatParticipant("codex-cli");
+      participant.homeMachineId = "machine";
+      const conversation = chatConversation([participant], {
+        running: true, runId: "finished", activeRunIds: concurrent ? ["finished", "other"] : ["finished"],
+        activeRunOwnersByRunId: { finished: { hostId: "old-desktop" }, ...(concurrent ? { other: { hostId: "other-machine" } } : {}) }
+      });
+      const snapshots: Conversation[] = [];
+      const { service, storage } = testService({ conversation, onSnapshot: snapshot => { snapshots.push(structuredClone(snapshot)); } });
+      await service.applyMachineLateTerminal({ conversationId: conversation.id, runId: "finished", status,
+        messages: [], machineName: "Box", finishedAt: NOW, receiptId: `receipt-${status}` });
+      for (const snapshot of [snapshots.at(-1)!, storage.current]) {
+        assert.equal(snapshot.metadata.running, concurrent);
+        assert.deepEqual(snapshot.metadata.activeRunIds, concurrent ? ["other"] : undefined);
+        assert.equal(snapshot.metadata.runId, concurrent ? "other" : undefined);
+        assert.ok(!(snapshot.metadata.activeRunOwnersByRunId as any)?.finished);
+      }
+    }
+  }
+});
+
 function participantManagerActor(conversationId: string, participant: ChatParticipant): {
   conversationId: string;
   participantId: string;

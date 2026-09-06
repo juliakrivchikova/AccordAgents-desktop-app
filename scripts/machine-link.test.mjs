@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
+import { desktopEvents, hostEvents, DESKTOP_ID, MACHINE_ID, DESKTOP_ISSUER } from "./machine-test-events.mjs";
 
 const require = createRequire(import.meta.url);
 const { createReferenceRelayServer } = require("./relay-reference-server.cjs");
@@ -43,17 +44,19 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const logs = capturedLogs;
     let settingsDelayMs = 0;
     const debugLogs = { write: async (event, payload) => { logs.push({ event, payload, at: Date.now() }); } };
-    const link = new MachineLinkService(desktopSettings, debugLogs, { appVersion: "test", desktopDeviceId: "device-desktop", reconnectDelayMs: 50 });
+    const link = new MachineLinkService(desktopSettings, debugLogs, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50 });
 
     const machineStore = new Map();
     const importedSnapshots = [];
     const hostRuns = [];
+    const messagesAtStart = new Map();
     const approvalRequests = [];
     let failNextApplyContaining;
     let releaseLongTurn;
     const hostChat = {
       runMachineHostedTurn: async (request, signal, progress) => {
         hostRuns.push(request);
+        messagesAtStart.set(request.runId, machineStore.get(request.conversationId)?.messages.length);
         // A large progress frame right before a small finished result: the desktop must apply them in order.
         progress?.({ runId: request.runId, phase: "debate", message: "working " + "x".repeat(request.messageId === "msg-1" ? 2_000_000 : 10), createdAt: new Date().toISOString() });
         if (request.messageId === "msg-fail") {
@@ -94,8 +97,9 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     };
     const hostSettings = { importMachineSettingsSnapshot: async (snapshot) => { importedSnapshots.push(snapshot); } };
     const host = new MachineHostService(hostChat, hostStorage, hostSettings, debugLogs, {
+      ...hostEvents,
       pairing,
-      deviceId: "device-machine-1",
+      deviceId: MACHINE_ID,
       machineName: "test-box",
       appVersion: "test",
       detectProviders: async () => [{ kind: "codex-cli", label: "Codex", installed: true, version: "0.153.4" }],
@@ -106,7 +110,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     await host.start();
     await waitFor(() => link.status()[0]?.connected === true, 5_000);
     await waitFor(() => record.lastHello?.machineName === "test-box", 5_000);
-    assert.equal(record.deviceId, "device-machine-1");
+    assert.equal(record.deviceId, MACHINE_ID);
     await waitFor(() => importedSnapshots.length >= 1, 5_000);
 
     const participant = { id: "p1", handle: "bot", roleConfigId: "engineer", kind: "codex-cli", homeMachineId: "machine-1" };
@@ -146,7 +150,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     // The machine keeps a result until the desktop has stored it and acknowledges.
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.ok(!logs.some((entry) => entry.event === "machine-host.terminal.acked" && entry.payload?.runId === "run-1"), "no ack before the desktop stored the result");
-    result.acknowledge();
+    await result.acknowledge();
     await waitFor(() => logs.some((entry) => entry.event === "machine-host.terminal.acked" && entry.payload?.runId === "run-1"), 5_000);
 
     // Approval decisions carry the whole card answer and resolve with the machine's outcome,
@@ -173,7 +177,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     conversation.messages.push({ id: "msg-2", role: "user", content: "again", createdAt: new Date().toISOString(), status: "done" });
     const second = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[1], runId: "run-2", pendingMessageId: "pending-2" });
     assert.equal(second.status, "completed");
-    second.acknowledge?.();
+    await second.acknowledge?.();
     assert.ok(machineStore.get("conv-1").messages.some((message) => message.id === "msg-2"));
     assert.equal(importedSnapshots.length, 5, "settings travel with every turn preparation, including a failed or cancelled intent write");
 
@@ -185,6 +189,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     controller.abort();
     const third = await pendingLong;
     assert.equal(third.status, "interrupted");
+    await third.acknowledge?.();
 
     // Stop before dispatch: an already-cancelled turn never reaches the machine.
     const runsBefore = hostRuns.length;
@@ -208,7 +213,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     };
     const bigResult = await link.runTurn({ conversation: big, participant, triggerMessage: big.messages[399], runId: "run-big", pendingMessageId: "pending-big" });
     assert.equal(bigResult.status, "completed");
-    bigResult.acknowledge?.();
+    await bigResult.acknowledge?.();
     assert.equal(machineStore.get("conv-big").messages.length, 401);
     const bigDeltas = logs.filter((entry) => entry.event === "machine-host.message" && entry.payload?.type === "machine.conversation.delta" && entry.payload?.conversationId === "conv-big");
     assert.ok(bigDeltas.length >= 3, `expected batched deltas, saw ${bigDeltas.length}`);
@@ -236,7 +241,8 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     await awayTurn.catch(() => undefined);
     await waitFor(() => logs.some((entry) => entry.event === "machine-host.desktop.away"), 5_000);
     releaseLongTurn();
-    await waitFor(() => logs.some((entry) => entry.event === "machine-host.terminal.retry-later"), 5_000);
+    await waitFor(async () => (await hostEvents.eventStorage.deviceEvents().listPending(pairing.rendezvousId))
+      .some(entry => entry.event.kind === "machine.turn.finished" && entry.event.payload.runId === "run-away"), 5_000);
     lateStoreDelay = 150;
     await link.connectMachine(record);
     await waitFor(() => lateTerminals.some((event) => event.runId === "run-away" && event.status === "completed"), 5_000);
@@ -256,7 +262,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const failTurn = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-fail", pendingMessageId: "pending-fail" });
     assert.equal(failTurn.status, "failed");
     assert.match(failTurn.error, /provider exploded/);
-    failTurn.acknowledge?.();
+    await failTurn.acknowledge?.();
 
     // When a machine asks for a copy again, the desktop serves its current state.
     const loadable = new Map([["conv-1", conversation]]);
@@ -269,11 +275,11 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const staleTurn = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-stale", pendingMessageId: "pending-stale" });
     assert.equal(staleTurn.status, "failed", "a turn on a copy with an unstored delta fails instead of running on stale rows");
     assert.match(staleTurn.error, /not complete/);
-    staleTurn.acknowledge?.();
+    await staleTurn.acknowledge?.();
     await waitFor(() => machineStore.get("conv-1")?.messages.some((message) => message.id === "msg-edit"), 10_000);
     const repairedTurn = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-repaired", pendingMessageId: "pending-repaired" });
     assert.equal(repairedTurn.status, "completed");
-    repairedTurn.acknowledge?.();
+    await repairedTurn.acknowledge?.();
 
     // A hello that arrives while a turn is still being prepared must not close it:
     // the machine is asked only about turns whose request has left.
@@ -285,7 +291,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const raced = await racedTurn;
     settingsDelayMs = 0;
     assert.equal(raced.status, "completed", "a turn in preparation survives a hello");
-    raced.acknowledge?.();
+    await raced.acknowledge?.();
     // A query may still be sent once the request has left (the machine simply holds the run and stays silent);
     // what must never happen is a close from an answer to a pre-dispatch query.
     assert.ok(!logs.some((entry) => entry.event === "machine-link.turn.unknown" && entry.payload?.runId === "run-raced" && entry.payload?.dispatched === true), "no lost-run close for a turn the machine holds");
@@ -298,15 +304,15 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const biggerEchoes = [];
     const stopBiggerEcho = link.onConversationBackDelta((delta) => { if (delta.conversationId === "conv-bigger") biggerEchoes.push(delta); });
     const biggerResult = await link.runTurn({ conversation: bigger, participant, triggerMessage: bigger.messages[399], runId: "run-bigger", pendingMessageId: "pending-bigger" });
-    assert.equal(biggerResult.status, "failed", "a turn requested while the copy is incomplete fails honestly");
-    assert.match(biggerResult.error, /not complete/);
-    biggerResult.acknowledge?.();
-    await waitFor(() => logs.filter((entry) => entry.event === "machine-host.message" && entry.payload?.type === "machine.conversation.sync.done" && entry.payload?.conversationId === "conv-bigger").length >= 2, 10_000);
-    assert.ok(logs.some((entry) => entry.event === "machine-link.resync" && entry.payload?.conversationId === "conv-bigger"));
-    await waitFor(() => machineStore.get("conv-bigger")?.messages.length === 400, 5_000);
+    assert.equal(biggerResult.status, "completed", "the retained failed event is retried before the copy boundary allows execution");
+    assert.equal(messagesAtStart.get("run-bigger"), 400, "the provider cannot start against a partial copy");
+    assert.equal(hostRuns.filter((run) => run.runId === "run-bigger").length, 1);
+    await biggerResult.acknowledge?.();
+    assert.ok(logs.some((entry) => entry.event === "machine-host.sync.batch-failed" && entry.payload?.conversationId === "conv-bigger"));
+    assert.equal(machineStore.get("conv-bigger")?.messages.length, 401);
     const retried = await link.runTurn({ conversation: bigger, participant, triggerMessage: bigger.messages[399], runId: "run-bigger-2", pendingMessageId: "pending-bigger-2" });
     assert.equal(retried.status, "completed");
-    retried.acknowledge?.();
+    await retried.acknowledge?.();
     host.noteConversationSnapshot(machineStore.get("conv-bigger"));
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.deepEqual(biggerEchoes.flatMap((delta) => delta.messages.map((message) => message.id)).filter((id) => id.startsWith("bigger-")), []);
@@ -338,7 +344,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     link.close(); // the desktop goes away mid-turn
     void survivingTurn.catch(() => undefined);
     record.pendingRuns = [...(record.pendingRuns ?? []), { runId: "run-forgotten", conversationId: "conv-1" }];
-    const link2 = new MachineLinkService(desktopSettings, debugLogs, { appVersion: "test", desktopDeviceId: "device-desktop", reconnectDelayMs: 50 });
+    const link2 = new MachineLinkService(desktopSettings, debugLogs, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50 });
     const lateAfterRestart = [];
     link2.onLateTerminal(async (event) => { lateAfterRestart.push(event); });
     await link2.start();
@@ -357,7 +363,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     await waitFor(() => typeof releaseLongTurn === "function", 5_000);
     host.close();
     const host2 = new MachineHostService(hostChat, hostStorage, hostSettings, debugLogs, {
-      pairing, deviceId: "device-machine-1", machineName: "test-box", appVersion: "test", detectProviders: async () => [], reconnectDelayMs: 50,
+      ...hostEvents, pairing, deviceId: MACHINE_ID, machineName: "test-box", appVersion: "test", detectProviders: async () => [], reconnectDelayMs: 50,
       // An outbox that cannot be written: results stay in memory and the desktop is told.
       outboxPath: "/dev/null/machine-outbox.json"
     });
@@ -377,7 +383,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     unknownController.abort();
     const unknown = await unknownTurn;
     assert.equal(unknown.status, "unconfirmed");
-    unknown.acknowledge?.();
+    await unknown.acknowledge?.();
     await waitFor(() => (record.pendingCancels ?? []).length === 0, 5_000);
     // The failed outbox write is visible on the desktop as a machine warning.
     await waitFor(() => /outbox/.test(link.status()[0]?.warning ?? ""), 5_000);
@@ -414,10 +420,14 @@ test("outgoing commands preserve order and Stop fences dispatch even when a writ
     listMachines: async () => [record], getMachinePairing: async () => pairing,
     saveMachine: async (next) => { Object.assign(record, next); onSave(next); return [record]; },
     exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
-  }, { write: async () => undefined }, { appVersion: "test", desktopDeviceId: "desktop-fence", createClient: () => client });
+  }, { write: async () => undefined }, { ...desktopEvents, appVersion: "test", desktopDeviceId: "desktop-fence", createClient: () => client });
   await link.start();
   const connection = link.connections.get(record.id);
   connection.machineDeviceId = "machine-device";
+  // This probe isolates the native dispatch fence after an already completed
+  // copy; the real SQLite event channel is exercised by the link probe above.
+  connection.eventChannel = { publish: async () => undefined, flush: async () => undefined, close() {} };
+  connection.settingsSynced = true;
   try {
     let releaseWrite;
     onWrite = async () => { await new Promise((resolve) => { releaseWrite = resolve; }); };
@@ -484,7 +494,7 @@ test("a damaged outbox that cannot be set aside is never overwritten", async () 
       { getConversation: async () => undefined },
       { importMachineSettingsSnapshot: async () => undefined },
       { write: async (event, payload) => { logs.push({ event, payload }); } },
-      { pairing: machinePairing("ws://127.0.0.1:1/v1/relay"), deviceId: "device-x", appVersion: "test", outboxPath: file, createClient: () => stubClient }
+      { ...hostEvents, pairing: machinePairing("ws://127.0.0.1:1/v1/relay"), deviceId: "device-x", appVersion: "test", outboxPath: file, createClient: () => stubClient }
     );
     assert.ok(logs.some((entry) => entry.event === "machine-host.outbox.corrupt-preserve-failed"));
     // A later write must refuse rather than destroy the damaged bytes.
@@ -511,7 +521,7 @@ test("machine link fails fast when the machine is not connected", async () => {
       removeMachine: async () => [],
       getMachinePairing: async () => pairing,
       exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
-    }, { write: async () => undefined }, { appVersion: "test", desktopDeviceId: "device-desktop", reconnectDelayMs: 50 });
+    }, { write: async () => undefined }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50 });
     await link.start();
     const result = await link.runTurn({
       conversation: { id: "c", kind: "chat", title: "", createdAt: "", updatedAt: "", messages: [], metadata: {}, findings: [] },
@@ -532,7 +542,7 @@ function machinePairing(relayUrl) {
   return {
     version: 1,
     purpose: "machine-host",
-    issuer: { originId: "device-desktop", keyId: "key-desktop", publicKeyDerBase64: "AA==" },
+    issuer: DESKTOP_ISSUER,
     rendezvousId: "rv-machine-test-" + now,
     stableRoutingId: "route-machine-test",
     relaySealKeyBase64: Buffer.from(new Uint8Array(32).map((_, index) => index + 1)).toString("base64url"),
@@ -544,20 +554,10 @@ function machinePairing(relayUrl) {
   };
 }
 
-function waitFor(predicate, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const started = Date.now();
-    const tick = () => {
-      if (predicate()) {
-        resolve();
-        return;
-      }
-      if (Date.now() - started > timeoutMs) {
-        reject(new Error("waitFor timed out"));
-        return;
-      }
-      setTimeout(tick, 20);
-    };
-    tick();
-  });
+async function waitFor(predicate, timeoutMs) {
+  const started = Date.now();
+  while (!await predicate()) {
+    if (Date.now() - started > timeoutMs) throw new Error("waitFor timed out");
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
 }

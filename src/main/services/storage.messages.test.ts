@@ -419,8 +419,9 @@ test("init records the supported storage schema version for a legacy database", 
     assert.equal(storage.initialized, true);
     assert.match(runSqlStatements[0], /create table if not exists schema_meta/);
     assert.match(queryTextSql[0], new RegExp(STORAGE_SCHEMA_VERSION_META_KEY));
-    // Two columns are ensured: body_json, then save_token.
-    assert.deepEqual(calls, ["prune", "ensureColumn", "ensureColumn", "backfill", "normalize", "clear"]);
+    // The conversation columns and the durable receipt-delivery column upgrade
+    // before reads and recovery run against the legacy database.
+    assert.deepEqual(calls, ["prune", "ensureColumn", "ensureColumn", "ensureColumn", "backfill", "normalize", "clear"]);
     assert.ok(runSqlStatements.some((sql) =>
       sql.includes(STORAGE_SCHEMA_VERSION_META_KEY) &&
       sql.includes(String(SUPPORTED_STORAGE_SCHEMA_VERSION))

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
+import { desktopEvents, hostEvents, DESKTOP_ID, MACHINE_ID, DESKTOP_ISSUER } from "./machine-test-events.mjs";
 
 const require = createRequire(import.meta.url);
 const SEAL_KEY = Buffer.from(new Uint8Array(32).map((_, index) => index + 1)).toString("base64url");
@@ -10,7 +11,7 @@ function pairing() {
   return {
     version: 1,
     purpose: "machine-host",
-    issuer: { originId: "device-desktop", keyId: "key-desktop", publicKeyDerBase64: "AA==" },
+    issuer: DESKTOP_ISSUER,
     rendezvousId: "rv-host-test-" + now,
     stableRoutingId: "route-host-test",
     relaySealKeyBase64: SEAL_KEY,
@@ -38,7 +39,7 @@ function stubClient() {
       }
     },
     async connect() {
-      this.emit("peer", { type: "ready", deviceId: "device-machine-1", peerConnected: true, peers: [{ role: "desktop", deviceId: "device-desktop" }] });
+      this.emit("peer", { type: "ready", deviceId: MACHINE_ID, peerConnected: true, peers: [{ role: "desktop", deviceId: DESKTOP_ID }] });
     },
     close() {},
     async sendCiphertext(request) {
@@ -57,7 +58,10 @@ async function sentBodies(client) {
   const { openMobileRelayPayload } = await import("../dist/main/main/services/mobileRelaySealing.js");
   const bodies = [];
   for (const request of client.sent) {
-    bodies.push((await openMobileRelayPayload(request.ciphertext, SEAL_KEY)).body);
+    const payload = await openMobileRelayPayload(request.ciphertext, SEAL_KEY);
+    if (payload.protocol === "accord-device-events-v1") {
+      if (payload.type === "event") bodies.push(await hostEvents.eventStorage.deviceEventBlobs().hydrate(payload.event.payload));
+    } else bodies.push(payload.body);
   }
   return bodies;
 }
@@ -82,12 +86,12 @@ test("a turn waiting for a chat copy counts as held, and a stop removes it befor
     { getConversation: async (id) => store.get(id) },
     { importMachineSettingsSnapshot: async () => undefined },
     { write: async (event, payload) => { logs.push({ event, payload }); } },
-    { pairing: pairing(), deviceId: "device-machine-1", appVersion: "test", createClient: () => client }
+    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
   );
   await host.start();
   await settle();
   const inbound = async (body) => { client.emit("message", { ciphertext: await envelope(body) }); await settle(); };
-  await inbound({ type: "machine.hello.ack", desktopDeviceId: "device-desktop", appVersion: "test" });
+  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test" });
   const shell = { id: "conv-1", kind: "chat", title: "t", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] };
   await inbound({ type: "machine.conversation.sync", conversation: shell });
   // The copy is still arriving: the turn waits instead of running or failing.
@@ -124,16 +128,16 @@ test("the machine's hello lists turns waiting for a copy as active", async () =>
     { getConversation: async (id) => store.get(id) },
     { importMachineSettingsSnapshot: async () => undefined },
     { write: async () => undefined },
-    { pairing: pairing(), deviceId: "device-machine-1", appVersion: "test", createClient: () => client }
+    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
   );
   await host.start();
   await settle();
   const inbound = async (body) => { client.emit("message", { ciphertext: await envelope(body) }); await settle(); };
-  await inbound({ type: "machine.hello.ack", desktopDeviceId: "device-desktop", appVersion: "test" });
+  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test" });
   await inbound({ type: "machine.conversation.sync", conversation: { id: "conv-2", kind: "chat", title: "t", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] } });
   await inbound({ type: "machine.turn.request", conversationId: "conv-2", participantId: "p1", participant: { id: "p1", handle: "bot" }, messageId: "m1", runId: "run-listed", pendingMessageId: "pending-listed", requestedAt: new Date().toISOString() });
   // A fresh link announces itself again; the hello must list the waiting turn.
-  client.emit("peer", { type: "ready", deviceId: "device-machine-1", peerConnected: true, peers: [{ role: "desktop", deviceId: "device-desktop" }] });
+  client.emit("peer", { type: "ready", deviceId: MACHINE_ID, peerConnected: true, peers: [{ role: "desktop", deviceId: DESKTOP_ID }] });
   await settle();
   const bodies = await sentBodies(client);
   const hello = bodies.filter((body) => body.type === "machine.hello").pop();
@@ -160,7 +164,48 @@ test("a desktop sweep never overrides an outcome the machine produced", async ()
   assert.equal(mergeReplicatedMessages([done], [edited])[0].content, "edited on the desktop");
 });
 
-test("a ChatService native resume is listed, stopped and delivered through the host's result outbox", async () => {
+test("restarting between acknowledged copy batches preserves the barrier and never echoes earlier rows", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const enrollment = pairing();
+  const store = new Map();
+  const runs = [];
+  let host;
+  const createHost = () => new MachineHostService({
+    runMachineHostedTurn: async (request) => { runs.push(store.get(request.conversationId).messages.map(m => m.id)); return { messages: [], warnings: [] }; },
+    cancelRun: () => true,
+    respondToAppToolApproval: async () => undefined,
+    applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) { store.set(id, next); host.noteConversationSnapshot(next); } }
+  }, { getConversation: async id => store.get(id) }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
+  { ...hostEvents, pairing: enrollment, deviceId: MACHINE_ID, appVersion: "test", createClient: stubClient });
+  const send = async body => {
+    const event = (await desktopEvents.eventLog.appendLocalEvent({ conversationId: "copy-restart", kind: body.type, payload: body,
+      logScopeId: `device:${enrollment.rendezvousId}:${JSON.stringify(["copy-restart", "actions"])}` })).event;
+    await host.eventChannel.receive({ protocol: "accord-device-events-v1", from: DESKTOP_ID, to: MACHINE_ID, type: "event", event });
+    assert.ok(await hostEvents.eventStorage.deviceEvents().receipt(event.eventId));
+  };
+  const shell = { id: "copy-restart", kind: "chat", title: "restart", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] };
+  const row = id => ({ id, role: "user", content: id, createdAt: shell.createdAt });
+  try {
+    host = createHost();
+    await host.start();
+    await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, machineId: "copy-home", appVersion: "test" });
+    await send({ type: "machine.conversation.sync", conversation: shell });
+    await send({ type: "machine.conversation.delta", conversationId: shell.id, messages: [row("first")], updatedAt: shell.updatedAt });
+    host.close();
+    host = createHost();
+    await host.start();
+    assert.equal(host.syncing.has(shell.id), true, "an acknowledged shell remains incomplete after the process restarts");
+    await send({ type: "machine.conversation.delta", conversationId: shell.id, messages: [row("second")], updatedAt: shell.updatedAt });
+    await host.handleBody({ type: "machine.turn.request", conversationId: shell.id, participantId: "p1", participant: { id: "p1", handle: "bot" }, messageId: "first", runId: "copy-resumed-run", pendingMessageId: "pending", requestedAt: shell.createdAt });
+    assert.deepEqual(runs, []);
+    await send({ type: "machine.conversation.sync.done", conversationId: shell.id });
+    await host.outbound;
+    assert.deepEqual(runs, [["first", "second"]]);
+    assert.equal((await hostEvents.eventStorage.deviceEvents().listPending(enrollment.rendezvousId)).filter(entry => entry.event.kind === "machine.conversation.backdelta").length, 0, "neither pre-restart nor post-restart incoming rows become backdelta events");
+  } finally { host?.close(); }
+});
+
+test("a ChatService native resume is listed, stopped and delivered through the host's result outbox", async (t) => {
   const { ChatService } = await import("../dist/main/main/services/chat.js");
   const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
   const client = stubClient();
@@ -172,11 +217,12 @@ test("a ChatService native resume is listed, stopped and delivered through the h
     appSendMessageCountsByRun: new Map(), appSendMessageImageBytesByRun: new Map(), debugLogs: logs,
     settledParticipantRunResult: async () => ({ messages: [{ id: "native-bubble", role: "participant", participantId: "p1", status: "error", content: "partial", createdAt: new Date().toISOString(), metadata: { runId: "native-resume", terminalReason: "user-stopped" } }], warnings: [] })
   });
-  const host = new MachineHostService(chat, {}, {}, logs, { pairing: pairing(), deviceId: "device-machine-1", appVersion: "test", createClient: () => client });
+  const host = new MachineHostService(chat, {}, {}, logs, { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client });
+  t.after(async () => { host.close(); await host.inbound; await host.outbound; await host.eventChannel.flush(); });
   const controller = new AbortController();
   chat.registerTargetRun("native-resume", controller, { conversationId: "native-chat", participantId: "p1", participantHandle: "bot" });
   await host.start();
-  client.emit("peer", { type: "ready", peers: [{ role: "desktop", deviceId: "device-desktop" }] });
+  client.emit("peer", { type: "ready", peers: [{ role: "desktop", deviceId: DESKTOP_ID }] });
   await settle();
   let bodies = await sentBodies(client);
   assert.ok(bodies.find((body) => body.type === "machine.hello").activeRunIds.includes("native-resume"));
@@ -188,7 +234,13 @@ test("a ChatService native resume is listed, stopped and delivered through the h
   assert.equal(bodies.filter((body) => body.type === "machine.turn.unknown").length, 0);
   assert.equal(bodies.filter((body) => body.type === "machine.turn.finished").length, 0, "abort is not completion");
   chat.unregisterTargetRun("native-resume", controller);
-  await settle();
+  const finishDeadline = Date.now() + 5000;
+  while (!host.pendingTerminals.has("native-resume")) {
+    assert.ok(Date.now() < finishDeadline, "the native completion must be retained");
+    await settle(20);
+  }
+  await host.outbound;
+  await host.eventChannel.flush();
   bodies = await sentBodies(client);
   const terminal = bodies.find((body) => body.type === "machine.turn.finished");
   assert.equal(terminal.status, "interrupted");

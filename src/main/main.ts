@@ -2393,15 +2393,23 @@ function registerIpc(): void {
       throw new Error("A machine needs a name.");
     }
     const settings = await settingsService.getPublicSettings();
-    // A machine needs only the relay room; the phone's mailbox and static
-    // origin are not part of a machine enrollment.
+    // Machines use the same live room and sealed durable buffer as the phone.
+    // The static PWA origin and the old command mailbox are not needed here.
     const pairing = await mobilePairingService.createPairing({
       purpose: "machine-host",
       ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES,
-      relayUrl: settings.mobileControl.defaults.relayUrl
+      relayUrl: settings.mobileControl.defaults.relayUrl,
+      outboxUrl: settings.mobileControl.defaults.outboxUrl
     });
     if (!pairing.package.relayUrl) {
       throw new Error("Machines need a relay URL; set the mobile control relay in Settings first.");
+    }
+    if (!pairing.package.outboxUrl) {
+      throw new Error("Machines need a sealed mailbox URL; set the mobile control mailbox in Settings first.");
+    }
+    // Reserve the sealed mailbox before exposing its enrollment credentials.
+    if (!await ensureMailboxRegisteredForPairing(pairing.package)) {
+      throw new Error("The machine's relay mailbox could not be registered. Try adding the machine again.");
     }
     const record = {
       id: randomUUID(),
@@ -2772,17 +2780,23 @@ void app.whenReady().then(async () => {
     const desktopIdentity = await chatEventLogService.getOrCreateDeviceIdentity();
     machineLinkService = new MachineLinkService(settingsService, debugLogService, {
       appVersion: app.getVersion(),
-      desktopDeviceId: desktopIdentity.originId
+      desktopDeviceId: desktopIdentity.originId,
+      eventStorage: storageService,
+      eventLog: chatEventLogService
     });
     machineLinkService.onStatus(() => {
       void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
     });
     machineLinkService.onConversationBackDelta((delta) => {
       // The machine keeps the result until the desktop has stored it.
-      void chatService.applyMachineBackDelta({ conversationId: delta.conversationId, messages: delta.messages })
-        .then(() => delta.acknowledge?.())
+      return chatService.applyMachineBackDelta({ conversationId: delta.conversationId, messages: delta.messages })
+        .then((conversation) => {
+          if (!conversation) throw new Error("The desktop chat is unavailable; machine messages remain unacknowledged.");
+          delta.acknowledge?.();
+        })
         .catch((error) => {
           void debugLogService.write("machine-link.backdelta.apply-error", { message: error instanceof Error ? error.message : String(error) });
+          throw error;
         });
     });
     machineLinkService.onApproval((event) =>

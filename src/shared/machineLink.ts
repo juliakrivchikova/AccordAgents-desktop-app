@@ -42,6 +42,8 @@ export interface MachineHelloBody {
   appVersion: string;
   platform: string;
   providers: Array<{ kind: string; installed: boolean; version?: string }>;
+  /** Bound to deviceId; exchanged inside the enrolled sealed room. */
+  publicKeyDerBase64?: string;
   /** Runs still executing on the machine (reconnect reconciliation). */
   activeRunIds?: string[];
   /** Finished runs whose result the desktop has not acknowledged yet. */
@@ -269,6 +271,15 @@ export type MachineLinkMessage =
   | MachineChoiceAnswerBody;
 
 export type MachineLinkMessageType = MachineLinkMessage["type"];
+
+export function isMachineReplicationMessage(body: MachineLinkMessage): boolean {
+  return body.type === "machine.conversation.sync" || body.type === "machine.conversation.delta" ||
+    body.type === "machine.conversation.sync.done" || body.type === "machine.conversation.backdelta";
+}
+
+export function isMachineDurableMessage(body: MachineLinkMessage): boolean {
+  return isMachineReplicationMessage(body) || body.type === "machine.turn.finished" || body.type === "machine.turn.finished.ack";
+}
 
 const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.hello",

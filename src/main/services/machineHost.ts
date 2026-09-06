@@ -31,12 +31,19 @@ import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySea
 import { RelayTunnelClient } from "./relayTunnelClient";
 import type { SettingsService } from "./settings";
 import type { StorageService } from "./storage";
+import type { ChatEventLogService } from "./chatEventLog";
+import { DeviceEventChannel } from "./deviceEventChannel";
+import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
+import { isMachineDurableMessage } from "../../shared/machineLink";
 
 export interface MachineHostOptions {
   pairing: MobilePairingPackage;
   deviceId: string;
   machineName?: string;
   appVersion: string;
+  eventStorage: StorageService;
+  eventLog: ChatEventLogService;
+  publicKeyDerBase64: string;
   detectProviders?: () => Promise<AgentHealth[]>;
   /** Runs after every settings snapshot import (runtime knobs such as the
    *  CLI run timeout are re-read from the imported settings). */
@@ -62,6 +69,8 @@ const OUTBOX_RETRY_MS = 30_000;
 const MAX_RESYNC_ATTEMPTS = 3;
 
 export class MachineHostService {
+  private readonly failedDeltaWasSyncing = new Map<string, boolean>();
+  private readonly eventChannel: DeviceEventChannel;
   private readonly client: RelayTunnelClient;
   private readonly now: () => Date;
   private readonly seenMessageIds = new Set<string>();
@@ -142,6 +151,29 @@ export class MachineHostService {
       streamId: `${pairing.stableRoutingId}:machine`,
       reconnectDelayMs: options.reconnectDelayMs
     });
+    this.eventChannel = new DeviceEventChannel({
+      storage: options.eventStorage, eventLog: options.eventLog,
+      pairing,
+      isPeerConnected: () => Boolean(this.desktopDeviceId),
+      channelId: pairing.rendezvousId, localDeviceId: options.deviceId,
+      peerDeviceId: pairing.issuer.originId, peerPublicKeyDerBase64: pairing.issuer.publicKeyDerBase64,
+      send: async (packet) => {
+        const ciphertext = await sealMobileRelayPayload(packet, pairing.relaySealKeyBase64);
+        await this.client.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: pairing.issuer.originId });
+      },
+      apply: async (event, body) => {
+        const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
+        if (!isMachineLinkEnvelope(envelope) || !isMachineDurableMessage(envelope.body) ||
+            envelope.body.type === "machine.conversation.backdelta" || envelope.body.type === "machine.turn.finished") {
+          throw new Error("Unexpected machine replication event.");
+        }
+        const conversationId = envelope.body.type === "machine.conversation.sync" ? envelope.body.conversation.id : "conversationId" in envelope.body ? envelope.body.conversationId : "";
+        if (event.kind !== envelope.body.type || event.conversationId !== conversationId) throw new Error("Machine replication event has the wrong chat identity.");
+        await this.handleBody(envelope.body, true);
+        return "applied";
+      },
+      onError: (error) => { void this.debugLogs.write("machine-host.events.error", { message: error.message }); }
+    });
     this.client.on("peer", (event) => {
       if (event.type === "ready") {
         // Own link (re)established: greet the desktop again even if it is
@@ -179,11 +211,22 @@ export class MachineHostService {
 
   async start(): Promise<void> {
     this.closed = false;
+    for (const state of await this.options.eventStorage.deviceEvents().replicaState(this.options.pairing.rendezvousId)) {
+      this.knownMessages.set(state.conversationId, state.messages);
+      if (state.syncing) this.syncing.add(state.conversationId);
+    }
+    const homeMachineId = await this.options.eventStorage.deviceEvents().hostMachineId(this.options.pairing.rendezvousId);
+    if (homeMachineId) {
+      this.homeMachineId = homeMachineId;
+      this.options.onDesktopMachineId?.(homeMachineId);
+      this.eventChannel.start();
+    }
     await this.client.connect();
   }
 
   close(): void {
     this.closed = true;
+    this.eventChannel.close();
     this.unsubscribeRunSettled?.();
     if (this.outboxRetryTimer) {
       clearTimeout(this.outboxRetryTimer);
@@ -311,6 +354,7 @@ export class MachineHostService {
       appVersion: this.options.appVersion,
       platform: `${process.platform}-${process.arch}`,
       providers,
+      publicKeyDerBase64: this.options.publicKeyDerBase64,
       activeRunIds: [...new Set([...this.activeTurns.keys(), ...this.queuedRunIds(), ...this.settlingRuns.keys(), ...(this.chat.activeParticipantRuns?.() ?? []).map((run) => run.runId)])],
       pendingTerminalRunIds: [...this.pendingTerminals.keys()],
       instanceId: this.instanceId,
@@ -322,6 +366,10 @@ export class MachineHostService {
 
   private async handleMessage(ciphertext: string): Promise<void> {
     const payload = await openMobileRelayPayload<unknown>(ciphertext, this.options.pairing.relaySealKeyBase64);
+    if (isDeviceEventPacket(payload)) {
+      await this.eventChannel.receive(payload);
+      return;
+    }
     if (!isMachineLinkEnvelope(payload) || this.seenMessageIds.has(payload.messageId)) {
       return;
     }
@@ -332,7 +380,10 @@ export class MachineHostService {
         this.seenMessageIds.delete(first);
       }
     }
-    const body = payload.body;
+    await this.handleBody(payload.body);
+  }
+
+  private async handleBody(body: MachineLinkMessage, durable = false): Promise<void> {
     void this.debugLogs.write("machine-host.message", {
       type: body.type,
       ...("conversationId" in body ? { conversationId: body.conversationId } : {})
@@ -341,9 +392,11 @@ export class MachineHostService {
       case "machine.hello.ack":
         this.desktopDeviceId = body.desktopDeviceId || this.desktopDeviceId;
         if (body.machineId) {
+          await this.options.eventStorage.deviceEvents().saveHostMachineId(this.options.pairing.rendezvousId, body.machineId);
           this.homeMachineId = body.machineId;
           this.options.onDesktopMachineId?.(body.machineId);
         }
+        this.eventChannel.start();
         return;
       case "machine.hello.request":
         // A (re)started desktop asks to be greeted: the same reconciliation
@@ -360,7 +413,8 @@ export class MachineHostService {
         // (the retry budget is not).
         this.failedSync.delete(body.conversation.id);
         this.syncing.add(body.conversation.id);
-        await this.applyConversationSync(body.conversation);
+        if (durable) await this.options.eventStorage.deviceEvents().saveReplicaState(this.options.pairing.rendezvousId, body.conversation.id, { syncing: true });
+        await this.applyConversationSync(body.conversation, durable);
         return;
       case "machine.conversation.sync.done": {
         if (this.failedSync.has(body.conversationId)) {
@@ -371,6 +425,7 @@ export class MachineHostService {
           await this.requestResync(body.conversationId);
           return;
         }
+        if (durable) await this.options.eventStorage.deviceEvents().saveReplicaState(this.options.pairing.rendezvousId, body.conversationId, { syncing: false });
         this.resyncAttempts.delete(body.conversationId);
         this.syncing.delete(body.conversationId);
         for (const waiting of this.turnsAwaitingCopy.get(body.conversationId) ?? []) {
@@ -386,7 +441,7 @@ export class MachineHostService {
         return;
       }
       case "machine.conversation.delta":
-        await this.applyConversationDelta(body);
+        await this.applyConversationDelta(body, durable);
         return;
       case "machine.turn.request":
         if (this.failedSync.has(body.conversationId)) {
@@ -436,7 +491,10 @@ export class MachineHostService {
         if (stored && stored.conversationId === body.conversationId &&
             stored.receiptId === body.receiptId && stored.finishedAt === body.finishedAt) {
           this.pendingTerminals.delete(body.runId);
-          this.persistOutbox();
+          if (!this.persistOutbox()) {
+            this.pendingTerminals.set(body.runId, stored);
+            throw new Error("The machine could not persist the terminal acknowledgement.");
+          }
           void this.debugLogs.write("machine-host.terminal.acked", { runId: body.runId, at: this.now().toISOString() });
         }
         return;
@@ -536,7 +594,13 @@ export class MachineHostService {
     return previous;
   }
 
-  private async applyConversationSync(incoming: Conversation): Promise<void> {
+  private async saveIncomingInventory(conversationId: string, messages: ChatMessage[], removedIds?: string[]): Promise<void> {
+    await this.options.eventStorage.deviceEvents().saveReplicaState(this.options.pairing.rendezvousId, conversationId, {
+      stamps: new Map(messages.map((message) => [message.id, messageStamp(message)])), removedIds
+    });
+  }
+
+  private async applyConversationSync(incoming: Conversation, durable = false): Promise<void> {
     // The desktop's copy is registered before it is applied, so the snapshot
     // the apply emits never echoes it back as a back delta. The inventory of
     // what the desktop holds is kept across syncs: a fresh copy after a
@@ -545,10 +609,12 @@ export class MachineHostService {
     const previousStamps = this.rememberDesktopMessages(incoming.id, incoming.messages);
     try {
       await this.applyConversationShell(incoming);
+      if (durable) await this.saveIncomingInventory(incoming.id, incoming.messages);
     } catch (error) {
       this.restoreInventory(incoming.id, previousStamps);
       this.failedSync.add(incoming.id);
       void this.debugLogs.write("machine-host.sync.batch-failed", { conversationId: incoming.id, stage: "shell", message: errorMessage(error) });
+      if (durable) throw error;
       return;
     }
     void this.debugLogs.write("machine-host.conversation.synced", { conversationId: incoming.id, messages: incoming.messages.length });
@@ -565,7 +631,7 @@ export class MachineHostService {
     });
   }
 
-  private async applyConversationDelta(delta: MachineConversationDeltaBody): Promise<void> {
+  private async applyConversationDelta(delta: MachineConversationDeltaBody, durable = false): Promise<void> {
     const previousStamps = this.rememberDesktopMessages(delta.conversationId, delta.messages, delta.removedMessageIds ?? []);
     let missing = false;
     try {
@@ -578,6 +644,7 @@ export class MachineHostService {
         const metadata = delta.metadata ? this.mergeMetadata(existing, delta.metadata) : existing.metadata;
         return { ...existing, messages, metadata, updatedAt: delta.updatedAt };
       });
+      if (durable && !missing) await this.saveIncomingInventory(delta.conversationId, delta.messages, delta.removedMessageIds);
     } catch (error) {
       // The inventory must describe what is stored, not what was attempted:
       // the batch's stamps are reverted, and a first copy in progress is
@@ -589,6 +656,11 @@ export class MachineHostService {
       // a first copy there is no sync.done to trigger the request, so it is
       // made here (same bounded budget).
       this.failedSync.add(delta.conversationId);
+      if (durable) {
+        if (!this.failedDeltaWasSyncing.has(delta.conversationId)) this.failedDeltaWasSyncing.set(delta.conversationId, this.syncing.has(delta.conversationId));
+        this.syncing.add(delta.conversationId);
+        throw error;
+      }
       if (!this.syncing.has(delta.conversationId)) {
         this.syncing.add(delta.conversationId);
         await this.requestResync(delta.conversationId);
@@ -597,6 +669,12 @@ export class MachineHostService {
     }
     if (missing) {
       void this.debugLogs.write("machine-host.conversation.delta-without-copy", { conversationId: delta.conversationId });
+      if (durable) throw new Error("The replicated chat shell is missing.");
+    }
+    if (durable) {
+      this.failedSync.delete(delta.conversationId);
+      if (this.failedDeltaWasSyncing.get(delta.conversationId) === false) this.syncing.delete(delta.conversationId);
+      this.failedDeltaWasSyncing.delete(delta.conversationId);
     }
   }
 
@@ -962,6 +1040,12 @@ export class MachineHostService {
 
   private async sendNow(body: MachineLinkMessage): Promise<void> {
     if (this.closed) {
+      return;
+    }
+    if (isMachineDurableMessage(body)) {
+      const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : "conversationId" in body ? body.conversationId : "";
+      await this.eventChannel.publish({ conversationId, kind: body.type, payload: body,
+        ...(body.type === "machine.turn.finished" ? { eventId: `machine-terminal:${body.receiptId ?? `${body.runId}:${body.finishedAt}`}`, scope: `terminal:${body.runId}` } : {}) });
       return;
     }
     const to = this.desktopDeviceId;

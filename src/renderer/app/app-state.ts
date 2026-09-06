@@ -133,6 +133,7 @@ export interface AppState {
   openConversationRequestRef: React.MutableRefObject<number>;
   chatMessageFocusNonceRef: React.MutableRefObject<number>;
   activityRefreshRequestRef: React.MutableRefObject<number>;
+  summaryRefreshRequestRef: React.MutableRefObject<number>;
   agentRefreshRequestRef: React.MutableRefObject<number>;
   activityRevisionByConversationRef: React.MutableRefObject<Record<string, number>>;
   activityItemPreferencesRef: React.MutableRefObject<ActivityItemPreferences>;
@@ -197,6 +198,7 @@ export function useAppState(): AppState {
   const openConversationRequestRef = useRef(0);
   const chatMessageFocusNonceRef = useRef(0);
   const activityRefreshRequestRef = useRef(0);
+  const summaryRefreshRequestRef = useRef(0);
   const agentRefreshRequestRef = useRef(0);
   const activityRevisionByConversationRef = useRef<Record<string, number>>({});
   const activityItemPreferencesRef = useRef<ActivityItemPreferences>(initialActivityItemPreferences);
@@ -242,7 +244,7 @@ export function useAppState(): AppState {
     chatMessageDraft, setChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
     setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,
-    activityRefreshRequestRef, agentRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
+    activityRefreshRequestRef, summaryRefreshRequestRef, agentRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
     lastViewedAtRef, startingChatRef, railViewRef
   };
 }

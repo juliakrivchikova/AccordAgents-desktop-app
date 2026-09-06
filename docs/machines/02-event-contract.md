@@ -99,6 +99,36 @@ States of one event as seen by its emitter, all visible on the sending surface:
 
 The **outbox** persists every event before the first send (Electron: SQLite; PWA: IndexedDB; headless machine: SQLite) and keeps it until every machine in the chat's roster has acknowledged it, independent of relay retention (72 h). Roster machines = home machines of the chat's participants plus machines that opened the chat. Outbox pressure (a roster machine absent for long) is visible in Machines settings.
 
+### Implemented delivery foundation, 2026-09-06
+
+`DeviceEventChannel` now carries machine conversation copies, deltas, copy
+boundaries, back deltas, terminal outcomes and terminal acknowledgements. Their
+signed envelopes and recipient outbox rows commit together in local SQLite with
+the accepted clock floor before either live-room or sealed-mailbox transmission.
+An event keeps its identity and ordering on retry; the receiver stores ingress
+before applying it and acknowledges only after its domain owner confirms saving.
+Separate conversation streams cannot apply across a gap, but a failing chat does
+not hold other chats. A deferred live terminal is acknowledged after ChatService
+saves it; a late terminal saves the messages and final run state together.
+
+Bodies over 32 KiB use immutable SHA-256 references and 384 KiB raw fragments in
+the same local database. Every fragment must be durable and the assembled body
+must match its hash before apply. Missing ranges or expired fragments request the
+original retained events. The relay's arrival cursor advances after durable
+ingress, independently of a failed domain projection; failed ingress holds it.
+Receiver receipts also form a local outbox, so failed ACK delivery survives
+restart. Small header probes repair expired events or ACKs even when peers never
+overlap online; normal delivered bodies are not uploaded again on every poll.
+Mailbox acceptance, peer acknowledgement and application remain distinct.
+
+This is not the complete event-contract cutover: native dispatch/control,
+settings, approvals and progress still require conversion; PWA IndexedDB outbox,
+canonical chat-wide roster fan-out, pure conflict projections, hash-bound
+artifact signatures, pressure UI and history/blob garbage collection remain.
+The retained history and blob fragments currently stay in local SQLite after
+ACK for origin repair. Replication inventory and partial-copy barriers also
+survive machine restart. No relay deployment is needed for these changes.
+
 ## 5. Channel and repair
 
 - The relay room is extended from `desktop | phone` to addressed enrolled devices (any number), with per-connection generations and fan-out to all peers; the mailbox stays the delivery buffer with cursor reads; the relay assigns no order and applies no rules (the `arrivalSeq` is a cursor, never an ordering key).

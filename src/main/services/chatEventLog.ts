@@ -8,6 +8,7 @@ import {
   verify
 } from "node:crypto";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import type { DeviceEventRecipient } from "../../shared/deviceEventDelivery";
 import { HybridLogicalClock } from "../../shared/hlc";
 import { stableJson } from "../../shared/stableJson";
 import type {
@@ -21,6 +22,8 @@ export interface CreateLocalChatEventRequest<Payload = unknown> {
   kind: string;
   payload: Payload;
   eventId?: string;
+  /** Written atomically with the event before it can be sent. */
+  recipients?: DeviceEventRecipient[];
 }
 
 export interface SignedChatEventAppendResult<Payload = unknown> {
@@ -85,6 +88,21 @@ export class ChatEventLogService {
   ): Promise<SignedChatEventAppendResult<Payload>> {
     const clock = await this.getClock();
     for (let attempt = 0; attempt < LOCAL_APPEND_RETRY_LIMIT; attempt += 1) {
+      if (request.eventId) {
+        const existing = await this.storage.getChatEvent(request.eventId);
+        if (existing) {
+          if (existing.originId !== identity.originId || existing.conversationId !== request.conversationId ||
+              existing.logScopeId !== request.logScopeId || existing.kind !== request.kind ||
+              stableJson(existing.payload) !== stableJson(request.payload)) {
+            throw new Error(`Chat event retry ${request.eventId} does not match its original action.`);
+          }
+          const appended = await this.storage.appendChatEvent(existing, { recipients: request.recipients });
+          if (appended.status === "conflict") {
+            throw new Error(`Chat event retry ${request.eventId} conflicts with stored history.`);
+          }
+          return { event: existing as ChatEventEnvelope<Payload>, status: "duplicate" };
+        }
+      }
       const basis = await this.storage.getChatEventSequenceBasis(identity.originId, request.logScopeId);
       clock.restore(await this.storage.getChatEventClock());
       const event = createSignedChatEvent(identity, {
@@ -94,11 +112,11 @@ export class ChatEventLogService {
         logicalTs: clock.tick(),
         createdAt: this.now().toISOString()
       });
-      const result = await this.storage.appendChatEvent(event);
+      const result = await this.storage.appendChatEvent(event, { recipients: request.recipients });
       if (result.status === "appended" || result.status === "duplicate") {
         return { event, status: result.status };
       }
-      if (request.eventId || result.conflictReason !== "origin-sequence-conflict") {
+      if (result.conflictReason !== "origin-sequence-conflict" && !(request.eventId && result.conflictReason === "event-id-conflict")) {
         throw new Error(`Chat event append conflict for ${event.eventId}: ${result.conflictReason ?? "unknown"}.`);
       }
     }

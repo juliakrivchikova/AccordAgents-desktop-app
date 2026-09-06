@@ -1,4 +1,5 @@
-import type { AgentDetectionRequest, AgentHealth, ChatActivityItem, ChatMessage, ChatSearchMessageMatch, Conversation } from "../../shared/types";
+import type { AgentDetectionRequest, AgentHealth, ChatActivityItem, ChatMessage, ChatSearchMessageMatch, Conversation, ConversationSummary } from "../../shared/types";
+import { reconcileConversationSummaryRefresh } from "../../shared/conversationSummary";
 import { buildChatActivityItems, reconcileChatActivityRefreshItems } from "../../shared/chatActivity";
 import { executeChatActivityFocus } from "../../shared/chatActivityFocus";
 import {
@@ -17,7 +18,7 @@ import {
 import { defaultChatParticipantDraft } from "../components/chat/chat-participant-drafts";
 import type { AppState } from "./app-state";
 import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
-import { conversationTimeValue, normalizeProjectPath } from "./conversation-summaries";
+import { compareConversationSummaries, conversationTimeValue, normalizeProjectPath } from "./conversation-summaries";
 import { persistLastViewedAt } from "./storage";
 import { activityItemsWithStoredPreferences } from "./activity-item-state";
 import { focusConversationMessage } from "./focus-conversation-message";
@@ -68,11 +69,19 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   async function refreshConversations(): Promise<void> {
+    const requestId = ++state.summaryRefreshRequestRef.current;
+    const revisionsAtStart = { ...state.activityRevisionByConversationRef.current };
     const summaries = await window.consensus.listConversations();
-    state.archivedConversationIdsRef.current = new Set(
-      summaries.filter((summary) => summary.archived === true).map((summary) => summary.id)
-    );
-    state.setSummaries(summaries);
+    applySummaryRefresh(summaries, requestId, revisionsAtStart);
+  }
+
+  function applySummaryRefresh(summaries: ConversationSummary[], requestId: number, revisionsAtStart: Record<string, number>): void {
+    state.setSummaries(current => {
+      if (requestId !== state.summaryRefreshRequestRef.current) return current;
+      const merged = reconcileConversationSummaryRefresh(current, summaries, revisionsAtStart, state.activityRevisionByConversationRef.current);
+      state.archivedConversationIdsRef.current = new Set(merged.filter(summary => summary.archived === true).map(summary => summary.id));
+      return merged.sort(compareConversationSummaries);
+    });
   }
 
   async function refreshActivity(): Promise<void> {
@@ -111,6 +120,8 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   async function refreshAll(): Promise<void> {
+    const summaryRequestId = ++state.summaryRefreshRequestRef.current;
+    const revisionsAtStart = { ...state.activityRevisionByConversationRef.current };
     state.setError(undefined);
     state.setHistoryLoading(true);
     try {
@@ -122,10 +133,7 @@ export function useConversationActions(state: AppState): ConversationActions {
       const seededSettings = await window.consensus.getSettings();
       state.setSettings(seededSettings);
       state.setAgents(nextAgents);
-      state.archivedConversationIdsRef.current = new Set(
-        nextSummaries.filter((summary) => summary.archived === true).map((summary) => summary.id)
-      );
-      state.setSummaries(nextSummaries);
+      applySummaryRefresh(nextSummaries, summaryRequestId, revisionsAtStart);
       const explicitRepoPath = (seededSettings.lastRepoPath ?? nextSettings.lastRepoPath)?.trim();
       const rememberedRepoPath = explicitRepoPath || nextSummaries.find((summary) => summary.repoPath?.trim())?.repoPath?.trim();
       if (!state.repoPath.trim() && rememberedRepoPath) {

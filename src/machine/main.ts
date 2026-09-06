@@ -172,6 +172,9 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     deviceId: identity.originId,
     machineName: args.machineName,
     appVersion: platform.appVersion(),
+    eventStorage: storageService,
+    eventLog: chatEventLogService,
+    publicKeyDerBase64: identity.publicKeyDerBase64,
     outboxPath: path.join(userDataPath(), "machine-outbox.json"),
     detectProviders: () => cliAgentRunner.detectAgents(),
     onSettingsImported: async () => {
