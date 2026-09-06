@@ -12,6 +12,7 @@
     "build": "npm run build:main && vite build && npm run build:mobile",
     "build:main": "tsc -p tsconfig.main.json && node scripts/copy-main-assets.mjs",
     "build:mobile": "node scripts/build-mobile-shell.mjs",
+    "build:machine": "npm run build:main && node scripts/build-machine-bundle.mjs",
     "build:renderer-tests": "tsc --noEmit -p tsconfig.renderer-tests.json && node scripts/build-renderer-component-tests.mjs",
     "assets:windows-icon": "node scripts/build-windows-icon.mjs",
     "test:active-run-popover": "node scripts/build-new-chat-screen-test.mjs && node --test dist/renderer-tests-new-chat/chat-active-run-popover.test.mjs",

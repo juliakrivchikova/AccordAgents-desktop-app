@@ -83,8 +83,14 @@ function readEnrollment(enrollmentPath: string): MobilePairingPackage {
 }
 
 function appSkillsSourceRoot(appPath: string): string {
-  const compiled = path.join(__dirname, "..", "main", "appSkills");
-  return existsSync(path.join(compiled, "accord")) ? compiled : path.join(appPath, "src", "main", "appSkills");
+  // Bundle layout (dist/machine/appSkills), compiled tree layout
+  // (dist/main/main/appSkills), and the source tree, in that order.
+  const candidates = [
+    path.join(__dirname, "appSkills"),
+    path.join(__dirname, "..", "main", "appSkills"),
+    path.join(appPath, "src", "main", "appSkills")
+  ];
+  return candidates.find((candidate) => existsSync(path.join(candidate, "accord"))) ?? candidates[candidates.length - 1];
 }
 
 export async function startMachine(args: MachineArgs): Promise<() => Promise<void>> {
