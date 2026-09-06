@@ -117,6 +117,20 @@ export function ChatAppToolApprovalCard(props: {
       : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, selfCompactionRequest, toolPermissionRequest);
   const displayPrompt = rosterApproval ? rosterApprovalQuestion(props.approval, added) : approvalPrompt;
 
+  const queuedDecision = props.approval.machineDecisionPending;
+  if (queuedDecision) {
+    return (
+      <section className="chat-app-tool-approval-card is-compact-result" aria-label={displayPrompt}
+        data-app-tool-approval-id={props.approval.id} tabIndex={-1}>
+        <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+        <div className="chat-app-tool-approval-body">
+          <strong>{queuedDecision.approve ? "Approval saved" : "Refusal saved"}</strong>
+          <p>Waiting for machine {queuedDecision.machineName} to confirm the decision.</p>
+        </div>
+      </section>
+    );
+  }
+
   if (reviewChange && readOnly) {
     return (
       <section

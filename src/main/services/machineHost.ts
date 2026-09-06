@@ -42,6 +42,7 @@ import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
 import { readPosixProcessTableAsync } from "./processTermination";
 import { verifyNativeExecutorGone } from "./nativeExecutorRecovery";
+import { MachineApprovalExecutor, machineApprovalResultId } from "./machineApprovalExecutor";
 
 export interface MachineHostOptions {
   pairing: MobilePairingPackage;
@@ -131,6 +132,7 @@ export class MachineHostService {
   private readonly commandSessions = new Map<string, Promise<void>>();
   private commandRetry?: ReturnType<typeof setTimeout>;
   private runtimeIdentity?: Promise<NativeRuntimeIdentity>;
+  private readonly approvalExecutor: MachineApprovalExecutor;
 
   /** approval id -> last status + updatedAt forwarded to the desktop. */
   private readonly forwardedApprovals = new Map<string, string>();
@@ -178,13 +180,21 @@ export class MachineHostService {
       apply: async (event, body) => {
         const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
         if (!isMachineLinkEnvelope(envelope) || !isMachineDurableMessage(envelope.body) ||
-            envelope.body.type === "machine.conversation.backdelta" || envelope.body.type === "machine.turn.finished" || envelope.body.type === "machine.turn.started") {
+            envelope.body.type === "machine.conversation.backdelta" || envelope.body.type === "machine.turn.finished" || envelope.body.type === "machine.turn.started" ||
+            envelope.body.type === "machine.approval.requested" || envelope.body.type === "machine.approval.updated" || envelope.body.type === "machine.approval.result") {
           throw new Error("Unexpected machine replication event.");
         }
         const conversationId = envelope.body.type === "machine.conversation.sync" ? envelope.body.conversation.id : "conversationId" in envelope.body ? envelope.body.conversationId : "";
         if (event.kind !== envelope.body.type || event.conversationId !== conversationId) throw new Error("Machine replication event has the wrong chat identity.");
         if (envelope.body.type === "machine.turn.request") {
           await this.acceptCommand(event, envelope.body);
+        } else if (envelope.body.type === "machine.approval.decision") {
+          // Do not hold the ingress queue while a native decision is delivered:
+          // Stop and other conversations must still be able to arrive.
+          void this.approvalExecutor.apply(event, envelope.body).then(() => this.eventChannel.confirmApplied(event)).catch(error => {
+            void this.debugLogs.write("machine-host.approval.retry-pending", { approvalId: envelope.body.type === "machine.approval.decision" ? envelope.body.approvalId : "", message: errorMessage(error) });
+          });
+          return "deferred";
         } else if (envelope.body.type === "machine.turn.cancel") {
           await this.options.eventStorage.nativeCommands().cancel(envelope.body.runId, conversationId, event.eventId);
           await this.handleBody(envelope.body, true);
@@ -192,6 +202,12 @@ export class MachineHostService {
         return "applied";
       },
       onError: (error) => { void this.debugLogs.write("machine-host.events.error", { message: error.message }); }
+    });
+    this.approvalExecutor = new MachineApprovalExecutor({
+      storage: options.eventStorage, deviceId: options.deviceId, chat, getConversation: id => storage.getConversation(id),
+      runtimeIdentity: () => this.getRuntimeIdentity(), nativeProcessDbPath: options.nativeProcessDbPath,
+      canApply: () => !this.closed && !this.draining,
+      publish: body => this.send(body)
     });
     this.client.on("peer", (event) => {
       if (event.type === "ready") {
@@ -272,7 +288,7 @@ export class MachineHostService {
     }
     this.turnsAwaitingCopy.clear();
     await stopProviders();
-    while (this.turnTasks.size || this.settlingInFlight.size || (this.chat.activeParticipantRuns?.().length ?? 0)) {
+    while (this.turnTasks.size || this.approvalExecutor.hasActiveWork() || this.settlingInFlight.size || (this.chat.activeParticipantRuns?.().length ?? 0)) {
       // A turn may still be preparing its workspace when shutdown begins.
       // Close an executor created by that preparation before waiting again.
       await stopProviders();
@@ -1291,6 +1307,8 @@ export class MachineHostService {
     if (isMachineDurableMessage(body)) {
       const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : "conversationId" in body ? body.conversationId : "";
       const published = await this.eventChannel.publish({ conversationId, kind: body.type, payload: body,
+        ...(body.type === "machine.approval.requested" || body.type === "machine.approval.updated" ? { scope: `approval:${body.approval.id}` } : {}),
+        ...(body.type === "machine.approval.result" && body.decisionId ? { eventId: machineApprovalResultId(body.decisionId), scope: `approval:${body.approvalId}` } : {}),
         ...(body.type === "machine.turn.started" ? { eventId: `machine-started:${body.runId}`, scope: `terminal:${body.runId}` } : {}),
         ...(body.type === "machine.turn.finished" ? { eventId: `machine-terminal:${body.receiptId ?? `${body.runId}:${body.finishedAt}`}`, scope: `terminal:${body.runId}` } : {}) });
       if (body.type === "machine.turn.finished") await this.options.eventStorage.nativeCommands().recordOutcome(body.runId, published.eventId);

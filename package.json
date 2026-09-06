@@ -87,7 +87,7 @@
     "tag-release": "node scripts/tag-release.mjs",
     "test:worker-relay": "npm run build:main && node --test scripts/worker-relay-chat-read.test.mjs",
     "test:device-events": "npm run build:main && node --test dist/main/main/services/deviceEventStorage.test.js dist/main/main/services/deviceEventChannel.test.js dist/main/main/services/deviceEventMailbox.test.js",
-    "test:native-execution": "npm run build:main && node --test dist/main/main/services/nativeCommandStore.test.js dist/main/main/services/nativeProcess.test.js scripts/machine-command.test.mjs"
+    "test:native-execution": "npm run build:main && node --test dist/main/main/services/nativeCommandStore.test.js dist/main/main/services/nativeProcess.test.js dist/main/main/services/machineApprovalExecutor.test.js scripts/machine-command.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-ec2": "^3.1079.0",

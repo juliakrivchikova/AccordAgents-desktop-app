@@ -1199,6 +1199,8 @@ export interface ChatAppToolApproval {
   /** Machines transport: the approval was raised by a member on this machine;
    *  the desktop shows it and forwards the decision there. */
   homeMachineId?: string;
+  machineDecisionPending?: { decisionId: string; machineName: string; approve: boolean; at: string };
+  machineDecisionReceiptId?: string;
 }
 
 export interface ChatAppToolApprovalPolicy {

@@ -136,8 +136,9 @@ event-contract work are still required.
 The conversation sync/delta/backdelta and finished/finished-ack rows in the table
 above now use `DeviceEventChannel` and the pairing's sealed mailbox as well as
 the live room. New enrollment requires and registers that mailbox. Native turn
-commands, progress, settings and approval RPCs still use the direct sealed link;
-that remaining conversion is required before cutover. The terminal file outbox
+commands, progress, settings and approval RPCs used the direct sealed link at
+that stage; the command and approval sections below supersede that limitation.
+Progress conversion remains required before cutover. The terminal file outbox
 is retained until its receipt is applied; SQLite additionally retains its signed
 event and fragments, including the desktop's acknowledgement, across disconnect.
 No native action is replayed by this delivery layer.
@@ -296,13 +297,54 @@ most 99,459 bytes (settings ciphertext included), a settings update 98,658 bytes
 and started/Stop bodies 173/133 bytes; these are QA settings, not a new measurement
 of the User's catalogue. Their large bodies use the same fragments and bounded
 SQLite stdin path, rather than one CLI argument or relay frame. Direct progress
-and approval control still need conversion.
+still needs conversion; approval control is covered below.
 
 Bodies, fragments, event headers, delivery receipts and inventory stay in the
 endpoints' local SQLite; only sealed packets reach the User's relay buffer.
 The new history has no garbage collection yet, and repeated growing snapshots
 can accumulate substantial history; progress coalescing and measured retention
 pressure remain cutover work. The 24-hour relay cost measurement is still open.
+
+## Durable approval decisions (2026-09-06)
+
+Approval requests, updates, decisions and results now travel through signed
+device events, the sealed live room and mailbox. The table's earlier synchronous
+card RPC is superseded: the desktop commits the decision locally and displays
+"Approval saved" or "Refusal saved" while application is unconfirmed, including
+while the machine is offline. A result is correlated by decision id, not just
+card id; concurrent retries cannot resolve a different decision's call. Queued
+feedback survives ordinary card notifications and clears only for its matching
+receipt, including a result arriving before the local callback finishes.
+
+`native_approval_effects` in the machine's SQLite claims each approval once,
+after validation and before changing permissions, applying an app tool or
+answering the provider. Codex decisions wait for the native adapter's delivery
+acknowledgement. A failed pre-effect claim leaves the decision queued; a failed
+result write retries the same response without applying again. After process
+loss, an existing claim cannot be reused: the old executor must be proven gone,
+and missing delivery confirmation is reported as uncertain. Stop can still
+enter while an approval waits for native delivery; shutdown drains that work.
+This guards native effects; canonical conflict projection across all peers is
+still separate unfinished work.
+
+Real Electron/Codex/public-relay QA: with the machine frozen, "allow once" saved
+locally in 229 ms. The desktop was killed, the machine resumed and fetched the
+requested page, then the machine was stopped before the desktop restarted.
+The new desktop received the approved card and the single "Example Domain"
+answer from the mailbox, with exactly one native approval claim. A second
+permission request on the final build was refused through the real card and
+stored as denied with its own receipt, without a lingering waiting badge.
+These are macOS checks; they do not claim physical-phone, Linux approval-replay
+or Claude verification for this change.
+
+On that real QA chat the decision body was 347 bytes, result 1,115 bytes and
+native-effect identity fields 294 bytes before SQLite overhead. A decision or
+result carries its card/policies, not the 14,000-message history; a large edited
+proposal uses the existing bounded blob fragments and SQLite stdin path.
+The whole conversation snapshot/save path still has the previously measured
+large-chat cost. Approval bodies/receipts remain on user machines in SQLite;
+only sealed packets reach the relay buffer. This does not solve history GC or
+the outstanding representative relay-cost measurement.
 
 ## Where the machine keeps data
 
@@ -316,7 +358,7 @@ Under the user-data directory: `accordagents.sqlite3` (its copy of the chats it 
 
 - User choices (`User choice:` blocks) raised by a member on a machine reach the desktop as ordinary messages; the answer travels back as the next user message, which is the same round trip a local member gets. Nothing else is forwarded for them yet.
 - A machine-hosted member's requests to other members run on the machine's copy; routing them to the other members' home machines follows the event contract (`docs/machines/02-event-contract.md`).
-- Conversation copies/deltas, native command admission/Stop, settings and terminal outcomes now use durable delivery and accepted-event clock observation; approval RPCs and progress still need conversion, followed by the PWA's IndexedDB clock/outbox and chat-wide event projections.
+- Conversation copies/deltas, native command admission/Stop, settings, approvals and terminal outcomes now use durable delivery and accepted-event clock observation; progress still needs conversion, followed by the PWA's IndexedDB clock/outbox and chat-wide event projections.
 - The doctor/setup flow does not yet install the runtime over SSH; the steps above are manual until it does.
 - The machine-owned three-hour AWS idle stop and scoped phone wake still need implementation and verification; the desktop timer does not protect against the desktop dying. The current manual QA deployment is not an always-on production installation.
 - The legacy worker path and the cloud-only prompt branch remain until the cutover commit removes them.

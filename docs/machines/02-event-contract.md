@@ -127,8 +127,14 @@ ledger; process-loss recovery never repeats already claimed native input and
 requires verified guardian closure before relinquishing an old executor.
 Settings are encrypted before they enter the immutable event/blob store.
 
-This is not the complete event-contract cutover: approvals and progress still
-require conversion; PWA IndexedDB outbox,
+Approval requests, updates, decisions and results also use this channel. A
+decision is saved locally before feedback; the machine records a durable native
+effect claim after validation and before applying it. Delivery retries never
+repeat that effect, and a lost execution receipt is reported as uncertain.
+The source stores the matching result before acknowledging it.
+
+This is not the complete event-contract cutover: progress still
+requires conversion; PWA IndexedDB outbox,
 canonical chat-wide roster fan-out, pure conflict projections, hash-bound
 artifact signatures, pressure UI and history/blob garbage collection remain.
 The retained history and blob fragments currently stay in local SQLite after

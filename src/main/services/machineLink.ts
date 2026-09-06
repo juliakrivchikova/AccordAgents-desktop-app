@@ -53,6 +53,7 @@ export interface MachineApprovalEvent {
   conversationId: string;
   approval: ChatAppToolApproval;
   policies?: ChatAppToolApprovalPolicy[];
+  decisionId?: string;
 }
 
 /** A turn result for a run this desktop no longer tracks (it restarted
@@ -103,7 +104,7 @@ interface MachineConnection {
    *  conversation: many snapshots in flight collapse into one more pass. */
   replicationQueued: Map<string, Conversation>;
   /** Approval decisions waiting for the machine's outcome. */
-  pendingApprovals: Map<string, { resolve: () => void; reject: (error: Error) => void }>;
+  pendingApprovals: Map<string, Set<{ resolve: () => void; reject: (error: Error) => void }>>;
   /** run id → conversation id for turns this desktop waits on. */
   pendingTurnConversations: Map<string, string>;
   /** Dispatched turns whose result is not stored yet (persisted in the
@@ -186,6 +187,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   private async emitApproval(event: MachineApprovalEvent): Promise<void> {
+    if (!this.approvalListeners.length) throw new Error("No chat owner is available to store the machine's approval.");
     await Promise.all(this.approvalListeners.map((listener) => listener(event)));
   }
 
@@ -219,27 +221,42 @@ export class MachineLinkService implements MachineTurnDispatcher {
     scope?: "once" | "chat";
     draftOverride?: ChatAppToolApprovalRequest;
     codexDecisionId?: string;
+    onQueued?: (decisionId: string, machineName: string) => Promise<void>;
   }): Promise<void> {
     const connection = this.connections.get(request.machineId);
-    if (!connection?.machineDeviceId) {
-      throw new Error("The machine that raised this approval is not connected; the decision will be possible once it reconnects.");
+    if (!connection?.eventChannel) {
+      throw new Error("The machine that raised this approval has not introduced its durable channel.");
     }
+    const decisionId = `machine-approval:${request.approvalId}:${createHash("sha256").update(JSON.stringify({ approve: request.approve, scope: request.scope,
+      draftOverride: request.draftOverride, codexDecisionId: request.codexDecisionId })).digest("hex")}`;
+    const previous = await this.options.eventStorage.getChatEvent(decisionId);
+    if (previous && (previous.originId !== this.options.desktopDeviceId || previous.kind !== "machine.approval.decision" || previous.conversationId !== request.conversationId)) {
+      throw new Error("The retained approval decision has inconsistent ownership.");
+    }
+    const retained = previous ? await this.options.eventStorage.deviceEventBlobs().hydrate(previous.payload) as import("../../shared/machineLink").MachineApprovalDecisionBody : undefined;
     // The call resolves with the machine's outcome: an edited proposal or a
     // native decision the machine rejects is an error here, not a silent no-op.
-    const outcome = new Promise<void>((resolve, reject) => {
-      connection.pendingApprovals.set(request.approvalId, { resolve, reject });
-    });
+    let waiter!: { resolve: () => void; reject: (error: Error) => void };
+    const outcome = new Promise<void>((resolve, reject) => { waiter = { resolve, reject }; });
+    const waiters = connection.pendingApprovals.get(decisionId) ?? new Set();
+    waiters.add(waiter);
+    connection.pendingApprovals.set(decisionId, waiters);
+    const removeWaiter = () => {
+      waiters.delete(waiter);
+      if (!waiters.size && connection.pendingApprovals.get(decisionId) === waiters) connection.pendingApprovals.delete(decisionId);
+    };
+    void outcome.catch(() => undefined);
     const timeout = setTimeout(() => {
-      const pending = connection.pendingApprovals.get(request.approvalId);
-      if (pending) {
-        connection.pendingApprovals.delete(request.approvalId);
-        pending.reject(new Error(`Machine ${connection.record.name} did not confirm the decision in time.`));
+      if (waiters.has(waiter)) {
+        removeWaiter();
+        waiter.reject(new Error(`The decision is saved and will be delivered to ${connection.record.name}; its application is not confirmed yet.`));
       }
     }, APPROVAL_RESULT_TIMEOUT_MS);
     timeout.unref?.();
     try {
-      await this.send(connection, {
+      await this.send(connection, retained ?? {
         type: "machine.approval.decision",
+        decisionId,
         conversationId: request.conversationId,
         approvalId: request.approvalId,
         approve: request.approve,
@@ -248,10 +265,16 @@ export class MachineLinkService implements MachineTurnDispatcher {
         ...(request.codexDecisionId ? { codexDecisionId: request.codexDecisionId } : {}),
         decidedAt: this.now().toISOString()
       });
+      await request.onQueued?.(decisionId, connection.record.name);
+      const savedResult = await this.options.eventStorage.getChatEvent(`machine-approval-result:${decisionId}`);
+      if (savedResult && savedResult.originId === connection.record.deviceId && savedResult.kind === "machine.approval.result" && savedResult.conversationId === request.conversationId) {
+        await this.handleBody(connection, await this.options.eventStorage.deviceEventBlobs().hydrate(savedResult.payload) as import("../../shared/machineLink").MachineApprovalResultBody);
+      }
+      if (request.onQueued) return;
       await outcome;
     } finally {
       clearTimeout(timeout);
-      connection.pendingApprovals.delete(request.approvalId);
+      removeWaiter();
     }
     void this.debugLogs.write("machine-link.approval.decision-sent", {
       machineId: request.machineId,
@@ -746,25 +769,29 @@ export class MachineLinkService implements MachineTurnDispatcher {
         await this.handleResync(connection, body.conversationId);
         return;
       case "machine.approval.result": {
-        const pending = connection.pendingApprovals.get(body.approvalId);
-        connection.pendingApprovals.delete(body.approvalId);
+        const pending = body.decisionId ? connection.pendingApprovals.get(body.decisionId) : undefined;
+        if (body.decisionId) connection.pendingApprovals.delete(body.decisionId);
         try {
-          if (!body.ok) {
-            throw new Error(body.error ?? `Machine ${connection.record.name} could not apply the decision.`);
-          }
-          if (body.approval) {
+          const cachedApprovals = body.approval ? undefined : (await this.conversationLoader?.(body.conversationId))?.metadata?.pendingAppToolApprovals;
+          const approval = body.approval ?? (Array.isArray(cachedApprovals) ? cachedApprovals.find((item: ChatAppToolApproval) => item.id === body.approvalId) as ChatAppToolApproval | undefined : undefined);
+          if (approval) {
             // Store the machine's view of the card (and policies) before the
             // desktop's card call returns; a failed store fails that call.
             await this.emitApproval({
               machineId: connection.record.id,
               conversationId: body.conversationId,
-              approval: { ...body.approval, homeMachineId: connection.record.id },
+              decisionId: body.decisionId,
+              approval: { ...approval, ...(!body.ok && body.error ? { error: body.error } : {}), homeMachineId: connection.record.id },
               ...(body.policies ? { policies: body.policies } : {})
             });
           }
-          pending?.resolve();
         } catch (error) {
-          pending?.reject(error instanceof Error ? error : new Error(String(error)));
+          for (const waiter of pending ?? []) waiter.reject(error instanceof Error ? error : new Error(String(error)));
+          throw error; // A failed projection must not acknowledge the event.
+        }
+        for (const waiter of pending ?? []) {
+          if (body.ok) waiter.resolve();
+          else waiter.reject(new Error(body.error ?? `Machine ${connection.record.name} could not apply the decision.`));
         }
         return;
       }
@@ -796,7 +823,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
         },
         apply: async (event, body) => {
           const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
-          if (!isMachineLinkEnvelope(envelope) || !["machine.conversation.backdelta", "machine.turn.finished", "machine.turn.started"].includes(envelope.body.type) ||
+          if (!isMachineLinkEnvelope(envelope) || !["machine.conversation.backdelta", "machine.turn.finished", "machine.turn.started",
+            "machine.approval.requested", "machine.approval.updated", "machine.approval.result"].includes(envelope.body.type) ||
               !("conversationId" in envelope.body) ||
               event.kind !== envelope.body.type || event.conversationId !== envelope.body.conversationId) {
             throw new Error("Unexpected machine replication event.");
@@ -1066,6 +1094,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : "conversationId" in body ? body.conversationId : "";
       beforeWrite?.();
       await connection.eventChannel.publish({ conversationId, kind: body.type, payload: body,
+        ...(body.type === "machine.approval.decision" && body.decisionId ? { eventId: body.decisionId, scope: `approval:${body.approvalId}` } : {}),
         ...(body.type === "machine.turn.request" ? { eventId: machineCommandId(body.runId) } : {}),
         ...(body.type === "machine.turn.cancel" ? { eventId: `machine-cancel:${body.runId}`, scope: `cancel:${body.runId}` } : {}),
         ...(body.type === "machine.turn.finished.ack" ? { eventId: `machine-terminal-ack:${body.receiptId ?? `${body.runId}:${body.finishedAt}`}`, scope: `terminal-ack:${body.runId}` } : {}) });

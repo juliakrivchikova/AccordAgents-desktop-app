@@ -6,6 +6,25 @@ import { desktopEvents, hostEvents, DESKTOP_ID, MACHINE_ID, DESKTOP_ISSUER } fro
 const require = createRequire(import.meta.url);
 const { createReferenceRelayServer } = require("./relay-reference-server.cjs");
 
+test("approval receipts resolve only their decision and every caller retrying that decision", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const resolved = [], rejected = [];
+  const waiter = id => ({ resolve: () => resolved.push(id), reject: error => rejected.push([id, error.message]) });
+  const connection = { record: { id: "machine", name: "Machine" }, pendingApprovals: new Map([
+    ["earlier", new Set([waiter("first"), waiter("retry")])], ["later", new Set([waiter("later")])]
+  ]) };
+  await MachineLinkService.prototype.handleBody.call({}, connection, {
+    type: "machine.approval.result", conversationId: "chat", approvalId: "approval", decisionId: "earlier", ok: true
+  });
+  assert.deepEqual(resolved, ["first", "retry"]);
+  assert.ok(connection.pendingApprovals.has("later"));
+  await MachineLinkService.prototype.handleBody.call({}, connection, {
+    type: "machine.approval.result", conversationId: "chat", approvalId: "approval", decisionId: "later", ok: false, error: "already answered"
+  });
+  assert.deepEqual(rejected, [["later", "already answered"]]);
+  assert.equal(connection.pendingApprovals.size, 0);
+});
+
 test("a command queued with the machine offline survives a desktop restart and executes once with its sealed settings", async () => {
   const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
   const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
@@ -143,13 +162,16 @@ test("machine link replicates settings and conversations, runs a turn, streams p
         }
         if (next) machineStore.set(id, next);
       },
-      respondToAppToolApproval: async (request) => {
+      respondToAppToolApproval: async (request, _progress, execution) => {
         approvalRequests.push(request);
         if (request.approvalId === "approval-bad") {
           throw new Error("decision rejected by the native session");
         }
         const conversation = machineStore.get(request.conversationId);
-        return { ...conversation, metadata: { ...conversation.metadata, pendingAppToolApprovals: [{ id: request.approvalId, status: "approved", updatedAt: new Date().toISOString() }] } };
+        await execution?.beforeApply({ id: request.approvalId, requesterParticipantId: conversation.metadata.participants[0].id });
+        const next = { ...conversation, metadata: { ...conversation.metadata, pendingAppToolApprovals: [{ id: request.approvalId, status: "approved", updatedAt: new Date().toISOString() }] } };
+        machineStore.set(request.conversationId, next);
+        return next;
       }
     };
     const hostStorage = {

@@ -24,6 +24,16 @@ export const NATIVE_COMMAND_SCHEMA_SQL = `
     event_id text not null references chat_events(event_id),
     origin_seq integer not null
   );
+  create table if not exists native_approval_effects (
+    conversation_id text not null,
+    approval_id text not null,
+    participant_id text not null,
+    event_id text not null unique references chat_events(event_id),
+    runtime_id text not null,
+    pid integer not null,
+    started_at text not null,
+    primary key(conversation_id, approval_id)
+  );
   create table if not exists native_session_executors (
     conversation_id text not null,
     participant_id text not null,
@@ -42,6 +52,13 @@ interface Database {
   execute(sql: string): Promise<void>;
 }
 
+export interface NativeApprovalEffect extends NativeRuntimeIdentity {
+  conversationId: string;
+  approvalId: string;
+  participantId: string;
+  eventId: string;
+}
+
 const COMMAND_COLUMNS = `command_id as commandId, event_id as eventId, conversation_id as conversationId,
   participant_id as participantId, run_id as runId, terminal_event_id as terminalEventId,
   phase, runtime_id as runtimeId, executor_generation as executorGeneration, cancelled`;
@@ -51,6 +68,31 @@ const COMMAND_COLUMNS = `command_id as commandId, event_id as eventId, conversat
  * a caller must verify the old provider processes are gone before releasing it. */
 export class NativeCommandStore {
   constructor(private readonly database: Database) {}
+
+  async approvalEffect(conversationId: string, approvalId: string): Promise<NativeApprovalEffect | undefined> {
+    await this.database.init();
+    return (await this.database.query<NativeApprovalEffect>(`select conversation_id as conversationId,
+      approval_id as approvalId, participant_id as participantId, event_id as eventId,
+      runtime_id as runtimeId, pid, started_at as startedAt from native_approval_effects
+      where conversation_id = ${quote(conversationId)} and approval_id = ${quote(approvalId)};`))[0];
+  }
+
+  /** Called only after the domain validated the answer, immediately before
+   * changing permissions, applying a tool or waking the native request. */
+  async claimApproval(effect: NativeApprovalEffect): Promise<boolean> {
+    if (!Number.isSafeInteger(effect.pid) || effect.pid < 1 || Object.entries(effect).some(([key, value]) => key !== "pid" && (typeof value !== "string" || !value.trim()))) {
+      throw new Error("A native approval effect requires stable identities.");
+    }
+    await this.database.init();
+    const rows = await this.database.query<{ eventId: string }>(durable(`insert into native_approval_effects(
+      conversation_id, approval_id, participant_id, event_id, runtime_id, pid, started_at)
+      select conversation_id, ${quote(effect.approvalId)}, ${quote(effect.participantId)}, event_id,
+        ${quote(effect.runtimeId)}, ${effect.pid}, ${quote(effect.startedAt)} from chat_events
+      where event_id = ${quote(effect.eventId)} and conversation_id = ${quote(effect.conversationId)} and kind = 'machine.approval.decision'
+      on conflict(conversation_id, approval_id) do nothing returning event_id as eventId;`));
+    if (!rows.length && !await this.approvalEffect(effect.conversationId, effect.approvalId)) throw new Error("The signed approval decision is not stored.");
+    return rows.length === 1;
+  }
 
   async accept(command: Pick<NativeCommand, "commandId" | "eventId" | "conversationId" | "participantId" | "runId" | "terminalEventId">): Promise<NativeCommand> {
     for (const value of Object.values(command)) if (typeof value !== "string" || !value.trim()) throw new Error("A native command requires stable identities.");

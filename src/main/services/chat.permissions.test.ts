@@ -11203,6 +11203,53 @@ test("Codex session approval resolves the blocked callback without creating a ch
   assert.equal(storage.current.messages.length, 1);
 });
 
+test("a durable approval claim precedes permission changes and a failed claim leaves them untouched", async () => {
+  const participant = chatParticipant("codex-cli", { webAccess: false });
+  const approval = permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] });
+  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+  const { service, storage } = testService({ conversation });
+  const request = { conversationId: conversation.id, approvalId: approval.id, approve: true, scope: "chat" as const };
+  await assert.rejects(service.respondToAppToolApproval(request, undefined, { beforeApply: async () => { throw new Error("SQLITE_FULL before claim"); } }), /SQLITE_FULL/);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
+  assert.equal(normalizeChatAgentPermissions(storage.current.metadata.participants[0].permissions).webAccess, false);
+  let claims = 0;
+  await service.respondToAppToolApproval(request, undefined, { beforeApply: async () => { claims++; } });
+  assert.equal(claims, 1);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+  assert.equal(normalizeChatAgentPermissions(storage.current.metadata.participants[0].permissions).webAccess, true);
+});
+
+test("machine approval feedback is local, survives notifications, and clears only for its matching receipt", async () => {
+  const participant = chatParticipant("codex-cli", { webAccess: false });
+  const approval = { ...permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] }), homeMachineId: "machine" };
+  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+  const { service, storage } = testService({ conversation });
+  service.setMachineLink({ runTurn: async () => { throw new Error("not a turn"); },
+    respondToMachineApproval: async request => { await request.onQueued?.("decision", "Offline machine"); }
+  });
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: approval.id, approve: true });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending.decisionId, "decision");
+  await service.applyMachineApproval({ conversationId: conversation.id, approval });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending.decisionId, "decision");
+  await service.applyMachineApproval({ conversationId: conversation.id, approval: { ...approval, status: "approved" }, decisionId: "decision" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending, undefined);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionReceiptId, "decision");
+});
+
+test("a fast rejected machine receipt cannot be overwritten by its later queued callback", async () => {
+  const participant = chatParticipant("codex-cli");
+  const approval = { ...permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] }), homeMachineId: "machine" };
+  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+  const { service, storage } = testService({ conversation });
+  service.setMachineLink({ runTurn: async () => { throw new Error("not a turn"); }, respondToMachineApproval: async request => {
+    await service.applyMachineApproval({ conversationId: conversation.id, approval: { ...approval, error: "Invalid decision" }, decisionId: "fast" });
+    await request.onQueued?.("fast", "Machine");
+  } });
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: approval.id, approve: true });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending, undefined);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].error, "Invalid decision");
+});
+
 test("Codex approval compacts immediately while the provider receives the selected response", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
@@ -11258,6 +11305,33 @@ test("Codex approval compacts immediately while the provider receives the select
   acknowledge();
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
+});
+
+test("a guarded Codex decision cannot report delivery before the native adapter acknowledges it", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const session = { participantId: participant.id, sessionId: "guarded-thread", roleConfigId: ROLE.id,
+    roleConfigVersion: ROLE.version, roleLabel: ROLE.label, roleInstructions: ROLE.instructions,
+    roleAppToolCapabilities: ROLE.appToolCapabilities, participantKind: "codex-cli", participantAgentMode: "auto",
+    participantPermissions: participant.permissions, updatedAt: NOW } as ChatParticipantSession;
+  let acknowledge!: () => void;
+  const responseDelivered = new Promise<void>(resolve => { acknowledge = resolve; });
+  const decision = (service as any).requestCodexApprovalFromCli(conversation, participant, session, "guarded-run", "user-message", {
+    id: 789, method: "item/commandExecution/requestApproval", signal: new AbortController().signal, responseDelivered,
+    params: { threadId: "guarded-thread", turnId: "turn", itemId: "item", startedAtMs: 1, environmentId: null, command: "git status", availableDecisions: ["accept", "decline"] }
+  });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  const pending = storage.current.metadata.pendingAppToolApprovals[0];
+  let claims = 0, finished = false;
+  const response = service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: pending.id, approve: true, codexDecisionId: "accept" }, undefined,
+    { beforeApply: async () => { claims++; }, awaitNativeDelivery: true }).then(() => { finished = true; });
+  assert.deepEqual(await decision, { decision: "accept" });
+  assert.equal(claims, 1);
+  assert.equal(finished, false);
+  acknowledge();
+  await response;
+  assert.equal(finished, true);
 });
 
 test("Codex approval keeps the compact decision and reports provider delivery failure through run progress", async () => {

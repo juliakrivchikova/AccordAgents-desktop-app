@@ -2805,7 +2805,8 @@ void app.whenReady().then(async () => {
       chatService.applyMachineApproval({
         conversationId: event.conversationId,
         approval: event.approval,
-        policies: event.policies
+        policies: event.policies,
+        decisionId: event.decisionId
       }).then(() => undefined, (error: unknown) => {
         void debugLogService.write("machine-link.approval.apply-error", { message: error instanceof Error ? error.message : String(error) });
         throw error;

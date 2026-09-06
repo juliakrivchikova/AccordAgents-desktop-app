@@ -583,6 +583,14 @@ export interface ChatAppToolApprovalDecisionEvent {
   status: Extract<ChatAppToolApproval["status"], "approved" | "denied">;
 }
 
+/** A device decision records its native-effect claim after validation and
+ * before applying permissions or waking a CLI. A replay must never cross this
+ * boundary twice, even if the caller lost its final acknowledgement. */
+export interface ChatApprovalExecutionGuard {
+  beforeApply(approval: ChatAppToolApproval): Promise<void>;
+  awaitNativeDelivery?: boolean;
+}
+
 interface ParticipantRequestRunResult {
   batch: ChatParticipantRequestBatch;
   replies: Array<{
@@ -679,6 +687,7 @@ export interface MachineTurnDispatcher {
     scope?: "once" | "chat";
     draftOverride?: ChatAppToolApprovalRequest;
     codexDecisionId?: string;
+    onQueued?: (decisionId: string, machineName: string) => Promise<void>;
   }): Promise<void>;
 }
 
@@ -4718,7 +4727,8 @@ export class ChatService {
   }
 
   private async respondToToolPermissionApproval(
-    request: RespondToChatAppToolApprovalRequest
+    request: RespondToChatAppToolApprovalRequest,
+    execution?: ChatApprovalExecutionGuard
   ): Promise<Conversation | undefined> {
     const conversation = await this.storage.getConversation(request.conversationId);
     if (!conversation || conversation.kind !== "chat") {
@@ -4738,6 +4748,7 @@ export class ChatService {
 
       const now = new Date().toISOString();
       if (!request.approve) {
+        await execution?.beforeApply(approval);
         decidedApproval = {
           ...approval,
           status: "denied",
@@ -4758,6 +4769,7 @@ export class ChatService {
         // the member's current mode, never the provider session's previous-turn mode.
         const agentMode = approval.request.agentMode ?? normalizeChatAgentMode(requester.agentMode);
         const scope = agentMode === "auto" ? "once" : request.scope === "chat" ? "chat" : "once";
+        await execution?.beforeApply(approval);
         decidedApproval = {
           ...approval,
           status: "approved",
@@ -4813,7 +4825,8 @@ export class ChatService {
 
   async respondToAppToolApproval(
     request: RespondToChatAppToolApprovalRequest,
-    progress?: ProgressCallback
+    progress?: ProgressCallback,
+    execution?: ChatApprovalExecutionGuard
   ): Promise<Conversation | undefined> {
     const conversation = await this.storage.getConversation(request.conversationId);
     if (!conversation || conversation.kind !== "chat") {
@@ -4844,21 +4857,31 @@ export class ChatService {
         approve: request.approve,
         ...(request.scope === "chat" ? { scope: "chat" as const } : request.scope === "once" ? { scope: "once" as const } : {}),
         ...(request.draftOverride ? { draftOverride: request.draftOverride } : {}),
-        ...(request.codexDecisionId ? { codexDecisionId: request.codexDecisionId } : {})
+        ...(request.codexDecisionId ? { codexDecisionId: request.codexDecisionId } : {}),
+        onQueued: async (decisionId, machineName) => {
+          await this.withChatMutation(conversation, async () => {
+            const current = this.chatAppToolApprovals(conversation).find(item => item.id === approval.id);
+            if (current?.status === "pending" && current.machineDecisionReceiptId !== decisionId) this.upsertAppToolApproval(conversation, { ...current,
+              machineDecisionPending: { decisionId, machineName, approve: request.approve, at: new Date().toISOString() } });
+            this.queueSnapshot(conversation);
+          });
+          if (!await this.waitForQueuedSaveResult(conversation.id)) throw new Error("The decision was queued, but its local feedback could not be stored.");
+        }
       });
       return (await this.storage.getConversation(conversation.id)) ?? conversation;
     }
     if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
-      return this.respondToToolPermissionApproval(request);
+      return this.respondToToolPermissionApproval(request, execution);
     }
     if (approval.status !== "pending") {
       throw new Error("App tool approval request has already been answered.");
     }
     if (approval.toolName === CODEX_APPROVAL_TOOL_NAME && this.isCodexApprovalRequest(approval.request)) {
-      return this.respondToCodexApproval(conversation, request, progress);
+      return this.respondToCodexApproval(conversation, request, progress, execution);
     }
     const now = new Date().toISOString();
     if (!request.approve) {
+      await execution?.beforeApply(approval);
       if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
         this.applyParticipantRequestApprovalDecision(conversation, approval, "denied", request.scope);
       }
@@ -4891,6 +4914,7 @@ export class ChatService {
 
     const scope = request.scope === "chat" ? "chat" : "once";
     if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
+      await execution?.beforeApply(approval);
       const participantScope = approval.request.source === "inferred" ? "once" : scope;
       this.upsertAppToolApproval(conversation, {
         ...approval,
@@ -4938,6 +4962,7 @@ export class ChatService {
         await this.saveConversation(conversation);
         return conversation;
       }
+      await execution?.beforeApply(approval);
       if (scope === "chat") {
         this.setParticipantCompactionPermission(conversation, requester.id, "allow");
       }
@@ -4981,6 +5006,7 @@ export class ChatService {
         await this.saveConversation(conversation);
         return conversation;
       }
+      await execution?.beforeApply(approval);
       const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
       this.upsertAppToolApproval(conversation, {
         ...approval,
@@ -5020,6 +5046,7 @@ export class ChatService {
         await this.saveConversation(conversation);
         return conversation;
       }
+      await execution?.beforeApply(approval);
       const appliedRoles = await this.applyPreparedRoleChange(prepared);
       this.upsertAppToolApproval(conversation, {
         ...approval,
@@ -5058,6 +5085,7 @@ export class ChatService {
         await this.saveConversation(conversation);
         return conversation;
       }
+      await execution?.beforeApply(approval);
       const applied = await this.applyPreparedParticipantChange(conversation, prepared);
       this.upsertAppToolApproval(conversation, {
         ...approval,
@@ -5105,6 +5133,7 @@ export class ChatService {
     if (!prepared) {
       return conversation;
     }
+    await execution?.beforeApply(approval);
     const applied = isPermissionApproval
       ? scope === "once"
         ? [requester].filter((participant): participant is ChatParticipant => Boolean(participant))
@@ -5310,7 +5339,8 @@ export class ChatService {
   private async respondToCodexApproval(
     conversation: Conversation,
     request: RespondToChatAppToolApprovalRequest,
-    progress?: ProgressCallback
+    progress?: ProgressCallback,
+    execution?: ChatApprovalExecutionGuard
   ): Promise<Conversation> {
     const selected = await this.withChatMutation(conversation, async () => {
       const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === request.approvalId);
@@ -5359,6 +5389,10 @@ export class ChatService {
         : option.outcome === "cancel"
           ? "cancelled"
           : "denied";
+      await execution?.beforeApply(approval);
+      if (this.codexApprovalResolvers.get(approval.id) !== resolver || resolver.submitted) {
+        throw new Error("The native approval ended while its decision was being recorded.");
+      }
       resolver.submitted = true;
       if (resolver.timer) {
         clearTimeout(resolver.timer);
@@ -5393,6 +5427,7 @@ export class ChatService {
       method: selected.method,
       outcome: selected.option.outcome
     });
+    if (execution?.awaitNativeDelivery) await selected.resolver.responseDelivered;
     return conversation;
   }
 
@@ -6945,13 +6980,18 @@ export class ChatService {
     conversationId: string;
     approval: ChatAppToolApproval;
     policies?: ChatAppToolApprovalPolicy[];
+    decisionId?: string;
   }): Promise<Conversation | undefined> {
     const conversation = await this.storage.getConversation(request.conversationId);
     if (!conversation || conversation.kind !== "chat") {
-      return conversation;
+      throw new Error("The approval's chat is not available; its delivery has not been acknowledged.");
     }
     const result = await this.withChatMutation(conversation, async () => {
-      this.upsertAppToolApproval(conversation, { ...request.approval, conversationId: conversation.id });
+      const current = this.chatAppToolApprovals(conversation).find(item => item.id === request.approval.id);
+      const queued = current?.machineDecisionPending;
+      this.upsertAppToolApproval(conversation, { ...request.approval, conversationId: conversation.id,
+        machineDecisionPending: queued && request.decisionId !== queued.decisionId ? queued : undefined,
+        machineDecisionReceiptId: request.decisionId ?? current?.machineDecisionReceiptId });
       for (const policy of request.policies ?? []) {
         if (policy && typeof policy === "object" && typeof policy.id === "string") {
           this.upsertAppToolApprovalPolicy(conversation, policy);
@@ -10713,6 +10753,10 @@ export class ChatService {
     stored: Record<string, unknown>,
     current: Record<string, unknown>
   ): Record<string, unknown> {
+    // Machine notifications and local queued/receipt feedback are applied by
+    // this mutation queue. A turn's older copy must not undo those writes,
+    // even when the native card's updatedAt did not change (a rejected answer).
+    if (typeof stored.homeMachineId === "string" && stored.homeMachineId) return stored;
     const storedStatus = typeof stored.status === "string" ? stored.status : undefined;
     const currentStatus = typeof current.status === "string" ? current.status : undefined;
     const storedTerminal = storedStatus ? this.isTerminalAppToolApprovalStatus(storedStatus) : false;

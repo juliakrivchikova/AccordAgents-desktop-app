@@ -177,6 +177,7 @@ export interface MachineApprovalUpdatedBody {
 
 export interface MachineApprovalDecisionBody {
   type: "machine.approval.decision";
+  decisionId?: string;
   conversationId: string;
   approvalId: string;
   approve: boolean;
@@ -192,6 +193,8 @@ export interface MachineApprovalDecisionBody {
  *  call resolves or fails with it). */
 export interface MachineApprovalResultBody {
   type: "machine.approval.result";
+  decisionId?: string;
+  uncertain?: boolean;
   conversationId: string;
   approvalId: string;
   ok: boolean;
@@ -298,7 +301,8 @@ export function isMachineReplicationMessage(body: MachineLinkMessage): boolean {
 
 export function isMachineDurableMessage(body: MachineLinkMessage): boolean {
   return isMachineReplicationMessage(body) || body.type === "machine.turn.finished" || body.type === "machine.turn.finished.ack" ||
-    body.type === "machine.turn.request" || body.type === "machine.turn.cancel" || body.type === "machine.settings.sealed" || body.type === "machine.turn.started";
+    body.type === "machine.turn.request" || body.type === "machine.turn.cancel" || body.type === "machine.settings.sealed" || body.type === "machine.turn.started" ||
+    body.type === "machine.approval.requested" || body.type === "machine.approval.updated" || body.type === "machine.approval.decision" || body.type === "machine.approval.result";
 }
 
 export function machineCommandId(runId: string): string { return `machine-command:${runId}`; }
