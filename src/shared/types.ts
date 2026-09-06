@@ -613,7 +613,7 @@ export interface AgentContextUsage {
 
 export type ChatAgentMode = "default" | "plan" | "auto";
 
-export type ChatReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ChatReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export type ChatParticipantRequestPermission = "ask" | "allow" | "deny";
 

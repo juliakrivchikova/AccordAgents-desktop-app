@@ -1689,7 +1689,7 @@ export class AppMcpService {
                         model: { type: "string" },
                         reasoningEffort: {
                           type: "string",
-                          enum: ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+                          enum: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
                         },
                         avatarId: { type: "string" },
                         agentMode: { type: "string", enum: ["default", "plan", "auto"] },
@@ -1763,7 +1763,7 @@ export class AppMcpService {
                         model: { type: "string" },
                         reasoningEffort: {
                           type: "string",
-                          enum: ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+                          enum: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
                         },
                         avatarId: { type: "string" },
                         agentMode: { type: "string", enum: ["default", "plan", "auto"] },
