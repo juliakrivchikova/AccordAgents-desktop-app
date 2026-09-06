@@ -955,3 +955,66 @@ test("buildChatActivityItems sorts by status priority and dedupes running run re
     ["recent", "run-2"]
   ]);
 });
+
+test("an approval anchored to a message it is not about does not hide the newest finished row", () => {
+  const approval: ChatAppToolApproval = {
+    id: "approval-anchor",
+    conversationId: "conversation-1",
+    requesterParticipantId: participant.id,
+    requesterHandle: participant.handle,
+    requesterRoleConfigId: "engineer",
+    toolName: "shell",
+    capability: "permissions.request",
+    status: "pending",
+    request: { kind: "portable", permissions: ["webAccess"] },
+    summary: "Web access requested",
+    createdAt: "2026-01-08T11:30:00.000Z",
+    updatedAt: "2026-01-08T11:30:00.000Z"
+  };
+  const items = buildChatActivityItems(conversation({
+    metadata: { pendingAppToolApprovals: [approval] },
+    messages: [
+      participantMessage("first", { createdAt: "2026-01-08T09:00:00.000Z", metadata: { runId: "run-1" } }),
+      participantMessage("second", { createdAt: "2026-01-08T10:00:00.000Z", metadata: { runId: "run-2" } }),
+      participantMessage("newest", { createdAt: "2026-01-08T11:00:00.000Z", metadata: { runId: "run-3" } })
+    ]
+  }), { now: NOW });
+
+  const finished = items.find((item) => item.kind === "message");
+  const pendingApproval = items.find((item) => item.kind === "approval");
+  assert.equal(pendingApproval?.target.messageId, "newest");
+  assert.equal(pendingApproval?.target.messageIsApproximate, true);
+  assert.equal(finished?.target.messageId, "newest");
+  assert.equal(finished?.groupedCount, 3);
+});
+
+test("repeated conversation updates for an open chat do not inflate the collapsed count", () => {
+  const messages: ChatMessage[] = [];
+  let current: ChatActivityItem[] = [];
+  for (let index = 1; index <= 5; index += 1) {
+    messages.push(participantMessage(`update-${index}`, {
+      createdAt: new Date(Date.parse("2026-01-08T09:00:00.000Z") + index * 60_000).toISOString(),
+      metadata: { runId: `run-${index}` }
+    }));
+    // Mirrors the renderer: rebuild the updated chat, then merge back the preserved read rows.
+    const rebuilt = buildChatActivityItemsForConversationUpdate(conversation({ messages: [...messages] }), {
+      now: NOW,
+      treatAsViewed: true
+    });
+    const preservedRead = preservedRecentChatActivityItems(current, "conversation-1", { archived: false, treatAsRead: true });
+    current = mergeChatActivityItems(current, [...rebuilt, ...preservedRead], { replaceConversationId: "conversation-1" });
+    assert.equal(current.length, 1);
+    assert.equal(current[0].groupedCount ?? 1, index);
+  }
+
+  // The same state delivered again is not new work and must not raise the count.
+  for (let round = 0; round < 3; round += 1) {
+    const rebuilt = buildChatActivityItemsForConversationUpdate(conversation({ messages: [...messages] }), {
+      now: NOW,
+      treatAsViewed: true
+    });
+    const preservedRead = preservedRecentChatActivityItems(current, "conversation-1", { archived: false, treatAsRead: true });
+    current = mergeChatActivityItems(current, [...rebuilt, ...preservedRead], { replaceConversationId: "conversation-1" });
+    assert.equal(current[0].groupedCount, 5);
+  }
+});

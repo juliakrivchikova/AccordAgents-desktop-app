@@ -344,7 +344,7 @@ function pendingApprovalItems(
       return [];
     }
     const triggerMessageId = cleanString(approval.resumeContext?.triggerMessageId);
-    const targetMessage = timelineMessageForApproval(conversation.messages, approval, triggerMessageId);
+    const { message: targetMessage, approximate } = timelineMessageForApproval(conversation.messages, approval, triggerMessageId);
     const participant = participantForMessage(targetMessage, participants)
       ?? participants.get(approval.requesterParticipantId);
     const messageId = targetMessage?.id ?? triggerMessageId;
@@ -362,6 +362,7 @@ function pendingApprovalItems(
       participant,
       target: {
         approvalId: approval.id,
+        ...(approximate ? { messageIsApproximate: true as const } : {}),
         ...("kind" in approval.request && approval.request.kind === "codexApproval"
           ? { approvalKind: "codex" as const }
           : {}),
@@ -377,17 +378,17 @@ function timelineMessageForApproval(
   messages: ChatMessage[],
   approval: ChatAppToolApproval,
   triggerMessageId: string
-): ChatMessage | undefined {
+): { message: ChatMessage | undefined; approximate: boolean } {
   const triggerMessage = triggerMessageId
     ? messages.find((message) => message.id === triggerMessageId)
     : undefined;
   const exact = triggerMessage && isVisibleTimelineMessage(triggerMessage) ? triggerMessage : undefined;
   if (exact) {
-    return exact;
+    return { message: exact, approximate: false };
   }
   const visibleReference = referencedVisibleMessage(triggerMessage, messages);
   if (visibleReference) {
-    return visibleReference;
+    return { message: visibleReference, approximate: false };
   }
   const approvalMs = timeValue(approval.createdAt);
   const requesterParticipantId = cleanString(approval.requesterParticipantId);
@@ -398,9 +399,11 @@ function timelineMessageForApproval(
   const requesterMessages = requesterParticipantId
     ? visibleMessages.filter((message) => cleanString(message.participantId) === requesterParticipantId)
     : [];
-  return newestMessageByCreatedAt(requesterMessages)
+  // Nothing ties the approval to a specific message, so the newest one is only an anchor to open.
+  const anchor = newestMessageByCreatedAt(requesterMessages)
     ?? newestMessageByCreatedAt(visibleMessages)
     ?? newestMessageByCreatedAt(messages.filter(isVisibleTimelineMessage));
+  return { message: anchor, approximate: Boolean(anchor) };
 }
 
 function referencedVisibleMessage(
@@ -517,7 +520,7 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
       continue;
     }
     byId.set(item.id, item);
-    const messageId = cleanString(item.target.messageId);
+    const messageId = item.target.messageIsApproximate ? "" : cleanString(item.target.messageId);
     if (messageId) {
       const existingMessageItem = strongestByMessage.get(messageId);
       if (!existingMessageItem || strongerActivityItem(item, existingMessageItem)) {
@@ -538,7 +541,7 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
   // message). Keep the strongest row per run and per message first, so a row that loses here
   // cannot go on to win - and silently hide - its finished group below.
   const distinct = [...byId.values()].filter((item) => {
-    const messageId = cleanString(item.target.messageId);
+    const messageId = item.target.messageIsApproximate ? "" : cleanString(item.target.messageId);
     if (messageId && item.kind === "message" && item.status === "recent" && strongestByMessage.get(messageId)?.id !== item.id) {
       return false;
     }

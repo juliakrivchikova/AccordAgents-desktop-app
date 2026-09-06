@@ -63,7 +63,10 @@ export function persistActivityItemPreferences(preferences: ActivityItemPreferen
       clearedRecentThroughByGroup: Object.fromEntries(
         Object.entries(preferences.clearedRecentThroughByGroup ?? {}).slice(-MAX_STORED_ACTIVITY_CLEAR_HORIZONS)
       ),
-      clearedRecentThroughBefore: preferences.clearedRecentThroughBefore
+      clearedRecentThroughBefore: preferences.clearedRecentThroughBefore,
+      // Also written under the old key: rolling back to a build that only understands the global
+      // cutoff must not resurrect every finished row the user had already cleared.
+      clearedRecentThrough: preferences.clearedRecentThroughBefore
     }));
   } catch {
     // Local storage persistence is best-effort.

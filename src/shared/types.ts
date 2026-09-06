@@ -2081,6 +2081,11 @@ export interface ChatActivityParticipantSummary {
 export interface ChatActivityTarget {
   runId?: string;
   messageId?: string;
+  /**
+   * The message is only a navigation anchor picked as a fallback, not a message this row is
+   * actually about. Such a row must not claim that message against another row that is.
+   */
+  messageIsApproximate?: boolean;
   sourceMessageId?: string;
   threadRootId?: string;
   approvalId?: string;
