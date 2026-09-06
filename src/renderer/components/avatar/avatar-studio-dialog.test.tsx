@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import type { AvatarStudioTurnRequest, AvatarStudioTurnResult, SaveCustomAvatarRequest } from "../../../shared/avatarStudio";
 import type { AgentHealth, AppSettings } from "../../../shared/types";
 import { avatarStudioNeedsSeed, customAvatarId } from "../../../shared/avatarStudio";
+import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { isChatAvatarIdForKind, mapChatAvatarIdToKind, normalizedChatAvatarId } from "../chat/chat-avatars";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
 import { defaultChatParticipantDraft, updateChatParticipantDraft } from "../chat/chat-participant-drafts";
@@ -251,4 +252,30 @@ test("a drawn avatar survives draft normalisation and a provider change", () => 
   assert.equal(withDrawn.avatarId, drawn);
   const switched = updateChatParticipantDraft(withDrawn, SETTINGS, { kind: "codex-cli" });
   assert.equal(switched.avatarId, drawn, "a provider change must not replace the drawn avatar");
+});
+
+test("the studio offers the provider's own reasoning levels, not a shorter list", async () => {
+  const harness = await mount(() => drawn("c1"));
+  const levels = async (): Promise<string[]> => {
+    await harness.click(document.querySelector('[aria-label="Change reasoning"]'));
+    await act(async () => {});
+    const offered = [...document.querySelectorAll(".chat-app-tool-inline-menu button")].map((node) => (node.textContent ?? "").trim());
+    await harness.click(document.querySelector('[aria-label="Change reasoning"]'));
+    await act(async () => {});
+    return offered;
+  };
+  const expected = (kind: "claude-code" | "codex-cli"): string[] =>
+    ["CLI default", ...reasoningEffortOptionsForProvider(kind).map((option) => option.label)];
+
+  // The member is on Claude, so its own levels are offered.
+  assert.deepEqual(await levels(), expected("claude-code"));
+
+  await harness.click(document.querySelector('[aria-label="Change рисует"]'));
+  await act(async () => {});
+  const codex = [...document.querySelectorAll("button")].find((node) => (node.textContent ?? "").trim() === "Codex CLI" && node.closest(".chat-app-tool-inline-menu"));
+  assert.ok(codex, `provider options: ${JSON.stringify([...document.querySelectorAll(".chat-app-tool-inline-menu button")].map((n) => n.textContent?.trim()))}`);
+  await harness.click(codex);
+  await act(async () => {});
+  // Codex reaches further: Minimal at one end, Ultra at the other.
+  assert.deepEqual(await levels(), expected("codex-cli"));
 });

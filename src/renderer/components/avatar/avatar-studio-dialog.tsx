@@ -11,6 +11,7 @@ import type {
 import { AVATAR_STUDIO_PROVIDER_KINDS, avatarStudioNeedsSeed, customAvatarId, isAvatarStudioProviderKind } from "../../../shared/avatarStudio";
 import type { AgentHealth, AppSettings, ChatProviderKind, ChatReasoningEffort, ProviderModel } from "../../../shared/types";
 import { readyProviderKinds } from "../../../shared/cliReadiness";
+import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { chatCliProviderLabel } from "../chat/chat-participant-drafts";
 import { ChatParticipantInlineSelectRow } from "../chat/chat-participant-config-panel";
 import { rememberCustomAvatar } from "./custom-avatars";
@@ -21,13 +22,6 @@ interface StudioMessage {
   text: string;
   failed?: boolean;
 }
-
-const REASONING_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "", label: "CLI default" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" }
-];
 
 // A studio window keeps one id for its whole life: the main process keys the
 // drawing sessions and their scratch directories by it.
@@ -63,6 +57,15 @@ export function AvatarStudioDialog(props: {
   }, [props.agents, props.settings.providers]);
 
   const selected = candidates.find((candidate) => candidate.id === selectedId) ?? candidates[candidates.length - 1];
+  // The same per-provider list the member settings use, so Codex keeps Extra
+  // High / Max / Ultra instead of a shorter list invented here.
+  const reasoningOptions = useMemo(
+    () => [
+      { value: "", label: "CLI default" },
+      ...reasoningEffortOptionsForProvider(providerKind).map((option) => ({ value: option.id, label: option.label }))
+    ],
+    [providerKind]
+  );
   const modelOptions = useMemo(
     () => [{ value: "", label: "CLI default" }, ...models.map((entry) => ({ value: entry.id, label: entry.label ?? entry.id }))],
     [models]
@@ -130,6 +133,16 @@ export function AvatarStudioDialog(props: {
     }
     props.onOpenChange(open);
   }, [props, studioId]);
+
+  function changeProvider(kind: AvatarStudioProviderKind): void {
+    setProviderKind(kind);
+    // Model and effort belong to a provider; carrying them over would send a
+    // value the new CLI does not know.
+    setModel("");
+    if (reasoning && !reasoningEffortOptionsForProvider(kind).some((option) => option.id === reasoning)) {
+      setReasoning("");
+    }
+  }
 
   async function send(): Promise<void> {
     const text = prompt.trim();
@@ -221,9 +234,9 @@ export function AvatarStudioDialog(props: {
             />
             <ChatParticipantInlineSelectRow
               label="Reasoning"
-              value={REASONING_OPTIONS.find((option) => option.value === reasoning)?.label ?? "CLI default"}
+              value={reasoningOptions.find((option) => option.value === reasoning)?.label ?? "CLI default"}
               current={reasoning}
-              options={REASONING_OPTIONS}
+              options={reasoningOptions}
               onSelect={(value: string) => setReasoning(value)}
             />
           </div>
