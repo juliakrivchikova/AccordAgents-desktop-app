@@ -14,6 +14,8 @@ import path from "node:path";
 import {
   MACHINE_LINK_PROTOCOL,
   isMachineLinkEnvelope,
+  machineCommandId,
+  machineCommandTerminalId,
   type MachineConversationDeltaBody,
   type MachineHelloBody,
   type MachineLinkEnvelope,
@@ -36,6 +38,10 @@ import { DeviceEventChannel } from "./deviceEventChannel";
 import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { isMachineDurableMessage } from "../../shared/machineLink";
 import { NativeProcessUnavailableError } from "./nativeProcess";
+import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
+import { readPosixProcessTableAsync } from "./processTermination";
+import { verifyNativeExecutorGone } from "./nativeExecutorRecovery";
 
 export interface MachineHostOptions {
   pairing: MobilePairingPackage;
@@ -58,6 +64,7 @@ export interface MachineHostOptions {
   reconnectDelayMs?: number;
   createClient?: (pairing: MobilePairingPackage) => RelayTunnelClient;
   now?: () => Date;
+  nativeProcessDbPath?: string;
 }
 
 /** Conversation metadata the machine owns and never takes from the desktop:
@@ -120,6 +127,10 @@ export class MachineHostService {
   private closed = false;
   private draining = false;
   private readonly turnTasks = new Set<Promise<void>>();
+  private readonly commandTasks = new Map<string, Promise<void>>();
+  private readonly commandSessions = new Map<string, Promise<void>>();
+  private commandRetry?: ReturnType<typeof setTimeout>;
+  private runtimeIdentity?: Promise<NativeRuntimeIdentity>;
 
   /** approval id -> last status + updatedAt forwarded to the desktop. */
   private readonly forwardedApprovals = new Map<string, string>();
@@ -167,12 +178,17 @@ export class MachineHostService {
       apply: async (event, body) => {
         const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
         if (!isMachineLinkEnvelope(envelope) || !isMachineDurableMessage(envelope.body) ||
-            envelope.body.type === "machine.conversation.backdelta" || envelope.body.type === "machine.turn.finished") {
+            envelope.body.type === "machine.conversation.backdelta" || envelope.body.type === "machine.turn.finished" || envelope.body.type === "machine.turn.started") {
           throw new Error("Unexpected machine replication event.");
         }
         const conversationId = envelope.body.type === "machine.conversation.sync" ? envelope.body.conversation.id : "conversationId" in envelope.body ? envelope.body.conversationId : "";
         if (event.kind !== envelope.body.type || event.conversationId !== conversationId) throw new Error("Machine replication event has the wrong chat identity.");
-        await this.handleBody(envelope.body, true);
+        if (envelope.body.type === "machine.turn.request") {
+          await this.acceptCommand(event, envelope.body);
+        } else if (envelope.body.type === "machine.turn.cancel") {
+          await this.options.eventStorage.nativeCommands().cancel(envelope.body.runId, conversationId, event.eventId);
+          await this.handleBody(envelope.body, true);
+        } else await this.handleBody(envelope.body, true);
         return "applied";
       },
       onError: (error) => { void this.debugLogs.write("machine-host.events.error", { message: error.message }); }
@@ -223,14 +239,18 @@ export class MachineHostService {
       this.homeMachineId = homeMachineId;
       this.options.onDesktopMachineId?.(homeMachineId);
       this.eventChannel.start();
+      await this.recoverCommands();
     }
-    await this.client.connect();
+    await this.client.connect().catch((error) => {
+      void this.debugLogs.write("machine-host.connect.retrying", { message: errorMessage(error) });
+    });
   }
 
   close(): void {
     this.closed = true;
     this.eventChannel.close();
     this.unsubscribeRunSettled?.();
+    if (this.commandRetry) clearTimeout(this.commandRetry);
     if (this.outboxRetryTimer) {
       clearTimeout(this.outboxRetryTimer);
       this.outboxRetryTimer = undefined;
@@ -423,6 +443,7 @@ export class MachineHostService {
           this.options.onDesktopMachineId?.(body.machineId);
         }
         this.eventChannel.start();
+        await this.recoverCommands();
         return;
       case "machine.hello.request":
         // A (re)started desktop asks to be greeted: the same reconciliation
@@ -434,6 +455,13 @@ export class MachineHostService {
         void this.debugLogs.write("machine-host.settings.synced", { exportedAt: body.snapshot.exportedAt });
         await this.options.onSettingsImported?.();
         return;
+      case "machine.settings.sealed": {
+        if (body.conversationId !== `machine-settings:${this.options.pairing.rendezvousId}`) throw new Error("Settings target the wrong enrolled machine.");
+        const snapshot = await openMobileRelayPayload(body.ciphertext, this.options.pairing.relaySealKeyBase64);
+        await this.settings.importMachineSettingsSnapshot(snapshot as import("../../shared/machineLink").MachineSettingsSnapshot);
+        await this.options.onSettingsImported?.();
+        return;
+      }
       case "machine.conversation.sync":
         // A fresh copy starts clean: a previous copy's failure is forgotten
         // (the retry budget is not).
@@ -470,6 +498,7 @@ export class MachineHostService {
         await this.applyConversationDelta(body, durable);
         return;
       case "machine.turn.request":
+        if (this.activeTurns.has(body.runId) || this.pendingTerminals.has(body.runId) || this.isQueuedRun(body.runId)) return;
         if (this.draining) {
           await this.finishQueuedTurn(body, "failed", "The machine is shutting down; this turn did not start.");
           return;
@@ -492,6 +521,11 @@ export class MachineHostService {
         void this.runTurn(body);
         return;
       case "machine.turn.query":
+        if (await this.options.eventStorage.nativeCommands().forRun(body.runId)) {
+          await this.repeatCommandResult(body.runId);
+          await this.recoverCommands();
+          return;
+        }
         if (!this.activeTurns.has(body.runId) && !this.pendingTerminals.has(body.runId) && !this.isQueuedRun(body.runId) && !this.settlingRuns.has(body.runId) && !this.chat.hasActiveRunForConversation?.(body.conversationId, body.runId)) {
           await this.send({ type: "machine.turn.unknown", conversationId: body.conversationId, runId: body.runId }).catch(() => undefined);
         }
@@ -506,6 +540,22 @@ export class MachineHostService {
           return;
         }
         const controller = this.activeTurns.get(body.runId);
+        const command = await this.options.eventStorage.nativeCommands().forRun(body.runId);
+        if (!controller && command) {
+          if (command.phase === "queued") {
+            const event = await this.options.eventStorage.getChatEvent(command.eventId);
+            if (!event) throw new Error("The queued native command has lost its request.");
+            const request = await this.options.eventStorage.deviceEventBlobs().hydrate(event.payload) as MachineTurnRequestBody;
+            await this.finishQueuedTurn(request, "interrupted");
+            return;
+          }
+          // Approval resumes can be owned directly by ChatService, even when
+          // the original dispatch wrapper has already returned its result.
+          if (this.chat.cancelRun(body.runId)) return;
+          await this.repeatCommandResult(body.runId);
+          await this.recoverCommands();
+          return;
+        }
         if (!controller && !this.pendingTerminals.has(body.runId) && !this.settlingRuns.has(body.runId) && !this.chat.hasActiveRunForConversation?.(body.conversationId, body.runId)) {
           // Not running here and no result waiting: this runtime cannot
           // confirm anything about it (Rule 2), so it says so.
@@ -517,6 +567,18 @@ export class MachineHostService {
         return;
       }
       case "machine.turn.finished.ack": {
+        // The acknowledgement can win the race with this runtime's index
+        // write, or arrive after a crash lost the legacy JSON outbox. Repair
+        // the local receipt pointer before acknowledging this durable event.
+        const eventId = `machine-terminal:${body.receiptId ?? `${body.runId}:${body.finishedAt}`}`;
+        const event = await this.options.eventStorage.getChatEvent(eventId);
+        if (event && event.originId === this.options.deviceId && event.kind === "machine.turn.finished" && event.conversationId === body.conversationId &&
+            event.logScopeId === `device:${this.options.pairing.rendezvousId}:${JSON.stringify([body.conversationId, `terminal:${body.runId}`])}`) {
+          await this.options.eventStorage.nativeCommands().recordOutcome(body.runId, eventId);
+          if (body.receiptId === machineCommandId(body.runId) && await this.options.eventStorage.nativeCommands().forRun(body.runId)) {
+            await this.options.eventStorage.nativeCommands().finish(machineCommandId(body.runId));
+          }
+        }
         const stored = this.pendingTerminals.get(body.runId);
         if (stored && stored.conversationId === body.conversationId &&
             stored.receiptId === body.receiptId && stored.finishedAt === body.finishedAt) {
@@ -736,9 +798,21 @@ export class MachineHostService {
   /** A turn that never started (stopped while waiting for the copy, or the
    *  copy failed) still gets a stored, acknowledged result. */
   private async finishQueuedTurn(request: MachineTurnRequestBody, status: "interrupted" | "failed", error?: string): Promise<void> {
+    const command = await this.options.eventStorage.nativeCommands().forRun(request.runId);
+    if (command && await this.options.eventStorage.getChatEvent(command.terminalEventId)) {
+      await this.options.eventStorage.nativeCommands().finish(command.commandId);
+      return;
+    }
+    // Stop, shutdown and admission recovery may finish the same queued run.
+    // Preserve the first receipt (including its finish time) through a failed
+    // write; regenerating it would conflict with its immutable event on retry.
+    if (this.pendingTerminals.has(request.runId)) {
+      await this.flushPendingTerminals();
+      return;
+    }
     this.pendingTerminals.set(request.runId, {
       type: "machine.turn.finished",
-      receiptId: randomUUID(),
+      receiptId: command?.commandId ?? randomUUID(),
       conversationId: request.conversationId,
       runId: request.runId,
       participantId: request.participantId,
@@ -824,14 +898,138 @@ export class MachineHostService {
   }
 
   private runTurn(request: MachineTurnRequestBody): Promise<void> {
-    const task = this.draining
-      ? this.finishQueuedTurn(request, "failed", "The machine shut down before this turn started.")
-      : this.executeTurn(request);
+    const previous = this.commandTasks.get(request.runId);
+    if (previous) return previous;
+    const scope = `${request.conversationId}:${request.participantId}`;
+    const task = (this.commandSessions.get(scope) ?? Promise.resolve()).catch(() => undefined).then(() => this.admitTurn(request));
+    this.commandSessions.set(scope, task);
+    this.commandTasks.set(request.runId, task);
     this.turnTasks.add(task);
-    void task.finally(() => this.turnTasks.delete(task)).catch((error) => {
+    void task.finally(() => {
+      this.turnTasks.delete(task); this.commandTasks.delete(request.runId);
+      if (this.commandSessions.get(scope) === task) this.commandSessions.delete(scope);
+    }).catch((error) => {
       void this.debugLogs.write("machine-host.turn.not-stored", { runId: request.runId, message: errorMessage(error) });
+      this.retryCommands();
     });
     return task;
+  }
+
+  private async acceptCommand(event: ChatEventEnvelope, request: MachineTurnRequestBody): Promise<void> {
+    if (event.eventId !== machineCommandId(request.runId) || request.participant.id !== request.participantId) {
+      throw new Error("The native command has inconsistent identities.");
+    }
+    if (!this.homeMachineId) throw new Error("This machine's enrolled identity is not available yet.");
+    await this.options.eventStorage.nativeCommands().accept({
+      commandId: event.eventId, eventId: event.eventId, conversationId: request.conversationId,
+      participantId: request.participantId, runId: request.runId, terminalEventId: machineCommandTerminalId(request.runId)
+    });
+    if (request.participant.homeMachineId !== this.homeMachineId) {
+      await this.finishQueuedTurn(request, "failed", "This participant's home is not this machine; the command did not run.");
+      return;
+    }
+    // Admission is durable before acknowledging the event. Execution is
+    // independent of the receiver queue, so Stop can arrive during the turn.
+    await this.handleBody(request, true);
+  }
+
+  private getRuntimeIdentity(): Promise<NativeRuntimeIdentity> {
+    const identity = this.runtimeIdentity ??= (async () => {
+      const identity = (await readPosixProcessTableAsync())?.get(process.pid);
+      if (!identity) throw new Error("This runtime's process identity could not be verified.");
+      return { runtimeId: this.instanceId, pid: identity.pid, startedAt: identity.startedAt };
+    })();
+    void identity.catch(() => { if (this.runtimeIdentity === identity) this.runtimeIdentity = undefined; });
+    return identity;
+  }
+
+  private async admitTurn(request: MachineTurnRequestBody): Promise<void> {
+    if (this.closed) return;
+    const commands = this.options.eventStorage.nativeCommands();
+    const command = await commands.forRun(request.runId);
+    if (!command) {
+      // Direct requests remain only for the pre-cutover protocol fixtures.
+      if (this.draining) return this.finishQueuedTurn(request, "failed", "The machine shut down before this turn started.");
+      return this.executeTurn(request);
+    }
+    const storedTerminal = await this.options.eventStorage.getChatEvent(command.terminalEventId);
+    if (storedTerminal) {
+      await commands.finish(command.commandId);
+      return;
+    }
+    if (command.phase === "finished") throw new Error("A finished native command has lost its terminal event.");
+    if (this.draining) return this.finishQueuedTurn(request, "failed", "The machine shut down before this turn started.");
+    const owner = await this.getRuntimeIdentity();
+    const executor = await commands.executor(command.conversationId, command.participantId);
+    if (executor && !executor.released && executor.runtimeId !== owner.runtimeId) {
+      if (!this.options.nativeProcessDbPath || !await verifyNativeExecutorGone(executor, this.options.nativeProcessDbPath)) {
+        throw new NativeProcessUnavailableError("Waiting for the previous native executor's verified shutdown.");
+      }
+      await commands.releaseVerifiedExecutor(executor);
+    }
+    if (command.phase === "claimed") {
+      // Input may have reached the CLI before the app died. Never replay it;
+      // its surviving guardian must close before this failure is reported.
+      return this.finishQueuedTurn(request, "failed", "The machine runtime ended after accepting this command; its execution outcome is uncertain and it was not run again.");
+    }
+    if (command.cancelled) return this.finishQueuedTurn(request, "interrupted");
+    const conversation = await this.storage.getConversation(request.conversationId);
+    const participants = (conversation?.metadata as { participants?: Array<{ id: string; homeMachineId?: string }> } | undefined)?.participants;
+    if (participants?.find(participant => participant.id === request.participantId)?.homeMachineId !== this.homeMachineId) {
+      return this.finishQueuedTurn(request, "failed", "This participant no longer belongs to this machine; the command did not run.");
+    }
+    const claimed = await commands.claim(command.commandId, owner);
+    if (!claimed) throw new Error("The command is cancelled or owned by another runtime; admission will be reconciled.");
+    if ((await commands.forRun(request.runId))?.cancelled) return this.finishQueuedTurn(request, "interrupted");
+    if (this.closed) return;
+    await this.send({ type: "machine.turn.started", conversationId: request.conversationId, runId: request.runId, startedAt: this.now().toISOString() });
+    if (this.closed) return;
+    if ((await commands.forRun(request.runId))?.cancelled) return this.finishQueuedTurn(request, "interrupted");
+    return this.executeTurn(request);
+  }
+
+  private async recoverCommands(): Promise<void> {
+    if (this.closed || this.draining || !this.homeMachineId) return;
+    let cursor: { commandId: string; logicalTs: string } | undefined;
+    for (;;) {
+      const commands = await this.options.eventStorage.nativeCommands().pending(cursor);
+      for (const command of commands) {
+        const event = await this.options.eventStorage.getChatEvent(command.eventId);
+        if (!event?.logScopeId.startsWith(`device:${this.options.pairing.rendezvousId}:`)) continue;
+        const body = await this.options.eventStorage.deviceEventBlobs().hydrate(event.payload) as MachineTurnRequestBody;
+        if (body.type !== "machine.turn.request" || body.runId !== command.runId) throw new Error("The retained native command is corrupt.");
+        if (!this.activeTurns.has(body.runId) && !this.commandTasks.has(body.runId) && !this.isQueuedRun(body.runId)) {
+          await this.handleBody(body, true);
+        }
+      }
+      if (commands.length < 100) break;
+      cursor = commands[commands.length - 1];
+    }
+  }
+
+  private async repeatCommandResult(runId: string): Promise<void> {
+    const commands = this.options.eventStorage.nativeCommands();
+    const eventId = await commands.latestOutcome(runId) ?? (await commands.forRun(runId))?.terminalEventId;
+    if (!eventId) return;
+    const event = await this.options.eventStorage.getChatEvent(eventId);
+    if (!event) return;
+    const body = await this.options.eventStorage.deviceEventBlobs().hydrate(event.payload) as MachineTurnFinishedBody;
+    // A new delivery references the same immutable execution receipt. The
+    // original delivery may already be acknowledged before a late Stop arrives.
+    await this.eventChannel.publish({ conversationId: body.conversationId, kind: body.type, payload: body,
+      eventId: `machine-reconcile:${event.eventId}`, scope: `terminal:${runId}` });
+  }
+
+  private retryCommands(): void {
+    if (this.commandRetry || this.closed || this.draining) return;
+    this.commandRetry = setTimeout(() => {
+      this.commandRetry = undefined;
+      void this.recoverCommands().catch((error) => {
+        void this.debugLogs.write("machine-host.command.recovery-error", { message: errorMessage(error) });
+        this.retryCommands();
+      });
+    }, 1000);
+    this.commandRetry.unref();
   }
 
   private async executeTurn(request: MachineTurnRequestBody): Promise<void> {
@@ -842,6 +1040,11 @@ export class MachineHostService {
     };
     let terminal: MachineTurnFinishedBody;
     try {
+      if (request.sealedSettings) {
+        const snapshot = await openMobileRelayPayload(request.sealedSettings, this.options.pairing.relaySealKeyBase64);
+        await this.settings.importMachineSettingsSnapshot(snapshot as import("../../shared/machineLink").MachineSettingsSnapshot);
+        await this.options.onSettingsImported?.();
+      }
       const result = await this.chat.runMachineHostedTurn(
         {
           conversationId: request.conversationId,
@@ -882,7 +1085,7 @@ export class MachineHostService {
     // The result is kept (on disk when configured) until the desktop
     // acknowledges it: a desktop that is away, a relay that drops the frame,
     // or a restart of this runtime all get it delivered again.
-    terminal.receiptId = randomUUID();
+    terminal.receiptId = (await this.options.eventStorage.nativeCommands().forRun(request.runId))?.commandId ?? randomUUID();
     this.pendingTerminals.set(request.runId, terminal);
     this.persistOutbox();
     // The finished messages travel in the result; they are not echoed again
@@ -1087,8 +1290,13 @@ export class MachineHostService {
     }
     if (isMachineDurableMessage(body)) {
       const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : "conversationId" in body ? body.conversationId : "";
-      await this.eventChannel.publish({ conversationId, kind: body.type, payload: body,
+      const published = await this.eventChannel.publish({ conversationId, kind: body.type, payload: body,
+        ...(body.type === "machine.turn.started" ? { eventId: `machine-started:${body.runId}`, scope: `terminal:${body.runId}` } : {}),
         ...(body.type === "machine.turn.finished" ? { eventId: `machine-terminal:${body.receiptId ?? `${body.runId}:${body.finishedAt}`}`, scope: `terminal:${body.runId}` } : {}) });
+      if (body.type === "machine.turn.finished") await this.options.eventStorage.nativeCommands().recordOutcome(body.runId, published.eventId);
+      if (body.type === "machine.turn.finished" && body.receiptId === machineCommandId(body.runId) && await this.options.eventStorage.nativeCommands().forRun(body.runId)) {
+        await this.options.eventStorage.nativeCommands().finish(machineCommandId(body.runId));
+      }
       return;
     }
     const to = this.desktopDeviceId;

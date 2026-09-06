@@ -85,6 +85,7 @@ export function foldMachineTurnResult(
   }
   bubble.metadata = { ...bubble.metadata, machineOutcome: { runId, status: result.status, ...(result.finishedAt ? { finishedAt: result.finishedAt } : {}), ...(result.receiptId ? { receiptId: result.receiptId } : {}) } };
   delete bubble.metadata.stopPending;
+  delete bubble.metadata.machinePending;
   switch (result.status) {
     case "completed":
       if (reply) {

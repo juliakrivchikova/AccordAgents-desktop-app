@@ -77,6 +77,13 @@ export interface MachineSettingsSyncBody {
   snapshot: MachineSettingsSnapshot;
 }
 
+export interface MachineSettingsSealedBody {
+  type: "machine.settings.sealed";
+  /** Device settings stream, not a user's conversation. */
+  conversationId: string;
+  ciphertext: string;
+}
+
 /** Full copy of a conversation, sent once per machine and after any gap. */
 export interface MachineConversationSyncBody {
   type: "machine.conversation.sync";
@@ -103,6 +110,9 @@ export interface MachineTurnRequestBody {
   runId: string;
   pendingMessageId: string;
   requestedAt: string;
+  /** Sealed before entering the immutable log: environment values must not
+   * become plaintext chat history or blob fragments on either endpoint. */
+  sealedSettings?: string;
 }
 
 export interface MachineTurnCancelBody {
@@ -116,6 +126,13 @@ export interface MachineTurnProgressBody {
   conversationId: string;
   runId: string;
   progress: ReviewProgress;
+}
+
+export interface MachineTurnStartedBody {
+  type: "machine.turn.started";
+  conversationId: string;
+  runId: string;
+  startedAt: string;
 }
 
 export interface MachineTurnFinishedBody {
@@ -251,11 +268,13 @@ export type MachineLinkMessage =
   | MachineHelloBody
   | MachineHelloAckBody
   | MachineSettingsSyncBody
+  | MachineSettingsSealedBody
   | MachineConversationSyncBody
   | MachineConversationDeltaBody
   | MachineTurnRequestBody
   | MachineTurnCancelBody
   | MachineTurnProgressBody
+  | MachineTurnStartedBody
   | MachineTurnFinishedBody
   | MachineConversationBackDeltaBody
   | MachineApprovalRequestedBody
@@ -278,18 +297,24 @@ export function isMachineReplicationMessage(body: MachineLinkMessage): boolean {
 }
 
 export function isMachineDurableMessage(body: MachineLinkMessage): boolean {
-  return isMachineReplicationMessage(body) || body.type === "machine.turn.finished" || body.type === "machine.turn.finished.ack";
+  return isMachineReplicationMessage(body) || body.type === "machine.turn.finished" || body.type === "machine.turn.finished.ack" ||
+    body.type === "machine.turn.request" || body.type === "machine.turn.cancel" || body.type === "machine.settings.sealed" || body.type === "machine.turn.started";
 }
+
+export function machineCommandId(runId: string): string { return `machine-command:${runId}`; }
+export function machineCommandTerminalId(runId: string): string { return `machine-terminal:${machineCommandId(runId)}`; }
 
 const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.hello",
   "machine.hello.ack",
   "machine.settings.sync",
+  "machine.settings.sealed",
   "machine.conversation.sync",
   "machine.conversation.delta",
   "machine.turn.request",
   "machine.turn.cancel",
   "machine.turn.progress",
+  "machine.turn.started",
   "machine.turn.finished",
   "machine.conversation.backdelta",
   "machine.approval.requested",

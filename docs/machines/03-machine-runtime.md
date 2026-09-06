@@ -232,11 +232,43 @@ The EC2 was stopped again after QA. Real Claude verification remains blocked by
 the provider quota; physical-phone checks remain open. Windows and other provider
 paths have not acquired this process-ownership mechanism yet.
 
-`NativeCommandStore` is a tested foundation for durable native command admission,
-early Stop tombstones and command deduplication in `accordagents.sqlite3`; it is
-**not yet wired into dispatch**. Native commands, settings, approvals and the
-remaining event-contract work below are still incomplete. This section does not
-mark the full machine transition or cutover ready.
+### Durable command admission, 2026-09-06
+
+`NativeCommandStore` now owns dispatch admission in `accordagents.sqlite3`.
+The source commits a signed request and its recipient outbox together, after
+the conversation-copy events. An already enrolled, offline machine shows
+"Waiting for machine <name>"; neither simultaneous connectivity nor a new SSH
+process is required. The receiver records acceptance before ACK, serializes
+commands per member session in signed logical order, and claims its executor
+generation before native input. A retained Stop uses an independent stream and
+a durable tombstone, including when it arrives before its request.
+
+After runtime loss a claimed command is never replayed. Recovery requires the
+previous app identity to be gone and its guardian to have closed the provider
+tree (or verified reboot of the same OS host); it then records an uncertain
+execution outcome. A terminal has one immutable identity, including through
+concurrent Stop, shutdown and failed-write retries. Receiver application of
+the started state and terminal must save successfully before their ACKs.
+
+Each request retains its settings snapshot, encrypted before event/blob
+persistence, so a later settings change cannot change an offline command.
+Separate settings updates are also durable and sealed. The receiver replaces
+configuration and its locally encrypted environment in one fsynced atomic write;
+an unreadable source secret refuses export instead of silently removing that
+variable on the machine. Concurrent headless starts publish one complete secret
+key exclusively, and a corrupt key is never replaced.
+
+Real Electron/public-relay QA on 2026-09-06: an offline request showed the waiting
+badge and completed after machine startup; another command and its answer
+crossed the mailbox with no simultaneous controller/machine connection, then
+appeared once after desktop restart with the machine already off. Stop queued
+offline was delivered and confirmed; a separate Stop on a running Python child
+confirmed in 631 ms with that PID gone. The next Codex turn resumed the same
+session and returned an earlier marker from context. Supporting failure tests
+cover failed admission, failed claim/terminal/started-state writes, early Stop,
+duplicate recovery, a surviving guardian, settings/key failures, and receipt
+index repair. These results do not mark the full transition or cutover ready:
+durable approvals, PWA and the remaining event contract are still open.
 
 ## Cost on a large chat
 
@@ -259,7 +291,12 @@ computer for that measurement. The 14,000-row case is a historical scale fixture
 not a claim about today's largest chat. A separate public-mailbox probe carried
 13,920,011 raw bytes in 36 fragments, maximum 700,218 bytes per POST, and applied
 once after sender exit. Single large messages and metadata in the converted
-events now fragment; direct settings/progress/control still need conversion.
+events now fragment. In the isolated QA profile a retained command body was at
+most 99,459 bytes (settings ciphertext included), a settings update 98,658 bytes,
+and started/Stop bodies 173/133 bytes; these are QA settings, not a new measurement
+of the User's catalogue. Their large bodies use the same fragments and bounded
+SQLite stdin path, rather than one CLI argument or relay frame. Direct progress
+and approval control still need conversion.
 
 Bodies, fragments, event headers, delivery receipts and inventory stay in the
 endpoints' local SQLite; only sealed packets reach the User's relay buffer.
@@ -279,7 +316,7 @@ Under the user-data directory: `accordagents.sqlite3` (its copy of the chats it 
 
 - User choices (`User choice:` blocks) raised by a member on a machine reach the desktop as ordinary messages; the answer travels back as the next user message, which is the same round trip a local member gets. Nothing else is forwarded for them yet.
 - A machine-hosted member's requests to other members run on the machine's copy; routing them to the other members' home machines follows the event contract (`docs/machines/02-event-contract.md`).
-- Conversation copies/deltas and terminal outcomes now use durable delivery and accepted-event clock observation; native commands, approval RPCs, settings and progress still need conversion, followed by the PWA's IndexedDB clock/outbox and chat-wide event projections.
+- Conversation copies/deltas, native command admission/Stop, settings and terminal outcomes now use durable delivery and accepted-event clock observation; approval RPCs and progress still need conversion, followed by the PWA's IndexedDB clock/outbox and chat-wide event projections.
 - The doctor/setup flow does not yet install the runtime over SSH; the steps above are manual until it does.
 - The machine-owned three-hour AWS idle stop and scoped phone wake still need implementation and verification; the desktop timer does not protect against the desktop dying. The current manual QA deployment is not an always-on production installation.
 - The legacy worker path and the cloud-only prompt branch remain until the cutover commit removes them.

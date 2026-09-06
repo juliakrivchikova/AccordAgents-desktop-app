@@ -29,7 +29,7 @@ import type { DebugLogService } from "./debugLogs";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
 import { RelayTunnelClient } from "./relayTunnelClient";
 import type { SettingsService } from "./settings";
-import { isMachineDurableMessage } from "../../shared/machineLink";
+import { isMachineDurableMessage, machineCommandId } from "../../shared/machineLink";
 import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { DeviceEventChannel } from "./deviceEventChannel";
 import type { ChatEventLogService } from "./chatEventLog";
@@ -140,6 +140,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private readonly emitter = new EventEmitter();
   private readonly approvalListeners: Array<(event: MachineApprovalEvent) => Promise<void> | void> = [];
   private readonly lateTerminalListeners: Array<(event: MachineLateTerminalEvent) => Promise<void> | void> = [];
+  private readonly runStartedListeners: Array<(event: { conversationId: string; runId: string }) => Promise<void> | void> = [];
   private readonly backDeltaListeners: Array<(delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void> = [];
   private conversationLoader?: (conversationId: string) => Promise<Conversation | undefined>;
   private readonly connections = new Map<string, MachineConnection>();
@@ -157,6 +158,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
   onStatus(listener: (status: MachineLinkStatus[]) => void): () => void {
     this.emitter.on("status", listener);
     return () => this.emitter.off("status", listener);
+  }
+
+  onRunStarted(listener: (event: { conversationId: string; runId: string }) => Promise<void> | void): () => void {
+    this.runStartedListeners.push(listener);
+    return () => { const index = this.runStartedListeners.indexOf(listener); if (index >= 0) this.runStartedListeners.splice(index, 1); };
   }
 
   /** Conversation changes made on a machine (approval cards, requests). The
@@ -403,12 +409,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
         await request.onStopPending?.(connection.record.name);
       }
     };
-    if (!connection.machineDeviceId) {
-      await waiting();
-      return;
-    }
     try {
       await this.send(connection, { type: "machine.turn.cancel", conversationId: request.conversationId, runId: request.runId });
+      if (!connection.machineDeviceId) await waiting();
       const grace = setTimeout(() => { void waiting().catch((error) => {
         void this.debugLogs.write("machine-link.stop.feedback-error", { runId: request.runId, message: errorMessage(error) });
       }); }, STOP_CONFIRM_GRACE_MS);
@@ -423,7 +426,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   async syncSettings(): Promise<void> {
     const snapshot = await this.settings.exportMachineSettingsSnapshot();
     for (const connection of this.connections.values()) {
-      if (!connection.machineDeviceId) {
+      if (!connection.eventChannel) {
         connection.settingsSynced = false;
         continue;
       }
@@ -443,7 +446,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     );
     for (const machineId of machineIds) {
       const connection = this.connections.get(machineId);
-      if (!connection?.machineDeviceId) {
+      if (!connection?.eventChannel) {
         continue;
       }
       await this.waitForIntroduction(connection);
@@ -457,7 +460,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (!connection) {
       return { status: "failed", messages: [], warnings: [], error: `@${request.participant.handle} is hosted on a machine that is not enrolled on this desktop.` };
     }
-    if (!connection.machineDeviceId) {
+    if (!connection.eventChannel && !connection.machineDeviceId) {
       return { status: "failed", messages: [], warnings: [], error: `@${request.participant.handle} is hosted on ${connection.record.name}, which is not connected.` };
     }
     const interrupted: MachineTurnDispatchResult = { status: "interrupted", messages: [], warnings: [] };
@@ -502,11 +505,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
     try {
       await this.waitForIntroduction(connection, request.signal);
       if (request.signal?.aborted) return interrupted;
-      // Settings are small (roles, rules, presets, environment) and must be
-      // exactly the desktop's at the moment the turn starts, so they travel
-      // with every turn request rather than on a change hook.
-      await this.send(connection, { type: "machine.settings.sync", snapshot: await this.settings.exportMachineSettingsSnapshot() });
-      connection.settingsSynced = true;
+      // The request retains its settings even if neither endpoint is online
+      // at the same time. Seal before the append: settings can contain secrets
+      // and can exceed one relay frame on the User's actual skill catalogue.
+      const sealedSettings = await sealMobileRelayPayload(await this.settings.exportMachineSettingsSnapshot(), connection.pairing.relaySealKeyBase64);
       if (request.signal?.aborted) {
         return interrupted;
       }
@@ -526,6 +528,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       if (request.signal?.aborted) {
         return interrupted;
       }
+      if (!connection.machineDeviceId) await request.onMachineWaiting?.(connection.record.name);
       await this.send(connection, {
         type: "machine.turn.request",
         conversationId: request.conversation.id,
@@ -534,6 +537,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         messageId: request.triggerMessage.id,
         runId: request.runId,
         pendingMessageId: request.pendingMessageId,
+        sealedSettings,
         requestedAt: this.now().toISOString()
       }, () => {
         // Queueing and sealing are still preparation. This synchronous fence
@@ -584,7 +588,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   private waitForIntroduction(connection: MachineConnection, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted || (connection.eventChannel && connection.settingsSynced)) return Promise.resolve();
+    if (signal?.aborted || connection.eventChannel) return Promise.resolve();
     return new Promise<void>((resolve, reject) => {
       const finish = (error?: Error): void => {
         clearTimeout(timer);
@@ -594,7 +598,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       };
       const check = (): void => {
         if (!this.connections.has(connection.record.id)) finish(new Error("The machine was removed while connecting."));
-        else if (connection.eventChannel && connection.settingsSynced) finish();
+        else if (connection.eventChannel) finish();
       };
       const aborted = (): void => finish();
       const timer = setTimeout(() => finish(new Error(`Machine ${connection.record.name} did not finish introducing its event channel.`)), 15_000);
@@ -792,7 +796,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         },
         apply: async (event, body) => {
           const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
-          if (!isMachineLinkEnvelope(envelope) || !["machine.conversation.backdelta", "machine.turn.finished"].includes(envelope.body.type) ||
+          if (!isMachineLinkEnvelope(envelope) || !["machine.conversation.backdelta", "machine.turn.finished", "machine.turn.started"].includes(envelope.body.type) ||
               !("conversationId" in envelope.body) ||
               event.kind !== envelope.body.type || event.conversationId !== envelope.body.conversationId) {
             throw new Error("Unexpected machine replication event.");
@@ -800,6 +804,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
           if (envelope.body.type === "machine.turn.finished") {
             const stored = await this.finishTurn(connection, envelope.body, () => connection.eventChannel!.confirmApplied(event));
             return stored ? "applied" : "deferred";
+          }
+          if (envelope.body.type === "machine.turn.started") {
+            await Promise.all(this.runStartedListeners.map(listener => listener(envelope.body as { conversationId: string; runId: string })));
+            return "applied";
           }
           await this.handleBody(connection, envelope.body);
           return "applied";
@@ -886,6 +894,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
       if (listed.has(runId) || asked.has(runId) || preparing) {
         continue;
       }
+      // A retained command may still be in the sealed mailbox or waiting on
+      // earlier copy events. A live query must not overtake durable admission.
+      if (await this.options.eventStorage.getChatEvent(machineCommandId(runId))) continue;
       asked.add(runId);
       void this.debugLogs.write("machine-link.turn.queried", { machineId: connection.record.id, runId });
       await this.send(connection, { type: "machine.turn.query", conversationId, runId }).catch(() => undefined);
@@ -963,6 +974,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       // stale answer): the turn is about to be dispatched, nothing to close.
       return;
     }
+    if (await this.options.eventStorage.getChatEvent(machineCommandId(body.runId))) return;
     const detail = held
       ? `Machine ${connection.record.name} does not know this run any more; whether its processes are gone is not verified.`
       : `Machine ${connection.record.name} does not know this run any more (it restarted or lost it before finishing).`;
@@ -1043,14 +1055,22 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   private async sendNow(connection: MachineConnection, body: MachineLinkMessage, beforeWrite?: () => void): Promise<void> {
+    if (body.type === "machine.settings.sync") {
+      return this.sendNow(connection, {
+        type: "machine.settings.sealed", conversationId: `machine-settings:${connection.pairing.rendezvousId}`,
+        ciphertext: await sealMobileRelayPayload(body.snapshot, connection.pairing.relaySealKeyBase64)
+      }, beforeWrite);
+    }
     if (isMachineDurableMessage(body)) {
       if (!connection.eventChannel) throw new Error("The machine has not introduced its event channel yet.");
       const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : "conversationId" in body ? body.conversationId : "";
+      beforeWrite?.();
       await connection.eventChannel.publish({ conversationId, kind: body.type, payload: body,
+        ...(body.type === "machine.turn.request" ? { eventId: machineCommandId(body.runId) } : {}),
+        ...(body.type === "machine.turn.cancel" ? { eventId: `machine-cancel:${body.runId}`, scope: `cancel:${body.runId}` } : {}),
         ...(body.type === "machine.turn.finished.ack" ? { eventId: `machine-terminal-ack:${body.receiptId ?? `${body.runId}:${body.finishedAt}`}`, scope: `terminal-ack:${body.runId}` } : {}) });
       return;
     }
-    if (body.type === "machine.turn.request") await connection.eventChannel?.flush();
     const to = connection.machineDeviceId;
     if (!to) {
       throw new Error(`${connection.record.name} is not connected.`);

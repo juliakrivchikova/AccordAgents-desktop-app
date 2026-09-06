@@ -19,6 +19,11 @@ export const NATIVE_COMMAND_SCHEMA_SQL = `
     conversation_id text not null,
     event_id text not null references chat_events(event_id)
   );
+  create table if not exists native_run_outcomes (
+    run_id text primary key,
+    event_id text not null references chat_events(event_id),
+    origin_seq integer not null
+  );
   create table if not exists native_session_executors (
     conversation_id text not null,
     participant_id text not null,
@@ -70,7 +75,8 @@ export class NativeCommandStore {
     await this.database.init();
     await this.database.execute(durable(`begin immediate;
       insert into native_run_cancellations(run_id, conversation_id, event_id)
-      select ${quote(runId)}, ${quote(conversationId)}, event_id from chat_events
+      select ${quote(runId)}, case when exists(select 1 from native_commands where run_id = ${quote(runId)} and conversation_id != ${quote(conversationId)})
+        then null else ${quote(conversationId)} end, event_id from chat_events
         where event_id = ${quote(eventId)} and conversation_id = ${quote(conversationId)}
       on conflict(run_id) do update set conversation_id = case
         when conversation_id = excluded.conversation_id then conversation_id else null end;
@@ -111,11 +117,37 @@ export class NativeCommandStore {
     return rows[0] ? normalizeCommand(rows[0]) : undefined;
   }
 
-  async pending(afterCommandId = ""): Promise<NativeCommand[]> {
+  async forRun(runId: string): Promise<NativeCommand | undefined> {
     await this.database.init();
-    const rows = await this.database.query<NativeCommand>(`select ${COMMAND_COLUMNS} from native_commands
-      where phase != 'finished' and command_id > ${quote(afterCommandId)} order by command_id limit 100;`);
-    return rows.map(normalizeCommand);
+    const rows = await this.database.query<NativeCommand>(`select ${COMMAND_COLUMNS} from native_commands where run_id = ${quote(runId)};`);
+    return rows[0] ? normalizeCommand(rows[0]) : undefined;
+  }
+
+  /** Native continuations can finish after their original dispatch wrapper.
+   * Keep the latest immutable receipt, including after its transport ACK. */
+  async recordOutcome(runId: string, eventId: string): Promise<void> {
+    await this.database.init();
+    await this.database.execute(durable(`insert into native_run_outcomes(run_id, event_id, origin_seq)
+      select ${quote(runId)}, event_id, origin_seq from chat_events where event_id = ${quote(eventId)} and kind = 'machine.turn.finished'
+      on conflict(run_id) do update set event_id = excluded.event_id, origin_seq = excluded.origin_seq
+        where excluded.origin_seq > native_run_outcomes.origin_seq;`));
+  }
+
+  async latestOutcome(runId: string): Promise<string | undefined> {
+    await this.database.init();
+    const rows = await this.database.query<{ eventId: string }>(`select event_id as eventId from native_run_outcomes where run_id = ${quote(runId)};`);
+    return rows[0]?.eventId;
+  }
+
+  async pending(after?: { commandId: string; logicalTs: string }): Promise<Array<NativeCommand & { logicalTs: string }>> {
+    await this.database.init();
+    const rows = await this.database.query<NativeCommand & { logicalTs: string }>(`select c.command_id as commandId, c.event_id as eventId,
+      c.conversation_id as conversationId, c.participant_id as participantId, c.run_id as runId, c.terminal_event_id as terminalEventId,
+      c.phase, c.runtime_id as runtimeId, c.executor_generation as executorGeneration, c.cancelled, e.logical_ts as logicalTs
+      from native_commands c join chat_events e on e.event_id = c.event_id
+      where c.phase != 'finished' ${after ? `and (e.logical_ts, c.command_id) > (${quote(after.logicalTs)}, ${quote(after.commandId)})` : ""}
+      order by e.logical_ts, c.command_id limit 100;`);
+    return rows.map(row => ({ ...normalizeCommand(row), logicalTs: row.logicalTs }));
   }
 
   async executor(conversationId: string, participantId: string): Promise<NativeSessionExecutor | undefined> {

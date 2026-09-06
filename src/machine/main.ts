@@ -176,6 +176,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     eventLog: chatEventLogService,
     publicKeyDerBase64: identity.publicKeyDerBase64,
     outboxPath: path.join(userDataPath(), "machine-outbox.json"),
+    nativeProcessDbPath: path.join(userDataPath(), "native-processes.sqlite3"),
     detectProviders: () => cliAgentRunner.detectAgents(),
     onSettingsImported: async () => {
       cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());

@@ -121,8 +121,14 @@ restart. Small header probes repair expired events or ACKs even when peers never
 overlap online; normal delivered bodies are not uploaded again on every poll.
 Mailbox acceptance, peer acknowledgement and application remain distinct.
 
-This is not the complete event-contract cutover: native dispatch/control,
-settings, approvals and progress still require conversion; PWA IndexedDB outbox,
+Native dispatch, Stop, started-state feedback and encrypted settings now use this
+channel too. Dispatch acceptance and executor claims have a separate durable
+ledger; process-loss recovery never repeats already claimed native input and
+requires verified guardian closure before relinquishing an old executor.
+Settings are encrypted before they enter the immutable event/blob store.
+
+This is not the complete event-contract cutover: approvals and progress still
+require conversion; PWA IndexedDB outbox,
 canonical chat-wide roster fan-out, pure conflict projections, hash-bound
 artifact signatures, pressure UI and history/blob garbage collection remain.
 The retained history and blob fragments currently stay in local SQLite after

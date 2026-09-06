@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { hostPlatform, userDataPath } from "../platform";
@@ -2588,21 +2588,28 @@ export class SettingsService {
 
   async getManualAgentEnvironment(): Promise<{ env: NodeJS.ProcessEnv; version: string }> {
     const stored = await this.readStored();
+    return this.readManualAgentEnvironment(stored);
+  }
+
+  private readManualAgentEnvironment(stored: StoredSettings, requireComplete = false): { env: NodeJS.ProcessEnv; version: string } {
     const env: NodeJS.ProcessEnv = {};
     for (const variable of stored.agentEnvironment?.variables ?? []) {
       if (variable.enabled === false) {
         continue;
       }
       if (normalizeAgentEnvironmentKey(variable.key) !== variable.key) {
+        if (requireComplete) throw new Error("Machine environment contains an invalid key; no settings were sent.");
         continue;
       }
       try {
         assertAgentEnvironmentKeyAllowed(variable.key);
       } catch {
+        if (requireComplete) throw new Error("Machine environment contains a forbidden key; no settings were sent.");
         continue;
       }
       const value = this.decodeAgentEnvironmentValue(variable);
       if (value === undefined) {
+        if (requireComplete) throw new Error(`The configured environment value ${variable.key} could not be read; no machine settings were sent.`);
         continue;
       }
       env[variable.key] = value;
@@ -2686,21 +2693,34 @@ export class SettingsService {
     }
   }
 
-  private async writeStored(settings: StoredSettings): Promise<void> {
+  private async writeStored(settings: StoredSettings, durable = false): Promise<void> {
+    const previous = this.storedState;
     this.storedState = settings;
     const serialized = `${JSON.stringify(settings, null, 2)}\n`;
     const write = this.storedWriteQueue.then(async () => {
       await mkdir(path.dirname(this.settingsPath), { recursive: true });
       const temporary = `${this.settingsPath}.${randomUUID()}.tmp`;
       try {
-        await writeFile(temporary, serialized, { encoding: "utf8", mode: 0o600 });
+        if (durable) {
+          const file = await open(temporary, "wx", 0o600);
+          try { await file.writeFile(serialized, "utf8"); await file.sync(); }
+          finally { await file.close(); }
+        } else await writeFile(temporary, serialized, { encoding: "utf8", mode: 0o600 });
         await rename(temporary, this.settingsPath);
+        if (durable && process.platform !== "win32") {
+          const directory = await open(path.dirname(this.settingsPath), "r");
+          try { await directory.sync(); } finally { await directory.close(); }
+        }
       } finally {
         await rm(temporary, { force: true }).catch(() => undefined);
       }
     });
     this.storedWriteQueue = write.catch(() => undefined);
-    await write;
+    try { await write; }
+    catch (error) {
+      if (durable && this.storedState === settings) this.storedState = previous;
+      throw error;
+    }
   }
 
   private mergeDefaults(settings: StoredSettings): StoredSettings {
@@ -3294,7 +3314,9 @@ export class SettingsService {
       lastRepoPath: _lastRepoPath,
       ...shareable
     } = stored;
-    const environment = await this.getManualAgentEnvironment();
+    // A partial export would remove the unreadable variable on the receiver.
+    // Read the same snapshot and fail before publishing anything instead.
+    const environment = this.readManualAgentEnvironment(stored, true);
     return {
       version: 1,
       exportedAt: new Date().toISOString(),
@@ -3314,6 +3336,21 @@ export class SettingsService {
       throw new Error("Machine settings snapshot is invalid.");
     }
     const incoming = JSON.parse(snapshot.settingsJson) as Partial<StoredSettings>;
+    if (!incoming || typeof incoming !== "object" || Array.isArray(incoming) || !Array.isArray(snapshot.agentEnvironment)) {
+      throw new Error("Machine settings snapshot is invalid.");
+    }
+    if (snapshot.agentEnvironment.length && !hostPlatform().secrets.isEncryptionAvailable()) {
+      throw new Error("Machine environment requires the machine's secret store.");
+    }
+    const now = new Date().toISOString();
+    const seen = new Set<string>();
+    const variables = snapshot.agentEnvironment.map((entry): StoredAgentEnvironmentVariable => {
+      if (!entry || typeof entry.value !== "string") throw new Error("Machine environment contains an invalid value.");
+      const key = assertAgentEnvironmentKeyAllowed(entry.key);
+      if (seen.has(key)) throw new Error("Machine environment contains a duplicate key.");
+      seen.add(key);
+      return { key, ...this.encodeAgentEnvironmentValue(entry.value), enabled: true, updatedAt: now };
+    });
     const stored = await this.readStored();
     const next: StoredSettings = {
       ...stored,
@@ -3322,34 +3359,23 @@ export class SettingsService {
       encryptedAwsCredentials: stored.encryptedAwsCredentials,
       awsWorkerHandle: stored.awsWorkerHandle,
       awsWorkerRegion: stored.awsWorkerRegion,
+      awsWorkerOperation: stored.awsWorkerOperation,
+      awsWorkerProvisioningToken: stored.awsWorkerProvisioningToken,
+      awsWorkerSpecAcceptance: stored.awsWorkerSpecAcceptance,
+      awsWorkerVolumeExpansion: stored.awsWorkerVolumeExpansion,
       cloudRuns: stored.cloudRuns,
       cloudRunsMode: stored.cloudRunsMode,
       cloudRunsDeviceId: stored.cloudRunsDeviceId,
-      agentEnvironment: stored.agentEnvironment,
+      agentEnvironment: { variables },
       machines: stored.machines,
       encryptedMachinePairings: stored.encryptedMachinePairings,
       remoteSessionCleanupTombstones: stored.remoteSessionCleanupTombstones,
       lastRepoPath: stored.lastRepoPath
     };
-    await this.writeStored(next);
-    const existing = new Set((stored.agentEnvironment?.variables ?? []).map((variable) => variable.key));
-    const incomingKeys = new Set<string>();
-    for (const entry of snapshot.agentEnvironment ?? []) {
-      if (!entry || typeof entry.key !== "string" || typeof entry.value !== "string") {
-        continue;
-      }
-      incomingKeys.add(entry.key);
-      try {
-        await this.saveAgentEnvironmentVariable({ key: entry.key, value: entry.value, enabled: true });
-      } catch {
-        // A key this machine's policy refuses stays absent; the desktop keeps it.
-      }
-    }
-    for (const key of existing) {
-      if (!incomingKeys.has(key)) {
-        await this.deleteAgentEnvironmentVariable(key).catch(() => undefined);
-      }
-    }
+    // One atomic settings write replaces both configuration and environment.
+    // A failed secret operation or disk write must not launch with a partially
+    // applied snapshot, or silently retain an obsolete environment variable.
+    await this.writeStored(next, true);
   }
 
   private readMachinePairings(stored: StoredSettings): Record<string, MobilePairingPackage> {

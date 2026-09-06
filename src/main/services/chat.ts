@@ -647,6 +647,7 @@ export interface MachineTurnDispatchRequest {
    *  requested but the machine has not confirmed it, so the User sees the
    *  honest state instead of a silent wait. */
   onStopPending?: (machineName: string) => void;
+  onMachineWaiting?: (machineName: string) => Promise<void>;
 }
 
 export interface MachineTurnDispatchResult {
@@ -6855,6 +6856,15 @@ export class ChatService {
         pendingMessageId: pendingMessage.id,
         signal,
         progress,
+        onMachineWaiting: async (machineName) => {
+          await this.withChatMutation(conversation, async () => {
+            for (const bubble of bubbleObjects().filter(item => item.status === "pending")) {
+              bubble.metadata = { ...bubble.metadata, machinePending: { machineName, at: new Date().toISOString() } };
+            }
+            this.queueSnapshot(conversation);
+          });
+          if (!await this.waitForQueuedSaveResult(conversation.id)) throw new Error("The waiting machine command could not be stored.");
+        },
         onStopPending: (machineName) => {
           void this.debugLogs.write("chat.stop-pending.requested", { conversationId: conversation.id, runId, pendingMessageId: pendingMessage.id });
           void this.withChatMutation(conversation, async () => {
@@ -7038,6 +7048,19 @@ export class ChatService {
       }
       return result;
     });
+  }
+
+  async applyMachineRunStarted(request: { conversationId: string; runId: string }): Promise<void> {
+    const conversation = await this.requireChat(request.conversationId);
+    await this.withChatMutation(conversation, async () => {
+      for (const message of conversation.messages) {
+        if (message.status === "pending" && message.metadata?.runId === request.runId) delete message.metadata.machinePending;
+      }
+      // Retry the write even when a previous failed save already cleared the
+      // in-memory mark. Transport acknowledgement requires a stored projection.
+      this.queueSnapshot(conversation);
+    });
+    if (!await this.waitForQueuedSaveResult(conversation.id)) throw new Error("The machine's started state could not be stored.");
   }
 
   /** Machines transport, desktop side: a turn result (any status) for a run

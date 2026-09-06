@@ -6,6 +6,65 @@ import { desktopEvents, hostEvents, DESKTOP_ID, MACHINE_ID, DESKTOP_ISSUER } fro
 const require = createRequire(import.meta.url);
 const { createReferenceRelayServer } = require("./relay-reference-server.cjs");
 
+test("a command queued with the machine offline survives a desktop restart and executes once with its sealed settings", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  const pairing = machinePairing(address.url);
+  const record = { id: "machine-offline", name: "Offline test", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId,
+    createdAt: new Date().toISOString(), lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } };
+  let envValue = "synthetic-retained-secret";
+  const settings = {
+    listMachines: async () => [record], getMachinePairing: async () => pairing,
+    saveMachine: async next => { Object.assign(record, next); return [record]; },
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: "{}", agentEnvironment: [{ key: "TEST", value: envValue }] })
+  };
+  const logs = [], outcomes = [], runs = [], conversations = new Map();
+  const debugLogs = { write: async (event, payload) => logs.push({ event, payload }) };
+  const createLink = () => new MachineLinkService(settings, debugLogs, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50 });
+  let link = createLink(), host;
+  try {
+    await link.start();
+    const participant = { id: "offline-member", homeMachineId: record.id, handle: "bot", kind: "codex-cli" };
+    const triggerMessage = { id: "offline-message", role: "user", content: "retained", createdAt: new Date().toISOString() };
+    const conversation = { id: "offline-chat", kind: "chat", title: "offline", messages: [triggerMessage], metadata: { participants: [participant] }, findings: [], createdAt: triggerMessage.createdAt, updatedAt: triggerMessage.createdAt };
+    const waiting = link.runTurn({ conversation, participant, triggerMessage, runId: "offline-command", pendingMessageId: "offline-reply" });
+    void waiting.catch(() => undefined);
+    await waitFor(async () => Boolean(await desktopEvents.eventStorage.getChatEvent("machine-command:offline-command")), 5_000);
+    const event = await desktopEvents.eventStorage.getChatEvent("machine-command:offline-command");
+    assert.equal(JSON.stringify(await desktopEvents.eventStorage.deviceEventBlobs().hydrate(event.payload)).includes(envValue), false);
+    assert.ok(record.pendingRuns.some(run => run.runId === "offline-command"));
+    link.close();
+    envValue = "a-later-settings-value";
+    link = createLink(); link.onLateTerminal(async outcome => outcomes.push(outcome));
+    let rejectStartedSave = true, startedApplyAttempts = 0;
+    link.onRunStarted(async () => {
+      startedApplyAttempts++;
+      if (rejectStartedSave) throw new Error("SQLITE_FULL: cannot store the started state");
+    });
+    await link.start();
+    let imported;
+    host = new MachineHostService({
+      runMachineHostedTurn: async request => { runs.push({ id: request.runId, environment: imported.agentEnvironment[0].value }); return { messages: [], warnings: [] }; },
+      cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async (id, merge) => { const next = merge(conversations.get(id)); if (next) conversations.set(id, next); }
+    }, { getConversation: async id => conversations.get(id) }, { importMachineSettingsSnapshot: async snapshot => { imported = snapshot; } }, debugLogs,
+    { ...hostEvents, pairing, deviceId: MACHINE_ID, appVersion: "test", createClient: undefined, reconnectDelayMs: 50 });
+    await host.start();
+    await waitFor(() => startedApplyAttempts > 0, 10_000);
+    assert.equal(await desktopEvents.eventStorage.deviceEvents().receipt("machine-started:offline-command"), undefined);
+    assert.deepEqual(outcomes, [], "the terminal does not apply across a failed started-state write");
+    rejectStartedSave = false;
+    link.connections.get(record.id).eventChannel.start();
+    await waitFor(() => outcomes.some(outcome => outcome.runId === "offline-command"), 10_000);
+    assert.deepEqual(runs, [{ id: "offline-command", environment: "synthetic-retained-secret" }]);
+    assert.equal(outcomes.find(outcome => outcome.runId === "offline-command").status, "completed");
+    await waitFor(() => !record.pendingRuns.some(run => run.runId === "offline-command"), 5_000);
+    assert.ok(!logs.some(entry => entry.event === "machine-link.turn.queried" && entry.payload.runId === "offline-command"));
+  } finally { link.close(); host?.close(); await relay.close(); }
+});
+
 // Machines transport: desktop MachineLinkService <-> machine MachineHostService
 // through the reference relay, sealed with a machine-host pairing.
 test("machine link replicates settings and conversations, runs a turn, streams progress, and cancels", async () => {
@@ -50,6 +109,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const importedSnapshots = [];
     const hostRuns = [];
     const messagesAtStart = new Map();
+    const triggerAtStart = new Map();
     const approvalRequests = [];
     let failNextApplyContaining;
     let releaseLongTurn;
@@ -57,6 +117,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
       runMachineHostedTurn: async (request, signal, progress) => {
         hostRuns.push(request);
         messagesAtStart.set(request.runId, machineStore.get(request.conversationId)?.messages.length);
+        triggerAtStart.set(request.runId, machineStore.get(request.conversationId)?.messages.find(message => message.id === request.messageId)?.content);
         // A large progress frame right before a small finished result: the desktop must apply them in order.
         progress?.({ runId: request.runId, phase: "debate", message: "working " + "x".repeat(request.messageId === "msg-1" ? 2_000_000 : 10), createdAt: new Date().toISOString() });
         if (request.messageId === "msg-fail") {
@@ -179,7 +240,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     assert.equal(second.status, "completed");
     await second.acknowledge?.();
     assert.ok(machineStore.get("conv-1").messages.some((message) => message.id === "msg-2"));
-    assert.equal(importedSnapshots.length, 5, "settings travel with every turn preparation, including a failed or cancelled intent write");
+    assert.equal(importedSnapshots.length, 3, "settings arrive on introduction and admitted requests, not failed or cancelled preparation");
 
     // Cancel: the desktop aborts, the machine's turn signal fires, the result is interrupted.
     conversation.messages.push({ id: "msg-long", role: "user", content: "slow", createdAt: new Date().toISOString(), status: "done" });
@@ -269,12 +330,12 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     link.setConversationLoader(async (id) => loadable.get(id));
 
     // A regular delta that cannot be stored after the first copy makes the copy incomplete:
-    // the next turn fails honestly and the copy is requested again.
+    // the durable request waits behind the failed delta until it is stored.
     conversation.messages.push({ id: "msg-edit", role: "user", content: "edited instruction", createdAt: new Date().toISOString(), status: "done" });
     failNextApplyContaining = "msg-edit";
     const staleTurn = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-stale", pendingMessageId: "pending-stale" });
-    assert.equal(staleTurn.status, "failed", "a turn on a copy with an unstored delta fails instead of running on stale rows");
-    assert.match(staleTurn.error, /not complete/);
+    assert.equal(staleTurn.status, "completed", "the retained request runs after its earlier delta is repaired");
+    assert.equal(triggerAtStart.get("run-stale"), "edited instruction", "the provider sees the repaired instruction, never stale rows");
     await staleTurn.acknowledge?.();
     await waitFor(() => machineStore.get("conv-1")?.messages.some((message) => message.id === "msg-edit"), 10_000);
     const repairedTurn = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-repaired", pendingMessageId: "pending-repaired" });
@@ -362,6 +423,11 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const lostTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-lost", pendingMessageId: "pending-lost" });
     await waitFor(() => typeof releaseLongTurn === "function", 5_000);
     host.close();
+    await Promise.allSettled([...host.turnTasks]);
+    // This fixture has no native OS process. Its terminated stub supplies the
+    // verified release; machine-command.test exercises the real registry gate.
+    const oldExecutor = await hostEvents.eventStorage.nativeCommands().executor("conv-1", "p1");
+    await hostEvents.eventStorage.nativeCommands().releaseVerifiedExecutor(oldExecutor);
     const host2 = new MachineHostService(hostChat, hostStorage, hostSettings, debugLogs, {
       ...hostEvents, pairing, deviceId: MACHINE_ID, machineName: "test-box", appVersion: "test", detectProviders: async () => [], reconnectDelayMs: 50,
       // An outbox that cannot be written: results stay in memory and the desktop is told.
@@ -370,19 +436,20 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     await host2.start();
     const lost = await lostTurn;
     assert.equal(lost.status, "failed");
-    assert.match(lost.error, /does not know this run/);
-    assert.ok(logs.some((entry) => entry.event === "machine-link.turn.queried" && entry.payload?.runId === "run-lost"), "the lost turn was asked about, not closed by process order");
+    assert.match(lost.error, /outcome is uncertain.*not run again/);
+    assert.equal(hostRuns.filter(run => run.runId === "run-lost").length, 1, "a claimed command is never replayed after a runtime restart");
 
-    // A stop held for a run the (restarted) machine does not know is answered
-    // "unknown": the desktop drops the held stop and reports it unconfirmed.
+    // A native continuation owned by ChatService can outlive the host wrapper:
+    // Stop still reaches that owner, and confirms only after it has returned.
     const unknownController = new AbortController();
     const unknownTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-unknown", pendingMessageId: "pending-unknown", signal: unknownController.signal });
     await waitFor(() => hostRuns.some((run) => run.runId === "run-unknown"), 5_000);
-    // Pretend the machine forgot the run (as after a restart without the outbox entry).
+    const nativeController = host2.activeTurns.get("run-unknown");
     host2.activeTurns.delete("run-unknown");
+    hostChat.cancelRun = runId => { if (runId !== "run-unknown") return false; nativeController.abort(); return true; };
     unknownController.abort();
     const unknown = await unknownTurn;
-    assert.equal(unknown.status, "unconfirmed");
+    assert.equal(unknown.status, "interrupted");
     await unknown.acknowledge?.();
     await waitFor(() => (record.pendingCancels ?? []).length === 0, 5_000);
     // The failed outbox write is visible on the desktop as a machine warning.
@@ -426,7 +493,7 @@ test("outgoing commands preserve order and Stop fences dispatch even when a writ
   connection.machineDeviceId = "machine-device";
   // This probe isolates the native dispatch fence after an already completed
   // copy; the real SQLite event channel is exercised by the link probe above.
-  connection.eventChannel = { publish: async () => undefined, flush: async () => undefined, close() {} };
+  connection.eventChannel = { publish: async ({ payload }) => { writes.push(payload); await onWrite(payload); }, flush: async () => undefined, close() {} };
   connection.settingsSynced = true;
   try {
     let releaseWrite;
@@ -439,7 +506,7 @@ test("outgoing commands preserve order and Stop fences dispatch even when a writ
     onWrite = async () => undefined;
     releaseWrite();
     await Promise.all([first, second]);
-    assert.deepEqual(writes.map((body) => body.type), ["machine.settings.sync", "machine.hello.request"]);
+    assert.deepEqual(writes.map((body) => body.type), ["machine.settings.sealed", "machine.hello.request"]);
 
     const participant = { id: "p", handle: "bot", roleConfigId: "r", kind: "codex-cli", homeMachineId: record.id };
     const triggerMessage = { id: "m", role: "user", content: "test", createdAt: new Date().toISOString() };

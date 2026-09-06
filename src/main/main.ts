@@ -2811,6 +2811,7 @@ void app.whenReady().then(async () => {
         throw error;
       })
     );
+    machineLinkService.onRunStarted((event) => chatService.applyMachineRunStarted(event));
     machineLinkService.onLateTerminal((event) =>
       chatService.applyMachineLateTerminal({
         conversationId: event.conversationId,

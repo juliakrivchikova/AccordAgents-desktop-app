@@ -8,8 +8,8 @@
  * composes the identical services with Node fallbacks.
  */
 
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -170,10 +170,25 @@ export function createHeadlessPlatform(options: HeadlessPlatformOptions = {}): H
     mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
     const keyPath = path.join(userDataDir, "machine-secrets.key");
     if (!existsSync(keyPath)) {
-      writeFileSync(keyPath, randomBytes(32).toString("base64") + "\n", { mode: 0o600 });
+      // Publish a complete key exclusively. Concurrent runtimes must never
+      // overwrite one another's key or read a partially written new file.
+      const temporary = `${keyPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+      try {
+        const file = openSync(temporary, "wx", 0o600);
+        try { writeFileSync(file, randomBytes(32).toString("base64") + "\n"); fsyncSync(file); }
+        finally { closeSync(file); }
+        try { linkSync(temporary, keyPath); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+        if (process.platform !== "win32") {
+          const directory = openSync(userDataDir, "r");
+          try { fsyncSync(directory); } finally { closeSync(directory); }
+        }
+      } finally { try { unlinkSync(temporary); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
     }
-    const raw = Buffer.from(readFileSync(keyPath, "utf8").trim(), "base64");
-    key = raw.length === 32 ? raw : createHash("sha256").update(raw).digest();
+    const encoded = readFileSync(keyPath, "utf8").trim();
+    const raw = Buffer.from(encoded, "base64");
+    if (raw.length !== 32 || raw.toString("base64") !== encoded) throw new Error("The machine secret key is corrupt; it was left untouched.");
+    key = raw;
     return key;
   };
   return {

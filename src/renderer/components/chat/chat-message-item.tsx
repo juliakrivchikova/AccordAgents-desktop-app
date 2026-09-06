@@ -393,6 +393,11 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               <span>Stop requested — waiting for machine {stopPending.machineName}</span>
             </div>
           )}
+          {isStreaming && message.metadata?.machinePending && !stopPending && (
+            <div className="chat-queued-badge">
+              <span>Waiting for machine {message.metadata.machinePending.machineName}</span>
+            </div>
+          )}
           {repoFileMentions.length > 0 && (
             <div className="repo-file-reference-footer">
               <FileText size={14} />
