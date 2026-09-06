@@ -3712,6 +3712,27 @@ test("chat add paths normalize legacy run location to concrete local or remote",
   assert.equal(added?.remoteExecution, "local");
 });
 
+test("Codex max and ultra survive runtime updates and later unrelated updates", async () => {
+  const codex = chatParticipant("codex-cli");
+  const conversation = chatConversation([codex]);
+  const { service, storage } = testService({ conversation });
+  for (const reasoningEffort of ["max", "ultra"] as const) {
+    const updated = await service.updateParticipantRuntime({
+      conversationId: conversation.id,
+      participantId: codex.id,
+      model: "gpt-6-astra",
+      reasoningEffort
+    });
+    assert.equal((updated?.metadata.participants as ChatParticipant[])[0]?.reasoningEffort, reasoningEffort);
+    await service.updateParticipantRuntime({
+      conversationId: conversation.id,
+      participantId: codex.id,
+      agentMode: "auto"
+    });
+    assert.equal((storage.current.metadata.participants as ChatParticipant[])[0]?.reasoningEffort, reasoningEffort);
+  }
+});
+
 test("auto-watch runtime update enforces one watcher and clears scheduler state on disable", async () => {
   const codex = chatParticipant("codex-cli");
   const drew = chatParticipant("claude-code");

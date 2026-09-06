@@ -3977,9 +3977,52 @@ test("reasoning effort mapping is provider-specific", () => {
   const runner = makeRunner() as any;
 
   assert.equal(runner.codexReasoningEffort("minimal"), "minimal");
-  assert.equal(runner.codexReasoningEffort("max"), undefined);
+  assert.equal(runner.codexReasoningEffort("max"), "max");
+  assert.equal(runner.codexReasoningEffort("ultra"), "ultra");
+  assert.equal(runner.codexReasoningEffort("invalid"), undefined);
   assert.equal(runner.claudeReasoningEffort("xhigh"), "xhigh");
+  assert.equal(runner.claudeReasoningEffort("max"), "max");
+  assert.equal(runner.claudeReasoningEffort("ultra"), undefined);
   assert.equal(runner.claudeReasoningEffort("minimal"), undefined);
+});
+
+test("Codex catalog preserves max and ultra and their default recommendation", () => {
+  const runner = makeRunner() as any;
+  const options = runner.codexModelReasoningEfforts({
+    defaultReasoningEffort: "max",
+    supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra", "invalid", "ultra"].map(
+      (reasoningEffort) => ({ reasoningEffort, description: `Use ${reasoningEffort}` })
+    )
+  });
+  assert.deepEqual(options.map((option: any) => option.id), ["low", "medium", "high", "xhigh", "max", "ultra"]);
+  assert.deepEqual(options.slice(-2), [
+    { id: "max", label: "Max", description: "Use max", recommended: true },
+    { id: "ultra", label: "Ultra", description: "Use ultra", recommended: false }
+  ]);
+  assert.deepEqual(runner.codexModelReasoningEfforts(undefined), []);
+});
+
+test("Codex max and ultra reach fresh and resumed local and remote invocations", () => {
+  const runner = makeRunner() as any;
+  for (const reasoningEffort of ["max", "ultra"] as const) {
+    const participant = { id: "participant", kind: "codex-cli" as const, label: "Codex", model: "gpt-6-astra", reasoningEffort };
+    const options = chatOptions({ agentMode: "auto", workspaceWrite: true });
+    const start = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", options);
+    const resume = runner.codexAppServerThreadResumeParams("session-1", participant, "/repo", "chat", options);
+    assert.equal(start.config.model_reasoning_effort, reasoningEffort);
+    assert.equal(resume.config.model_reasoning_effort, reasoningEffort);
+    for (const sessionId of [undefined, "session-1"]) {
+      const invocation = buildCodexExecInvocation({
+        participant,
+        prompt: "Prompt",
+        outputPath: "/tmp/output",
+        repoPath: "/repo",
+        kind: "chat",
+        options: { ...options, sessionId, remoteSandbox: { networkAccess: true, gitWritableRoot: "/repo" } }
+      });
+      assert.ok(invocation.args.includes(`model_reasoning_effort="${reasoningEffort}"`));
+    }
+  }
 });
 
 test("codex app-server resume re-asserts the auto preset so a mode switch applies without a fresh session", () => {

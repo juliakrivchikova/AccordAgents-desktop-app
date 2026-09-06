@@ -367,6 +367,23 @@ test("Workflow Manager saved member presets force auto-watch on", async () => {
   assert.equal(stored().chatParticipantConfigs[0]?.autoWatchEnabled, true);
 });
 
+test("saved Codex max and ultra survive settings writes and reload normalization", async () => {
+  for (const reasoningEffort of ["max", "ultra"] as const) {
+    const { service, stored } = settingsServiceWith({ chatRoleConfigs: [makeRole()] });
+    await service.saveChatParticipantConfig({
+      handle: "astra",
+      roleConfigId: "custom-reviewer",
+      behaviorRuleIds: [],
+      kind: "codex-cli",
+      model: "gpt-6-astra",
+      reasoningEffort
+    });
+    assert.equal(stored().chatParticipantConfigs[0]?.reasoningEffort, reasoningEffort);
+    const reloaded = service.mergeDefaults(JSON.parse(JSON.stringify(stored())));
+    assert.equal(reloaded.chatParticipantConfigs[0]?.reasoningEffort, reasoningEffort);
+  }
+});
+
 test("saved member permissions preserve explicit role management overrides", async () => {
   const { service, stored } = settingsServiceWith({ chatRoleConfigs: [makeRole()] });
 

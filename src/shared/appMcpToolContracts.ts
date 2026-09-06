@@ -1992,7 +1992,8 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
                         "medium",
                         "high",
                         "xhigh",
-                        "max"
+                        "max",
+                        "ultra"
                       ]
                     },
                     "avatarId": {
@@ -2198,7 +2199,8 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
                         "medium",
                         "high",
                         "xhigh",
-                        "max"
+                        "max",
+                        "ultra"
                       ]
                     },
                     "avatarId": {
