@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Send, Square } from "lucide-react";
+import { Check, ChevronDown, Loader2, Send, Square, X } from "lucide-react";
 
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import type {
   AvatarStudioCandidate,
@@ -13,7 +14,6 @@ import type { AgentHealth, AppSettings, ChatProviderKind, ChatReasoningEffort, P
 import { readyProviderKinds } from "../../../shared/cliReadiness";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { chatCliProviderLabel } from "../chat/chat-participant-drafts";
-import { ChatParticipantInlineSelectRow } from "../chat/chat-participant-config-panel";
 import { rememberCustomAvatar } from "./custom-avatars";
 
 interface StudioMessage {
@@ -205,46 +205,26 @@ export function AvatarStudioDialog(props: {
     }
   }
 
+  const noDrawingProvider = drawingProviders.length === 0;
+
   return (
     <Dialog open={props.open} onOpenChange={closeStudio}>
-      <DialogContent className="avatar-studio-dialog" data-testid="avatar-studio-dialog">
+      <DialogContent className="avatar-studio-dialog" data-testid="avatar-studio-dialog" showCloseButton={false}>
         <DialogHeader className="avatar-studio-head">
-          <div>
-            <DialogTitle>Нарисовать аватар</DialogTitle>
-            <DialogDescription>
-              Для @{props.member.handle}
-              {props.member.roleLabel ? ` — ${props.member.roleLabel}` : ""}
-            </DialogDescription>
+          <div className="avatar-studio-head-row">
+            <span className="avatar-studio-title-block">
+              <DialogTitle>Draw an avatar</DialogTitle>
+              <DialogDescription>
+                For @{props.member.handle}
+                {props.member.roleLabel ? ` · ${props.member.roleLabel}` : ""}
+              </DialogDescription>
+            </span>
+            <DialogClose asChild>
+              <button type="button" className="avatar-studio-close" aria-label="Close avatar studio">
+                <X size={15} aria-hidden />
+              </button>
+            </DialogClose>
           </div>
-          <div className="avatar-studio-runner">
-            <ChatParticipantInlineSelectRow
-              label="Рисует"
-              value={chatCliProviderLabel(providerKind)}
-              current={providerKind}
-              options={drawingProviders.map((kind) => ({ value: kind, label: chatCliProviderLabel(kind) }))}
-              onSelect={(value: string) => setProviderKind(value as AvatarStudioProviderKind)}
-            />
-            <ChatParticipantInlineSelectRow
-              label="Модель"
-              value={modelOptions.find((option) => option.value === model)?.label ?? "CLI default"}
-              current={model}
-              options={modelOptions}
-              searchable
-              onSelect={(value: string) => setModel(value)}
-            />
-            <ChatParticipantInlineSelectRow
-              label="Reasoning"
-              value={reasoningOptions.find((option) => option.value === reasoning)?.label ?? "CLI default"}
-              current={reasoning}
-              options={reasoningOptions}
-              onSelect={(value: string) => setReasoning(value)}
-            />
-          </div>
-          <p className="avatar-studio-note">
-            {drawingProviders.length === 0
-              ? "Нет установленного CLI, который умеет рисовать: подключите Codex или Claude Code."
-              : `Рисует ${chatCliProviderLabel(providerKind)}, тратит вашу подписку.`}
-          </p>
         </DialogHeader>
 
         <div className="avatar-studio-body">
@@ -253,24 +233,24 @@ export function AvatarStudioDialog(props: {
               {selected ? (
                 <img src={selected.dataUrl} alt="" />
               ) : (
-                <span className="avatar-studio-empty">Здесь появится аватар. Напишите, кого нарисовать.</span>
+                <span className="avatar-studio-empty">The avatar appears here</span>
               )}
             </div>
             {selected && (
-              <div className="avatar-studio-sizes" aria-hidden>
-                <span className="avatar-studio-size is-message"><img src={selected.dataUrl} alt="" /></span>
-                <span className="avatar-studio-size is-roster"><img src={selected.dataUrl} alt="" /></span>
-                <small>как в ленте и в списке участников</small>
+              <div className="avatar-studio-sizes">
+                <span className="avatar-studio-size is-message" aria-hidden><img src={selected.dataUrl} alt="" /></span>
+                <span className="avatar-studio-size is-roster" aria-hidden><img src={selected.dataUrl} alt="" /></span>
+                <small>In a message and in the member list</small>
               </div>
             )}
-            {candidates.length > 0 && (
-              <div className="avatar-studio-strip" role="listbox" aria-label="Кандидаты">
+            {candidates.length > 1 && (
+              <div className="avatar-studio-strip" role="listbox" aria-label="Candidates">
                 {candidates.map((candidate) => (
                   <button
                     type="button"
                     key={candidate.id}
                     className={`avatar-studio-thumb${candidate.id === selected?.id ? " selected" : ""}`}
-                    title={`${chatCliProviderLabel(candidate.drawnBy.kind)}${candidate.drawnBy.model ? ` · ${candidate.drawnBy.model}` : ""}`}
+                    title={`Drawn by ${chatCliProviderLabel(candidate.drawnBy.kind)}${candidate.drawnBy.model ? ` · ${candidate.drawnBy.model}` : ""}`}
                     aria-selected={candidate.id === selected?.id}
                     role="option"
                     onClick={() => setSelectedId(candidate.id)}
@@ -284,6 +264,12 @@ export function AvatarStudioDialog(props: {
 
           <div className="avatar-studio-chat">
             <div className="avatar-studio-messages" data-testid="avatar-studio-messages">
+              {messages.length === 0 && !busy && (
+                <p className="avatar-studio-hint">
+                  Ask for a picture to start — for example, <em>a red fox in a purple hoodie</em>. Then refine it in
+                  words: warmer background, no laptop, make it a cat.
+                </p>
+              )}
               {messages.map((message) => (
                 <div key={message.id} className={`avatar-studio-message is-${message.author}${message.failed ? " is-failed" : ""}`}>
                   {message.text}
@@ -291,17 +277,47 @@ export function AvatarStudioDialog(props: {
               ))}
               {busy && (
                 <div className="avatar-studio-message is-runner is-busy">
-                  <Loader2 size={14} className="spin" aria-hidden /> рисует…
+                  <Loader2 size={14} className="spin" aria-hidden /> Drawing…
                 </div>
               )}
             </div>
+
+            <div className="avatar-studio-toolbar">
+              <span className="avatar-studio-toolbar-label">Drawn by</span>
+              <StudioSelect
+                label="drawn by"
+                value={providerKind}
+                display={chatCliProviderLabel(providerKind)}
+                options={drawingProviders.map((kind) => ({ value: kind, label: chatCliProviderLabel(kind) }))}
+                disabled={noDrawingProvider}
+                onSelect={(value) => changeProvider(value as AvatarStudioProviderKind)}
+              />
+              <StudioSelect
+                label="model"
+                value={model}
+                display={modelOptions.find((option) => option.value === model)?.label ?? "CLI default"}
+                options={modelOptions}
+                disabled={noDrawingProvider}
+                onSelect={setModel}
+              />
+              <StudioSelect
+                label="reasoning"
+                value={reasoning}
+                display={reasoningOptions.find((option) => option.value === reasoning)?.label ?? "CLI default"}
+                options={reasoningOptions}
+                disabled={noDrawingProvider || reasoningOptions.length <= 1}
+                onSelect={setReasoning}
+              />
+            </div>
+
             <div className="avatar-studio-composer">
               <textarea
                 ref={inputRef}
                 value={prompt}
-                placeholder="Например: рыжая лиса в фиолетовой худи"
+                rows={2}
+                placeholder={noDrawingProvider ? "No CLI installed that can draw" : "Describe the avatar…"}
                 data-testid="avatar-studio-prompt"
-                disabled={drawingProviders.length === 0}
+                disabled={noDrawingProvider}
                 onChange={(event) => setPrompt(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
@@ -317,11 +333,11 @@ export function AvatarStudioDialog(props: {
                   size="sm"
                   onClick={() => void window.consensus.cancelAvatarStudioTurn(studioId)}
                 >
-                  <Square size={14} aria-hidden /> Прервать
+                  <Square size={13} aria-hidden /> Stop
                 </Button>
               ) : (
-                <Button type="button" size="sm" disabled={!prompt.trim() || drawingProviders.length === 0} onClick={() => void send()}>
-                  <Send size={14} aria-hidden /> Отправить
+                <Button type="button" size="sm" disabled={!prompt.trim() || noDrawingProvider} onClick={() => void send()}>
+                  <Send size={13} aria-hidden /> Send
                 </Button>
               )}
             </div>
@@ -329,17 +345,65 @@ export function AvatarStudioDialog(props: {
         </div>
 
         <DialogFooter className="avatar-studio-footer">
-          <Button type="button" variant="ghost" onClick={() => closeStudio(false)}>Отмена</Button>
+          <p className="avatar-studio-note">
+            {noDrawingProvider
+              ? "Connect Codex CLI or Claude Code to draw an avatar."
+              : `${chatCliProviderLabel(providerKind)} draws it, on your subscription.`}
+          </p>
+          <Button type="button" variant="ghost" onClick={() => closeStudio(false)}>Cancel</Button>
           <Button
             type="button"
             disabled={!selected || saving}
             data-testid="avatar-studio-use"
             onClick={() => void useAvatar()}
           >
-            Использовать этот аватар
+            Use this avatar
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** A compact toolbar select: the app's menu, without the settings-table row around it. */
+function StudioSelect(props: {
+  label: string;
+  value: string;
+  display: string;
+  options: Array<{ value: string; label: string }>;
+  disabled?: boolean;
+  onSelect: (value: string) => void;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="avatar-studio-chip"
+          aria-label={`Change ${props.label}`}
+          disabled={props.disabled}
+        >
+          <span>{props.display}</span>
+          <ChevronDown size={13} aria-hidden />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" sideOffset={6} className="chat-app-tool-inline-menu">
+        {props.options.map((option) => (
+          <button
+            type="button"
+            key={option.value || "default"}
+            className={`chat-app-tool-inline-option${option.value === props.value ? " selected" : ""}`}
+            onClick={() => {
+              props.onSelect(option.value);
+              setOpen(false);
+            }}
+          >
+            <span>{option.label}</span>
+            {option.value === props.value && <Check size={14} aria-hidden />}
+          </button>
+        ))}
+      </PopoverContent>
+    </Popover>
   );
 }

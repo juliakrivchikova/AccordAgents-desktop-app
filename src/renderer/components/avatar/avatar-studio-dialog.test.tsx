@@ -160,12 +160,12 @@ function drawn(id: string): AvatarStudioTurnResult {
 
 async function ask(harness: Harness, prompt: string): Promise<void> {
   await harness.type(prompt);
-  await harness.click(harness.button("Отправить"));
+  await harness.click(harness.button("Send"));
 }
 
 test("the studio opens empty and runs nothing until the user asks", async () => {
   const harness = await mount(() => drawn("c1"));
-  assert.match(harness.find("avatar-studio-canvas").textContent ?? "", /Здесь появится аватар/);
+  assert.match(harness.find("avatar-studio-canvas").textContent ?? "", /The avatar appears here/);
   assert.equal(harness.turns.length, 0);
   assert.equal((harness.find("avatar-studio-use") as HTMLButtonElement).disabled, true);
 });
@@ -234,7 +234,7 @@ test("Antigravity is not offered as a drawing provider", async () => {
 
 test("with no drawing CLI ready the studio says so instead of offering to draw", async () => {
   const harness = await mount(() => drawn("c1"), []);
-  assert.match(harness.text(), /Нет установленного CLI/);
+  assert.match(harness.text(), /Connect Codex CLI or Claude Code/);
   assert.equal((harness.find("avatar-studio-prompt") as HTMLTextAreaElement).disabled, true);
   await harness.type("нарисуй лису");
   assert.equal(harness.turns.length, 0);
@@ -257,11 +257,14 @@ test("a drawn avatar survives draft normalisation and a provider change", () => 
 test("the studio offers the provider's own reasoning levels, not a shorter list", async () => {
   const harness = await mount(() => drawn("c1"));
   const levels = async (): Promise<string[]> => {
-    await harness.click(document.querySelector('[aria-label="Change reasoning"]'));
-    await act(async () => {});
+    if (!document.querySelector(".chat-app-tool-inline-menu")) {
+      await harness.click(document.querySelector('[aria-label="Change reasoning"]'));
+      await act(async () => {});
+    }
     const offered = [...document.querySelectorAll(".chat-app-tool-inline-menu button")].map((node) => (node.textContent ?? "").trim());
-    await harness.click(document.querySelector('[aria-label="Change reasoning"]'));
-    await act(async () => {});
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
     return offered;
   };
   const expected = (kind: "claude-code" | "codex-cli"): string[] =>
@@ -270,7 +273,7 @@ test("the studio offers the provider's own reasoning levels, not a shorter list"
   // The member is on Claude, so its own levels are offered.
   assert.deepEqual(await levels(), expected("claude-code"));
 
-  await harness.click(document.querySelector('[aria-label="Change рисует"]'));
+  await harness.click(document.querySelector('[aria-label="Change drawn by"]'));
   await act(async () => {});
   const codex = [...document.querySelectorAll("button")].find((node) => (node.textContent ?? "").trim() === "Codex CLI" && node.closest(".chat-app-tool-inline-menu"));
   assert.ok(codex, `provider options: ${JSON.stringify([...document.querySelectorAll(".chat-app-tool-inline-menu button")].map((n) => n.textContent?.trim()))}`);

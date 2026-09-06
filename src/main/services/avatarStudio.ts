@@ -76,7 +76,7 @@ export class AvatarStudioService {
   async runTurn(request: AvatarStudioTurnRequest): Promise<AvatarStudioTurnResult> {
     const prompt = request.prompt.trim();
     if (!prompt) {
-      return { ok: false, error: "Напишите, что нарисовать." };
+      return { ok: false, error: "Describe the avatar first." };
     }
     assertStudioId(request.studioId);
     const key = sessionKey(request.studioId, request.runner);
@@ -133,7 +133,7 @@ export class AvatarStudioService {
       // A cancelled run can surface either as a thrown abort or as a failed
       // result, depending on where the CLI was when the signal arrived.
       if (controller.signal.aborted) {
-        return { ok: false, error: "Отменено." };
+        return { ok: false, error: "Stopped." };
       }
       const candidate = await this.newestCandidate(session.workDir, before, request.runner);
       if (candidate) {
@@ -144,14 +144,14 @@ export class AvatarStudioService {
           ok: false,
           reply: result.content?.trim() || undefined,
           error: result.ok
-            ? "Рисующий ответил, но не сохранил картинку. Попробуйте ещё раз или смените провайдера."
-            : result.error ?? "Рисующий не смог нарисовать."
+            ? "The agent answered but saved no picture. Try again, or switch who draws."
+            : result.error ?? "The agent could not draw."
         };
       }
       return { ok: true, candidate: { ...candidate, note: result.content?.trim() || undefined }, reply: result.content?.trim() || undefined };
     } catch (error) {
       if (controller.signal.aborted) {
-        return { ok: false, error: "Отменено." };
+        return { ok: false, error: "Stopped." };
       }
       const message = error instanceof Error ? error.message : String(error);
       void this.options.debugLogs?.write("avatar-studio.error", { studioId: request.studioId, message });

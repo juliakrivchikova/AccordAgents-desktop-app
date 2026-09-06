@@ -1814,7 +1814,7 @@ export class SettingsService {
       return [{
         id,
         mediaType,
-        label: typeof record.label === "string" && record.label.trim() ? record.label.trim() : "Свой аватар",
+        label: typeof record.label === "string" && record.label.trim() ? record.label.trim() : "Custom avatar",
         createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date().toISOString()
       }];
     });
@@ -1823,7 +1823,7 @@ export class SettingsService {
   async saveCustomAvatar(request: SaveCustomAvatarRequest): Promise<AppSettings> {
     const bytes = Buffer.from(request.dataBase64, "base64");
     if (bytes.length === 0) {
-      throw new Error("Пустая картинка.");
+      throw new Error("Empty picture.");
     }
     const id = randomUUID();
     await mkdir(this.customAvatarDir(), { recursive: true });
@@ -1831,7 +1831,7 @@ export class SettingsService {
     const summary: CustomAvatarSummary = {
       id,
       mediaType: request.mediaType,
-      label: request.label.trim() || "Свой аватар",
+      label: request.label.trim() || "Custom avatar",
       createdAt: new Date().toISOString()
     };
     const stored = await this.readStored();
@@ -1844,7 +1844,7 @@ export class SettingsService {
     const stored = await this.readStored();
     const summary = this.normalizeCustomAvatars(stored.chatCustomAvatars).find((entry) => entry.id === id);
     if (!summary) {
-      throw new Error("Аватар не найден.");
+      throw new Error("Avatar not found.");
     }
     const bytes = await readFile(this.customAvatarPath(id, summary.mediaType));
     return { id, mediaType: summary.mediaType, dataBase64: bytes.toString("base64") };

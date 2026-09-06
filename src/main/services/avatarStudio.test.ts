@@ -77,7 +77,7 @@ test("a run that writes nothing is a failure the user can act on", async () => {
   const result = await service.runTurn(REQUEST);
   assert.equal(result.ok, false);
   assert.equal(result.candidate, undefined);
-  assert.match(result.error ?? "", /не сохранил картинку/);
+  assert.match(result.error ?? "", /saved no picture/);
   // The runner's own words still reach the studio chat.
   assert.equal(result.reply, "Готово!");
 });
@@ -192,7 +192,7 @@ test("cancelling a turn reports it as cancelled, not as an error", async () => {
   service.cancel("studio-cancel");
   const result = await pending;
   assert.equal(result.ok, false);
-  assert.equal(result.error, "Отменено.");
+  assert.equal(result.error, "Stopped.");
 });
 
 test("the drawing run gets its own directory, not the user's repository", async () => {

@@ -39,12 +39,12 @@ test("a saved avatar survives a restart and later settings writes", async () => 
 
 test("reading an unknown avatar fails instead of returning someone else's bytes", async () => {
   const { settings } = await service();
-  await assert.rejects(() => settings.readCustomAvatar("missing"), /не найден/);
+  await assert.rejects(() => settings.readCustomAvatar("missing"), /not found/);
 });
 
 test("an empty picture is rejected before anything is written", async () => {
   const { settings, userData } = await service();
-  await assert.rejects(() => settings.saveCustomAvatar({ mediaType: "image/png", dataBase64: "", label: "@gera" }), /Пуст/);
+  await assert.rejects(() => settings.saveCustomAvatar({ mediaType: "image/png", dataBase64: "", label: "@gera" }), /Empty/);
   const files = await readdir(path.join(userData, "avatars")).catch(() => []);
   assert.deepEqual(files, []);
 });

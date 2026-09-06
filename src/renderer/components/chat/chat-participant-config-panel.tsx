@@ -85,15 +85,15 @@ export function ChatParticipantAvatarField(props: {
               type="button"
               className="chat-app-tool-avatar-choice is-create"
               data-testid="avatar-create-tile"
-              title="Нарисовать аватар"
-              aria-label="Нарисовать аватар"
+              title="Draw an avatar"
+              aria-label="Draw an avatar"
               onClick={() => {
                 setOpen(false);
                 setStudioOpen(true);
               }}
             >
               <Sparkles size={16} aria-hidden />
-              <span>Создать</span>
+              <span>Create</span>
             </button>
           )}
           {customAvatars.map((custom) => {

@@ -1,64 +1,93 @@
-/* Avatar studio: picture on the left, conversation on the right. */
+/* Avatar studio.
+   Built on the member editor's dialog language (16px radius, hairline head and
+   footer, 22px gutters) so it reads as the same app: the picture is the subject,
+   the conversation is the tool, and the drawing controls are a quiet toolbar
+   above the composer rather than a settings table above the picture. */
 
-/* The shared DialogContent caps itself at sm:max-w-sm through a utility class,
-   which outranks this layer; the studio needs both columns, so it overrides the
-   cap the same way the member editor does. */
 .avatar-studio-dialog {
-  display: grid !important;
-  width: min(940px, calc(100vw - 32px)) !important;
-  max-width: min(940px, calc(100vw - 32px)) !important;
-  max-height: min(760px, calc(100vh - 48px));
-  gap: 14px;
+  display: flex !important;
+  flex-direction: column;
+  width: min(860px, calc(100vw - 32px)) !important;
+  max-width: min(860px, calc(100vw - 32px)) !important;
+  max-height: min(700px, calc(100vh - 48px));
+  gap: 0 !important;
+  padding: 0 !important;
+  border-radius: 16px;
   overflow: hidden;
 }
 
 .avatar-studio-head {
+  flex: 0 0 auto;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.avatar-studio-head-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  min-width: 0;
+  text-align: left;
+}
+
+.avatar-studio-title-block {
   display: grid;
-  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  gap: 4px;
 }
 
-/* Three spec rows side by side; each needs room or the shared row truncates the
-   value it shows ("Code…"). */
-.avatar-studio-runner {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px 18px;
-}
-
-.avatar-studio-runner .chat-app-tool-inline-edit span {
-  max-width: none;
-  overflow: visible;
-}
-
-.avatar-studio-note {
-  margin: 0;
+.avatar-studio-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface);
   color: var(--app-muted);
-  font-size: 12px;
+  cursor: pointer;
+}
+
+.avatar-studio-close:hover {
+  border-color: var(--app-border-strong);
+  color: var(--app-text-strong);
 }
 
 .avatar-studio-body {
   display: grid;
-  grid-template-columns: minmax(240px, 300px) minmax(320px, 1fr);
-  gap: 18px;
-  align-items: start;
-  min-height: 0;
+  grid-template-columns: 280px minmax(0, 1fr);
+  flex: 1 1 auto;
+  /* As a flex child its min-width defaults to auto, and the conversation would
+     push the whole dialog wider than its own frame. */
+  min-width: 0;
+  min-height: 340px;
+  padding: 18px 22px;
+  gap: 22px;
 }
+
+/* ---- left: the picture, at the size decisions are made ---- */
 
 .avatar-studio-preview {
   display: grid;
+  align-content: start;
   gap: 12px;
   justify-items: center;
+  min-width: 0;
 }
 
 .avatar-studio-canvas {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 220px;
-  height: 220px;
-  padding: 10px;
+  width: 240px;
+  height: 240px;
+  padding: 12px;
   border: 1px solid var(--app-border);
-  border-radius: var(--radius-control);
+  border-radius: 16px;
   background: var(--app-avatar-bg);
   overflow: hidden;
 }
@@ -71,12 +100,11 @@
 
 .avatar-studio-empty {
   color: var(--app-muted);
-  font-size: 12.5px;
-  line-height: 1.4;
+  font-size: 13px;
   text-align: center;
 }
 
-/* The real sizes the avatar has to survive, shown next to the big preview. */
+/* The two sizes the avatar actually has to survive. */
 .avatar-studio-sizes {
   display: flex;
   align-items: center;
@@ -89,6 +117,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   overflow: hidden;
   background: var(--app-avatar-bg);
 }
@@ -116,12 +145,13 @@
   flex-wrap: wrap;
   gap: 6px;
   justify-content: center;
+  width: 100%;
 }
 
 .avatar-studio-thumb {
   display: inline-flex;
-  width: 44px;
-  height: 44px;
+  width: 42px;
+  height: 42px;
   padding: 0;
   border: 0;
   border-radius: 10px;
@@ -137,37 +167,64 @@
 }
 
 .avatar-studio-thumb:hover {
-  box-shadow: 0 0 0 1.5px var(--app-border);
+  box-shadow: 0 0 0 1.5px var(--app-border-strong);
 }
 
 .avatar-studio-thumb.selected {
   box-shadow: 0 0 0 2px var(--app-accent);
 }
 
+/* ---- right: the conversation ---- */
+
 .avatar-studio-chat {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  /* Without an explicit column the implicit one is max-content, and a long line
+     of copy widens it past the dialog instead of wrapping. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto auto;
   gap: 10px;
   min-width: 0;
-  min-height: 300px;
-  max-height: 46vh;
+  min-height: 0;
 }
 
 .avatar-studio-messages {
   display: grid;
   align-content: start;
+  align-self: stretch;
   gap: 8px;
+  min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
 }
 
+.avatar-studio-messages > * {
+  min-width: 0;
+}
+
+.avatar-studio-messages:has(> .avatar-studio-hint:only-child) {
+  align-content: center;
+}
+
+.avatar-studio-hint {
+  margin: 0;
+  color: var(--app-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.avatar-studio-hint em {
+  color: var(--app-text);
+  font-style: normal;
+}
+
 .avatar-studio-message {
-  padding: 8px 10px;
+  padding: 8px 12px;
   border-radius: 10px;
   background: var(--app-surface-subtle);
   color: var(--app-text);
   font-size: 13px;
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
 .avatar-studio-message.is-user {
@@ -185,7 +242,52 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  background: transparent;
   color: var(--app-muted);
+  padding-left: 0;
+}
+
+/* Quiet toolbar: who draws, which model, how hard it thinks. */
+.avatar-studio-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.avatar-studio-toolbar-label {
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.avatar-studio-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  padding: 3px 7px 3px 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.avatar-studio-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.avatar-studio-chip:hover:not(:disabled) {
+  border-color: var(--app-border-strong);
+}
+
+.avatar-studio-chip:disabled {
+  color: var(--app-muted);
+  cursor: default;
+  opacity: 0.7;
 }
 
 .avatar-studio-composer {
@@ -196,7 +298,6 @@
 }
 
 .avatar-studio-composer textarea {
-  min-height: 62px;
   padding: 8px 10px;
   border: 1px solid var(--app-border);
   border-radius: var(--radius-control);
@@ -204,7 +305,8 @@
   color: var(--app-text);
   font: inherit;
   font-size: 13px;
-  resize: vertical;
+  line-height: 1.45;
+  resize: none;
 }
 
 .avatar-studio-composer textarea:focus-visible {
@@ -213,48 +315,51 @@
 }
 
 .avatar-studio-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-/* "Создать" sits first in the avatar grid and reads as an action, not a picture.
-   Two grids show it: the popover (36px tiles) and the chat draft row (52px). */
-.avatar-choice.is-create {
-  display: inline-flex;
-  flex-direction: column;
+  flex: 0 0 auto;
   align-items: center;
-  justify-content: center;
-  gap: 3px;
-  overflow: hidden;
-  border: 1px dashed var(--app-border-strong);
-  background: var(--app-surface-subtle);
+  justify-content: flex-end !important;
+  margin: 0 !important;
+  padding: 14px 22px !important;
+  border-top: 1px solid var(--app-border);
+  background: var(--app-surface) !important;
+  gap: 9px;
+}
+
+.avatar-studio-note {
+  margin: 0 auto 0 0;
   color: var(--app-muted);
-  font-size: 9px;
-  line-height: 1;
+  font-size: 12px;
 }
 
-.avatar-choice.is-create:hover {
-  border-color: var(--app-accent);
-  color: var(--app-accent);
-}
-
+/* "Create" leads the avatar grid and reads as an action, not a picture.
+   Two grids show it: the popover (36px tiles) and the chat draft row (52px). */
+.avatar-choice.is-create,
 .chat-app-tool-avatar-choice.is-create {
   display: inline-flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 2px;
-  width: 36px;
-  height: 36px;
+  overflow: hidden;
   border: 1px dashed var(--app-border-strong);
-  border-radius: 10px;
   background: var(--app-surface-subtle);
   color: var(--app-muted);
-  font-size: 8.5px;
   line-height: 1;
 }
 
+.avatar-choice.is-create {
+  gap: 3px;
+  font-size: 9px;
+}
+
+.chat-app-tool-avatar-choice.is-create {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  font-size: 8.5px;
+}
+
+.avatar-choice.is-create:hover,
 .chat-app-tool-avatar-choice.is-create:hover {
   border-color: var(--app-accent);
   color: var(--app-accent);
