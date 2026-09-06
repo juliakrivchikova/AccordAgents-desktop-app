@@ -28,6 +28,7 @@ export type DismissedWarningMap = Record<string, string[]>;
 export type ActivityItemPreferences = ChatActivityItemPreferences;
 
 const MAX_STORED_ACTIVITY_ITEM_IDS = 1_000;
+const MAX_STORED_ACTIVITY_CLEAR_HORIZONS = 500;
 
 export function readActivityItemPreferencesFromStorage(): ActivityItemPreferences {
   try {
@@ -38,11 +39,16 @@ export function readActivityItemPreferencesFromStorage(): ActivityItemPreference
       return emptyActivityItemPreferences();
     }
     const record = parsed as Record<string, unknown>;
-    const clearedRecentThrough = storedTimestamp(record.clearedRecentThrough);
+    const clearedRecentThroughByGroup = storedActivityClearHorizons(record.clearedRecentThroughByGroup);
+    // The older global cutoff is kept as a frozen floor so rows cleared before the upgrade stay
+    // cleared; it is never extended, so it cannot hide one chat's rows because of another.
+    const clearedRecentThroughBefore = storedTimestamp(record.clearedRecentThroughBefore)
+      ?? storedTimestamp(record.clearedRecentThrough);
     return {
       readItemIds: storedActivityItemIds(record.readItemIds),
       clearedItemIds: storedActivityItemIds(record.clearedItemIds),
-      ...(clearedRecentThrough ? { clearedRecentThrough } : {})
+      ...(Object.keys(clearedRecentThroughByGroup).length > 0 ? { clearedRecentThroughByGroup } : {}),
+      ...(clearedRecentThroughBefore ? { clearedRecentThroughBefore } : {})
     };
   } catch {
     return emptyActivityItemPreferences();
@@ -54,7 +60,10 @@ export function persistActivityItemPreferences(preferences: ActivityItemPreferen
     window.localStorage.setItem(ACTIVITY_ITEM_PREFERENCES_STORAGE_KEY, JSON.stringify({
       readItemIds: [...preferences.readItemIds].slice(-MAX_STORED_ACTIVITY_ITEM_IDS),
       clearedItemIds: [...preferences.clearedItemIds].slice(-MAX_STORED_ACTIVITY_ITEM_IDS),
-      clearedRecentThrough: preferences.clearedRecentThrough
+      clearedRecentThroughByGroup: Object.fromEntries(
+        Object.entries(preferences.clearedRecentThroughByGroup ?? {}).slice(-MAX_STORED_ACTIVITY_CLEAR_HORIZONS)
+      ),
+      clearedRecentThroughBefore: preferences.clearedRecentThroughBefore
     }));
   } catch {
     // Local storage persistence is best-effort.
@@ -181,4 +190,17 @@ function storedActivityItemIds(value: unknown): Set<string> {
 
 function storedTimestamp(value: unknown): string | undefined {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : undefined;
+}
+
+function storedActivityClearHorizons(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const horizons: Record<string, string> = {};
+  for (const [groupKey, timestamp] of Object.entries(value as Record<string, unknown>).slice(-MAX_STORED_ACTIVITY_CLEAR_HORIZONS)) {
+    if (groupKey.trim().length > 0 && typeof timestamp === "string" && Number.isFinite(Date.parse(timestamp))) {
+      horizons[groupKey] = timestamp;
+    }
+  }
+  return horizons;
 }

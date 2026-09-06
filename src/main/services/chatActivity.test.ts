@@ -4,11 +4,14 @@ import {
   applyChatActivityItemPreferences,
   buildChatActivityItems,
   buildChatActivityItemsForConversationUpdate,
+  limitChatActivityItems,
+  mergeChatActivityItems,
   preservedRecentChatActivityItems,
   reconcileChatActivityRefreshItems,
-  resolveSelectedChatActivityItem
+  resolveSelectedChatActivityItem,
+  sortChatActivityItems
 } from "../../shared/chatActivity";
-import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
+import type { ChatActivityItem, ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 
 const NOW = "2026-01-08T12:00:00.000Z";
 const participant: ChatParticipant = {
@@ -249,7 +252,7 @@ test("buildChatActivityItems marks only Codex approvals as typed Activity decisi
   assert.equal(ordinaryItem?.target.approvalKind, undefined);
 });
 
-test("buildChatActivityItems moves cancelled pending cards to read finished activity", () => {
+test("buildChatActivityItems keeps cancelled pending cards out of activity entirely", () => {
   const approval: ChatAppToolApproval = {
     id: "approval-1",
     conversationId: "conversation-1",
@@ -301,15 +304,93 @@ test("buildChatActivityItems moves cancelled pending cards to read finished acti
     ]
   }), { now: NOW });
 
-  const terminalKinds = items.filter((item) => item.kind !== "message").map((item) => item.kind).sort();
-  assert.deepEqual(terminalKinds, ["approval", "choice", "mention"]);
-  assert.ok(items.every((item) => item.status === "recent"));
-  assert.ok(items.filter((item) => item.kind !== "message").every((item) => item.read === true));
-  assert.equal(items.find((item) => item.kind === "approval")?.target.approvalId, "approval-1");
-  assert.equal(items.find((item) => item.kind === "choice")?.target.choiceId, "choice-1");
-  assert.deepEqual(items.find((item) => item.kind === "mention")?.target.mentionTargetParticipantIds, ["p2"]);
-  assert.equal(items.filter((item) => item.conversationId === "conversation-1").length, 4);
+  // The three timeline messages are ordinary finished member updates; only the cancelled
+  // approval, choice and mention cards are gone, and the updates collapse into one row.
+  assert.deepEqual(items.map((item) => item.kind), ["message"]);
+  assert.equal(items[0].target.messageId, "finished");
+  assert.equal(items[0].groupedCount, 3);
 });
+
+test("mergeChatActivityItems drops a cancelled card preserved from older renderer state", () => {
+  const staleCancelled: ChatActivityItem = {
+    id: "choice:conversation-1:choice-message:choice-1",
+    conversationId: "conversation-1",
+    conversationTitle: "Chat",
+    status: "recent",
+    read: true,
+    kind: "choice",
+    title: "Choice cancelled",
+    preview: "A member choice was cancelled.",
+    createdAt: "2026-01-08T10:00:00.000Z",
+    updatedAt: "2026-01-08T11:10:00.000Z",
+    participant: { id: participant.id, handle: participant.handle, kind: "claude-code" },
+    target: { messageId: "choice-message", sourceMessageId: "choice-message", choiceId: "choice-1" }
+  };
+  const finished = buildChatActivityItems(conversation({
+    messages: [participantMessage("finished", { createdAt: "2026-01-08T11:25:00.000Z", metadata: { runId: "finished-run" } })]
+  }), { now: NOW });
+
+  const merged = mergeChatActivityItems([staleCancelled], finished);
+
+  assert.deepEqual(merged.map((item) => item.id), finished.map((item) => item.id));
+});
+
+test("buildChatActivityItems collapses a member's finished updates into one counted row", () => {
+  const items = buildChatActivityItems(conversation({
+    messages: [
+      participantMessage("first", { createdAt: "2026-01-08T09:00:00.000Z", metadata: { runId: "run-1" } }),
+      participantMessage("second", { createdAt: "2026-01-08T10:00:00.000Z", metadata: { runId: "run-2" } }),
+      participantMessage("third", { createdAt: "2026-01-08T11:00:00.000Z", metadata: { runId: "run-3" } })
+    ]
+  }), { now: NOW });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].target.messageId, "third");
+  assert.equal(items[0].groupedCount, 3);
+});
+
+test("mergeChatActivityItems keeps the collapsed count when a delta rebuild sees fewer updates", () => {
+  const full = buildChatActivityItems(conversation({
+    messages: [
+      participantMessage("first", { createdAt: "2026-01-08T09:00:00.000Z", metadata: { runId: "run-1" } }),
+      participantMessage("second", { createdAt: "2026-01-08T10:00:00.000Z", metadata: { runId: "run-2" } })
+    ]
+  }), { now: NOW });
+  const deltaRebuild = buildChatActivityItems(conversation({
+    messages: [participantMessage("second", { createdAt: "2026-01-08T10:00:00.000Z", metadata: { runId: "run-2" } })]
+  }), { now: NOW });
+
+  const merged = mergeChatActivityItems(full, deltaRebuild, { replaceConversationId: "conversation-1" });
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].groupedCount, 2);
+});
+
+test("limitChatActivityItems caps finished rows without dropping pending or running ones", () => {
+  const pending = { ...syntheticItem("pending-1", "2026-01-08T11:00:00.000Z"), status: "pending" as const, kind: "choice" as const };
+  const running = { ...syntheticItem("running-1", "2026-01-08T11:00:00.000Z"), status: "running" as const, kind: "run" as const };
+  const finished = [1, 2, 3].map((index) => syntheticItem(`finished-${index}`, `2026-01-08T1${index}:00:00.000Z`));
+
+  const limited = limitChatActivityItems(sortChatActivityItems([...finished, pending, running]), 1);
+
+  assert.deepEqual(limited.map((item) => item.id), ["pending-1", "running-1", "finished-3"]);
+});
+
+function syntheticItem(id: string, updatedAt: string): ChatActivityItem {
+  return {
+    id,
+    conversationId: "conversation-1",
+    conversationTitle: "Chat",
+    status: "recent",
+    kind: "message",
+    title: id,
+    preview: id,
+    createdAt: updatedAt,
+    updatedAt,
+    participant: { id: `${id}-member`, handle: id, kind: "claude-code" },
+    target: { messageId: id }
+  };
+}
 
 test("buildChatActivityItems surfaces an unread finished run over an older denied approval on the same run", () => {
   const approval: ChatAppToolApproval = {

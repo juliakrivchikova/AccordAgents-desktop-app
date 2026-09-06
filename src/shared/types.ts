@@ -2101,6 +2101,8 @@ export interface ChatActivityItem {
   preview: string;
   createdAt: string;
   updatedAt: string;
+  /** Finished updates from one member in one chat share a row; how many that row stands for. */
+  groupedCount?: number;
   participant?: ChatActivityParticipantSummary;
   target: ChatActivityTarget;
 }

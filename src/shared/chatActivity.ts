@@ -38,13 +38,25 @@ export interface ReconcileChatActivityRefreshOptions {
 export interface ApplyChatActivityItemPreferencesOptions {
   readItemIds?: ReadonlySet<string>;
   clearedItemIds?: ReadonlySet<string>;
-  clearedRecentThrough?: string;
+  /**
+   * Clear horizons keyed by finished-activity group (one chat + one member). Clearing a
+   * collapsed row hides the older updates it stood for, and only those: a horizon must never
+   * suppress finished rows of another member or another chat.
+   */
+  clearedRecentThroughByGroup?: Readonly<Record<string, string>>;
+  /**
+   * Frozen cutoff inherited from the pre-per-group clear state. It keeps finished rows the user
+   * had already cleared hidden after the upgrade, and it never moves: new clears write group
+   * horizons instead, so it can no longer suppress another chat's later activity.
+   */
+  clearedRecentThroughBefore?: string;
 }
 
 export interface ChatActivityItemPreferences {
   readItemIds: Set<string>;
   clearedItemIds: Set<string>;
-  clearedRecentThrough?: string;
+  clearedRecentThroughByGroup?: Record<string, string>;
+  clearedRecentThroughBefore?: string;
 }
 
 export function buildChatActivityItems(
@@ -62,9 +74,9 @@ export function buildChatActivityItems(
   const recentCutoffMs = nowMs - recentWindowDays * 24 * 60 * 60 * 1000;
   const lastViewedMs = timeValue(options.lastViewedAt);
 
-  items.push(...pendingApprovalItems(conversation, participants, recentCutoffMs));
+  items.push(...pendingApprovalItems(conversation, participants));
   for (const message of conversation.messages) {
-    items.push(...pendingMessageItems(conversation, message, participants, recentCutoffMs));
+    items.push(...pendingMessageItems(conversation, message, participants));
   }
 
   const runningRunIds = new Set<string>();
@@ -142,17 +154,23 @@ export function applyChatActivityItemPreferences(
 ): ChatActivityItem[] {
   const readItemIds = options.readItemIds ?? new Set<string>();
   const clearedItemIds = options.clearedItemIds ?? new Set<string>();
-  const clearedRecentThroughMs = timeValue(options.clearedRecentThrough);
+  const clearedRecentThroughByGroup = options.clearedRecentThroughByGroup ?? {};
+  const clearedBeforeMs = timeValue(options.clearedRecentThroughBefore);
   return items
     .filter((item) => {
       if (clearedItemIds.has(item.id)) {
         return false;
       }
+      if (item.status === "recent" && clearedBeforeMs > 0 && timeValue(item.updatedAt) > 0 && timeValue(item.updatedAt) <= clearedBeforeMs) {
+        return false;
+      }
+      const groupKey = recentParticipantGroupKey(item);
+      if (!groupKey) {
+        return true;
+      }
+      const clearedThroughMs = timeValue(clearedRecentThroughByGroup[groupKey]);
       const updatedMs = timeValue(item.updatedAt);
-      return item.status !== "recent"
-        || clearedRecentThroughMs <= 0
-        || updatedMs <= 0
-        || updatedMs > clearedRecentThroughMs;
+      return clearedThroughMs <= 0 || updatedMs <= 0 || updatedMs > clearedThroughMs;
     })
     .map((item) => item.read === true || !readItemIds.has(item.id) ? item : { ...item, read: true });
 }
@@ -169,15 +187,21 @@ export function chatActivityItemPreferencesAfterClear(
   clearedItemIds.delete(normalizedId);
   clearedItemIds.add(normalizedId);
   const clearedItem = items.find((item) => item.id === normalizedId);
-  const clearsFinishedList = clearedItem?.status === "recent"
-    && !items.some((item) => item.status === "recent" && item.id !== normalizedId);
-  const clearedRecentThrough = clearsFinishedList
-    ? newerTimestamp(current.clearedRecentThrough, clearedItem.updatedAt)
-    : current.clearedRecentThrough;
+  // A finished row stands for every update of that member in that chat, so clearing it must also
+  // hide the older updates it collapsed - and nothing outside that member and chat.
+  const groupKey = clearedItem ? recentParticipantGroupKey(clearedItem) : undefined;
+  const clearedRecentThroughByGroup = { ...(current.clearedRecentThroughByGroup ?? {}) };
+  if (groupKey && clearedItem) {
+    const clearedThrough = newerTimestamp(clearedRecentThroughByGroup[groupKey], clearedItem.updatedAt);
+    if (clearedThrough) {
+      clearedRecentThroughByGroup[groupKey] = clearedThrough;
+    }
+  }
   return {
     readItemIds,
     clearedItemIds,
-    ...(clearedRecentThrough ? { clearedRecentThrough } : {})
+    ...(Object.keys(clearedRecentThroughByGroup).length > 0 ? { clearedRecentThroughByGroup } : {}),
+    ...(current.clearedRecentThroughBefore ? { clearedRecentThroughBefore: current.clearedRecentThroughBefore } : {})
   };
 }
 
@@ -214,17 +238,37 @@ export function mergeChatActivityItems(
   options: { limit?: number; replaceConversationId?: string } = {}
 ): ChatActivityItem[] {
   const byId = new Map<string, ChatActivityItem>();
+  const collapsedCountById = new Map<string, number>();
+  const rememberItem = (item: ChatActivityItem): void => {
+    // A rebuild from a narrower message delta can see fewer updates than the row already stood
+    // for, so the collapsed count never shrinks just because the newer source knew less.
+    collapsedCountById.set(
+      item.id,
+      Math.max(collapsedCountById.get(item.id) ?? 1, collapsedActivityItemCount(item))
+    );
+    byId.set(item.id, item);
+  };
   const replaceConversationId = cleanString(options.replaceConversationId);
   for (const item of current) {
     if (replaceConversationId && item.conversationId === replaceConversationId) {
+      // The row itself is replaced by the rebuild, but how many updates it already stood for is
+      // knowledge the rebuild does not have when it only saw part of the chat.
+      collapsedCountById.set(
+        item.id,
+        Math.max(collapsedCountById.get(item.id) ?? 1, collapsedActivityItemCount(item))
+      );
       continue;
     }
-    byId.set(item.id, item);
+    rememberItem(item);
   }
   for (const item of incoming) {
-    byId.set(item.id, item);
+    rememberItem(item);
   }
-  return limitChatActivityItems(sortChatActivityItems(dedupeChatActivityItems([...byId.values()])), options.limit);
+  const merged = [...byId.values()].map((item) => {
+    const collapsedCount = collapsedCountById.get(item.id) ?? 1;
+    return collapsedCount > collapsedActivityItemCount(item) ? { ...item, groupedCount: collapsedCount } : item;
+  });
+  return limitChatActivityItems(sortChatActivityItems(dedupeChatActivityItems(merged)), options.limit);
 }
 
 export function reconcileChatActivityRefreshItems(
@@ -287,17 +331,27 @@ export function sortChatActivityItems(items: ChatActivityItem[]): ChatActivityIt
 
 export function limitChatActivityItems(items: ChatActivityItem[], limit?: number): ChatActivityItem[] {
   const normalizedLimit = normalizePositiveNumber(limit, DEFAULT_CHAT_ACTIVITY_LIMIT);
-  return items.slice(0, normalizedLimit);
+  // Running and pending rows are actionable and bounded by real runs, so the cap applies to the
+  // finished list alone; a long finished history must never push a waiting approval out of view.
+  let recentCount = 0;
+  return items.filter((item) => {
+    if (item.status !== "recent") {
+      return true;
+    }
+    recentCount += 1;
+    return recentCount <= normalizedLimit;
+  });
 }
 
 function pendingApprovalItems(
   conversation: Conversation,
-  participants: Map<string, ChatActivityParticipantSummary>,
-  recentCutoffMs: number
+  participants: Map<string, ChatActivityParticipantSummary>
 ): ChatActivityItem[] {
   const approvals = chatAppToolApprovals(conversation.metadata.pendingAppToolApprovals);
   return approvals.flatMap((approval) => {
-    if (approval.status !== "pending" && approval.status !== "denied") {
+    // A cancelled or denied approval is finished business: it stays visible on the card in the
+    // chat timeline and leaves activity entirely instead of piling up in the finished list.
+    if (approval.status !== "pending") {
       return [];
     }
     const triggerMessageId = cleanString(approval.resumeContext?.triggerMessageId);
@@ -305,17 +359,12 @@ function pendingApprovalItems(
     const participant = participantForMessage(targetMessage, participants)
       ?? participants.get(approval.requesterParticipantId);
     const messageId = targetMessage?.id ?? triggerMessageId;
-    const cancelled = approval.status === "denied";
-    if (cancelled && timeValue(approval.updatedAt) < recentCutoffMs) {
-      return [];
-    }
     return [{
       id: `approval:${conversation.id}:${approval.id}`,
       conversationId: conversation.id,
       conversationTitle: conversation.title,
       repoPath: conversation.repoPath,
-      status: cancelled ? "recent" as const : "pending" as const,
-      ...(cancelled ? { read: true } : {}),
+      status: "pending" as const,
       kind: "approval" as const,
       title: participant ? `@${participant.handle} needs approval` : "Approval required",
       preview: previewText(targetMessage?.content) || approval.summary || approval.toolName || "A tool request is waiting for approval.",
@@ -389,8 +438,7 @@ function isVisibleTimelineMessage(message: ChatMessage): boolean {
 function pendingMessageItems(
   conversation: Conversation,
   message: ChatMessage,
-  participants: Map<string, ChatActivityParticipantSummary>,
-  recentCutoffMs: number
+  participants: Map<string, ChatActivityParticipantSummary>
 ): ChatActivityItem[] {
   const items: ChatActivityItem[] = [];
   const targetMessage = isVisibleTimelineMessage(message)
@@ -428,37 +476,8 @@ function pendingMessageItems(
       }
     });
   }
-  if (message.metadata?.pendingChoice?.status === "cancelled") {
-    const terminalAt = message.metadata.pendingChoice.cancelledAt || updatedAt;
-    if (timeValue(terminalAt) < recentCutoffMs) {
-      return items;
-    }
-    items.push({
-      id: `choice:${conversation.id}:${message.id}:${message.metadata.pendingChoice.id}`,
-      conversationId: conversation.id,
-      conversationTitle: conversation.title,
-      repoPath: conversation.repoPath,
-      status: "recent",
-      read: true,
-      kind: "choice",
-      title: message.metadata.pendingChoice.title || "Choice cancelled",
-      preview: previewText(targetMessage.content) || message.metadata.pendingChoice.question || "A member choice was cancelled.",
-      createdAt: message.createdAt,
-      updatedAt: terminalAt,
-      participant,
-      target: {
-        ...target,
-        sourceMessageId: message.id,
-        choiceId: message.metadata.pendingChoice.id
-      }
-    });
-  }
-
   const pendingMentions = Array.isArray(message.metadata?.pendingMentions)
     ? message.metadata.pendingMentions.filter((mention) => mention.status === "pending")
-    : [];
-  const rejectedMentions = Array.isArray(message.metadata?.pendingMentions)
-    ? message.metadata.pendingMentions.filter((mention) => mention.status === "rejected")
     : [];
   if (pendingMentions.length > 0) {
     items.push({
@@ -480,32 +499,6 @@ function pendingMessageItems(
       }
     });
   }
-  if (pendingMentions.length === 0 && rejectedMentions.length > 0) {
-    const terminalAt = newestMentionTimestamp(rejectedMentions) || conversation.updatedAt;
-    if (timeValue(terminalAt) < recentCutoffMs) {
-      return items;
-    }
-    items.push({
-      id: `mention:${conversation.id}:${message.id}`,
-      conversationId: conversation.id,
-      conversationTitle: conversation.title,
-      repoPath: conversation.repoPath,
-      status: "recent",
-      read: true,
-      kind: "mention",
-      title: "Mention approval cancelled",
-      preview: previewText(targetMessage.content) || rejectedMentions.map((mention) => `@${mention.targetHandle}`).join(", "),
-      createdAt: message.createdAt,
-      updatedAt: terminalAt,
-      participant,
-      target: {
-        ...target,
-        sourceMessageId: message.id,
-        mentionTargetParticipantIds: rejectedMentions.map((mention) => mention.targetParticipantId)
-      }
-    });
-  }
-
   if (message.metadata?.participantRequest?.status === "pending_approval") {
     items.push({
       id: `participant-request:${conversation.id}:${message.id}:${message.metadata.participantRequest.id}`,
@@ -530,8 +523,10 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
   const byId = new Map<string, ChatActivityItem>();
   const strongestByRun = new Map<string, ChatActivityItem>();
   const strongestByMessage = new Map<string, ChatActivityItem>();
-  const newestRecentByParticipant = new Map<string, ChatActivityItem>();
   for (const item of items) {
+    if (!isRetainableChatActivityItem(item)) {
+      continue;
+    }
     byId.set(item.id, item);
     const messageId = cleanString(item.target.messageId);
     if (messageId) {
@@ -549,33 +544,66 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
       strongestByRun.set(runId, item);
     }
   }
-  for (const item of byId.values()) {
-    const groupKey = recentParticipantGroupKey(item);
-    if (!groupKey) {
-      continue;
-    }
-    const existing = newestRecentByParticipant.get(groupKey);
-    if (!existing || isNewerActivityItem(item, existing)) {
-      newestRecentByParticipant.set(groupKey, item);
-    }
-  }
 
-  return [...byId.values()].filter((item) => {
+  // One event can be described by several rows (a run, its message, an approval on the same
+  // message). Keep the strongest row per run and per message first, so a row that loses here
+  // cannot go on to win - and silently hide - its finished group below.
+  const distinct = [...byId.values()].filter((item) => {
     const messageId = cleanString(item.target.messageId);
     if (messageId && item.kind === "message" && item.status === "recent" && strongestByMessage.get(messageId)?.id !== item.id) {
       return false;
     }
     const runId = cleanString(item.target.runId);
-    if (!runId || item.status !== "recent") {
-      const groupKey = recentParticipantGroupKey(item);
-      return !groupKey || newestRecentByParticipant.get(groupKey)?.id === item.id;
-    }
-    if (strongestByRun.get(runId)?.id !== item.id) {
-      return false;
-    }
-    const groupKey = recentParticipantGroupKey(item);
-    return !groupKey || newestRecentByParticipant.get(groupKey)?.id === item.id;
+    return !runId || item.status !== "recent" || strongestByRun.get(runId)?.id === item.id;
   });
+
+  // Finished updates collapse to one row per chat and member. The row carries how many updates
+  // it stands for, summed over the rows it replaces so the count survives later merges.
+  const newestRecentByGroup = new Map<string, ChatActivityItem>();
+  const collapsedCountByGroup = new Map<string, number>();
+  for (const item of distinct) {
+    const groupKey = recentParticipantGroupKey(item);
+    if (!groupKey) {
+      continue;
+    }
+    collapsedCountByGroup.set(groupKey, (collapsedCountByGroup.get(groupKey) ?? 0) + collapsedActivityItemCount(item));
+    const existing = newestRecentByGroup.get(groupKey);
+    if (!existing || isNewerActivityItem(item, existing)) {
+      newestRecentByGroup.set(groupKey, item);
+    }
+  }
+
+  return distinct
+    .filter((item) => {
+      const groupKey = recentParticipantGroupKey(item);
+      return !groupKey || newestRecentByGroup.get(groupKey)?.id === item.id;
+    })
+    .map((item) => {
+      const groupKey = recentParticipantGroupKey(item);
+      const groupedCount = groupKey ? collapsedCountByGroup.get(groupKey) ?? 1 : 1;
+      if (groupedCount <= 1) {
+        if (item.groupedCount === undefined) {
+          return item;
+        }
+        const { groupedCount: _dropped, ...rest } = item;
+        return rest;
+      }
+      return item.groupedCount === groupedCount ? item : { ...item, groupedCount };
+    });
+}
+
+/**
+ * Cancelled, denied and rejected cards are finished business that lives on the chat card, so they
+ * never belong in activity. Rows built before that rule can still arrive from preserved renderer
+ * state, and this is the one place every build, merge and refresh path passes through.
+ */
+function isRetainableChatActivityItem(item: ChatActivityItem): boolean {
+  return item.status !== "recent" || item.kind === "message";
+}
+
+function collapsedActivityItemCount(item: ChatActivityItem): number {
+  const count = item.groupedCount;
+  return typeof count === "number" && Number.isFinite(count) && count > 0 ? Math.floor(count) : 1;
 }
 
 function recentParticipantGroupKey(item: ChatActivityItem): string | undefined {
@@ -741,13 +769,6 @@ function participantRequestPreview(message: ChatMessage): string {
     return "A member request is waiting for approval.";
   }
   return requests.map((request) => `@${cleanHandle(request.targetHandle)}`).filter(Boolean).join(", ");
-}
-
-function newestMentionTimestamp(mentions: Array<{ approvedAt?: string; rejectedAt?: string; updatedAt?: string; createdAt?: string }>): string | undefined {
-  return mentions
-    .map((mention) => mention.rejectedAt || mention.approvedAt || mention.updatedAt || mention.createdAt)
-    .filter((value): value is string => Boolean(cleanString(value)))
-    .sort((left, right) => timeValue(right) - timeValue(left))[0];
 }
 
 function previewText(value: unknown): string {

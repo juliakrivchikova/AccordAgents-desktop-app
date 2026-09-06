@@ -6,7 +6,7 @@ import {
 } from "../../shared/chatActivity";
 import type { ChatActivityItem } from "../../shared/types";
 
-test("clearing the final visible finished item keeps older history hidden after restart", () => {
+test("clearing a collapsed finished row keeps that member's older updates hidden after restart", () => {
   const visible = activityItem("visible", "2026-07-11T07:00:00.000Z");
   const olderBackfill = activityItem("older", "2026-07-05T07:00:00.000Z");
   const preferences = chatActivityItemPreferencesAfterClear(
@@ -15,7 +15,9 @@ test("clearing the final visible finished item keeps older history hidden after 
     visible.id
   );
 
-  assert.equal(preferences.clearedRecentThrough, visible.updatedAt);
+  assert.deepEqual(preferences.clearedRecentThroughByGroup, {
+    "conversation-1:id:member-1": visible.updatedAt
+  });
   assert.deepEqual(applyChatActivityItemPreferences([olderBackfill], preferences), []);
 });
 
@@ -23,24 +25,42 @@ test("finished activity created after the clear horizon remains visible", () => 
   const newer = activityItem("newer", "2026-07-11T08:00:00.000Z");
 
   const filtered = applyChatActivityItemPreferences([newer], {
-    clearedRecentThrough: "2026-07-11T07:30:00.000Z"
+    clearedRecentThroughByGroup: { "conversation-1:id:member-1": "2026-07-11T07:30:00.000Z" }
   });
 
   assert.deepEqual(filtered.map((item) => item.id), [newer.id]);
 });
 
-test("clearing one of several finished items does not dismiss the rest", () => {
-  const first = activityItem("first", "2026-07-11T07:00:00.000Z");
-  const second = activityItem("second", "2026-07-11T06:00:00.000Z");
+test("clearing one member's finished row leaves another member's older row in the same chat", () => {
+  const cleared = activityItem("cleared", "2026-07-11T07:00:00.000Z");
+  const otherMember = activityItem("other-member", "2026-07-11T06:00:00.000Z", { participantId: "member-2" });
 
   const preferences = chatActivityItemPreferencesAfterClear(
     { readItemIds: new Set(), clearedItemIds: new Set() },
-    [first, second],
-    first.id
+    [cleared, otherMember],
+    cleared.id
   );
 
-  assert.equal(preferences.clearedRecentThrough, undefined);
-  assert.deepEqual(applyChatActivityItemPreferences([first, second], preferences).map((item) => item.id), [second.id]);
+  assert.deepEqual(
+    applyChatActivityItemPreferences([otherMember], preferences).map((item) => item.id),
+    [otherMember.id]
+  );
+});
+
+test("clearing the last finished row of one chat leaves older rows of another chat visible", () => {
+  const cleared = activityItem("cleared", "2026-07-11T07:00:00.000Z");
+  const otherChat = activityItem("other-chat", "2026-07-05T07:00:00.000Z", { conversationId: "conversation-2" });
+
+  const preferences = chatActivityItemPreferencesAfterClear(
+    { readItemIds: new Set(), clearedItemIds: new Set() },
+    [cleared],
+    cleared.id
+  );
+
+  assert.deepEqual(
+    applyChatActivityItemPreferences([otherChat], preferences).map((item) => item.id),
+    [otherChat.id]
+  );
 });
 
 test("clear horizon follows a future-dated item and hides older backfill", () => {
@@ -52,7 +72,7 @@ test("clear horizon follows a future-dated item and hides older backfill", () =>
     futureDated.id
   );
 
-  assert.equal(preferences.clearedRecentThrough, futureDated.updatedAt);
+  assert.equal(preferences.clearedRecentThroughByGroup?.["conversation-1:id:member-1"], futureDated.updatedAt);
   assert.deepEqual(applyChatActivityItemPreferences([olderBackfill], preferences), []);
 });
 
@@ -63,19 +83,38 @@ test("clear horizon never moves backward", () => {
     {
       readItemIds: new Set(),
       clearedItemIds: new Set(),
-      clearedRecentThrough: existingHorizon
+      clearedRecentThroughByGroup: { "conversation-1:id:member-1": existingHorizon }
     },
     [item],
     item.id
   );
 
-  assert.equal(preferences.clearedRecentThrough, existingHorizon);
+  assert.equal(preferences.clearedRecentThroughByGroup?.["conversation-1:id:member-1"], existingHorizon);
 });
 
-function activityItem(id: string, updatedAt: string): ChatActivityItem {
+test("clearing a pending row does not create a finished clear horizon", () => {
+  const pending: ChatActivityItem = { ...activityItem("pending", "2026-07-11T08:00:00.000Z"), status: "pending", kind: "choice" };
+
+  const preferences = chatActivityItemPreferencesAfterClear(
+    { readItemIds: new Set(), clearedItemIds: new Set() },
+    [pending],
+    pending.id
+  );
+
+  assert.equal(preferences.clearedRecentThroughByGroup, undefined);
+  assert.ok(preferences.clearedItemIds.has(pending.id));
+});
+
+function activityItem(
+  id: string,
+  updatedAt: string,
+  options: { conversationId?: string; participantId?: string } = {}
+): ChatActivityItem {
+  const conversationId = options.conversationId ?? "conversation-1";
+  const participantId = options.participantId ?? "member-1";
   return {
     id,
-    conversationId: "conversation-1",
+    conversationId,
     conversationTitle: "Activity",
     status: "recent",
     kind: "message",
@@ -83,6 +122,22 @@ function activityItem(id: string, updatedAt: string): ChatActivityItem {
     preview: id,
     createdAt: updatedAt,
     updatedAt,
+    participant: { id: participantId, handle: participantId, kind: "claude-code" },
     target: { messageId: id }
   };
 }
+
+test("the legacy global clear cutoff keeps pre-upgrade rows hidden and never grows", () => {
+  const olderThanUpgrade = activityItem("older", "2026-07-10T07:00:00.000Z");
+  const afterUpgrade = activityItem("newer", "2026-07-12T07:00:00.000Z", { participantId: "member-2" });
+  const legacy = { readItemIds: new Set<string>(), clearedItemIds: new Set<string>(), clearedRecentThroughBefore: "2026-07-11T00:00:00.000Z" };
+
+  assert.deepEqual(
+    applyChatActivityItemPreferences([olderThanUpgrade, afterUpgrade], legacy).map((item) => item.id),
+    [afterUpgrade.id]
+  );
+
+  const preferences = chatActivityItemPreferencesAfterClear(legacy, [afterUpgrade], afterUpgrade.id);
+  assert.equal(preferences.clearedRecentThroughBefore, "2026-07-11T00:00:00.000Z");
+  assert.deepEqual(Object.keys(preferences.clearedRecentThroughByGroup ?? {}), ["conversation-1:id:member-2"]);
+});
