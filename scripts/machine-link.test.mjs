@@ -29,6 +29,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const machineStore = new Map();
     const importedSnapshots = [];
     const hostRuns = [];
+    const approvalRequests = [];
     let releaseLongTurn;
     const hostChat = {
       runMachineHostedTurn: async (request, signal, progress) => {
@@ -46,8 +47,14 @@ test("machine link replicates settings and conversations, runs a turn, streams p
         return { messages: [reply], warnings: ["w1"] };
       },
       cancelRun: () => true,
-      applyReplicatedConversation: async (conversation) => { machineStore.set(conversation.id, conversation); },
-      respondToAppToolApproval: async () => undefined
+      applyReplicatedConversation: async (id, merge) => { const next = merge(machineStore.get(id)); if (next) machineStore.set(id, next); },
+      respondToAppToolApproval: async (request) => {
+        approvalRequests.push(request);
+        if (request.approvalId === "approval-bad") {
+          throw new Error("decision rejected by the native session");
+        }
+        return machineStore.get(request.conversationId);
+      }
     };
     const hostStorage = {
       getConversation: async (id) => machineStore.get(id),
@@ -88,6 +95,18 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     assert.equal(result.messages[0].content, "reply to msg-1");
     assert.equal(progressSeen.length, 1);
     assert.equal(hostRuns[0].pendingMessageId, "pending-1");
+    // The machine keeps a result until the desktop acknowledges it.
+    await waitFor(() => logs.some((entry) => entry.event === "machine-host.terminal.acked" && entry.payload?.runId === "run-1"), 5_000);
+
+    // Approval decisions carry the whole card answer and resolve with the machine's outcome.
+    await link.respondToMachineApproval({ machineId: "machine-1", conversationId: "conv-1", approvalId: "approval-1", approve: true, scope: "once", draftOverride: { kind: "edited" }, codexDecisionId: "decision-7" });
+    assert.equal(approvalRequests.length, 1);
+    assert.deepEqual(approvalRequests[0].draftOverride, { kind: "edited" });
+    assert.equal(approvalRequests[0].codexDecisionId, "decision-7");
+    await assert.rejects(
+      () => link.respondToMachineApproval({ machineId: "machine-1", conversationId: "conv-1", approvalId: "approval-bad", approve: false }),
+      /rejected by the native session/
+    );
     // The machine keeps its own run bookkeeping and sessions, not the desktop's.
     const copy = machineStore.get("conv-1");
     assert.equal(copy.metadata.activeRunIds, undefined);
@@ -135,6 +154,14 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     assert.equal(machineStore.get("conv-big").messages.length, 401);
     const bigDeltas = logs.filter((entry) => entry.event === "machine-host.message" && entry.payload?.type === "machine.conversation.delta" && entry.payload?.conversationId === "conv-big");
     assert.ok(bigDeltas.length >= 3, `expected batched deltas, saw ${bigDeltas.length}`);
+    // What the desktop replicated is never echoed back as a back delta.
+    const echoes = [];
+    const stopEchoListener = link.onConversationBackDelta((delta) => { if (delta.conversationId === "conv-big") echoes.push(delta); });
+    host.noteConversationSnapshot(machineStore.get("conv-big"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const echoedReplicated = echoes.flatMap((delta) => delta.messages.map((message) => message.id)).filter((id) => id.startsWith("big-"));
+    assert.deepEqual(echoedReplicated, [], "replicated messages must not come back as a back delta");
+    stopEchoListener();
 
     // A reply finished while the desktop was away is delivered on reconnect.
     const backdeltas = [];

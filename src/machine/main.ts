@@ -172,6 +172,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     deviceId: identity.originId,
     machineName: args.machineName,
     appVersion: platform.appVersion(),
+    outboxPath: path.join(userDataPath(), "machine-outbox.json"),
     detectProviders: () => cliAgentRunner.detectAgents(),
     onSettingsImported: async () => {
       cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());

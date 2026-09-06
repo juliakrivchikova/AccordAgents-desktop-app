@@ -3328,12 +3328,18 @@ export class SettingsService {
     if (!stored.encryptedMachinePairings) {
       return {};
     }
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(this.openJson(stored.encryptedMachinePairings)) as Record<string, MobilePairingPackage>;
-      return parsed && typeof parsed === "object" ? parsed : {};
-    } catch {
-      return {};
+      parsed = JSON.parse(this.openJson(stored.encryptedMachinePairings));
+    } catch (error) {
+      // Never treat an unreadable record as empty: a later save would replace
+      // every stored enrollment. The stored blob stays as it is.
+      throw new Error(
+        `Stored machine enrollments could not be read (${error instanceof Error ? error.message : String(error)}). ` +
+        "They were left untouched; if the system secret store changed, remove and re-enroll the machines."
+      );
     }
+    return parsed && typeof parsed === "object" ? parsed as Record<string, MobilePairingPackage> : {};
   }
 
   // Machine pairings carry relay keys, so they are stored sealed or not at

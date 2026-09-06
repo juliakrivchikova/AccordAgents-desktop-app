@@ -656,7 +656,15 @@ export interface MachineTurnDispatchResult {
 export interface MachineTurnDispatcher {
   runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult>;
   /** Forwards the desktop's decision on an approval raised on a machine. */
-  respondToMachineApproval?(request: { machineId: string; conversationId: string; approvalId: string; approve: boolean; scope?: "once" | "chat" }): Promise<void>;
+  respondToMachineApproval?(request: {
+    machineId: string;
+    conversationId: string;
+    approvalId: string;
+    approve: boolean;
+    scope?: "once" | "chat";
+    draftOverride?: ChatAppToolApprovalRequest;
+    codexDecisionId?: string;
+  }): Promise<void>;
 }
 
 interface RemoteRunStarter {
@@ -4759,14 +4767,19 @@ export class ChatService {
       if (!link?.respondToMachineApproval) {
         throw new Error("The machine link is not available, so this approval cannot be answered right now.");
       }
+      // The whole card answer travels: an edited Codex proposal and the
+      // native decision id are applied on the machine exactly as they would
+      // be here, and the machine's outcome (or error) is this call's outcome.
       await link.respondToMachineApproval({
         machineId: approval.homeMachineId,
         conversationId: conversation.id,
         approvalId: approval.id,
         approve: request.approve,
-        ...(request.scope === "chat" ? { scope: "chat" as const } : request.scope === "once" ? { scope: "once" as const } : {})
+        ...(request.scope === "chat" ? { scope: "chat" as const } : request.scope === "once" ? { scope: "once" as const } : {}),
+        ...(request.draftOverride ? { draftOverride: request.draftOverride } : {}),
+        ...(request.codexDecisionId ? { codexDecisionId: request.codexDecisionId } : {})
       });
-      return conversation;
+      return (await this.storage.getConversation(conversation.id)) ?? conversation;
     }
     if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
       return this.respondToToolPermissionApproval(request);
@@ -6723,11 +6736,18 @@ export class ChatService {
         this.queueSnapshot(conversation);
       });
     }
+    // After refresh-then-merge the bubble object held here may no longer be
+    // the one inside conversation.messages; both are updated by id.
+    const bubbleObjects = (): ChatMessage[] => {
+      const inConversation = conversation.messages.find((message) => message.id === pendingMessage.id);
+      return inConversation && inConversation !== pendingMessage ? [pendingMessage, inConversation] : [pendingMessage];
+    };
     const clearStopPending = (): void => {
-      if (pendingMessage.metadata?.stopPending) {
-        const { stopPending: _stopPending, ...rest } = pendingMessage.metadata;
-        pendingMessage.metadata = rest;
-        pendingMessage.content = "";
+      for (const bubble of bubbleObjects()) {
+        if (bubble.metadata?.stopPending) {
+          const { stopPending: _stopPending, ...rest } = bubble.metadata;
+          bubble.metadata = rest;
+        }
       }
     };
     try {
@@ -6740,15 +6760,25 @@ export class ChatService {
         signal,
         progress,
         onStopPending: (machineName) => {
+          void this.debugLogs.write("chat.stop-pending.requested", { conversationId: conversation.id, runId, pendingMessageId: pendingMessage.id });
           void this.withChatMutation(conversation, async () => {
-            if (pendingMessage.status !== "pending") {
+            const bubbles = bubbleObjects().filter((bubble) => bubble.status === "pending");
+            void this.debugLogs.write("chat.stop-pending.mutation", { conversationId: conversation.id, runId, bubbles: bubbles.length, statuses: bubbleObjects().map((bubble) => bubble.status) });
+            if (bubbles.length === 0) {
               return;
             }
-            pendingMessage.content = `Stop requested — waiting for machine ${machineName}.`;
-            pendingMessage.metadata = { ...pendingMessage.metadata, stopPending: true };
+            // Delivered text stays; the waiting state is a separate mark the
+            // renderer shows under the bubble.
+            const stopPending = { machineName, at: new Date().toISOString() };
+            for (const bubble of bubbles) {
+              bubble.metadata = { ...bubble.metadata, stopPending };
+            }
             conversation.updatedAt = new Date().toISOString();
             this.queueSnapshot(conversation);
-          }).catch(() => undefined);
+            void this.debugLogs.write("chat.stop-pending.marked", { conversationId: conversation.id, runId });
+          }).catch((error: unknown) => {
+            void this.debugLogs.write("chat.stop-pending.error", { conversationId: conversation.id, runId, message: error instanceof Error ? error.message : String(error) });
+          });
         }
       });
       clearStopPending();
@@ -6823,18 +6853,31 @@ export class ChatService {
    *  tracking, so later saves by turns on this machine never collide with
    *  rows written behind the service's back. The caller has already merged
    *  the machine-owned metadata. */
-  async applyReplicatedConversation(incoming: Conversation): Promise<void> {
-    const existing = await this.storage.getConversation(incoming.id);
+  async applyReplicatedConversation(
+    conversationId: string,
+    merge: (existing: Conversation | undefined) => Conversation | undefined
+  ): Promise<void> {
+    const existing = await this.storage.getConversation(conversationId);
     if (!existing) {
-      await this.saveConversation(incoming);
+      const created = merge(undefined);
+      if (created) {
+        await this.saveConversation(created);
+      }
       return;
     }
+    // The merge runs inside the mutation, against the copy refreshed there,
+    // so a reply or session id written by a turn on this machine between the
+    // read and the write is never replaced by an older desktop copy.
     await this.withChatMutation(existing, async () => {
-      existing.messages = incoming.messages;
-      existing.metadata = incoming.metadata;
-      existing.title = incoming.title;
-      existing.repoPath = incoming.repoPath;
-      existing.updatedAt = incoming.updatedAt;
+      const merged = merge(existing);
+      if (!merged) {
+        return;
+      }
+      existing.messages = merged.messages;
+      existing.metadata = merged.metadata;
+      existing.title = merged.title;
+      existing.repoPath = merged.repoPath;
+      existing.updatedAt = merged.updatedAt;
       await this.saveConversation(existing);
     });
   }
@@ -6888,13 +6931,19 @@ export class ChatService {
     signal?: AbortSignal,
     progress?: ProgressCallback
   ): Promise<{ messages: ChatMessage[]; warnings: string[] }> {
+    // The desktop's pending bubble for this run is already in the copy; the
+    // run must count as live before the stale-run sweep in requireChat sees
+    // it, or the bubble is marked interrupted before the turn even starts.
+    this.activeRunIds.add(request.runId);
     const conversation = await this.requireChat(request.conversationId);
     const participant = this.chatParticipants(conversation).find((item) => item.id === request.participantId);
     if (!participant) {
+      this.activeRunIds.delete(request.runId);
       throw new Error("Machine-hosted turn participant was not found in this machine's copy of the chat.");
     }
     const triggerMessage = conversation.messages.find((message) => message.id === request.messageId);
     if (!triggerMessage) {
+      this.activeRunIds.delete(request.runId);
       throw new Error("Machine-hosted turn message was not found in this machine's copy of the chat.");
     }
     const warnings: string[] = [];

@@ -158,6 +158,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     omittedActivityEventCount: processingTranscript.omittedActivityEventCount
   }) : undefined;
   const queuedBehind = isStreaming ? message.metadata?.queuedBehind : undefined;
+  const stopPending = isStreaming ? message.metadata?.stopPending : undefined;
   const workedMs = typeof message.metadata?.workedMs === "number" && Number.isFinite(message.metadata.workedMs) && message.metadata.workedMs >= 0
     ? message.metadata.workedMs
     : undefined;
@@ -385,6 +386,11 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           {queuedBehind && (
             <div className="chat-queued-badge">
               <span>Queued — waiting for @{queuedBehind.handle} to finish</span>
+            </div>
+          )}
+          {stopPending && (
+            <div className="chat-queued-badge">
+              <span>Stop requested — waiting for machine {stopPending.machineName}</span>
             </div>
           )}
           {repoFileMentions.length > 0 && (

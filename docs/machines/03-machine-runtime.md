@@ -8,15 +8,17 @@ Every message is sealed with the pairing's key inside the machine's own relay ro
 
 | Direction | Message | When |
 |---|---|---|
-| machine → desktop | `machine.hello` | on every (re)connect: device id, name, app version, platform, installed providers |
+| machine → desktop | `machine.hello` | on every (re)connect, including the machine's own link coming back: device id, name, app version, platform, installed providers, runtime instance id, active runs, results waiting in the outbox |
 | desktop → machine | `machine.hello.ack`, `machine.settings.sync` | after hello; the settings snapshot (roles, rules, saved prompts, member presets, limits, agent environment values) also travels with every turn request |
 | desktop → machine | `machine.conversation.sync` / `machine.conversation.delta` | the first time a chat reaches the machine: the conversation shell, then its messages in bounded batches (at most 150 messages / ~1.5 MB of JSON per relay message, so a chat of any size stays under the relay's 10 MiB limit); changed messages afterwards, batched the same way. The machine keeps its own `participantSessions`, `activeRunIds`, `running`, `runId`, `pendingAppToolApprovals`; approval policies are the union of both sides. A fresh copy after a reconnect never erases messages the machine produced meanwhile. |
 | desktop → machine | `machine.turn.request` | the member's home is this machine: run this member for this message, with the desktop's run id and pending message id. Settings sync and replication precede it; a Stop that lands during that preparation means the request is never sent. |
-| machine → desktop | `machine.turn.progress`, `machine.turn.finished` | streamed progress and the finished messages (same ids on both sides). The machine keeps a finished turn until the desktop has received it and resends it after a reconnect; a desktop that finds no pending turn for it (restart) lands the messages as a back-delta. |
+| machine → desktop | `machine.turn.progress`, `machine.turn.finished` | streamed progress and the finished messages (same ids on both sides), sent in order. The machine keeps a finished turn in its outbox (`machine-outbox.json` under its user data, so it survives a restart of the runtime) and resends it on every hello until the desktop answers `machine.turn.finished.ack`; a desktop that finds no pending turn for it (restart) lands the messages as a back-delta. |
+| desktop → machine | `machine.turn.finished.ack` | the finished turn is applied on the desktop; the machine drops it from its outbox |
 | machine → desktop | `machine.conversation.backdelta` | messages the machine wrote outside a turn result (mid-turn `app_chat_send_message`, artifact notes) |
 | machine → desktop | `machine.approval.requested` / `machine.approval.updated` | a member on the machine needs a permission or app-tool approval: the desktop shows the same card it shows for a local member, tagged with the member's home machine |
-| desktop → machine | `machine.approval.decision` | the User's answer on that card; the machine applies it through the ordinary approval path and the member resumes |
-| desktop → machine | `machine.turn.cancel` | Stop. If the machine is unreachable or does not confirm within a few seconds, the bubble shows "Stop requested — waiting for machine <name>" (Rule 2, an approved parity exception in `docs/parity-requirements.md`); the stop is kept and delivered again on the machine's next `machine.hello`, and "stopped by user" appears only after the machine confirms. A hello also carries the machine's `activeRunIds`/`pendingTerminalRunIds`, so a turn the machine lost in a restart is closed on the desktop instead of waiting forever. |
+| desktop → machine | `machine.approval.decision` | the User's whole card answer (approve/deny, scope, an edited Codex proposal, the native decision id); the machine applies it through the ordinary approval path and the member resumes |
+| machine → desktop | `machine.approval.result` | outcome of applying that decision; the desktop's card call resolves or fails with it. After a reconnect the machine offers every approval it holds again, so one raised while the desktop was away is not lost |
+| desktop → machine | `machine.turn.cancel` | Stop. If the machine is unreachable or does not confirm within a few seconds, the bubble shows "Stop requested — waiting for machine <name>" (Rule 2, an approved parity exception in `docs/parity-requirements.md`); the stop is kept and delivered again on the machine's next `machine.hello`, and "stopped by user" appears only after the machine confirms. A held stop is stored in the machine's record on the desktop, so it survives a desktop restart. A hello carries the runtime's `instanceId` plus `activeRunIds`/`pendingTerminalRunIds`: only a turn dispatched to a previous instance whose result is not in the new instance's outbox is closed on the desktop, and it is closed as failed ("restarted before confirming the stop"), never as "stopped", because a restart proves nothing about the run's processes. |
 
 Provider API keys, AWS credentials, cloud-run settings, and other machines' records never leave the desktop (`SettingsService.exportMachineSettingsSnapshot`).
 
@@ -58,9 +60,13 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
+## Cost on a large chat
+
+Every conversation snapshot on the desktop triggers a replication pass for the chats a machine hosts. A pass compares every message against what the machine holds; the per-message hash is cached per message object and recomputed only when content, status, metadata, or attachments changed in place, and snapshots that arrive while a pass is running collapse into one more pass. The first copy of a 14 000-row chat still travels whole (about 94 batches, ~55 MB sealed, measured by Drew on 2026-09-06); a single message or metadata larger than the relay's 10 MiB logical limit is not split yet.
+
 ## Where the machine keeps data
 
-Under the user-data directory: `accordagents.sqlite3` (its copy of the chats it hosts, artifacts, chat events), `settings.json` (the desktop's shareable settings plus the machine's own records), `machine-secrets.key` (0600; seals the machine's secrets), `chats/<id>/` (history files the CLIs read), `debug-logs/`.
+Under the user-data directory: `accordagents.sqlite3` (its copy of the chats it hosts, artifacts, chat events), `settings.json` (the desktop's shareable settings plus the machine's own records), `machine-secrets.key` (0600; seals the machine's secrets), `machine-outbox.json` (finished turns not yet acknowledged by the desktop), `chats/<id>/` (history files the CLIs read), `debug-logs/`.
 
 ## Local QA on one Mac
 

@@ -43,11 +43,15 @@ async function conv(client, id) {
   const machinePid = Number(execSync("pgrep -f accordagents-machine.cjs").toString().trim().split("\n")[0]);
   process.kill(machinePid, "SIGSTOP"); console.log(stamp(), "froze machine pid", machinePid);
   await client.click(".message-action-stop"); console.log(stamp(), "clicked Stop");
+  // The waiting state is a mark beside the bubble (metadata.stopPending) that the
+  // renderer shows as "Stop requested — waiting for machine <name>"; delivered
+  // text is left untouched.
   let waiting = null;
   for (let i = 0; i < 30; i += 1) {
-    const s = await conv(client, id);
-    waiting = s && s.messages.find((m) => /Stop requested/i.test(m.text));
-    if (waiting) break;
+    const badge = await evalJson(client, `return document.body.innerText.includes("Stop requested");`);
+    const r = await evalAsync(client, `(async () => { const c = await window.consensus.getConversation(${JSON.stringify(id)}); return c.messages.filter((m) => m.metadata && m.metadata.stopPending).map((m) => ({ status: m.status, text: (m.content || "").slice(0, 80), stopPending: m.metadata.stopPending })); })()`);
+    const marked = r.ok ? r.v : [];
+    if (badge && marked.length > 0) { waiting = { badge, marked }; break; }
     await sleep(500);
   }
   console.log(stamp(), "waiting state shown:", JSON.stringify(waiting));
@@ -62,7 +66,8 @@ async function conv(client, id) {
   }
   console.log(stamp(), "state after stop:", JSON.stringify(state, null, 1));
   const stopped = Boolean(state && state.messages.some((m) => /stopped by user/i.test(m.text) || m.reason === "user-stopped"));
-  const stale = Boolean(state && state.messages.some((m) => /Stop requested/i.test(m.text)));
+  const staleBadge = await evalJson(client, `return document.body.innerText.includes("Stop requested");`);
+  const stale = staleBadge || Boolean(state && state.messages.some((m) => /Stop requested/i.test(m.text)));
   const pass = Boolean(waiting) && stopped && !stale;
   console.log(stamp(), pass ? "MACHINE STOP UNREACHABLE: PASS" : `MACHINE STOP UNREACHABLE: FAIL (waiting=${Boolean(waiting)} stopped=${stopped} stale=${stale})`);
   process.exit(pass ? 0 : 1);

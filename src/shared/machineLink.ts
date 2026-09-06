@@ -10,7 +10,8 @@
  * machine answers with progress and the finished participant messages.
  */
 
-import type { ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "./types";
+import type {
+  ChatAppToolApprovalRequest, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "./types";
 
 export const MACHINE_LINK_PROTOCOL = "accord-machine-link-v1";
 
@@ -43,8 +44,11 @@ export interface MachineHelloBody {
   providers: Array<{ kind: string; installed: boolean; version?: string }>;
   /** Runs still executing on the machine (reconnect reconciliation). */
   activeRunIds?: string[];
-  /** Finished runs whose result the desktop has not received yet. */
+  /** Finished runs whose result the desktop has not acknowledged yet. */
   pendingTerminalRunIds?: string[];
+  /** Random id of this runtime process; changes when the machine restarts,
+   *  so the desktop can tell a restart from a reconnect. */
+  instanceId?: string;
 }
 
 export interface MachineHelloAckBody {
@@ -143,7 +147,29 @@ export interface MachineApprovalDecisionBody {
   approvalId: string;
   approve: boolean;
   scope?: "once" | "chat";
+  /** The card's edited proposal (Codex approvals) and native decision id,
+   *  exactly as the desktop's own approval path receives them. */
+  draftOverride?: ChatAppToolApprovalRequest;
+  codexDecisionId?: string;
   decidedAt: string;
+}
+
+/** Machine -> desktop: outcome of applying a decision (the desktop's card
+ *  call resolves or fails with it). */
+export interface MachineApprovalResultBody {
+  type: "machine.approval.result";
+  conversationId: string;
+  approvalId: string;
+  ok: boolean;
+  error?: string;
+}
+
+/** Desktop -> machine: the finished turn has been applied on the desktop;
+ *  the machine may drop it from its outbox. */
+export interface MachineTurnFinishedAckBody {
+  type: "machine.turn.finished.ack";
+  conversationId: string;
+  runId: string;
 }
 
 export interface MachineChoiceAnswerBody {
@@ -168,6 +194,8 @@ export type MachineLinkMessage =
   | MachineApprovalRequestedBody
   | MachineApprovalUpdatedBody
   | MachineApprovalDecisionBody
+  | MachineApprovalResultBody
+  | MachineTurnFinishedAckBody
   | MachineChoiceAnswerBody;
 
 export type MachineLinkMessageType = MachineLinkMessage["type"];
@@ -186,6 +214,8 @@ const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.approval.requested",
   "machine.approval.updated",
   "machine.approval.decision",
+  "machine.approval.result",
+  "machine.turn.finished.ack",
   "machine.choice.answer"
 ]);
 
@@ -248,4 +278,7 @@ export interface MachineRecord {
   createdAt: string;
   lastSeenAt?: string;
   lastHello?: Omit<MachineHelloBody, "type">;
+  /** Stops requested while the machine was unreachable (Rule 2): kept until
+   *  the machine confirms, across desktop restarts. */
+  pendingCancels?: Array<{ runId: string; conversationId: string }>;
 }

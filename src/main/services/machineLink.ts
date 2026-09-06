@@ -23,7 +23,7 @@ import {
   type MachineTurnFinishedBody
 } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
-import type { ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
+import type { ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatAppToolApprovalRequest, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
 import type { MachineTurnDispatchRequest, MachineTurnDispatchResult, MachineTurnDispatcher } from "./chat";
 import type { DebugLogService } from "./debugLogs";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
@@ -55,16 +55,29 @@ interface MachineConnection {
   pendingTurns: Map<string, {
     resolve: (result: MachineTurnDispatchResult) => void;
     progress?: (progress: ReviewProgress) => void;
+    /** Runtime instance the turn was dispatched to (from the machine's hello). */
+    instanceId?: string;
   }>;
   /** Stops the machine has not confirmed yet (run id → conversation id).
-   *  Rule 2: a Stop is stored and delivered again when the machine is back;
-   *  "stopped" appears only after the machine confirms. */
+   *  Rule 2: a Stop is stored (in the machine record, so it survives a desktop
+   *  restart) and delivered again when the machine is back; "stopped" appears
+   *  only after the machine confirms. */
   pendingCancels: Map<string, string>;
+  /** Serializes machine-record writes for this connection. */
+  persist: Promise<void>;
+  /** Latest snapshot waiting for the running replication pass, per
+   *  conversation: many snapshots in flight collapse into one more pass. */
+  replicationQueued: Map<string, Conversation>;
+  /** Approval decisions waiting for the machine's outcome. */
+  pendingApprovals: Map<string, { resolve: () => void; reject: (error: Error) => void }>;
 }
 
 /** How long a delivered Stop may go unconfirmed before the User is told the
  *  machine has not answered yet. */
 const STOP_CONFIRM_GRACE_MS = 5_000;
+/** How long the desktop waits for a machine to report the outcome of an
+ *  approval decision. */
+const APPROVAL_RESULT_TIMEOUT_MS = 60_000;
 const TURN_ACK_TIMEOUT_MS = 24 * 60 * 60_000;
 
 export class MachineLinkService implements MachineTurnDispatcher {
@@ -99,19 +112,48 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   /** Forwards the desktop's decision on a machine-raised approval. */
-  async respondToMachineApproval(request: { machineId: string; conversationId: string; approvalId: string; approve: boolean; scope?: "once" | "chat" }): Promise<void> {
+  async respondToMachineApproval(request: {
+    machineId: string;
+    conversationId: string;
+    approvalId: string;
+    approve: boolean;
+    scope?: "once" | "chat";
+    draftOverride?: ChatAppToolApprovalRequest;
+    codexDecisionId?: string;
+  }): Promise<void> {
     const connection = this.connections.get(request.machineId);
     if (!connection?.machineDeviceId) {
       throw new Error("The machine that raised this approval is not connected; the decision will be possible once it reconnects.");
     }
-    await this.send(connection, {
-      type: "machine.approval.decision",
-      conversationId: request.conversationId,
-      approvalId: request.approvalId,
-      approve: request.approve,
-      ...(request.scope ? { scope: request.scope } : {}),
-      decidedAt: this.now().toISOString()
+    // The call resolves with the machine's outcome: an edited proposal or a
+    // native decision the machine rejects is an error here, not a silent no-op.
+    const outcome = new Promise<void>((resolve, reject) => {
+      connection.pendingApprovals.set(request.approvalId, { resolve, reject });
     });
+    const timeout = setTimeout(() => {
+      const pending = connection.pendingApprovals.get(request.approvalId);
+      if (pending) {
+        connection.pendingApprovals.delete(request.approvalId);
+        pending.reject(new Error(`Machine ${connection.record.name} did not confirm the decision in time.`));
+      }
+    }, APPROVAL_RESULT_TIMEOUT_MS);
+    timeout.unref?.();
+    try {
+      await this.send(connection, {
+        type: "machine.approval.decision",
+        conversationId: request.conversationId,
+        approvalId: request.approvalId,
+        approve: request.approve,
+        ...(request.scope ? { scope: request.scope } : {}),
+        ...(request.draftOverride ? { draftOverride: request.draftOverride } : {}),
+        ...(request.codexDecisionId ? { codexDecisionId: request.codexDecisionId } : {}),
+        decidedAt: this.now().toISOString()
+      });
+      await outcome;
+    } finally {
+      clearTimeout(timeout);
+      connection.pendingApprovals.delete(request.approvalId);
+    }
     void this.debugLogs.write("machine-link.approval.decision-sent", {
       machineId: request.machineId,
       conversationId: request.conversationId,
@@ -161,7 +203,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
       replicated: new Map(),
       replication: new Map(),
       pendingTurns: new Map(),
-      pendingCancels: new Map()
+      pendingCancels: new Map((record.pendingCancels ?? []).map((cancel) => [cancel.runId, cancel.conversationId])),
+      persist: Promise.resolve(),
+      replicationQueued: new Map(),
+      pendingApprovals: new Map()
     };
     this.connections.set(record.id, connection);
     client.on("peer", (event) => {
@@ -289,6 +334,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         return;
       }
       connection.pendingCancels.set(request.runId, request.conversation.id);
+      this.persistCancels(connection);
       if (!connection.machineDeviceId) {
         stopPending("machine unreachable");
         return;
@@ -304,7 +350,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     };
     request.signal?.addEventListener("abort", onAbort, { once: true });
     const result = new Promise<MachineTurnDispatchResult>((resolve) => {
-      connection.pendingTurns.set(request.runId, { resolve, progress: request.progress });
+      connection.pendingTurns.set(request.runId, { resolve, progress: request.progress, instanceId: connection.record.lastHello?.instanceId });
     });
     const timeout = setTimeout(() => {
       const pending = connection.pendingTurns.get(request.runId);
@@ -355,10 +401,35 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   private replicateTo(connection: MachineConnection, conversation: Conversation): Promise<void> {
+    // Snapshots arrive faster than a pass over a large chat takes; only the
+    // newest one matters, so a pass already queued just picks it up.
+    const queued = connection.replicationQueued;
+    const alreadyQueued = queued.has(conversation.id);
+    queued.set(conversation.id, conversation);
+    if (alreadyQueued) {
+      return connection.replication.get(conversation.id) ?? Promise.resolve();
+    }
     const previous = connection.replication.get(conversation.id) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(() => this.replicateNow(connection, conversation));
+    const next = previous.catch(() => undefined).then(() => {
+      const latest = queued.get(conversation.id) ?? conversation;
+      queued.delete(conversation.id);
+      return this.replicateNow(connection, latest);
+    });
     connection.replication.set(conversation.id, next.then(() => undefined, () => undefined));
     return next;
+  }
+
+  /** Rule 2: stops waiting for a machine are part of its record, so a
+   *  desktop restart does not forget them. */
+  private persistCancels(connection: MachineConnection): void {
+    const pendingCancels = [...connection.pendingCancels.entries()].map(([runId, conversationId]) => ({ runId, conversationId }));
+    connection.record = { ...connection.record, pendingCancels };
+    const record = connection.record;
+    connection.persist = connection.persist
+      .then(() => this.settings.saveMachine(record))
+      .then(() => undefined, (error: unknown) => {
+        void this.debugLogs.write("machine-link.record.save-error", { machineId: record.id, message: errorMessage(error) });
+      });
   }
 
   private async replicateNow(connection: MachineConnection, conversation: Conversation): Promise<void> {
@@ -450,6 +521,18 @@ export class MachineLinkService implements MachineTurnDispatcher {
         this.emitter.emit("backdelta", { machineId: connection.record.id, conversationId: body.conversationId, messages: body.messages });
         return;
       }
+      case "machine.approval.result": {
+        const pending = connection.pendingApprovals.get(body.approvalId);
+        connection.pendingApprovals.delete(body.approvalId);
+        if (pending) {
+          if (body.ok) {
+            pending.resolve();
+          } else {
+            pending.reject(new Error(body.error ?? `Machine ${connection.record.name} could not apply the decision.`));
+          }
+        }
+        return;
+      }
       case "machine.approval.requested":
       case "machine.approval.updated":
         this.emitter.emit("approval", {
@@ -473,7 +556,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
       ...connection.record,
       deviceId: hello.deviceId,
       lastSeenAt: this.now().toISOString(),
-      lastHello: rest
+      lastHello: rest,
+      pendingCancels: [...connection.pendingCancels.entries()].map(([runId, conversationId]) => ({ runId, conversationId }))
     };
     await this.settings.saveMachine(connection.record);
     await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion });
@@ -491,25 +575,52 @@ export class MachineLinkService implements MachineTurnDispatcher {
       void this.debugLogs.write("machine-link.stop.redelivered", { machineId: connection.record.id, runId });
       await this.send(connection, { type: "machine.turn.cancel", conversationId, runId }).catch(() => undefined);
     }
-    if (!Array.isArray(hello.activeRunIds)) {
+    // A turn is lost only when the runtime that received it is gone (a new
+    // instance id) and the result is not in that runtime's outbox. A hello
+    // from the same instance proves nothing about a turn dispatched a moment
+    // ago, so it is left alone.
+    const instanceId = hello.instanceId;
+    if (!instanceId) {
       return;
     }
-    const alive = new Set([...hello.activeRunIds, ...(hello.pendingTerminalRunIds ?? [])]);
+    const held = new Set(hello.pendingTerminalRunIds ?? []);
+    let cancelsChanged = false;
     for (const [runId, pending] of [...connection.pendingTurns.entries()]) {
-      if (alive.has(runId)) {
+      if (!pending.instanceId || pending.instanceId === instanceId || held.has(runId)) {
         continue;
       }
       connection.pendingTurns.delete(runId);
       const stopped = connection.pendingCancels.delete(runId);
+      cancelsChanged = cancelsChanged || stopped;
       void this.debugLogs.write("machine-link.turn.lost-on-restart", { machineId: connection.record.id, runId, stopped });
-      pending.resolve(stopped
-        ? { status: "interrupted", messages: [], warnings: [] }
-        : { status: "failed", messages: [], warnings: [], error: `Machine ${connection.record.name} restarted before this turn finished.` });
+      // Rule 2: "stopped" is shown only when the machine confirmed the
+      // process is gone; a restart confirms nothing.
+      pending.resolve({
+        status: "failed",
+        messages: [],
+        warnings: [],
+        error: stopped
+          ? `Machine ${connection.record.name} restarted before confirming the stop; whether the run's processes are gone is not verified.`
+          : `Machine ${connection.record.name} restarted before this turn finished.`
+      });
+    }
+    for (const runId of [...connection.pendingCancels.keys()]) {
+      if (!connection.pendingTurns.has(runId) && !hello.activeRunIds?.includes(runId) && !held.has(runId)) {
+        connection.pendingCancels.delete(runId);
+        cancelsChanged = true;
+      }
+    }
+    if (cancelsChanged) {
+      this.persistCancels(connection);
     }
   }
 
   private finishTurn(connection: MachineConnection, body: MachineTurnFinishedBody): void {
-    connection.pendingCancels.delete(body.runId);
+    if (connection.pendingCancels.delete(body.runId)) {
+      this.persistCancels(connection);
+    }
+    // The machine keeps the result until this acknowledgement arrives.
+    void this.send(connection, { type: "machine.turn.finished.ack", conversationId: body.conversationId, runId: body.runId }).catch(() => undefined);
     const pending = connection.pendingTurns.get(body.runId);
     if (!pending) {
       // The turn finished while this desktop was away (restart, relay drop):
@@ -568,9 +679,36 @@ export class MachineLinkService implements MachineTurnDispatcher {
 }
 
 /** Content hash of everything a message carries, so edits of equal length
- *  are never mistaken for "unchanged". */
+ *  are never mistaken for "unchanged". Message objects are shared between
+ *  snapshots, so the hash is cached per object and recomputed only when the
+ *  fields that change in place (content, status, metadata, attachments)
+ *  differ from the cached ones: a pass over a 14 000-row chat compares
+ *  strings instead of serializing and hashing every row again. */
+const stampCache = new WeakMap<ChatMessage, { content: string; status: string | undefined; metadata: unknown; metadataJson: string; attachments: unknown; stamp: string }>();
+
 export function messageStamp(message: ChatMessage): string {
-  return createHash("sha256").update(JSON.stringify(message)).digest("hex");
+  const cached = stampCache.get(message);
+  const attachments = (message as { attachments?: unknown }).attachments;
+  if (cached && cached.content === message.content && cached.status === message.status && cached.attachments === attachments) {
+    if (cached.metadata === message.metadata) {
+      return cached.stamp;
+    }
+    const metadataJson = JSON.stringify(message.metadata ?? null);
+    if (metadataJson === cached.metadataJson) {
+      cached.metadata = message.metadata;
+      return cached.stamp;
+    }
+  }
+  const stamp = createHash("sha256").update(JSON.stringify(message)).digest("hex");
+  stampCache.set(message, {
+    content: message.content,
+    status: message.status,
+    metadata: message.metadata,
+    metadataJson: JSON.stringify(message.metadata ?? null),
+    attachments,
+    stamp
+  });
+  return stamp;
 }
 
 /** Bounded message batches: at most MAX_BATCH_MESSAGES messages and about

@@ -7,8 +7,10 @@
  * progress and finished messages back to the desktop.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import {
   MACHINE_LINK_PROTOCOL,
   isMachineLinkEnvelope,
@@ -23,6 +25,7 @@ import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type { AgentHealth, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
 import type { ChatService } from "./chat";
 import type { DebugLogService } from "./debugLogs";
+import { messageBatches, messageStamp } from "./machineLink";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
 import { RelayTunnelClient } from "./relayTunnelClient";
 import type { SettingsService } from "./settings";
@@ -37,6 +40,9 @@ export interface MachineHostOptions {
   /** Runs after every settings snapshot import (runtime knobs such as the
    *  CLI run timeout are re-read from the imported settings). */
   onSettingsImported?: () => Promise<void> | void;
+  /** File that keeps finished turns until the desktop acknowledges them, so
+   *  a result survives a restart of this runtime. In-memory only when unset. */
+  outboxPath?: string;
   reconnectDelayMs?: number;
   createClient?: (pairing: MobilePairingPackage) => RelayTunnelClient;
   now?: () => Date;
@@ -52,9 +58,16 @@ export class MachineHostService {
   private readonly now: () => Date;
   private readonly seenMessageIds = new Set<string>();
   private readonly activeTurns = new Map<string, AbortController>();
-  /** Finished turns not yet delivered to the desktop (resent on reconnect). */
+  /** Finished turns the desktop has not acknowledged (resent on every hello,
+   *  kept on disk when an outbox path is configured). */
   private readonly pendingTerminals = new Map<string, MachineTurnFinishedBody>();
+  /** Conversations that have raised approvals; re-forwarded after a reconnect. */
+  private readonly approvalConversations = new Set<string>();
+  /** Changes when this runtime starts: the desktop tells a restart from a reconnect by it. */
+  private readonly instanceId = randomUUID();
   private inbound: Promise<void> = Promise.resolve();
+  /** Outbound sends leave in call order (progress before the finished result). */
+  private outbound: Promise<void> = Promise.resolve();
   private desktopDeviceId?: string;
   private closed = false;
 
@@ -72,6 +85,7 @@ export class MachineHostService {
     private readonly options: MachineHostOptions
   ) {
     this.now = options.now ?? (() => new Date());
+    this.loadOutbox();
     const pairing = options.pairing;
     if (!pairing.relayUrl) {
       throw new Error("Machine enrollment has no relay URL.");
@@ -140,6 +154,9 @@ export class MachineHostService {
     if (!Array.isArray(approvals)) {
       return;
     }
+    if (approvals.length > 0) {
+      this.approvalConversations.add(conversation.id);
+    }
     const policies = (conversation.metadata as { appToolApprovalPolicies?: unknown }).appToolApprovalPolicies;
     for (const item of approvals) {
       if (!item || typeof item !== "object") {
@@ -180,9 +197,23 @@ export class MachineHostService {
     if (changed || options.announce) {
       void this.sendHello()
         .then(() => this.flushPendingTerminals())
+        .then(() => this.reforwardApprovals())
         .catch((error) => {
           void this.debugLogs.write("machine-host.hello.error", { message: errorMessage(error) });
         });
+    }
+  }
+
+  /** After a reconnect the desktop may have missed approvals raised while it
+   *  was away: every approval this machine holds is offered again (the
+   *  desktop upserts by id, so repeats are harmless). */
+  private async reforwardApprovals(): Promise<void> {
+    this.forwardedApprovals.clear();
+    for (const conversationId of [...this.approvalConversations]) {
+      const conversation = await this.storage.getConversation(conversationId);
+      if (conversation && conversation.kind === "chat") {
+        this.noteConversationSnapshot(conversation);
+      }
     }
   }
 
@@ -206,7 +237,8 @@ export class MachineHostService {
       platform: `${process.platform}-${process.arch}`,
       providers,
       activeRunIds: [...this.activeTurns.keys()],
-      pendingTerminalRunIds: [...this.pendingTerminals.keys()]
+      pendingTerminalRunIds: [...this.pendingTerminals.keys()],
+      instanceId: this.instanceId
     });
   }
 
@@ -249,12 +281,23 @@ export class MachineHostService {
         this.activeTurns.get(body.runId)?.abort();
         this.chat.cancelRun(body.runId);
         return;
-      case "machine.approval.decision":
-        await this.chat.respondToAppToolApproval({
+      case "machine.turn.finished.ack":
+        if (this.pendingTerminals.delete(body.runId)) {
+          this.persistOutbox();
+          void this.debugLogs.write("machine-host.terminal.acked", { runId: body.runId });
+        }
+        return;
+      case "machine.approval.decision": {
+        // The whole card answer is applied here exactly as the desktop's own
+        // approval path would; the outcome (or the error) goes back so the
+        // desktop's card call fails visibly instead of silently.
+        const outcome = await this.chat.respondToAppToolApproval({
           conversationId: body.conversationId,
           approvalId: body.approvalId,
           approve: body.approve,
-          ...(body.scope ? { scope: body.scope } : {})
+          ...(body.scope ? { scope: body.scope } : {}),
+          ...(body.draftOverride ? { draftOverride: body.draftOverride } : {}),
+          ...(body.codexDecisionId ? { codexDecisionId: body.codexDecisionId } : {})
         }).then((conversation) => {
           const approvals = (conversation?.metadata as { pendingAppToolApprovals?: Array<{ id: string; status: string }> } | undefined)?.pendingAppToolApprovals ?? [];
           void this.debugLogs.write("machine-host.approval.decision-applied", {
@@ -265,10 +308,20 @@ export class MachineHostService {
           if (conversation) {
             this.noteConversationSnapshot(conversation);
           }
-        }).catch((error) => {
+          return { ok: true as const };
+        }).catch((error: unknown) => {
           void this.debugLogs.write("machine-host.approval.decision-error", { approvalId: body.approvalId, message: errorMessage(error) });
+          return { ok: false as const, error: errorMessage(error) };
         });
+        await this.send({
+          type: "machine.approval.result",
+          conversationId: body.conversationId,
+          approvalId: body.approvalId,
+          ok: outcome.ok,
+          ...(outcome.ok ? {} : { error: outcome.error })
+        }).catch(() => undefined);
         return;
+      }
       default:
         return;
     }
@@ -289,17 +342,20 @@ export class MachineHostService {
     for (const message of changed) {
       known.set(message.id, messageStamp(message));
     }
-    void this.send({
-      type: "machine.conversation.backdelta",
-      conversationId: conversation.id,
-      messages: changed,
-      updatedAt: conversation.updatedAt
-    }).catch((error) => {
-      for (const message of changed) {
-        known.delete(message.id);
-      }
-      void this.debugLogs.write("machine-host.backdelta.error", { conversationId: conversation.id, message: errorMessage(error) });
-    });
+    // Bounded batches, like every other message list on this link.
+    for (const batch of messageBatches(changed)) {
+      void this.send({
+        type: "machine.conversation.backdelta",
+        conversationId: conversation.id,
+        messages: batch,
+        updatedAt: conversation.updatedAt
+      }).catch((error) => {
+        for (const message of batch) {
+          known.delete(message.id);
+        }
+        void this.debugLogs.write("machine-host.backdelta.error", { conversationId: conversation.id, message: errorMessage(error) });
+      });
+    }
   }
 
   private rememberDesktopMessages(conversationId: string, messages: ChatMessage[], removedIds: string[] = []): void {
@@ -314,37 +370,35 @@ export class MachineHostService {
   }
 
   private async applyConversationSync(incoming: Conversation): Promise<void> {
-    const existing = await this.storage.getConversation(incoming.id);
-    const metadata = existing ? this.mergeMetadata(existing, incoming.metadata) : this.stripMachineOwned(incoming.metadata);
-    // A fresh copy after a reconnect must not erase messages this machine
-    // produced meanwhile: the desktop's messages win by id, ours are kept.
-    const byId = new Map((existing?.messages ?? []).map((message) => [message.id, message]));
-    for (const message of incoming.messages) {
-      byId.set(message.id, message);
-    }
-    const messages = [...byId.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-    await this.chat.applyReplicatedConversation({ ...incoming, messages, metadata });
+    // The desktop's copy is registered before it is applied, so the snapshot
+    // the apply emits never echoes it back as a back delta.
     this.knownMessages.set(incoming.id, new Map(incoming.messages.map((message) => [message.id, messageStamp(message)])));
+    await this.chat.applyReplicatedConversation(incoming.id, (existing) => {
+      const metadata = existing ? this.mergeMetadata(existing, incoming.metadata) : this.stripMachineOwned(incoming.metadata);
+      // A fresh copy after a reconnect must not erase what this machine
+      // produced meanwhile: the desktop's messages win by id, ours are kept,
+      // and a reply finished here is never demoted by a stale pending bubble.
+      const messages = mergeReplicatedMessages(existing?.messages ?? [], incoming.messages);
+      return { ...incoming, messages, metadata };
+    });
     void this.debugLogs.write("machine-host.conversation.synced", { conversationId: incoming.id, messages: incoming.messages.length });
   }
 
   private async applyConversationDelta(delta: MachineConversationDeltaBody): Promise<void> {
-    const existing = await this.storage.getConversation(delta.conversationId);
-    if (!existing) {
-      void this.debugLogs.write("machine-host.conversation.delta-without-copy", { conversationId: delta.conversationId });
-      return;
-    }
-    const byId = new Map(existing.messages.map((message) => [message.id, message]));
-    for (const message of delta.messages) {
-      byId.set(message.id, message);
-    }
-    for (const id of delta.removedMessageIds ?? []) {
-      byId.delete(id);
-    }
-    const messages = [...byId.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-    const metadata = delta.metadata ? this.mergeMetadata(existing, delta.metadata) : existing.metadata;
-    await this.chat.applyReplicatedConversation({ ...existing, messages, metadata, updatedAt: delta.updatedAt });
     this.rememberDesktopMessages(delta.conversationId, delta.messages, delta.removedMessageIds ?? []);
+    let missing = false;
+    await this.chat.applyReplicatedConversation(delta.conversationId, (existing) => {
+      if (!existing) {
+        missing = true;
+        return undefined;
+      }
+      const messages = mergeReplicatedMessages(existing.messages, delta.messages, delta.removedMessageIds ?? []);
+      const metadata = delta.metadata ? this.mergeMetadata(existing, delta.metadata) : existing.metadata;
+      return { ...existing, messages, metadata, updatedAt: delta.updatedAt };
+    });
+    if (missing) {
+      void this.debugLogs.write("machine-host.conversation.delta-without-copy", { conversationId: delta.conversationId });
+    }
   }
 
   private mergeMetadata(existing: Conversation, incoming: Conversation["metadata"]): Conversation["metadata"] {
@@ -426,9 +480,14 @@ export class MachineHostService {
     } finally {
       this.activeTurns.delete(request.runId);
     }
-    // The result is kept until it has left this machine: a desktop that is
-    // away or a relay that drops the frame gets it again on reconnect.
+    // The result is kept (on disk when configured) until the desktop
+    // acknowledges it: a desktop that is away, a relay that drops the frame,
+    // or a restart of this runtime all get it delivered again.
     this.pendingTerminals.set(request.runId, terminal);
+    this.persistOutbox();
+    // The finished messages travel in the result; they are not echoed again
+    // as a back delta by the snapshot that saved them.
+    this.rememberDesktopMessages(request.conversationId, terminal.messages);
     await this.flushPendingTerminals();
   }
 
@@ -436,7 +495,6 @@ export class MachineHostService {
     for (const [runId, terminal] of [...this.pendingTerminals.entries()]) {
       try {
         await this.send(terminal);
-        this.pendingTerminals.delete(runId);
       } catch (error) {
         void this.debugLogs.write("machine-host.terminal.retry-later", { runId, message: errorMessage(error) });
         return;
@@ -444,7 +502,47 @@ export class MachineHostService {
     }
   }
 
-  private async send(body: MachineLinkMessage): Promise<void> {
+  private loadOutbox(): void {
+    const file = this.options.outboxPath;
+    if (!file) {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(file, "utf8")) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const entry of parsed) {
+          if (entry && typeof entry === "object" && (entry as MachineTurnFinishedBody).type === "machine.turn.finished" && typeof (entry as MachineTurnFinishedBody).runId === "string") {
+            this.pendingTerminals.set((entry as MachineTurnFinishedBody).runId, entry as MachineTurnFinishedBody);
+          }
+        }
+      }
+    } catch {
+      // No outbox yet, or unreadable: nothing to deliver.
+    }
+  }
+
+  private persistOutbox(): void {
+    const file = this.options.outboxPath;
+    if (!file) {
+      return;
+    }
+    try {
+      mkdirSync(path.dirname(file), { recursive: true });
+      const temp = `${file}.${process.pid}.tmp`;
+      writeFileSync(temp, JSON.stringify([...this.pendingTerminals.values()]), "utf8");
+      renameSync(temp, file);
+    } catch (error) {
+      void this.debugLogs.write("machine-host.outbox.write-error", { message: errorMessage(error) });
+    }
+  }
+
+  private send(body: MachineLinkMessage): Promise<void> {
+    const run = this.outbound.then(() => this.sendNow(body));
+    this.outbound = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async sendNow(body: MachineLinkMessage): Promise<void> {
     if (this.closed) {
       return;
     }
@@ -467,8 +565,21 @@ export function machineMessagesForRun(conversation: Conversation, participantId:
   return conversation.messages.filter((message) => message.participantId === participantId && message.metadata?.runId === runId);
 }
 
-function messageStamp(message: ChatMessage): string {
-  return createHash("sha256").update(JSON.stringify(message)).digest("hex");
+/** Desktop messages win by id, this machine's own are kept, and a message
+ *  finished here is never replaced by a stale pending copy of itself. */
+export function mergeReplicatedMessages(own: ChatMessage[], incoming: ChatMessage[], removedIds: string[] = []): ChatMessage[] {
+  const byId = new Map(own.map((message) => [message.id, message]));
+  for (const message of incoming) {
+    const current = byId.get(message.id);
+    if (current && current.status !== "pending" && message.status === "pending") {
+      continue;
+    }
+    byId.set(message.id, message);
+  }
+  for (const id of removedIds) {
+    byId.delete(id);
+  }
+  return [...byId.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 }
 
 function errorMessage(error: unknown): string {
