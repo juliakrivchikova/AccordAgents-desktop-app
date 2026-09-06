@@ -5,7 +5,10 @@ import { createRoot } from "react-dom/client";
 
 import type { AvatarStudioTurnRequest, AvatarStudioTurnResult, SaveCustomAvatarRequest } from "../../../shared/avatarStudio";
 import type { AgentHealth, AppSettings } from "../../../shared/types";
-import { avatarStudioNeedsSeed } from "../../../shared/avatarStudio";
+import { avatarStudioNeedsSeed, customAvatarId } from "../../../shared/avatarStudio";
+import { isChatAvatarIdForKind, mapChatAvatarIdToKind, normalizedChatAvatarId } from "../chat/chat-avatars";
+import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
+import { defaultChatParticipantDraft, updateChatParticipantDraft } from "../chat/chat-participant-drafts";
 import { DEFAULT_SETTINGS } from "../../app/constants";
 import { AvatarStudioDialog } from "./avatar-studio-dialog";
 
@@ -234,4 +237,18 @@ test("with no drawing CLI ready the studio says so instead of offering to draw",
   assert.equal((harness.find("avatar-studio-prompt") as HTMLTextAreaElement).disabled, true);
   await harness.type("нарисуй лису");
   assert.equal(harness.turns.length, 0);
+});
+
+test("a drawn avatar survives draft normalisation and a provider change", () => {
+  const drawn = customAvatarId("saved-1");
+  // Presets are provider-specific; a drawn avatar is the member's own picture.
+  assert.equal(isChatAvatarIdForKind(drawn, "codex-cli"), true);
+  assert.equal(isChatAvatarIdForKind(drawn, "claude-code"), true);
+  assert.equal(normalizedChatAvatarId("claude-code", drawn, "gera"), drawn);
+  assert.equal(mapChatAvatarIdToKind("codex-cli", drawn, "gera"), drawn);
+  const base: ChatParticipantDraft = { ...defaultChatParticipantDraft(SETTINGS), handle: "gera", kind: "claude-code" };
+  const withDrawn = updateChatParticipantDraft(base, SETTINGS, { avatarId: drawn });
+  assert.equal(withDrawn.avatarId, drawn);
+  const switched = updateChatParticipantDraft(withDrawn, SETTINGS, { kind: "codex-cli" });
+  assert.equal(switched.avatarId, drawn, "a provider change must not replace the drawn avatar");
 });

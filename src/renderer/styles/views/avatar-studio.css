@@ -1,10 +1,15 @@
 /* Avatar studio: picture on the left, conversation on the right. */
 
+/* The shared DialogContent caps itself at sm:max-w-sm through a utility class,
+   which outranks this layer; the studio needs both columns, so it overrides the
+   cap the same way the member editor does. */
 .avatar-studio-dialog {
-  width: min(940px, calc(100vw - 48px));
-  max-width: none;
-  display: grid;
+  display: grid !important;
+  width: min(940px, calc(100vw - 32px)) !important;
+  max-width: min(940px, calc(100vw - 32px)) !important;
+  max-height: min(760px, calc(100vh - 48px));
   gap: 14px;
+  overflow: hidden;
 }
 
 .avatar-studio-head {
@@ -12,10 +17,17 @@
   gap: 8px;
 }
 
+/* Three spec rows side by side; each needs room or the shared row truncates the
+   value it shows ("Code…"). */
 .avatar-studio-runner {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 18px;
+}
+
+.avatar-studio-runner .chat-app-tool-inline-edit span {
+  max-width: none;
+  overflow: visible;
 }
 
 .avatar-studio-note {
@@ -26,9 +38,10 @@
 
 .avatar-studio-body {
   display: grid;
-  grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+  grid-template-columns: minmax(240px, 300px) minmax(320px, 1fr);
   gap: 18px;
   align-items: start;
+  min-height: 0;
 }
 
 .avatar-studio-preview {
@@ -135,6 +148,7 @@
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 10px;
+  min-width: 0;
   min-height: 300px;
   max-height: 46vh;
 }

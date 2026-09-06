@@ -122,6 +122,11 @@ export function chatAvatarOption(avatarId: string | undefined): ChatAvatarOption
 }
 
 export function isChatAvatarIdForKind(avatarId: string | undefined, kind: ChatProviderKind): boolean {
+  // A drawn avatar belongs to the member, not to a provider: it stays valid for
+  // every kind, and switching provider must not replace it with a preset.
+  if (parseCustomAvatarId(avatarId)) {
+    return true;
+  }
   return chatAvatarOption(avatarId)?.kind === kind;
 }
 
