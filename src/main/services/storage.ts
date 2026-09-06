@@ -37,6 +37,7 @@ import { formatHlcKey, logicalOrderKey, parseHlcKey, type HlcParts } from "../..
 import type { DeviceEventAppendOptions } from "../../shared/deviceEventDelivery";
 import { DEVICE_EVENT_SCHEMA_SQL, DeviceEventStorage, deviceEventAppendSql } from "./deviceEventStorage";
 import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEventBlobStorage";
+import { NATIVE_COMMAND_SCHEMA_SQL, NativeCommandStore } from "./nativeCommandStore";
 
 const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
 const MAX_MESSAGE_PAGE_LIMIT = 200;
@@ -393,6 +394,7 @@ export class StorageService {
       );
       ${DEVICE_EVENT_SCHEMA_SQL}
       ${DEVICE_EVENT_BLOB_SCHEMA_SQL}
+      ${NATIVE_COMMAND_SCHEMA_SQL}
     `);
     await this.pruneStaleRunCancelRequests();
     await this.ensureColumn("conversations", "body_json", "text");
@@ -1488,6 +1490,10 @@ export class StorageService {
       query: <T>(sql: string) => this.queryJson<T>(sql),
       execute: (sql: string) => this.runSql(sql)
     });
+  }
+
+  nativeCommands(): NativeCommandStore {
+    return new NativeCommandStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
   }
 
   deviceEventBlobs(): DeviceEventBlobStorage {

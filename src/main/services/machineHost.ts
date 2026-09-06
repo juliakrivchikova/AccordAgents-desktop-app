@@ -35,6 +35,7 @@ import type { ChatEventLogService } from "./chatEventLog";
 import { DeviceEventChannel } from "./deviceEventChannel";
 import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { isMachineDurableMessage } from "../../shared/machineLink";
+import { NativeProcessUnavailableError } from "./nativeProcess";
 
 export interface MachineHostOptions {
   pairing: MobilePairingPackage;
@@ -117,6 +118,8 @@ export class MachineHostService {
   private readonly settlingInFlight = new Set<string>();
   private unsubscribeRunSettled?: () => void;
   private closed = false;
+  private draining = false;
+  private readonly turnTasks = new Set<Promise<void>>();
 
   /** approval id -> last status + updatedAt forwarded to the desktop. */
   private readonly forwardedApprovals = new Map<string, string>();
@@ -237,6 +240,29 @@ export class MachineHostService {
     }
     this.activeTurns.clear();
     this.client.close();
+  }
+
+  /** Keep result delivery alive while providers finish closing. In particular,
+   * don't turn a runtime shutdown into a User Stop or exit before the result
+   * has entered the durable channel. */
+  async shutdown(stopProviders: () => Promise<void>): Promise<void> {
+    this.draining = true;
+    for (const waiting of this.turnsAwaitingCopy.values()) {
+      for (const request of waiting) await this.finishQueuedTurn(request, "failed", "The machine shut down before this turn started.");
+    }
+    this.turnsAwaitingCopy.clear();
+    await stopProviders();
+    while (this.turnTasks.size || this.settlingInFlight.size || (this.chat.activeParticipantRuns?.().length ?? 0)) {
+      // A turn may still be preparing its workspace when shutdown begins.
+      // Close an executor created by that preparation before waiting again.
+      await stopProviders();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    for (const run of this.settlingRuns.values()) await this.finishNativeRun(run);
+    await this.flushPendingTerminals();
+    await this.outbound;
+    if (this.settlingRuns.size || !this.persistOutbox()) throw new Error("The machine's final results have not been stored; shutdown is not complete.");
+    this.close();
   }
 
   isDesktopConnected(): boolean {
@@ -444,6 +470,10 @@ export class MachineHostService {
         await this.applyConversationDelta(body, durable);
         return;
       case "machine.turn.request":
+        if (this.draining) {
+          await this.finishQueuedTurn(body, "failed", "The machine is shutting down; this turn did not start.");
+          return;
+        }
         if (this.failedSync.has(body.conversationId)) {
           // A batch of this chat's copy could not be stored; an honest
           // failure beats running a member against half a chat.
@@ -793,7 +823,18 @@ export class MachineHostService {
     return copy as Conversation["metadata"];
   }
 
-  private async runTurn(request: MachineTurnRequestBody): Promise<void> {
+  private runTurn(request: MachineTurnRequestBody): Promise<void> {
+    const task = this.draining
+      ? this.finishQueuedTurn(request, "failed", "The machine shut down before this turn started.")
+      : this.executeTurn(request);
+    this.turnTasks.add(task);
+    void task.finally(() => this.turnTasks.delete(task)).catch((error) => {
+      void this.debugLogs.write("machine-host.turn.not-stored", { runId: request.runId, message: errorMessage(error) });
+    });
+    return task;
+  }
+
+  private async executeTurn(request: MachineTurnRequestBody): Promise<void> {
     const controller = new AbortController();
     this.activeTurns.set(request.runId, controller);
     const progress = (update: ReviewProgress): void => {
@@ -817,7 +858,8 @@ export class MachineHostService {
         conversationId: request.conversationId,
         runId: request.runId,
         participantId: request.participantId,
-        status: controller.signal.aborted ? "interrupted" : "completed",
+        status: result.messages.some((message) => message.metadata?.terminalReason === "stop-unconfirmed") ? "failed"
+          : controller.signal.aborted ? "interrupted" : result.messages.some((message) => message.status === "error") ? "failed" : "completed",
         messages: result.messages,
         warnings: result.warnings,
         finishedAt: this.now().toISOString()
@@ -828,7 +870,7 @@ export class MachineHostService {
         conversationId: request.conversationId,
         runId: request.runId,
         participantId: request.participantId,
-        status: controller.signal.aborted ? "interrupted" : "failed",
+        status: controller.signal.aborted && !(error instanceof NativeProcessUnavailableError) ? "interrupted" : "failed",
         messages: [],
         warnings: [],
         error: errorMessage(error),
@@ -861,7 +903,8 @@ export class MachineHostService {
         type: "machine.turn.finished", conversationId: run.conversationId,
         receiptId: randomUUID(),
         runId: run.runId, participantId: run.participantId,
-        status: run.aborted ? "interrupted" : failed ? "failed" : "completed",
+        status: result.messages.some((message) => message.metadata?.terminalReason === "stop-unconfirmed") ? "failed"
+          : run.aborted ? "interrupted" : failed ? "failed" : "completed",
         ...result, finishedAt: this.now().toISOString()
       };
       this.pendingTerminals.set(run.runId, terminal);

@@ -33,6 +33,15 @@ const result = await build({
   metafile: true
 });
 
+// The provider supervisor has an independent OS lifetime and must remain an
+// executable beside the main bundle (not inline in its module graph).
+await build({
+  entryPoints: [path.join(repoRoot, "src/main/services/nativeProcessSupervisor.ts")],
+  outfile: path.join(outdir, "nativeProcessSupervisor.cjs"),
+  bundle: true, format: "cjs", platform: "node", target: ["node20"],
+  logLevel: "warning"
+});
+
 // Packages the bundle still requires at runtime (only the externals that are
 // actually referenced) become the machine's dependencies.
 const referenced = new Set();

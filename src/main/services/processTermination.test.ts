@@ -1,3 +1,4 @@
+import { parseLinuxProcessStat } from "./processTermination";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -147,4 +148,17 @@ test("captured POSIX identity checks refuse a recycled PID and signal a matching
   } finally {
     process.kill = originalKill;
   }
+});
+
+
+test("Linux process identities use kernel start ticks and boot identity, never wall time or the command name", () => {
+  const fields = ["S", "12", "34", ...Array(16).fill("0"), "123456789", "999"];
+  const boot = "11111111-1111-1111-1111-111111111111";
+  const row = parseLinuxProcessStat(`45 (name with ) and spaces) ${fields.join(" ")}`, boot);
+  assert.equal(row.pid, 45);
+  assert.equal(row.ppid, 12);
+  assert.equal(row.pgid, 34);
+  assert.equal(row.startedAt, `linux:${boot}:123456789`);
+  assert.notEqual(parseLinuxProcessStat(`45 (name) ${fields.join(" ")}`, "22222222-2222-2222-2222-222222222222").startedAt, row.startedAt);
+  assert.throws(() => parseLinuxProcessStat("45 broken", boot));
 });

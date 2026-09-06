@@ -176,6 +176,68 @@ part of this change. Review covered persistence, receipt loss, apply failure,
 fragment repair, restarts, ownership and the full changed data path. Full
 transition acceptance remains open as listed below and in the event contract.
 
+## Native process ownership — Mac and Linux real-provider verification
+
+Codex and Claude resident sessions on macOS/Linux now share one supervisor
+process per app data directory. Each participant session owns a separate SQLite
+lease and increasing process generation in `native-processes.sqlite3`. The
+supervisor starts a shell gate, records its PID and birth identity durably, and
+only then permits `exec` of the provider; the shell is replaced by the provider,
+so there is no extra resident process per participant. The gate uses its own
+file descriptor and cannot consume native stdin. A failed receipt write admits
+no provider input; transport initialization failure never replays the prompt
+through a one-shot CLI.
+
+When the app crashes, the supervisor remains alive to close and verify its own
+provider trees. Stop captures descendants before closing stdin, including Claude
+background work in separate process groups. A new app waits for the previous
+supervisor's stored closure; losing the supervisor itself does not prove Stop.
+A different OS boot on the same OS host permits retiring the old process lease,
+but says nothing about whether the old command executed. Linux identities use
+kernel boot ID and `/proc/<pid>/stat` start ticks, independent of wall time;
+macOS `ps` reads use a fixed UTC/C environment. The Linux field semantics come
+from the [kernel proc documentation](https://www.kernel.org/doc/html/v6.15/filesystems/proc.html).
+Normal machine shutdown drains active outcomes to the durable channel before
+closing it; a failed final save does not count as completed shutdown.
+
+The supervisor's local IPC is bounded to 64 KiB input/output chunks and preserves
+backpressure per session. Three local echo sessions shared one supervisor with
+59,280 KiB RSS, median 0.10 ms / p95 0.30 ms round trip, and 915 bytes of process
+receipts in a 12 KiB database (measurement before adding OS host/boot fields).
+This is synthetic local overhead, not Codex latency, Linux resource usage or a
+relay cost measurement. A separate 42,047,781-byte input passed unchanged and
+left less than 2 KiB of process metadata. No prompt, response, CLI arguments or
+environment is written into the process registry: only scoped process identities,
+a hashed OS host identity, boot identity, generation and shutdown state. The
+registry stays on that machine and is not replicated or uploaded.
+
+Local checks: 152 lifecycle / CLI protocol tests passed with two platform skips,
+including guarded Codex and Claude protocol fixtures, process crashes, detached
+children, full-disk refusal, blocked output in one of two sessions, large output,
+large stdin, synchronous/asynchronous startup refusal and concurrent shutdown;
+296 chat / machine-link / machine-host tests also passed. These support the real
+Electron/public-relay checks completed on 2026-09-06 with native Codex 0.153.4 on
+macOS and the User's Linux EC2, using isolated profiles and synthetic chats.
+Foreground Stop confirmed process exit in 705 ms on Mac and 959 ms on Linux;
+subsequent turns resumed the same native session and retained its context.
+Killing each machine runtime while its provider was executing a child command
+left the supervisor alive to verify the old process tree was gone before a new
+runtime resumed the session. The desktop showed the lost turn as failed, never
+as a confirmed User Stop. A frozen Mac runtime produced the waiting-for-machine
+Stop badge and confirmed interruption only after it returned. A completed reply
+arrived through the public mailbox after the controller restarted with the
+machine already shut down. Linux also passed an approval answered through the
+desktop card and normal shutdown with no remaining owned provider processes.
+The EC2 was stopped again after QA. Real Claude verification remains blocked by
+the provider quota; physical-phone checks remain open. Windows and other provider
+paths have not acquired this process-ownership mechanism yet.
+
+`NativeCommandStore` is a tested foundation for durable native command admission,
+early Stop tombstones and command deduplication in `accordagents.sqlite3`; it is
+**not yet wired into dispatch**. Native commands, settings, approvals and the
+remaining event-contract work below are still incomplete. This section does not
+mark the full machine transition or cutover ready.
+
 ## Cost on a large chat
 
 Every conversation snapshot on the desktop triggers a replication pass for the

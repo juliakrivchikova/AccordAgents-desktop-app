@@ -41,6 +41,8 @@ import {
   type CommandEnvironmentOptions
 } from "./command";
 import { CliReadinessService } from "./cliReadiness";
+import { hasConfiguredHostPlatform, userDataPath } from "../platform";
+import { spawnNativeProcess, confirmNativeProcessClosed, isSupervisedNativeProcess } from "./nativeProcess";
 import {
   capturePosixDescendants,
   capturePosixDescendantsFromTable,
@@ -572,6 +574,7 @@ interface ClaudeModelProbeExpectOptions {
 interface CliAgentRunnerOptions {
   codexExecutable?: string;
   electronAppPath?: string;
+  nativeProcessDbPath?: string;
 }
 
 class CliGeminiResumeMissError extends Error {
@@ -1012,6 +1015,9 @@ export class CliAgentRunner {
   private readonly geminiSessionUsage = new Map<string, AgentContextUsage>();
   private geminiMcpConfigSyncing?: Promise<string | undefined>;
   private runTimeoutMs = CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS;
+  private readonly nativeProcessDbPath?: string;
+  private readonly warmAgentCreations = new Map<string, Promise<WarmAgentEntry>>();
+  private warmShutdown?: Promise<void>;
 
   constructor(
     private readonly debugLogs?: CliAgentDebugLogger,
@@ -1023,6 +1029,7 @@ export class CliAgentRunner {
     const options = typeof codexExecutableOrOptions === "string"
       ? { codexExecutable: codexExecutableOrOptions }
       : codexExecutableOrOptions;
+    this.nativeProcessDbPath = options.nativeProcessDbPath ?? (hasConfiguredHostPlatform() ? path.join(userDataPath(), "native-processes.sqlite3") : undefined);
     this.codexExecutable = options.codexExecutable ?? "codex";
     this.electronAppPath = options.electronAppPath ?? process.argv[1];
     this.readiness = new CliReadinessService(debugLogs, {
@@ -1180,15 +1187,20 @@ export class CliAgentRunner {
     return { participant, ok: false, error: `${participant.label} is not a CLI agent.` };
   }
 
-  async shutdownWarmAgents(): Promise<void> {
-    const entries = Array.from(this.warmAgents.values());
-    const closing = Array.from(this.closingWarmAgents.values());
-    this.warmAgents.clear();
-    this.stopClaudeBackgroundProcessCapture();
-    await Promise.all([
-      ...closing,
-      ...entries.map((entry) => this.closeWarmAgent(entry, "shutdown"))
-    ]);
+  shutdownWarmAgents(): Promise<void> {
+    if (this.warmShutdown) return this.warmShutdown;
+    const closing = (async () => {
+      // An in-flight supervisor handshake must finish before shutdown can
+      // declare its process set empty. New handshakes are refused meanwhile.
+      await Promise.allSettled([...this.warmAgentCreations.values()]);
+      const entries = Array.from(this.warmAgents.values());
+      const alreadyClosing = Array.from(this.closingWarmAgents.values());
+      this.warmAgents.clear();
+      this.stopClaudeBackgroundProcessCapture();
+      await Promise.all([...alreadyClosing, ...entries.map((entry) => this.closeWarmAgent(entry, "shutdown"))]);
+    })();
+    this.warmShutdown = closing.finally(() => { this.warmShutdown = undefined; });
+    return this.warmShutdown;
   }
 
   terminateWarmAgentsImmediately(reason = "immediate shutdown"): void {
@@ -2389,7 +2401,7 @@ export class CliAgentRunner {
     try {
       await ensureLoginShellEnvPrimed();
       const codexExecutable = await this.codexExecutableForRun(options);
-      const entry = this.createCodexAppServerWarmAgent(
+      const entry = await this.createCodexAppServerWarmAgent(
         `native-goal:${randomUUID()}`,
         `native-goal:${participant.id}`,
         participant,
@@ -2460,8 +2472,7 @@ export class CliAgentRunner {
         try {
           await ensureLoginShellEnvPrimed();
           const codexExecutable = await this.codexExecutableForRun(options);
-          entry = this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable);
-          this.warmAgents.set(key, entry);
+          entry = await this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable);
         } catch (error) {
           return this.failedCompact(participant, error);
         }
@@ -2472,7 +2483,7 @@ export class CliAgentRunner {
     try {
       await ensureLoginShellEnvPrimed();
       const codexExecutable = await this.codexExecutableForRun(options);
-      const entry = this.createCodexAppServerWarmAgent(
+      const entry = await this.createCodexAppServerWarmAgent(
         `compact:${options.sessionId}:${randomUUID()}`,
         `compact:${options.sessionId}`,
         participant,
@@ -2510,7 +2521,7 @@ export class CliAgentRunner {
             : "Native /goal requires a Codex app-server session."
         ));
       }
-      return this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
+      return this.failed(participant, new Error("A resident Codex app-server session is required; the command was not replayed."));
     }
     const key = this.warmAgentKey(participant, repoPath, kind, options);
     const scopeKey = this.warmAgentScopeKey(warm);
@@ -2524,8 +2535,7 @@ export class CliAgentRunner {
       try {
         await ensureLoginShellEnvPrimed();
         const codexExecutable = await this.codexExecutableForRun(options);
-        entry = this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable);
-        this.warmAgents.set(key, entry);
+        entry = await this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable);
         void this.writeDebugLog("cli-agent-warm-started", {
           providerKind: participant.kind,
           participantId: participant.id,
@@ -2540,9 +2550,7 @@ export class CliAgentRunner {
           runtime: "codex-app-server",
           error: this.errorText(error)
         });
-        return options.nativeGoal
-          ? this.failed(participant, error)
-          : this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
+        return this.failed(participant, error);
       }
     }
 
@@ -2585,21 +2593,19 @@ export class CliAgentRunner {
           });
           return this.failed(participant, error);
         }
-        void this.writeDebugLog("cli-agent-warm-fallback", {
+        void this.writeDebugLog("cli-agent-warm-failed-without-replay", {
           providerKind: participant.kind,
           participantId: participant.id,
           conversationId: warm.conversationId,
           runtime: "codex-app-server",
           error: this.errorText(error)
         });
-        return options.nativeGoal
-          ? this.failed(participant, error)
-          : this.runCodexOneShot(participant, prompt, repoPath, diffMode, kind, signal, this.withoutWarm(options));
+        return this.failed(participant, error);
       }
     });
   }
 
-  private createCodexAppServerWarmAgent(
+  private async createCodexAppServerWarmAgent(
     key: string,
     scopeKey: string,
     participant: ParticipantConfig,
@@ -2608,8 +2614,21 @@ export class CliAgentRunner {
     kind: ConversationKind,
     options: CliAgentRunOptions,
     codexExecutable: string
-  ): WarmAgentEntry {
-    const child = spawnCommand(codexExecutable, ["app-server", "--listen", "stdio://"], {
+  ): Promise<WarmAgentEntry> {
+    return this.createTrackedWarmAgent(key, () => this.constructCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable));
+  }
+
+  private async constructCodexAppServerWarmAgent(
+    key: string,
+    scopeKey: string,
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    diffMode: GitDiffMode | undefined,
+    kind: ConversationKind,
+    options: CliAgentRunOptions,
+    codexExecutable: string
+  ): Promise<WarmAgentEntry> {
+    const child = await this.spawnResidentProcess(scopeKey, codexExecutable, ["app-server", "--listen", "stdio://"], {
       cwd: repoPath,
       env: commandEnvironment(this.agentRunEnv(options)),
       detached: process.platform !== "win32",
@@ -4906,8 +4925,7 @@ export class CliAgentRunner {
       try {
         await ensureLoginShellEnvPrimed();
         const claudeExecutable = await this.providerExecutableForRun("claude", options, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
-        entry = this.createClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options, claudeExecutable);
-        this.warmAgents.set(key, entry);
+        entry = await this.createClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options, claudeExecutable);
         void this.writeDebugLog("cli-agent-warm-started", {
           providerKind: participant.kind,
           participantId: participant.id,
@@ -4920,7 +4938,7 @@ export class CliAgentRunner {
           conversationId: warm.conversationId,
           error: this.errorText(error)
         });
-        return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+        return this.failed(participant, error);
       }
     }
 
@@ -4954,18 +4972,18 @@ export class CliAgentRunner {
         if (signal?.aborted) {
           return this.failed(participant, error);
         }
-        void this.writeDebugLog("cli-agent-warm-fallback", {
+        void this.writeDebugLog("cli-agent-warm-failed-without-replay", {
           providerKind: participant.kind,
           participantId: participant.id,
           conversationId: warm.conversationId,
           error: this.errorText(error)
         });
-        return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+        return this.failed(participant, error);
       }
     });
   }
 
-  private createClaudeWarmAgent(
+  private async createClaudeWarmAgent(
     key: string,
     scopeKey: string,
     participant: ParticipantConfig,
@@ -4973,7 +4991,19 @@ export class CliAgentRunner {
     kind: ConversationKind,
     options: CliAgentRunOptions,
     claudeExecutable: string
-  ): WarmAgentEntry {
+  ): Promise<WarmAgentEntry> {
+    return this.createTrackedWarmAgent(key, () => this.constructClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options, claudeExecutable));
+  }
+
+  private async constructClaudeWarmAgent(
+    key: string,
+    scopeKey: string,
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    options: CliAgentRunOptions,
+    claudeExecutable: string
+  ): Promise<WarmAgentEntry> {
     const newSessionId = options.persistSession && !options.sessionId ? randomUUID() : undefined;
     const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
     const toolConfig = this.claudeToolConfig(kind, repoPath, extraReadableDirs, options);
@@ -4988,7 +5018,7 @@ export class CliAgentRunner {
     );
     this.logClaudeLaunch(participant, repoPath, kind, options, args, toolConfig, extraReadableDirs, "warm");
 
-    const child = spawnCommand(claudeExecutable, args, {
+    const child = await this.spawnResidentProcess(scopeKey, claudeExecutable, args, {
       cwd: repoPath,
       env: commandEnvironment(this.agentRunEnv(options), CLAUDE_CODE_COMMAND_ENV_OPTIONS),
       detached: process.platform !== "win32",
@@ -5781,6 +5811,29 @@ export class CliAgentRunner {
     return run;
   }
 
+  private createTrackedWarmAgent(key: string, construct: () => Promise<WarmAgentEntry>): Promise<WarmAgentEntry> {
+    if (this.warmShutdown) return Promise.reject(new Error("The native sessions are shutting down; this command did not start."));
+    const existing = this.warmAgentCreations.get(key);
+    if (existing) return existing;
+    const creating = construct().then(async (entry) => {
+      if (this.warmShutdown) {
+        await this.closeWarmAgent(entry, "shutdown-during-start");
+        throw new Error("The native session shut down before this command started.");
+      }
+      this.warmAgents.set(key, entry);
+      return entry;
+    }).finally(() => this.warmAgentCreations.delete(key));
+    this.warmAgentCreations.set(key, creating);
+    return creating;
+  }
+
+  private async spawnResidentProcess(scope: string, command: string, args: string[], options: {
+    cwd?: string; env: NodeJS.ProcessEnv; detached: boolean; stdio: ["pipe", "pipe", "pipe"];
+  }): Promise<ChildProcessWithoutNullStreams> {
+    if (!this.nativeProcessDbPath || process.platform === "win32") return spawnCommand(command, args, options);
+    return spawnNativeProcess({ scope, command, args, cwd: options.cwd, env: options.env, dbPath: this.nativeProcessDbPath });
+  }
+
   private warmAgentKey(
     participant: ParticipantConfig,
     repoPath: string | undefined,
@@ -5902,6 +5955,7 @@ export class CliAgentRunner {
       return Promise.resolve();
     }
     entry.closed = true;
+    if (this.warmAgents.get(entry.key) === entry) this.warmAgents.delete(entry.key);
     this.clearWarmIdleTimer(entry);
     this.maybeStopClaudeBackgroundProcessCapture();
     void this.writeDebugLog("cli-agent-warm-closed", {
@@ -5916,6 +5970,10 @@ export class CliAgentRunner {
   }
 
   private async closeWarmAgentProcess(entry: WarmAgentEntry): Promise<void> {
+    if (isSupervisedNativeProcess(entry.process)) {
+      await confirmNativeProcessClosed(entry.process);
+      return;
+    }
     if (entry.providerKind === "codex-cli" && process.platform !== "win32") {
       await this.closeCodexProcessTree(entry);
       return;

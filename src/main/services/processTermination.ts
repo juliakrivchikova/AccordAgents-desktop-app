@@ -1,5 +1,7 @@
 import { execFile, execFileSync, spawnSync, type ChildProcess } from "node:child_process";
 import path from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { readFile, readdir } from "node:fs/promises";
 
 type KillableProcess = Pick<ChildProcess, "pid" | "kill">;
 type TrackedProcess = KillableProcess & Pick<ChildProcess, "exitCode" | "signalCode" | "killed">;
@@ -45,11 +47,23 @@ export function readPosixProcessTableSync(): Map<number, PosixProcessRow> | unde
   if (process.platform === "win32") {
     return new Map();
   }
+  if (process.platform === "linux") {
+    try {
+      const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      const rows = new Map<number, PosixProcessRow>();
+      for (const pid of readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
+        try { const row = parseLinuxProcessStat(readFileSync(`/proc/${pid}/stat`, "utf8"), boot); rows.set(row.pid, row); }
+        catch (error) { if (!processDisappeared(error)) throw error; }
+      }
+      return rows;
+    } catch { return undefined; }
+  }
   try {
     const output = execFileSync(POSIX_PS_PATH, POSIX_PS_ARGS, {
       encoding: "utf8",
       maxBuffer: POSIX_PS_MAX_BUFFER_BYTES,
-      timeout: POSIX_PS_TIMEOUT_MS
+      timeout: POSIX_PS_TIMEOUT_MS,
+      env: { ...process.env, LC_ALL: "C", TZ: "UTC" }
     });
     return parsePosixProcessTable(output);
   } catch {
@@ -61,15 +75,53 @@ export function readPosixProcessTableAsync(): Promise<Map<number, PosixProcessRo
   if (process.platform === "win32") {
     return Promise.resolve(new Map());
   }
+  if (process.platform === "linux") return readLinuxProcessTable();
   return new Promise((resolve) => {
     execFile(POSIX_PS_PATH, POSIX_PS_ARGS, {
       encoding: "utf8",
       maxBuffer: POSIX_PS_MAX_BUFFER_BYTES,
-      timeout: POSIX_PS_TIMEOUT_MS
+      timeout: POSIX_PS_TIMEOUT_MS,
+      env: { ...process.env, LC_ALL: "C", TZ: "UTC" }
     }, (error, stdout) => {
       resolve(error ? undefined : parsePosixProcessTable(stdout));
     });
   });
+}
+
+/** /proc starttime is measured since boot, not against wall time (kernel
+ * proc documentation, stat field 22). Include the kernel boot identity so
+ * persisted pids cannot match an unrelated process after an OS restart. */
+export function parseLinuxProcessStat(value: string, boot: string): PosixProcessRow {
+  const close = value.lastIndexOf(")");
+  const pid = Number(value.slice(0, value.indexOf(" ")));
+  const fields = value.slice(close + 2).trim().split(/\s+/);
+  const ppid = Number(fields[1]);
+  const pgid = Number(fields[2]);
+  if (close < 0 || !Number.isSafeInteger(pid) || pid < 1 || !Number.isSafeInteger(ppid) || ppid < 0 ||
+      !Number.isSafeInteger(pgid) || pgid < 0 || !/^\d+$/.test(fields[19] ?? "") || !/^[a-fA-F0-9-]{36}$/.test(boot)) {
+    throw new Error("Invalid process identity from /proc.");
+  }
+  return { pid, ppid, pgid, state: fields[0], startedAt: `linux:${boot}:${fields[19]}` };
+}
+
+async function readLinuxProcessTable(): Promise<Map<number, PosixProcessRow> | undefined> {
+  try {
+    const boot = (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
+    const pids = (await readdir("/proc")).filter((name) => /^\d+$/.test(name));
+    const rows = new Map<number, PosixProcessRow>();
+    for (let offset = 0; offset < pids.length; offset += 32) {
+      await Promise.all(pids.slice(offset, offset + 32).map(async (pid) => {
+        try { const row = parseLinuxProcessStat(await readFile(`/proc/${pid}/stat`, "utf8"), boot); rows.set(row.pid, row); }
+        catch (error) { if (!processDisappeared(error)) throw error; }
+      }));
+    }
+    return rows;
+  } catch { return undefined; }
+}
+
+function processDisappeared(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ESRCH";
 }
 
 export function capturePosixDescendantsFromTable(

@@ -216,6 +216,7 @@ import {
 } from "../../shared/chatRunState";
 import { INTERRUPTED_RUN_WARNING, sanitizeWarningList, sanitizeWarningText } from "../../shared/warnings";
 import { foldMachineTurnResult, markStopUnconfirmed, markStoppedByUser } from "./machineTurnOutcome";
+import { NativeProcessUnavailableError } from "./nativeProcess";
 import { normalizeAutoChatTitle, normalizeManualChatTitle, sanitizeAutoChatTitleSuggestion } from "../../shared/chatTitles";
 import {
   agentReadinessReason,
@@ -7768,6 +7769,11 @@ export class ChatService {
       this.upsertSession(conversation, session);
       this.lockParticipantRoleVersion(conversation, participant, session.roleConfigVersion);
       return [pendingMessage];
+    } catch (error) {
+      if (signal?.aborted && error instanceof NativeProcessUnavailableError) {
+        this.markParticipantMessageStopUnconfirmed(pendingMessage, participant, error.message);
+      }
+      throw error;
     } finally {
       if (awsRemoteRunRefHeld) {
         void this.cloudRunAws?.noteRunEnded(runId);

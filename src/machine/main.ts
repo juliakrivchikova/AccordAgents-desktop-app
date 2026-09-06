@@ -189,7 +189,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.relayUrl} (user data: ${userDataPath()})`);
 
   return async () => {
-    host.close();
+    await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
     await appMcpService.stop();
   };
 }
@@ -197,8 +197,14 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
 if (require.main === module) {
   startMachine(parseArgs(process.argv.slice(2)))
     .then((stop) => {
+      let stopping = false;
       const shutdown = (): void => {
-        void stop().finally(() => process.exit(0));
+        if (stopping) return;
+        stopping = true;
+        void stop().then(() => process.exit(0), (error) => {
+          stopping = false;
+          console.error(`Machine shutdown is not complete: ${error instanceof Error ? error.message : String(error)}`);
+        });
       };
       process.on("SIGINT", shutdown);
       process.on("SIGTERM", shutdown);

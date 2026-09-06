@@ -2992,7 +2992,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   }
 });
 `);
-  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const runner = new CliAgentRunner(undefined, undefined, { codexExecutable: codexPath, nativeProcessDbPath: path.join(fixtureDir, "native-processes.sqlite3") }) as any;
   const controller = new AbortController();
   let requestSeen!: () => void;
   let approvalAborted = false;
@@ -3079,7 +3079,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   }
 });
 `);
-  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const runner = new CliAgentRunner(undefined, undefined, { codexExecutable: codexPath, nativeProcessDbPath: path.join(fixtureDir, "native-processes.sqlite3") }) as any;
   const controller = new AbortController();
   let ready!: () => void;
   const seen = new Promise<void>((resolve) => { ready = resolve; });
@@ -3203,7 +3203,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   }
 });
 `);
-  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const runner = new CliAgentRunner(undefined, undefined, { codexExecutable: codexPath, nativeProcessDbPath: path.join(fixtureDir, "native-processes.sqlite3") }) as any;
   const participants = ["one", "two"].map((id) => ({ id: `participant-${id}`, kind: "codex-cli" as const, label: `Codex ${id}` }));
   t.after(async () => {
     await runner.shutdownWarmAgents();
@@ -3311,6 +3311,7 @@ input.on("line", () => {
   await chmod(claudePath, 0o755);
 
   const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
   runner.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-background", kind: "claude-code", label: "Claude" };
   const warm = {
@@ -3414,6 +3415,7 @@ readline.createInterface({ input: process.stdin }).on("line", () => {
   await chmod(claudePath, 0o755);
 
   const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
   runner.providerExecutableForRun = async () => claudePath;
   let oneShotFallbacks = 0;
   runner.runClaudeOneShot = async (): Promise<never> => {
@@ -3496,6 +3498,7 @@ input.on("line", () => {
   await chmod(claudePath, 0o755);
 
   const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
   runner.providerExecutableForRun = async () => claudePath;
   runner.claudeBackgroundCloseGraceMs = 20;
   const participant = { id: "claude-escalation", kind: "claude-code", label: "Claude" };
@@ -3570,6 +3573,7 @@ input.on("line", () => {
   await chmod(claudePath, 0o755);
 
   const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
   runner.providerExecutableForRun = async () => claudePath;
   runner.claudeBackgroundCloseGraceMs = 200;
   const participant = { id: "claude-eof-exit", kind: "claude-code", label: "Claude" };
@@ -3996,7 +4000,27 @@ test("codex app-server never replays a prompt after the provider accepted the tu
   assert.equal(oneShotRuns, 0);
 });
 
-test("codex app-server retains one-shot fallback only before provider turn acceptance", async () => {
+test("shutdown waits for a session still being constructed and duplicate construction shares its owner", async () => {
+  const runner = makeRunner() as any;
+  let create!: (entry: any) => void;
+  const ready = new Promise<any>((resolve) => { create = resolve; });
+  let constructions = 0;
+  const closed: string[] = [];
+  runner.closeWarmAgent = async (entry: any) => { closed.push(entry.key); entry.closed = true; };
+  const first = runner.createTrackedWarmAgent("starting", () => { constructions += 1; return ready; });
+  const duplicate = runner.createTrackedWarmAgent("starting", () => { constructions += 1; return ready; });
+  assert.equal(first, duplicate);
+  const shuttingDown = runner.shutdownWarmAgents();
+  await assert.rejects(runner.createTrackedWarmAgent("new", async () => ({})), /shutting down/);
+  create({ key: "starting", closed: false });
+  await assert.rejects(first, /before this command started/);
+  await shuttingDown;
+  assert.deepEqual(closed, ["starting"]);
+  assert.equal(constructions, 1);
+  assert.equal(runner.warmAgents.size, 0);
+});
+
+test("codex app-server initialization failure never replays a command through one-shot execution", async () => {
   const runner = makeRunner() as any;
   let oneShotRuns = 0;
   runner.createCodexAppServerWarmAgent = () => ({
@@ -4033,9 +4057,9 @@ test("codex app-server retains one-shot fallback only before provider turn accep
     }
   );
 
-  assert.equal(result.ok, true);
-  assert.equal(result.content, "FALLBACK");
-  assert.equal(oneShotRuns, 1);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /initialize failed/);
+  assert.equal(oneShotRuns, 0);
 });
 
 test("reasoning effort mapping is provider-specific", () => {

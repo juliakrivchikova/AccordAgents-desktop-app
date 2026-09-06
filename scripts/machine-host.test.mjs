@@ -90,7 +90,12 @@ test("a turn waiting for a chat copy counts as held, and a stop removes it befor
   );
   await host.start();
   await settle();
-  const inbound = async (body) => { client.emit("message", { ciphertext: await envelope(body) }); await settle(); };
+  const inbound = async (body) => {
+    client.emit("message", { ciphertext: await envelope(body) });
+    await host.inbound;
+    await host.outbound;
+    await host.eventChannel.flush();
+  };
   await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test" });
   const shell = { id: "conv-1", kind: "chat", title: "t", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] };
   await inbound({ type: "machine.conversation.sync", conversation: shell });
@@ -132,7 +137,12 @@ test("the machine's hello lists turns waiting for a copy as active", async () =>
   );
   await host.start();
   await settle();
-  const inbound = async (body) => { client.emit("message", { ciphertext: await envelope(body) }); await settle(); };
+  const inbound = async (body) => {
+    client.emit("message", { ciphertext: await envelope(body) });
+    await host.inbound;
+    await host.outbound;
+    await host.eventChannel.flush();
+  };
   await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test" });
   await inbound({ type: "machine.conversation.sync", conversation: { id: "conv-2", kind: "chat", title: "t", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] } });
   await inbound({ type: "machine.turn.request", conversationId: "conv-2", participantId: "p1", participant: { id: "p1", handle: "bot" }, messageId: "m1", runId: "run-listed", pendingMessageId: "pending-listed", requestedAt: new Date().toISOString() });
@@ -255,4 +265,35 @@ test("a ChatService native resume is listed, stopped and delivered through the h
   await settle();
   assert.equal(host.pendingTerminals.has("native-resume"), false);
   host.close();
+});
+
+
+test("runtime shutdown stores the final outcome before closing its device channel", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  let closed = false;
+  client.close = () => { closed = true; };
+  let finishRun;
+  const held = new Promise(resolve => { finishRun = resolve; });
+  const enrollment = pairing();
+  const host = new MachineHostService(
+    { runMachineHostedTurn: async () => held, cancelRun: () => true,
+      respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined },
+    { getConversation: async () => undefined },
+    { importMachineSettingsSnapshot: async () => undefined },
+    { write: async () => undefined },
+    { ...hostEvents, pairing: enrollment, deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
+  );
+  await host.start();
+  await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test" });
+  const request = { type: "machine.turn.request", conversationId: "shutdown-chat", participantId: "p", participant: {id:"p",handle:"bot"}, messageId:"input",runId:"shutdown-run",pendingMessageId:"reply",requestedAt:new Date().toISOString() };
+  await host.handleBody(request);
+  await host.shutdown(async () => {
+    assert.equal(closed, false);
+    finishRun({ messages: [{id:"reply",role:"participant",participantId:"p",status:"error",content:"The provider closed.",createdAt:new Date().toISOString()}], warnings:[] });
+  });
+  assert.equal(closed, true);
+  const pending = await hostEvents.eventStorage.deviceEvents().listPending(enrollment.rendezvousId);
+  assert.ok(pending.some(row => row.event.kind === "machine.turn.finished"));
+  assert.equal(host.pendingTerminals.get("shutdown-run").status, "failed", "runtime closure must not be presented as User Stop");
 });

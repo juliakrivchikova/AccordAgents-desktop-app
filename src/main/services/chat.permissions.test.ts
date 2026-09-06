@@ -1,3 +1,4 @@
+import { NativeProcessUnavailableError } from "./nativeProcess";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -2264,6 +2265,29 @@ test("running participant cancellation preserves output in one stopped bubble", 
   assert.equal(storage.current.messages.some((message: ChatMessage) =>
     message.role === "system" && message.content === `@${participant.handle} stopped by user.`
   ), false);
+});
+
+test("Stop cannot claim success when native process supervision was lost", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => { started = resolve; });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (_participant, _prompt, _path, _diff, _kind, signal: AbortSignal | undefined) => {
+      started();
+      await new Promise<void>((resolve) => { if (signal?.aborted) resolve(); else signal?.addEventListener("abort", () => resolve(), { once: true }); });
+      throw new NativeProcessUnavailableError("The supervisor disappeared without a shutdown receipt.");
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "unconfirmed-native-stop", content: `@${participant.handle} work` });
+  await ready;
+  const pending = storage.current.messages.find((message: ChatMessage) => message.role === "participant" && message.status === "pending");
+  assert.ok(pending?.metadata?.runId);
+  service.cancelRun(pending.metadata.runId);
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.id === pending.id && message.metadata?.terminalReason === "stop-unconfirmed"));
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.includes("stopped by user")), false);
 });
 
 test("running participant cancellation preserves a successful reply returned after Stop", async () => {
