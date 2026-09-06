@@ -83,3 +83,7 @@ The **outbox** persists every event before the first send (Electron: SQLite; PWA
 
 - Its copy of every conversation it participates in (events + projections in SQLite), its outbox, its receipts, its executor generations and process-group records, its provider sessions.
 - A controller device (phone) stores its outbox and a display cache only.
+
+## Relay tunnel client note (2026-09-06)
+
+A socket the tunnel client has already moved on from (replaced by a newer connection, or closed and reconnected before the old close arrived) must never start another dial: the second dial evicts the live socket at the relay with code 4001, whose close dials again, and the two sockets evict each other forever. `RelayTunnelClient` now ignores the close of a socket that is no longer current (`scripts/relay-tunnel-client.test.mjs`, "does not dial again for a socket it already replaced"). The phone↔desktop tunnel uses the same client, so this fix applies there too.

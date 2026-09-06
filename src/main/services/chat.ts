@@ -655,6 +655,9 @@ export interface MachineTurnDispatchResult {
   messages: ChatMessage[];
   warnings: string[];
   error?: string;
+  /** The machine's finish time of this result (absent for outcomes the
+   *  desktop produced itself). */
+  finishedAt?: string;
   /** Called once the desktop has stored the result; the machine keeps it
    *  until then. */
   acknowledge?: () => void;
@@ -6826,7 +6829,7 @@ export class ChatService {
       // contributes its text and the run's other messages, and the whole
       // result is stored before the machine is told to drop it.
       const status = result.status === "failed" && signal?.aborted ? "unconfirmed" : result.status;
-      const others = foldMachineTurnResult(pendingMessage, participant.handle, runId, { status, messages: result.messages, error: result.error });
+      const others = foldMachineTurnResult(pendingMessage, participant.handle, runId, { status, messages: result.messages, error: result.error, finishedAt: result.finishedAt });
       for (const bubble of bubbleObjects()) {
         if (bubble !== pendingMessage) {
           bubble.content = pendingMessage.content;
@@ -6990,6 +6993,7 @@ export class ChatService {
     messages: ChatMessage[];
     warnings?: string[];
     error?: string;
+    finishedAt?: string;
     machineName: string;
   }): Promise<void> {
     const conversation = await this.storage.getConversation(request.conversationId);
@@ -7002,7 +7006,7 @@ export class ChatService {
       if (bubble) {
         const participant = this.chatParticipants(conversation).find((item) => item.id === bubble.participantId);
         const handle = participant?.handle ?? bubble.participantLabel?.replace(/^@/, "") ?? "member";
-        others = foldMachineTurnResult(bubble, handle, request.runId, { status: request.status, messages: request.messages, error: request.error });
+        others = foldMachineTurnResult(bubble, handle, request.runId, { status: request.status, messages: request.messages, error: request.error, finishedAt: request.finishedAt });
         this.recordLastMessageByParticipant(conversation, bubble);
       }
       for (const incoming of others) {

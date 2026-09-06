@@ -14,6 +14,9 @@ export interface MachineTurnOutcomeInput {
   status: MachineTurnOutcomeStatus;
   messages: ChatMessage[];
   error?: string;
+  /** The machine's own finish time of this result; absent for outcomes the
+   *  desktop produced itself (a timeout, a lost run). */
+  finishedAt?: string;
 }
 
 /** Marks a member bubble as stopped by the User (the machine confirmed the
@@ -58,8 +61,10 @@ export function foldMachineTurnResult(
   const reply = result.messages.find((message) => message.id === bubble.id);
   const others = result.messages.filter((message) => message.id !== bubble.id);
   const applied = bubble.metadata?.machineOutcome;
-  if (applied && applied.runId === runId && applied.status === result.status) {
-    // The same result again (a redelivery): the bubble already carries it.
+  if (applied && applied.runId === runId && applied.status === result.status && applied.finishedAt !== undefined && applied.finishedAt === result.finishedAt) {
+    // The very same result again (a redelivery): the bubble already carries
+    // it. A different result of the same run (a real terminal after a
+    // provisional desktop-side outcome) is folded.
     return others;
   }
   if (reply) {
@@ -72,7 +77,7 @@ export function foldMachineTurnResult(
     delete metadata.stopPending;
     bubble.metadata = metadata;
   }
-  bubble.metadata = { ...bubble.metadata, machineOutcome: { runId, status: result.status } };
+  bubble.metadata = { ...bubble.metadata, machineOutcome: { runId, status: result.status, ...(result.finishedAt ? { finishedAt: result.finishedAt } : {}) } };
   switch (result.status) {
     case "completed":
       if (reply) {

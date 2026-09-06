@@ -8,7 +8,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -83,6 +83,9 @@ export class MachineHostService {
   /** How many times the first copy was requested again per conversation;
    *  a copy that keeps failing (a full disk) is not requested forever. */
   private readonly resyncAttempts = new Map<string, number>();
+  /** Turn requests that arrived while a copy of their chat was still being
+   *  received: they run once the copy is complete, or fail if it is not. */
+  private readonly turnsAwaitingCopy = new Map<string, MachineTurnRequestBody[]>();
   /** True when the outbox file exists but could not be read: it is then
    *  never overwritten, so a result on disk is not lost to a bad read. */
   private outboxUnreadable = false;
@@ -232,6 +235,7 @@ export class MachineHostService {
     const changed = this.desktopDeviceId !== deviceId;
     this.desktopDeviceId = deviceId;
     if (changed || options.announce) {
+      void this.debugLogs.write("machine-host.hello.sending", { reason: options.announce ? "link-ready" : "desktop-changed", deviceId });
       void this.sendHello()
         .then(() => this.flushPendingTerminals())
         .then(() => this.reforwardApprovals())
@@ -326,6 +330,10 @@ export class MachineHostService {
         }
         this.resyncAttempts.delete(body.conversationId);
         this.syncing.delete(body.conversationId);
+        for (const waiting of this.turnsAwaitingCopy.get(body.conversationId) ?? []) {
+          void this.runTurn(waiting);
+        }
+        this.turnsAwaitingCopy.delete(body.conversationId);
         // Everything the desktop holds is registered now: rows this machine
         // made on its own (offline replies) travel back, nothing else does.
         const stored = await this.storage.getConversation(body.conversationId);
@@ -338,22 +346,19 @@ export class MachineHostService {
         await this.applyConversationDelta(body);
         return;
       case "machine.turn.request":
-        if (this.syncing.has(body.conversationId) || this.failedSync.has(body.conversationId)) {
-          // The copy of this chat is not complete here; an honest failure
-          // beats running a member against half a chat.
-          this.pendingTerminals.set(body.runId, {
-            type: "machine.turn.finished",
-            conversationId: body.conversationId,
-            runId: body.runId,
-            participantId: body.participantId,
-            status: "failed",
-            messages: [],
-            warnings: [],
-            error: "This machine's copy of the chat is not complete yet (a sync batch could not be stored); try again once it has synced.",
-            finishedAt: this.now().toISOString()
-          });
-          this.persistOutbox();
-          await this.flushPendingTerminals();
+        if (this.failedSync.has(body.conversationId)) {
+          // A batch of this chat's copy could not be stored; an honest
+          // failure beats running a member against half a chat.
+          await this.failTurnOnIncompleteCopy(body);
+          return;
+        }
+        if (this.syncing.has(body.conversationId)) {
+          // The copy is still arriving (a reconnect re-sent it while this
+          // request was in flight): the turn runs when the copy is complete.
+          const waiting = this.turnsAwaitingCopy.get(body.conversationId) ?? [];
+          waiting.push(body);
+          this.turnsAwaitingCopy.set(body.conversationId, waiting);
+          void this.debugLogs.write("machine-host.turn.awaiting-copy", { conversationId: body.conversationId, runId: body.runId });
           return;
         }
         void this.runTurn(body);
@@ -541,6 +546,11 @@ export class MachineHostService {
   }
 
   private async requestResync(conversationId: string): Promise<void> {
+    // Turns waiting for this copy cannot run on it any more.
+    for (const waiting of this.turnsAwaitingCopy.get(conversationId) ?? []) {
+      await this.failTurnOnIncompleteCopy(waiting);
+    }
+    this.turnsAwaitingCopy.delete(conversationId);
     const attempts = (this.resyncAttempts.get(conversationId) ?? 0) + 1;
     this.resyncAttempts.set(conversationId, attempts);
     if (attempts > MAX_RESYNC_ATTEMPTS) {
@@ -549,6 +559,22 @@ export class MachineHostService {
     }
     void this.debugLogs.write("machine-host.sync.resync", { conversationId, attempt: attempts });
     await this.send({ type: "machine.conversation.resync", conversationId }).catch(() => undefined);
+  }
+
+  private async failTurnOnIncompleteCopy(request: MachineTurnRequestBody): Promise<void> {
+    this.pendingTerminals.set(request.runId, {
+      type: "machine.turn.finished",
+      conversationId: request.conversationId,
+      runId: request.runId,
+      participantId: request.participantId,
+      status: "failed",
+      messages: [],
+      warnings: [],
+      error: "This machine's copy of the chat is not complete yet (a sync batch could not be stored); try again once it has synced.",
+      finishedAt: this.now().toISOString()
+    });
+    this.persistOutbox();
+    await this.flushPendingTerminals();
   }
 
   private restoreInventory(conversationId: string, previous: Map<string, string | undefined>): void {
@@ -723,12 +749,21 @@ export class MachineHostService {
         this.archiveRejectedEntries();
       }
     } catch (error) {
-      // Damaged outbox: keep the file for inspection instead of overwriting it.
+      // Damaged outbox: the original bytes are preserved before anything
+      // may overwrite the file; if they cannot be moved or copied aside, the
+      // file is never overwritten and the desktop is told.
       const damaged = `${file}.corrupt-${Date.now()}`;
       try {
         renameSync(file, damaged);
       } catch {
-        // Leave it in place if it cannot be moved.
+        try {
+          copyFileSync(file, damaged);
+        } catch (copyError) {
+          this.outboxUnreadable = true;
+          this.outboxError = `the outbox on disk is damaged and could not be preserved (${errorMessage(copyError)}); it is left untouched`;
+          void this.debugLogs.write("machine-host.outbox.corrupt-preserve-failed", { file, message: errorMessage(copyError) });
+          return;
+        }
       }
       void this.debugLogs.write("machine-host.outbox.corrupt", { file, movedTo: damaged, message: errorMessage(error) });
     }
@@ -798,6 +833,7 @@ export class MachineHostService {
   /** The desktop learns about the outbox state through hello. */
   private announceOutboxState(): void {
     if (this.desktopDeviceId && !this.closed) {
+      void this.debugLogs.write("machine-host.hello.sending", { reason: "outbox-state" });
       void this.sendHello().catch(() => undefined);
     }
   }

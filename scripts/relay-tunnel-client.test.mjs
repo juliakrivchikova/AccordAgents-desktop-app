@@ -219,6 +219,38 @@ test("RelayTunnelClient widens the reconnect gap while the relay refuses", async
   assert.ok(gaps[3] > gaps[2] * 1.2, `gap 4 must outgrow gap 3: ${JSON.stringify(gaps)}`);
 });
 
+test("RelayTunnelClient does not dial again for a socket it already replaced", async () => {
+  const { RelayTunnelClient } = await import("../dist/main/main/services/relayTunnelClient.js");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  try {
+    const machine = new RelayTunnelClient({
+      relayUrl: address.url,
+      rendezvousId: "pair-replaced-1",
+      role: "machine",
+      deviceId: "did-machine-1",
+      capability: "cap-replaced-1",
+      streamId: "stream-replaced-1",
+      reconnectDelayMs: 20
+    });
+    const errors = [];
+    machine.on("error", (error) => errors.push(error.message));
+    await machine.connect();
+    // Close and dial again before the relay has processed the old close: the
+    // old socket's close event arrives while the new socket is live and must
+    // not start a second dial (which would evict the live socket, whose close
+    // would dial again, forever).
+    machine.close();
+    await machine.connect();
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(machine.currentState(), "connected");
+    assert.deepEqual(errors.filter((message) => message.includes("4001")), [], "no eviction loop after close+connect");
+    machine.close();
+  } finally {
+    await relay.close();
+  }
+});
+
 test("RelayTunnelClient targets machines by device id and reports peers", async () => {
   const { RelayTunnelClient } = await import("../dist/main/main/services/relayTunnelClient.js");
   const relay = createReferenceRelayServer();

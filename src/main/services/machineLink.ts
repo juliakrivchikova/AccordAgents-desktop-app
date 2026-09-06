@@ -60,6 +60,7 @@ export interface MachineLateTerminalEvent {
   messages: ChatMessage[];
   warnings: string[];
   error?: string;
+  finishedAt?: string;
 }
 
 interface MachineConnection {
@@ -78,6 +79,9 @@ interface MachineConnection {
     progress?: (progress: ReviewProgress) => void;
     /** Runtime instance the turn was dispatched to (from the machine's hello). */
     instanceId?: string;
+    /** True once machine.turn.request has left; only then can the machine be
+     *  asked whether it holds the run. */
+    dispatched: boolean;
   }>;
   /** Stops the machine has not confirmed yet (run id → conversation id).
    *  Rule 2: a Stop is stored (in the machine record, so it survives a desktop
@@ -423,7 +427,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     };
     request.signal?.addEventListener("abort", onAbort, { once: true });
     const result = new Promise<MachineTurnDispatchResult>((resolve) => {
-      connection.pendingTurns.set(request.runId, { resolve, progress: request.progress, instanceId: connection.record.lastHello?.instanceId });
+      connection.pendingTurns.set(request.runId, { resolve, progress: request.progress, instanceId: connection.record.lastHello?.instanceId, dispatched: false });
     });
     connection.pendingTurnConversations.set(request.runId, request.conversation.id);
     const timeout = setTimeout(() => {
@@ -458,6 +462,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
         requestedAt: this.now().toISOString()
       });
       requestSent = true;
+      const entry = connection.pendingTurns.get(request.runId);
+      if (entry) {
+        entry.dispatched = true;
+      }
       if (request.signal?.aborted) {
         onAbort();
       }
@@ -693,8 +701,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
     // then; one that does hold it stays silent and the result follows. No
     // turn is ever closed from process order or clocks.
     const listed = new Set([...(hello.activeRunIds ?? []), ...(hello.pendingTerminalRunIds ?? [])]);
-    for (const runId of connection.pendingTurns.keys()) {
-      if (listed.has(runId)) {
+    for (const [runId, entry] of connection.pendingTurns.entries()) {
+      // A turn still in preparation has not reached the machine; asking
+      // about it would close a run that is about to start there.
+      if (listed.has(runId) || !entry.dispatched) {
         continue;
       }
       const conversationId = connection.pendingCancels.get(runId) ?? connection.pendingTurnConversations.get(runId);
@@ -734,6 +744,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         status: body.status,
         messages: body.messages,
         warnings: body.warnings,
+        finishedAt: body.finishedAt,
         ...(body.error ? { error: body.error } : {})
       })
         .then(acknowledge)
@@ -748,6 +759,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       messages: body.messages,
       warnings: body.warnings,
       error: body.error,
+      finishedAt: body.finishedAt,
       acknowledge
     });
   }
@@ -757,7 +769,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private async handleUnknownRun(connection: MachineConnection, body: { conversationId: string; runId: string }): Promise<void> {
     const pending = connection.pendingTurns.get(body.runId);
     const held = connection.pendingCancels.has(body.runId);
-    void this.debugLogs.write("machine-link.turn.unknown", { machineId: connection.record.id, runId: body.runId, pending: Boolean(pending), held });
+    void this.debugLogs.write("machine-link.turn.unknown", { machineId: connection.record.id, runId: body.runId, pending: Boolean(pending), held, dispatched: pending?.dispatched });
+    if (pending && !pending.dispatched) {
+      // The request has not left yet (a query raced the preparation, or a
+      // stale answer): the turn is about to be dispatched, nothing to close.
+      return;
+    }
     const detail = held
       ? `Machine ${connection.record.name} does not know this run any more; whether its processes are gone is not verified.`
       : `Machine ${connection.record.name} does not know this run any more (it restarted or lost it before finishing).`;

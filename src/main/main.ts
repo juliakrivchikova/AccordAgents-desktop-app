@@ -2805,6 +2805,7 @@ void app.whenReady().then(async () => {
         messages: event.messages,
         warnings: event.warnings,
         error: event.error,
+        finishedAt: event.finishedAt,
         machineName: event.machineName
       })
     );

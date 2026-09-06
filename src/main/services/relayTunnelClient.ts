@@ -166,11 +166,20 @@ export class RelayTunnelClient {
       });
       socket.on("message", (data) => this.handleMessage(data));
       socket.on("close", (code, reason) => {
-        if (this.socket === socket) {
+        // A close of a socket this client has already moved on from (it was
+        // replaced by a newer connection, or closed and reconnected before
+        // the old close arrived) must not start another dial: that second
+        // dial evicts the live socket at the relay, whose close then dials
+        // again, and the two sockets evict each other forever.
+        const current = this.socket === socket;
+        if (current) {
           this.socket = undefined;
         }
         if (!settled) {
           reject(new Error("Relay tunnel closed before opening."));
+          return;
+        }
+        if (!current) {
           return;
         }
         // An abnormal close carries the relay's reason ("duplicate relay

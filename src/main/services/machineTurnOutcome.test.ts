@@ -56,12 +56,19 @@ test("an unconfirmed stop is marked as such, not as stopped by user", () => {
   assert.match(target.content, /machine restarted/);
 });
 
-test("a redelivered result of the same run is applied once", () => {
+test("a redelivered result of the same run is applied once, a real result replaces a provisional one", () => {
   const target = bubble({ content: "text" });
-  foldMachineTurnResult(target, "bot", "run-1", { status: "failed", messages: [], error: "provider exited" });
+  foldMachineTurnResult(target, "bot", "run-1", { status: "failed", messages: [], error: "provider exited", finishedAt: "2026-09-06T00:00:05.000Z" });
   const once = target.content;
-  foldMachineTurnResult(target, "bot", "run-1", { status: "failed", messages: [], error: "provider exited" });
+  foldMachineTurnResult(target, "bot", "run-1", { status: "failed", messages: [], error: "provider exited", finishedAt: "2026-09-06T00:00:05.000Z" });
   assert.equal(target.content, once);
+  // A desktop-side timeout first, then the machine's real failure: both facts end up in the bubble.
+  const timedOut = bubble({ content: "partial" });
+  foldMachineTurnResult(timedOut, "bot", "run-1", { status: "failed", messages: [], error: "did not finish within the run timeout" });
+  foldMachineTurnResult(timedOut, "bot", "run-1", { status: "failed", messages: [reply("partial plus more")], error: "provider crashed", finishedAt: "2026-09-06T00:00:09.000Z" });
+  assert.match(timedOut.content, /partial plus more/);
+  assert.match(timedOut.content, /provider crashed/);
+  assert.equal(timedOut.metadata?.machineOutcome?.finishedAt, "2026-09-06T00:00:09.000Z");
   const stop = bubble({ content: "text" });
   foldMachineTurnResult(stop, "bot", "run-1", { status: "unconfirmed", messages: [], error: "gone" });
   const stopOnce = stop.content;

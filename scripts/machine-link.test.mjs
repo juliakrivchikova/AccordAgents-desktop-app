@@ -12,6 +12,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
   const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
   const relay = createReferenceRelayServer();
   const address = await relay.listen();
+  const capturedLogs = [];
   try {
     const pairing = machinePairing(address.url);
     const record = { id: "machine-1", name: "Test box", deviceId: "", pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
@@ -20,10 +21,16 @@ test("machine link replicates settings and conversations, runs a turn, streams p
       saveMachine: async (next) => { Object.assign(record, next); return [record]; },
       removeMachine: async () => [],
       getMachinePairing: async (key) => (key === pairing.rendezvousId ? pairing : undefined),
-      exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: JSON.stringify({ chatRoleConfigs: [{ id: "engineer" }] }), agentEnvironment: [{ key: "GH_TOKEN", value: "secret" }] })
+      exportMachineSettingsSnapshot: async () => {
+        if (settingsDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, settingsDelayMs));
+        }
+        return { version: 1, exportedAt: new Date().toISOString(), settingsJson: JSON.stringify({ chatRoleConfigs: [{ id: "engineer" }] }), agentEnvironment: [{ key: "GH_TOKEN", value: "secret" }] };
+      }
     };
-    const logs = [];
-    const debugLogs = { write: async (event, payload) => { logs.push({ event, payload }); } };
+    const logs = capturedLogs;
+    let settingsDelayMs = 0;
+    const debugLogs = { write: async (event, payload) => { logs.push({ event, payload, at: Date.now() }); } };
     const link = new MachineLinkService(desktopSettings, debugLogs, { appVersion: "test", desktopDeviceId: "device-desktop", reconnectDelayMs: 50 });
 
     const machineStore = new Map();
@@ -240,6 +247,21 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     assert.equal(repairedTurn.status, "completed");
     repairedTurn.acknowledge?.();
 
+    // A hello that arrives while a turn is still being prepared must not close it:
+    // the machine is asked only about turns whose request has left.
+    settingsDelayMs = 400;
+    const racedTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: "run-raced", pendingMessageId: "pending-raced" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    host.client.close();
+    await host.client.connect(); // the machine's hello lands during the desktop's preparation
+    const raced = await racedTurn;
+    settingsDelayMs = 0;
+    assert.equal(raced.status, "completed", "a turn in preparation survives a hello");
+    raced.acknowledge?.();
+    // A query may still be sent once the request has left (the machine simply holds the run and stays silent);
+    // what must never happen is a close from an answer to a pre-dispatch query.
+    assert.ok(!logs.some((entry) => entry.event === "machine-link.turn.unknown" && entry.payload?.runId === "run-raced" && entry.payload?.dispatched === true), "no lost-run close for a turn the machine holds");
+
     // A batch of the first copy that cannot be stored on the machine makes it ask for the copy again;
     // the completed copy never echoes back and the retry stores everything.
     const bigger = { ...big, id: "conv-bigger", messages: big.messages.map((message) => ({ ...message, id: message.id.replace("big-", "bigger-") })) };
@@ -312,8 +334,43 @@ test("machine link replicates settings and conversations, runs a turn, streams p
 
     link.close();
     host.close();
+  } catch (error) {
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync("/tmp/link-logs.json", JSON.stringify(capturedLogs, null, 1));
+    throw error;
   } finally {
     await relay.close();
+  }
+});
+
+test("a damaged outbox that cannot be set aside is never overwritten", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const { mkdtempSync, writeFileSync, chmodSync, readFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = mkdtempSync(path.join(os.tmpdir(), "machine-outbox-"));
+  const file = path.join(dir, "machine-outbox.json");
+  writeFileSync(file, "{not json", "utf8");
+  chmodSync(dir, 0o500); // the damaged file cannot be renamed or copied within its directory
+  const logs = [];
+  const stubClient = { on: () => () => undefined, connect: async () => undefined, close: () => undefined, sendCiphertext: async () => [] };
+  try {
+    const host = new MachineHostService(
+      { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined },
+      { getConversation: async () => undefined },
+      { importMachineSettingsSnapshot: async () => undefined },
+      { write: async (event, payload) => { logs.push({ event, payload }); } },
+      { pairing: machinePairing("ws://127.0.0.1:1/v1/relay"), deviceId: "device-x", appVersion: "test", outboxPath: file, createClient: () => stubClient }
+    );
+    assert.ok(logs.some((entry) => entry.event === "machine-host.outbox.corrupt-preserve-failed"));
+    // A later write must refuse rather than destroy the damaged bytes.
+    host.persistOutbox();
+    assert.equal(readFileSync(file, "utf8"), "{not json");
+    assert.ok(logs.some((entry) => entry.event === "machine-host.outbox.write-skipped"));
+    host.close();
+  } finally {
+    chmodSync(dir, 0o700);
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
