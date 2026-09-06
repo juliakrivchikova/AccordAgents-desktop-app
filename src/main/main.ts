@@ -2786,12 +2786,24 @@ void app.whenReady().then(async () => {
         });
     });
     machineLinkService.onApproval((event) =>
+      // A failed store must fail the machine's decision outcome (and the
+      // card call behind it), so the error is logged and re-thrown.
       chatService.applyMachineApproval({
         conversationId: event.conversationId,
         approval: event.approval,
         policies: event.policies
-      }).then(() => undefined, (error) => {
+      }).then(() => undefined, (error: unknown) => {
         void debugLogService.write("machine-link.approval.apply-error", { message: error instanceof Error ? error.message : String(error) });
+        throw error;
+      })
+    );
+    machineLinkService.onRunOutcome((event) =>
+      chatService.applyMachineRunOutcome({
+        conversationId: event.conversationId,
+        runId: event.runId,
+        outcome: event.outcome,
+        machineName: event.machineName,
+        detail: event.detail
       })
     );
     chatService.setMachineLink(machineLinkService);

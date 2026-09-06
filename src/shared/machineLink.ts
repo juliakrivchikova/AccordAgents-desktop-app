@@ -52,6 +52,9 @@ export interface MachineHelloBody {
   /** When this runtime process started; a hello from an older instance that
    *  arrives late is ignored by the desktop. */
   instanceStartedAt?: string;
+  /** Monotonic start counter kept by the machine on disk; preferred over the
+   *  wall-clock start time for ordering instances. */
+  instanceSequence?: number;
 }
 
 export interface MachineHelloAckBody {
@@ -181,6 +184,14 @@ export interface MachineTurnUnknownBody {
   runId: string;
 }
 
+/** Desktop -> machine: the first copy of a chat (shell plus every batch) has
+ *  been sent in full; the machine may now compare its own rows against what
+ *  the desktop holds. */
+export interface MachineConversationSyncDoneBody {
+  type: "machine.conversation.sync.done";
+  conversationId: string;
+}
+
 /** Desktop -> machine: the finished turn has been applied on the desktop;
  *  the machine may drop it from its outbox. */
 export interface MachineTurnFinishedAckBody {
@@ -214,6 +225,7 @@ export type MachineLinkMessage =
   | MachineApprovalResultBody
   | MachineTurnFinishedAckBody
   | MachineTurnUnknownBody
+  | MachineConversationSyncDoneBody
   | MachineChoiceAnswerBody;
 
 export type MachineLinkMessageType = MachineLinkMessage["type"];
@@ -235,6 +247,7 @@ const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.approval.result",
   "machine.turn.finished.ack",
   "machine.turn.unknown",
+  "machine.conversation.sync.done",
   "machine.choice.answer"
 ]);
 

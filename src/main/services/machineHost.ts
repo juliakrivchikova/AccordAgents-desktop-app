@@ -66,6 +66,15 @@ export class MachineHostService {
   /** Changes when this runtime starts: the desktop tells a restart from a reconnect by it. */
   private readonly instanceId = randomUUID();
   private readonly instanceStartedAt = new Date().toISOString();
+  /** Monotonic start counter kept next to the outbox (falls back to the
+   *  clock when there is no outbox path). */
+  private readonly instanceSequence: number;
+  /** Conversations whose first copy (shell + batches) is still arriving:
+   *  own rows are compared against the desktop's only once it is complete. */
+  private readonly syncing = new Set<string>();
+  /** True when the outbox file exists but could not be read: it is then
+   *  never overwritten, so a result on disk is not lost to a bad read. */
+  private outboxUnreadable = false;
   private inbound: Promise<void> = Promise.resolve();
   /** Outbound sends leave in call order (progress before the finished result). */
   private outbound: Promise<void> = Promise.resolve();
@@ -86,6 +95,7 @@ export class MachineHostService {
     private readonly options: MachineHostOptions
   ) {
     this.now = options.now ?? (() => new Date());
+    this.instanceSequence = this.nextInstanceSequence();
     this.loadOutbox();
     const pairing = options.pairing;
     if (!pairing.relayUrl) {
@@ -240,7 +250,8 @@ export class MachineHostService {
       activeRunIds: [...this.activeTurns.keys()],
       pendingTerminalRunIds: [...this.pendingTerminals.keys()],
       instanceId: this.instanceId,
-      instanceStartedAt: this.instanceStartedAt
+      instanceStartedAt: this.instanceStartedAt,
+      instanceSequence: this.instanceSequence
     });
   }
 
@@ -271,8 +282,19 @@ export class MachineHostService {
         await this.options.onSettingsImported?.();
         return;
       case "machine.conversation.sync":
+        this.syncing.add(body.conversation.id);
         await this.applyConversationSync(body.conversation);
         return;
+      case "machine.conversation.sync.done": {
+        this.syncing.delete(body.conversationId);
+        // Everything the desktop holds is registered now: rows this machine
+        // made on its own (offline replies) travel back, nothing else does.
+        const stored = await this.storage.getConversation(body.conversationId);
+        if (stored && stored.kind === "chat") {
+          this.forwardMachineMessages(stored);
+        }
+        return;
+      }
       case "machine.conversation.delta":
         await this.applyConversationDelta(body);
         return;
@@ -349,7 +371,7 @@ export class MachineHostService {
    *  back delta; messages the desktop sent here are never echoed. */
   private forwardMachineMessages(conversation: Conversation): void {
     const known = this.knownMessages.get(conversation.id);
-    if (!known) {
+    if (!known || this.syncing.has(conversation.id)) {
       return;
     }
     const changed = conversation.messages.filter((message) => known.get(message.id) !== messageStamp(message));
@@ -522,6 +544,33 @@ export class MachineHostService {
     }
   }
 
+  private nextInstanceSequence(): number {
+    const outbox = this.options.outboxPath;
+    if (!outbox) {
+      return Date.now();
+    }
+    const file = path.join(path.dirname(outbox), "machine-instance.json");
+    let previous = 0;
+    try {
+      const parsed = JSON.parse(readFileSync(file, "utf8")) as { sequence?: unknown };
+      if (typeof parsed.sequence === "number" && Number.isFinite(parsed.sequence)) {
+        previous = parsed.sequence;
+      }
+    } catch {
+      // First start, or unreadable: the clock keeps the order monotonic
+      // across the gap without a stored value.
+      previous = Math.max(previous, Date.now());
+    }
+    const next = Math.max(previous + 1, Date.now());
+    try {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, JSON.stringify({ sequence: next }), "utf8");
+    } catch (error) {
+      void this.debugLogs.write("machine-host.instance.write-error", { message: errorMessage(error) });
+    }
+    return next;
+  }
+
   private loadOutbox(): void {
     const file = this.options.outboxPath;
     if (!file) {
@@ -530,17 +579,26 @@ export class MachineHostService {
     let raw: string;
     try {
       raw = readFileSync(file, "utf8");
-    } catch {
-      // No outbox yet: nothing to deliver.
+    } catch (error) {
+      if ((error as { code?: string }).code === "ENOENT") {
+        // No outbox yet: nothing to deliver.
+        return;
+      }
+      // Present but unreadable (permissions, I/O): never overwrite it.
+      this.outboxUnreadable = true;
+      void this.debugLogs.write("machine-host.outbox.read-error", { file, message: errorMessage(error) });
       return;
     }
     try {
       const parsed = JSON.parse(raw) as unknown;
-      if (Array.isArray(parsed)) {
-        for (const entry of parsed) {
-          if (entry && typeof entry === "object" && (entry as MachineTurnFinishedBody).type === "machine.turn.finished" && typeof (entry as MachineTurnFinishedBody).runId === "string") {
-            this.pendingTerminals.set((entry as MachineTurnFinishedBody).runId, entry as MachineTurnFinishedBody);
-          }
+      if (!Array.isArray(parsed)) {
+        throw new Error("outbox is not a list");
+      }
+      for (const entry of parsed) {
+        if (isStoredTerminal(entry)) {
+          this.pendingTerminals.set(entry.runId, entry);
+        } else {
+          void this.debugLogs.write("machine-host.outbox.entry-skipped", { file });
         }
       }
     } catch (error) {
@@ -558,6 +616,10 @@ export class MachineHostService {
   private persistOutbox(): void {
     const file = this.options.outboxPath;
     if (!file) {
+      return;
+    }
+    if (this.outboxUnreadable) {
+      void this.debugLogs.write("machine-host.outbox.write-skipped", { file, reason: "the existing outbox could not be read; not overwriting it" });
       return;
     }
     try {
@@ -593,6 +655,21 @@ export class MachineHostService {
     const ciphertext = await sealMobileRelayPayload(envelope, this.options.pairing.relaySealKeyBase64);
     await this.client.sendCiphertext({ logicalMessageId: envelope.messageId, ciphertext, to });
   }
+}
+
+function isStoredTerminal(entry: unknown): entry is MachineTurnFinishedBody {
+  if (!entry || typeof entry !== "object") {
+    return false;
+  }
+  const record = entry as Partial<MachineTurnFinishedBody>;
+  return record.type === "machine.turn.finished" &&
+    typeof record.runId === "string" &&
+    typeof record.conversationId === "string" &&
+    typeof record.participantId === "string" &&
+    typeof record.status === "string" &&
+    Array.isArray(record.messages) &&
+    Array.isArray(record.warnings) &&
+    typeof record.finishedAt === "string";
 }
 
 export function machineMessagesForRun(conversation: Conversation, participantId: string, runId: string): ChatMessage[] {

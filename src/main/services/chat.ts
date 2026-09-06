@@ -730,6 +730,8 @@ export class ChatService {
   // every one, tells the renderer which messages changed, and hands storage
   // pre-hashed rows. Bounded to the most recently active chats.
   private readonly snapshotRowStates = new Map<string, SnapshotMessageRow[]>();
+  /** Per conversation: whether the latest queued save succeeded. */
+  private readonly saveOutcomes = new Map<string, Promise<boolean>>();
   // The snapshot this process last persisted per tracked conversation, with the
   // save token that persist returned. While the database row still carries that
   // token, refreshStoredChatState reads this instead of re-reading every
@@ -6756,6 +6758,27 @@ export class ChatService {
         }
       }
     };
+    // The machine keeps its result until this desktop has stored the
+    // outcome (whatever it is): store now, acknowledge only on a successful
+    // write, and leave the result on the machine otherwise.
+    const storeOutcomeAndAcknowledge = async (result: MachineTurnDispatchResult, extra: ChatMessage[] = []): Promise<void> => {
+      await this.withChatMutation(conversation, async () => {
+        for (const message of extra) {
+          if (!conversation.messages.some((existing) => existing.id === message.id)) {
+            conversation.messages.push(message);
+          }
+        }
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+      const stored = await this.waitForQueuedSaveResult(conversation.id);
+      if (stored) {
+        result.acknowledge?.();
+      } else {
+        void this.debugLogs.write("chat.machine-turn.not-stored", { conversationId: conversation.id, runId, status: result.status });
+      }
+    };
+    let dispatchResult: MachineTurnDispatchResult | undefined;
     try {
       const result = await link.runTurn({
         conversation,
@@ -6788,6 +6811,7 @@ export class ChatService {
         }
       });
       clearStopPending();
+      dispatchResult = result;
       for (const warning of result.warnings) {
         if (!options.warnings.includes(warning)) {
           options.warnings.push(warning);
@@ -6797,6 +6821,7 @@ export class ChatService {
         // Rule 2: the machine never confirmed the run is gone; this is not a
         // stop, and the batch path keeps this outcome as it is.
         this.markParticipantMessageStopUnconfirmed(pendingMessage, participant, result.error);
+        await storeOutcomeAndAcknowledge(result);
         return ownsPendingMessage ? [pendingMessage] : [];
       }
       if (result.status === "failed") {
@@ -6804,6 +6829,7 @@ export class ChatService {
       }
       if (result.status === "interrupted") {
         this.markParticipantMessageStoppedByUser(pendingMessage, participant, { preserveContent: true });
+        await storeOutcomeAndAcknowledge(result);
         return ownsPendingMessage ? [pendingMessage] : [];
       }
       // The machine's copy of the bubble carries the reply; fold it into the
@@ -6818,20 +6844,7 @@ export class ChatService {
         pendingMessage.status = "error";
         pendingMessage.content = `@${participant.handle} finished on its machine without a reply.`;
       }
-      // The machine keeps the result until it is stored here: store the
-      // folded reply now (the batch path stores again later, harmlessly)
-      // and only then acknowledge.
-      await this.withChatMutation(conversation, async () => {
-        for (const message of others) {
-          if (!conversation.messages.some((existing) => existing.id === message.id)) {
-            conversation.messages.push(message);
-          }
-        }
-        conversation.updatedAt = new Date().toISOString();
-        this.queueSnapshot(conversation);
-      });
-      await this.waitForQueuedSave(conversation.id);
-      result.acknowledge?.();
+      await storeOutcomeAndAcknowledge(result, others);
       return [pendingMessage, ...others];
     } catch (error) {
       clearStopPending();
@@ -6841,6 +6854,9 @@ export class ChatService {
       } else {
         // Stopped, but the failure means the machine never confirmed it.
         this.markParticipantMessageStopUnconfirmed(pendingMessage, participant, error instanceof Error ? error.message : String(error));
+      }
+      if (dispatchResult) {
+        await storeOutcomeAndAcknowledge(dispatchResult).catch(() => undefined);
       }
       throw error;
     } finally {
@@ -6862,7 +6878,7 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat") {
       return conversation;
     }
-    return this.withChatMutation(conversation, async () => {
+    const result = await this.withChatMutation(conversation, async () => {
       this.upsertAppToolApproval(conversation, { ...request.approval, conversationId: conversation.id });
       for (const policy of request.policies ?? []) {
         if (policy && typeof policy === "object" && typeof policy.id === "string") {
@@ -6873,6 +6889,12 @@ export class ChatService {
       this.queueSnapshot(conversation);
       return conversation;
     });
+    // The machine's decision outcome (and the card call behind it) waits for
+    // this write; a failed write is an error, not a silent success.
+    if (!(await this.waitForQueuedSaveResult(request.conversationId))) {
+      throw new Error("The approval could not be stored in this desktop's chat.");
+    }
+    return result;
   }
 
   /** Machines transport, machine side: stores a conversation replicated from
@@ -6947,10 +6969,42 @@ export class ChatService {
       this.queueSnapshot(conversation);
       return conversation;
     }).then(async (result) => {
-      // Callers acknowledge to the machine only once the rows are stored.
-      await this.waitForQueuedSave(request.conversationId);
+      // Callers acknowledge to the machine only once the rows are stored; a
+      // failed write is an error here, so no acknowledgement follows it.
+      if (!(await this.waitForQueuedSaveResult(request.conversationId))) {
+        throw new Error("The machine's messages could not be stored in this desktop's chat.");
+      }
       return result;
     });
+  }
+
+  /** Machines transport, desktop side: the outcome of a stop for a run this
+   *  desktop no longer tracks (it restarted meanwhile). "stopped" only when
+   *  the machine confirmed the run is gone; "unconfirmed" otherwise (Rule 2). */
+  async applyMachineRunOutcome(request: { conversationId: string; runId: string; outcome: "stopped" | "unconfirmed"; machineName: string; detail?: string }): Promise<void> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return;
+    }
+    await this.withChatMutation(conversation, async () => {
+      const bubble = conversation.messages.find((message) => message.role === "participant" && message.metadata?.runId === request.runId);
+      if (!bubble) {
+        return;
+      }
+      const participant = this.chatParticipants(conversation).find((item) => item.id === bubble.participantId);
+      const handle = participant?.handle ?? bubble.participantLabel?.replace(/^@/, "") ?? "member";
+      const stub = { handle } as ChatParticipant;
+      if (request.outcome === "stopped") {
+        this.markParticipantMessageStoppedByUser(bubble, stub, { preserveContent: true });
+      } else {
+        this.markParticipantMessageStopUnconfirmed(bubble, stub, request.detail ?? `Machine ${request.machineName} does not know this run any more.`);
+      }
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
+    if (!(await this.waitForQueuedSaveResult(request.conversationId))) {
+      throw new Error("The stop outcome could not be stored in this desktop's chat.");
+    }
   }
 
   /** Machines transport, machine side: runs one participant turn for a message
@@ -6966,19 +7020,18 @@ export class ChatService {
     // run must count as live before the stale-run sweep in requireChat sees
     // it, or the bubble is marked interrupted before the turn even starts.
     this.activeRunIds.add(request.runId);
-    const conversation = await this.requireChat(request.conversationId);
-    const participant = this.chatParticipants(conversation).find((item) => item.id === request.participantId);
-    if (!participant) {
-      this.activeRunIds.delete(request.runId);
-      throw new Error("Machine-hosted turn participant was not found in this machine's copy of the chat.");
-    }
-    const triggerMessage = conversation.messages.find((message) => message.id === request.messageId);
-    if (!triggerMessage) {
-      this.activeRunIds.delete(request.runId);
-      throw new Error("Machine-hosted turn message was not found in this machine's copy of the chat.");
-    }
     const warnings: string[] = [];
+    let participant: ChatParticipant | undefined;
     try {
+      const conversation = await this.requireChat(request.conversationId);
+      participant = this.chatParticipants(conversation).find((item) => item.id === request.participantId);
+      if (!participant) {
+        throw new Error("Machine-hosted turn participant was not found in this machine's copy of the chat.");
+      }
+      const triggerMessage = conversation.messages.find((message) => message.id === request.messageId);
+      if (!triggerMessage) {
+        throw new Error("Machine-hosted turn message was not found in this machine's copy of the chat.");
+      }
       await this.runParticipantBatch(
         conversation,
         [participant],
@@ -6993,15 +7046,16 @@ export class ChatService {
         }
       );
     } finally {
-      // The early registration above is dropped unless the batch's own
-      // ref-counted bookkeeping still holds the run.
+      // The early registration above is dropped on every exit unless the
+      // batch's own ref-counted bookkeeping still holds the run.
       if ((this.activeRunRefCounts.get(request.runId) ?? 0) === 0) {
         this.activeRunIds.delete(request.runId);
       }
     }
+    const participantId = participant.id;
     const refreshed = await this.requireChat(request.conversationId);
     const messages = refreshed.messages.filter((message) =>
-      message.participantId === participant.id && message.metadata?.runId === request.runId && message.status !== "pending"
+      message.participantId === participantId && message.metadata?.runId === request.runId && message.status !== "pending"
     );
     return { messages, warnings };
   }
@@ -10950,6 +11004,16 @@ export class ChatService {
 
   private async waitForQueuedSave(conversationId: string): Promise<void> {
     await this.saveQueues.get(conversationId)?.catch(() => undefined);
+  }
+
+  /** Resolves with whether the latest queued save of this conversation
+   *  reached SQLite. A failed write is a false, never an exception. */
+  private async waitForQueuedSaveResult(conversationId: string): Promise<boolean> {
+    const outcome = this.saveOutcomes.get(conversationId);
+    if (!outcome) {
+      return true;
+    }
+    return outcome.catch(() => false);
   }
 
   private async validateParticipants(
@@ -18598,10 +18662,10 @@ export class ChatService {
     }
     const { snapshot, rows } = this.buildAndEmitSnapshot(conversation);
     const previous = this.saveQueues.get(conversation.id) ?? Promise.resolve();
-    const next = previous
+    const outcome = previous
       .catch(() => undefined)
       .then(() => this.persistConversationSnapshot(snapshot, rows))
-      .catch((error) => {
+      .then(() => true, (error: unknown) => {
         void this.debugLogs.write("chat.persistence.error", {
           conversationId: conversation.id,
           message: error instanceof Error ? error.message : String(error),
@@ -18609,7 +18673,12 @@ export class ChatService {
             ? ((error as { result: { stderr: string } }).result.stderr).slice(0, 400)
             : undefined
         });
+        return false;
       });
+    // Callers that must know whether the rows actually reached SQLite (the
+    // machines transport acknowledges results only then) read this outcome.
+    this.saveOutcomes.set(conversation.id, outcome);
+    const next = outcome.then(() => undefined);
     this.saveQueues.set(conversation.id, next);
     void next.finally(() => {
       if (this.saveQueues.get(conversation.id) === next) {

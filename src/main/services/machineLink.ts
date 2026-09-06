@@ -48,6 +48,15 @@ export interface MachineApprovalEvent {
   policies?: ChatAppToolApprovalPolicy[];
 }
 
+export interface MachineRunOutcomeEvent {
+  machineId: string;
+  machineName: string;
+  conversationId: string;
+  runId: string;
+  outcome: "stopped" | "unconfirmed";
+  detail?: string;
+}
+
 interface MachineConnection {
   record: MachineRecord;
   pairing: MobilePairingPackage;
@@ -82,6 +91,9 @@ interface MachineConnection {
   /** Start time of the newest runtime instance seen; a late hello from an
    *  older instance is ignored. */
   latestInstanceStartedAt?: string;
+  /** Monotonic start counter of the newest runtime instance seen (preferred
+   *  over the wall-clock start time). */
+  latestInstanceSequence?: number;
 }
 
 /** How long a delivered Stop may go unconfirmed before the User is told the
@@ -95,6 +107,7 @@ const TURN_ACK_TIMEOUT_MS = 24 * 60 * 60_000;
 export class MachineLinkService implements MachineTurnDispatcher {
   private readonly emitter = new EventEmitter();
   private readonly approvalListeners: Array<(event: MachineApprovalEvent) => Promise<void> | void> = [];
+  private readonly runOutcomeListeners: Array<(event: MachineRunOutcomeEvent) => Promise<void> | void> = [];
   private readonly connections = new Map<string, MachineConnection>();
   private readonly seenMessageIds = new Set<string>();
   private readonly now: () => Date;
@@ -134,6 +147,23 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   private async emitApproval(event: MachineApprovalEvent): Promise<void> {
     await Promise.all(this.approvalListeners.map((listener) => listener(event)));
+  }
+
+  /** The outcome of a stop for a run this desktop no longer tracks (it
+   *  restarted meanwhile): the listener stores it before the held stop is
+   *  dropped or the result acknowledged. */
+  onRunOutcome(listener: (event: MachineRunOutcomeEvent) => Promise<void> | void): () => void {
+    this.runOutcomeListeners.push(listener);
+    return () => {
+      const index = this.runOutcomeListeners.indexOf(listener);
+      if (index >= 0) {
+        this.runOutcomeListeners.splice(index, 1);
+      }
+    };
+  }
+
+  private async emitRunOutcome(event: MachineRunOutcomeEvent): Promise<void> {
+    await Promise.all(this.runOutcomeListeners.map((listener) => listener(event)));
   }
 
   /** Forwards the desktop's decision on a machine-raised approval. */
@@ -481,6 +511,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
           sent.set(message.id, messageStamp(message));
         }
       }
+      // The machine compares its own rows against this copy only now, so a
+      // shell followed by batches never makes its stored rows look new.
+      await this.send(connection, { type: "machine.conversation.sync.done", conversationId: conversation.id });
       connection.replicated.set(conversation.id, sent);
       return;
     }
@@ -552,27 +585,28 @@ export class MachineLinkService implements MachineTurnDispatcher {
         return;
       }
       case "machine.turn.unknown":
-        this.handleUnknownRun(connection, body);
+        await this.handleUnknownRun(connection, body);
         return;
       case "machine.approval.result": {
         const pending = connection.pendingApprovals.get(body.approvalId);
         connection.pendingApprovals.delete(body.approvalId);
-        if (body.ok && body.approval) {
-          // Store the machine's view of the card (and policies) before the
-          // desktop's card call returns.
-          await this.emitApproval({
-            machineId: connection.record.id,
-            conversationId: body.conversationId,
-            approval: { ...body.approval, homeMachineId: connection.record.id },
-            ...(body.policies ? { policies: body.policies } : {})
-          });
-        }
-        if (pending) {
-          if (body.ok) {
-            pending.resolve();
-          } else {
-            pending.reject(new Error(body.error ?? `Machine ${connection.record.name} could not apply the decision.`));
+        try {
+          if (!body.ok) {
+            throw new Error(body.error ?? `Machine ${connection.record.name} could not apply the decision.`);
           }
+          if (body.approval) {
+            // Store the machine's view of the card (and policies) before the
+            // desktop's card call returns; a failed store fails that call.
+            await this.emitApproval({
+              machineId: connection.record.id,
+              conversationId: body.conversationId,
+              approval: { ...body.approval, homeMachineId: connection.record.id },
+              ...(body.policies ? { policies: body.policies } : {})
+            });
+          }
+          pending?.resolve();
+        } catch (error) {
+          pending?.reject(error instanceof Error ? error : new Error(String(error)));
         }
         return;
       }
@@ -591,11 +625,19 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   private async handleHello(connection: MachineConnection, hello: MachineHelloBody): Promise<void> {
-    if (hello.instanceStartedAt && connection.latestInstanceStartedAt && hello.instanceStartedAt < connection.latestInstanceStartedAt) {
-      // A hello from an instance older than one already seen (the old
-      // process saying goodbye late): it must not reconcile anything.
-      void this.debugLogs.write("machine-link.hello.stale-instance", { machineId: connection.record.id, instanceId: hello.instanceId, instanceStartedAt: hello.instanceStartedAt });
+    // A hello from an instance older than one already seen (the old process
+    // saying goodbye late) must not reconcile anything. The machine's
+    // on-disk start counter orders instances; the wall clock is only a
+    // fallback for machines that do not send one.
+    const stale = typeof hello.instanceSequence === "number" && typeof connection.latestInstanceSequence === "number"
+      ? hello.instanceSequence < connection.latestInstanceSequence
+      : Boolean(hello.instanceStartedAt && connection.latestInstanceStartedAt && hello.instanceStartedAt < connection.latestInstanceStartedAt);
+    if (stale) {
+      void this.debugLogs.write("machine-link.hello.stale-instance", { machineId: connection.record.id, instanceId: hello.instanceId, instanceSequence: hello.instanceSequence, instanceStartedAt: hello.instanceStartedAt });
       return;
+    }
+    if (typeof hello.instanceSequence === "number") {
+      connection.latestInstanceSequence = hello.instanceSequence;
     }
     if (hello.instanceStartedAt) {
       connection.latestInstanceStartedAt = hello.instanceStartedAt;
@@ -683,6 +725,14 @@ export class MachineLinkService implements MachineTurnDispatcher {
           known?.set(message.id, messageStamp(message));
         }
         this.emitter.emit("backdelta", { machineId: connection.record.id, conversationId: body.conversationId, messages: body.messages, acknowledge });
+      } else if (body.status === "interrupted") {
+        // The machine confirmed a stop this desktop no longer tracks: the
+        // chat records it as stopped, then the result is acknowledged.
+        void this.emitRunOutcome({ machineId: connection.record.id, machineName: connection.record.name, conversationId: body.conversationId, runId: body.runId, outcome: "stopped" })
+          .then(acknowledge)
+          .catch((error: unknown) => {
+            void this.debugLogs.write("machine-link.turn.outcome-error", { machineId: connection.record.id, runId: body.runId, message: errorMessage(error) });
+          });
       } else {
         acknowledge();
       }
@@ -700,22 +750,22 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   /** The machine does not know this run: not running there, no result
    *  waiting. A held stop for it cannot be confirmed (Rule 2). */
-  private handleUnknownRun(connection: MachineConnection, body: { conversationId: string; runId: string }): void {
+  private async handleUnknownRun(connection: MachineConnection, body: { conversationId: string; runId: string }): Promise<void> {
+    const pending = connection.pendingTurns.get(body.runId);
+    const held = connection.pendingCancels.has(body.runId);
+    void this.debugLogs.write("machine-link.turn.unknown", { machineId: connection.record.id, runId: body.runId, pending: Boolean(pending), held });
+    const detail = `Machine ${connection.record.name} does not know this run any more; whether its processes are gone is not verified.`;
+    if (pending) {
+      connection.pendingTurns.delete(body.runId);
+      pending.resolve({ status: "unconfirmed", messages: [], warnings: [], error: detail });
+    } else if (held) {
+      // This desktop restarted since the stop was held: the chat gets the
+      // outcome first, and the held stop is dropped only once it is stored.
+      await this.emitRunOutcome({ machineId: connection.record.id, machineName: connection.record.name, conversationId: body.conversationId, runId: body.runId, outcome: "unconfirmed", detail });
+    }
     if (connection.pendingCancels.delete(body.runId)) {
       this.persistCancels(connection);
     }
-    const pending = connection.pendingTurns.get(body.runId);
-    void this.debugLogs.write("machine-link.turn.unknown", { machineId: connection.record.id, runId: body.runId, pending: Boolean(pending) });
-    if (!pending) {
-      return;
-    }
-    connection.pendingTurns.delete(body.runId);
-    pending.resolve({
-      status: "unconfirmed",
-      messages: [],
-      warnings: [],
-      error: `Machine ${connection.record.name} does not know this run any more; whether its processes are gone is not verified.`
-    });
   }
 
   private setMachinePeer(connection: MachineConnection, deviceId: string | undefined): void {
