@@ -1,3 +1,4 @@
+import { reasoningEffortOptionsForProvider } from "./reasoningEffort";
 import type { ChatProviderKind, ChatReasoningEffort } from "./types";
 
 // Providers that can actually produce a picture: Codex through its own image
@@ -117,4 +118,18 @@ export function avatarStudioNeedsSeed(
   return candidate.drawnBy.kind !== runner.kind
     || (candidate.drawnBy.model ?? "") !== (runner.model ?? "")
     || (candidate.drawnBy.reasoningEffort ?? "") !== (runner.reasoningEffort ?? "");
+}
+
+/**
+ * Reasoning levels the studio offers: the provider's own list from the app, with
+ * "CLI default" in front. Typing a shorter list here once cost Codex its Extra
+ * High, Max and Ultra levels.
+ */
+export function avatarStudioReasoningOptions(
+  kind: AvatarStudioProviderKind
+): Array<{ value: string; label: string }> {
+  return [
+    { value: "", label: "CLI default" },
+    ...reasoningEffortOptionsForProvider(kind).map((option) => ({ value: option.id, label: option.label }))
+  ];
 }

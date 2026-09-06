@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 
 import type { AvatarStudioTurnRequest, AvatarStudioTurnResult, SaveCustomAvatarRequest } from "../../../shared/avatarStudio";
 import type { AgentHealth, AppSettings } from "../../../shared/types";
-import { avatarStudioNeedsSeed, customAvatarId } from "../../../shared/avatarStudio";
+import { avatarStudioNeedsSeed, avatarStudioReasoningOptions, customAvatarId } from "../../../shared/avatarStudio";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { isChatAvatarIdForKind, mapChatAvatarIdToKind, normalizedChatAvatarId } from "../chat/chat-avatars";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
@@ -254,31 +254,15 @@ test("a drawn avatar survives draft normalisation and a provider change", () => 
   assert.equal(switched.avatarId, drawn, "a provider change must not replace the drawn avatar");
 });
 
-test("the studio offers the provider's own reasoning levels, not a shorter list", async () => {
-  const harness = await mount(() => drawn("c1"));
-  const levels = async (): Promise<string[]> => {
-    if (!document.querySelector(".chat-app-tool-inline-menu")) {
-      await harness.click(document.querySelector('[aria-label="Change reasoning"]'));
-      await act(async () => {});
-    }
-    const offered = [...document.querySelectorAll(".chat-app-tool-inline-menu button")].map((node) => (node.textContent ?? "").trim());
-    await act(async () => {
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    });
-    return offered;
-  };
-  const expected = (kind: "claude-code" | "codex-cli"): string[] =>
-    ["CLI default", ...reasoningEffortOptionsForProvider(kind).map((option) => option.label)];
-
-  // The member is on Claude, so its own levels are offered.
-  assert.deepEqual(await levels(), expected("claude-code"));
-
-  await harness.click(document.querySelector('[aria-label="Change drawn by"]'));
-  await act(async () => {});
-  const codex = [...document.querySelectorAll("button")].find((node) => (node.textContent ?? "").trim() === "Codex CLI" && node.closest(".chat-app-tool-inline-menu"));
-  assert.ok(codex, `provider options: ${JSON.stringify([...document.querySelectorAll(".chat-app-tool-inline-menu button")].map((n) => n.textContent?.trim()))}`);
-  await harness.click(codex);
-  await act(async () => {});
-  // Codex reaches further: Minimal at one end, Ultra at the other.
-  assert.deepEqual(await levels(), expected("codex-cli"));
+test("the studio offers each provider's own reasoning levels", () => {
+  const labels = (kind: "claude-code" | "codex-cli"): string[] =>
+    avatarStudioReasoningOptions(kind).map((option) => option.label);
+  // Whatever the app offers a member, the studio offers for drawing.
+  assert.deepEqual(labels("codex-cli"), ["CLI default", ...reasoningEffortOptionsForProvider("codex-cli").map((o) => o.label)]);
+  assert.deepEqual(labels("claude-code"), ["CLI default", ...reasoningEffortOptionsForProvider("claude-code").map((o) => o.label)]);
+  // The levels a hand-typed list dropped.
+  assert.ok(labels("codex-cli").includes("Extra High"));
+  assert.ok(labels("codex-cli").includes("Max"));
+  assert.ok(labels("codex-cli").includes("Ultra"));
+  assert.ok(labels("claude-code").includes("Extra High"));
 });

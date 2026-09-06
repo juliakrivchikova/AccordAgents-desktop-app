@@ -9,7 +9,13 @@ import type {
   AvatarStudioProviderKind,
   AvatarStudioRunner
 } from "../../../shared/avatarStudio";
-import { AVATAR_STUDIO_PROVIDER_KINDS, avatarStudioNeedsSeed, customAvatarId, isAvatarStudioProviderKind } from "../../../shared/avatarStudio";
+import {
+  AVATAR_STUDIO_PROVIDER_KINDS,
+  avatarStudioNeedsSeed,
+  avatarStudioReasoningOptions,
+  customAvatarId,
+  isAvatarStudioProviderKind
+} from "../../../shared/avatarStudio";
 import type { AgentHealth, AppSettings, ChatProviderKind, ChatReasoningEffort, ProviderModel } from "../../../shared/types";
 import { readyProviderKinds } from "../../../shared/cliReadiness";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
@@ -59,13 +65,7 @@ export function AvatarStudioDialog(props: {
   const selected = candidates.find((candidate) => candidate.id === selectedId) ?? candidates[candidates.length - 1];
   // The same per-provider list the member settings use, so Codex keeps Extra
   // High / Max / Ultra instead of a shorter list invented here.
-  const reasoningOptions = useMemo(
-    () => [
-      { value: "", label: "CLI default" },
-      ...reasoningEffortOptionsForProvider(providerKind).map((option) => ({ value: option.id, label: option.label }))
-    ],
-    [providerKind]
-  );
+  const reasoningOptions = useMemo(() => avatarStudioReasoningOptions(providerKind), [providerKind]);
   const modelOptions = useMemo(
     () => [{ value: "", label: "CLI default" }, ...models.map((entry) => ({ value: entry.id, label: entry.label ?? entry.id }))],
     [models]
