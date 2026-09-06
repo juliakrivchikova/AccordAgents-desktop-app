@@ -318,9 +318,14 @@ function assertBase64Url(value: string, label: string): void {
   }
 }
 
-function assertWssUrl(value: string, label: string): void {
+function assertWssUrl(value: unknown, label: string): void {
+  assertNonEmptyString(value, label);
   const parsed = new URL(value);
-  if (parsed.protocol !== "wss:") {
+  // A relay on this computer (wrangler dev, the reference relay) speaks plain
+  // ws:; anything that leaves the machine must be wss:.
+  const loopbackPlainWs = parsed.protocol === "ws:" &&
+    (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "[::1]");
+  if (parsed.protocol !== "wss:" && !loopbackPlainWs) {
     throw new Error(`Mobile pairing ${label} must use wss.`);
   }
 }

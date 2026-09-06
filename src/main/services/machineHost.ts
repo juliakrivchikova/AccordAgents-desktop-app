@@ -47,6 +47,7 @@ export class MachineHostService {
   private readonly now: () => Date;
   private readonly seenMessageIds = new Set<string>();
   private readonly activeTurns = new Map<string, AbortController>();
+  private inbound: Promise<void> = Promise.resolve();
   private desktopDeviceId?: string;
   private closed = false;
 
@@ -81,10 +82,15 @@ export class MachineHostService {
         this.desktopDeviceId = undefined;
       }
     });
+    // Inbound messages are applied strictly in arrival order: a conversation
+    // delta must be stored before the turn request that follows it is read.
+    // Turns themselves run detached from the queue (see runTurn).
     this.client.on("message", (message) => {
-      void this.handleMessage(message.ciphertext).catch((error) => {
-        void this.debugLogs.write("machine-host.message.error", { message: errorMessage(error) });
-      });
+      this.inbound = this.inbound
+        .then(() => this.handleMessage(message.ciphertext))
+        .catch((error) => {
+          void this.debugLogs.write("machine-host.message.error", { message: errorMessage(error) });
+        });
     });
     this.client.on("error", (error) => {
       void this.debugLogs.write("machine-host.tunnel.error", { message: error.message });

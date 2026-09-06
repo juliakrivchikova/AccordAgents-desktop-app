@@ -49,6 +49,9 @@ interface MachineConnection {
   settingsSynced: boolean;
   /** Per conversation: the message ids and updatedAt values the machine holds. */
   replicated: Map<string, Map<string, string>>;
+  /** Replication of one conversation is serialized so a snapshot push and a
+   *  turn dispatch cannot interleave their deltas. */
+  replication: Map<string, Promise<void>>;
   pendingTurns: Map<string, {
     resolve: (result: MachineTurnDispatchResult) => void;
     progress?: (progress: ReviewProgress) => void;
@@ -84,6 +87,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   async start(): Promise<void> {
     const machines = await this.settings.listMachines();
+    void this.debugLogs.write("machine-link.start", { machines: machines.length, desktopDeviceId: this.options.desktopDeviceId });
     for (const record of machines) {
       await this.connectMachine(record).catch((error) => {
         void this.debugLogs.write("machine-link.connect.error", { machineId: record.id, message: errorMessage(error) });
@@ -119,6 +123,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       client,
       settingsSynced: false,
       replicated: new Map(),
+      replication: new Map(),
       pendingTurns: new Map()
     };
     this.connections.set(record.id, connection);
@@ -269,7 +274,14 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
   }
 
-  private async replicateTo(connection: MachineConnection, conversation: Conversation): Promise<void> {
+  private replicateTo(connection: MachineConnection, conversation: Conversation): Promise<void> {
+    const previous = connection.replication.get(conversation.id) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(() => this.replicateNow(connection, conversation));
+    connection.replication.set(conversation.id, next.then(() => undefined, () => undefined));
+    return next;
+  }
+
+  private async replicateNow(connection: MachineConnection, conversation: Conversation): Promise<void> {
     const known = connection.replicated.get(conversation.id);
     if (!known) {
       await this.send(connection, { type: "machine.conversation.sync", conversation });

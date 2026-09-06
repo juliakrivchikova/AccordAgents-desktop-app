@@ -2749,8 +2749,37 @@ export class SettingsService {
       chatParticipantSeedState: this.normalizeSeedState(settings.chatParticipantSeedState),
       remoteSessionCleanupTombstones: this.normalizeRemoteSessionCleanupTombstones(
         settings.remoteSessionCleanupTombstones
-      )
+      ),
+      machines: this.normalizeMachines(settings.machines),
+      encryptedMachinePairings: typeof settings.encryptedMachinePairings === "string" && settings.encryptedMachinePairings.trim()
+        ? settings.encryptedMachinePairings
+        : undefined
     };
+  }
+
+  private normalizeMachines(value: unknown): MachineRecord[] | undefined {
+    if (!Array.isArray(value)) {
+      return undefined;
+    }
+    const machines = value.flatMap((entry): MachineRecord[] => {
+      if (!entry || typeof entry !== "object") {
+        return [];
+      }
+      const record = entry as Partial<MachineRecord>;
+      if (typeof record.id !== "string" || !record.id.trim() || typeof record.name !== "string" || typeof record.pairingKey !== "string" || !record.pairingKey.trim()) {
+        return [];
+      }
+      return [{
+        id: record.id.trim(),
+        name: record.name.trim() || "Machine",
+        deviceId: typeof record.deviceId === "string" ? record.deviceId : "",
+        pairingKey: record.pairingKey.trim(),
+        createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date(0).toISOString(),
+        ...(typeof record.lastSeenAt === "string" ? { lastSeenAt: record.lastSeenAt } : {}),
+        ...(record.lastHello && typeof record.lastHello === "object" ? { lastHello: record.lastHello } : {})
+      }];
+    });
+    return machines.length > 0 ? machines : undefined;
   }
 
   private normalizeChatProviderKind(value: unknown): ChatProviderKind | undefined {
@@ -3587,6 +3616,10 @@ export class SettingsService {
             ? { ...permissions, manageRolesParticipants: "allow" as const }
             : permissions,
           remoteExecution: this.normalizeRemoteExecutionMode((participant as { remoteExecution?: unknown }).remoteExecution),
+          homeMachineId: typeof (participant as { homeMachineId?: unknown }).homeMachineId === "string" &&
+            ((participant as { homeMachineId?: string }).homeMachineId ?? "").trim()
+            ? ((participant as { homeMachineId?: string }).homeMachineId ?? "").trim()
+            : undefined,
           skipToolchainPreflight: (participant as { skipToolchainPreflight?: unknown }).skipToolchainPreflight === true,
           autoWatchEnabled: this.autoWatchEnabledForRole(
             roleById.get(participant.roleConfigId) ?? { id: participant.roleConfigId },
