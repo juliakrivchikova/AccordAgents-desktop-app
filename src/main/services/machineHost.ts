@@ -41,6 +41,9 @@ export interface MachineHostOptions {
   /** Runs after every settings snapshot import (runtime knobs such as the
    *  CLI run timeout are re-read from the imported settings). */
   onSettingsImported?: () => Promise<void> | void;
+  /** The desktop's record id for this machine (from hello.ack): members
+   *  whose home is this id are this runtime's own. */
+  onDesktopMachineId?: (machineId: string) => void;
   /** File that keeps finished turns until the desktop acknowledges them, so
    *  a result survives a restart of this runtime. In-memory only when unset. */
   outboxPath?: string;
@@ -239,9 +242,25 @@ export class MachineHostService {
       void this.sendHello()
         .then(() => this.flushPendingTerminals())
         .then(() => this.reforwardApprovals())
+        .then(() => this.reforwardMachineMessages())
         .catch((error) => {
           void this.debugLogs.write("machine-host.hello.error", { message: errorMessage(error) });
         });
+    }
+  }
+
+  /** Rows this machine changed while the desktop was away (a reply from a
+   *  resume the machine started itself, a note) are offered again on
+   *  reconnect; the inventory of what the desktop holds decides what goes. */
+  private async reforwardMachineMessages(): Promise<void> {
+    for (const conversationId of [...this.knownMessages.keys()]) {
+      if (this.syncing.has(conversationId)) {
+        continue;
+      }
+      const conversation = await this.storage.getConversation(conversationId);
+      if (conversation && conversation.kind === "chat") {
+        this.forwardMachineMessages(conversation);
+      }
     }
   }
 
@@ -306,6 +325,14 @@ export class MachineHostService {
     switch (body.type) {
       case "machine.hello.ack":
         this.desktopDeviceId = body.desktopDeviceId || this.desktopDeviceId;
+        if (body.machineId) {
+          this.options.onDesktopMachineId?.(body.machineId);
+        }
+        return;
+      case "machine.hello.request":
+        // A (re)started desktop asks to be greeted: the same reconciliation
+        // as after a peer change, whether or not the relay reported one.
+        this.setDesktop(body.desktopDeviceId, { announce: true });
         return;
       case "machine.settings.sync":
         await this.settings.importMachineSettingsSnapshot(body.snapshot);
@@ -913,9 +940,9 @@ export function mergeReplicatedMessages(own: ChatMessage[], incoming: ChatMessag
       continue;
     }
     // A desktop that swept a bubble as "interrupted" (its stale-run sweep
-    // found no live run for it) never overrides an outcome this machine
-    // already produced for that bubble: the machine ran it and knows.
-    if (current && current.status !== "pending" && message.metadata?.staleRunRecovery) {
+    // found no live run for it) never overrides this machine's own row for
+    // that bubble, finished or still running: the machine runs it and knows.
+    if (current && message.metadata?.staleRunRecovery) {
       continue;
     }
     byId.set(message.id, message);

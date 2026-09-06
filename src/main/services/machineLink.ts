@@ -97,8 +97,15 @@ interface MachineConnection {
   pendingApprovals: Map<string, { resolve: () => void; reject: (error: Error) => void }>;
   /** run id → conversation id for turns this desktop waits on. */
   pendingTurnConversations: Map<string, string>;
+  /** Dispatched turns whose result is not stored yet (persisted in the
+   *  machine record, so a restarted desktop still asks about them). */
+  pendingRuns: Map<string, string>;
   /** Inbound messages are decrypted and applied strictly in arrival order. */
   inbound: Promise<void>;
+  /** A hello arrived on this connection; until then the machine is asked
+   *  to greet a desktop that just connected. */
+  helloSeen: boolean;
+  helloRequestTimer?: ReturnType<typeof setTimeout>;
   /** Start time of the newest runtime instance seen; a late hello from an
    *  older instance is ignored. */
   latestInstanceStartedAt?: string;
@@ -114,6 +121,9 @@ const STOP_CONFIRM_GRACE_MS = 5_000;
  *  approval decision. */
 const APPROVAL_RESULT_TIMEOUT_MS = 60_000;
 const TURN_ACK_TIMEOUT_MS = 24 * 60 * 60_000;
+/** How long a freshly connected desktop waits for the machine's own hello
+ *  before asking for one. */
+const HELLO_REQUEST_GRACE_MS = 750;
 
 export class MachineLinkService implements MachineTurnDispatcher {
   private readonly emitter = new EventEmitter();
@@ -274,14 +284,22 @@ export class MachineLinkService implements MachineTurnDispatcher {
       replication: new Map(),
       pendingTurns: new Map(),
       pendingCancels: new Map((record.pendingCancels ?? []).map((cancel) => [cancel.runId, cancel.conversationId])),
+      pendingRuns: new Map((record.pendingRuns ?? []).map((run) => [run.runId, run.conversationId])),
       persist: Promise.resolve(),
       replicationQueued: new Map(),
       pendingApprovals: new Map(),
       pendingTurnConversations: new Map(),
-      inbound: Promise.resolve()
+      inbound: Promise.resolve(),
+      helloSeen: false
     };
     this.connections.set(record.id, connection);
     client.on("peer", (event) => {
+      void this.debugLogs.write("machine-link.peer", {
+        machineId: record.id,
+        type: event.type,
+        ...(event.type === "ready" ? { peers: event.peers.map((peer) => `${peer.role}:${peer.deviceId ?? ""}`) } : {}),
+        ...(event.type === "peer-connected" || event.type === "peer-disconnected" ? { peer: `${event.peer.role}:${event.peer.deviceId ?? ""}` } : {})
+      });
       if (event.type === "ready") {
         const machine = event.peers.find((peer) => peer.role === "machine");
         this.setMachinePeer(connection, machine?.deviceId);
@@ -301,6 +319,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         });
     });
     client.on("state", (state) => {
+      void this.debugLogs.write("machine-link.tunnel.state", { machineId: record.id, state });
       if (state !== "connected") {
         this.setMachinePeer(connection, undefined);
       }
@@ -469,6 +488,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
       if (entry) {
         entry.dispatched = true;
       }
+      // Recorded durably: a desktop restart must still ask about this run.
+      connection.pendingRuns.set(request.runId, request.conversation.id);
+      this.persistCancels(connection);
       if (request.signal?.aborted) {
         onAbort();
       }
@@ -522,7 +544,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
    *  desktop restart does not forget them. */
   private persistCancels(connection: MachineConnection): void {
     const pendingCancels = [...connection.pendingCancels.entries()].map(([runId, conversationId]) => ({ runId, conversationId }));
-    connection.record = { ...connection.record, pendingCancels };
+    const pendingRuns = [...connection.pendingRuns.entries()].map(([runId, conversationId]) => ({ runId, conversationId }));
+    connection.record = { ...connection.record, pendingCancels, pendingRuns };
     const record = connection.record;
     connection.persist = connection.persist
       .then(() => this.settings.saveMachine(record))
@@ -685,6 +708,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
       connection.latestInstanceStartedAt = hello.instanceStartedAt;
     }
     connection.machineDeviceId = hello.deviceId;
+    connection.helloSeen = true;
+    if (connection.helloRequestTimer) {
+      clearTimeout(connection.helloRequestTimer);
+      connection.helloRequestTimer = undefined;
+    }
     connection.settingsSynced = false;
     // The machine's inventory of what it holds lives in its process: after
     // a restart (new instance id) every chat is copied afresh; after a mere
@@ -699,10 +727,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
       deviceId: hello.deviceId,
       lastSeenAt: this.now().toISOString(),
       lastHello: rest,
-      pendingCancels: [...connection.pendingCancels.entries()].map(([runId, conversationId]) => ({ runId, conversationId }))
+      pendingCancels: [...connection.pendingCancels.entries()].map(([runId, conversationId]) => ({ runId, conversationId })),
+      pendingRuns: [...connection.pendingRuns.entries()].map(([runId, conversationId]) => ({ runId, conversationId }))
     };
     await this.settings.saveMachine(connection.record);
-    await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion });
+    await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion, machineId: connection.record.id });
     await this.send(connection, { type: "machine.settings.sync", snapshot: await this.settings.exportMachineSettingsSnapshot() });
     connection.settingsSynced = true;
     this.emitStatus();
@@ -722,17 +751,16 @@ export class MachineLinkService implements MachineTurnDispatcher {
     // not hold the run answers machine.turn.unknown and the turn is closed
     // then; one that does hold it stays silent and the result follows. No
     // turn is ever closed from process order or clocks.
+    // The recorded runs include those dispatched before a desktop restart
+    // (their bubbles are still pending in the chat); a turn still in
+    // preparation is not recorded yet, so it is never asked about.
     const listed = new Set([...(hello.activeRunIds ?? []), ...(hello.pendingTerminalRunIds ?? [])]);
-    for (const [runId, entry] of connection.pendingTurns.entries()) {
-      // A turn still in preparation has not reached the machine; asking
-      // about it would close a run that is about to start there.
-      if (listed.has(runId) || !entry.dispatched) {
+    const asked = new Set<string>();
+    for (const [runId, conversationId] of [...connection.pendingRuns.entries(), ...connection.pendingCancels.entries()]) {
+      if (listed.has(runId) || asked.has(runId)) {
         continue;
       }
-      const conversationId = connection.pendingCancels.get(runId) ?? connection.pendingTurnConversations.get(runId);
-      if (!conversationId) {
-        continue;
-      }
+      asked.add(runId);
       void this.debugLogs.write("machine-link.turn.queried", { machineId: connection.record.id, runId });
       await this.send(connection, { type: "machine.turn.query", conversationId, runId }).catch(() => undefined);
     }
@@ -743,7 +771,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
     // it is sent only once the result has been stored on this desktop; a
     // held stop for the run is dropped at the same moment, never before.
     const acknowledge = (): void => {
-      if (connection.pendingCancels.delete(body.runId)) {
+      const changed = connection.pendingCancels.delete(body.runId);
+      const forgotten = connection.pendingRuns.delete(body.runId);
+      if (changed || forgotten) {
         this.persistCancels(connection);
       }
       void this.send(connection, { type: "machine.turn.finished.ack", conversationId: body.conversationId, runId: body.runId }).catch(() => undefined);
@@ -805,24 +835,33 @@ export class MachineLinkService implements MachineTurnDispatcher {
         this.persistCancels(connection);
       }
     };
+    const recorded = connection.pendingRuns.has(body.runId);
+    const dropRecords = (): void => {
+      const changed = connection.pendingCancels.delete(body.runId);
+      const forgotten = connection.pendingRuns.delete(body.runId);
+      if (changed || forgotten) {
+        this.persistCancels(connection);
+      }
+    };
     if (pending) {
       connection.pendingTurns.delete(body.runId);
       // The live path stores the outcome and calls acknowledge; the held
       // stop goes with it. Without a stop this is a lost run, not a stop.
-      pending.resolve({ status: held ? "unconfirmed" : "failed", messages: [], warnings: [], error: detail, acknowledge: dropHeldStop });
+      pending.resolve({ status: held ? "unconfirmed" : "failed", messages: [], warnings: [], error: detail, acknowledge: dropRecords });
       return;
     }
-    if (held) {
-      // This desktop restarted since the stop was held: the chat gets the
-      // outcome first, and the held stop is dropped only once it is stored.
+    if (held || recorded) {
+      // This desktop restarted since the turn was dispatched (or the stop
+      // held): the chat gets the outcome first, and the records are dropped
+      // only once it is stored.
       try {
-        await this.emitLateTerminal({ machineId: connection.record.id, machineName: connection.record.name, conversationId: body.conversationId, runId: body.runId, status: "unconfirmed", messages: [], warnings: [], error: detail });
+        await this.emitLateTerminal({ machineId: connection.record.id, machineName: connection.record.name, conversationId: body.conversationId, runId: body.runId, status: held ? "unconfirmed" : "failed", messages: [], warnings: [], error: detail });
       } catch (error) {
         void this.debugLogs.write("machine-link.turn.late-store-error", { machineId: connection.record.id, runId: body.runId, message: errorMessage(error) });
         return;
       }
     }
-    dropHeldStop();
+    dropRecords();
   }
 
   /** The machine could not store a batch of the first copy: send the whole
@@ -846,6 +885,20 @@ export class MachineLinkService implements MachineTurnDispatcher {
       connection.replicated.clear();
     } else if (!connection.machineDeviceId) {
       connection.machineDeviceId = deviceId;
+      if (!connection.helloSeen && !connection.helloRequestTimer) {
+        // The machine is there; if it does not greet this connection by
+        // itself shortly (a relay may seat a restarted desktop silently in
+        // place of the old one), ask for the hello that drives reconciliation.
+        connection.helloRequestTimer = setTimeout(() => {
+          connection.helloRequestTimer = undefined;
+          if (connection.helloSeen || !connection.machineDeviceId) {
+            return;
+          }
+          void this.debugLogs.write("machine-link.hello.requested", { machineId: connection.record.id });
+          void this.send(connection, { type: "machine.hello.request", desktopDeviceId: this.options.desktopDeviceId }).catch(() => undefined);
+        }, HELLO_REQUEST_GRACE_MS);
+        connection.helloRequestTimer.unref?.();
+      }
     }
     if (changed) {
       this.emitStatus();

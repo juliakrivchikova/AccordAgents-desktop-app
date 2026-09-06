@@ -65,6 +65,9 @@ export interface MachineHelloAckBody {
   type: "machine.hello.ack";
   desktopDeviceId: string;
   appVersion: string;
+  /** The desktop's record id for this machine: the value members carry as
+   *  `homeMachineId`, so the runtime knows which members are its own. */
+  machineId?: string;
 }
 
 export interface MachineSettingsSyncBody {
@@ -179,6 +182,14 @@ export interface MachineApprovalResultBody {
   policies?: ChatAppToolApprovalPolicy[];
 }
 
+/** Desktop -> machine: a desktop that just connected asks the machine to
+ *  greet it (hello), because a relay may seat a restarted desktop in place
+ *  of the old one without telling the machine that anything changed. */
+export interface MachineHelloRequestBody {
+  type: "machine.hello.request";
+  desktopDeviceId: string;
+}
+
 /** Desktop -> machine: does this runtime still hold this run (running, or a
  *  result waiting in its outbox)? Answered with machine.turn.unknown when
  *  not; silence otherwise (progress or the result follows). Sent after a
@@ -248,6 +259,7 @@ export type MachineLinkMessage =
   | MachineTurnFinishedAckBody
   | MachineTurnUnknownBody
   | MachineTurnQueryBody
+  | MachineHelloRequestBody
   | MachineConversationSyncDoneBody
   | MachineConversationResyncBody
   | MachineChoiceAnswerBody;
@@ -272,6 +284,7 @@ const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.turn.finished.ack",
   "machine.turn.unknown",
   "machine.turn.query",
+  "machine.hello.request",
   "machine.conversation.sync.done",
   "machine.conversation.resync",
   "machine.choice.answer"
@@ -342,4 +355,8 @@ export interface MachineRecord {
   /** Stops requested while the machine was unreachable (Rule 2): kept until
    *  the machine confirms, across desktop restarts. */
   pendingCancels?: Array<{ runId: string; conversationId: string }>;
+  /** Turns dispatched to the machine whose result has not been stored here
+   *  yet: kept across desktop restarts, so a restarted desktop asks the
+   *  machine about them instead of leaving their bubbles pending forever. */
+  pendingRuns?: Array<{ runId: string; conversationId: string }>;
 }

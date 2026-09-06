@@ -736,6 +736,14 @@ export class ChatService {
   private readonly snapshotRowStates = new Map<string, SnapshotMessageRow[]>();
   /** Per conversation: whether the latest queued save succeeded. */
   private readonly saveOutcomes = new Map<string, Promise<boolean>>();
+  /** Set inside a machine runtime: the desktop's record id for this machine. */
+  private hostMachineId?: string;
+
+  /** Machines transport, machine side: members whose home is this id are
+   *  this runtime's own (swept, resumed, and run here like local ones). */
+  setHostMachineId(machineId: string | undefined): void {
+    this.hostMachineId = machineId;
+  }
   // The snapshot this process last persisted per tracked conversation, with the
   // save token that persist returned. While the database row still carries that
   // token, refreshStoredChatState reads this instead of re-reading every
@@ -18340,12 +18348,15 @@ export class ChatService {
     if (typeof runId !== "string" || !runId) {
       return false;
     }
-    // Machines transport: a member whose home is a machine runs there, and
-    // the machine owns every outcome of its runs (including runs it started
-    // itself, such as a resume after an approval, which this desktop never
-    // registered). Its pending bubbles are never swept here; the machine's
-    // result, or its answer to a query, finishes them.
-    if (message.participantId && this.chatParticipants(conversation).some((participant) => participant.id === message.participantId && participant.homeMachineId)) {
+    // Machines transport: a member whose home is another machine runs
+    // there, and that machine owns every outcome of its runs (including
+    // runs it started itself, such as a resume after an approval, which
+    // this instance never registered). Such bubbles are never swept here;
+    // the machine's result, or its answer to a query, finishes them. Inside
+    // a machine runtime its own members are local and are swept as usual.
+    if (message.participantId && this.chatParticipants(conversation).some((participant) =>
+      participant.id === message.participantId && participant.homeMachineId && participant.homeMachineId !== this.hostMachineId
+    )) {
       return true;
     }
     if (this.isNonTerminalRemoteRun(conversation.metadata, runId)) {

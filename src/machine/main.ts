@@ -176,6 +176,9 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     detectProviders: () => cliAgentRunner.detectAgents(),
     onSettingsImported: async () => {
       cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());
+    },
+    onDesktopMachineId: (machineId) => {
+      chatService.setHostMachineId(machineId);
     }
   });
   hostRef = host;

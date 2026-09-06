@@ -148,6 +148,9 @@ test("a desktop sweep never overrides an outcome the machine produced", async ()
   const merged = mergeReplicatedMessages([done], [swept]);
   assert.equal(merged[0].status, "done");
   assert.equal(merged[0].content, "The page title is Example Domain.");
+  // The same holds for a bubble the machine is still filling in.
+  const partial = { ...done, content: "half", status: "pending" };
+  assert.equal(mergeReplicatedMessages([partial], [swept])[0].status, "pending");
   // A genuine later edit by the desktop (no sweep marker) still wins.
   const edited = { ...done, content: "edited on the desktop", metadata: { runId: "run-x" } };
   assert.equal(mergeReplicatedMessages([done], [edited])[0].content, "edited on the desktop");

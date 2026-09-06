@@ -9580,6 +9580,21 @@ test("recoverStaleChatRun leaves a pending bubble of a machine-hosted member alo
   assert.equal(pending.metadata?.staleRunRecovery, undefined);
 });
 
+test("inside a machine runtime its own members' bubbles are swept like local ones, other machines' are not", () => {
+  const own = { ...chatParticipant("claude-code"), id: "own", handle: "own", homeMachineId: "machine-1" };
+  const other = { ...chatParticipant("claude-code"), id: "other", handle: "other", homeMachineId: "machine-2" };
+  const conversation = chatConversation([own, other]);
+  conversation.messages.push(pendingParticipantMessage(own, "pending-own", "run-own"));
+  conversation.messages.push(pendingParticipantMessage(other, "pending-other", "run-other"));
+  const { service } = testService({ conversation });
+  service.setHostMachineId("machine-1");
+
+  (service as any).recoverStaleChatRun(conversation);
+
+  assert.equal(conversation.messages.find((message: any) => message.id === "pending-own")!.status, "error");
+  assert.equal(conversation.messages.find((message: any) => message.id === "pending-other")!.status, "pending");
+});
+
 test("a swept placeholder is marked, and a late result repairs it preserving reactions", async () => {
   const participant = chatParticipant("codex-cli");
   const runId = "dead-run";

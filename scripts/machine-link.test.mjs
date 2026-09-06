@@ -300,6 +300,29 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const held = await heldTurn;
     assert.equal(held.status, "interrupted");
 
+    // A desktop restart: the machine record remembers dispatched runs, the new desktop
+    // asks about them, a result the machine still holds lands as a late result, and a
+    // run the machine does not know is closed instead of staying pending forever.
+    releaseLongTurn = undefined;
+    const survivingTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-survives", pendingMessageId: "pending-survives" });
+    await waitFor(() => hostRuns.some((run) => run.runId === "run-survives") && typeof releaseLongTurn === "function", 5_000);
+    assert.ok((record.pendingRuns ?? []).some((run) => run.runId === "run-survives"), "the dispatched run is recorded durably");
+    link.close(); // the desktop goes away mid-turn
+    void survivingTurn.catch(() => undefined);
+    record.pendingRuns = [...(record.pendingRuns ?? []), { runId: "run-forgotten", conversationId: "conv-1" }];
+    const link2 = new MachineLinkService(desktopSettings, debugLogs, { appVersion: "test", desktopDeviceId: "device-desktop", reconnectDelayMs: 50 });
+    const lateAfterRestart = [];
+    link2.onLateTerminal(async (event) => { lateAfterRestart.push(event); });
+    await link2.start();
+    await waitFor(() => link2.status()[0]?.connected === true, 5_000);
+    await waitFor(() => lateAfterRestart.some((event) => event.runId === "run-forgotten" && event.status === "failed"), 5_000);
+    releaseLongTurn();
+    await waitFor(() => lateAfterRestart.some((event) => event.runId === "run-survives" && event.status === "completed"), 5_000);
+    await waitFor(() => !(record.pendingRuns ?? []).some((run) => run.runId === "run-survives" || run.runId === "run-forgotten"), 5_000);
+    link2.close();
+    await link.connectMachine(record);
+    await waitFor(() => link.status()[0]?.connected === true, 5_000);
+
     // A machine restart closes the turns it lost instead of leaving them pending.
     releaseLongTurn = undefined;
     const lostTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-lost", pendingMessageId: "pending-lost" });
