@@ -227,7 +227,10 @@
 
 .activity-row:hover .activity-row-time,
 .activity-row:focus-within .activity-row-time,
-.activity-row[data-active="true"] .activity-row-time {
+.activity-row[data-active="true"] .activity-row-time,
+.activity-row:hover .activity-row-count,
+.activity-row:focus-within .activity-row-count,
+.activity-row[data-active="true"] .activity-row-count {
   opacity: 0;
 }
 
@@ -353,6 +356,14 @@
   flex: 0 0 auto;
   color: var(--app-muted);
   font-size: 12px;
+  white-space: nowrap;
+}
+
+.activity-row-count {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 600;
   white-space: nowrap;
 }
 

@@ -307,6 +307,9 @@ function ActivityRow({
               <span className="activity-row-context">post in</span>
               <span className="activity-row-chat">{item.conversationTitle}</span>
             </span>
+            {collapsedUpdateCount(item) > 1 ? (
+              <span className="activity-row-count">{collapsedUpdateCount(item)} updates</span>
+            ) : null}
             <span className="activity-row-time">{relativeTime(item.updatedAt)}</span>
           </span>
           <span className="activity-row-preview">{item.preview}</span>
@@ -355,6 +358,11 @@ function ActivityRow({
       </span>
     </div>
   );
+}
+
+function collapsedUpdateCount(item: ChatActivityItem): number {
+  const count = item.groupedCount;
+  return typeof count === "number" && Number.isFinite(count) && count > 1 ? Math.floor(count) : 1;
 }
 
 function activityActorHandle(item: ChatActivityItem): string {

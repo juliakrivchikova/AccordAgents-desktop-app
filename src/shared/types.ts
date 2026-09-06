@@ -2183,6 +2183,11 @@ export interface ChatActivityParticipantSummary {
 export interface ChatActivityTarget {
   runId?: string;
   messageId?: string;
+  /**
+   * The message is only a navigation anchor picked as a fallback, not a message this row is
+   * actually about. Such a row must not claim that message against another row that is.
+   */
+  messageIsApproximate?: boolean;
   sourceMessageId?: string;
   threadRootId?: string;
   approvalId?: string;
@@ -2203,6 +2208,8 @@ export interface ChatActivityItem {
   preview: string;
   createdAt: string;
   updatedAt: string;
+  /** Finished updates from one member in one chat share a row; how many that row stands for. */
+  groupedCount?: number;
   participant?: ChatActivityParticipantSummary;
   target: ChatActivityTarget;
 }
@@ -2213,6 +2220,10 @@ export interface ListChatActivityRequest {
   recentWindowDays?: number;
   lastViewedAtByConversationId?: Record<string, string>;
   excludedItemIds?: string[];
+  /** Per chat and member "cleared through" timestamps, so cleared updates stay cleared and uncounted. */
+  clearedRecentThroughByGroup?: Record<string, string>;
+  /** Frozen cutoff inherited from the pre-per-group clear state. */
+  clearedRecentThroughBefore?: string;
 }
 
 export interface ListChatActivityResult {
