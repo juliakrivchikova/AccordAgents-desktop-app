@@ -151,6 +151,36 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     await link.connectMachine(record);
     await waitFor(() => backdeltas.some((delta) => delta.messages.some((message) => message.id === "pending-away")), 5_000);
 
+    // Rule 2: a Stop while the machine is unreachable is held and shown as
+    // waiting, delivered when the machine is back, and confirmed only then.
+    const stopsWaiting = [];
+    releaseLongTurn = undefined;
+    const heldController = new AbortController();
+    const heldTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-held", pendingMessageId: "pending-held", signal: heldController.signal, onStopPending: (name) => stopsWaiting.push(name) });
+    await waitFor(() => typeof releaseLongTurn === "function", 5_000);
+    host.client.close(); // the machine's own link drops (network blip); the turn keeps running there
+    await waitFor(() => link.status()[0]?.connected === false, 5_000);
+    heldController.abort();
+    await waitFor(() => stopsWaiting.length === 1, 5_000);
+    assert.equal(stopsWaiting[0], "Test box");
+    await host.client.connect(); // the machine is back: hello, the stop is redelivered, the machine confirms
+    const held = await heldTurn;
+    assert.equal(held.status, "interrupted");
+
+    // A machine restart closes the turns it lost instead of leaving them pending.
+    releaseLongTurn = undefined;
+    const lostTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-lost", pendingMessageId: "pending-lost" });
+    await waitFor(() => typeof releaseLongTurn === "function", 5_000);
+    host.close();
+    const host2 = new MachineHostService(hostChat, hostStorage, hostSettings, debugLogs, {
+      pairing, deviceId: "device-machine-1", machineName: "test-box", appVersion: "test", detectProviders: async () => [], reconnectDelayMs: 50
+    });
+    await host2.start();
+    const lost = await lostTurn;
+    assert.equal(lost.status, "failed");
+    assert.match(lost.error, /restarted/);
+    host2.close();
+
     link.close();
     host.close();
   } finally {

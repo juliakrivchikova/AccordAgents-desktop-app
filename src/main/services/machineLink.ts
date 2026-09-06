@@ -56,8 +56,15 @@ interface MachineConnection {
     resolve: (result: MachineTurnDispatchResult) => void;
     progress?: (progress: ReviewProgress) => void;
   }>;
+  /** Stops the machine has not confirmed yet (run id → conversation id).
+   *  Rule 2: a Stop is stored and delivered again when the machine is back;
+   *  "stopped" appears only after the machine confirms. */
+  pendingCancels: Map<string, string>;
 }
 
+/** How long a delivered Stop may go unconfirmed before the User is told the
+ *  machine has not answered yet. */
+const STOP_CONFIRM_GRACE_MS = 5_000;
 const TURN_ACK_TIMEOUT_MS = 24 * 60 * 60_000;
 
 export class MachineLinkService implements MachineTurnDispatcher {
@@ -153,7 +160,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
       settingsSynced: false,
       replicated: new Map(),
       replication: new Map(),
-      pendingTurns: new Map()
+      pendingTurns: new Map(),
+      pendingCancels: new Map()
     };
     this.connections.set(record.id, connection);
     client.on("peer", (event) => {
@@ -268,10 +276,31 @@ export class MachineLinkService implements MachineTurnDispatcher {
     // Stop can arrive at any point of the preparation; a cancelled turn is
     // never dispatched, and one already dispatched is cancelled on the machine.
     let requestSent = false;
-    const onAbort = (): void => {
-      if (requestSent) {
-        void this.send(connection, { type: "machine.turn.cancel", conversationId: request.conversation.id, runId: request.runId }).catch(() => undefined);
+    let stopGrace: ReturnType<typeof setTimeout> | undefined;
+    const stopPending = (reason: string): void => {
+      if (!connection.pendingTurns.has(request.runId)) {
+        return;
       }
+      void this.debugLogs.write("machine-link.stop.waiting", { machineId: connection.record.id, runId: request.runId, reason });
+      request.onStopPending?.(connection.record.name);
+    };
+    const onAbort = (): void => {
+      if (!requestSent) {
+        return;
+      }
+      connection.pendingCancels.set(request.runId, request.conversation.id);
+      if (!connection.machineDeviceId) {
+        stopPending("machine unreachable");
+        return;
+      }
+      this.send(connection, { type: "machine.turn.cancel", conversationId: request.conversation.id, runId: request.runId })
+        .then(() => {
+          // Delivered to the relay; the machine has a few seconds to confirm
+          // before the User is told the stop is still waiting.
+          stopGrace = setTimeout(() => stopPending("no confirmation"), STOP_CONFIRM_GRACE_MS);
+          stopGrace.unref?.();
+        })
+        .catch((error: unknown) => stopPending(errorMessage(error)));
     };
     request.signal?.addEventListener("abort", onAbort, { once: true });
     const result = new Promise<MachineTurnDispatchResult>((resolve) => {
@@ -318,6 +347,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
     } finally {
       connection.pendingTurns.delete(request.runId);
       clearTimeout(timeout);
+      if (stopGrace) {
+        clearTimeout(stopGrace);
+      }
       request.signal?.removeEventListener("abort", onAbort);
     }
   }
@@ -448,9 +480,36 @@ export class MachineLinkService implements MachineTurnDispatcher {
     await this.send(connection, { type: "machine.settings.sync", snapshot: await this.settings.exportMachineSettingsSnapshot() });
     connection.settingsSynced = true;
     this.emitStatus();
+    await this.reconcileAfterHello(connection, hello);
+  }
+
+  /** After a machine reconnects: stops that were waiting are delivered
+   *  again, and turns the machine no longer knows (it restarted) are closed
+   *  instead of waiting for a result that will never come. */
+  private async reconcileAfterHello(connection: MachineConnection, hello: MachineHelloBody): Promise<void> {
+    for (const [runId, conversationId] of [...connection.pendingCancels.entries()]) {
+      void this.debugLogs.write("machine-link.stop.redelivered", { machineId: connection.record.id, runId });
+      await this.send(connection, { type: "machine.turn.cancel", conversationId, runId }).catch(() => undefined);
+    }
+    if (!Array.isArray(hello.activeRunIds)) {
+      return;
+    }
+    const alive = new Set([...hello.activeRunIds, ...(hello.pendingTerminalRunIds ?? [])]);
+    for (const [runId, pending] of [...connection.pendingTurns.entries()]) {
+      if (alive.has(runId)) {
+        continue;
+      }
+      connection.pendingTurns.delete(runId);
+      const stopped = connection.pendingCancels.delete(runId);
+      void this.debugLogs.write("machine-link.turn.lost-on-restart", { machineId: connection.record.id, runId, stopped });
+      pending.resolve(stopped
+        ? { status: "interrupted", messages: [], warnings: [] }
+        : { status: "failed", messages: [], warnings: [], error: `Machine ${connection.record.name} restarted before this turn finished.` });
+    }
   }
 
   private finishTurn(connection: MachineConnection, body: MachineTurnFinishedBody): void {
+    connection.pendingCancels.delete(body.runId);
     const pending = connection.pendingTurns.get(body.runId);
     if (!pending) {
       // The turn finished while this desktop was away (restart, relay drop):

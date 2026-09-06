@@ -1215,6 +1215,9 @@ export interface ChatAppToolApprovalPolicy {
 }
 
 export interface ChatMessageMetadata {
+  /** Machines transport, Rule 2: a Stop was requested but the member's
+   *  machine has not confirmed it yet (shown honestly instead of "stopped"). */
+  stopPending?: boolean;
   threadId?: string;
   parentMessageId?: string;
   chatThreadRootId?: string;

@@ -41,6 +41,10 @@ export interface MachineHelloBody {
   appVersion: string;
   platform: string;
   providers: Array<{ kind: string; installed: boolean; version?: string }>;
+  /** Runs still executing on the machine (reconnect reconciliation). */
+  activeRunIds?: string[];
+  /** Finished runs whose result the desktop has not received yet. */
+  pendingTerminalRunIds?: string[];
 }
 
 export interface MachineHelloAckBody {

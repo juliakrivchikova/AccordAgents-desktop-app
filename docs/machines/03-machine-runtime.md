@@ -10,10 +10,13 @@ Every message is sealed with the pairing's key inside the machine's own relay ro
 |---|---|---|
 | machine → desktop | `machine.hello` | on every (re)connect: device id, name, app version, platform, installed providers |
 | desktop → machine | `machine.hello.ack`, `machine.settings.sync` | after hello; the settings snapshot (roles, rules, saved prompts, member presets, limits, agent environment values) also travels with every turn request |
-| desktop → machine | `machine.conversation.sync` / `machine.conversation.delta` | full copy the first time a chat reaches the machine, changed messages afterwards; the machine keeps its own `participantSessions`, `activeRunIds`, `running`, `runId` |
-| desktop → machine | `machine.turn.request` | the member's home is this machine: run this member for this message, with the desktop's run id and pending message id |
-| machine → desktop | `machine.turn.progress`, `machine.turn.finished` | streamed progress and the finished messages (same ids on both sides) |
-| desktop → machine | `machine.turn.cancel` | Stop |
+| desktop → machine | `machine.conversation.sync` / `machine.conversation.delta` | the first time a chat reaches the machine: the conversation shell, then its messages in bounded batches (at most 150 messages / ~1.5 MB of JSON per relay message, so a chat of any size stays under the relay's 10 MiB limit); changed messages afterwards, batched the same way. The machine keeps its own `participantSessions`, `activeRunIds`, `running`, `runId`, `pendingAppToolApprovals`; approval policies are the union of both sides. A fresh copy after a reconnect never erases messages the machine produced meanwhile. |
+| desktop → machine | `machine.turn.request` | the member's home is this machine: run this member for this message, with the desktop's run id and pending message id. Settings sync and replication precede it; a Stop that lands during that preparation means the request is never sent. |
+| machine → desktop | `machine.turn.progress`, `machine.turn.finished` | streamed progress and the finished messages (same ids on both sides). The machine keeps a finished turn until the desktop has received it and resends it after a reconnect; a desktop that finds no pending turn for it (restart) lands the messages as a back-delta. |
+| machine → desktop | `machine.conversation.backdelta` | messages the machine wrote outside a turn result (mid-turn `app_chat_send_message`, artifact notes) |
+| machine → desktop | `machine.approval.requested` / `machine.approval.updated` | a member on the machine needs a permission or app-tool approval: the desktop shows the same card it shows for a local member, tagged with the member's home machine |
+| desktop → machine | `machine.approval.decision` | the User's answer on that card; the machine applies it through the ordinary approval path and the member resumes |
+| desktop → machine | `machine.turn.cancel` | Stop. If the machine is unreachable or does not confirm within a few seconds, the bubble shows "Stop requested — waiting for machine <name>" (Rule 2, an approved parity exception in `docs/parity-requirements.md`); the stop is kept and delivered again on the machine's next `machine.hello`, and "stopped by user" appears only after the machine confirms. A hello also carries the machine's `activeRunIds`/`pendingTerminalRunIds`, so a turn the machine lost in a restart is closed on the desktop instead of waiting forever. |
 
 Provider API keys, AWS credentials, cloud-run settings, and other machines' records never leave the desktop (`SettingsService.exportMachineSettingsSnapshot`).
 
@@ -61,11 +64,13 @@ Under the user-data directory: `accordagents.sqlite3` (its copy of the chats it 
 
 ## Local QA on one Mac
 
-`scripts/probes/machines/` holds the drivers used for the end-to-end check: a relay under `wrangler dev` (`--port 18099`), an isolated desktop (`ACCORDAGENTS_USER_DATA_DIR=/private/tmp/accordagents-qa-machines ACCORDAGENTS_MOBILE_RELAY_URL=ws://127.0.0.1:18099/v1/relay npx electron . --remote-debugging-port=9223`), `qa-create-machine.cjs` (mints the enrollment through the bridge), the machine runtime started with that enrollment and its own user-data directory, `qa-wait-machine.cjs`, `qa-machine-turn2.cjs <marker>` (a member turn through the real UI), and the Stop scenario. Loopback `ws:` relays are accepted only for `127.0.0.1`/`localhost`.
+`scripts/probes/machines/` holds the drivers used for the end-to-end check: a relay under `wrangler dev` (`--port 18099`), an isolated desktop (`ACCORDAGENTS_USER_DATA_DIR=/private/tmp/accordagents-qa-machines ACCORDAGENTS_MOBILE_RELAY_URL=ws://127.0.0.1:18099/v1/relay npx electron . --remote-debugging-port=9223`), `qa-create-machine.cjs` (mints the enrollment through the bridge), the machine runtime started with that enrollment and its own user-data directory, `qa-wait-machine.cjs`, `qa-machine-turn2.cjs <marker>` (a member turn through the real UI), `qa-machine-approval.cjs` (a permission approval answered on the desktop for a member on the machine), `qa-machine-stop.cjs` (Stop, no orphaned processes), `qa-machine-stop-unreachable.cjs` (Stop while the machine process is frozen: waiting state, then confirmation), and `qa-machine-second-turn.cjs <conversationId> [marker]` (a second turn on the resident session). Loopback `ws:` relays are accepted only for `127.0.0.1`/`localhost`.
 
 ## Not yet on machines (tracked, next)
 
-- App-tool approvals and user choices raised by a member on a machine are answered on the machine's copy only; forwarding them to the desktop (and the decision back) is the next slice.
+- User choices (`User choice:` blocks) raised by a member on a machine reach the desktop as ordinary messages; the answer travels back as the next user message, which is the same round trip a local member gets. Nothing else is forwarded for them yet.
 - A machine-hosted member's requests to other members run on the machine's copy; routing them to the other members' home machines follows the event contract (`docs/machines/02-event-contract.md`).
+- Delivery of a finished turn is retried until the desktop is back; delivery of every other event is not yet acknowledged (the outbox/ack of the event contract is the next slice).
+- Inbound replicated messages are not yet observed by the hybrid logical clock on the receiving side.
 - The doctor/setup flow does not yet install the runtime over SSH; the steps above are manual until it does.
 - The legacy worker path and the cloud-only prompt branch remain until the cutover commit removes them.

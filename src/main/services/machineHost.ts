@@ -87,8 +87,10 @@ export class MachineHostService {
     });
     this.client.on("peer", (event) => {
       if (event.type === "ready") {
+        // Own link (re)established: greet the desktop again even if it is
+        // the same one, so stops and results held meanwhile are reconciled.
         const desktop = event.peers.find((peer) => peer.role === "desktop");
-        this.setDesktop(desktop?.deviceId);
+        this.setDesktop(desktop?.deviceId, { announce: true });
       } else if (event.type === "peer-connected" && event.peer.role === "desktop") {
         this.setDesktop(event.peer.deviceId);
       } else if (event.type === "peer-disconnected" && event.peer.role === "desktop") {
@@ -169,13 +171,13 @@ export class MachineHostService {
     }
   }
 
-  private setDesktop(deviceId: string | undefined): void {
+  private setDesktop(deviceId: string | undefined, options: { announce?: boolean } = {}): void {
     if (!deviceId) {
       return;
     }
     const changed = this.desktopDeviceId !== deviceId;
     this.desktopDeviceId = deviceId;
-    if (changed) {
+    if (changed || options.announce) {
       void this.sendHello()
         .then(() => this.flushPendingTerminals())
         .catch((error) => {
@@ -202,7 +204,9 @@ export class MachineHostService {
       machineName: this.options.machineName ?? os.hostname(),
       appVersion: this.options.appVersion,
       platform: `${process.platform}-${process.arch}`,
-      providers
+      providers,
+      activeRunIds: [...this.activeTurns.keys()],
+      pendingTerminalRunIds: [...this.pendingTerminals.keys()]
     });
   }
 

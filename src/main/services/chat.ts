@@ -640,6 +640,10 @@ export interface MachineTurnDispatchRequest {
   pendingMessageId: string;
   signal?: AbortSignal;
   progress?: ProgressCallback;
+  /** Rule 2 (docs/parity-requirements.md): called when a Stop has been
+   *  requested but the machine has not confirmed it, so the User sees the
+   *  honest state instead of a silent wait. */
+  onStopPending?: (machineName: string) => void;
 }
 
 export interface MachineTurnDispatchResult {
@@ -6719,6 +6723,13 @@ export class ChatService {
         this.queueSnapshot(conversation);
       });
     }
+    const clearStopPending = (): void => {
+      if (pendingMessage.metadata?.stopPending) {
+        const { stopPending: _stopPending, ...rest } = pendingMessage.metadata;
+        pendingMessage.metadata = rest;
+        pendingMessage.content = "";
+      }
+    };
     try {
       const result = await link.runTurn({
         conversation,
@@ -6727,8 +6738,20 @@ export class ChatService {
         runId,
         pendingMessageId: pendingMessage.id,
         signal,
-        progress
+        progress,
+        onStopPending: (machineName) => {
+          void this.withChatMutation(conversation, async () => {
+            if (pendingMessage.status !== "pending") {
+              return;
+            }
+            pendingMessage.content = `Stop requested — waiting for machine ${machineName}.`;
+            pendingMessage.metadata = { ...pendingMessage.metadata, stopPending: true };
+            conversation.updatedAt = new Date().toISOString();
+            this.queueSnapshot(conversation);
+          }).catch(() => undefined);
+        }
       });
+      clearStopPending();
       for (const warning of result.warnings) {
         if (!options.warnings.includes(warning)) {
           options.warnings.push(warning);
@@ -6755,6 +6778,7 @@ export class ChatService {
       }
       return [pendingMessage, ...others];
     } catch (error) {
+      clearStopPending();
       if (!signal?.aborted) {
         pendingMessage.status = "error";
         pendingMessage.content = this.failedPrecreatedPendingMessageContent(participant, error);
