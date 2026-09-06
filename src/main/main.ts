@@ -2778,19 +2778,22 @@ void app.whenReady().then(async () => {
       void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
     });
     machineLinkService.onConversationBackDelta((delta) => {
-      void chatService.applyMachineBackDelta({ conversationId: delta.conversationId, messages: delta.messages }).catch((error) => {
-        void debugLogService.write("machine-link.backdelta.apply-error", { message: error instanceof Error ? error.message : String(error) });
-      });
+      // The machine keeps the result until the desktop has stored it.
+      void chatService.applyMachineBackDelta({ conversationId: delta.conversationId, messages: delta.messages })
+        .then(() => delta.acknowledge?.())
+        .catch((error) => {
+          void debugLogService.write("machine-link.backdelta.apply-error", { message: error instanceof Error ? error.message : String(error) });
+        });
     });
-    machineLinkService.onApproval((event) => {
-      void chatService.applyMachineApproval({
+    machineLinkService.onApproval((event) =>
+      chatService.applyMachineApproval({
         conversationId: event.conversationId,
         approval: event.approval,
         policies: event.policies
-      }).catch((error) => {
+      }).then(() => undefined, (error) => {
         void debugLogService.write("machine-link.approval.apply-error", { message: error instanceof Error ? error.message : String(error) });
-      });
-    });
+      })
+    );
     chatService.setMachineLink(machineLinkService);
     void machineLinkService.start().catch((error) => {
       void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });

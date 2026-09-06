@@ -65,6 +65,7 @@ export class MachineHostService {
   private readonly approvalConversations = new Set<string>();
   /** Changes when this runtime starts: the desktop tells a restart from a reconnect by it. */
   private readonly instanceId = randomUUID();
+  private readonly instanceStartedAt = new Date().toISOString();
   private inbound: Promise<void> = Promise.resolve();
   /** Outbound sends leave in call order (progress before the finished result). */
   private outbound: Promise<void> = Promise.resolve();
@@ -238,7 +239,8 @@ export class MachineHostService {
       providers,
       activeRunIds: [...this.activeTurns.keys()],
       pendingTerminalRunIds: [...this.pendingTerminals.keys()],
-      instanceId: this.instanceId
+      instanceId: this.instanceId,
+      instanceStartedAt: this.instanceStartedAt
     });
   }
 
@@ -277,10 +279,18 @@ export class MachineHostService {
       case "machine.turn.request":
         void this.runTurn(body);
         return;
-      case "machine.turn.cancel":
-        this.activeTurns.get(body.runId)?.abort();
+      case "machine.turn.cancel": {
+        const controller = this.activeTurns.get(body.runId);
+        if (!controller && !this.pendingTerminals.has(body.runId)) {
+          // Not running here and no result waiting: this runtime cannot
+          // confirm anything about it (Rule 2), so it says so.
+          await this.send({ type: "machine.turn.unknown", conversationId: body.conversationId, runId: body.runId }).catch(() => undefined);
+          return;
+        }
+        controller?.abort();
         this.chat.cancelRun(body.runId);
         return;
+      }
       case "machine.turn.finished.ack":
         if (this.pendingTerminals.delete(body.runId)) {
           this.persistOutbox();
@@ -299,16 +309,18 @@ export class MachineHostService {
           ...(body.draftOverride ? { draftOverride: body.draftOverride } : {}),
           ...(body.codexDecisionId ? { codexDecisionId: body.codexDecisionId } : {})
         }).then((conversation) => {
-          const approvals = (conversation?.metadata as { pendingAppToolApprovals?: Array<{ id: string; status: string }> } | undefined)?.pendingAppToolApprovals ?? [];
+          const approvals = (conversation?.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[] } | undefined)?.pendingAppToolApprovals ?? [];
+          const approval = approvals.find((item) => item.id === body.approvalId);
+          const policies = (conversation?.metadata as { appToolApprovalPolicies?: ChatAppToolApprovalPolicy[] } | undefined)?.appToolApprovalPolicies;
           void this.debugLogs.write("machine-host.approval.decision-applied", {
             approvalId: body.approvalId,
             approve: body.approve,
-            status: approvals.find((item) => item.id === body.approvalId)?.status
+            status: approval?.status
           });
           if (conversation) {
             this.noteConversationSnapshot(conversation);
           }
-          return { ok: true as const };
+          return { ok: true as const, approval, policies };
         }).catch((error: unknown) => {
           void this.debugLogs.write("machine-host.approval.decision-error", { approvalId: body.approvalId, message: errorMessage(error) });
           return { ok: false as const, error: errorMessage(error) };
@@ -318,7 +330,12 @@ export class MachineHostService {
           conversationId: body.conversationId,
           approvalId: body.approvalId,
           ok: outcome.ok,
-          ...(outcome.ok ? {} : { error: outcome.error })
+          ...(outcome.ok
+            ? {
+                ...(outcome.approval ? { approval: { ...outcome.approval, homeMachineId: this.options.deviceId } } : {}),
+                ...(Array.isArray(outcome.policies) ? { policies: outcome.policies } : {})
+              }
+            : { error: outcome.error })
         }).catch(() => undefined);
         return;
       }
@@ -371,8 +388,11 @@ export class MachineHostService {
 
   private async applyConversationSync(incoming: Conversation): Promise<void> {
     // The desktop's copy is registered before it is applied, so the snapshot
-    // the apply emits never echoes it back as a back delta.
-    this.knownMessages.set(incoming.id, new Map(incoming.messages.map((message) => [message.id, messageStamp(message)])));
+    // the apply emits never echoes it back as a back delta. The inventory of
+    // what the desktop holds is kept across syncs: a fresh copy after a
+    // reconnect arrives as a shell plus batches, and a shell must not make
+    // every stored row look new.
+    this.rememberDesktopMessages(incoming.id, incoming.messages);
     await this.chat.applyReplicatedConversation(incoming.id, (existing) => {
       const metadata = existing ? this.mergeMetadata(existing, incoming.metadata) : this.stripMachineOwned(incoming.metadata);
       // A fresh copy after a reconnect must not erase what this machine
@@ -507,8 +527,15 @@ export class MachineHostService {
     if (!file) {
       return;
     }
+    let raw: string;
     try {
-      const parsed = JSON.parse(readFileSync(file, "utf8")) as unknown;
+      raw = readFileSync(file, "utf8");
+    } catch {
+      // No outbox yet: nothing to deliver.
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
       if (Array.isArray(parsed)) {
         for (const entry of parsed) {
           if (entry && typeof entry === "object" && (entry as MachineTurnFinishedBody).type === "machine.turn.finished" && typeof (entry as MachineTurnFinishedBody).runId === "string") {
@@ -516,8 +543,15 @@ export class MachineHostService {
           }
         }
       }
-    } catch {
-      // No outbox yet, or unreadable: nothing to deliver.
+    } catch (error) {
+      // Damaged outbox: keep the file for inspection instead of overwriting it.
+      const damaged = `${file}.corrupt-${Date.now()}`;
+      try {
+        renameSync(file, damaged);
+      } catch {
+        // Leave it in place if it cannot be moved.
+      }
+      void this.debugLogs.write("machine-host.outbox.corrupt", { file, movedTo: damaged, message: errorMessage(error) });
     }
   }
 

@@ -1224,7 +1224,9 @@ export interface ChatMessageMetadata {
   chatThreadRootId?: string;
   reactions?: ChatMessageReactions;
   staleRunRecovery?: ChatStaleRunRecovery;
-  terminalReason?: "user-stopped";
+  /** "stop-unconfirmed": machines transport, Rule 2 — a Stop the member's
+   *  machine never confirmed; shown as such, never as "stopped by user". */
+  terminalReason?: "user-stopped" | "stop-unconfirmed";
   mentions?: string[];
   skillMentions?: ChatSkillMention[];
   repoFileMentions?: RepoFileMention[];

@@ -41,6 +41,13 @@ export interface MachineLinkOptions {
 
 export type { MachineLinkStatus };
 
+export interface MachineApprovalEvent {
+  machineId: string;
+  conversationId: string;
+  approval: ChatAppToolApproval;
+  policies?: ChatAppToolApprovalPolicy[];
+}
+
 interface MachineConnection {
   record: MachineRecord;
   pairing: MobilePairingPackage;
@@ -70,6 +77,11 @@ interface MachineConnection {
   replicationQueued: Map<string, Conversation>;
   /** Approval decisions waiting for the machine's outcome. */
   pendingApprovals: Map<string, { resolve: () => void; reject: (error: Error) => void }>;
+  /** Inbound messages are decrypted and applied strictly in arrival order. */
+  inbound: Promise<void>;
+  /** Start time of the newest runtime instance seen; a late hello from an
+   *  older instance is ignored. */
+  latestInstanceStartedAt?: string;
 }
 
 /** How long a delivered Stop may go unconfirmed before the User is told the
@@ -82,6 +94,7 @@ const TURN_ACK_TIMEOUT_MS = 24 * 60 * 60_000;
 
 export class MachineLinkService implements MachineTurnDispatcher {
   private readonly emitter = new EventEmitter();
+  private readonly approvalListeners: Array<(event: MachineApprovalEvent) => Promise<void> | void> = [];
   private readonly connections = new Map<string, MachineConnection>();
   private readonly seenMessageIds = new Set<string>();
   private readonly now: () => Date;
@@ -99,16 +112,28 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return () => this.emitter.off("status", listener);
   }
 
-  /** Conversation changes made on a machine (approval cards, requests). */
-  onConversationBackDelta(listener: (delta: { machineId: string; conversationId: string; messages: ChatMessage[] }) => void): () => void {
+  /** Conversation changes made on a machine (approval cards, requests). The
+   *  listener calls `acknowledge` once the messages are stored. */
+  onConversationBackDelta(listener: (delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => void): () => void {
     this.emitter.on("backdelta", listener);
     return () => this.emitter.off("backdelta", listener);
   }
 
-  /** An approval raised or answered by a member on a machine. */
-  onApproval(listener: (event: { machineId: string; conversationId: string; approval: ChatAppToolApproval; policies?: ChatAppToolApprovalPolicy[] }) => void): () => void {
-    this.emitter.on("approval", listener);
-    return () => this.emitter.off("approval", listener);
+  /** An approval raised or answered by a member on a machine. A listener
+   *  may return a promise; the machine's decision outcome waits for it, so
+   *  the card call returns only after the desktop stored the approval. */
+  onApproval(listener: (event: MachineApprovalEvent) => Promise<void> | void): () => void {
+    this.approvalListeners.push(listener);
+    return () => {
+      const index = this.approvalListeners.indexOf(listener);
+      if (index >= 0) {
+        this.approvalListeners.splice(index, 1);
+      }
+    };
+  }
+
+  private async emitApproval(event: MachineApprovalEvent): Promise<void> {
+    await Promise.all(this.approvalListeners.map((listener) => listener(event)));
   }
 
   /** Forwards the desktop's decision on a machine-raised approval. */
@@ -206,7 +231,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
       pendingCancels: new Map((record.pendingCancels ?? []).map((cancel) => [cancel.runId, cancel.conversationId])),
       persist: Promise.resolve(),
       replicationQueued: new Map(),
-      pendingApprovals: new Map()
+      pendingApprovals: new Map(),
+      inbound: Promise.resolve()
     };
     this.connections.set(record.id, connection);
     client.on("peer", (event) => {
@@ -220,9 +246,13 @@ export class MachineLinkService implements MachineTurnDispatcher {
       }
     });
     client.on("message", (message) => {
-      void this.handleMessage(connection, message.ciphertext).catch((error) => {
-        void this.debugLogs.write("machine-link.message.error", { machineId: record.id, message: errorMessage(error) });
-      });
+      // Strictly in order from decryption on: a large progress frame must
+      // not be overtaken by the small finished result behind it.
+      connection.inbound = connection.inbound
+        .then(() => this.handleMessage(connection, message.ciphertext))
+        .catch((error) => {
+          void this.debugLogs.write("machine-link.message.error", { machineId: record.id, message: errorMessage(error) });
+        });
     });
     client.on("state", (state) => {
       if (state !== "connected") {
@@ -521,9 +551,22 @@ export class MachineLinkService implements MachineTurnDispatcher {
         this.emitter.emit("backdelta", { machineId: connection.record.id, conversationId: body.conversationId, messages: body.messages });
         return;
       }
+      case "machine.turn.unknown":
+        this.handleUnknownRun(connection, body);
+        return;
       case "machine.approval.result": {
         const pending = connection.pendingApprovals.get(body.approvalId);
         connection.pendingApprovals.delete(body.approvalId);
+        if (body.ok && body.approval) {
+          // Store the machine's view of the card (and policies) before the
+          // desktop's card call returns.
+          await this.emitApproval({
+            machineId: connection.record.id,
+            conversationId: body.conversationId,
+            approval: { ...body.approval, homeMachineId: connection.record.id },
+            ...(body.policies ? { policies: body.policies } : {})
+          });
+        }
         if (pending) {
           if (body.ok) {
             pending.resolve();
@@ -535,7 +578,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       }
       case "machine.approval.requested":
       case "machine.approval.updated":
-        this.emitter.emit("approval", {
+        await this.emitApproval({
           machineId: connection.record.id,
           conversationId: body.conversationId,
           approval: { ...body.approval, homeMachineId: connection.record.id },
@@ -548,6 +591,15 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   private async handleHello(connection: MachineConnection, hello: MachineHelloBody): Promise<void> {
+    if (hello.instanceStartedAt && connection.latestInstanceStartedAt && hello.instanceStartedAt < connection.latestInstanceStartedAt) {
+      // A hello from an instance older than one already seen (the old
+      // process saying goodbye late): it must not reconcile anything.
+      void this.debugLogs.write("machine-link.hello.stale-instance", { machineId: connection.record.id, instanceId: hello.instanceId, instanceStartedAt: hello.instanceStartedAt });
+      return;
+    }
+    if (hello.instanceStartedAt) {
+      connection.latestInstanceStartedAt = hello.instanceStartedAt;
+    }
     connection.machineDeviceId = hello.deviceId;
     connection.settingsSynced = false;
     connection.replicated.clear();
@@ -604,12 +656,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
           : `Machine ${connection.record.name} restarted before this turn finished.`
       });
     }
-    for (const runId of [...connection.pendingCancels.keys()]) {
-      if (!connection.pendingTurns.has(runId) && !hello.activeRunIds?.includes(runId) && !held.has(runId)) {
-        connection.pendingCancels.delete(runId);
-        cancelsChanged = true;
-      }
-    }
+    // Held stops stay until the machine answers them (finished, or
+    // machine.turn.unknown when it cannot confirm anything about the run).
     if (cancelsChanged) {
       this.persistCancels(connection);
     }
@@ -619,8 +667,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (connection.pendingCancels.delete(body.runId)) {
       this.persistCancels(connection);
     }
-    // The machine keeps the result until this acknowledgement arrives.
-    void this.send(connection, { type: "machine.turn.finished.ack", conversationId: body.conversationId, runId: body.runId }).catch(() => undefined);
+    // The machine keeps the result until this acknowledgement arrives, and
+    // it is sent only once the result has been stored on this desktop.
+    const acknowledge = (): void => {
+      void this.send(connection, { type: "machine.turn.finished.ack", conversationId: body.conversationId, runId: body.runId }).catch(() => undefined);
+    };
     const pending = connection.pendingTurns.get(body.runId);
     if (!pending) {
       // The turn finished while this desktop was away (restart, relay drop):
@@ -631,7 +682,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
         for (const message of body.messages) {
           known?.set(message.id, messageStamp(message));
         }
-        this.emitter.emit("backdelta", { machineId: connection.record.id, conversationId: body.conversationId, messages: body.messages });
+        this.emitter.emit("backdelta", { machineId: connection.record.id, conversationId: body.conversationId, messages: body.messages, acknowledge });
+      } else {
+        acknowledge();
       }
       return;
     }
@@ -640,7 +693,28 @@ export class MachineLinkService implements MachineTurnDispatcher {
       status: body.status,
       messages: body.messages,
       warnings: body.warnings,
-      error: body.error
+      error: body.error,
+      acknowledge
+    });
+  }
+
+  /** The machine does not know this run: not running there, no result
+   *  waiting. A held stop for it cannot be confirmed (Rule 2). */
+  private handleUnknownRun(connection: MachineConnection, body: { conversationId: string; runId: string }): void {
+    if (connection.pendingCancels.delete(body.runId)) {
+      this.persistCancels(connection);
+    }
+    const pending = connection.pendingTurns.get(body.runId);
+    void this.debugLogs.write("machine-link.turn.unknown", { machineId: connection.record.id, runId: body.runId, pending: Boolean(pending) });
+    if (!pending) {
+      return;
+    }
+    connection.pendingTurns.delete(body.runId);
+    pending.resolve({
+      status: "unconfirmed",
+      messages: [],
+      warnings: [],
+      error: `Machine ${connection.record.name} does not know this run any more; whether its processes are gone is not verified.`
     });
   }
 

@@ -647,10 +647,16 @@ export interface MachineTurnDispatchRequest {
 }
 
 export interface MachineTurnDispatchResult {
-  status: "completed" | "interrupted" | "failed";
+  /** "unconfirmed": a Stop was requested and the machine never confirmed the
+   *  run is gone (it restarted or reported the run unknown); Rule 2 forbids
+   *  showing it as stopped. */
+  status: "completed" | "interrupted" | "failed" | "unconfirmed";
   messages: ChatMessage[];
   warnings: string[];
   error?: string;
+  /** Called once the desktop has stored the result; the machine keeps it
+   *  until then. */
+  acknowledge?: () => void;
 }
 
 export interface MachineTurnDispatcher {
@@ -6787,10 +6793,16 @@ export class ChatService {
           options.warnings.push(warning);
         }
       }
+      if (result.status === "unconfirmed" || (result.status === "failed" && signal?.aborted)) {
+        // Rule 2: the machine never confirmed the run is gone; this is not a
+        // stop, and the batch path keeps this outcome as it is.
+        this.markParticipantMessageStopUnconfirmed(pendingMessage, participant, result.error);
+        return ownsPendingMessage ? [pendingMessage] : [];
+      }
       if (result.status === "failed") {
         throw new Error(result.error ?? `@${participant.handle} failed on its machine.`);
       }
-      if (result.status === "interrupted" || signal?.aborted) {
+      if (result.status === "interrupted") {
         this.markParticipantMessageStoppedByUser(pendingMessage, participant, { preserveContent: true });
         return ownsPendingMessage ? [pendingMessage] : [];
       }
@@ -6806,6 +6818,20 @@ export class ChatService {
         pendingMessage.status = "error";
         pendingMessage.content = `@${participant.handle} finished on its machine without a reply.`;
       }
+      // The machine keeps the result until it is stored here: store the
+      // folded reply now (the batch path stores again later, harmlessly)
+      // and only then acknowledge.
+      await this.withChatMutation(conversation, async () => {
+        for (const message of others) {
+          if (!conversation.messages.some((existing) => existing.id === message.id)) {
+            conversation.messages.push(message);
+          }
+        }
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+      await this.waitForQueuedSave(conversation.id);
+      result.acknowledge?.();
       return [pendingMessage, ...others];
     } catch (error) {
       clearStopPending();
@@ -6813,7 +6839,8 @@ export class ChatService {
         pendingMessage.status = "error";
         pendingMessage.content = this.failedPrecreatedPendingMessageContent(participant, error);
       } else {
-        this.markParticipantMessageStoppedByUser(pendingMessage, participant, { preserveContent: true });
+        // Stopped, but the failure means the machine never confirmed it.
+        this.markParticipantMessageStopUnconfirmed(pendingMessage, participant, error instanceof Error ? error.message : String(error));
       }
       throw error;
     } finally {
@@ -6919,6 +6946,10 @@ export class ChatService {
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
       return conversation;
+    }).then(async (result) => {
+      // Callers acknowledge to the machine only once the rows are stored.
+      await this.waitForQueuedSave(request.conversationId);
+      return result;
     });
   }
 
@@ -6947,19 +6978,27 @@ export class ChatService {
       throw new Error("Machine-hosted turn message was not found in this machine's copy of the chat.");
     }
     const warnings: string[] = [];
-    await this.runParticipantBatch(
-      conversation,
-      [participant],
-      triggerMessage,
-      request.runId,
-      signal,
-      progress,
-      warnings,
-      {
-        targetRunIds: new Map([[participant.id, request.runId]]),
-        pendingMessageIds: new Map([[participant.id, request.pendingMessageId]])
+    try {
+      await this.runParticipantBatch(
+        conversation,
+        [participant],
+        triggerMessage,
+        request.runId,
+        signal,
+        progress,
+        warnings,
+        {
+          targetRunIds: new Map([[participant.id, request.runId]]),
+          pendingMessageIds: new Map([[participant.id, request.pendingMessageId]])
+        }
+      );
+    } finally {
+      // The early registration above is dropped unless the batch's own
+      // ref-counted bookkeeping still holds the run.
+      if ((this.activeRunRefCounts.get(request.runId) ?? 0) === 0) {
+        this.activeRunIds.delete(request.runId);
       }
-    );
+    }
     const refreshed = await this.requireChat(request.conversationId);
     const messages = refreshed.messages.filter((message) =>
       message.participantId === participant.id && message.metadata?.runId === request.runId && message.status !== "pending"
@@ -7003,8 +7042,9 @@ export class ChatService {
           if (
             pending.role === "participant" &&
             pending.status === "error" &&
-            pending.metadata?.terminalReason === "user-stopped"
+            (pending.metadata?.terminalReason === "user-stopped" || pending.metadata?.terminalReason === "stop-unconfirmed")
           ) {
+            // An unconfirmed stop (Rule 2) stays as it is: no "stopped by user" line.
             keptStoppedParticipantMessage = true;
           }
         }
@@ -7709,6 +7749,20 @@ export class ChatService {
     message.metadata = {
       ...message.metadata,
       terminalReason: "user-stopped"
+    };
+  }
+
+  /** Rule 2 (docs/parity-requirements.md): a Stop the member's machine never
+   *  confirmed is shown as exactly that, never as "stopped by user". */
+  private markParticipantMessageStopUnconfirmed(message: ChatMessage, participant: ChatParticipant, reason?: string): void {
+    message.status = "error";
+    const detail = reason?.trim() ? ` ${reason.trim()}` : "";
+    message.content = message.content.trim()
+      ? `${message.content}\n\nStop not confirmed for @${participant.handle}: the machine did not confirm the run is gone.${detail}`
+      : `Stop not confirmed for @${participant.handle}: the machine did not confirm the run is gone.${detail}`;
+    message.metadata = {
+      ...message.metadata,
+      terminalReason: "stop-unconfirmed"
     };
   }
 

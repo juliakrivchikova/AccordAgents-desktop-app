@@ -34,7 +34,8 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const hostChat = {
       runMachineHostedTurn: async (request, signal, progress) => {
         hostRuns.push(request);
-        progress?.({ runId: request.runId, phase: "debate", message: "working", createdAt: new Date().toISOString() });
+        // A large progress frame right before a small finished result: the desktop must apply them in order.
+        progress?.({ runId: request.runId, phase: "debate", message: "working " + "x".repeat(request.messageId === "msg-1" ? 2_000_000 : 10), createdAt: new Date().toISOString() });
         if (request.messageId === "msg-long" || request.messageId === "msg-away") {
           await new Promise((resolve) => { releaseLongTurn = resolve; signal?.addEventListener("abort", resolve, { once: true }); });
           if (signal?.aborted) {
@@ -53,7 +54,8 @@ test("machine link replicates settings and conversations, runs a turn, streams p
         if (request.approvalId === "approval-bad") {
           throw new Error("decision rejected by the native session");
         }
-        return machineStore.get(request.conversationId);
+        const conversation = machineStore.get(request.conversationId);
+        return { ...conversation, metadata: { ...conversation.metadata, pendingAppToolApprovals: [{ id: request.approvalId, status: "approved", updatedAt: new Date().toISOString() }] } };
       }
     };
     const hostStorage = {
@@ -95,12 +97,20 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     assert.equal(result.messages[0].content, "reply to msg-1");
     assert.equal(progressSeen.length, 1);
     assert.equal(hostRuns[0].pendingMessageId, "pending-1");
-    // The machine keeps a result until the desktop acknowledges it.
+    // The machine keeps a result until the desktop has stored it and acknowledges.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.ok(!logs.some((entry) => entry.event === "machine-host.terminal.acked" && entry.payload?.runId === "run-1"), "no ack before the desktop stored the result");
+    result.acknowledge();
     await waitFor(() => logs.some((entry) => entry.event === "machine-host.terminal.acked" && entry.payload?.runId === "run-1"), 5_000);
 
-    // Approval decisions carry the whole card answer and resolve with the machine's outcome.
+    // Approval decisions carry the whole card answer and resolve with the machine's outcome,
+    // after the desktop stored the machine's view of the card.
+    const storedApprovals = [];
+    link.onApproval(async (event) => { await new Promise((resolve) => setTimeout(resolve, 50)); storedApprovals.push(event.approval); });
     await link.respondToMachineApproval({ machineId: "machine-1", conversationId: "conv-1", approvalId: "approval-1", approve: true, scope: "once", draftOverride: { kind: "edited" }, codexDecisionId: "decision-7" });
     assert.equal(approvalRequests.length, 1);
+    assert.ok(storedApprovals.length >= 1, "the card call returns only after the stored approval");
+    assert.ok(storedApprovals.every((approval) => approval.status === "approved"));
     assert.deepEqual(approvalRequests[0].draftOverride, { kind: "edited" });
     assert.equal(approvalRequests[0].codexDecisionId, "decision-7");
     await assert.rejects(
@@ -117,6 +127,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     conversation.messages.push({ id: "msg-2", role: "user", content: "again", createdAt: new Date().toISOString(), status: "done" });
     const second = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[1], runId: "run-2", pendingMessageId: "pending-2" });
     assert.equal(second.status, "completed");
+    second.acknowledge?.();
     assert.ok(machineStore.get("conv-1").messages.some((message) => message.id === "msg-2"));
     assert.equal(importedSnapshots.length, 3, "settings travel with every turn request");
 
@@ -151,6 +162,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     };
     const bigResult = await link.runTurn({ conversation: big, participant, triggerMessage: big.messages[399], runId: "run-big", pendingMessageId: "pending-big" });
     assert.equal(bigResult.status, "completed");
+    bigResult.acknowledge?.();
     assert.equal(machineStore.get("conv-big").messages.length, 401);
     const bigDeltas = logs.filter((entry) => entry.event === "machine-host.message" && entry.payload?.type === "machine.conversation.delta" && entry.payload?.conversationId === "conv-big");
     assert.ok(bigDeltas.length >= 3, `expected batched deltas, saw ${bigDeltas.length}`);
@@ -206,6 +218,18 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const lost = await lostTurn;
     assert.equal(lost.status, "failed");
     assert.match(lost.error, /restarted/);
+
+    // A stop held for a run the (restarted) machine does not know is answered
+    // "unknown": the desktop drops the held stop and reports it unconfirmed.
+    const unknownController = new AbortController();
+    const unknownTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-unknown", pendingMessageId: "pending-unknown", signal: unknownController.signal });
+    await waitFor(() => hostRuns.some((run) => run.runId === "run-unknown"), 5_000);
+    // Pretend the machine forgot the run (as after a restart without the outbox entry).
+    host2.activeTurns.delete("run-unknown");
+    unknownController.abort();
+    const unknown = await unknownTurn;
+    assert.equal(unknown.status, "unconfirmed");
+    await waitFor(() => (record.pendingCancels ?? []).length === 0, 5_000);
     host2.close();
 
     link.close();

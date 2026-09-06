@@ -49,6 +49,9 @@ export interface MachineHelloBody {
   /** Random id of this runtime process; changes when the machine restarts,
    *  so the desktop can tell a restart from a reconnect. */
   instanceId?: string;
+  /** When this runtime process started; a hello from an older instance that
+   *  arrives late is ignored by the desktop. */
+  instanceStartedAt?: string;
 }
 
 export interface MachineHelloAckBody {
@@ -162,6 +165,20 @@ export interface MachineApprovalResultBody {
   approvalId: string;
   ok: boolean;
   error?: string;
+  /** The approval as the machine holds it after applying the decision, and
+   *  the chat-wide policies; the desktop stores both before the card call
+   *  returns. */
+  approval?: ChatAppToolApproval;
+  policies?: ChatAppToolApprovalPolicy[];
+}
+
+/** Machine -> desktop: a stop (or any command) named a run this runtime does
+ *  not know: it is not running here and no result is waiting. Whether its
+ *  processes are gone is not verified (a restarted runtime does not know). */
+export interface MachineTurnUnknownBody {
+  type: "machine.turn.unknown";
+  conversationId: string;
+  runId: string;
 }
 
 /** Desktop -> machine: the finished turn has been applied on the desktop;
@@ -196,6 +213,7 @@ export type MachineLinkMessage =
   | MachineApprovalDecisionBody
   | MachineApprovalResultBody
   | MachineTurnFinishedAckBody
+  | MachineTurnUnknownBody
   | MachineChoiceAnswerBody;
 
 export type MachineLinkMessageType = MachineLinkMessage["type"];
@@ -216,6 +234,7 @@ const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.approval.decision",
   "machine.approval.result",
   "machine.turn.finished.ack",
+  "machine.turn.unknown",
   "machine.choice.answer"
 ]);
 
