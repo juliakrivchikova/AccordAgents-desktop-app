@@ -2113,6 +2113,10 @@ export interface ListChatActivityRequest {
   recentWindowDays?: number;
   lastViewedAtByConversationId?: Record<string, string>;
   excludedItemIds?: string[];
+  /** Per chat and member "cleared through" timestamps, so cleared updates stay cleared and uncounted. */
+  clearedRecentThroughByGroup?: Record<string, string>;
+  /** Frozen cutoff inherited from the pre-per-group clear state. */
+  clearedRecentThroughBefore?: string;
 }
 
 export interface ListChatActivityResult {

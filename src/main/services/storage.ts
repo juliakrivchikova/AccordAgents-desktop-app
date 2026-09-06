@@ -462,12 +462,18 @@ export class StorageService {
         .filter((itemId): itemId is string => typeof itemId === "string" && itemId.trim().length > 0)
         .slice(-1_000)
     );
+    const preferences = {
+      clearedItemIds: excludedItemIds,
+      ...(request.clearedRecentThroughByGroup ? { clearedRecentThroughByGroup: request.clearedRecentThroughByGroup } : {}),
+      ...(request.clearedRecentThroughBefore ? { clearedRecentThroughBefore: request.clearedRecentThroughBefore } : {})
+    };
     const items = [...conversationsById.values()].flatMap((conversation) =>
       buildChatActivityItems(conversation, {
         recentWindowDays,
-        lastViewedAt: request.lastViewedAtByConversationId?.[conversation.id]
+        lastViewedAt: request.lastViewedAtByConversationId?.[conversation.id],
+        preferences
       })
-    ).filter((item) => !excludedItemIds.has(item.id));
+    );
     return {
       items: limitChatActivityItems(sortChatActivityItems(items), limit),
       generatedAt: new Date().toISOString()

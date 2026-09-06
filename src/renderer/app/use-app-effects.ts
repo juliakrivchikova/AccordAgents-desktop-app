@@ -149,7 +149,8 @@ export function useAppEffects(
           state,
           buildChatActivityItemsForConversationUpdate(updated, {
             lastViewedAt: state.lastViewedAtRef.current[updated.id],
-            treatAsViewed: viewedLive
+            treatAsViewed: viewedLive,
+            preferences: state.activityItemPreferencesRef.current
           })
         );
         state.setActivityItems((activityCurrent) => {

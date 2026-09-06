@@ -11,6 +11,7 @@ import type {
 export const DEFAULT_CHAT_ACTIVITY_LIMIT = 50;
 export const DEFAULT_CHAT_ACTIVITY_RECENT_CONVERSATION_LIMIT = 80;
 export const DEFAULT_CHAT_ACTIVITY_RECENT_WINDOW_DAYS = 7;
+export const MAX_CHAT_ACTIVITY_CLEAR_HORIZONS = 500;
 
 const STATUS_RANK: Record<ChatActivityItem["status"], number> = {
   pending: 0,
@@ -22,6 +23,11 @@ export interface BuildChatActivityItemsOptions {
   now?: string | Date;
   lastViewedAt?: string;
   recentWindowDays?: number;
+  /**
+   * Applied before rows collapse, so a cleared update is not counted by the row that replaces it.
+   * Filtering after the collapse cannot fix that: the rows it would drop are already gone.
+   */
+  preferences?: ApplyChatActivityItemPreferencesOptions;
 }
 
 export interface BuildChatActivityItemsForUpdateOptions extends BuildChatActivityItemsOptions {
@@ -145,7 +151,8 @@ export function buildChatActivityItems(
     });
   }
 
-  return sortChatActivityItems(dedupeChatActivityItems(items));
+  const retained = options.preferences ? applyChatActivityItemPreferences(items, options.preferences) : items;
+  return sortChatActivityItems(dedupeChatActivityItems(retained));
 }
 
 export function applyChatActivityItemPreferences(
@@ -156,7 +163,7 @@ export function applyChatActivityItemPreferences(
   const clearedItemIds = options.clearedItemIds ?? new Set<string>();
   const clearedRecentThroughByGroup = options.clearedRecentThroughByGroup ?? {};
   const clearedBeforeMs = timeValue(options.clearedRecentThroughBefore);
-  return items
+  const retained = items
     .filter((item) => {
       if (clearedItemIds.has(item.id)) {
         return false;
@@ -173,6 +180,7 @@ export function applyChatActivityItemPreferences(
       return clearedThroughMs <= 0 || updatedMs <= 0 || updatedMs > clearedThroughMs;
     })
     .map((item) => item.read === true || !readItemIds.has(item.id) ? item : { ...item, read: true });
+  return retained;
 }
 
 export function chatActivityItemPreferencesAfterClear(
@@ -190,13 +198,16 @@ export function chatActivityItemPreferencesAfterClear(
   // A finished row stands for every update of that member in that chat, so clearing it must also
   // hide the older updates it collapsed - and nothing outside that member and chat.
   const groupKey = clearedItem ? recentParticipantGroupKey(clearedItem) : undefined;
-  const clearedRecentThroughByGroup = { ...(current.clearedRecentThroughByGroup ?? {}) };
-  if (groupKey && clearedItem) {
-    const clearedThrough = newerTimestamp(clearedRecentThroughByGroup[groupKey], clearedItem.updatedAt);
-    if (clearedThrough) {
-      clearedRecentThroughByGroup[groupKey] = clearedThrough;
-    }
-  }
+  const existingHorizons = current.clearedRecentThroughByGroup ?? {};
+  const clearedThrough = groupKey && clearedItem
+    ? newerTimestamp(existingHorizons[groupKey], clearedItem.updatedAt)
+    : undefined;
+  // Re-insert the touched group last and keep only the newest horizons, so a bounded store drops
+  // the least recently cleared group instead of the one the user just cleared.
+  const clearedRecentThroughByGroup = Object.fromEntries([
+    ...Object.entries(existingHorizons).filter(([key]) => key !== groupKey),
+    ...(groupKey && clearedThrough ? [[groupKey, clearedThrough] as [string, string]] : [])
+  ].slice(-MAX_CHAT_ACTIVITY_CLEAR_HORIZONS));
   return {
     readItemIds,
     clearedItemIds,
@@ -238,37 +249,17 @@ export function mergeChatActivityItems(
   options: { limit?: number; replaceConversationId?: string } = {}
 ): ChatActivityItem[] {
   const byId = new Map<string, ChatActivityItem>();
-  const collapsedCountById = new Map<string, number>();
-  const rememberItem = (item: ChatActivityItem): void => {
-    // A rebuild from a narrower message delta can see fewer updates than the row already stood
-    // for, so the collapsed count never shrinks just because the newer source knew less.
-    collapsedCountById.set(
-      item.id,
-      Math.max(collapsedCountById.get(item.id) ?? 1, collapsedActivityItemCount(item))
-    );
-    byId.set(item.id, item);
-  };
   const replaceConversationId = cleanString(options.replaceConversationId);
   for (const item of current) {
     if (replaceConversationId && item.conversationId === replaceConversationId) {
-      // The row itself is replaced by the rebuild, but how many updates it already stood for is
-      // knowledge the rebuild does not have when it only saw part of the chat.
-      collapsedCountById.set(
-        item.id,
-        Math.max(collapsedCountById.get(item.id) ?? 1, collapsedActivityItemCount(item))
-      );
       continue;
     }
-    rememberItem(item);
+    byId.set(item.id, item);
   }
   for (const item of incoming) {
-    rememberItem(item);
+    byId.set(item.id, item);
   }
-  const merged = [...byId.values()].map((item) => {
-    const collapsedCount = collapsedCountById.get(item.id) ?? 1;
-    return collapsedCount > collapsedActivityItemCount(item) ? { ...item, groupedCount: collapsedCount } : item;
-  });
-  return limitChatActivityItems(sortChatActivityItems(dedupeChatActivityItems(merged)), options.limit);
+  return limitChatActivityItems(sortChatActivityItems(dedupeChatActivityItems([...byId.values()])), options.limit);
 }
 
 export function reconcileChatActivityRefreshItems(
@@ -331,15 +322,13 @@ export function sortChatActivityItems(items: ChatActivityItem[]): ChatActivityIt
 
 export function limitChatActivityItems(items: ChatActivityItem[], limit?: number): ChatActivityItem[] {
   const normalizedLimit = normalizePositiveNumber(limit, DEFAULT_CHAT_ACTIVITY_LIMIT);
-  // Running and pending rows are actionable and bounded by real runs, so the cap applies to the
-  // finished list alone; a long finished history must never push a waiting approval out of view.
-  let recentCount = 0;
+  // The cap is per status: a long finished history can no longer push a waiting approval out of
+  // view, and no status can grow without a bound of its own.
+  const countByStatus = new Map<ChatActivityItem["status"], number>();
   return items.filter((item) => {
-    if (item.status !== "recent") {
-      return true;
-    }
-    recentCount += 1;
-    return recentCount <= normalizedLimit;
+    const count = (countByStatus.get(item.status) ?? 0) + 1;
+    countByStatus.set(item.status, count);
+    return count <= normalizedLimit;
   });
 }
 
@@ -557,16 +546,23 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
     return !runId || item.status !== "recent" || strongestByRun.get(runId)?.id === item.id;
   });
 
-  // Finished updates collapse to one row per chat and member. The row carries how many updates
-  // it stands for, summed over the rows it replaces so the count survives later merges.
+  // Finished updates collapse to one row per chat and member. The count is the larger of the rows
+  // seen in this pass and the count a surviving row already carried - never their sum, because a
+  // delta that re-supplies a row already folded into the survivor would otherwise keep inflating
+  // it, and never the pass alone, because a pass over already collapsed rows would reset it to 1.
   const newestRecentByGroup = new Map<string, ChatActivityItem>();
-  const collapsedCountByGroup = new Map<string, number>();
+  const rowsByGroup = new Map<string, number>();
+  const carriedCountByGroup = new Map<string, number>();
   for (const item of distinct) {
     const groupKey = recentParticipantGroupKey(item);
     if (!groupKey) {
       continue;
     }
-    collapsedCountByGroup.set(groupKey, (collapsedCountByGroup.get(groupKey) ?? 0) + collapsedActivityItemCount(item));
+    rowsByGroup.set(groupKey, (rowsByGroup.get(groupKey) ?? 0) + 1);
+    carriedCountByGroup.set(
+      groupKey,
+      Math.max(carriedCountByGroup.get(groupKey) ?? 1, carriedCollapsedCount(item))
+    );
     const existing = newestRecentByGroup.get(groupKey);
     if (!existing || isNewerActivityItem(item, existing)) {
       newestRecentByGroup.set(groupKey, item);
@@ -580,7 +576,9 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
     })
     .map((item) => {
       const groupKey = recentParticipantGroupKey(item);
-      const groupedCount = groupKey ? collapsedCountByGroup.get(groupKey) ?? 1 : 1;
+      const groupedCount = groupKey
+        ? Math.max(rowsByGroup.get(groupKey) ?? 1, carriedCountByGroup.get(groupKey) ?? 1)
+        : 1;
       if (groupedCount <= 1) {
         if (item.groupedCount === undefined) {
           return item;
@@ -597,13 +595,13 @@ function dedupeChatActivityItems(items: ChatActivityItem[]): ChatActivityItem[] 
  * never belong in activity. Rows built before that rule can still arrive from preserved renderer
  * state, and this is the one place every build, merge and refresh path passes through.
  */
-function isRetainableChatActivityItem(item: ChatActivityItem): boolean {
-  return item.status !== "recent" || item.kind === "message";
+function carriedCollapsedCount(item: ChatActivityItem): number {
+  const count = item.groupedCount;
+  return typeof count === "number" && Number.isFinite(count) && count > 1 ? Math.floor(count) : 1;
 }
 
-function collapsedActivityItemCount(item: ChatActivityItem): number {
-  const count = item.groupedCount;
-  return typeof count === "number" && Number.isFinite(count) && count > 0 ? Math.floor(count) : 1;
+function isRetainableChatActivityItem(item: ChatActivityItem): boolean {
+  return item.status !== "recent" || item.kind === "message";
 }
 
 function recentParticipantGroupKey(item: ChatActivityItem): string | undefined {

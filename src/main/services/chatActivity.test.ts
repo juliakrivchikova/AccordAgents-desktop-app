@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   applyChatActivityItemPreferences,
   buildChatActivityItems,
+  chatActivityItemPreferencesAfterClear,
   buildChatActivityItemsForConversationUpdate,
   limitChatActivityItems,
   mergeChatActivityItems,
@@ -349,21 +350,46 @@ test("buildChatActivityItems collapses a member's finished updates into one coun
   assert.equal(items[0].groupedCount, 3);
 });
 
-test("mergeChatActivityItems keeps the collapsed count when a delta rebuild sees fewer updates", () => {
-  const full = buildChatActivityItems(conversation({
+test("repeated merges of the same rows do not inflate the collapsed count", () => {
+  const conversationWithBoth = conversation({
     messages: [
       participantMessage("first", { createdAt: "2026-01-08T09:00:00.000Z", metadata: { runId: "run-1" } }),
       participantMessage("second", { createdAt: "2026-01-08T10:00:00.000Z", metadata: { runId: "run-2" } })
     ]
-  }), { now: NOW });
-  const deltaRebuild = buildChatActivityItems(conversation({
-    messages: [participantMessage("second", { createdAt: "2026-01-08T10:00:00.000Z", metadata: { runId: "run-2" } })]
+  });
+  const full = buildChatActivityItems(conversationWithBoth, { now: NOW });
+  const olderRowOnly = buildChatActivityItems(conversation({
+    messages: [participantMessage("first", { createdAt: "2026-01-08T09:00:00.000Z", metadata: { runId: "run-1" } })]
   }), { now: NOW });
 
-  const merged = mergeChatActivityItems(full, deltaRebuild, { replaceConversationId: "conversation-1" });
+  // A delta that re-supplies the older message arrives again and again; the row it folds into
+  // must keep reporting two updates, not three, four, five.
+  let merged = full;
+  for (let round = 0; round < 4; round += 1) {
+    merged = mergeChatActivityItems(merged, [...olderRowOnly, ...full]);
+  }
 
   assert.equal(merged.length, 1);
   assert.equal(merged[0].groupedCount, 2);
+});
+
+test("a cleared update is no longer counted by the row that replaces it", () => {
+  const messages = [
+    participantMessage("old", { createdAt: "2026-01-08T09:00:00.000Z", metadata: { runId: "run-old" } }),
+    participantMessage("new", { createdAt: "2026-01-08T11:00:00.000Z", metadata: { runId: "run-new" } })
+  ];
+  const [collapsed] = buildChatActivityItems(conversation({ messages: [messages[0]] }), { now: NOW });
+  const preferences = chatActivityItemPreferencesAfterClear(
+    { readItemIds: new Set(), clearedItemIds: new Set() },
+    [collapsed],
+    collapsed.id
+  );
+
+  const items = buildChatActivityItems(conversation({ messages }), { now: NOW, preferences });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].target.messageId, "new");
+  assert.equal(items[0].groupedCount, undefined);
 });
 
 test("limitChatActivityItems caps finished rows without dropping pending or running ones", () => {
@@ -371,8 +397,12 @@ test("limitChatActivityItems caps finished rows without dropping pending or runn
   const running = { ...syntheticItem("running-1", "2026-01-08T11:00:00.000Z"), status: "running" as const, kind: "run" as const };
   const finished = [1, 2, 3].map((index) => syntheticItem(`finished-${index}`, `2026-01-08T1${index}:00:00.000Z`));
 
-  const limited = limitChatActivityItems(sortChatActivityItems([...finished, pending, running]), 1);
+  const extraPending = { ...syntheticItem("pending-2", "2026-01-08T10:00:00.000Z"), status: "pending" as const, kind: "choice" as const };
 
+  const limited = limitChatActivityItems(sortChatActivityItems([...finished, pending, extraPending, running]), 1);
+
+  // Each status keeps its own budget: finished rows cannot evict a waiting card, and no status
+  // is exempt from a bound.
   assert.deepEqual(limited.map((item) => item.id), ["pending-1", "running-1", "finished-3"]);
 });
 

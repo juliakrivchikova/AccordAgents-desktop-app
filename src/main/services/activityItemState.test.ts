@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   applyChatActivityItemPreferences,
-  chatActivityItemPreferencesAfterClear
+  chatActivityItemPreferencesAfterClear,
+  MAX_CHAT_ACTIVITY_CLEAR_HORIZONS
 } from "../../shared/chatActivity";
 import type { ChatActivityItem } from "../../shared/types";
 
@@ -140,4 +141,19 @@ test("the legacy global clear cutoff keeps pre-upgrade rows hidden and never gro
   const preferences = chatActivityItemPreferencesAfterClear(legacy, [afterUpgrade], afterUpgrade.id);
   assert.equal(preferences.clearedRecentThroughBefore, "2026-07-11T00:00:00.000Z");
   assert.deepEqual(Object.keys(preferences.clearedRecentThroughByGroup ?? {}), ["conversation-1:id:member-2"]);
+});
+
+test("clearing a group again keeps its horizon when the bounded store evicts the oldest", () => {
+  let preferences = { readItemIds: new Set<string>(), clearedItemIds: new Set<string>() } as Parameters<typeof chatActivityItemPreferencesAfterClear>[0];
+  for (let index = 0; index < MAX_CHAT_ACTIVITY_CLEAR_HORIZONS; index += 1) {
+    const item = activityItem(`filler-${index}`, "2026-07-11T07:00:00.000Z", { participantId: `member-${index}` });
+    preferences = chatActivityItemPreferencesAfterClear(preferences, [item], item.id);
+  }
+  const firstGroupAgain = activityItem("first-again", "2026-07-11T09:00:00.000Z", { participantId: "member-0" });
+
+  preferences = chatActivityItemPreferencesAfterClear(preferences, [firstGroupAgain], firstGroupAgain.id);
+
+  const horizons = preferences.clearedRecentThroughByGroup ?? {};
+  assert.equal(Object.keys(horizons).length, MAX_CHAT_ACTIVITY_CLEAR_HORIZONS);
+  assert.equal(horizons["conversation-1:id:member-0"], firstGroupAgain.updatedAt);
 });

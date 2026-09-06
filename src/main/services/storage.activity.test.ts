@@ -488,10 +488,20 @@ test("listChatActivity does not backfill older finished rows for the same partic
     throw new Error(`Unexpected query: ${sql}`);
   });
 
-  const result = await storage.listChatActivity({
+  // Clearing a finished row also records a "cleared through" horizon for that chat and member,
+  // and both travel with the refresh: the id alone only removes the row the user saw.
+  const clearedIdOnly = await storage.listChatActivity({
     limit: 1,
     recentWindowDays: 400,
     excludedItemIds: ["recent:chat-1:newest-run"]
+  });
+  assert.deepEqual(clearedIdOnly.items.map((item) => item.id), ["recent:chat-1:older-run"]);
+
+  const result = await storage.listChatActivity({
+    limit: 1,
+    recentWindowDays: 400,
+    excludedItemIds: ["recent:chat-1:newest-run"],
+    clearedRecentThroughByGroup: { "chat-1:id:participant-1": "2026-01-08T11:00:00.000Z" }
   });
 
   assert.deepEqual(result.items, []);
