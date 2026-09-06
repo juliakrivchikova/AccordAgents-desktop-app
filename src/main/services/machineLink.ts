@@ -9,7 +9,7 @@
  * the finished participant messages.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   MACHINE_LINK_PROTOCOL,
@@ -23,7 +23,7 @@ import {
   type MachineTurnFinishedBody
 } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
-import type { ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
+import type { ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
 import type { MachineTurnDispatchRequest, MachineTurnDispatchResult, MachineTurnDispatcher } from "./chat";
 import type { DebugLogService } from "./debugLogs";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
@@ -83,6 +83,35 @@ export class MachineLinkService implements MachineTurnDispatcher {
   onConversationBackDelta(listener: (delta: { machineId: string; conversationId: string; messages: ChatMessage[] }) => void): () => void {
     this.emitter.on("backdelta", listener);
     return () => this.emitter.off("backdelta", listener);
+  }
+
+  /** An approval raised or answered by a member on a machine. */
+  onApproval(listener: (event: { machineId: string; conversationId: string; approval: ChatAppToolApproval; policies?: ChatAppToolApprovalPolicy[] }) => void): () => void {
+    this.emitter.on("approval", listener);
+    return () => this.emitter.off("approval", listener);
+  }
+
+  /** Forwards the desktop's decision on a machine-raised approval. */
+  async respondToMachineApproval(request: { machineId: string; conversationId: string; approvalId: string; approve: boolean; scope?: "once" | "chat" }): Promise<void> {
+    const connection = this.connections.get(request.machineId);
+    if (!connection?.machineDeviceId) {
+      throw new Error("The machine that raised this approval is not connected; the decision will be possible once it reconnects.");
+    }
+    await this.send(connection, {
+      type: "machine.approval.decision",
+      conversationId: request.conversationId,
+      approvalId: request.approvalId,
+      approve: request.approve,
+      ...(request.scope ? { scope: request.scope } : {}),
+      decidedAt: this.now().toISOString()
+    });
+    void this.debugLogs.write("machine-link.approval.decision-sent", {
+      machineId: request.machineId,
+      conversationId: request.conversationId,
+      approvalId: request.approvalId,
+      approve: request.approve,
+      scope: request.scope
+    });
   }
 
   async start(): Promise<void> {
@@ -232,19 +261,22 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (!connection.machineDeviceId) {
       return { status: "failed", messages: [], warnings: [], error: `@${request.participant.handle} is hosted on ${connection.record.name}, which is not connected.` };
     }
-    // Settings are small (roles, rules, presets, environment) and must be
-    // exactly the desktop's at the moment the turn starts, so they travel with
-    // every turn request rather than on a change hook.
-    await this.send(connection, { type: "machine.settings.sync", snapshot: await this.settings.exportMachineSettingsSnapshot() });
-    connection.settingsSynced = true;
-    await this.replicateTo(connection, request.conversation);
+    const interrupted: MachineTurnDispatchResult = { status: "interrupted", messages: [], warnings: [] };
+    if (request.signal?.aborted) {
+      return interrupted;
+    }
+    // Stop can arrive at any point of the preparation; a cancelled turn is
+    // never dispatched, and one already dispatched is cancelled on the machine.
+    let requestSent = false;
+    const onAbort = (): void => {
+      if (requestSent) {
+        void this.send(connection, { type: "machine.turn.cancel", conversationId: request.conversation.id, runId: request.runId }).catch(() => undefined);
+      }
+    };
+    request.signal?.addEventListener("abort", onAbort, { once: true });
     const result = new Promise<MachineTurnDispatchResult>((resolve) => {
       connection.pendingTurns.set(request.runId, { resolve, progress: request.progress });
     });
-    const onAbort = (): void => {
-      void this.send(connection, { type: "machine.turn.cancel", conversationId: request.conversation.id, runId: request.runId }).catch(() => undefined);
-    };
-    request.signal?.addEventListener("abort", onAbort, { once: true });
     const timeout = setTimeout(() => {
       const pending = connection.pendingTurns.get(request.runId);
       if (pending) {
@@ -254,6 +286,18 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }, TURN_ACK_TIMEOUT_MS);
     timeout.unref?.();
     try {
+      // Settings are small (roles, rules, presets, environment) and must be
+      // exactly the desktop's at the moment the turn starts, so they travel
+      // with every turn request rather than on a change hook.
+      await this.send(connection, { type: "machine.settings.sync", snapshot: await this.settings.exportMachineSettingsSnapshot() });
+      connection.settingsSynced = true;
+      if (request.signal?.aborted) {
+        return interrupted;
+      }
+      await this.replicateTo(connection, request.conversation);
+      if (request.signal?.aborted) {
+        return interrupted;
+      }
       await this.send(connection, {
         type: "machine.turn.request",
         conversationId: request.conversation.id,
@@ -264,11 +308,15 @@ export class MachineLinkService implements MachineTurnDispatcher {
         pendingMessageId: request.pendingMessageId,
         requestedAt: this.now().toISOString()
       });
+      requestSent = true;
+      if (request.signal?.aborted) {
+        onAbort();
+      }
       return await result;
     } catch (error) {
-      connection.pendingTurns.delete(request.runId);
       return { status: "failed", messages: [], warnings: [], error: errorMessage(error) };
     } finally {
+      connection.pendingTurns.delete(request.runId);
       clearTimeout(timeout);
       request.signal?.removeEventListener("abort", onAbort);
     }
@@ -284,24 +332,47 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private async replicateNow(connection: MachineConnection, conversation: Conversation): Promise<void> {
     const known = connection.replicated.get(conversation.id);
     if (!known) {
-      await this.send(connection, { type: "machine.conversation.sync", conversation });
-      connection.replicated.set(conversation.id, new Map(conversation.messages.map((message) => [message.id, messageStamp(message)])));
+      // A first copy travels as the conversation shell plus bounded message
+      // batches, so a chat of any size stays under the relay's logical
+      // message limit (the User's chats reach tens of megabytes as JSON).
+      await this.send(connection, { type: "machine.conversation.sync", conversation: { ...conversation, messages: [] } });
+      const sent = new Map<string, string>();
+      for (const batch of messageBatches(conversation.messages)) {
+        await this.send(connection, {
+          type: "machine.conversation.delta",
+          conversationId: conversation.id,
+          messages: batch,
+          updatedAt: conversation.updatedAt
+        });
+        for (const message of batch) {
+          sent.set(message.id, messageStamp(message));
+        }
+      }
+      connection.replicated.set(conversation.id, sent);
       return;
     }
     const changed = conversation.messages.filter((message) => known.get(message.id) !== messageStamp(message));
     const presentIds = new Set(conversation.messages.map((message) => message.id));
     const removedMessageIds = [...known.keys()].filter((id) => !presentIds.has(id));
-    const delta: MachineConversationDeltaBody = {
-      type: "machine.conversation.delta",
-      conversationId: conversation.id,
-      messages: changed,
-      metadata: conversation.metadata,
-      removedMessageIds: removedMessageIds.length > 0 ? removedMessageIds : undefined,
-      updatedAt: conversation.updatedAt
-    };
-    await this.send(connection, delta);
-    for (const message of changed) {
-      known.set(message.id, messageStamp(message));
+    const batches = messageBatches(changed);
+    if (batches.length === 0) {
+      batches.push([]);
+    }
+    for (const [index, batch] of batches.entries()) {
+      const last = index === batches.length - 1;
+      const delta: MachineConversationDeltaBody = {
+        type: "machine.conversation.delta",
+        conversationId: conversation.id,
+        messages: batch,
+        // Metadata and removals travel once, with the final batch.
+        ...(last ? { metadata: conversation.metadata } : {}),
+        ...(last && removedMessageIds.length > 0 ? { removedMessageIds } : {}),
+        updatedAt: conversation.updatedAt
+      };
+      await this.send(connection, delta);
+      for (const message of batch) {
+        known.set(message.id, messageStamp(message));
+      }
     }
     for (const id of removedMessageIds) {
       known.delete(id);
@@ -336,8 +407,25 @@ export class MachineLinkService implements MachineTurnDispatcher {
       case "machine.turn.finished":
         this.finishTurn(connection, body);
         return;
-      case "machine.conversation.backdelta":
+      case "machine.conversation.backdelta": {
+        // The machine already holds these; do not echo them back on the next delta.
+        const known = connection.replicated.get(body.conversationId);
+        if (known) {
+          for (const message of body.messages) {
+            known.set(message.id, messageStamp(message));
+          }
+        }
         this.emitter.emit("backdelta", { machineId: connection.record.id, conversationId: body.conversationId, messages: body.messages });
+        return;
+      }
+      case "machine.approval.requested":
+      case "machine.approval.updated":
+        this.emitter.emit("approval", {
+          machineId: connection.record.id,
+          conversationId: body.conversationId,
+          approval: { ...body.approval, homeMachineId: connection.record.id },
+          ...(body.type === "machine.approval.updated" && body.policies ? { policies: body.policies } : {})
+        });
         return;
       default:
         return;
@@ -365,6 +453,16 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private finishTurn(connection: MachineConnection, body: MachineTurnFinishedBody): void {
     const pending = connection.pendingTurns.get(body.runId);
     if (!pending) {
+      // The turn finished while this desktop was away (restart, relay drop):
+      // the machine kept the result and its messages still belong in the chat.
+      void this.debugLogs.write("machine-link.turn.finished-late", { machineId: connection.record.id, runId: body.runId, status: body.status, messages: body.messages.length });
+      if (body.messages.length > 0) {
+        const known = connection.replicated.get(body.conversationId);
+        for (const message of body.messages) {
+          known?.set(message.id, messageStamp(message));
+        }
+        this.emitter.emit("backdelta", { machineId: connection.record.id, conversationId: body.conversationId, messages: body.messages });
+      }
       return;
     }
     connection.pendingTurns.delete(body.runId);
@@ -410,8 +508,36 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 }
 
-function messageStamp(message: ChatMessage): string {
-  return `${message.status ?? ""}\0${message.createdAt}\0${message.content.length}\0${JSON.stringify(message.metadata ?? null)}`;
+/** Content hash of everything a message carries, so edits of equal length
+ *  are never mistaken for "unchanged". */
+export function messageStamp(message: ChatMessage): string {
+  return createHash("sha256").update(JSON.stringify(message)).digest("hex");
+}
+
+/** Bounded message batches: at most MAX_BATCH_MESSAGES messages and about
+ *  MAX_BATCH_BYTES of JSON per relay logical message (the sealed form is
+ *  larger; the relay limit is 10 MiB). */
+const MAX_BATCH_MESSAGES = 150;
+const MAX_BATCH_BYTES = 1_500_000;
+
+export function messageBatches(messages: ChatMessage[]): ChatMessage[][] {
+  const batches: ChatMessage[][] = [];
+  let current: ChatMessage[] = [];
+  let currentBytes = 0;
+  for (const message of messages) {
+    const bytes = Buffer.byteLength(JSON.stringify(message), "utf8");
+    if (current.length > 0 && (current.length >= MAX_BATCH_MESSAGES || currentBytes + bytes > MAX_BATCH_BYTES)) {
+      batches.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(message);
+    currentBytes += bytes;
+  }
+  if (current.length > 0) {
+    batches.push(current);
+  }
+  return batches;
 }
 
 function errorMessage(error: unknown): string {

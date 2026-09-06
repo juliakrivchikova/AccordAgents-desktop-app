@@ -3336,17 +3336,35 @@ export class SettingsService {
     }
   }
 
+  // Machine pairings carry relay keys, so they are stored sealed or not at
+  // all; the format is marked so a later read never guesses.
   private sealJson(json: string): string {
     const secrets = hostPlatform().secrets;
-    return secrets.isEncryptionAvailable()
-      ? secrets.encryptString(json).toString("base64")
-      : Buffer.from(json, "utf8").toString("base64");
+    if (!secrets.isEncryptionAvailable()) {
+      throw new Error("Machine enrollments need the system secret store, which is not available on this computer.");
+    }
+    return `sealed:${secrets.encryptString(json).toString("base64")}`;
   }
 
-  private openJson(sealed: string): string {
-    const buffer = Buffer.from(sealed, "base64");
+  private openJson(stored: string): string {
     const secrets = hostPlatform().secrets;
-    return secrets.isEncryptionAvailable() ? secrets.decryptString(buffer) : buffer.toString("utf8");
+    if (stored.startsWith("sealed:")) {
+      if (!secrets.isEncryptionAvailable()) {
+        throw new Error("Machine enrollments are sealed with the system secret store, which is not available on this computer.");
+      }
+      return secrets.decryptString(Buffer.from(stored.slice("sealed:".length), "base64"));
+    }
+    // Records written before the format marker: sealed when a store existed,
+    // otherwise plain base64.
+    const buffer = Buffer.from(stored, "base64");
+    if (secrets.isEncryptionAvailable()) {
+      try {
+        return secrets.decryptString(buffer);
+      } catch {
+        return buffer.toString("utf8");
+      }
+    }
+    return buffer.toString("utf8");
   }
 
   async getCloudRunsDeviceId(): Promise<string> {

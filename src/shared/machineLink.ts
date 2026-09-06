@@ -10,7 +10,7 @@
  * machine answers with progress and the finished participant messages.
  */
 
-import type { ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "./types";
+import type { ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "./types";
 
 export const MACHINE_LINK_PROTOCOL = "accord-machine-link-v1";
 
@@ -116,12 +116,29 @@ export interface MachineConversationBackDeltaBody {
   updatedAt: string;
 }
 
+/** An app-tool approval (permission, Codex approval, participant request)
+ *  raised by a member on the machine; the desktop shows the same card. */
+export interface MachineApprovalRequestedBody {
+  type: "machine.approval.requested";
+  conversationId: string;
+  approval: ChatAppToolApproval;
+}
+
+/** The machine answered or timed out an approval; carries the machine's
+ *  chat-wide policies so a "for this chat" grant reaches the desktop. */
+export interface MachineApprovalUpdatedBody {
+  type: "machine.approval.updated";
+  conversationId: string;
+  approval: ChatAppToolApproval;
+  policies?: ChatAppToolApprovalPolicy[];
+}
+
 export interface MachineApprovalDecisionBody {
   type: "machine.approval.decision";
   conversationId: string;
-  messageId: string;
-  decision: "approved" | "denied";
-  scope?: string;
+  approvalId: string;
+  approve: boolean;
+  scope?: "once" | "chat";
   decidedAt: string;
 }
 
@@ -144,6 +161,8 @@ export type MachineLinkMessage =
   | MachineTurnProgressBody
   | MachineTurnFinishedBody
   | MachineConversationBackDeltaBody
+  | MachineApprovalRequestedBody
+  | MachineApprovalUpdatedBody
   | MachineApprovalDecisionBody
   | MachineChoiceAnswerBody;
 
@@ -160,6 +179,8 @@ const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.turn.progress",
   "machine.turn.finished",
   "machine.conversation.backdelta",
+  "machine.approval.requested",
+  "machine.approval.updated",
   "machine.approval.decision",
   "machine.choice.answer"
 ]);

@@ -651,6 +651,8 @@ export interface MachineTurnDispatchResult {
 
 export interface MachineTurnDispatcher {
   runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult>;
+  /** Forwards the desktop's decision on an approval raised on a machine. */
+  respondToMachineApproval?(request: { machineId: string; conversationId: string; approvalId: string; approve: boolean; scope?: "once" | "chat" }): Promise<void>;
 }
 
 interface RemoteRunStarter {
@@ -4742,6 +4744,26 @@ export class ChatService {
     if (!approval) {
       throw new Error("App tool approval request was not found.");
     }
+    // Machines transport: an approval raised by a member on a machine is
+    // answered there; this desktop's copy updates when the machine reports
+    // the outcome.
+    if (approval.homeMachineId) {
+      if (approval.status !== "pending") {
+        throw new Error("App tool approval request has already been answered.");
+      }
+      const link = this.machineLink;
+      if (!link?.respondToMachineApproval) {
+        throw new Error("The machine link is not available, so this approval cannot be answered right now.");
+      }
+      await link.respondToMachineApproval({
+        machineId: approval.homeMachineId,
+        conversationId: conversation.id,
+        approvalId: approval.id,
+        approve: request.approve,
+        ...(request.scope === "chat" ? { scope: "chat" as const } : request.scope === "once" ? { scope: "once" as const } : {})
+      });
+      return conversation;
+    }
     if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
       return this.respondToToolPermissionApproval(request);
     }
@@ -6588,7 +6610,14 @@ export class ChatService {
           runBegun = true;
           await options.onTargetRunBegun?.(participant.id, targetRunId);
           await this.withChatMutation(conversation, async () => {
-            conversation.messages.push(pendingMessage);
+            // A machine-hosted turn reuses the desktop's bubble id, and that
+            // bubble may already be in this copy through replication.
+            const existingIndex = conversation.messages.findIndex((message) => message.id === pendingMessage.id);
+            if (existingIndex >= 0) {
+              conversation.messages[existingIndex] = pendingMessage;
+            } else {
+              conversation.messages.push(pendingMessage);
+            }
             this.recordLastMessageByParticipant(conversation, pendingMessage);
             conversation.updatedAt = new Date().toISOString();
             this.queueSnapshot(conversation);
@@ -6738,6 +6767,92 @@ export class ChatService {
         await this.finalizePendingParticipantMessage(conversation, participant, pendingMessage);
       }
     }
+  }
+
+  /** Machines transport, desktop side: an approval raised or answered by a
+   *  member on a machine lands in this desktop's copy as the same card, with
+   *  the machine's chat-wide policies merged in. */
+  async applyMachineApproval(request: {
+    conversationId: string;
+    approval: ChatAppToolApproval;
+    policies?: ChatAppToolApprovalPolicy[];
+  }): Promise<Conversation | undefined> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return conversation;
+    }
+    return this.withChatMutation(conversation, async () => {
+      this.upsertAppToolApproval(conversation, { ...request.approval, conversationId: conversation.id });
+      for (const policy of request.policies ?? []) {
+        if (policy && typeof policy === "object" && typeof policy.id === "string") {
+          this.upsertAppToolApprovalPolicy(conversation, policy);
+        }
+      }
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+      return conversation;
+    });
+  }
+
+  /** Machines transport, machine side: stores a conversation replicated from
+   *  the desktop through this service's own mutation queue and snapshot
+   *  tracking, so later saves by turns on this machine never collide with
+   *  rows written behind the service's back. The caller has already merged
+   *  the machine-owned metadata. */
+  async applyReplicatedConversation(incoming: Conversation): Promise<void> {
+    const existing = await this.storage.getConversation(incoming.id);
+    if (!existing) {
+      await this.saveConversation(incoming);
+      return;
+    }
+    await this.withChatMutation(existing, async () => {
+      existing.messages = incoming.messages;
+      existing.metadata = incoming.metadata;
+      existing.title = incoming.title;
+      existing.repoPath = incoming.repoPath;
+      existing.updatedAt = incoming.updatedAt;
+      await this.saveConversation(existing);
+    });
+  }
+
+  /** Machines transport, desktop side: messages created or changed by turns
+   *  that started on a machine (a member resumed after an approval, a member
+   *  request run there) land in this desktop's copy under their own ids. */
+  async applyMachineBackDelta(request: { conversationId: string; messages: ChatMessage[] }): Promise<Conversation | undefined> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return conversation;
+    }
+    return this.withChatMutation(conversation, async () => {
+      let changed = false;
+      for (const incoming of request.messages) {
+        if (!incoming || typeof incoming.id !== "string") {
+          continue;
+        }
+        const index = conversation.messages.findIndex((message) => message.id === incoming.id);
+        if (index >= 0) {
+          const current = conversation.messages[index];
+          // Never let a machine's copy demote a message this desktop already finished.
+          if (current.status !== "pending" && incoming.status === "pending") {
+            continue;
+          }
+          conversation.messages[index] = incoming;
+        } else {
+          conversation.messages.push(incoming);
+        }
+        if (incoming.role === "participant") {
+          this.recordLastMessageByParticipant(conversation, incoming);
+        }
+        changed = true;
+      }
+      if (!changed) {
+        return conversation;
+      }
+      conversation.messages.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+      return conversation;
+    });
   }
 
   /** Machines transport, machine side: runs one participant turn for a message
@@ -18362,7 +18477,10 @@ export class ChatService {
       .catch((error) => {
         void this.debugLogs.write("chat.persistence.error", {
           conversationId: conversation.id,
-          message: error instanceof Error ? error.message : String(error)
+          message: error instanceof Error ? error.message : String(error),
+          stderr: typeof (error as { result?: { stderr?: unknown } }).result?.stderr === "string"
+            ? ((error as { result: { stderr: string } }).result.stderr).slice(0, 400)
+            : undefined
         });
       });
     this.saveQueues.set(conversation.id, next);

@@ -2777,6 +2777,20 @@ void app.whenReady().then(async () => {
     machineLinkService.onStatus(() => {
       void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
     });
+    machineLinkService.onConversationBackDelta((delta) => {
+      void chatService.applyMachineBackDelta({ conversationId: delta.conversationId, messages: delta.messages }).catch((error) => {
+        void debugLogService.write("machine-link.backdelta.apply-error", { message: error instanceof Error ? error.message : String(error) });
+      });
+    });
+    machineLinkService.onApproval((event) => {
+      void chatService.applyMachineApproval({
+        conversationId: event.conversationId,
+        approval: event.approval,
+        policies: event.policies
+      }).catch((error) => {
+        void debugLogService.write("machine-link.approval.apply-error", { message: error instanceof Error ? error.message : String(error) });
+      });
+    });
     chatService.setMachineLink(machineLinkService);
     void machineLinkService.start().catch((error) => {
       void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });

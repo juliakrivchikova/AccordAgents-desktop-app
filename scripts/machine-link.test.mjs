@@ -34,7 +34,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
       runMachineHostedTurn: async (request, signal, progress) => {
         hostRuns.push(request);
         progress?.({ runId: request.runId, phase: "debate", message: "working", createdAt: new Date().toISOString() });
-        if (request.messageId === "msg-long") {
+        if (request.messageId === "msg-long" || request.messageId === "msg-away") {
           await new Promise((resolve) => { releaseLongTurn = resolve; signal?.addEventListener("abort", resolve, { once: true }); });
           if (signal?.aborted) {
             return { messages: [], warnings: [] };
@@ -45,7 +45,9 @@ test("machine link replicates settings and conversations, runs a turn, streams p
         conversation.messages.push(reply);
         return { messages: [reply], warnings: ["w1"] };
       },
-      cancelRun: () => true
+      cancelRun: () => true,
+      applyReplicatedConversation: async (conversation) => { machineStore.set(conversation.id, conversation); },
+      respondToAppToolApproval: async () => undefined
     };
     const hostStorage = {
       getConversation: async (id) => machineStore.get(id),
@@ -107,6 +109,47 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     controller.abort();
     const third = await pendingLong;
     assert.equal(third.status, "interrupted");
+
+    // Stop before dispatch: an already-cancelled turn never reaches the machine.
+    const runsBefore = hostRuns.length;
+    const preAborted = new AbortController();
+    preAborted.abort();
+    const early = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: "run-early", pendingMessageId: "pending-early", signal: preAborted.signal });
+    assert.equal(early.status, "interrupted");
+    // Stop during preparation (settings/replication in flight): same outcome.
+    const midPrep = new AbortController();
+    const midPrepTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: "run-midprep", pendingMessageId: "pending-midprep", signal: midPrep.signal });
+    midPrep.abort();
+    assert.equal((await midPrepTurn).status, "interrupted");
+    assert.equal(hostRuns.length, runsBefore, "cancelled turns are not dispatched");
+
+    // A large chat travels as a shell plus bounded batches and arrives whole.
+    const big = {
+      id: "conv-big", kind: "chat", title: "Big", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      metadata: { participants: [participant] },
+      messages: Array.from({ length: 400 }, (_, index) => ({ id: `big-${index}`, role: "user", content: "x".repeat(10_000), createdAt: new Date(Date.now() + index).toISOString(), status: "done" })),
+      findings: []
+    };
+    const bigResult = await link.runTurn({ conversation: big, participant, triggerMessage: big.messages[399], runId: "run-big", pendingMessageId: "pending-big" });
+    assert.equal(bigResult.status, "completed");
+    assert.equal(machineStore.get("conv-big").messages.length, 401);
+    const bigDeltas = logs.filter((entry) => entry.event === "machine-host.message" && entry.payload?.type === "machine.conversation.delta" && entry.payload?.conversationId === "conv-big");
+    assert.ok(bigDeltas.length >= 3, `expected batched deltas, saw ${bigDeltas.length}`);
+
+    // A reply finished while the desktop was away is delivered on reconnect.
+    const backdeltas = [];
+    link.onConversationBackDelta((delta) => backdeltas.push(delta));
+    conversation.messages.push({ id: "msg-away", role: "user", content: "away", createdAt: new Date().toISOString(), status: "done" });
+    releaseLongTurn = undefined;
+    const awayTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[3], runId: "run-away", pendingMessageId: "pending-away" });
+    await waitFor(() => hostRuns.length === runsBefore + 2 && typeof releaseLongTurn === "function", 5_000);
+    await link.disconnectMachine("machine-1");
+    await awayTurn.catch(() => undefined);
+    await waitFor(() => logs.some((entry) => entry.event === "machine-host.desktop.away"), 5_000);
+    releaseLongTurn();
+    await waitFor(() => logs.some((entry) => entry.event === "machine-host.terminal.retry-later"), 5_000);
+    await link.connectMachine(record);
+    await waitFor(() => backdeltas.some((delta) => delta.messages.some((message) => message.id === "pending-away")), 5_000);
 
     link.close();
     host.close();

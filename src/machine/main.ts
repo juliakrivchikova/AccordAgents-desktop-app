@@ -129,13 +129,16 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     debugLogService,
     chatEventMirrorOptionsFromEnv()
   );
+  let hostRef: MachineHostService | undefined;
   const chatService = new ChatService(
     storageService,
     settingsService,
     cliAgentRunner,
     debugLogService,
     appMcpService,
-    undefined,
+    (conversation) => {
+      hostRef?.noteConversationSnapshot(conversation);
+    },
     userSkillsService,
     undefined,
     chatEventMirrorService
@@ -169,8 +172,12 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     deviceId: identity.originId,
     machineName: args.machineName,
     appVersion: platform.appVersion(),
-    detectProviders: () => cliAgentRunner.detectAgents()
+    detectProviders: () => cliAgentRunner.detectAgents(),
+    onSettingsImported: async () => {
+      cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());
+    }
   });
+  hostRef = host;
   await host.start();
   console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.relayUrl} (user data: ${userDataPath()})`);
 
