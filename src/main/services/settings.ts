@@ -56,6 +56,13 @@ import {
   normalizeChatParticipantRequestMaxDepth,
   normalizeChatParticipantRequestPromptMaxChars
 } from "../../shared/chatParticipantRequests";
+import type {
+  AvatarImageMediaType,
+  CustomAvatarSummary,
+  ReadCustomAvatarResult,
+  SaveCustomAvatarRequest
+} from "../../shared/avatarStudio";
+import { avatarImageExtension } from "../../shared/avatarStudio";
 import { normalizeChatAutoWatchWakeLimit } from "../../shared/chatAutoWatch";
 import { normalizeChatPromptContextSettings } from "../../shared/chatPromptContext";
 import { normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
@@ -130,6 +137,7 @@ interface StoredSettings {
   chatBehaviorRules?: ChatBehaviorRuleConfig[];
   chatSavedPrompts?: ChatSavedPromptConfig[];
   chatParticipantConfigs?: ChatParticipantConfig[];
+  chatCustomAvatars?: CustomAvatarSummary[];
   chatParticipantSeedState?: ChatParticipantSeedState;
   remoteSessionCleanupTombstones?: RemoteSessionCleanupTombstone[];
 }
@@ -1766,6 +1774,7 @@ export class SettingsService {
       chatBehaviorRules: stored.chatBehaviorRules ?? [],
       chatSavedPrompts: stored.chatSavedPrompts ?? [],
       chatParticipantConfigs: stored.chatParticipantConfigs ?? [],
+      chatCustomAvatars: this.normalizeCustomAvatars(stored.chatCustomAvatars),
       chatParticipantSeedState: stored.chatParticipantSeedState,
       providers: stored.providers.map((provider) => ({
         kind: provider.kind,
@@ -1774,6 +1783,71 @@ export class SettingsService {
         model: provider.model
       }))
     };
+  }
+
+  // Generated avatars are stored as files next to the settings file: a base64 PNG
+  // inside settings.json would be read on every getSettings and grow it without limit.
+  private customAvatarDir(): string {
+    return path.join(app.getPath("userData"), "avatars");
+  }
+
+  private customAvatarPath(id: string, mediaType: AvatarImageMediaType): string {
+    return path.join(this.customAvatarDir(), `${id}.${avatarImageExtension(mediaType)}`);
+  }
+
+  private normalizeCustomAvatars(value: unknown): CustomAvatarSummary[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return [];
+      }
+      const record = entry as Record<string, unknown>;
+      const id = typeof record.id === "string" ? record.id.trim() : "";
+      const mediaType = record.mediaType === "image/png" || record.mediaType === "image/svg+xml"
+        ? record.mediaType
+        : undefined;
+      if (!id || !mediaType) {
+        return [];
+      }
+      return [{
+        id,
+        mediaType,
+        label: typeof record.label === "string" && record.label.trim() ? record.label.trim() : "Свой аватар",
+        createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date().toISOString()
+      }];
+    });
+  }
+
+  async saveCustomAvatar(request: SaveCustomAvatarRequest): Promise<AppSettings> {
+    const bytes = Buffer.from(request.dataBase64, "base64");
+    if (bytes.length === 0) {
+      throw new Error("Пустая картинка.");
+    }
+    const id = randomUUID();
+    await mkdir(this.customAvatarDir(), { recursive: true });
+    await writeFile(this.customAvatarPath(id, request.mediaType), bytes);
+    const summary: CustomAvatarSummary = {
+      id,
+      mediaType: request.mediaType,
+      label: request.label.trim() || "Свой аватар",
+      createdAt: new Date().toISOString()
+    };
+    const stored = await this.readStored();
+    stored.chatCustomAvatars = [...this.normalizeCustomAvatars(stored.chatCustomAvatars), summary];
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
+  async readCustomAvatar(id: string): Promise<ReadCustomAvatarResult> {
+    const stored = await this.readStored();
+    const summary = this.normalizeCustomAvatars(stored.chatCustomAvatars).find((entry) => entry.id === id);
+    if (!summary) {
+      throw new Error("Аватар не найден.");
+    }
+    const bytes = await readFile(this.customAvatarPath(id, summary.mediaType));
+    return { id, mediaType: summary.mediaType, dataBase64: bytes.toString("base64") };
   }
 
   async listRemoteSessionCleanupTombstones(): Promise<RemoteSessionCleanupTombstone[]> {
@@ -2731,6 +2805,7 @@ export class SettingsService {
         chatRoleConfigs,
         { migrateWorkflowManagerParticipantManagement }
       ),
+      chatCustomAvatars: this.normalizeCustomAvatars(settings.chatCustomAvatars),
       chatParticipantSeedState: this.normalizeSeedState(settings.chatParticipantSeedState),
       remoteSessionCleanupTombstones: this.normalizeRemoteSessionCleanupTombstones(
         settings.remoteSessionCleanupTombstones

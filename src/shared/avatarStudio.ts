@@ -31,13 +31,13 @@ export interface AvatarStudioCandidate {
 }
 
 export interface AvatarStudioTurnRequest {
-  /** Identifies the studio window; a session per (studio, provider). */
+  /** Identifies the studio window; a session per (window, provider). */
   studioId: string;
   prompt: string;
   runner: AvatarStudioRunner;
   member: { handle: string; roleLabel?: string };
-  /** Candidate the user is refining, when the run starts a fresh session. */
-  baseCandidateId?: string;
+  /** The picture on screen, so a fresh session can start from it. */
+  baseCandidate?: { mediaType: AvatarImageMediaType; dataUrl: string };
 }
 
 export interface AvatarStudioTurnResult {
@@ -48,12 +48,24 @@ export interface AvatarStudioTurnResult {
   error?: string;
 }
 
-export interface SavedAvatarImage {
+/** Metadata only: the bytes live in a file and are fetched on demand. */
+export interface CustomAvatarSummary {
   id: string;
   mediaType: AvatarImageMediaType;
-  dataUrl: string;
   label: string;
   createdAt: string;
+}
+
+export interface SaveCustomAvatarRequest {
+  mediaType: AvatarImageMediaType;
+  dataBase64: string;
+  label: string;
+}
+
+export interface ReadCustomAvatarResult {
+  id: string;
+  mediaType: AvatarImageMediaType;
+  dataBase64: string;
 }
 
 const CUSTOM_AVATAR_PREFIX = "custom:";
@@ -81,7 +93,28 @@ export function avatarImageMediaType(fileName: string): AvatarImageMediaType | u
   return undefined;
 }
 
-export function avatarImageDataUrl(mediaType: AvatarImageMediaType, bytes: Buffer | Uint8Array): string {
-  const base64 = Buffer.from(bytes).toString("base64");
+export function avatarImageExtension(mediaType: AvatarImageMediaType): "svg" | "png" {
+  return mediaType === "image/png" ? "png" : "svg";
+}
+
+export function avatarImageDataUrl(mediaType: AvatarImageMediaType, base64: string): string {
   return `data:${mediaType};base64,${base64}`;
+}
+
+/**
+ * Whether the picture on screen has to travel with the next request. A session
+ * that already drew it knows it; a different provider, model or effort starts a
+ * fresh session and needs it as the starting point. Re-sending it every turn
+ * would push megabytes over IPC for nothing.
+ */
+export function avatarStudioNeedsSeed(
+  candidate: Pick<AvatarStudioCandidate, "drawnBy"> | undefined,
+  runner: AvatarStudioRunner
+): boolean {
+  if (!candidate) {
+    return false;
+  }
+  return candidate.drawnBy.kind !== runner.kind
+    || (candidate.drawnBy.model ?? "") !== (runner.model ?? "")
+    || (candidate.drawnBy.reasoningEffort ?? "") !== (runner.reasoningEffort ?? "");
 }

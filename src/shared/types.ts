@@ -323,6 +323,14 @@ export interface ChatPromptContextSettings {
   timeline: ChatPromptContextScopeSettings;
 }
 
+import type {
+  AvatarStudioTurnRequest,
+  AvatarStudioTurnResult,
+  CustomAvatarSummary,
+  ReadCustomAvatarResult,
+  SaveCustomAvatarRequest
+} from "./avatarStudio";
+
 export interface AppSettings {
   roundLimitDefault: number;
   betaUpdates: boolean;
@@ -337,6 +345,7 @@ export interface AppSettings {
   chatBehaviorRules: ChatBehaviorRuleConfig[];
   chatSavedPrompts: ChatSavedPromptConfig[];
   chatParticipantConfigs: ChatParticipantConfig[];
+  chatCustomAvatars: CustomAvatarSummary[];
   chatParticipantSeedState?: ChatParticipantSeedState;
   assistantProviderKind?: ChatProviderKind;
   lastSuccessfulChatProviderKind?: ChatProviderKind;
@@ -2491,6 +2500,11 @@ export interface AppBridge {
   saveChatSavedPromptConfig(update: ChatSavedPromptConfigUpdate): Promise<AppSettings>;
   deleteChatSavedPromptConfig(id: string): Promise<AppSettings>;
   saveChatParticipantConfig(update: ChatParticipantConfigUpdate): Promise<AppSettings>;
+  runAvatarStudioTurn(request: AvatarStudioTurnRequest): Promise<AvatarStudioTurnResult>;
+  cancelAvatarStudioTurn(studioId: string): Promise<void>;
+  closeAvatarStudio(studioId: string): Promise<void>;
+  saveCustomAvatar(request: SaveCustomAvatarRequest): Promise<AppSettings>;
+  readCustomAvatar(id: string): Promise<ReadCustomAvatarResult>;
   deleteChatParticipantConfig(id: string): Promise<AppSettings>;
   updateLastRepoPath(repoPath: string): Promise<AppSettings>;
   listProviderModels(kind: ProviderKind): Promise<ProviderModelCatalog>;

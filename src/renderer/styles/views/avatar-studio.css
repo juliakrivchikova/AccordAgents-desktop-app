@@ -1,0 +1,248 @@
+/* Avatar studio: picture on the left, conversation on the right. */
+
+.avatar-studio-dialog {
+  width: min(940px, calc(100vw - 48px));
+  max-width: none;
+  display: grid;
+  gap: 14px;
+}
+
+.avatar-studio-head {
+  display: grid;
+  gap: 8px;
+}
+
+.avatar-studio-runner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.avatar-studio-note {
+  margin: 0;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.avatar-studio-body {
+  display: grid;
+  grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.avatar-studio-preview {
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+}
+
+.avatar-studio-canvas {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 220px;
+  height: 220px;
+  padding: 10px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-avatar-bg);
+  overflow: hidden;
+}
+
+.avatar-studio-canvas img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.avatar-studio-empty {
+  color: var(--app-muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+/* The real sizes the avatar has to survive, shown next to the big preview. */
+.avatar-studio-sizes {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--app-muted);
+  font-size: 11.5px;
+}
+
+.avatar-studio-size {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--app-avatar-bg);
+}
+
+.avatar-studio-size img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar-studio-size.is-message {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+}
+
+.avatar-studio-size.is-roster {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+}
+
+.avatar-studio-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+}
+
+.avatar-studio-thumb {
+  display: inline-flex;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: var(--app-avatar-bg);
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.avatar-studio-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar-studio-thumb:hover {
+  box-shadow: 0 0 0 1.5px var(--app-border);
+}
+
+.avatar-studio-thumb.selected {
+  box-shadow: 0 0 0 2px var(--app-accent);
+}
+
+.avatar-studio-chat {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 10px;
+  min-height: 300px;
+  max-height: 46vh;
+}
+
+.avatar-studio-messages {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.avatar-studio-message {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.avatar-studio-message.is-user {
+  justify-self: end;
+  max-width: 85%;
+  background: var(--app-user-bub);
+}
+
+.avatar-studio-message.is-failed {
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
+}
+
+.avatar-studio-message.is-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--app-muted);
+}
+
+.avatar-studio-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.avatar-studio-composer textarea {
+  min-height: 62px;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.avatar-studio-composer textarea:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 1px;
+}
+
+.avatar-studio-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* "Создать" sits first in the avatar grid and reads as an action, not a picture.
+   Two grids show it: the popover (36px tiles) and the chat draft row (52px). */
+.avatar-choice.is-create {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  overflow: hidden;
+  border: 1px dashed var(--app-border-strong);
+  background: var(--app-surface-subtle);
+  color: var(--app-muted);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.avatar-choice.is-create:hover {
+  border-color: var(--app-accent);
+  color: var(--app-accent);
+}
+
+.chat-app-tool-avatar-choice.is-create {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 36px;
+  height: 36px;
+  border: 1px dashed var(--app-border-strong);
+  border-radius: 10px;
+  background: var(--app-surface-subtle);
+  color: var(--app-muted);
+  font-size: 8.5px;
+  line-height: 1;
+}
+
+.chat-app-tool-avatar-choice.is-create:hover {
+  border-color: var(--app-accent);
+  color: var(--app-accent);
+  box-shadow: none;
+}

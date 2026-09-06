@@ -11780,6 +11780,7 @@ function testService(options: {
   };
   let assistantProviderKind = options.settings?.assistantProviderKind;
   const publicSettings = (): AppSettings => ({
+    chatCustomAvatars: [],
     roundLimitDefault: 1,
     betaUpdates: false,
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,

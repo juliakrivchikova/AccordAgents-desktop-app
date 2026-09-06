@@ -65,7 +65,8 @@
     "bump:patch": "node scripts/bump-version.mjs patch",
     "bump:minor": "node scripts/bump-version.mjs minor",
     "bump:major": "node scripts/bump-version.mjs major",
-    "tag-release": "node scripts/tag-release.mjs"
+    "tag-release": "node scripts/tag-release.mjs",
+    "test:avatar-studio": "npm run build:main && node --require ./scripts/electron-stub.cjs --test dist/main/main/services/avatarStudio.test.js dist/main/main/services/settings.customAvatars.test.js && npm run build:renderer-tests && node --test --test-force-exit --import ./scripts/renderer-jsdom-setup.mjs dist/renderer-tests/renderer/components/avatar/avatar-studio-dialog.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-ec2": "^3.1079.0",

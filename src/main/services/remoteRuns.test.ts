@@ -2833,6 +2833,7 @@ async function testRemoteRun(options: {
         chatBehaviorRules: [],
         chatSavedPrompts: [],
         chatParticipantConfigs: [],
+        chatCustomAvatars: [],
         chatParticipantSeedState: {}
       };
     }
@@ -3234,6 +3235,7 @@ function coordinatorSettings(patch: { maxRuntimeMs: number; pollIntervalMs: numb
     async getPublicSettings(): Promise<AppSettings> {
       return {
         roundLimitDefault: 1,
+        chatCustomAvatars: [],
         betaUpdates: false,
         cliAgentRunTimeoutMs: 24 * 60 * 60_000,
         chatAutoWatchWakeLimit: CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT,

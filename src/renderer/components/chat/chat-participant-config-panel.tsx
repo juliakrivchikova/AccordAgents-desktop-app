@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type React from "react";
-import { Check, ChevronDown, ShieldCheck } from "lucide-react";
+import { Check, ChevronDown, ShieldCheck, Sparkles } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -14,6 +14,8 @@ import {
   resolveChatManageRolesParticipantsPermission
 } from "../../../shared/agentPermissions";
 import type {
+  AgentHealth,
+  AppSettings,
   ChatAgentPermissions,
   ChatParticipantRequestPermission,
   ChatProviderKind,
@@ -22,6 +24,9 @@ import type {
   ProviderModelCatalog
 } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
+import { AvatarStudioDialog } from "../avatar/avatar-studio-dialog";
+import { useCustomAvatarLibrary } from "../avatar/custom-avatars";
+import { customAvatarId } from "../../../shared/avatarStudio";
 import { avatarForChatAvatarOption, avatarForChatParticipant, chatAvatarOptionsForKind, normalizedChatAvatarId } from "./chat-avatars";
 import { chatAgentModeLabel, chatInheritedCliSettingLabel } from "./chat-participant-drafts";
 
@@ -46,11 +51,19 @@ export function ChatParticipantAvatarField(props: {
   kind: ChatProviderKind;
   handle: string;
   avatarId?: string;
+  /** Drawing a new avatar needs the member's role for context and the ready CLIs. */
+  roleLabel?: string;
+  settings?: AppSettings;
+  agents?: AgentHealth[];
   onSelect: (avatarId: string) => void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
+  const [studioOpen, setStudioOpen] = useState(false);
   const currentId = normalizedChatAvatarId(props.kind, props.avatarId, props.handle);
   const options = chatAvatarOptionsForKind(props.kind);
+  const customAvatars = props.settings?.chatCustomAvatars ?? [];
+  useCustomAvatarLibrary(customAvatars);
+  const canDraw = Boolean(props.settings && props.agents);
   const spec = avatarForChatParticipant(
     { id: props.handle, handle: props.handle, kind: props.kind, avatarId: props.avatarId },
     props.handle
@@ -67,6 +80,44 @@ export function ChatParticipantAvatarField(props: {
       </PopoverTrigger>
       <PopoverContent align="start" sideOffset={6} className="chat-app-tool-avatar-menu">
         <div className="chat-app-tool-avatar-grid" role="radiogroup" aria-label="Member avatar">
+          {canDraw && (
+            <button
+              type="button"
+              className="chat-app-tool-avatar-choice is-create"
+              data-testid="avatar-create-tile"
+              title="Нарисовать аватар"
+              aria-label="Нарисовать аватар"
+              onClick={() => {
+                setOpen(false);
+                setStudioOpen(true);
+              }}
+            >
+              <Sparkles size={16} aria-hidden />
+              <span>Создать</span>
+            </button>
+          )}
+          {customAvatars.map((custom) => {
+            const id = customAvatarId(custom.id);
+            const selected = id === currentId;
+            return (
+              <button
+                type="button"
+                key={id}
+                className={`chat-app-tool-avatar-choice ${selected ? "selected" : ""}`}
+                aria-pressed={selected}
+                title={custom.label}
+                onClick={() => {
+                  props.onSelect(id);
+                  setOpen(false);
+                }}
+              >
+                <Avatar
+                  className="chat-app-tool-avatar-choice-img"
+                  spec={avatarForChatParticipant({ id: custom.id, handle: props.handle, kind: props.kind, avatarId: id }, custom.label)}
+                />
+              </button>
+            );
+          })}
           {options.map((option) => {
             const selected = option.id === currentId;
             return (
@@ -87,6 +138,16 @@ export function ChatParticipantAvatarField(props: {
           })}
         </div>
       </PopoverContent>
+      {canDraw && props.settings && props.agents && (
+        <AvatarStudioDialog
+          open={studioOpen}
+          member={{ handle: props.handle, roleLabel: props.roleLabel, kind: props.kind }}
+          settings={props.settings}
+          agents={props.agents}
+          onOpenChange={setStudioOpen}
+          onUseAvatar={props.onSelect}
+        />
+      )}
     </Popover>
   );
 }

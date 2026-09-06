@@ -201,6 +201,11 @@ export interface CliAgentRunOptions {
   nativeGoal?: NativeGoalRun;
   onProviderActivity?: () => void;
   onCodexServerRequest?: CliAgentCodexServerRequestCallback;
+  /**
+   * App-internal run that is not a participant turn: keep the user's MCP servers,
+   * skills and subagents out of it. Used by the avatar studio.
+   */
+  isolated?: boolean;
 }
 
 export interface NativeGoalRun {
@@ -5709,6 +5714,12 @@ export class CliAgentRunner {
   }
 
   private claudeMcpArgs(kind: ConversationKind, options: CliAgentRunOptions): string[] {
+    if (options.isolated) {
+      // Without --strict-mcp-config the CLI boots every server from the user's
+      // own config; an app-internal run must not spend their tokens or wait for
+      // those connections.
+      return ["--mcp-config", "{\"mcpServers\":{}}", "--strict-mcp-config"];
+    }
     if (!options.appMcp) {
       return [];
     }
@@ -6079,13 +6090,16 @@ export class CliAgentRunner {
     }
     // Claude's native Skill tool is read-only skill discovery/loading. It must be present even
     // when no slash skill was selected so participants can truthfully inspect available skills.
-    tools.add("Skill");
-    allowedTools.push("Skill");
+    // An isolated app run has no skills to inspect and no reason to spawn subagents.
+    if (!options.isolated) {
+      tools.add("Skill");
+      allowedTools.push("Skill");
+    }
     // Always-on subagent spawning for Claude participants. The subagent tool is registered as
     // "Agent" in current Claude Code (params prompt/subagent_type); "Task" is the older name and
     // is listed too for version robustness — unknown tool names are ignored by the CLI. Subagents
     // inherit this run's permissions and are separate from chat participant requests.
-    for (const subagentTool of ["Agent", "Task"]) {
+    for (const subagentTool of options.isolated ? [] : ["Agent", "Task"]) {
       tools.add(subagentTool);
       allowedTools.push(subagentTool);
     }

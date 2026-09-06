@@ -1,4 +1,6 @@
+import { parseCustomAvatarId } from "../../../shared/avatarStudio";
 import type { ChatParticipant, ChatProviderKind } from "../../../shared/types";
+import { customAvatarUrl } from "../avatar/custom-avatars";
 import { CHAT_ASSISTANT_DISPLAY_NAME, chatParticipantDisplayName } from "../conversation/conversation-display";
 
 const CHAT_AVATAR_URLS = {
@@ -134,7 +136,11 @@ export function defaultChatAvatarId(kind: ChatProviderKind, seed = ""): ChatAvat
   return options[index]?.id ?? fallback;
 }
 
-export function normalizedChatAvatarId(kind: ChatProviderKind, avatarId: string | undefined, seed = ""): ChatAvatarId {
+export function normalizedChatAvatarId(kind: ChatProviderKind, avatarId: string | undefined, seed = ""): string {
+  // A generated avatar is not tied to a provider, so it survives a provider change.
+  if (parseCustomAvatarId(avatarId)) {
+    return avatarId as string;
+  }
   const option = chatAvatarOption(avatarId);
   if (option?.kind === kind) {
     return option.id;
@@ -149,7 +155,10 @@ function chatAvatarCharacter(id: string): string {
 
 // Map an avatar to the equivalent character on a different provider so switching
 // provider keeps logo->logo and cat->cat instead of falling back to a hashed default.
-export function mapChatAvatarIdToKind(kind: ChatProviderKind, avatarId: string | undefined, seed = ""): ChatAvatarId {
+export function mapChatAvatarIdToKind(kind: ChatProviderKind, avatarId: string | undefined, seed = ""): string {
+  if (parseCustomAvatarId(avatarId)) {
+    return avatarId as string;
+  }
   const option = chatAvatarOption(avatarId);
   if (option?.kind === kind) {
     return option.id;
@@ -174,6 +183,14 @@ export function avatarForChatParticipant(
 ): AvatarSpec {
   if (label === CHAT_ASSISTANT_DISPLAY_NAME) {
     return { kind: "custom", label, imageUrl: CHAT_AVATAR_URLS["accordagents-mark"], mediaMode: "glyph" };
+  }
+  const customId = parseCustomAvatarId(participant.avatarId);
+  if (customId) {
+    const imageUrl = customAvatarUrl(customId);
+    // The bytes load asynchronously; initials stand in rather than a broken image.
+    return imageUrl
+      ? { kind: "custom", label, imageUrl, mediaMode: "photo" }
+      : { kind: "generic", label, initials: initials(label), mediaMode: "glyph" };
   }
   const avatarId = normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle);
   const option = chatAvatarOption(avatarId);
