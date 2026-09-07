@@ -34,7 +34,9 @@ import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
 import { ChatActionApplier } from "../main/services/chatActionApplier";
 import { ChatActionEmitter } from "../main/services/chatActionEmitter";
 import { createChatActionEffects } from "../main/services/chatActionEffects";
-import { MachineIdlePower } from "../main/services/machineIdlePower";
+import { MachineIdlePower, assertNativeRegistryClosed } from "../main/services/machineIdlePower";
+import { MachineHostPowerRegistry } from "../main/services/machineHostPower";
+import { uptime } from "node:os";
 import { MachineMaintenance } from "../main/services/machineMaintenance";
 import { nativeHostIdentity } from "../main/services/nativeHostIdentity";
 import { assertAwsMachinePowerConfig } from "../shared/machinePower";
@@ -103,10 +105,34 @@ async function runMachineMaintenance(args: MachineArgs): Promise<void> {
   await storage.init();
   const maintenance = new MachineMaintenance(storage.machinePower(), path.join(userDataPath(), "native-processes.sqlite3"),
     path.join(userDataPath(), "accordagents.sqlite3"));
+  // Maintenance is work like any other on this host. Without its own claim a
+  // runtime in another profile could find the instance idle and stop it in the
+  // middle of an install or a mirror sync.
+  const hostIdentity = await nativeHostIdentity().catch(() => undefined);
+  let presence: MachineHostPowerRegistry | undefined;
+  if (hostIdentity) {
+    presence = new MachineHostPowerRegistry({
+      profilePath: userDataPath(), bootId: hostIdentity.boot, kind: "maintenance",
+      uptimeMs: () => uptime() * 1000
+    });
+    const admitted = presence.admit("this maintenance command");
+    if (!admitted.admitted) {
+      process.stderr.write(`${admitted.reason}\n`);
+      process.exit(69);
+    }
+  }
   const [command, ...commandArgs] = args.maintenanceCommand!;
-  const code = await maintenance.run({ command, args: commandArgs, env: process.env,
-    stdin: process.stdin, stdout: process.stdout, stderr: process.stderr });
-  process.exit(code);
+  try {
+    const code = await maintenance.run({ command, args: commandArgs, env: process.env,
+      stdin: process.stdin, stdout: process.stdout, stderr: process.stderr });
+    // Released only after the guardian confirmed the child is gone, which
+    // `run` awaits: an unconfirmed kill keeps the host awake on purpose.
+    presence?.release();
+    process.exit(code);
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
 }
 
 /** Installer-only key hand-off: the same host secret store seals it before
@@ -246,6 +272,40 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   await storageService.machineProgress().recoverLocal(identity.originId);
 
   let idlePower: MachineIdlePower | undefined;
+  // Every runtime on this host publishes what it is doing and consults the
+  // shared barrier, with or without AWS power configuration. A deployment that
+  // cannot stop the instance itself must still stop another one from stopping
+  // it underneath, and must refuse to start work into a stop already decided.
+  const nativeProcessDbPath = path.join(userDataPath(), "native-processes.sqlite3");
+  let presence: MachineHostPowerRegistry | undefined;
+  const hostIdentity = await nativeHostIdentity().catch(() => undefined);
+  if (hostIdentity) {
+    try {
+      presence = new MachineHostPowerRegistry({
+        profilePath: userDataPath(),
+        bootId: hostIdentity.boot,
+        uptimeMs: () => uptime() * 1000
+      });
+      // A crash leaves a claim whose owner is dead, and a dead owner is not
+      // proof its providers died with it. Clearing it needs this profile's own
+      // guardian receipts; otherwise one crash disables automatic stop until
+      // the host reboots.
+      const cleared = await presence.adoptOwnStaleClaims(
+        () => assertNativeRegistryClosed(nativeProcessDbPath, hostIdentity)
+      ).catch((error) => {
+        void debugLogService.write("machine.host-power.adopt-failed", { message: error instanceof Error ? error.message : String(error) });
+        return 0;
+      });
+      presence.publish(true);
+      if (cleared) void debugLogService.write("machine.host-power.adopted", { cleared });
+    } catch (error) {
+      presence = undefined;
+      void debugLogService.write("machine.host-power.unavailable", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  // Refused before a provider is started, not discovered when the instance
+  // disappears underneath a running turn.
+  cliAgentRunner.setHostAdmission(presence ? (what) => presence!.admit(what) : undefined);
   const host = new MachineHostService(chatService, storageService, settingsService, debugLogService, {
     // A signature or a superseded change that arrives here has to become part
     // of this machine's own state, not just a stored event.
@@ -318,6 +378,12 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     publicKeyDerBase64: identity.publicKeyDerBase64,
     outboxPath: path.join(userDataPath(), "machine-outbox.json"),
     nativeProcessDbPath: path.join(userDataPath(), "native-processes.sqlite3"),
+    // A stop another deployment has made final holds this one's queued
+    // commands in the durable inbox instead of failing them as turns.
+    hostStopCommitted: () => {
+      try { return presence?.stopIntent()?.phase === "committed"; }
+      catch { return true; }
+    },
     detectProviders: () => cliAgentRunner.detectAgents(),
     onNativeActivitySettled: () => idlePower?.noteActivity() ?? Promise.resolve(),
     idleStopWarning: () => idlePower?.warning(),
@@ -347,7 +413,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   }
   if (powerConfig) {
     idlePower = new MachineIdlePower({ config: powerConfig, store: storageService.machinePower(), host,
-      runner: cliAgentRunner, nativeProcessDbPath: path.join(userDataPath(), "native-processes.sqlite3"),
+      runner: cliAgentRunner, nativeProcessDbPath: nativeProcessDbPath,
+      ...(presence ? { presence } : {}),
       log: (event, payload) => { void debugLogService.write(event, payload); } });
     await idlePower.start();
   }
@@ -359,6 +426,14 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
     idlePower?.close();
     await idlePower?.releaseAfterShutdown();
+    // The registration outlives the idle scheduler: it is released only once
+    // this runtime's own native work is proven closed, so a neighbour never
+    // reads a shutdown in progress as an idle host.
+    if (presence && hostIdentity && !idlePower) {
+      if (cliAgentRunner.hasActiveNativeWork()) throw new Error("Native work has not finished shutting down.");
+      await assertNativeRegistryClosed(nativeProcessDbPath, hostIdentity);
+      presence.release();
+    }
     await appMcpService.stop();
   };
 }

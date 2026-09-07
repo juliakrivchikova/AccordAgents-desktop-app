@@ -147,3 +147,130 @@ test("a claim survives a reader that cannot remove it", () => {
   assert.equal(claim.kind, "runtime");
   assert.equal(claim.bootId, "boot-1");
 });
+
+test("a stop cannot commit around work admitted while it was draining", () => {
+  // The window a plain read leaves open: one deployment decides to stop, the
+  // other starts a turn, and the stop still goes through. Admission and commit
+  // take the same host lock, so the second one loses.
+  const shared = dir();
+  const stopper = registry({ dir: shared, profile: "/srv/one", pid: 11 });
+  const neighbour = registry({ dir: shared, profile: "/srv/two", pid: 22 });
+  stopper.publish(false);
+  neighbour.publish(false);
+
+  assert.equal(stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true, "an idle host may be stopped");
+  // The neighbour starts work before the stop is final.
+  assert.deepEqual(neighbour.admit("a turn"), { admitted: true });
+  assert.equal(stopper.commitStop(), false, "work admitted meanwhile withdraws the stop");
+  assert.equal(stopper.stopIntent(), undefined, "and the intent is gone, not left blocking the host");
+
+  // With nobody working, the same sequence commits.
+  neighbour.publish(false);
+  assert.equal(stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true);
+  assert.equal(stopper.commitStop(), true);
+  assert.equal(stopper.stopIntent()?.phase, "committed");
+});
+
+test("a committed stop refuses new work instead of letting it start into a machine that is going away", () => {
+  const shared = dir();
+  const stopper = registry({ dir: shared, profile: "/srv/one", pid: 11 });
+  const neighbour = registry({ dir: shared, profile: "/srv/two", pid: 22 });
+  stopper.publish(false);
+  neighbour.publish(false);
+  assert.equal(stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true);
+  assert.equal(stopper.commitStop(), true);
+
+  const refused = neighbour.admit("a turn");
+  assert.equal(refused.admitted, false);
+  assert.match(refused.admitted === false ? refused.reason : "", /stopping after being idle/);
+  assert.match(refused.admitted === false ? refused.reason : "", /\/srv\/one/, "the deployment that decided it is named");
+});
+
+test("a neighbour's recent work is not this profile's three hours of idle", () => {
+  const shared = dir();
+  let now = 10_000;
+  const mine = registry({ dir: shared, profile: "/srv/one", pid: 11, now: () => now });
+  const neighbour = registry({ dir: shared, profile: "/srv/two", pid: 22, now: () => now });
+
+  neighbour.publish(true);
+  neighbour.publish(false);
+  mine.publish(false);
+  // This profile has been idle since uptime 0, but the host has not: the
+  // neighbour was working at this very moment.
+  assert.equal(mine.hostIdleForMs(0), 0, "the neighbour was working a moment ago");
+  now += 30_000;
+  assert.equal(mine.hostIdleForMs(0), 30_000, "host idle runs from the neighbour's last work, not from this profile's");
+  assert.equal(mine.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }), false);
+  now += 40_000;
+  assert.equal(mine.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }), true);
+});
+
+test("a claim left by a crash keeps the host awake, and only proven closure clears it", async () => {
+  const shared = dir();
+  const crashed = registry({ dir: shared, profile: "/srv/one", pid: 4242, alive: () => false });
+  crashed.publish(false);
+
+  // Same profile, new instance: the dead owner is not proof its providers died.
+  const restarted = registry({ dir: shared, profile: "/srv/one", pid: 4243, alive: (pid) => pid === 4243 });
+  assert.ok(restarted.blockingReason(), "a dead owner's claim still keeps the host awake");
+
+  let proved = 0;
+  await assert.rejects(
+    () => restarted.adoptOwnStaleClaims(async () => { proved += 1; throw new Error("a native executor has not confirmed that its processes are gone"); }),
+    /processes are gone/,
+    "closure that cannot be proven leaves the claim in place"
+  );
+  assert.equal(proved, 1);
+  assert.ok(restarted.blockingReason());
+
+  assert.equal(await restarted.adoptOwnStaleClaims(async () => undefined), 1, "proven closure clears this profile's own claim");
+  assert.equal(restarted.blockingReason(), undefined, "and automatic stop is not disabled until the host reboots");
+});
+
+test("one deployment's crash does not let it clear another profile's claim", async () => {
+  const shared = dir();
+  const other = registry({ dir: shared, profile: "/srv/two", pid: 999, alive: () => false });
+  other.publish(false);
+  const mine = registry({ dir: shared, profile: "/srv/one", pid: 4243, alive: (pid) => pid === 4243 });
+  assert.equal(await mine.adoptOwnStaleClaims(async () => undefined), 0, "only this profile's own leftovers are cleared");
+  assert.ok(mine.blockingReason(), "the other profile still keeps the host awake");
+});
+
+test("a lock left by a dead holder is broken, a live holder is waited for", () => {
+  const shared = dir();
+  let now = 0;
+  const holder = registry({ dir: shared, profile: "/srv/one", pid: 11, now: () => now, alive: () => false });
+  fs.mkdirSync(path.join(shared, "lock"), { recursive: true });
+  fs.writeFileSync(path.join(shared, "lock", "owner.json"), JSON.stringify({ pid: 11, uptimeMs: 0 }));
+  now = 60_000;
+  // The holder is gone and the section is far older than it can legitimately be.
+  assert.equal(holder.withLock(() => "ran"), "ran");
+
+  const live = registry({ dir: shared, profile: "/srv/one", pid: 12, now: () => now, alive: () => true });
+  fs.mkdirSync(path.join(shared, "lock"), { recursive: true });
+  fs.writeFileSync(path.join(shared, "lock", "owner.json"), JSON.stringify({ pid: 4242, uptimeMs: now }));
+  assert.throws(() => live.withLock(() => "ran"), /holding the power lock/, "a live holder is never overrun");
+  fs.rmSync(path.join(shared, "lock"), { recursive: true, force: true });
+});
+
+test("an unreadable stop intent stops both stopping and admitting", () => {
+  const shared = dir();
+  const one = registry({ dir: shared, profile: "/srv/one", pid: 11 });
+  one.publish(false);
+  fs.writeFileSync(path.join(shared, "stop-intent.json"), "{\"version\":1,\"phase\":\"maybe\"}");
+  assert.throws(() => one.stopIntent(), /cannot be read/);
+  assert.throws(() => one.admit("a turn"), /cannot be read/);
+  assert.throws(() => one.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), /cannot be read/);
+});
+
+test("maintenance is a host claim like any other and names itself", () => {
+  const shared = dir();
+  const runtime = registry({ dir: shared, profile: "/srv/one", pid: 11 });
+  const maintenance = registry({ dir: shared, profile: "/srv/two", pid: 22, kind: "maintenance" });
+  runtime.publish(false);
+  assert.deepEqual(maintenance.admit("this maintenance command"), { admitted: true });
+  assert.match(runtime.blockingReason() ?? "", /maintenance command/);
+  assert.equal(runtime.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), false);
+  maintenance.release();
+  assert.equal(runtime.blockingReason(), undefined);
+});

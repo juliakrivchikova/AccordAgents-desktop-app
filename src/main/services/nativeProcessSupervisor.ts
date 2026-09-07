@@ -41,7 +41,12 @@ interface SessionIO {
   report(message: object): Promise<void>;
 }
 
-export async function supervise(config: NativeSupervisorStart, io: SessionIO): Promise<void> {
+export /** How long a guardian keeps trying to release its power hold after closure
+ *  is already durable. Past this the hold is left for recovery to release,
+ *  because a guardian that never exits is a machine that never sleeps. */
+const MAINTENANCE_RELEASE_RETRY_MS = 30_000;
+
+async function supervise(config: NativeSupervisorStart, io: SessionIO): Promise<void> {
   const rows = await processTable();
   const supervisor = capturePosixProcessIdentity(process.pid, () => rows);
   const parent = capturePosixProcessIdentity(process.ppid, () => rows);
@@ -162,12 +167,27 @@ export async function supervise(config: NativeSupervisorStart, io: SessionIO): P
             await Promise.all([flush(io.stdout), flush(io.stderr)]);
           }
           await registry.update({ ...lease, phase: "closed", shutdownReason: "processes-gone" });
-          // Closure is durable first. A disk outage here keeps this guardian
-          // and the power hold alive; retrying cleanup never re-executes work.
+          // Closure is durable first. A disk outage here keeps the power hold,
+          // and retrying cleanup never re-executes work.
+          //
+          // The retry is bounded: the closure receipt is already stored, so a
+          // store that stays unreadable is released by the next runtime's
+          // maintenance recovery from that receipt. Retrying here forever
+          // would leave a guardian process alive for the rest of the host's
+          // life — an idle machine that can never be stopped again, which is
+          // the opposite of what holding the lease is for.
           if (power) {
+            const until = Date.now() + MAINTENANCE_RELEASE_RETRY_MS;
             for (;;) {
               try { await power.releaseMaintenance(config.scope, host.boot); break; }
-              catch (error) { await io.report({ type: "error", message: text(error) }); await delay(500); }
+              catch (error) {
+                await io.report({ type: "error", message: text(error) });
+                if (Date.now() >= until) {
+                  await io.report({ type: "error", message: "The maintenance power hold could not be released; it stays held until this machine's next start recovers it from the stored closure." });
+                  break;
+                }
+                await delay(500);
+              }
             }
           }
           await io.report({ type: "closed", exitCode, signal: exitSignal });

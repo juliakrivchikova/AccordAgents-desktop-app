@@ -114,16 +114,19 @@ test("a deployment sharing this instance keeps it awake, and its own claim is pu
     shutdownWarmAgents: async () => undefined,
     fenceIdleNativeAdmissions: () => () => undefined
   };
+  // A shared host clock both sides read, so a neighbour's work can be placed
+  // in time rather than assumed to be infinitely old.
+  let now = MACHINE_IDLE_STOP_MS + 100;
   const neighbour = new MachineHostPowerRegistry({
     dir: shared, profilePath: "/home/ubuntu/.accordagents/other", bootId: identity.boot,
-    uptimeMs: () => MACHINE_IDLE_STOP_MS + 100, pid: 4321, isAlive: () => true
+    uptimeMs: () => now, pid: 4321, isAlive: () => true
   });
   const power = new MachineIdlePower({
     config, store, host, runner, nativeProcessDbPath: path.join(dir, "native.sqlite3"),
     profilePath: "/home/ubuntu/.accordagents/mine", log: () => undefined
   }, {
     identity: async () => identity, verifyAws: async () => undefined,
-    uptimeMs: () => MACHINE_IDLE_STOP_MS + 100,
+    uptimeMs: () => now,
     createHostRegistry: options => new MachineHostPowerRegistry({ ...options, dir: shared, isAlive: () => true }),
     client: { close: () => undefined, stopAfterDrain: async () => { stops++; return { instanceId: config.instanceId, state: "stopping" }; } }
   });
@@ -142,9 +145,18 @@ test("a deployment sharing this instance keeps it awake, and its own claim is pu
     assert.ok(mine, "the deployment publishes its own claim for the others to read");
     assert.equal(mine?.busy, false);
 
+    // The neighbour goes idle, but it was working a moment ago: the host has
+    // not been quiet for three hours, only this deployment has.
     neighbour.publish(false);
     await (power as unknown as { scheduler: { check(): Promise<void> } }).scheduler.check();
-    assert.equal(stops, 1, "once the neighbour is idle the stop proceeds");
+    assert.equal(stops, 0, "a neighbour's recent work is not three hours of host idle");
+    assert.match(power.warning() ?? "", /stays awake/);
+
+    // Once the whole host has been quiet for the window, the stop proceeds.
+    now += MACHINE_IDLE_STOP_MS + 100;
+    neighbour.publish(false);
+    await (power as unknown as { scheduler: { check(): Promise<void> } }).scheduler.check();
+    assert.equal(stops, 1, "once the host itself has been idle the stop proceeds");
   } finally {
     power.close();
     neighbour.release();

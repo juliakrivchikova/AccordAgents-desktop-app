@@ -6,6 +6,7 @@ import type { CliAgentRunner } from "./cliAgents";
 import type { MachineHostService } from "./machineHost";
 import { MachineIdleScheduler } from "./machineIdle";
 import { MachineHostPowerRegistry, type MachineHostPowerOptions } from "./machineHostPower";
+import { MACHINE_IDLE_STOP_MS } from "../../shared/machinePower";
 import { userDataPath } from "../platform";
 import type { MachinePowerStore } from "./machinePowerStore";
 import { nativeHostIdentity, verifiedNativeHostReboot, type NativeHostIdentity } from "./nativeHostIdentity";
@@ -35,6 +36,11 @@ export class MachineIdlePower {
     nativeProcessDbPath: string;
     /** This deployment's user-data directory; identifies it host-wide. */
     profilePath?: string;
+    /** The host-wide registration this runtime already publishes. Every
+     *  runtime has one, with or without AWS power configuration, so a
+     *  deployment that cannot stop the instance still keeps another one from
+     *  stopping it underneath. */
+    presence?: MachineHostPowerRegistry;
     log(event: string, payload: Record<string, unknown>): void;
   }, private readonly environment: {
     identity(): Promise<NativeHostIdentity | undefined>;
@@ -75,7 +81,9 @@ export class MachineIdlePower {
         bootId,
         uptimeMs: this.environment.uptimeMs
       };
-      this.hostPower = this.environment.createHostRegistry?.(registryOptions) ?? new MachineHostPowerRegistry(registryOptions);
+      this.hostPower = this.options.presence
+        ?? this.environment.createHostRegistry?.(registryOptions)
+        ?? new MachineHostPowerRegistry(registryOptions);
       this.hostPower.publish(true);
     } catch (error) {
       // Fail closed: without coordination a stop could destroy another
@@ -96,22 +104,32 @@ export class MachineIdlePower {
         return busy;
       },
       prepareStop: async since => {
-        const blocked = this.blockedByAnotherDeployment();
-        if (blocked) return undefined;
-        await this.environment.verifyAws(this.options.config);
-        // Re-read after the AWS round trip: it is the longest step before the
-        // fence, and another deployment may have started work during it.
-        if (this.blockedByAnotherDeployment()) return undefined;
-        const drain = await this.options.host.prepareIdleStop({ bootId, uptimeMs: this.environment.uptimeMs(), idleSinceMs: since,
-          fenceNative: () => this.options.runner.fenceIdleNativeAdmissions(), stopProviders: () => this.options.runner.shutdownWarmAgents() });
-        if (!drain) return undefined;
-        return async () => {
-          this.stopping = true;
-          this.setWarning("The machine is stopping after three hours idle; new turns remain queued.");
-          try { await drain(); await this.stopAws(); }
-          catch (error) { this.failedStop(error); }
-        };
-      }, onError: error => this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`) });
+        // The decision and the work that could invalidate it are one critical
+        // section on this host. `beginStop` surveys every deployment's claim
+        // and writes the intent inside the same lock an admission takes, so a
+        // turn cannot start in the gap a plain read would leave open.
+        if (!this.beginHostStop(since)) return undefined;
+        let committed = false;
+        try {
+          await this.environment.verifyAws(this.options.config);
+          const drain = await this.options.host.prepareIdleStop({ bootId, uptimeMs: this.environment.uptimeMs(), idleSinceMs: since,
+            fenceNative: () => this.options.runner.fenceIdleNativeAdmissions(), stopProviders: () => this.options.runner.shutdownWarmAgents() });
+          if (!drain) return undefined;
+          // Last gate: anything admitted while this was draining has removed
+          // the intent, and this returns false rather than stopping over it.
+          if (!this.commitHostStop()) return undefined;
+          committed = true;
+          return async () => {
+            this.stopping = true;
+            this.setWarning("The machine is stopping after three hours idle; new turns remain queued.");
+            try { await drain(); await this.stopAws(); }
+            catch (error) { this.failedStop(error); }
+          };
+        } finally {
+          if (!committed) this.abandonHostStop();
+        }
+      },
+      onError: error => this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`) });
   }
 
   /** Only after the host restored its inbox/copy barriers and run inventory.
@@ -150,19 +168,47 @@ export class MachineIdlePower {
     return this.options.store.hasMaintenance(bootId, this.environment.uptimeMs());
   }
 
-  /** True when another deployment on this instance is running work or holding
-   *  a maintenance lease. Its warning names the directory, so the User can see
-   *  which deployment is keeping the machine awake. */
-  private blockedByAnotherDeployment(): boolean {
-    let reason: string | undefined;
-    try {
-      reason = this.hostPower ? this.hostPower.blockingReason() : "Host-power coordination is unavailable.";
-    } catch (error) {
-      reason = `This machine's deployments cannot be read (${errorText(error)}).`;
+  /**
+   * Takes the host-wide intent to stop, or explains why the host stays awake.
+   *
+   * Three hours of quiet in this profile is not three hours of host idle: the
+   * survey inside `beginStop` measures from the last moment ANY deployment
+   * here was working, so a neighbour's short turn keeps the instance up.
+   */
+  private beginHostStop(ownIdleSinceUptimeMs: number): boolean {
+    if (!this.hostPower) {
+      this.setWarning("The machine stays awake: this machine's deployments cannot coordinate.");
+      return false;
     }
-    if (!reason) return false;
-    this.setWarning(`The machine stays awake: ${reason}`);
-    return true;
+    try {
+      if (this.hostPower.beginStop({ minIdleMs: MACHINE_IDLE_STOP_MS, ownIdleSinceUptimeMs })) return true;
+    } catch (error) {
+      this.setWarning(`The machine stays awake: this machine's deployments cannot be read (${errorText(error)}).`);
+      return false;
+    }
+    let reason: string | undefined;
+    try { reason = this.hostPower.blockingReason(); }
+    catch (error) { reason = `they cannot be read (${errorText(error)})`; }
+    this.setWarning(`The machine stays awake: ${reason ?? "another deployment on this machine worked recently."}`);
+    return false;
+  }
+
+  private commitHostStop(): boolean {
+    try { return this.hostPower?.commitStop() ?? false; }
+    catch (error) {
+      this.setWarning(`The machine stays awake: its stop could not be made final (${errorText(error)}).`);
+      return false;
+    }
+  }
+
+  private abandonHostStop(): void {
+    try { this.hostPower?.abandonStop(); }
+    catch (error) { this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`); }
+  }
+
+  /** The gate every native admission on this host consults. */
+  admission(): ((what: string) => { admitted: true } | { admitted: false; reason: string }) | undefined {
+    return this.hostPower ? (what) => this.hostPower!.admit(what) : undefined;
   }
 
   private async stopAws(): Promise<void> {
