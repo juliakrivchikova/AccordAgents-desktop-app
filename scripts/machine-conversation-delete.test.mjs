@@ -182,14 +182,18 @@ test("the deletion survives a restart of the machine runtime", async (t) => {
     "a restarted runtime does not accept a copy of a chat it was told was deleted");
 });
 
-test("a trusted phone may drive members but cannot delete the owner's chat", async (t) => {
+test("a device the owner trusts can delete a chat from the machine, like any other control", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-delete-peer-"));
   const box = await machine(dir);
   t.after(async () => { await box.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5 }); });
 
   await box.deliver({ type: "machine.conversation.sync", conversation: conversation() });
 
-  // A phone the owner really trusts: in the roster, with its own key.
+  // Every device in the roster drives members: sends a turn, stops one,
+  // answers a card, deletes a chat. Only the machine's own settings, identity
+  // and roster are narrower, and a conversation is none of those. Making
+  // deletion desktop-only would be a control the User has on one device and
+  // not another, which is not a restriction anyone approved.
   const phoneIdentity = await phone.createIdentity();
   await box.trust([{
     deviceId: phoneIdentity.deviceId, publicKeyDerBase64: phoneIdentity.publicKeyDerBase64,
@@ -204,14 +208,27 @@ test("a trusted phone may drive members but cannot delete the owner's chat", asy
     kind: body.type, originSeq: 1, payload: body
   });
   await box.host.handleMessage(await sealMobileRelayPayload(
-    phone.eventPacket(phoneIdentity.deviceId, box.identity.originId, event), box.pairing.relaySealKeyBase64)).catch(() => undefined);
+    phone.eventPacket(phoneIdentity.deviceId, box.identity.originId, event), box.pairing.relaySealKeyBase64));
+  await new Promise((resolve) => setTimeout(resolve, 600));
+
+  assert.equal(await box.storage.getConversation(CONVERSATION), undefined,
+    "a device the owner trusts deletes the chat, wherever the User happens to be");
+  assert.equal(await box.storage.conversationTombstones().isDeleted(CONVERSATION), true);
+
+  // A device that is not in the roster still cannot.
+  const stranger = await phone.createIdentity();
+  const strangerEvent = await phone.mintEvent(stranger, {
+    eventId: "stranger-delete-1", conversationId: "other-chat",
+    logScopeId: phone.deviceEventScope(box.pairing.rendezvousId, "other-chat", "actions"),
+    kind: body.type, originSeq: 1,
+    payload: { ...body, conversationId: "other-chat" }
+  });
+  await box.host.handleMessage(await sealMobileRelayPayload(
+    phone.eventPacket(stranger.deviceId, box.identity.originId, strangerEvent), box.pairing.relaySealKeyBase64)).catch(() => undefined);
   await new Promise((resolve) => setTimeout(resolve, 300));
-
-  assert.ok(await box.storage.getConversation(CONVERSATION),
-    "destroying the owner's chat is not something a driving device may do");
-  assert.equal(await box.storage.conversationTombstones().isDeleted(CONVERSATION), false);
+  assert.equal(await box.storage.conversationTombstones().isDeleted("other-chat"), false,
+    "a device the owner never trusted deletes nothing");
 });
-
 test("a machine that was off when the chat was deleted is told when it comes back", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-delete-offline-"));
   const first = await machine(dir);

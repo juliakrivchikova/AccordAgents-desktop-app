@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle } from "lucide-react";
 
 import type {
+  CloudRunWorkerDoctorReport,
+  CloudRunWorkerSetupProgress,
   AgentHealth,
   ChatProviderKind,
   CloudRunsSettings,
@@ -256,10 +258,50 @@ function CloudRunsControl(props: {
   onSave: (update: CloudRunsSettingsUpdate) => Promise<void>;
 }): JSX.Element {
   const [draft, setDraft] = useState<CloudRunsSettings>(props.settings);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string>("");
+  const [report, setReport] = useState<CloudRunWorkerDoctorReport | null>(null);
+  const [setupProgress, setSetupProgress] = useState<CloudRunWorkerSetupProgress | null>(null);
 
   useEffect(() => {
     setDraft(props.settings);
   }, [props.settings]);
+
+  useEffect(() => window.consensus.onCloudRunSetupProgress(setSetupProgress), []);
+
+  // Checking and preparing the instance are the same two acts they always
+  // were; what they no longer offer is a hand-written SSH box for a per-turn
+  // worker, so they always speak to the machine's own instance.
+  const diagnose = async (): Promise<void> => {
+    setBusy(true);
+    setStatus("Checking the instance...");
+    setReport(null);
+    try {
+      const result = await window.consensus.diagnoseCloudRunWorker(undefined);
+      setReport(result);
+      setStatus(result.message);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setup = async (): Promise<void> => {
+    setBusy(true);
+    setStatus("Preparing the instance...");
+    setReport(null);
+    try {
+      const result = await window.consensus.setupCloudRunWorker(undefined);
+      setReport(result);
+      setStatus(result.message);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+      setSetupProgress(null);
+    }
+  };
 
   const patch = (update: CloudRunsSettingsUpdate): void => {
     setDraft((current) => ({ ...current, ...update, worker: { ...current.worker, ...(update.worker ?? {}) } }));
@@ -288,6 +330,55 @@ function CloudRunsControl(props: {
         onDiskSizeChange={(value) => patch({ awsRootVolumeSizeGb: value })}
         onDeleted={() => props.onSave({ mode: "aws" })}
       />
+      <div className="gen-card-divider" />
+      <div className="gen-row">
+        <div className="gen-row-text">
+          <div className="gen-row-title">{(busy && setupProgress?.message) || status || "Ready"}</div>
+          {busy && setupProgress?.authUrl && (
+            <div className="gen-row-desc">
+              <button
+                type="button"
+                className="gen-doctor-auth-link"
+                onClick={() => void window.consensus.openExternal(setupProgress.authUrl as string)}
+              >
+                Open the sign-in page
+              </button>
+              {setupProgress.authCode ? (
+                <>
+                  {" and enter code "}
+                  <code className="gen-doctor-auth-code" data-testid="cloud-run-device-auth-code">
+                    {setupProgress.authCode}
+                  </code>
+                </>
+              ) : null}
+            </div>
+          )}
+        </div>
+        <div className="gen-actions">
+          <button type="button" className="gen-pill" data-testid="machine-instance-check" disabled={busy} onClick={() => void diagnose()}>
+            <span className="gen-pill-label">Check</span>
+          </button>
+          <button type="button" className="gen-pill" data-testid="machine-instance-setup" disabled={busy} onClick={() => void setup()}>
+            <span className="gen-pill-label">Set up</span>
+          </button>
+        </div>
+      </div>
+      {report && (
+        <>
+          <div className="gen-card-divider" />
+          <ul className="gen-doctor-list" aria-label="Instance checks">
+            {report.checks.map((check) => (
+              <li key={check.id} className={`gen-doctor-item is-${check.status}`}>
+                <span className="gen-doctor-mark" aria-hidden="true">
+                  {check.status === "pass" ? "\u2713" : check.status === "warn" ? "!" : "\u2715"}
+                </span>
+                <span className="gen-doctor-label">{check.label}</span>
+                {check.detail && <span className="gen-doctor-detail">{check.detail}</span>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </div>
   );
 }

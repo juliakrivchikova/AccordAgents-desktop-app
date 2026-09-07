@@ -22,7 +22,12 @@ test("the machine instance panel offers nothing the deleted worker used to need"
   assert.doesNotMatch(generalSettings, /Worker source/);
   assert.doesNotMatch(generalSettings, /placeholder="Worker root"/);
   assert.doesNotMatch(generalSettings, /placeholder="Codex path"/);
-  assert.doesNotMatch(generalSettings, /diagnoseCloudRunWorker|setupCloudRunWorker/);
+  // Checking and preparing the instance are retained by the resolution and
+  // must stay reachable; what they may not offer is a hand-written worker.
+  assert.match(generalSettings, /diagnoseCloudRunWorker\(undefined\)/);
+  assert.match(generalSettings, /setupCloudRunWorker\(undefined\)/);
+  assert.match(generalSettings, /data-testid="machine-instance-check"/);
+  assert.match(generalSettings, /data-testid="machine-instance-setup"/);
   assert.doesNotMatch(generalSettings, /Cloud Runs \(beta\)/);
 });
 

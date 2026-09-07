@@ -694,7 +694,8 @@ async function main() {
   await evaluate(`(() => {
     const input = document.getElementById("composer-input");
     input.value = ${JSON.stringify([
-      "@one Reply with exactly these four lines and nothing else:",
+      "@one End your reply with exactly these three lines, as plain text, not inside a code block",
+      "and with nothing after them:",
       "user choice: Which colour?",
       "O1: Orchid",
       "O2: Indigo"
@@ -726,12 +727,36 @@ async function main() {
       held.querySelector("[data-option-id]").click();
       return true;
     })()`);
-    await waitFor(async () => (await machineLog(machineUserData, machineOutput)).includes("choice.answered"), 120_000,
-      "the machine to receive the phone's choice answer");
-    log("the machine applied the phone's choice answer");
+    // The proof is the row the answer had to claim before it could reach the
+    // member, not a line in a log: that row is the admission itself.
+    await waitFor(() => query("accordagents.sqlite3",
+      "select approval_id from native_approval_effects where approval_id like 'choice:%';").length > 0,
+      120_000, "the machine to admit the phone's choice answer at its durable boundary");
+    const claims = query("accordagents.sqlite3",
+      "select approval_id as approvalId, runtime_id as runtimeId from native_approval_effects where approval_id like 'choice:%';");
+    assert.equal(claims.length, 1, "one answer, one claim");
+    log("the machine admitted and applied the phone's choice answer:", claims[0].approvalId);
     choiceProven = true;
   } else {
-    log("NOT PROVEN: the member did not raise a choice in this run");
+    // Say what the member actually wrote, so this is diagnosable rather than
+    // just absent.
+    const said = await evaluate(`(async () => {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open("accordagents-mobile-control");
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const rows = await new Promise((resolve) => {
+        const tx = db.transaction("timeline", "readonly");
+        const all = tx.objectStore("timeline").getAll();
+        all.onsuccess = () => resolve(all.result);
+        all.onerror = () => resolve([]);
+      });
+      db.close();
+      const last = rows.filter((row) => row.role === "participant").slice(-1)[0];
+      return last ? String(last.content || "").slice(-300) : "(no participant row)";
+    })()`);
+    log("NOT PROVEN: the member did not raise a choice. Its last words were:", JSON.stringify(said));
   }
 
   // --- 6. The desktop comes back and learns what happened without it -------

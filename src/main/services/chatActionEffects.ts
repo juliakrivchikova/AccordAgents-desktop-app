@@ -58,7 +58,19 @@ export function createChatActionEffects(deps: {
   /** Absent only where nothing native can be reached; then a receipt lookup is
    *  all there is, and that is stated rather than assumed to be a lock. */
   nativeClaims?: ChatActionNativeClaims;
+  /** This machine's enrolled id, on a machine runtime; absent on a desktop.
+   *  A member with no home machine lives on the desktop, so the two answer the
+   *  same question from opposite sides without either guessing. */
+  homeMachineId?: () => string | undefined;
 }): ChatActionEffectPort {
+  const ownsMember = (conversation: Conversation | undefined, participantId: string | undefined): boolean => {
+    if (!participantId) return false;
+    const participants = (conversation?.metadata as { participants?: Array<{ id: string; homeMachineId?: string }> } | undefined)
+      ?.participants ?? [];
+    const participant = participants.find((item) => item.id === participantId);
+    if (!participant) return false;
+    return (participant.homeMachineId ?? undefined) === (deps.homeMachineId?.() ?? undefined);
+  };
   return {
     ...(deps.applyApproval ? { applyApproval: async (event: ChatEventEnvelope, payload: ChatActionPayload) => {
       const result = await deps.applyApproval!(event, payload);
@@ -83,16 +95,15 @@ export function createChatActionEffects(deps: {
       }
       const choice = /^choice:(.+)$/.exec(targetKey);
       if (choice) {
-        // A choice belongs to the peer running the turn that raised it. Any
-        // active run used to be enough, so a machine holding a replicated copy
-        // with unrelated work in flight claimed answers it did not own, and a
-        // copy with nothing running disowned answers it did.
+        // A choice belongs to the peer the member lives on. Any active run in
+        // the chat used to be enough, so a copy with unrelated work in flight
+        // claimed answers it did not own. Tying it to the run that raised it is
+        // wrong in the other direction: the User answers after the turn has
+        // ended, when that run is no longer anywhere.
         const conversation = await deps.storage.getConversation(conversationId);
         const message = (conversation?.messages ?? []).find((item) => item.metadata?.pendingChoice?.id === choice[1]);
         if (!message) return undefined;
-        const runId = message.metadata?.runId;
-        if (!runId) return false;
-        return deps.chat.conversationIdForRun(runId) === conversationId;
+        return ownsMember(conversation, message.participantId);
       }
       return false;
     },
@@ -100,6 +111,7 @@ export function createChatActionEffects(deps: {
     async claim(targetKey, event) {
       const choice = /^choice:(.+)$/.exec(targetKey);
       if (!choice || !deps.nativeClaims || !event) return deps.emitter.beginExecution(targetKey);
+
       // The same admission an approval takes, for the same reason: the answer
       // wakes a native request that is waiting, and that can happen once.
       const conversation = await deps.storage.getConversation(event.conversationId);

@@ -178,7 +178,13 @@ test("an emitted answer reaches the receiving owner with the full native decisio
       createdAt: new Date().toISOString(), status: "done",
       metadata: { runId: "run", pendingChoice: { id: "choice", status: "pending", options: [] } }
     }],
-    metadata: { pendingAppToolApprovals: [{ id: "card", status: "pending" }], activeRunIds: ["run"] }
+    metadata: {
+      pendingAppToolApprovals: [{ id: "card", status: "pending" }],
+      activeRunIds: ["run"],
+      // The member the choice belongs to: a peer answers for the members that
+      // live on it, which is what ownership of a choice means.
+      participants: [{ id: "p1", handle: "one", kind: "codex-cli", roleConfigId: "engineer" }]
+    }
   } as unknown as Conversation;
   const effects = createChatActionEffects({
     emitter: h.emitter,

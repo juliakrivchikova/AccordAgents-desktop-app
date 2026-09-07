@@ -34,7 +34,10 @@ async function box() {
       content: "Which one?", createdAt: new Date().toISOString(), status: "done",
       metadata: { runId: "run-1", pendingChoice: { id: CHOICE, status: "pending", options: [{ id: "a", label: "A" }] } }
     }],
-    findings: [], metadata: {}
+    findings: [],
+    // A choice belongs to the member that raised it, so the copy has to hold
+    // that member: this is what says whether this peer answers for it.
+    metadata: { participants: [{ id: "p1", handle: "one", kind: "codex-cli", roleConfigId: "engineer" }] }
   } as unknown as Conversation;
 
   const owner = { runtimeId: "runtime-a", pid: 4321, startedAt: "synthetic-start" };
@@ -144,17 +147,18 @@ test("a runtime that is shutting down keeps the answer instead of half-applying 
   } finally { await held.cleanup(); }
 });
 
-test("a copy that is not running the turn does not answer its choice", async () => {
+test("a copy the member does not live on does not answer its choice", async () => {
   const held = await box();
   try {
-    // The same replicated conversation on a peer that owns no run for it. Any
-    // active run in the chat used to be enough to claim ownership.
+    // The same replicated conversation on a peer that is not the member's
+    // home. Any active run in the chat used to be enough to claim ownership.
     const effects = createChatActionEffects({
+      homeMachineId: () => "machine-elsewhere",
       chat: {
         respondToAppToolApproval: async () => held.conversation,
         respondToChoice: async () => { held.answered.push("wrong-peer"); },
         cancelRun: () => true,
-        conversationIdForRun: () => undefined
+        conversationIdForRun: () => CONVERSATION
       },
       emitter: { beginExecution: async () => true, recordExecution: async () => undefined },
       storage: { getConversation: async () => held.conversation },
@@ -254,6 +258,29 @@ test("a receipt that cannot be written does not make the answer repeatable", asy
   } finally { await held.cleanup(); }
 });
 
+test("a choice is still answered after the turn that raised it has ended", async () => {
+  const held = await box();
+  try {
+    // The User answers when the member has stopped working; the run is gone
+    // from everywhere. Tying ownership to that run would leave the member
+    // waiting for an answer nobody would ever apply.
+    const effects = createChatActionEffects({
+      chat: {
+        respondToAppToolApproval: async () => held.conversation,
+        respondToChoice: async (request) => { held.answered.push(`${request.choiceId}:${request.selectedOptionId ?? ""}`); },
+        cancelRun: () => true,
+        conversationIdForRun: () => undefined
+      },
+      emitter: { beginExecution: async () => true, recordExecution: async () => undefined },
+      storage: { getConversation: async () => held.conversation },
+      nativeClaims: createNativeTargetClaims({ storage: held.storage, runtimeIdentity: async () => ({ runtimeId: "r", pid: 1, startedAt: "s" }) })
+    });
+    const result = await new ChatActionApplier({ effects }).apply(await held.answer("a"));
+    assert.equal(result.status, "applied");
+    assert.deepEqual(held.answered, [`${CHOICE}:a`], "the member gets the answer it is waiting for");
+  } finally { await held.cleanup(); }
+});
+
 test("an answer whose request names no member is kept, not called already answered", async () => {
   const held = await box();
   try {
@@ -273,9 +300,10 @@ test("an answer whose request names no member is kept, not called already answer
       nativeClaims: createNativeTargetClaims({ storage: held.storage, runtimeIdentity: async () => ({ runtimeId: "r", pid: 1, startedAt: "s" }) })
     });
     const result = await new ChatActionApplier({ effects }).apply(await held.answer("a"));
-    assert.equal(result.status, "deferred");
+    // Nobody can say whose request this is, so nobody acts on it and nobody
+    // claims it was answered. The member keeps waiting, visibly.
+    assert.deepEqual(held.answered, []);
     assert.doesNotMatch(result.detail ?? "", /already acted on/,
       "not knowing who to claim against is not the same as it having been answered");
-    assert.deepEqual(held.answered, []);
   } finally { await held.cleanup(); }
 });

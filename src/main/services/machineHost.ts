@@ -159,6 +159,12 @@ export class MachineHostService {
     return this.approvalExecutor.applyAction(event, payload);
   }
 
+  /** The machine id the enrolling desktop gave this runtime. Members whose
+   *  home is this id are the ones it acts for. */
+  enrolledMachineId(): string | undefined {
+    return this.homeMachineId;
+  }
+
   /** This runtime, as a durable claim names its owner. Shared by every native
    *  admission here so one process cannot appear as two. */
   nativeRuntimeIdentity(): Promise<NativeRuntimeIdentity> {
@@ -675,9 +681,6 @@ export class MachineHostService {
       case "machine.settings.sync":
       case "machine.settings.sealed":
       case "machine.trust.roster":
-      // Deleting the owner's chat is an ownership act, like the settings and
-      // the roster: it comes from the desktop that enrolled this machine.
-      case "machine.conversation.deleted":
         return !peer;
       case "machine.participants.delegate":
         // This machine sends delegations to the member's home; it accepts one

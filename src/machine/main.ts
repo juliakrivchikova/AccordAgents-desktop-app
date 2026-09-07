@@ -321,6 +321,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
         // The same durable row an approval crosses. A machine is where the
         // native request is actually waiting, so a choice answered twice or
         // replayed after a crash would wake it twice.
+        // Members whose home is this machine are the ones it answers for.
+        homeMachineId: () => host.enrolledMachineId(),
         nativeClaims: createNativeTargetClaims({
           storage: storageService,
           runtimeIdentity: () => host.nativeRuntimeIdentity(),
