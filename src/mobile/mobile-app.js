@@ -1705,12 +1705,37 @@
     return taken;
   }
 
-  function enqueueMessage(input) {
-    return createOutboxEvent(input).then(function (entry) {
-      return putOutboxEntry(entry).then(function () {
-        return entry;
+  /**
+   * Records what this device did and queues it for delivery in ONE IndexedDB
+   * transaction. A failed queue write leaves no event either: an action nobody
+   * will ever hear about is worse than one the User can retry.
+   */
+  function persistOutboundEvent(entry) {
+    return eventLogPort().runAtomic([EVENT_STORE, OUTBOX_STORE], function (tx) {
+      return tx.get(EVENT_STORE, entry.eventId).then(function (existing) {
+        if (existing) return entry;
+        return tx.put(EVENT_STORE, {
+          eventId: entry.eventId,
+          conversationId: entry.conversationId,
+          logScopeId: entry.logScopeId,
+          originId: entry.originId,
+          originSeq: entry.originSeq,
+          logicalTs: entry.logicalTs,
+          kind: entry.kind,
+          payload: entry.payload,
+          payloadHash: entry.payloadHash,
+          eventHash: entry.eventHash,
+          createdAt: entry.createdAt,
+          acknowledgedBy: []
+        }).then(function () {
+          return tx.put(OUTBOX_STORE, entry);
+        }).then(function () { return entry; });
       });
     });
+  }
+
+  function enqueueMessage(input) {
+    return createOutboxEvent(input).then(persistOutboundEvent);
   }
 
   function enqueueRunCancel(input) {
@@ -1718,11 +1743,7 @@
       conversationId: input.conversationId,
       kind: "run.cancel.requested",
       payload: { runId: input.runId }
-    }).then(function (entry) {
-      return putOutboxEntry(entry).then(function () {
-        return entry;
-      });
-    });
+    }).then(persistOutboundEvent);
   }
 
   function isMessageOutboxEntry(entry) {
@@ -1753,8 +1774,17 @@
     return "mobile-" + (await sha256Hex(source)).slice(0, 32);
   }
 
+  /** Every event this device has emitted, from the durable store. The queue is
+   *  emptied when things are delivered, so deriving the sequence from it would
+   *  restart at 1 and fork this origin's log. */
+  function listEmittedEvents() {
+    return eventLogPort().runAtomic([EVENT_STORE], function (tx) {
+      return tx.getAll(EVENT_STORE);
+    }).catch(function () { return []; });
+  }
+
   async function nextOriginSeq(originId, logScopeId) {
-    const entries = await listOutboxEntries();
+    const entries = await listEmittedEvents();
     return entries.filter(function (entry) {
       return entry.originId === originId && entry.logScopeId === logScopeId && Number.isSafeInteger(entry.originSeq);
     }).reduce(function (max, entry) {
@@ -1763,7 +1793,7 @@
   }
 
   async function previousEventHash(originId, logScopeId) {
-    const entries = await listOutboxEntries();
+    const entries = await listEmittedEvents();
     const previous = entries.filter(function (entry) {
       return entry.originId === originId && entry.logScopeId === logScopeId && typeof entry.eventHash === "string";
     }).sort(function (left, right) {

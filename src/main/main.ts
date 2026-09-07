@@ -97,6 +97,7 @@ import { MachineLinkService } from "./services/machineLink";
 import { MachineInstallerService } from "./services/machineInstaller";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
 import { ChatActionApplier } from "./services/chatActionApplier";
+import { ChatActionEmitter } from "./services/chatActionEmitter";
 import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, RemoveMachineRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
@@ -463,23 +464,8 @@ const artifactService = new ArtifactService({
   // decision. `operationId` is derived from the immutable revision identity, so
   // a re-emission after a restart is folded once as a duplicate rather than as
   // a second revision.
-  hasEmittedAction: async (eventId) => Boolean(await storageService.getChatEvent(eventId)),
-  emitAction: async (action) => {
-    const request = {
-      conversationId: action.conversationId,
-      kind: action.kind,
-      payload: action.payload as unknown,
-      eventId: `chat-action:${action.payload.operationId}`
-    };
-    // Every enrolled machine that holds this chat becomes a recipient, so the
-    // event stays in the outbox until it acknowledges. With no machine
-    // enrolled the action is still written locally, for this desktop's own
-    // projection and for a machine that enrols later.
-    const published = (await machineLinkService?.publishChatAction(request)) ?? 0;
-    if (published === 0) {
-      await chatEventLogService.appendLocalEvent({ ...request, logScopeId: CHAT_ACTION_LOG_SCOPE });
-    }
-  }
+  hasEmittedAction: (eventId) => chatActionEventExists(eventId),
+  emitAction: (action) => publishChatAction(action)
 });
 chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
 const dispatchArtifactTool = createArtifactToolDispatcher(artifactService);
@@ -501,6 +487,39 @@ const chatActionApplier = new ChatActionApplier({
     void debugLogService.write(event, payload);
   }
 });
+/** One route for every chat action: the local event plus a copy queued for
+ *  each enrolled machine that holds the chat. With no machine enrolled the
+ *  action is still written locally, for this desktop's own projection and for
+ *  a machine that enrols later. */
+async function publishChatAction(action: { conversationId: string; kind: string; payload: { operationId: string } }): Promise<void> {
+  const request = {
+    conversationId: action.conversationId,
+    kind: action.kind,
+    payload: action.payload as unknown,
+    eventId: `chat-action:${action.payload.operationId}`
+  };
+  const published = (await machineLinkService?.publishChatAction(request)) ?? 0;
+  if (published === 0) {
+    await chatEventLogService.appendLocalEvent({ ...request, logScopeId: CHAT_ACTION_LOG_SCOPE });
+  }
+}
+
+async function chatActionEventExists(eventId: string): Promise<boolean> {
+  return Boolean(await storageService.getChatEvent(eventId));
+}
+
+/** Permission answers, choices, participant requests and Stop become durable
+ *  events here, before the provider is told, and the effect that follows is
+ *  recorded once per target. */
+const chatActionEmitter = new ChatActionEmitter({
+  executedBy: app.getName(),
+  publish: (action) => publishChatAction(action),
+  hasEvent: (eventId) => chatActionEventExists(eventId),
+  logger: (event, payload) => {
+    void debugLogService.write(event, payload);
+  }
+});
+
 const activeReviews = new Map<string, AbortController>();
 
 function appSkillsSourceRoot(): string {
@@ -2525,12 +2544,26 @@ function registerIpc(): void {
     const controller = new AbortController();
     activeReviews.set(runId, controller);
 
+    const target = await chatActionEmitter.choiceAnswered({
+      conversationId: request.conversationId,
+      choiceId: request.choiceId,
+      sourceMessageId: request.sourceMessageId,
+      selectedOptionId: request.selectedOptionId,
+      customAnswer: request.customAnswer,
+      cancel: request.cancel
+    });
     try {
-      return await chatService.respondToChoice(
+      const answered = await chatService.respondToChoice(
         { ...request, runId },
         controller.signal,
         (progress) => emitReviewProgress(progress)
       );
+      await chatActionEmitter.recordExecution({
+        conversationId: request.conversationId,
+        targetKey: target,
+        effect: request.cancel ? "cancelled the choice" : "answered the choice"
+      });
+      return answered;
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
       sendToMainWindow("conversations:review-progress", {
@@ -2545,10 +2578,31 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("chat:respond-to-app-tool-approval", async (_event, request: RespondToChatAppToolApprovalRequest) => {
-    return chatService.respondToAppToolApproval(
+    // The answer becomes a durable event before the provider is told, so a
+    // crash between the two leaves the decision recorded rather than lost.
+    const target = await chatActionEmitter.permissionDecided({
+      conversationId: request.conversationId,
+      approvalId: request.approvalId,
+      approve: request.approve,
+      scope: request.scope,
+      decisionId: request.codexDecisionId
+    });
+    // A card is answered to the provider exactly once. A second answer — the
+    // other way, from another device, or a retry after a restart — stays
+    // visible as a decision but cannot tell the provider again.
+    if (!await chatActionEmitter.beginExecution(target)) {
+      return storageService.getConversation(request.conversationId);
+    }
+    const result = await chatService.respondToAppToolApproval(
       request,
       (progress) => emitReviewProgress(progress)
     );
+    await chatActionEmitter.recordExecution({
+      conversationId: request.conversationId,
+      targetKey: target,
+      effect: `${request.approve ? "allowed" : "denied"} the app tool request`
+    });
+    return result;
   });
   ipcMain.handle("machines:list", async (): Promise<MachineListResult> => machineListResult());
   ipcMain.handle("machines:create", async (_event, request: CreateMachineRequest): Promise<CreateMachineResult> => {
@@ -2859,6 +2913,13 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("conversations:cancel-review", (_event, runId: string) => {
+    // Stop is unconditional and idempotent: the same run stopped twice is one
+    // operation. The event is what lets the machine that owns the run see it.
+    const stopConversationId = chatService.conversationIdForRun(runId);
+    if (stopConversationId) {
+      void chatActionEmitter.stopRequested({ conversationId: stopConversationId, runId, by: "user" })
+        .catch(() => undefined);
+    }
     const controller = activeReviews.get(runId);
     if (controller) {
       controller.abort();
