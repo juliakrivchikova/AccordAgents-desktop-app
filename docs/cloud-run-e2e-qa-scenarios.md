@@ -1,5 +1,38 @@
 # Cloud Run + PWA End-to-End QA Scenarios
 
+> ## Read this first: the executor these scenarios were written against is gone
+>
+> Everything below was written while a participant marked "remote" ran through
+> a per-turn SSH worker (`remoteRuns.ts`, the Cloud Runs settings, the mirror,
+> the worker agent setup). That path is deleted. A member now lives on a
+> machine, and the machine runs it the same way this desktop does.
+>
+> So the entries here are **history, not a live checklist**. Any scenario whose
+> evidence names `remoteRuns.ts`, the worker root, the mirror or the Cloud Runs
+> toggle describes something the app can no longer do, and its status cannot be
+> re-tested as written. They are kept because they record what was found and
+> when, which is worth more than a tidy file.
+>
+> What carried over, and where it is now proven:
+>
+> - **Requirement 1 (a member behaves the same wherever it runs)** is now
+>   answered by the machine path: same `ChatService`, same app tools, same
+>   sessions, same Stop. Evidence lives in the machine acceptance work rather
+>   than here.
+> - **Stop on an unreachable machine** became an approved exception; it is
+>   recorded in `docs/parity-requirements.md`, not here.
+> - **The phone with the desktop closed** is proven by
+>   `scripts/mobile-phone-machine-e2e.mjs` against a real relay, a built
+>   machine runtime and the shipped PWA in a browser.
+> - **Durable native admission for approvals and choices, machine deletion,
+>   roster fanout and all-peer retention** are proven by the focused checks
+>   named in those commits.
+>
+> A scenario below that is still meaningful is one about the *product* rather
+> than the transport — what the User sees, what a member can reach, what a
+> failure says. Those are the ones worth re-homing onto the machine path; the
+> rest are closed by deletion.
+
 > ## GOAL: run this QA from the cloud
 >
 > **Owner:** unassigned — needs a participant with auto-watch or a native `/goal`.

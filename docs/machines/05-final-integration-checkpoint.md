@@ -244,3 +244,60 @@ this checkpoint makes no new claim about the previously measured large-chat
 snapshot cost. Persistent copies remain in the desktop/owning machine SQLite
 stores and the sealed relay delivery path. Remaining work includes choices,
 durable archive/delete, confidential revocation and the phone/acceptance gates.
+
+
+## Taylor's continuation — 2026-09-07
+
+Carried on from `952ca45` without restarting it. Head `fafd845` on
+`taylor/machine-installer`; the root checkout stays clean `beta`.
+
+- **A choice now crosses the same durable row an approval does.** It was
+  admitted by asking whether a receipt event existed, which is a read, not a
+  claim: two answers arriving together both told the provider, and a crash
+  between telling it and writing the receipt told it again on the next start.
+  A claim with no receipt is reported uncertain and never repeated. Ownership
+  moved from "any run is active in this chat" to the run that raised the
+  choice. Eight focused cases including a disk that refuses the claim and a
+  receipt that cannot be written.
+- **Deleting a chat reaches the machines that hold it**, as a durable command
+  with a tombstone: providers closed first, rows after, a stale sync or delta
+  refused, a restarted runtime still refusing, a turn for it failed rather than
+  run, offline delivery on return, and a roster-trusted phone refused because
+  deletion is an ownership act. Seven focused cases.
+- **The room owes a newly trusted device what it already held** — checked by
+  counting outbox recipients before and after a phone joins the roster.
+- **The deleted executor's controls are gone from Settings.** The toggle, the
+  worker-source choice, the SSH target and paths, the runtime timeouts, the
+  staging paragraph and the worker doctor all described something the app can
+  no longer do. What remains is the instance a machine is installed onto.
+
+### Size and destination
+
+Measured against the real thing rather than a fixture: the User's own database
+is 3.67 GB, and the conversation baseline in this document is 14,000 rows /
+about 41 MB.
+
+- A deletion tombstone is one row of an id and a timestamp per deleted chat —
+  about 60 bytes. It grows with chats the User deletes, never with messages,
+  and holds nothing of the conversation.
+- A choice claim is one row per answered choice in the same table approvals
+  already use — ids and a runtime identity, roughly 200 bytes. It grows with
+  answers, not with history.
+- Both reach SQLite through the same `sqlite3` argv path that once failed on a
+  megabyte-sized argument. Neither carries any conversation content: the
+  largest value in either statement is a conversation id.
+- The deletion command's payload is a type, a conversation id and a timestamp,
+  so it is never large enough to be fragmented on the wire.
+- On the phone, fragments of a body are released once the machine acknowledges
+  the event that names them, and the record of runs that ended is capped at
+  300 entries.
+
+### Still open
+
+- **Revoking a device's authority does not revoke its reading.** Recorded as a
+  divergence in `docs/parity-requirements.md`; closing it changes the pairing
+  surface, so it waits on the User's decision between rotating the machine's
+  room and per-pair keys.
+- Real Linux, real AWS Stop, signing and a physically installed phone remain
+  unverified here. Desktop Chrome is not an installed PWA and a reference relay
+  on this machine is not the public one.
