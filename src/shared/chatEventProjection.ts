@@ -71,15 +71,39 @@ export interface ChatConversationFoldOptions {
   logScopeId?: string;
 }
 
-export function foldChatConversationEvents(
+export interface ChatEventOrderResult {
+  events: ChatEventEnvelope[];
+  gaps: ChatEventVisibleScopeGap[];
+  forks: ChatEventForkConflict[];
+}
+
+/**
+ * The one order every projection folds in: per origin and scope only a
+ * contiguous run is visible (a missing sequence is a gap to repair, never a
+ * hole to skip), and what remains is sorted by logical time, then origin, then
+ * scope, then sequence, then event id.
+ *
+ * Exported so an action projection uses exactly this, rather than a second
+ * ordering that could disagree with the conversation projection on the same
+ * events.
+ */
+export function orderVisibleChatEvents(
   events: ChatEventEnvelope[],
   options: ChatConversationFoldOptions = {}
-): ChatConversationFoldResult {
+): ChatEventOrderResult {
   const scoped = visibleContiguousEvents(events.filter((event) =>
     (!options.conversationId || event.conversationId === options.conversationId) &&
       (!options.logScopeId || event.logScopeId === options.logScopeId)
   ));
-  const ordered = scoped.events.sort(compareEventsForProjection);
+  return { ...scoped, events: scoped.events.sort(compareEventsForProjection) };
+}
+
+export function foldChatConversationEvents(
+  events: ChatEventEnvelope[],
+  options: ChatConversationFoldOptions = {}
+): ChatConversationFoldResult {
+  const scoped = orderVisibleChatEvents(events, options);
+  const ordered = scoped.events;
   let conversation: Conversation | undefined;
   const appliedEventIds: string[] = [];
   for (const event of ordered) {
