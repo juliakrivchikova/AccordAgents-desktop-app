@@ -574,12 +574,12 @@ async function main() {
   // against the hash the event claims, and only then apply it. A body that is
   // incomplete must not be acknowledged, or the machine would drop what the
   // phone cannot read.
-  // A long message: over the 32 KiB an event carries inline, so the machine
-  // sends it back as a reference plus fragments and the phone has to keep
-  // those in IndexedDB, put them together and check the whole body against the
-  // hash the event claims before applying it.
-  const longBody = "LONGBODY ".repeat(4200) + "LONGBODY_END";
-  assert.ok(longBody.length > 32 * 1024, "the check needs a body larger than one event carries");
+  // A long paste, both ways. Past one fragment, so the phone has to take a
+  // body apart to send it and put one back together to read it, keeping the
+  // pieces in its own IndexedDB in between and checking the whole thing
+  // against the hash the event claims before applying it.
+  const longBody = "LONGBODY ".repeat(100_000) + "LONGBODY_END";
+  assert.ok(longBody.length > 800 * 1024, "the check needs a body that takes several fragments");
   await evaluate(`(() => {
     const input = document.getElementById("composer-input");
     input.value = ${JSON.stringify(longBody)};
@@ -605,10 +605,15 @@ async function main() {
       .sort((left, right) => String(right.content || "").length - String(left.content || "").length)[0];
     return JSON.stringify({ bytes: held ? String(held.content || "").length : 0, heldFragments: blobs.length });
   })()`);
-  await waitFor(async () => JSON.parse(await longRowBytes()).bytes > 32 * 1024, 180_000,
+  // Sent as fragments: the phone kept them while the event was unacknowledged.
+  await waitFor(async () => JSON.parse(await longRowBytes()).heldFragments > 1, 120_000,
+    "the phone to hold the body it is sending as more than one fragment");
+  log("the phone split the paste into", JSON.parse(await longRowBytes()).heldFragments, "fragments to send it");
+  await waitFor(async () => JSON.parse(await longRowBytes()).bytes > 800 * 1024, 300_000,
     "the whole long body to come back through the phone's fragment store");
   const longRow = JSON.parse(await longRowBytes());
-  assert.equal(longRow.heldFragments, 0, "a body that has been put together is not kept as fragments as well");
+  assert.equal(longRow.heldFragments, 0,
+    "no fragments are kept once the body is whole and the event that named it is acknowledged");
   await waitFor(async () => (await owed()) === 0, 90_000, "the long message to be fully acknowledged");
   log("a", longRow.bytes, "byte body came back through the phone's fragment store and was applied");
 
@@ -619,7 +624,68 @@ async function main() {
   assert.equal(await runCount(), runsBeforeTab, "a second tab must not re-run anything the first one holds");
   log("a second tab ran nothing again");
 
-  // --- 5. The desktop comes back and learns what happened without it -------
+  // --- 5. A permission the member asks for, answered on the phone ----------
+  //
+  // The member runs in a read-only sandbox, so writing a file is something it
+  // has to ask for. With the desktop closed there is nobody else to ask.
+  const approvalRuns = await runCount();
+  await evaluate(`(() => {
+    const input = document.getElementById("composer-input");
+    input.value = ${JSON.stringify("@one Create a file called phone-approval-qa.txt containing the single word hello, in the current working directory. Do it now.")};
+    document.getElementById("composer-form").dispatchEvent(new Event("submit", { cancelable: true }));
+    return true;
+  })()`);
+  await waitFor(async () => (await runCount()) > approvalRuns, 120_000, "the permission turn to reach the machine");
+  const card = async () => evaluate(`(() => {
+    const host = document.getElementById("control-cards");
+    const first = host && host.querySelector(".control-card");
+    if (!first) return "";
+    return JSON.stringify({
+      id: first.dataset.cardId, kind: first.dataset.cardKind,
+      text: (first.innerText || "").replace(/\\s+/g, " ").slice(0, 120),
+      options: [...first.querySelectorAll("[data-option-id]")].map((button) => button.dataset.optionId)
+    });
+  })()`);
+  let raised = "";
+  for (let attempt = 0; attempt < 240 && !raised; attempt += 1) {
+    raised = await card();
+    if (!raised) await wait(1000);
+  }
+  let approvalProven = false;
+  if (raised) {
+    const shown = JSON.parse(raised);
+    log("the member asked for permission on the phone:", shown.text);
+    assert.ok(shown.options.length > 0, "a permission card with no options is a card the User cannot answer");
+    const tapped = await evaluate(`(() => {
+      const host = document.getElementById("control-cards");
+      const allow = host.querySelector('[data-option-id="allow"]') || host.querySelector("[data-option-id]");
+      if (!allow) return false;
+      allow.click();
+      return true;
+    })()`);
+    assert.ok(tapped, "the card offered nothing to tap");
+    // Sent is not applied. The card states that it has handed the answer over
+    // and is waiting, and never claims the member was told.
+    let state = "";
+    for (let attempt = 0; attempt < 60 && !/[Ss]ent|[Ww]aiting/.test(state); attempt += 1) {
+      state = await evaluate(`(() => {
+        const held = document.querySelector("#control-cards .control-card-state");
+        return held ? held.innerText : "";
+      })()`);
+      if (!/[Ss]ent|[Ww]aiting/.test(state)) await wait(500);
+    }
+    assert.match(state, /[Ss]ent|[Ww]aiting/, `the card must say the answer was sent and is waiting: ${state}`);
+    assert.doesNotMatch(state, /applied|approved|answered/i,
+      "and must not claim the member was told before the machine says so");
+    await waitFor(async () => (await machineLog(machineUserData, machineOutput)).includes("permission.decided"), 120_000,
+      "the machine to receive the phone's permission answer");
+    log("the machine applied the phone's permission answer");
+    approvalProven = true;
+  } else {
+    log("NOT PROVEN: the member never asked for permission in this run; the card path was not exercised");
+  }
+
+  // --- 6. The desktop comes back and learns what happened without it -------
   const backDeltas = [];
   const returningLink = new MachineLinkService(desktopSettings(records, pairings), {
     write: async () => undefined
@@ -650,11 +716,12 @@ async function main() {
   await wait(500);
   await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => undefined);
   await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => undefined);
-  return { learned };
+  return { learned, approvalProven };
 }
 
 main().then((result) => {
   stopSpawned();
+  if (!result.approvalProven) console.error("[phone-e2e] REMAINDER: the machine-raised permission card was not exercised");
   process.exit(result.learned ? 0 : 2);
 }).catch((error) => {
   console.error("[phone-e2e] FAILED", error);

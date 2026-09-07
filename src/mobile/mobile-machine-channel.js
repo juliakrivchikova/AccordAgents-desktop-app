@@ -38,6 +38,15 @@
   const RELAY_PROTOCOL = "accord-relay-v1";
   const RECONNECT_MIN_MS = 1000;
   const RECONNECT_MAX_MS = 30000;
+  // What an event carries inline, and how much of a larger body travels in one
+  // fragment. Both are the machine's numbers (DEVICE_EVENT_INLINE_BYTES and
+  // BLOB_FRAGMENT_MAX_BYTES); a body split any other way is refused there.
+  const INLINE_BYTES = 32 * 1024;
+  const FRAGMENT_BYTES = 384 * 1024;
+  // Past this a paste is refused with a reason rather than fragmented. There
+  // is no point holding tens of megabytes of base64 in a phone's storage and
+  // pushing thousands of relay frames at a machine for one message.
+  const MAX_BODY_BYTES = 8 * 1024 * 1024;
   const RESEND_MIN_MS = 5000;
   const RESEND_MAX_MS = 300000;
   const TICK_MS = 5000;
@@ -129,6 +138,44 @@
       return connection.lastError
         ? { connected: connection.connected, reason: connection.lastError }
         : { connected: connection.connected };
+    }
+
+    /**
+     * A payload the phone can actually send.
+     *
+     * Anything past what an event carries inline becomes a content-addressed
+     * body: the event carries only the reference, and the bytes travel beside
+     * it as fragments. This is the same shape a machine sends, so the phone can
+     * hand over a long paste instead of refusing it -- which is what it used to
+     * do, because it could take one of these apart and not put one together.
+     *
+     * The fragments are kept until the event is acknowledged, so a re-send
+     * after a dropped connection or a reload sends the same bytes again rather
+     * than a body the machine can never complete.
+     */
+    async function prepare(payload) {
+      const json = JSON.stringify(payload);
+      if (json === undefined) throw new Error("A machine event needs a JSON payload.");
+      const bytes = new TextEncoder().encode(json);
+      if (bytes.byteLength <= INLINE_BYTES) return payload;
+      if (bytes.byteLength > MAX_BODY_BYTES) {
+        throw new Error("This message is too long to send from this phone (" +
+          Math.round(bytes.byteLength / (1024 * 1024)) + " MB). Send it from the desktop.");
+      }
+      const reference = {
+        type: "device.event.blob",
+        blobHash: "sha256:" + await api.sha256Hex(bytes),
+        byteLength: bytes.byteLength,
+        fragments: Math.ceil(bytes.byteLength / FRAGMENT_BYTES)
+      };
+      for (let index = 0; index < reference.fragments; index += 1) {
+        await blobs.store({
+          reference: reference,
+          index: index,
+          bytesBase64: api.bytesToBase64(bytes.subarray(index * FRAGMENT_BYTES, (index + 1) * FRAGMENT_BYTES))
+        });
+      }
+      return reference;
     }
 
     // ---- transport -------------------------------------------------------
@@ -282,6 +329,11 @@
           }
           await log.acknowledge(packet.from, receipt.eventId);
           connection.lastSent.delete(receipt.eventId);
+          // Acknowledged: the machine has the body, so this phone stops
+          // carrying it. Held until now so a re-send has the same bytes.
+          if (held && held.payload && held.payload.type === "device.event.blob" && blobs.release) {
+            await blobs.release(held.payload).catch(function () { return undefined; });
+          }
           if (options.onAcknowledged) await options.onAcknowledged(receipt, connection.machine);
           await release();
           return;
@@ -378,6 +430,16 @@
     // ---- outgoing --------------------------------------------------------
 
     async function sendEvent(connection, event, deliveryId) {
+      // The body first, then the event that names it: the machine holds an
+      // event whose body has not fully arrived rather than applying half of it.
+      if (event.payload && event.payload.type === "device.event.blob") {
+        for (let index = 0; index < event.payload.fragments; index += 1) {
+          const fragment = await blobs.fragment(event.payload, index);
+          if (!fragment) throw new Error("A fragment of this message is missing from this phone.");
+          await sendPacket(connection, { protocol: PROTOCOL, from: identity.deviceId, to: connection.machine.deviceId,
+            type: "fragment", fragment: fragment, ...(deliveryId ? { deliveryId: deliveryId } : {}) });
+        }
+      }
       const packet = { protocol: PROTOCOL, from: identity.deviceId, to: connection.machine.deviceId, type: "event", event: event };
       if (deliveryId) packet.deliveryId = deliveryId;
       await sendPacket(connection, packet);
@@ -433,6 +495,14 @@
 
     return {
       setMachines: setMachines,
+      prepare: prepare,
+      /** Drops a prepared body whose event was never recorded. Without this a
+       *  failed write leaves its fragments behind with nothing to release
+       *  them, and a retry leaves another set. */
+      discard: function (payload) {
+        if (!payload || payload.type !== "device.event.blob" || !blobs.release) return Promise.resolve();
+        return blobs.release(payload).catch(function () { return undefined; });
+      },
       roster: roster,
       status: statusFor,
       deliver: deliver,

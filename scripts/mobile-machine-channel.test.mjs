@@ -118,6 +118,7 @@ async function machineBox(options = {}) {
   const runs = [];
   const aborted = [];
   const actions = [];
+  const results = [];
   const replicated = [];
   const outbound = [];
   const client = {
@@ -126,7 +127,8 @@ async function machineBox(options = {}) {
     close: () => undefined,
     sendCiphertext: async (request) => { outbound.push(request); await hooks.onOutbound?.(request); return []; }
   };
-  const host = new MachineHostService(
+  let host;
+  host = new MachineHostService(
     {
       runMachineHostedTurn: async (request, signal) => {
         runs.push(request.runId);
@@ -159,14 +161,20 @@ async function machineBox(options = {}) {
       eventStorage: storage, eventLog, publicKeyDerBase64: identity.publicKeyDerBase64,
       outboxPath: path.join(dir, "outbox.json"), trustRosterPath: path.join(dir, "trust.json"),
       createClient: () => client, createPeerClient: () => client,
-      // The seam the owner's own applier sits behind. This test is about what
-      // the phone sends and what the machine accepts from it, so the applier
-      // records rather than executes.
+      // The same seam the machine runtime wires: a permission answer goes
+      // through the owner's real approval executor and its durable claim, not
+      // a stand-in, so what the phone sends is checked against the boundary
+      // that actually executes it.
       chatActions: {
         handles: (event) => ["permission.decided", "choice.answered"].includes(event.kind),
         apply: async (event, payload) => {
           actions.push({ kind: event.kind, payload, originId: event.originId });
-          return { status: "applied", kind: event.kind, targetKey: payload?.targetKey };
+          if (event.kind !== "permission.decided") {
+            return { status: "applied", kind: event.kind, targetKey: payload?.targetKey };
+          }
+          const result = await host.applyApprovalAction(event, payload);
+          results.push(result);
+          return { status: "applied", kind: event.kind, targetKey: payload?.targetKey, detail: { ok: result.ok } };
         }
       }
     }
@@ -174,7 +182,7 @@ async function machineBox(options = {}) {
   await host.start();
   await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: desktop.originId, appVersion: "t", machineId: "machine-one" });
   return {
-    host, runs, aborted, actions, replicated, outbound, pairing, identity, desktop, dir, hooks,
+    host, runs, aborted, actions, results, replicated, outbound, pairing, identity, desktop, dir, hooks,
     trust: async (peers) => {
       const body = { type: "machine.trust.roster", conversationId: `machine-trust:${pairing.rendezvousId}`,
         roster: { version: 1, issuerDeviceId: desktop.originId, updatedAt: new Date().toISOString(), peers } };
@@ -223,6 +231,13 @@ function memoryBlobs() {
   return {
     store: async (fragment) => {
       parts.set(fragment.reference.blobHash + ":" + fragment.index, Buffer.from(fragment.bytesBase64, "base64"));
+    },
+    fragment: async (reference, index) => {
+      const part = parts.get(reference.blobHash + ":" + index);
+      return part ? { reference, index, bytesBase64: part.toString("base64") } : undefined;
+    },
+    release: async (reference) => {
+      for (let index = 0; index < reference.fragments; index += 1) parts.delete(reference.blobHash + ":" + index);
     },
     take: async (reference) => {
       const held = [];
@@ -557,6 +572,14 @@ test("a permission a member raises on a machine reaches the phone, and the phone
     assert.equal(box.actions[0].kind, "permission.decided");
     assert.equal(box.actions[0].payload.targetKey, "approval:approval-1");
     assert.equal(box.actions[0].originId, identity.deviceId, "and know which device answered");
+    // Through the owner's real executor: one canonical command, keyed by the
+    // action's own event id, with a result that says what became of it.
+    assert.equal(await settle(() => box.results.length === 1, 200), true,
+      "the approval executor must have run for the phone's answer");
+    assert.equal(box.results[0].type, "machine.approval.result");
+    assert.equal(box.results[0].approvalId, "approval-1");
+    assert.equal(box.results[0].decisionId, answer.eventId,
+      "the decision is named by the action's own event id, not a second command of its own");
 
     // Answered is not the same as sent: the phone stops owing it only once the
     // machine has acknowledged applying it.
@@ -609,5 +632,67 @@ test("a body whose fragments did not all arrive is not applied and not acknowled
       "once the phone can keep the body, the held result is applied");
     const finished = device.applied.find((entry) => entry.kind === "machine.turn.finished");
     assert.equal(finished.payload.messages[0].content, long, "and it is the whole reply");
+  } finally { await box.cleanup(); }
+});
+
+test("a message too long for one event is sent in fragments and arrives whole", async () => {
+  const identity = await phone.createIdentity();
+  const box = await machineBox();
+  try {
+    await box.trust([phonePeer(identity, box.pairing)]);
+    const blobs = memoryBlobs();
+    const device = await phoneOn(box, identity, { blobs });
+    device.identityId = identity.deviceId;
+    deliverMachineTraffic(box, device);
+
+    // A long paste: past what one event carries, and past one fragment, so it
+    // is really split rather than merely moved out of the envelope.
+    const long = "PHONE_LONG_PASTE " + "z".repeat(900_000);
+    const scope = phone.deviceEventScope(box.pairing.rendezvousId, CONVERSATION, "actions");
+    const payload = await device.channels.prepare({
+      type: "machine.conversation.delta", conversationId: CONVERSATION,
+      messages: [{ id: "msg-long-out", role: "user", content: long, createdAt: new Date().toISOString(), status: "done" }],
+      updatedAt: new Date().toISOString()
+    });
+    assert.equal(payload.type, "device.event.blob", "a body this size does not travel inside the event");
+    assert.ok(payload.fragments > 1, `and it takes more than one fragment (${payload.fragments})`);
+    await device.log.append({
+      eventId: "phone-delta-run-long-out", conversationId: CONVERSATION, logScopeId: scope,
+      kind: "machine.conversation.delta", recipients: [box.identity.originId], payload: payload
+    });
+    await device.log.append({
+      eventId: phone.machineCommandEventId("run-long-out"), conversationId: CONVERSATION, logScopeId: scope,
+      kind: "machine.turn.request", recipients: [box.identity.originId],
+      payload: phone.turnRequest({ conversationId: CONVERSATION, participant: PARTICIPANT,
+        messageId: "msg-long-out", runId: "run-long-out", pendingMessageId: "pending-run-long-out" })
+    });
+    await device.channels.deliver("machine-one");
+
+    assert.equal(await settle(() => box.replicated.some((message) => message.content === long), 300), true,
+      "the machine must receive the whole message, not a truncated one");
+    assert.equal(await settle(() => box.runs.includes("run-long-out"), 300), true,
+      "and run the turn that answers it");
+    // Held until acknowledged, then dropped: a re-send before that must have
+    // the same bytes to send.
+    assert.equal(await settle(async () => (await device.log.pendingFor(box.identity.originId)).length === 0), true);
+    assert.equal(await settle(() => blobs.count() === 0, 100), true,
+      "the fragments are released once the machine has acknowledged the event that names them");
+  } finally { await box.cleanup(); }
+});
+
+test("a paste no phone should try to send is refused with a reason, not queued forever", async () => {
+  const identity = await phone.createIdentity();
+  const box = await machineBox();
+  try {
+    await box.trust([phonePeer(identity, box.pairing)]);
+    const device = await phoneOn(box, identity);
+    device.identityId = identity.deviceId;
+    await assert.rejects(
+      () => device.channels.prepare({ type: "machine.conversation.delta", conversationId: CONVERSATION,
+        messages: [{ id: "huge", role: "user", content: "q".repeat(9 * 1024 * 1024), createdAt: new Date().toISOString() }],
+        updatedAt: new Date().toISOString() }),
+      /too long to send from this phone/,
+      "the User is told why, rather than watching a message never arrive"
+    );
   } finally { await box.cleanup(); }
 });

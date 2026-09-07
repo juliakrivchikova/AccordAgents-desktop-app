@@ -12,9 +12,6 @@
   const MACHINE_EVENT_STORE = "machineEvents";
   const MACHINE_OUTBOX_STORE = "machineOutbox";
   const MACHINE_BLOB_STORE = "machineBlobs";
-  // What a machine's channel accepts inside one event (DEVICE_EVENT_INLINE_BYTES
-  // * 2 in src/main/services/deviceEventChannel.ts), less room for the envelope.
-  const MACHINE_EVENT_MAX_BYTES = 48 * 1024;
   const TIMELINE_STORE = "timeline";
   const PAIRING_KEY = "accordagents.mobile.pairing.v1";
   const ACTIVE_CONVERSATION_KEY = "accordagents.mobile.activeConversationId.v1";
@@ -980,6 +977,21 @@
           store.put({ key: key(fragment.reference, fragment.index), bytesBase64: fragment.bytesBase64 });
         });
       },
+      /** A fragment held for sending, in the shape the machine reads. */
+      fragment: async function (reference, index) {
+        const held = await withNamedStore(MACHINE_BLOB_STORE, "readonly", function (store) {
+          return requestToPromise(store.get(key(reference, index)));
+        });
+        return held ? { reference: reference, index: index, bytesBase64: held.bytesBase64 } : undefined;
+      },
+      /** Dropped once the machine has acknowledged the event that names it. */
+      release: async function (reference) {
+        for (let index = 0; index < reference.fragments; index += 1) {
+          await withNamedStore(MACHINE_BLOB_STORE, "readwrite", function (store) {
+            store.delete(key(reference, index));
+          });
+        }
+      },
       take: async function (reference) {
         const parts = [];
         for (let index = 0; index < reference.fragments; index += 1) {
@@ -1287,30 +1299,34 @@
     if (!built || !machine) throw new Error("This phone cannot reach that machine directly yet.");
     const api = globalThis.AccordMachineCommand;
     const scope = api.deviceEventScope(machine.rendezvousId, request.conversationId, "actions");
-    // An event larger than a machine will accept is refused here, plainly. The
-    // phone does not split a body across fragments the way a desktop does, so
-    // queueing one would be a message retried forever and never delivered.
-    const messageBytes = request.message ? new TextEncoder().encode(JSON.stringify(request.message)).length : 0;
-    if (messageBytes > MACHINE_EVENT_MAX_BYTES) {
-      throw new Error("This message is too long to send straight to a machine from this phone (" +
-        Math.round(messageBytes / 1024) + " KB). Send it when the desktop is reachable.");
-    }
     // The machine runs against its own copy of the chat, so the row the turn
     // answers travels with the command rather than being assumed to be there.
+    // A long paste is larger than one event carries, so it goes as a body the
+    // event names and the fragments beside it -- the same shape a machine uses
+    // to send this phone a long answer.
     if (request.message) {
-      await built.log.append({
-        eventId: "phone-delta-" + request.runId,
+      const body = await built.channels.prepare({
+        type: "machine.conversation.delta",
         conversationId: request.conversationId,
-        logScopeId: scope,
-        kind: "machine.conversation.delta",
-        recipients: [machine.deviceId],
-        payload: {
-          type: "machine.conversation.delta",
-          conversationId: request.conversationId,
-          messages: [request.message],
-          updatedAt: nowIso()
-        }
+        messages: [request.message],
+        updatedAt: nowIso()
       });
+      try {
+        await built.log.append({
+          eventId: "phone-delta-" + request.runId,
+          conversationId: request.conversationId,
+          logScopeId: scope,
+          kind: "machine.conversation.delta",
+          recipients: [machine.deviceId],
+          payload: body
+        });
+      } catch (error) {
+        // The event was never recorded, so nothing will ever release the body
+        // it named. Dropping it here is what keeps a failing write from
+        // leaving a fresh copy behind on every retry.
+        await built.channels.discard(body);
+        throw error;
+      }
     }
     const event = await built.log.append({
       eventId: api.machineCommandEventId(request.runId),
