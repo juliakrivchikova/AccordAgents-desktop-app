@@ -14,6 +14,7 @@ import { EventEmitter } from "node:events";
 import {
   MACHINE_LINK_PROTOCOL,
   isMachineLinkEnvelope,
+  type MachineConversationDeletedBody,
   type MachineConversationDeltaBody,
   type MachineHelloBody,
   type MachineLinkEnvelope,
@@ -726,6 +727,41 @@ export class MachineLinkService implements MachineTurnDispatcher {
       await this.waitForIntroduction(connection);
       await this.replicateTo(connection, conversation);
     }
+  }
+
+  /**
+   * Tells every machine that hosts a member of this chat that it is gone.
+   *
+   * Durable, not best-effort: a machine that is off learns when it comes back,
+   * and the event is retained until it acknowledges. The participants have to
+   * be read before the chat is deleted, because afterwards there is nothing
+   * left to read them from.
+   */
+  async deleteConversationOnMachines(conversation: Pick<Conversation, "id" | "metadata">): Promise<number> {
+    const participants = (conversation.metadata as { participants?: Array<{ homeMachineId?: unknown }> }).participants ?? [];
+    const machineIds = new Set(
+      participants
+        .map((participant) => participant.homeMachineId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0)
+    );
+    const body: MachineConversationDeletedBody = {
+      type: "machine.conversation.deleted", conversationId: conversation.id, deletedAt: new Date().toISOString()
+    };
+    let told = 0;
+    for (const machineId of machineIds) {
+      const connection = this.connections.get(machineId);
+      if (!connection?.eventChannel) continue;
+      try {
+        await this.send(connection, body);
+        told += 1;
+      } catch (error) {
+        // Retained by the channel's own outbox; a machine that is away is told
+        // when it returns, so this is not a lost deletion.
+        void this.debugLogs.write("machine-link.conversation.delete-pending",
+          { machineId, conversationId: conversation.id, message: errorMessage(error) });
+      }
+    }
+    return told;
   }
 
   async runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult> {

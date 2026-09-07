@@ -262,6 +262,21 @@ export interface MachineTurnFinishedAckBody {
   finishedAt: string;
 }
 
+/**
+ * The chat is gone on the device that owns it, and must be gone here.
+ *
+ * Deletion is a command of its own rather than a shape of the conversation,
+ * because the conversation is exactly what stops existing: a machine that only
+ * ever learns state from snapshots cannot be told about the absence of one. It
+ * is durable, so a machine that is off is told when it comes back, and it
+ * leaves a tombstone, so a snapshot still in flight cannot bring the chat back.
+ */
+export interface MachineConversationDeletedBody {
+  type: "machine.conversation.deleted";
+  conversationId: string;
+  deletedAt: string;
+}
+
 export interface MachineChoiceAnswerBody {
   type: "machine.choice.answer";
   conversationId: string;
@@ -312,6 +327,7 @@ export type MachineLinkMessage =
   | MachineConversationSyncBody
   | MachineConversationDeltaBody
   | MachineTurnRequestBody
+  | MachineConversationDeletedBody
   | MachineTurnCancelBody
   | MachineTurnProgressBody
   | MachineProgressFrame
@@ -344,7 +360,7 @@ export function isMachineDurableMessage(body: MachineLinkMessage): boolean {
     body.type === "machine.turn.request" || body.type === "machine.turn.cancel" || body.type === "machine.settings.sealed" || body.type === "machine.turn.started" ||
     body.type === "machine.approval.requested" || body.type === "machine.approval.updated" || body.type === "machine.approval.decision" || body.type === "machine.approval.result" ||
     body.type === "machine.turn.progress.delta" || body.type === "machine.participants.delegate" ||
-    body.type === "machine.trust.roster";
+    body.type === "machine.conversation.deleted" || body.type === "machine.trust.roster";
 }
 
 export function machineCommandId(runId: string): string { return `machine-command:${runId}`; }
@@ -357,6 +373,7 @@ const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.settings.sealed",
   "machine.conversation.sync",
   "machine.conversation.delta",
+  "machine.conversation.deleted",
   "machine.turn.request",
   "machine.turn.cancel",
   "machine.turn.progress",

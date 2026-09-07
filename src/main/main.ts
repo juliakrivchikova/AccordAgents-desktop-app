@@ -476,6 +476,11 @@ const artifactService = new ArtifactService({
   })).then((outcome) => outcome.result)
 });
 chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
+// A deleted chat is deleted on the machines that host its members too, durably
+// and with a tombstone, so a snapshot still in flight cannot bring it back.
+chatService.setConversationDeletedHandler(async (conversation) => {
+  await machineLinkService?.deleteConversationOnMachines(conversation);
+});
 const dispatchArtifactTool = createArtifactToolDispatcher(artifactService);
 wireArtifactToolHandler(appMcpService, chatService, dispatchArtifactTool);
 // Applies chat actions that arrive from a machine. Emitting an action is half

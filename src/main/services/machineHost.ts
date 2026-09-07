@@ -210,8 +210,8 @@ export class MachineHostService {
   private readonly knownMessages = new Map<string, Map<string, string>>();
 
   constructor(
-    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest">>,
-    private readonly storage: Pick<StorageService, "getConversation">,
+    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions">>,
+    private readonly storage: Pick<StorageService, "getConversation"> & Partial<Pick<StorageService, "deleteConversation">>,
     private readonly settings: Pick<SettingsService, "importMachineSettingsSnapshot">,
     private readonly debugLogs: Pick<DebugLogService, "write">,
     private readonly options: MachineHostOptions
@@ -675,6 +675,9 @@ export class MachineHostService {
       case "machine.settings.sync":
       case "machine.settings.sealed":
       case "machine.trust.roster":
+      // Deleting the owner's chat is an ownership act, like the settings and
+      // the roster: it comes from the desktop that enrolled this machine.
+      case "machine.conversation.deleted":
         return !peer;
       case "machine.participants.delegate":
         // This machine sends delegations to the member's home; it accepts one
@@ -774,7 +777,20 @@ export class MachineHostService {
         await this.options.onSettingsImported?.();
         return;
       }
+      case "machine.conversation.deleted": {
+        // The owner deleted the chat. Nothing here may keep running against
+        // it, and nothing that arrives later may write it back.
+        await this.deleteReplicatedConversation(body.conversationId, body.deletedAt);
+        return;
+      }
       case "machine.conversation.sync":
+        // A snapshot of a chat the owner deleted is stale by definition; it
+        // cannot be told apart from a new one except by the tombstone.
+        if (await this.options.eventStorage.conversationTombstones().isDeleted(body.conversation.id)) {
+          void this.debugLogs.write("machine-host.conversation.deleted-copy-refused",
+            { conversationId: body.conversation.id, type: body.type });
+          return;
+        }
         // A fresh copy starts clean: a previous copy's failure is forgotten
         // (the retry budget is not).
         this.failedSync.delete(body.conversation.id);
@@ -807,6 +823,11 @@ export class MachineHostService {
         return;
       }
       case "machine.conversation.delta":
+        if (await this.options.eventStorage.conversationTombstones().isDeleted(body.conversationId)) {
+          void this.debugLogs.write("machine-host.conversation.deleted-copy-refused",
+            { conversationId: body.conversationId, type: body.type });
+          return;
+        }
         // Only the desktop's own copy tells this machine what the desktop
         // already holds. A message the phone delivered here is new to the
         // desktop, and recording it as known would mean the desktop never
@@ -825,6 +846,10 @@ export class MachineHostService {
         return;
       case "machine.turn.request":
         if (this.activeTurns.has(body.runId) || this.pendingTerminals.has(body.runId) || this.isQueuedRun(body.runId)) return;
+        if (await this.options.eventStorage.conversationTombstones().isDeleted(body.conversationId)) {
+          await this.finishQueuedTurn(body, "failed", "This chat was deleted; the turn did not run.");
+          return;
+        }
         if (this.draining) {
           await this.finishQueuedTurn(body, "failed", "The machine is shutting down; this turn did not start.");
           return;
@@ -1048,6 +1073,37 @@ export class MachineHostService {
       const messages = mergeReplicatedMessages(existing?.messages ?? [], incoming.messages, [], this.ownedParticipantIds(existing ?? incoming));
       return { ...incoming, messages, metadata };
     });
+  }
+
+  /**
+   * Deletes this machine's copy of a chat the owner deleted.
+   *
+   * Order matters and is the whole point: nothing native may still be running
+   * against it, the providers it holds have to be actually closed, and the
+   * tombstone is written before the rows go — a crash between the two must
+   * leave the chat deletable, never resurrectable.
+   */
+  private async deleteReplicatedConversation(conversationId: string, deletedAt: string): Promise<void> {
+    const tombstones = this.options.eventStorage.conversationTombstones();
+    await tombstones.mark(conversationId, deletedAt);
+    this.syncing.delete(conversationId);
+    this.failedSync.delete(conversationId);
+    this.turnsAwaitingCopy.delete(conversationId);
+    this.knownMessages.delete(conversationId);
+    // Anything of this chat still in flight is stopped and waited for. A
+    // provider left running against a deleted chat is exactly the process
+    // nobody would ever come looking for.
+    for (const [runId, controller] of this.activeTurns) {
+      if (this.chat.conversationIdForRun?.(runId) === conversationId) controller.abort();
+    }
+    await this.chat.closeReplicatedConversationSessions?.(conversationId);
+    if (this.storage.deleteConversation) {
+      await this.storage.deleteConversation(conversationId).catch((error: unknown) => {
+        void this.debugLogs.write("machine-host.conversation.delete-error", { conversationId, message: errorMessage(error) });
+        throw error;
+      });
+    }
+    void this.debugLogs.write("machine-host.conversation.deleted", { conversationId, deletedAt });
   }
 
   private async applyConversationDelta(delta: MachineConversationDeltaBody, durable = false, fromDesktop = true): Promise<void> {

@@ -1247,6 +1247,15 @@ export class ChatService {
           });
         this.saveQueues.delete(conversation.id);
         this.chatMutationQueues.delete(conversation.id);
+        // Every machine that hosts a member of this chat has its own copy and
+        // its own providers. The participants were read before the rows went;
+        // afterwards there is nothing left to read them from.
+        await this.onConversationDeleted?.({ id: conversation.id, metadata: conversation.metadata }).catch((error) => {
+          void this.debugLogs.write("chat.delete.machines.error", {
+            conversationId: conversation.id,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        });
         return true;
       } catch (error) {
         if (await this.storage.getConversation(conversation.id)) {
@@ -1258,6 +1267,14 @@ export class ChatService {
       rejectIfQueued: true,
       queuedMessage: "Chat cannot be deleted while members are running."
     });
+  }
+
+  /** Told after a chat is deleted here, so the machines holding a copy of it
+   *  are told too. Set by the composition root. */
+  private onConversationDeleted?: (conversation: Pick<Conversation, "id" | "metadata">) => Promise<unknown>;
+
+  setConversationDeletedHandler(handler: (conversation: Pick<Conversation, "id" | "metadata">) => Promise<unknown>): void {
+    this.onConversationDeleted = handler;
   }
 
   /** Run ids recorded by the cloud-worker transport that no longer exists.
@@ -5788,6 +5805,18 @@ export class ChatService {
    *  tracking, so later saves by turns on this machine never collide with
    *  rows written behind the service's back. The caller has already merged
    *  the machine-owned metadata. */
+  /**
+   * Closes this device's providers for a chat that is being deleted elsewhere,
+   * and proves they are gone.
+   *
+   * Deletion has to leave nothing running against a conversation that no
+   * longer exists; a provider held for a chat nobody can open again is a
+   * process nobody would ever come looking for.
+   */
+  async closeReplicatedConversationSessions(conversationId: string): Promise<void> {
+    await this.cliRunner.closeConversationSessions(conversationId);
+  }
+
   async applyReplicatedConversation(
     conversationId: string,
     merge: (existing: Conversation | undefined) => Conversation | undefined

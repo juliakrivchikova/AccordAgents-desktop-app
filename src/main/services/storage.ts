@@ -366,6 +366,13 @@ export class StorageService {
         conversation_id text not null,
         requested_at text not null
       );
+      -- A chat the owner deleted. Kept after the rows are gone, because a
+      -- snapshot already in flight would otherwise write it back: the copy
+      -- has no way to tell "new" from "stale" without a record of the absence.
+      create table if not exists deleted_conversations (
+        conversation_id text primary key,
+        deleted_at text not null
+      );
       create table if not exists chat_events (
         event_id text primary key,
         conversation_id text not null,
@@ -1497,6 +1504,36 @@ export class StorageService {
       query: <T>(sql: string) => this.queryJson<T>(sql),
       execute: (sql: string) => this.runSql(sql)
     });
+  }
+
+  /**
+   * Chats this device has been told are gone.
+   *
+   * A replicated copy cannot tell a new conversation from a stale snapshot of
+   * a deleted one; both are just rows arriving. The tombstone is what makes
+   * the difference, and it has to outlive the rows and the process.
+   */
+  conversationTombstones(): {
+    mark(conversationId: string, deletedAt: string): Promise<void>;
+    isDeleted(conversationId: string): Promise<boolean>;
+    deletedAt(conversationId: string): Promise<string | undefined>;
+  } {
+    return {
+      mark: async (conversationId, deletedAt) => {
+        if (!conversationId.trim() || !deletedAt.trim()) throw new Error("A deletion tombstone requires stable identities.");
+        await this.init();
+        await this.runSql(`insert into deleted_conversations(conversation_id, deleted_at)
+          values (${sqlString(conversationId)}, ${sqlString(deletedAt)})
+          on conflict(conversation_id) do nothing;`);
+      },
+      isDeleted: async (conversationId) => Boolean(await this.conversationTombstones().deletedAt(conversationId)),
+      deletedAt: async (conversationId) => {
+        await this.init();
+        const rows = await this.queryJson<{ deletedAt: string }>(
+          `select deleted_at as deletedAt from deleted_conversations where conversation_id = ${sqlString(conversationId)};`);
+        return rows[0]?.deletedAt;
+      }
+    };
   }
 
   nativeCommands(): NativeCommandStore {
