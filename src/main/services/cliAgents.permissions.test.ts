@@ -4057,6 +4057,50 @@ test("shutdown waits for a session still being constructed and duplicate constru
   assert.equal(runner.warmAgents.size, 0);
 });
 
+test("conversation shutdown keeps other chats running and retries failed native closure", async () => {
+  const runner = makeRunner() as any;
+  const entry = (conversationId: string) => ({ key: JSON.stringify({ conversationId, participantId: "member" }), scopeKey: `${conversationId}:member`, closed: false });
+  const archived = entry("chat");
+  const other = entry("chat:other");
+  runner.warmAgents.set(archived.key, archived);
+  runner.warmAgents.set(other.key, other);
+  runner.clearWarmIdleTimer = () => {};
+  runner.maybeStopClaudeBackgroundProcessCapture = () => {};
+  let attempts = 0;
+  runner.closeWarmAgentProcess = async (value: unknown) => {
+    assert.equal(value, archived);
+    if (++attempts === 1) throw new Error("closure receipt could not be stored");
+  };
+  await assert.rejects(runner.closeConversationSessions("chat"), /receipt could not be stored/);
+  assert.equal(runner.hasActiveNativeWork(), true, "a closed flag is not a proof that descendants are gone");
+  await assert.rejects(runner.createTrackedWarmAgent(archived.key, async () => archived), /sessions are closing/);
+  assert.equal(runner.warmAgents.get(other.key), other);
+  assert.equal(other.closed, false);
+  await runner.closeConversationSessions("chat");
+  assert.equal(attempts, 2);
+  assert.equal(runner.hasActiveNativeWork(), false);
+  assert.equal(runner.warmAgents.get(other.key), other);
+});
+
+test("conversation shutdown fences concurrent construction and preserves another chat's startup", async () => {
+  const runner = makeRunner() as any;
+  const key = JSON.stringify({ conversationId: "closing", participantId: "member" });
+  let finish!: (entry: unknown) => void;
+  const creating = runner.createTrackedWarmAgent(key, () => new Promise(resolve => { finish = resolve; }));
+  const closed: string[] = [];
+  runner.closeWarmAgent = async (entry: { key: string }) => { closed.push(entry.key); };
+  const closing = runner.closeConversationSessions("closing");
+  assert.equal(runner.closeConversationSessions("closing"), closing);
+  await assert.rejects(runner.createTrackedWarmAgent(key, async () => ({})), /sessions are closing/);
+  const unrelated = JSON.stringify({ conversationId: "another", participantId: "member" });
+  await runner.createTrackedWarmAgent(unrelated, async () => ({ key: unrelated }));
+  finish({ key });
+  await assert.rejects(creating, /before this command started/);
+  await closing;
+  assert.deepEqual(closed, [key]);
+  assert.ok(runner.warmAgents.has(unrelated));
+});
+
 test("codex app-server initialization failure never replays a command through one-shot execution", async () => {
   const runner = makeRunner() as any;
   let oneShotRuns = 0;

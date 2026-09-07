@@ -5,7 +5,7 @@ import { assertCurrentAwsMachine } from "./awsMachineIdentity";
 import type { CliAgentRunner } from "./cliAgents";
 import type { MachineHostService } from "./machineHost";
 import { MachineIdleScheduler } from "./machineIdle";
-import { MachineHostPowerRegistry } from "./machineHostPower";
+import { MachineHostPowerRegistry, type MachineHostPowerOptions } from "./machineHostPower";
 import { userDataPath } from "../platform";
 import type { MachinePowerStore } from "./machinePowerStore";
 import { nativeHostIdentity, verifiedNativeHostReboot, type NativeHostIdentity } from "./nativeHostIdentity";
@@ -40,6 +40,7 @@ export class MachineIdlePower {
     identity(): Promise<NativeHostIdentity | undefined>;
     verifyAws(config: AwsMachinePowerConfig): Promise<void>;
     uptimeMs(): number;
+    createHostRegistry?(options: MachineHostPowerOptions): MachineHostPowerRegistry;
     client?: Pick<AwsMachinePowerClient, "stopAfterDrain" | "close">;
   } = {
     identity: async () => process.platform === "linux" ? nativeHostIdentity() : undefined,
@@ -69,11 +70,12 @@ export class MachineIdlePower {
     // cannot see this one's work. Without a shared claim, whichever of them
     // reaches three hours first would stop the instance underneath the others.
     try {
-      this.hostPower = new MachineHostPowerRegistry({
+      const registryOptions = {
         profilePath: this.options.profilePath ?? userDataPath(),
         bootId,
         uptimeMs: this.environment.uptimeMs
-      });
+      };
+      this.hostPower = this.environment.createHostRegistry?.(registryOptions) ?? new MachineHostPowerRegistry(registryOptions);
       this.hostPower.publish(true);
     } catch (error) {
       // Fail closed: without coordination a stop could destroy another
@@ -90,7 +92,7 @@ export class MachineIdlePower {
         // Publish before answering, so a deployment deciding to stop right now
         // reads this one's current state rather than a stale claim.
         try { this.hostPower?.publish(busy); }
-        catch (error) { this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`); }
+        catch (error) { this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`); return true; }
         return busy;
       },
       prepareStop: async since => {
@@ -119,14 +121,26 @@ export class MachineIdlePower {
     else this.scheduler?.start();
   }
 
-  noteActivity(): Promise<void> { return this.scheduler?.noteActivity() ?? Promise.resolve(); }
+  noteActivity(): Promise<void> {
+    try { this.hostPower?.publish(true); }
+    catch (error) { this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`); }
+    return this.scheduler?.noteActivity() ?? Promise.resolve();
+  }
 
   close(): void {
     this.closed = true;
-    this.hostPower?.release();
+    // Observation can end before the host finishes draining. The caller must
+    // explicitly release the registration after admission and shutdown settle.
     this.scheduler?.close();
     if (this.retry) clearTimeout(this.retry);
     this.client.close();
+  }
+
+  async releaseAfterShutdown(): Promise<void> {
+    if (!this.hostPower || !this.hostIdentity) return;
+    if (!this.closed || this.options.runner.hasActiveNativeWork()) throw new Error("Native work has not finished shutting down.");
+    await assertNativeRegistryClosed(this.options.nativeProcessDbPath, this.hostIdentity);
+    this.hostPower.release();
   }
 
   private async localBusy(bootId: string): Promise<boolean> {
@@ -142,7 +156,7 @@ export class MachineIdlePower {
   private blockedByAnotherDeployment(): boolean {
     let reason: string | undefined;
     try {
-      reason = this.hostPower?.blockingReason();
+      reason = this.hostPower ? this.hostPower.blockingReason() : "Host-power coordination is unavailable.";
     } catch (error) {
       reason = `This machine's deployments cannot be read (${errorText(error)}).`;
     }

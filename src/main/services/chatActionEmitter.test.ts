@@ -9,6 +9,9 @@ import {
 } from "./chatActionEmitter";
 import { foldChatActionEvents } from "../../shared/chatActionEvents";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import { ChatActionApplier } from "./chatActionApplier";
+import { createChatActionEffects } from "./chatActionEffects";
+import type { Conversation, RespondToChatAppToolApprovalRequest } from "../../shared/types";
 
 function harness(options: { failPublish?: boolean } = {}) {
   const published: ChatActionEmission[] = [];
@@ -53,7 +56,7 @@ test("a permission answer is recorded before the provider is told, and the provi
   });
   assert.equal(target, approvalTarget("card-1"));
   assert.equal(h.published[0].kind, "permission.decided");
-  assert.deepEqual(h.published[0].payload.detail, { approve: true, scope: "session", decisionId: "native-7" });
+  assert.deepEqual(h.published[0].payload.detail, { approve: true, scope: "session", codexDecisionId: "native-7" });
 
   assert.equal(await h.emitter.beginExecution(target), true, "nothing has been executed yet");
   await h.emitter.recordExecution({ conversationId: "chat", targetKey: target, effect: "answered the provider" });
@@ -141,9 +144,47 @@ test("an answer to a request this peer never saw opened is superseded, not inven
 
 test("a failed publish is reported and never pretends the decision was recorded", async () => {
   const h = harness({ failPublish: true });
-  await h.emitter.permissionDecided({ conversationId: "chat", approvalId: "card-4", approve: true });
+  let providerCalled = false;
+  await assert.rejects(async () => {
+    await h.emitter.permissionDecided({ conversationId: "chat", approvalId: "card-4", approve: true });
+    providerCalled = true;
+  }, /SQLITE_FULL/);
   assert.deepEqual(h.published, []);
+  assert.equal(providerCalled, false);
   assert.ok(h.logged.some((entry) => entry.event === "chat.action.emit-failed"));
-  assert.equal(await h.emitter.beginExecution(approvalTarget("card-4")), true,
-    "an unrecorded decision must not block the provider being told");
+  await assert.rejects(h.emitter.recordExecution({ conversationId: "chat", targetKey: "approval:card-4", effect: "answered" }), /SQLITE_FULL/);
+});
+
+test("an emitted answer reaches the receiving owner with the full native decision and custom text", async () => {
+  const h = harness();
+  const approvals: RespondToChatAppToolApprovalRequest[] = [];
+  const choices: Array<Record<string, unknown>> = [];
+  const conversation = { id: "chat", metadata: { pendingAppToolApprovals: [{ id: "card", status: "pending" }], activeRunIds: ["run"] } } as unknown as Conversation;
+  const effects = createChatActionEffects({
+    emitter: h.emitter,
+    storage: { getConversation: async () => conversation },
+    chat: {
+      respondToAppToolApproval: async (request) => { approvals.push(request); return conversation; },
+      respondToChoice: async (request) => { choices.push(request); },
+      cancelRun: () => true,
+      conversationIdForRun: () => "chat"
+    }
+  });
+  const applier = new ChatActionApplier({ effects });
+  const draft = { tool: "command", proposed: "echo amended" } as unknown as NonNullable<RespondToChatAppToolApprovalRequest["draftOverride"]>;
+  await h.emitter.permissionDecided({ conversationId: "chat", approvalId: "card", approve: true, scope: "chat", decisionId: "native-allow", draftOverride: draft });
+  await applier.apply(envelopes(h.published)[0]);
+  assert.deepEqual(approvals, [{ conversationId: "chat", approvalId: "card", approve: true, scope: "chat", codexDecisionId: "native-allow", draftOverride: draft }]);
+
+  await h.emitter.choiceAnswered({ conversationId: "chat", choiceId: "choice", sourceMessageId: "message", selectedOptionId: "custom", customAnswer: "Первый ответ", note: "С пояснением" });
+  const first = h.published.at(-1)!;
+  await applier.apply(envelopes([first])[0]);
+  assert.equal(choices[0].customAnswer, "Первый ответ");
+  assert.equal(choices[0].note, "С пояснением");
+  await h.emitter.choiceAnswered({ conversationId: "chat", choiceId: "choice", sourceMessageId: "message", selectedOptionId: "custom", customAnswer: "Другой ответ", note: "С пояснением" });
+  assert.notEqual(h.published.at(-1)!.payload.operationId, first.payload.operationId, "different custom answers cannot collide in the immutable event log");
+
+  await h.emitter.stopRequested({ conversationId: "chat", runId: "run" });
+  await applier.apply(envelopes([h.published.at(-1)!])[0]);
+  assert.equal((h.published.at(-1)!.payload as unknown as { effect: string }).effect, "requested the run to stop");
 });

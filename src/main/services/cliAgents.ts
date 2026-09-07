@@ -1017,6 +1017,9 @@ export class CliAgentRunner {
   private runTimeoutMs = CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS;
   private readonly nativeProcessDbPath?: string;
   private readonly warmAgentCreations = new Map<string, Promise<WarmAgentEntry>>();
+  private readonly conversationShutdowns = new Map<string, Promise<void>>();
+  private readonly conversationOperations = new Map<string, number>();
+  private readonly failedWarmClosures = new Set<WarmAgentEntry>();
   private warmShutdown?: Promise<void>;
   private warmOperations = 0;
   private nativeOperations = 0;
@@ -1136,6 +1139,9 @@ export class CliAgentRunner {
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
     if (this.nativeAdmissionsFenced) return this.failed(participant, new Error("The machine is stopping after idle; this native command did not start."));
+    if (options.warm && this.conversationClosing(options.warm.conversationId)) {
+      return this.failed(participant, new Error("This chat's native sessions are closing; this command did not start."));
+    }
     const effectiveRepoPath = this.repoPathForRun(repoPath, diffMode, kind);
     const idleMonitor = options.nativeGoal
       ? this.createNativeGoalIdleMonitor(participant, options.onOutput)
@@ -1152,6 +1158,7 @@ export class CliAgentRunner {
         }
       : options;
     this.nativeOperations++;
+    this.trackConversationOperation(options.warm?.conversationId, 1);
     try {
       if (participant.kind === "codex-cli") {
         return await this.runCodex(participant, prompt, effectiveRepoPath, diffMode, kind, signal, effectiveOptions);
@@ -1165,6 +1172,7 @@ export class CliAgentRunner {
       return { participant, ok: false, content: "", error: `${participant.label} is not a CLI agent.` };
     } finally {
       this.nativeOperations--;
+      this.trackConversationOperation(options.warm?.conversationId, -1);
       idleMonitor?.close();
     }
   }
@@ -1178,11 +1186,15 @@ export class CliAgentRunner {
     options: CliAgentRunOptions = {}
   ): Promise<CliAgentCompactResult> {
     if (this.nativeAdmissionsFenced) return { participant, ok: false, error: "The machine is stopping after idle; compaction did not start." };
+    if (options.warm && this.conversationClosing(options.warm.conversationId)) {
+      return { participant, ok: false, error: "This chat's native sessions are closing; compaction did not start." };
+    }
     if (!options.sessionId) {
       return { participant, ok: false, error: `${participant.label} does not have an active CLI session to compact.` };
     }
     const effectiveRepoPath = this.repoPathForRun(repoPath, diffMode, kind);
     this.nativeOperations++;
+    this.trackConversationOperation(options.warm?.conversationId, 1);
     try {
       if (participant.kind === "codex-cli") {
         return await this.compactCodexSession(participant, effectiveRepoPath, diffMode, kind, signal, options);
@@ -1194,11 +1206,11 @@ export class CliAgentRunner {
         return await this.compactGeminiSession(participant, effectiveRepoPath, kind, signal, options);
       }
       return { participant, ok: false, error: `${participant.label} is not a CLI agent.` };
-    } finally { this.nativeOperations--; }
+    } finally { this.nativeOperations--; this.trackConversationOperation(options.warm?.conversationId, -1); }
   }
 
   hasActiveNativeWork(): boolean {
-    return this.nativeOperations > 0 || this.warmOperations > 0 || this.warmAgentCreations.size > 0 || this.closingWarmAgents.size > 0 ||
+    return this.nativeOperations > 0 || this.warmOperations > 0 || this.warmAgentCreations.size > 0 || this.closingWarmAgents.size > 0 || this.failedWarmClosures.size > 0 ||
       [...this.warmAgents.values()].some(entry => !entry.closed && entry.hasLiveBackgroundWork?.());
   }
 
@@ -1216,7 +1228,7 @@ export class CliAgentRunner {
       // An in-flight supervisor handshake must finish before shutdown can
       // declare its process set empty. New handshakes are refused meanwhile.
       await Promise.allSettled([...this.warmAgentCreations.values()]);
-      const entries = Array.from(this.warmAgents.values());
+      const entries = [...new Set([...this.warmAgents.values(), ...this.failedWarmClosures])];
       const alreadyClosing = Array.from(this.closingWarmAgents.values());
       this.warmAgents.clear();
       this.stopClaudeBackgroundProcessCapture();
@@ -1226,10 +1238,42 @@ export class CliAgentRunner {
     return this.warmShutdown;
   }
 
+  /** Archive/delete closes resident processes, while leaving provider session
+   * files intact for a later unarchive. Other chats continue running. */
+  closeConversationSessions(conversationId: string): Promise<void> {
+    const pending = this.conversationShutdowns.get(conversationId);
+    if (pending) return pending;
+    if ((this.conversationOperations.get(conversationId) ?? 0) > 0) {
+      return Promise.reject(new Error("Chat cannot be closed while native work is running."));
+    }
+    const belongs = (key: string): boolean => warmConversationId(key) === conversationId;
+    // Install the admission barrier synchronously, before waiting on startup or
+    // native shutdown. A second archive shares the exact same closure proof.
+    const closing = Promise.resolve().then(async () => {
+      await Promise.allSettled([...this.warmAgentCreations].filter(([key]) => belongs(key)).map(([, value]) => value));
+      const entries = new Set([...this.warmAgents.values(), ...this.closingWarmAgents.keys(), ...this.failedWarmClosures]);
+      await Promise.all([...entries].filter(entry => belongs(entry.key)).map(entry => this.closeWarmAgent(entry, "conversation-closed")));
+    }).finally(() => this.conversationShutdowns.delete(conversationId));
+    this.conversationShutdowns.set(conversationId, closing);
+    return closing;
+  }
+
+  private trackConversationOperation(conversationId: string | undefined, delta: number): void {
+    if (!conversationId) return;
+    const count = (this.conversationOperations.get(conversationId) ?? 0) + delta;
+    if (count > 0) this.conversationOperations.set(conversationId, count);
+    else this.conversationOperations.delete(conversationId);
+  }
+
+  private conversationClosing(conversationId: string): boolean {
+    return this.conversationShutdowns.has(conversationId) || [...this.failedWarmClosures].some(entry => warmConversationId(entry.key) === conversationId);
+  }
+
   terminateWarmAgentsImmediately(reason = "immediate shutdown"): void {
     const entries = new Set([
       ...this.warmAgents.values(),
-      ...this.closingWarmAgents.keys()
+      ...this.closingWarmAgents.keys(),
+      ...this.failedWarmClosures
     ]);
     this.warmAgents.clear();
     this.stopClaudeBackgroundProcessCapture();
@@ -5839,10 +5883,11 @@ export class CliAgentRunner {
   private createTrackedWarmAgent(key: string, construct: () => Promise<WarmAgentEntry>): Promise<WarmAgentEntry> {
     if (this.nativeAdmissionsFenced) return Promise.reject(new Error("The machine is stopping after idle; this native session did not start."));
     if (this.warmShutdown) return Promise.reject(new Error("The native sessions are shutting down; this command did not start."));
+    if (this.conversationClosing(warmConversationId(key) ?? "")) return Promise.reject(new Error("This chat's native sessions are closing; this command did not start."));
     const existing = this.warmAgentCreations.get(key);
     if (existing) return existing;
     const creating = construct().then(async (entry) => {
-      if (this.warmShutdown) {
+      if (this.warmShutdown || this.conversationShutdowns.has(warmConversationId(key) ?? "")) {
         await this.closeWarmAgent(entry, "shutdown-during-start");
         throw new Error("The native session shut down before this command started.");
       }
@@ -5977,7 +6022,7 @@ export class CliAgentRunner {
     if (existingClose) {
       return existingClose;
     }
-    if (entry.closed) {
+    if (entry.closed && !this.failedWarmClosures.has(entry)) {
       return Promise.resolve();
     }
     entry.closed = true;
@@ -5988,7 +6033,14 @@ export class CliAgentRunner {
       providerKind: entry.providerKind,
       reason
     });
-    const close = this.closeWarmAgentProcess(entry).finally(() => {
+    const close = this.closeWarmAgentProcess(entry).then(() => {
+      this.failedWarmClosures.delete(entry);
+    }, error => {
+      // closed prevents reuse; it is not a successful process-closure receipt.
+      // Keep the entry so retries and the idle gate cannot forget its children.
+      this.failedWarmClosures.add(entry);
+      throw error;
+    }).finally(() => {
       this.closingWarmAgents.delete(entry);
     });
     this.closingWarmAgents.set(entry, close);
@@ -7767,4 +7819,11 @@ export class CliAgentRunner {
     }
     return `${trimmed.slice(0, maxChars).trimEnd()}... [truncated ${trimmed.length - maxChars} chars]`;
   }
+}
+
+function warmConversationId(key: string): string | undefined {
+  try {
+    const value = JSON.parse(key) as { conversationId?: unknown };
+    return typeof value?.conversationId === "string" ? value.conversationId : undefined;
+  } catch { return undefined; }
 }

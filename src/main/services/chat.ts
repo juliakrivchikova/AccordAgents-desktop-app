@@ -1171,27 +1171,28 @@ export class ChatService {
       if (conversation.kind !== "chat") {
         throw new Error("Only chat conversations can be archived.");
       }
-      if (conversation.metadata.running === true || this.chatHasLiveWork(conversation.id)) {
-        throw new Error("Chat cannot be archived while members are running.");
-      }
-      const alreadyArchived = conversation.metadata.archived === true;
-      if (request.archived === alreadyArchived) {
+      return this.withChatMutation(conversation, async () => {
+        if (conversation.metadata.running === true || this.chatHasLiveWork(conversation.id)) {
+          throw new Error("Chat cannot be archived while members are running.");
+        }
+        const alreadyArchived = conversation.metadata.archived === true;
+        if (request.archived) await this.cliRunner.closeConversationSessions(conversation.id);
+        if (request.archived === alreadyArchived) {
+          return conversation;
+        }
+        const nextMetadata = { ...conversation.metadata };
+        if (request.archived) {
+          nextMetadata.archived = true;
+          nextMetadata.archivedAt = new Date().toISOString();
+        } else {
+          delete nextMetadata.archived;
+          delete nextMetadata.archivedAt;
+        }
+        conversation.metadata = nextMetadata;
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
         return conversation;
-      }
-      if (request.archived) {
-      }
-      const nextMetadata = { ...conversation.metadata };
-      if (request.archived) {
-        nextMetadata.archived = true;
-        nextMetadata.archivedAt = new Date().toISOString();
-      } else {
-        delete nextMetadata.archived;
-        delete nextMetadata.archivedAt;
-      }
-      conversation.metadata = nextMetadata;
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
-      return conversation;
+      });
     }, {
       rejectIfQueued: true,
       queuedMessage: "Chat cannot be archived while members are running."
@@ -1214,6 +1215,7 @@ export class ChatService {
       if (conversation.metadata.running === true || this.chatHasLiveWork(conversation.id)) {
         throw new Error("Chat cannot be deleted while members are running.");
       }
+      await this.cliRunner.closeConversationSessions(conversation.id);
       this.deletedConversationIds.add(conversation.id);
       this.snapshotRowStates.delete(conversation.id);
       this.lastSavedSnapshots.delete(conversation.id);
@@ -5389,6 +5391,7 @@ export class ChatService {
       onTargetRunBegun?: (participantId: string, runId: string) => Promise<void> | void;
     } = {}
   ): Promise<void> {
+    if (conversation.metadata.archived === true) throw new Error("Unarchive the chat before starting a member.");
     let completed = 0;
     const turnSnapshot = this.clone(conversation);
     const workspacePath = await this.ensureHistoryFiles(turnSnapshot);
@@ -5775,6 +5778,7 @@ export class ChatService {
     if (!existing) {
       const created = merge(undefined);
       if (created) {
+        if (created.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
         await this.saveConversation(created);
       }
       return;
@@ -5787,6 +5791,7 @@ export class ChatService {
       if (!merged) {
         return;
       }
+      if (merged.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
       existing.messages = merged.messages;
       existing.metadata = merged.metadata;
       existing.title = merged.title;
@@ -17108,6 +17113,7 @@ export class ChatService {
     this.rememberActiveChatRun(conversation.id, runId);
     try {
       await this.withChatMutation(conversation, async () => {
+        if (conversation.metadata.archived === true) throw new Error("Unarchive the chat before starting a member.");
         conversation.metadata = this.metadataWithLiveRunState(conversation.id, {
           ...conversation.metadata,
           runId

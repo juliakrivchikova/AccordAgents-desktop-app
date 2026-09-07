@@ -75,7 +75,7 @@ test("a live deployment that stopped refreshing counts as busy, never as idle", 
   assert.match(a.blockingReason() ?? "", /Another deployment on this machine/);
 });
 
-test("a claim from a dead process or an earlier boot is pruned, not obeyed", () => {
+test("a dead owner still blocks until shutdown is proven; an earlier boot is pruned", () => {
   const shared = dir();
   const a = registry({ dir: shared, profile: "/p/a", pid: 11, alive: (pid) => pid === 11 });
   registry({ dir: shared, profile: "/p/dead", pid: 99, alive: () => true }).publish(true);
@@ -83,19 +83,22 @@ test("a claim from a dead process or an earlier boot is pruned, not obeyed", () 
   oldBoot.publish(true);
   a.publish(false);
 
-  assert.equal(a.blockingReason(), undefined, "neither a dead owner nor an old boot may block a stop");
+  assert.match(a.blockingReason() ?? "", /\/p\/dead/, "a dead controller can leave native work behind");
   const remaining = fs.readdirSync(shared).sort();
-  assert.deepEqual(remaining, [`${machineHostProfileId("/p/a")}.json`], "stale claims are removed");
+  assert.equal(remaining.length, 2);
+  assert.ok(remaining.some(name => name.startsWith(`${machineHostProfileId("/p/a")}-`)));
+  assert.ok(remaining.some(name => name.startsWith(`${machineHostProfileId("/p/dead")}-`)));
 });
 
-test("a damaged claim file is dropped instead of being trusted or crashing", () => {
+test("damaged and invalid claims suspend idle stop and retain the evidence", () => {
   const shared = dir();
   const a = registry({ dir: shared, profile: "/p/a", pid: 11 });
   a.publish(false);
   fs.writeFileSync(path.join(shared, "broken.json"), "{ not json");
   fs.writeFileSync(path.join(shared, "wrong.json"), JSON.stringify({ version: 9, profileId: "x" }));
-  assert.equal(a.blockingReason(), undefined);
-  assert.equal(fs.existsSync(path.join(shared, "broken.json")), false);
+  assert.throws(() => a.blockingReason(), /cannot be verified/);
+  assert.equal(fs.existsSync(path.join(shared, "broken.json")), true);
+  assert.equal(fs.existsSync(path.join(shared, "wrong.json")), true);
 });
 
 test("releasing a deployment stops it blocking the others", () => {
@@ -107,15 +110,38 @@ test("releasing a deployment stops it blocking the others", () => {
   assert.notEqual(a.blockingReason(), undefined);
   b.release();
   assert.equal(a.blockingReason(), undefined);
-  b.publish(true);
-  assert.equal(a.blockingReason(), undefined, "a released registry does not publish again");
+  assert.throws(() => b.publish(true), /released/, "a caller must not believe it still publishes after releasing the registry");
+  assert.equal(a.blockingReason(), undefined);
+});
+
+test("an unreadable claim directory never appears as an idle host", () => {
+  const shared = dir();
+  const a = registry({ dir: shared, profile: "/p/a" });
+  a.publish(false);
+  fs.rmSync(shared, { recursive: true });
+  fs.writeFileSync(shared, "unreadable as a directory");
+  assert.throws(() => a.blockingReason(), /ENOTDIR/);
+});
+
+test("each instance keeps a distinct claim that an earlier instance cannot overwrite or release", () => {
+  const shared = dir();
+  const a = registry({ dir: shared, profile: "/p/a", pid: 11 });
+  const replacement = registry({ dir: shared, profile: "/p/a", pid: 22 });
+  a.publish(false);
+  replacement.publish(true);
+  assert.equal(fs.readdirSync(shared).length, 2);
+  a.publish(false);
+  assert.match(a.blockingReason() ?? "", /running work/);
+  a.release();
+  assert.equal(fs.readdirSync(shared).length, 1);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(shared, fs.readdirSync(shared)[0]), "utf8")).pid, 22);
 });
 
 test("a claim survives a reader that cannot remove it", () => {
   const shared = dir();
   const a = registry({ dir: shared, profile: "/p/a", pid: 11 });
   a.publish(false);
-  const file = path.join(shared, `${machineHostProfileId("/p/a")}.json`);
+  const file = path.join(shared, fs.readdirSync(shared)[0]);
   const claim = JSON.parse(fs.readFileSync(file, "utf8")) as MachineHostClaim;
   assert.equal(claim.profilePath, "/p/a");
   assert.equal(claim.kind, "runtime");

@@ -30,6 +30,7 @@ test("a retained power stop survives runtime restart, never reopens admission an
     fenceIdleNativeAdmissions: () => { fenced = true; return () => { fenced = false; }; } };
   const create = () => new MachineIdlePower({ config, store, host, runner, nativeProcessDbPath: nativePath, log: () => undefined }, {
     identity: async () => identity, verifyAws: async () => undefined, uptimeMs: () => MACHINE_IDLE_STOP_MS + 100,
+    createHostRegistry: options => new MachineHostPowerRegistry({ ...options, dir: path.join(dir, "host-power"), profilePath: dir }),
     client: { close: () => undefined, stopAfterDrain: async () => { stops++; if (failedAws) throw new Error("response lost"); return { instanceId: config.instanceId, state: "stopping" }; } }
   });
   let power: MachineIdlePower | undefined;
@@ -123,17 +124,12 @@ test("a deployment sharing this instance keeps it awake, and its own claim is pu
   }, {
     identity: async () => identity, verifyAws: async () => undefined,
     uptimeMs: () => MACHINE_IDLE_STOP_MS + 100,
+    createHostRegistry: options => new MachineHostPowerRegistry({ ...options, dir: shared, isAlive: () => true }),
     client: { close: () => undefined, stopAfterDrain: async () => { stops++; return { instanceId: config.instanceId, state: "stopping" }; } }
   });
-  (power as unknown as { hostPower?: unknown }).hostPower = undefined;
   try {
     await store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
     await power.start();
-    // Point this deployment's registry at the shared test directory.
-    (power as unknown as { hostPower: MachineHostPowerRegistry }).hostPower = new MachineHostPowerRegistry({
-      dir: shared, profilePath: "/home/ubuntu/.accordagents/mine", bootId: identity.boot,
-      uptimeMs: () => MACHINE_IDLE_STOP_MS + 100, pid: process.pid, isAlive: () => true
-    });
 
     neighbour.publish(true);
     await (power as unknown as { scheduler: { check(): Promise<void> } }).scheduler.check();

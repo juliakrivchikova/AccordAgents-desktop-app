@@ -16,6 +16,9 @@
  */
 
 import type { ChatActionKind, ChatActionPayload } from "../../shared/chatActionEvents";
+import { createHash } from "node:crypto";
+import type { ChatAppToolApprovalRequest } from "../../shared/types";
+import { stableJson } from "../../shared/stableJson";
 
 export interface ChatActionEmission {
   conversationId: string;
@@ -79,9 +82,17 @@ export class ChatActionEmitter {
     approve: boolean;
     scope?: string;
     decisionId?: string;
+    draftOverride?: ChatAppToolApprovalRequest;
   }): Promise<string> {
     const targetKey = approvalTarget(request.approvalId);
-    const operationId = `permission:${request.approvalId}:${request.approve ? "allow" : "deny"}`;
+    const answer = {
+      approve: request.approve,
+      ...(request.scope ? { scope: request.scope } : {}),
+      ...(request.decisionId ? { codexDecisionId: request.decisionId } : {}),
+      ...(request.draftOverride ? { draftOverride: request.draftOverride } : {})
+    };
+    const operationId = `permission:${request.approvalId}:${request.approve ? "allow" : "deny"}${
+      request.scope || request.decisionId || request.draftOverride ? `:${answerHash(answer)}` : ""}`;
     await this.emit({
       conversationId: request.conversationId,
       kind: "permission.decided",
@@ -89,11 +100,7 @@ export class ChatActionEmitter {
         operationId,
         targetKey,
         stateId: request.approve ? "approved" : "denied",
-        detail: {
-          approve: request.approve,
-          ...(request.scope ? { scope: request.scope } : {}),
-          ...(request.decisionId ? { decisionId: request.decisionId } : {})
-        }
+        detail: answer
       }
     });
     return targetKey;
@@ -105,23 +112,27 @@ export class ChatActionEmitter {
     sourceMessageId: string;
     selectedOptionId?: string;
     customAnswer?: string;
+    note?: string;
     cancel?: boolean;
   }): Promise<string> {
     const targetKey = choiceTarget(request.choiceId);
-    const answer = request.cancel
+    const state = request.cancel
       ? "cancelled"
-      : request.selectedOptionId ?? (request.customAnswer ? "custom" : "empty");
+      : request.selectedOptionId ?? (request.customAnswer !== undefined ? "custom" : "empty");
+    const answer = request.customAnswer !== undefined || request.note !== undefined
+      ? `${state}:${answerHash({ customAnswer: request.customAnswer, note: request.note })}` : state;
     await this.emit({
       conversationId: request.conversationId,
       kind: "choice.answered",
       payload: {
         operationId: `choice:${request.choiceId}:${answer}`,
         targetKey,
-        stateId: answer,
+        stateId: state,
         detail: {
           sourceMessageId: request.sourceMessageId,
           ...(request.selectedOptionId ? { selectedOptionId: request.selectedOptionId } : {}),
-          ...(request.customAnswer ? { hasCustomAnswer: true } : {}),
+          ...(request.customAnswer !== undefined ? { customAnswer: request.customAnswer } : {}),
+          ...(request.note !== undefined ? { note: request.note } : {}),
           ...(request.cancel ? { cancel: true } : {})
         }
       }
@@ -231,7 +242,9 @@ export class ChatActionEmitter {
     });
   }
 
-  /** A publish failure is reported and never undoes what the User did. */
+  /** A failed local commit must stop the caller before it performs an effect.
+   * Relay delivery is asynchronous; failure here means the durable decision
+   * itself was not recorded, rather than an offline peer. */
   private async emit(action: ChatActionEmission): Promise<void> {
     try {
       await this.deps.publish(action);
@@ -242,6 +255,11 @@ export class ChatActionEmitter {
         targetKey: action.payload.targetKey,
         message: error instanceof Error ? error.message : String(error)
       });
+      throw error;
     }
   }
+}
+
+function answerHash(value: unknown): string {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
 }

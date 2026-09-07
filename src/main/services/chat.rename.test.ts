@@ -410,6 +410,46 @@ test("setArchived archives a chat by stamping metadata and bumping updatedAt", a
   assert.equal(typeof stored?.metadata.archivedAt, "string");
 });
 
+test("archive and delete wait for this chat's native closure; a failed proof leaves the chat available", async () => {
+  const conversation = chatConversation();
+  const closed: string[] = [];
+  let fail = true;
+  const { service, storage } = testService([conversation], { closeSessions: async id => {
+    closed.push(id);
+    if (fail) throw new Error("native descendants still live");
+  } });
+  await assert.rejects(service.setArchived({ conversationId: conversation.id, archived: true }), /descendants still live/);
+  assert.notEqual((await storage.getConversation(conversation.id))?.metadata.archived, true);
+  fail = false;
+  await service.setArchived({ conversationId: conversation.id, archived: true });
+  fail = true;
+  await assert.rejects(service.deleteConversation({ conversationId: conversation.id }), /descendants still live/);
+  assert.ok(await storage.getConversation(conversation.id));
+  assert.deepEqual(closed, [conversation.id, conversation.id, conversation.id]);
+});
+
+test("replicated archive waits for closure and an archived machine chat cannot start a member", async () => {
+  const conversation = chatConversation({ metadata: { participants: [chatParticipant()] } });
+  let release!: () => void;
+  const closed = new Promise<void>(resolve => { release = resolve; });
+  let started!: () => void;
+  const reached = new Promise<void>(resolve => { started = resolve; });
+  const { service, storage } = testService([conversation], { closeSessions: async () => { started(); await closed; } });
+  let acknowledged = false;
+  const applying = service.applyReplicatedConversation(conversation.id, existing => existing && ({ ...existing, metadata: { ...existing.metadata, archived: true } }))
+    .then(() => { acknowledged = true; });
+  await reached;
+  assert.equal(acknowledged, false);
+  assert.notEqual((await storage.getConversation(conversation.id))?.metadata.archived, true, "closure must precede publishing the archived state");
+  const unarchive = service.setArchived({ conversationId: conversation.id, archived: false });
+  release();
+  await applying;
+  await unarchive;
+  assert.notEqual((await storage.getConversation(conversation.id))?.metadata.archived, true, "a later unarchive must wait for replicated closure and then win");
+  const batch = service as unknown as { runParticipantBatch(conversation: Conversation): Promise<void> };
+  await assert.rejects(batch.runParticipantBatch({ ...conversation, metadata: { ...conversation.metadata, archived: true } }), /Unarchive/);
+});
+
 test("setArchived unarchiving removes both archived and archivedAt", async () => {
   const conversation = chatConversation({
     title: "Archived chat",
@@ -909,6 +949,7 @@ test("participant-session metadata merge preserves newer handles and respects ne
 });
 
 function testService(conversationList: Conversation[], options: {
+  closeSessions?: (conversationId: string) => Promise<void>;
   participantConfigs?: ChatParticipantConfig[];
   contextUsageBySession?: Record<string, AgentContextUsage | undefined>;
   failSaves?: number;
@@ -960,6 +1001,7 @@ function testService(conversationList: Conversation[], options: {
     }
   };
   const cliRunner = {
+    async closeConversationSessions(id: string): Promise<void> { await options.closeSessions?.(id); },
     async detectAgents(): Promise<[]> {
       return [];
     },

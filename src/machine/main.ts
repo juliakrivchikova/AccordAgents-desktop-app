@@ -358,6 +358,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   return async () => {
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
     idlePower?.close();
+    await idlePower?.releaseAfterShutdown();
     await appMcpService.stop();
   };
 }

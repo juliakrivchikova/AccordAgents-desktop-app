@@ -2368,15 +2368,16 @@ function registerIpc(): void {
     const controller = new AbortController();
     activeReviews.set(runId, controller);
 
-    const target = await chatActionEmitter.choiceAnswered({
-      conversationId: request.conversationId,
-      choiceId: request.choiceId,
-      sourceMessageId: request.sourceMessageId,
-      selectedOptionId: request.selectedOptionId,
-      customAnswer: request.customAnswer,
-      cancel: request.cancel
-    });
     try {
+      const target = await chatActionEmitter.choiceAnswered({
+        conversationId: request.conversationId,
+        choiceId: request.choiceId,
+        sourceMessageId: request.sourceMessageId,
+        selectedOptionId: request.selectedOptionId,
+        customAnswer: request.customAnswer,
+        note: request.note,
+        cancel: request.cancel
+      });
       const answered = await chatService.respondToChoice(
         { ...request, runId },
         controller.signal,
@@ -2409,7 +2410,8 @@ function registerIpc(): void {
       approvalId: request.approvalId,
       approve: request.approve,
       scope: request.scope,
-      decisionId: request.codexDecisionId
+      decisionId: request.codexDecisionId,
+      draftOverride: request.draftOverride
     });
     // A card is answered to the provider exactly once. A second answer — the
     // other way, from another device, or a retry after a restart — stays

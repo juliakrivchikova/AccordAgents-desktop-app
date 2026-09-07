@@ -11,21 +11,17 @@
 
 import type { ChatActionEffectPort } from "./chatActionApplier";
 import type { ChatActionEmitter } from "./chatActionEmitter";
-import type { Conversation } from "../../shared/types";
+import type { Conversation, RespondToChatAppToolApprovalRequest } from "../../shared/types";
 
 export interface ChatActionEffectChat {
-  respondToAppToolApproval(request: {
-    conversationId: string;
-    approvalId: string;
-    approve: boolean;
-    scope?: never;
-  }): Promise<Conversation | undefined>;
+  respondToAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;
   respondToChoice(request: {
     conversationId: string;
     sourceMessageId: string;
     choiceId: string;
     selectedOptionId?: string;
     customAnswer?: string;
+    note?: string;
     cancel?: boolean;
   }): Promise<unknown>;
   cancelRun(runId: string): boolean;
@@ -73,7 +69,12 @@ export function createChatActionEffects(deps: {
         await deps.chat.respondToAppToolApproval({
           conversationId: request.conversationId,
           approvalId,
-          approve: detail.approve === true
+          approve: detail.approve === true,
+          ...(detail.scope === "once" || detail.scope === "chat" ? { scope: detail.scope } : {}),
+          ...(typeof detail.codexDecisionId === "string" ? { codexDecisionId: detail.codexDecisionId }
+            : typeof detail.decisionId === "string" ? { codexDecisionId: detail.decisionId } : {}),
+          ...(detail.draftOverride && typeof detail.draftOverride === "object"
+            ? { draftOverride: detail.draftOverride as RespondToChatAppToolApprovalRequest["draftOverride"] } : {})
         });
         return `${detail.approve === true ? "allowed" : "denied"} the app tool request`;
       }
@@ -84,6 +85,8 @@ export function createChatActionEffects(deps: {
           sourceMessageId: typeof detail.sourceMessageId === "string" ? detail.sourceMessageId : "",
           choiceId,
           ...(typeof detail.selectedOptionId === "string" ? { selectedOptionId: detail.selectedOptionId } : {}),
+          ...(typeof detail.customAnswer === "string" ? { customAnswer: detail.customAnswer } : {}),
+          ...(typeof detail.note === "string" ? { note: detail.note } : {}),
           ...(detail.cancel === true ? { cancel: true } : {})
         });
         return detail.cancel === true ? "cancelled the choice" : "answered the choice";
@@ -94,7 +97,9 @@ export function createChatActionEffects(deps: {
         // Honest either way: a Stop the runtime could not confirm is recorded
         // as uncertain rather than as a completed stop.
         if (!stopped) throw new Error("The run is no longer active here.");
-        return "stopped the run";
+        // cancelRun only requests cancellation. Native closure is confirmed
+        // asynchronously by the run owner and its terminal result.
+        return "requested the run to stop";
       }
       throw new Error(`No effect for ${request.kind}.`);
     },
