@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>machine-command</title></head>
+  <body>
+    <script src="/mobile-machine-command.js"></script>
+    <script>
+      // The page a phone would be: the shipped module, a browser's WebCrypto,
+      // and nothing from Node.
+      window.mintInBrowser = async function () {
+        try {
+          const api = window.AccordMachineCommand;
+          const identity = await api.createIdentity();
+          const event = await api.mintEvent(identity, {
+            eventId: api.machineCommandEventId("run-browser"),
+            conversationId: "browser-chat",
+            logScopeId: api.deviceEventScope("room-one", "browser-chat", "actions"),
+            kind: "machine.turn.request",
+            originSeq: 1,
+            createdAt: "2026-09-07T00:00:00.000Z",
+            payload: api.turnRequest({
+              conversationId: "browser-chat",
+              participant: { id: "p1", handle: "bot", kind: "codex-cli" },
+              messageId: "m1",
+              runId: "run-browser",
+              pendingMessageId: "pending-browser",
+              requestedAt: "2026-09-07T00:00:00.000Z"
+            })
+          });
+          return { identity: { deviceId: identity.deviceId, publicKeyDerBase64: identity.publicKeyDerBase64 }, event };
+        } catch (error) {
+          return { error: String(error && error.message || error) };
+        }
+      };
+    </script>
+  </body>
+</html>

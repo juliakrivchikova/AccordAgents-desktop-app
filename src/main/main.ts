@@ -99,7 +99,7 @@ import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
 import { ChatActionApplier } from "./services/chatActionApplier";
 import { ChatActionEmitter } from "./services/chatActionEmitter";
 import { createChatActionEffects } from "./services/chatActionEffects";
-import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, RemoveMachineRequest } from "../shared/machineLink";
+import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
   MachineInstallRequest,
@@ -895,6 +895,41 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
       isActive: () => isMobilePairingActive(pairing),
       onPhoneActivity: () => {
         void noteMobilePairingClaimed(pairing);
+      },
+      // The phone's own signing key: stored here and named to every machine,
+      // so a machine answers the phone when this desktop is closed.
+      onPhoneIdentity: async (identity) => {
+        await settingsService.saveTrustedDevice({
+          deviceId: identity.deviceId,
+          publicKeyDerBase64: identity.publicKeyDerBase64,
+          role: "phone",
+          name: identity.name,
+          addedAt: new Date().toISOString()
+        });
+        await machineLinkService?.refreshTrustRosters();
+        await debugLogService.write("mobile.device.identity", { deviceId: identity.deviceId });
+      },
+      // Where the phone can reach each machine directly.
+      machineAccess: async () => {
+        const machines = await settingsService.listMachines();
+        const access = [];
+        for (const machine of machines) {
+          const machinePairing = await settingsService.getMachinePairing(machine.pairingKey);
+          const publicKeyDerBase64 = machine.lastHello?.publicKeyDerBase64;
+          if (!machinePairing?.relayUrl || !machine.deviceId || !publicKeyDerBase64) continue;
+          access.push({
+            machineId: machine.id,
+            name: machine.name,
+            deviceId: machine.deviceId,
+            publicKeyDerBase64,
+            relayUrl: machinePairing.relayUrl,
+            rendezvousId: machinePairing.rendezvousId,
+            relaySealKeyBase64: machinePairing.relaySealKeyBase64,
+            fingerprint: machinePairing.fingerprint,
+            ...(machinePairing.outboxUrl ? { outboxUrl: machinePairing.outboxUrl } : {})
+          });
+        }
+        return access;
       }
     },
     {
@@ -1315,6 +1350,22 @@ function assertMachineSshTarget(value: unknown): MachineSshTarget {
     port: typeof target.port === "number" && Number.isFinite(target.port) ? Math.floor(target.port) : undefined,
     identityFile: typeof target.identityFile === "string" && target.identityFile.trim() ? target.identityFile.trim() : undefined,
     hostKeyAlias: typeof target.hostKeyAlias === "string" && target.hostKeyAlias.trim() ? target.hostKeyAlias.trim() : undefined
+  };
+}
+
+/** What Settings shows: this desktop's own identity, so it can be added on
+ *  another device, and the devices this one already trusts. */
+async function trustedDevicesResult(): Promise<MachineTrustedDevicesResult> {
+  const identity = await chatEventLogService.getOrCreateDeviceIdentity();
+  return {
+    thisDevice: {
+      deviceId: identity.originId,
+      publicKeyDerBase64: identity.publicKeyDerBase64,
+      role: "desktop",
+      name: "This computer",
+      addedAt: identity.createdAt ?? new Date().toISOString()
+    },
+    devices: await settingsService.listTrustedDevices()
   };
 }
 
@@ -2521,6 +2572,25 @@ function registerIpc(): void {
     return machineInstallerService.bootstrapProjectMirror({ machineId: assertMachineId(request?.machineId), localPath });
   });
   ipcMain.handle("machines:install-list", async (): Promise<MachineInstallRecord[]> => settingsService.listMachineInstalls());
+  // A machine answers the devices on this list, so the User can see exactly
+  // which ones they are and take one off.
+  ipcMain.handle("machines:trusted-devices", async (): Promise<MachineTrustedDevicesResult> => trustedDevicesResult());
+  ipcMain.handle("machines:trust-device", async (_event, request: SaveTrustedDeviceRequest): Promise<MachineTrustedDevicesResult> => {
+    await settingsService.saveTrustedDevice({
+      deviceId: String(request?.deviceId ?? "").trim(),
+      publicKeyDerBase64: String(request?.publicKeyDerBase64 ?? "").trim(),
+      role: request?.role === "phone" ? "phone" : "desktop",
+      name: String(request?.name ?? "").trim() || "Another device",
+      addedAt: new Date().toISOString()
+    });
+    await machineLinkService?.refreshTrustRosters();
+    return trustedDevicesResult();
+  });
+  ipcMain.handle("machines:untrust-device", async (_event, deviceId: string): Promise<MachineTrustedDevicesResult> => {
+    await settingsService.removeTrustedDevice(String(deviceId ?? "").trim());
+    await machineLinkService?.refreshTrustRosters();
+    return trustedDevicesResult();
+  });
   ipcMain.handle("machines:install-payload", async (): Promise<MachineRuntimePayloadInfo> => machineInstallerService.readPayload());
   ipcMain.handle("machines:enrollment", async (_event, request: MachineEnrollmentRequest): Promise<CreateMachineResult> => {
     const id = typeof request?.id === "string" ? request.id.trim() : "";
@@ -2899,7 +2969,20 @@ void app.whenReady().then(async () => {
       appVersion: app.getVersion(),
       desktopDeviceId: desktopIdentity.originId,
       eventStorage: storageService,
-      eventLog: chatEventLogService
+      eventLog: chatEventLogService,
+      // Every device the User has trusted is named to each machine, in the
+      // room that machine is met in. That is what lets a machine keep working
+      // when this desktop is closed.
+      trustedDevices: async (room) => (await settingsService.listTrustedDevices()).map((device) => ({
+        deviceId: device.deviceId,
+        publicKeyDerBase64: device.publicKeyDerBase64,
+        role: device.role,
+        name: device.name,
+        relayUrl: room.relayUrl,
+        rendezvousId: room.rendezvousId,
+        relaySealKeyBase64: room.relaySealKeyBase64,
+        fingerprint: room.fingerprint
+      }))
     });
     machineLinkService.onStatus(() => {
       void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
@@ -2921,7 +3004,8 @@ void app.whenReady().then(async () => {
     machineLinkService.onParticipantRequest((request) => chatService.runDelegatedParticipantRequest({
       conversationId: request.conversationId,
       requestMessageId: request.requestMessageId,
-      depth: request.depth
+      depth: request.depth,
+      ...(request.targetParticipantIds ? { targetParticipantIds: request.targetParticipantIds } : {})
     }).catch((error) => {
       void debugLogService.write("machine-link.participants.delegate-error", {
         conversationId: request.conversationId,

@@ -4,6 +4,8 @@ import type {
   CreateMachineResult,
   MachineEnrollmentRequest,
   MachineListResult,
+  MachineTrustedDevicesResult,
+  SaveTrustedDeviceRequest,
   RemoveMachineRequest
 } from "../shared/machineLink";
 import type {
@@ -230,6 +232,11 @@ const bridge: AppBridge = {
   bootstrapMachineProjectMirror: (request: MachineMirrorBootstrapRequest): Promise<MachineMirrorBootstrapResult> =>
     ipcRenderer.invoke("machines:bootstrap-mirror", request),
   listMachineInstalls: (): Promise<MachineInstallRecord[]> => ipcRenderer.invoke("machines:install-list"),
+  listTrustedDevices: (): Promise<MachineTrustedDevicesResult> => ipcRenderer.invoke("machines:trusted-devices"),
+  trustDevice: (request: SaveTrustedDeviceRequest): Promise<MachineTrustedDevicesResult> =>
+    ipcRenderer.invoke("machines:trust-device", request),
+  untrustDevice: (deviceId: string): Promise<MachineTrustedDevicesResult> =>
+    ipcRenderer.invoke("machines:untrust-device", deviceId),
   machineRuntimePayload: (): Promise<MachineRuntimePayloadInfo> => ipcRenderer.invoke("machines:install-payload"),
   onMachineInstallProgress: (callback: (snapshot: MachineInstallSnapshot) => void) => {
     const listener = (_event: unknown, snapshot: MachineInstallSnapshot): void => callback(snapshot);

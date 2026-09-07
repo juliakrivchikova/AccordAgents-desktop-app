@@ -82,6 +82,11 @@ export class DeviceEventChannel {
     /** A chat action is one event for every peer, not a copy per channel: the
      *  same decision must keep one identity however many machines hold it. */
     sharedScope?: boolean;
+    /** Every device that should receive this event. Defaults to this peer.
+     *  A machine's result is minted once and delivered to each of the owner's
+     *  devices, so whichever of them is online receives it and retention waits
+     *  for all of them. */
+    recipients?: Array<{ deviceId: string; channelId: string }>;
   }): Promise<ChatEventEnvelope> {
     if (this.stopped) throw new Error("Device event channel is closed.");
     const payload = await this.options.storage.deviceEventBlobs().prepare(request.payload);
@@ -91,7 +96,9 @@ export class DeviceEventChannel {
       // use the same HLC, immutable event log and gap rules.
       logScopeId: request.sharedScope ? CHAT_ACTION_LOG_SCOPE : this.scope(request.conversationId, request.scope ?? "actions"),
       payload,
-      recipients: [{ deviceId: this.options.peerDeviceId, channelId: this.options.channelId }]
+      recipients: request.recipients?.length
+        ? request.recipients
+        : [{ deviceId: this.options.peerDeviceId, channelId: this.options.channelId }]
     });
     this.scheduleFlush();
     return result.event;

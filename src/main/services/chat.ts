@@ -683,6 +683,14 @@ export interface ChatParticipantRequestDelegate {
     requestMessageId: string;
     batchId: string;
     depth: number;
+    /** Where these members live: a machine id, or undefined for the desktop.
+     *  Exactly one device is asked for each group, so no two run the same
+     *  member. */
+    homeMachineId?: string;
+    targetParticipantIds: string[];
+    /** The rows the recipient needs to act on this request, for the case
+     *  where it is another machine that has not seen them. */
+    messages: ChatMessage[];
   }): Promise<void>;
 }
 
@@ -11598,13 +11606,32 @@ export class ChatService {
     prepared: PreparedParticipantRequest
   ): Promise<ParticipantRequestRunResult> {
     const delegate = this.participantRequestDelegate;
-    if (!delegate) throw new Error("This machine cannot reach the desktop to ask other members.");
-    await delegate.delegateParticipantRequest({
-      conversationId,
-      requestMessageId: prepared.requestMessage.id,
-      batchId: prepared.batch.id,
-      depth: prepared.batch.depth
-    });
+    if (!delegate) throw new Error("This machine cannot reach the owner's other devices to ask other members.");
+    // One delegation per home: each member is run by the device it lives on,
+    // and no device is asked for a member that is not its own.
+    const conversation = await this.requireChat(conversationId);
+    const participants = this.chatParticipants(conversation);
+    const byHome = new Map<string, string[]>();
+    for (const item of prepared.batch.items) {
+      if (item.status !== "running" && item.status !== "pending_approval") continue;
+      const target = participants.find((participant) => participant.id === item.targetParticipantId);
+      const home = target?.homeMachineId ?? "";
+      byHome.set(home, [...(byHome.get(home) ?? []), item.targetParticipantId]);
+    }
+    if (byHome.size === 0) byHome.set("", prepared.batch.items.map((item) => item.targetParticipantId));
+    const carried = conversation.messages.filter((message) =>
+      message.id === prepared.requestMessage.id || message.id === prepared.requestMessage.metadata?.sourceMessageId);
+    for (const [home, targetParticipantIds] of byHome) {
+      await delegate.delegateParticipantRequest({
+        conversationId,
+        requestMessageId: prepared.requestMessage.id,
+        batchId: prepared.batch.id,
+        depth: prepared.batch.depth,
+        ...(home ? { homeMachineId: home } : {}),
+        targetParticipantIds,
+        messages: carried
+      });
+    }
     const deadline = Date.now() + DELEGATED_PARTICIPANT_REQUEST_LIMIT_MS;
     for (;;) {
       const conversation = await this.requireChat(conversationId);
@@ -11643,7 +11670,15 @@ export class ChatService {
     conversationId: string;
     requestMessageId: string;
     depth: number;
+    /** Only these members are run here; the rest live elsewhere and were
+     *  asked for separately. */
+    targetParticipantIds?: string[];
+    /** Rows the asking device carried, for a machine that has not seen them. */
+    messages?: ChatMessage[];
   }): Promise<void> {
+    if (request.messages?.length) {
+      await this.applyMachineBackDelta({ conversationId: request.conversationId, messages: request.messages });
+    }
     await this.waitForQueuedSave(request.conversationId);
     // The request message travels ahead of this on the same stream. Waiting a
     // little rather than failing keeps a slow write from turning into a retry
@@ -11662,7 +11697,9 @@ export class ChatService {
       request.conversationId,
       request.requestMessageId,
       randomUUID(),
-      request.depth
+      request.depth,
+      undefined,
+      request.targetParticipantIds?.length ? new Set(request.targetParticipantIds) : undefined
     );
   }
 
@@ -11671,7 +11708,8 @@ export class ChatService {
     requestMessageId: string,
     runId: string,
     depth: number,
-    progress?: ProgressCallback
+    progress?: ProgressCallback,
+    onlyParticipantIds?: ReadonlySet<string>
   ): Promise<ParticipantRequestRunResult> {
     const existing = this.participantRequestRunners.get(requestMessageId);
     if (existing) {
@@ -11679,7 +11717,7 @@ export class ChatService {
     }
     const runnerProgress = progress ?? this.onReviewProgress;
     this.incrementBackgroundRunner(conversationId);
-    const runner = this.runParticipantRequest(conversationId, requestMessageId, runId, depth, runnerProgress)
+    const runner = this.runParticipantRequest(conversationId, requestMessageId, runId, depth, runnerProgress, onlyParticipantIds)
       .finally(() => {
         this.participantRequestRunners.delete(requestMessageId);
         this.decrementBackgroundRunner(conversationId);
@@ -11730,7 +11768,10 @@ export class ChatService {
     requestMessageId: string,
     runId: string,
     depth: number,
-    progress?: ProgressCallback
+    progress?: ProgressCallback,
+    /** When a device was asked for specific members, it runs only those: the
+     *  others live elsewhere and are being run there. */
+    onlyParticipantIds?: ReadonlySet<string>
   ): Promise<ParticipantRequestRunResult> {
     const warnings: string[] = [];
     const conversation = await this.requireChat(conversationId);
@@ -11740,7 +11781,8 @@ export class ChatService {
       throw new Error("Member request message was not found.");
     }
     const participants = this.chatParticipants(conversation);
-    const runnableItems = batch.items.filter((item) => item.status === "running");
+    const runnableItems = batch.items.filter((item) => item.status === "running"
+      && (!onlyParticipantIds || onlyParticipantIds.has(item.targetParticipantId)));
     const replies: ParticipantRequestRunResult["replies"] = [];
     await Promise.all(runnableItems.map(async (item) => {
       const target = participants.find((participant) => participant.id === item.targetParticipantId);

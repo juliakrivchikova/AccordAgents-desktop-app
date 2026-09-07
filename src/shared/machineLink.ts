@@ -13,6 +13,7 @@
 import type {
   ChatAppToolApprovalRequest, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "./types";
 import type { MachineProgressFrame } from "./machineProgress";
+import type { MachineTrustRoster, TrustedDeviceRecord } from "./machineTrust";
 
 export const MACHINE_LINK_PROTOCOL = "accord-machine-link-v1";
 
@@ -283,6 +284,24 @@ export interface MachineParticipantsDelegateBody {
   requestMessageId: string;
   batchId: string;
   depth: number;
+  /** The members this recipient is being asked to run, because it is where
+   *  they live. Absent in older deliveries, which meant "all of them". */
+  targetParticipantIds?: string[];
+}
+
+/**
+ * The owner's devices, as the desktop that installed this machine knows them.
+ *
+ * Sent whenever the set changes and on every reconnection, so a machine can
+ * be commanded by any of the owner's devices instead of only by the desktop
+ * that enrolled it. It travels in the enrolled channel, signed by the issuer,
+ * which is what makes it trustworthy: nothing else may change the roster.
+ */
+export interface MachineTrustRosterBody {
+  type: "machine.trust.roster";
+  /** Its own stream, so a roster update never queues behind chat traffic. */
+  conversationId: string;
+  roster: MachineTrustRoster;
 }
 
 export type MachineLinkMessage =
@@ -309,6 +328,7 @@ export type MachineLinkMessage =
   | MachineHelloRequestBody
   | MachineConversationSyncDoneBody
   | MachineConversationResyncBody
+  | MachineTrustRosterBody
   | MachineParticipantsDelegateBody
   | MachineChoiceAnswerBody;
 
@@ -323,7 +343,8 @@ export function isMachineDurableMessage(body: MachineLinkMessage): boolean {
   return isMachineReplicationMessage(body) || body.type === "machine.turn.finished" || body.type === "machine.turn.finished.ack" ||
     body.type === "machine.turn.request" || body.type === "machine.turn.cancel" || body.type === "machine.settings.sealed" || body.type === "machine.turn.started" ||
     body.type === "machine.approval.requested" || body.type === "machine.approval.updated" || body.type === "machine.approval.decision" || body.type === "machine.approval.result" ||
-    body.type === "machine.turn.progress.delta" || body.type === "machine.participants.delegate";
+    body.type === "machine.turn.progress.delta" || body.type === "machine.participants.delegate" ||
+    body.type === "machine.trust.roster";
 }
 
 export function machineCommandId(runId: string): string { return `machine-command:${runId}`; }
@@ -341,6 +362,7 @@ const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.turn.progress",
   "machine.turn.progress.delta",
   "machine.participants.delegate",
+  "machine.trust.roster",
   "machine.turn.started",
   "machine.turn.finished",
   "machine.conversation.backdelta",
@@ -397,6 +419,21 @@ export interface CreateMachineResult {
   machine: MachineRecord;
   /** The enrollment file contents for the machine runtime (`--enrollment`). */
   enrollmentJson: string;
+}
+
+/** What the Machines screen shows about trust: this desktop's own identity,
+ *  which is what another device needs to be let in, and the devices that are
+ *  already allowed to use this desktop's machines. */
+export interface MachineTrustedDevicesResult {
+  thisDevice: TrustedDeviceRecord;
+  devices: TrustedDeviceRecord[];
+}
+
+export interface SaveTrustedDeviceRequest {
+  deviceId: string;
+  publicKeyDerBase64: string;
+  role: "desktop" | "phone";
+  name: string;
 }
 
 export interface MachineEnrollmentRequest {
