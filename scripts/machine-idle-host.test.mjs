@@ -10,7 +10,7 @@ import { MachineHostPowerRegistry } from "../dist/main/main/services/machineHost
 import { MachineIdleScheduler } from "../dist/main/main/services/machineIdle.js";
 import { MachineIdlePower } from "../dist/main/main/services/machineIdlePower.js";
 import { MACHINE_IDLE_STOP_MS } from "../dist/main/shared/machinePower.js";
-import { openMobileRelayPayload } from "../dist/main/main/services/mobileRelaySealing.js";
+import { openMachineRelayPayload } from "../dist/main/main/services/machineRelaySealing.js";
 
 test("idle fences the actual host admission path; retained results resend and late turns wait for a new boot", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-host-"));
@@ -28,7 +28,14 @@ test("idle fences the actual host admission path; retained results resend and la
     let activityCalls = 0; let nativeCloses = 0; let nativeFenced = false;
     const gate = new Promise(resolve => { finish = resolve; });
     const client = { on: () => () => undefined, connect: async () => undefined, close: () => undefined,
-      sendCiphertext: async request => { sent.push(await openMobileRelayPayload(request.ciphertext, pairing.relaySealKeyBase64)); return []; } };
+      // The machine seals for the device it is answering, so the desktop reads
+      // its own frames with its own key rather than a key the room shares.
+      sendCiphertext: async request => {
+        sent.push(await openMachineRelayPayload(request.ciphertext,
+          { publicKeyDerBase64: sender.publicKeyDerBase64, privateKeyDerBase64: sender.privateKeyDerBase64 },
+          undefined, pairing.rendezvousId));
+        return [];
+      } };
     const chat = { activeParticipantRuns: () => [], cancelRun: () => true,
       runMachineHostedTurn: async request => { runs.push(request.runId); await gate; return { messages: [], warnings: [] }; },
       applyReplicatedConversation: async (id, merge) => { const value = merge(conversations.get(id)); if (value) conversations.set(id, value); } };
