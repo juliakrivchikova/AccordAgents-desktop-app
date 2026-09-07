@@ -569,71 +569,17 @@ async function main() {
   assert.equal(await runCount(), runsAfterStop, "a restart must not run the stopped turn again");
   log("machine restart replayed nothing");
 
-  // --- 4. A reply too large for one event, through the phone's own store ---
-  //
-  // Anything over 32 KiB travels as a reference plus fragments. The phone has
-  // to keep those in IndexedDB, put them back together, check the whole body
-  // against the hash the event claims, and only then apply it. A body that is
-  // incomplete must not be acknowledged, or the machine would drop what the
-  // phone cannot read.
-  // A long paste, both ways. Past one fragment, so the phone has to take a
-  // body apart to send it and put one back together to read it, keeping the
-  // pieces in its own IndexedDB in between and checking the whole thing
-  // against the hash the event claims before applying it.
-  const longBody = "LONGBODY ".repeat(100_000) + "LONGBODY_END";
-  assert.ok(longBody.length > 800 * 1024, "the check needs a body that takes several fragments");
-  await evaluate(`(() => {
-    const input = document.getElementById("composer-input");
-    input.value = ${JSON.stringify(longBody)};
-    document.getElementById("composer-form").dispatchEvent(new Event("submit", { cancelable: true }));
-    return true;
-  })()`);
-  const longRowBytes = async () => evaluate(`(async () => {
-    const db = await new Promise((resolve, reject) => {
-      const request = indexedDB.open("accordagents-mobile-control");
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-    const read = (name) => new Promise((resolve) => {
-      const tx = db.transaction(name, "readonly");
-      const all = tx.objectStore(name).getAll();
-      all.onsuccess = () => resolve(all.result);
-      all.onerror = () => resolve([]);
-    });
-    const timeline = await read("timeline");
-    const blobs = await read("machineBlobs");
-    db.close();
-    const held = timeline.filter((row) => String(row.content || "").includes("LONGBODY_END"))
-      .sort((left, right) => String(right.content || "").length - String(left.content || "").length)[0];
-    return JSON.stringify({ bytes: held ? String(held.content || "").length : 0, heldFragments: blobs.length });
-  })()`);
-  // Sent as fragments: the phone kept them while the event was unacknowledged.
-  await waitFor(async () => JSON.parse(await longRowBytes()).heldFragments > 1, 120_000,
-    "the phone to hold the body it is sending as more than one fragment");
-  log("the phone split the paste into", JSON.parse(await longRowBytes()).heldFragments, "fragments to send it");
-  await waitFor(async () => JSON.parse(await longRowBytes()).bytes > 800 * 1024, 300_000,
-    "the whole long body to come back through the phone's fragment store");
-  const longRow = JSON.parse(await longRowBytes());
-  await waitFor(async () => (await owed()) === 0, 90_000, "the long message to be fully acknowledged");
-  // The same body went out and came back, so one set of bytes is named by two
-  // events. They are kept while either still needs them -- deleting them on
-  // the first acknowledgement is what used to lose a body still being applied
-  // -- and released when the last reference is gone.
-  await waitFor(async () => JSON.parse(await longRowBytes()).heldFragments === 0, 120_000,
-    "the fragments to be released once no event still names them");
-  log("a", longRow.bytes, "byte body came back through the phone's fragment store, was applied, and its fragments released");
-
-  // A second tab over the same storage, and a reload: neither re-runs held work.
-  const runsBeforeTab = await runCount();
-  await app.send("Target.createTarget", { url: `https://127.0.0.1:${sitePort}/?qa=1` });
-  await wait(6000);
-  assert.equal(await runCount(), runsBeforeTab, "a second tab must not re-run anything the first one holds");
-  log("a second tab ran nothing again");
-
   // --- 5. A permission the member asks for, answered on the phone ----------
   //
   // The member runs in a read-only sandbox, so writing a file is something it
   // has to ask for. With the desktop closed there is nobody else to ask.
+  // Renumbered ahead of the long-body step, which is slow enough to starve
+  // anything queued behind it.
+  // The member answers one thing at a time; asking while it is still working
+  // returns the previous answer and reads as though it was never asked.
+  await waitFor(() => query("accordagents.sqlite3",
+    "select run_id from native_commands where phase not in ('finished');").length === 0,
+    300_000, "the member to finish what it is already doing before it is asked for permission");
   const approvalRuns = await runCount();
   await evaluate(`(() => {
     const input = document.getElementById("composer-input");
@@ -696,6 +642,13 @@ async function main() {
   // A member raises a choice by writing one in its own message, so this is the
   // real path: the machine's member asks, the machine's copy holds the pending
   // choice, and the phone is the only place there is to answer it.
+  // The member answers one thing at a time. Asking while it is still working
+  // through the long paste queues the request behind it, and what comes back
+  // is the answer to the previous message — which is how this step read a
+  // reply about LONGBODY_END and concluded no choice was ever raised.
+  await waitFor(() => query("accordagents.sqlite3",
+    "select run_id from native_commands where phase not in ('finished');").length === 0,
+    300_000, "the member to finish what it is already doing before it is asked a choice");
   const choiceRuns = await runCount();
   await evaluate(`(() => {
     const input = document.getElementById("composer-input");
@@ -744,10 +697,13 @@ async function main() {
     // Admission alone precedes validation/dispatch in old builds and cannot
     // prove the choice resumed a provider. Require its saved selection, a
     // non-uncertain receipt and the provider's new answer after this tap.
+    // "selected" is the status ChatService writes for an answered choice, and
+    // the option it records has to be the one that was tapped.
     await waitFor(() => query("accordagents.sqlite3", `select message_id from conversation_messages
       where conversation_id=${sqlText(CONVERSATION)}
         and json_extract(payload_json, '$.metadata.pendingChoice.id')=${sqlText(shown.id)}
-        and json_extract(payload_json, '$.metadata.pendingChoice.status')='answered';`).length === 1,
+        and json_extract(payload_json, '$.metadata.pendingChoice.status')='selected'
+        and json_extract(payload_json, '$.metadata.pendingChoice.selectedOptionId')=${sqlText(shown.options[0])};`).length === 1,
       120_000, "the chosen option to be saved by its home machine");
     await waitFor(() => query("accordagents.sqlite3", `select event_id from chat_events
       where event_id=${sqlText("chat-action:receipt:" + claims[0].approvalId)}
@@ -782,6 +738,72 @@ async function main() {
     })()`);
     log("NOT PROVEN: the member did not raise a choice. Its last words were:", JSON.stringify(said));
   }
+
+  // --- 5c. A reply too large for one event, through the phone's own store --
+  //
+  // Last of the member-driven steps on purpose: a 900 KB prompt takes the
+  // member a long time, and anything queued behind it waits. Asking it for a
+  // permission or a choice while it is still reading this got an answer to
+  // this message instead, and read as though it had never been asked.
+  //
+  // Anything over 32 KiB travels as a reference plus fragments. The phone has
+  // to keep those in IndexedDB, put them back together, check the whole body
+  // against the hash the event claims, and only then apply it. A body that is
+  // incomplete must not be acknowledged, or the machine would drop what the
+  // phone cannot read.
+  // A long paste, both ways. Past one fragment, so the phone has to take a
+  // body apart to send it and put one back together to read it, keeping the
+  // pieces in its own IndexedDB in between and checking the whole thing
+  // against the hash the event claims before applying it.
+  const longBody = "LONGBODY ".repeat(100_000) + "LONGBODY_END";
+  assert.ok(longBody.length > 800 * 1024, "the check needs a body that takes several fragments");
+  await evaluate(`(() => {
+    const input = document.getElementById("composer-input");
+    input.value = ${JSON.stringify(longBody)};
+    document.getElementById("composer-form").dispatchEvent(new Event("submit", { cancelable: true }));
+    return true;
+  })()`);
+  const longRowBytes = async () => evaluate(`(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open("accordagents-mobile-control");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const read = (name) => new Promise((resolve) => {
+      const tx = db.transaction(name, "readonly");
+      const all = tx.objectStore(name).getAll();
+      all.onsuccess = () => resolve(all.result);
+      all.onerror = () => resolve([]);
+    });
+    const timeline = await read("timeline");
+    const blobs = await read("machineBlobs");
+    db.close();
+    const held = timeline.filter((row) => String(row.content || "").includes("LONGBODY_END"))
+      .sort((left, right) => String(right.content || "").length - String(left.content || "").length)[0];
+    return JSON.stringify({ bytes: held ? String(held.content || "").length : 0, heldFragments: blobs.length });
+  })()`);
+  // Sent as fragments: the phone kept them while the event was unacknowledged.
+  await waitFor(async () => JSON.parse(await longRowBytes()).heldFragments > 1, 120_000,
+    "the phone to hold the body it is sending as more than one fragment");
+  log("the phone split the paste into", JSON.parse(await longRowBytes()).heldFragments, "fragments to send it");
+  await waitFor(async () => JSON.parse(await longRowBytes()).bytes > 800 * 1024, 300_000,
+    "the whole long body to come back through the phone's fragment store");
+  const longRow = JSON.parse(await longRowBytes());
+  await waitFor(async () => (await owed()) === 0, 90_000, "the long message to be fully acknowledged");
+  // The same body went out and came back, so one set of bytes is named by two
+  // events. They are kept while either still needs them -- deleting them on
+  // the first acknowledgement is what used to lose a body still being applied
+  // -- and released when the last reference is gone.
+  await waitFor(async () => JSON.parse(await longRowBytes()).heldFragments === 0, 120_000,
+    "the fragments to be released once no event still names them");
+  log("a", longRow.bytes, "byte body came back through the phone's fragment store, was applied, and its fragments released");
+
+  // A second tab over the same storage, and a reload: neither re-runs held work.
+  const runsBeforeTab = await runCount();
+  await app.send("Target.createTarget", { url: `https://127.0.0.1:${sitePort}/?qa=1` });
+  await wait(6000);
+  assert.equal(await runCount(), runsBeforeTab, "a second tab must not re-run anything the first one holds");
+  log("a second tab ran nothing again");
 
   // --- 6. The desktop comes back and learns what happened without it -------
   const backDeltas = [];
