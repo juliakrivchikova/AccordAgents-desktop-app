@@ -666,3 +666,36 @@ async function waitFor(predicate, timeoutMs) {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
 }
+
+test("trust changes queue while a known machine is offline and outbox failures reach the caller", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { createChatEventDeviceIdentity } = await import("../dist/main/main/services/chatEventLog.js");
+  const controller = createChatEventDeviceIdentity(new Date().toISOString());
+  const pairing = machinePairing("ws://127.0.0.1:1/v1/relay");
+  const record = { id: "offline-trust", name: "Offline trust", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId,
+    createdAt: new Date().toISOString(), lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } };
+  let peers = [{ deviceId: controller.originId, publicKeyDerBase64: controller.publicKeyDerBase64, role: "desktop" }];
+  const link = new MachineLinkService({ listMachines: async () => [record], getMachinePairing: async () => pairing,
+    saveMachine: async () => [record] }, { write: async () => undefined }, {
+    ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 60_000,
+    trustedDevices: async room => peers.map(peer => ({ ...room, ...peer }))
+  });
+  const append = desktopEvents.eventStorage.appendChatEvent.bind(desktopEvents.eventStorage);
+  try {
+    await link.start();
+    assert.equal(link.status()[0].connected, false);
+    const pending = () => desktopEvents.eventStorage.deviceEvents().listPending(pairing.rendezvousId);
+    assert.equal((await pending()).filter(row => row.event.kind === "machine.trust.roster").length, 1);
+    peers = [];
+    await link.refreshTrustRosters();
+    const rows = (await pending()).filter(row => row.event.kind === "machine.trust.roster");
+    assert.equal(rows.length, 2);
+    const latest = await desktopEvents.eventStorage.deviceEventBlobs().hydrate(rows[1].event.payload);
+    assert.equal(latest.roster.peers.some(peer => peer.deviceId === controller.originId), false);
+    desktopEvents.eventStorage.appendChatEvent = async () => { throw new Error("SQLITE_FULL: trust outbox"); };
+    await assert.rejects(link.refreshTrustRosters(), /SQLITE_FULL/);
+  } finally {
+    desktopEvents.eventStorage.appendChatEvent = append;
+    link.close();
+  }
+});

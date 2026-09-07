@@ -19,6 +19,7 @@
  * dropped before any signature or command is considered.
  */
 import { randomUUID } from "node:crypto";
+import { stableJson } from "../../shared/stableJson";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { DeviceEventApplyOutcome } from "../../shared/deviceEventDelivery";
 import type { DeviceEventPacket } from "../../shared/deviceEventChannel";
@@ -64,6 +65,7 @@ export class MachinePeerFabric {
   private readonly rooms = new Map<string, RelayTunnelClient>();
   private started = false;
   private shareTimer?: ReturnType<typeof setInterval>;
+  private sharing?: Promise<void>;
 
   constructor(private readonly options: MachinePeerFabricOptions) {}
 
@@ -120,16 +122,23 @@ export class MachinePeerFabric {
   async reconcile(peers: readonly TrustedPeerAccess[]): Promise<void> {
     const wanted = new Map(peers.filter((peer) => peer.deviceId !== this.options.selfDeviceId).map((peer) => [peer.deviceId, peer]));
     for (const [deviceId, connection] of this.connections) {
-      if (!wanted.has(deviceId)) {
+      if (!wanted.has(deviceId) || stableJson(wanted.get(deviceId)) !== stableJson(connection.peer)) {
         connection.channel.close();
         this.connections.delete(deviceId);
         this.options.logger("machine-host.trust.peer-removed", { deviceId });
+      }
+    }
+    for (const [key, client] of this.rooms) {
+      if (![...this.connections.values()].some(connection => connection.client === client)) {
+        client.close();
+        this.rooms.delete(key);
       }
     }
     for (const peer of wanted.values()) {
       if (this.connections.has(peer.deviceId)) continue;
       const room = this.meetingRoom(peer);
       let client: RelayTunnelClient | undefined;
+      let connect = false;
       if (!room.here) {
         const key = `${room.relayUrl} ${room.rendezvousId}`;
         client = this.rooms.get(key);
@@ -141,8 +150,9 @@ export class MachinePeerFabric {
             ...(room.fingerprint ? { fingerprint: room.fingerprint } : {})
           });
           this.rooms.set(key, client);
+          let inbound: Promise<void> = Promise.resolve();
           client.on("message", (message) => {
-            void this.receiveSealed(message.ciphertext, room.sealKeyBase64).catch((error) => {
+            inbound = inbound.then(() => this.receiveSealed(message.ciphertext, room.sealKeyBase64)).catch((error) => {
               this.options.logger("machine-host.trust.receive-error", {
                 rendezvousId: room.rendezvousId,
                 message: error instanceof Error ? error.message : String(error)
@@ -153,18 +163,17 @@ export class MachinePeerFabric {
           client.on("state", (state) => {
             this.options.logger("machine-host.trust.room-state", { rendezvousId: room.rendezvousId, state });
           });
-          await client.connect().catch((error) => {
-            this.options.logger("machine-host.trust.connect-retrying", {
-              rendezvousId: room.rendezvousId,
-              message: error instanceof Error ? error.message : String(error)
-            });
-          });
+          connect = true;
         }
       }
       this.connections.set(peer.deviceId, {
         peer,
         client,
         channel: this.buildChannel(peer, room, client)
+      });
+      if (connect) await client!.connect().catch((error) => {
+        this.options.logger("machine-host.trust.connect-retrying", { rendezvousId: room.rendezvousId,
+          message: error instanceof Error ? error.message : String(error) });
       });
       // Whatever this room still owes anyone is owed to this device too:
       // a result published while it was not yet trusted must still reach it.
@@ -180,7 +189,14 @@ export class MachinePeerFabric {
 
   /** Every trusted device gets a delivery row for everything its room has not
    *  acknowledged, and then a flush. Idempotent: rows are inserted or ignored. */
-  private async shareOutstanding(): Promise<void> {
+  private shareOutstanding(): Promise<void> {
+    if (this.sharing) return this.sharing;
+    const run = this.shareOutstandingNow();
+    this.sharing = run;
+    return run.finally(() => { if (this.sharing === run) this.sharing = undefined; });
+  }
+
+  private async shareOutstandingNow(): Promise<void> {
     for (const connection of this.connections.values()) {
       try {
         const pending = await this.options.storage.deviceEvents()
@@ -252,7 +268,7 @@ export class MachinePeerFabric {
 
   private buildChannel(
     peer: TrustedPeerAccess,
-    room: { rendezvousId: string; sealKeyBase64: string },
+    room: { rendezvousId: string; relayUrl: string; sealKeyBase64: string; fingerprint?: string; here: boolean },
     client: RelayTunnelClient | undefined
   ): DeviceEventChannel {
     const send = async (packet: DeviceEventPacket): Promise<void> => {
@@ -265,14 +281,19 @@ export class MachinePeerFabric {
       eventLog: this.options.eventLog,
       // The mailbox of the room this peer is met in, so a device that is not
       // online right now still receives what it was sent.
-      pairing: { ...this.options.home, rendezvousId: room.rendezvousId, relaySealKeyBase64: room.sealKeyBase64 },
+      pairing: { ...this.options.home, rendezvousId: room.rendezvousId, relaySealKeyBase64: room.sealKeyBase64,
+        relayUrl: room.relayUrl, fingerprint: room.fingerprint ?? "",
+        outboxUrl: room.here ? this.options.home.outboxUrl : peer.outboxUrl },
       channelId: this.channelIdFor(peer),
       localDeviceId: this.options.selfDeviceId,
       peerDeviceId: peer.deviceId,
       peerPublicKeyDerBase64: peer.publicKeyDerBase64,
       isPeerConnected: () => this.options.isPeerConnected(peer.deviceId),
       send,
-      apply: (event, payload) => this.options.apply(event, payload, peer),
+      apply: (event, payload) => {
+        if (this.connections.get(peer.deviceId)?.peer !== peer) throw new Error("Machine peer authorization changed.");
+        return this.options.apply(event, payload, peer);
+      },
       ...(this.options.serveDependency ? { serveDependency: this.options.serveDependency } : {}),
       ...(this.options.onDependencyUnavailable ? { onDependencyUnavailable: this.options.onDependencyUnavailable } : {}),
       onError: this.options.onError

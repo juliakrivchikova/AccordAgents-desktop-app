@@ -93,11 +93,13 @@ async function machine(options = {}) {
     host, runs, logs, replicated, pairing, identity, desktop, dir,
     // The real ingress: a sealed frame off the relay, routed by who sent it.
     deliver: async (packet) => host.handleMessage(await sealMobileRelayPayload(packet, pairing.relaySealKeyBase64)),
-    trust: async (peers) => host.handleBody({
-      type: "machine.trust.roster",
-      conversationId: `machine-trust:${pairing.rendezvousId}`,
-      roster: { version: 1, issuerDeviceId: desktop.originId, updatedAt: new Date().toISOString(), peers }
-    }),
+    trust: async (peers) => {
+      const body = { type: "machine.trust.roster", conversationId: `machine-trust:${pairing.rendezvousId}`,
+        roster: { version: 1, issuerDeviceId: desktop.originId, updatedAt: new Date().toISOString(), peers } };
+      const { event } = await desktopLog.appendLocalEvent({ conversationId: body.conversationId,
+        logScopeId: phone.deviceEventScope(pairing.rendezvousId, body.conversationId, "actions"), kind: body.type, payload: body });
+      await host.handleMessage(await sealMobileRelayPayload(phone.eventPacket(desktop.originId, identity.originId, event), pairing.relaySealKeyBase64));
+    },
     cleanup: async () => {
       host.close();
       // The runtime finishes its own writes after close; removing the
@@ -240,5 +242,29 @@ test("the row a phone's turn answers travels with the command", async () => {
       box.replicated.some((row) => row.id === "phone-msg-1"),
       "the machine has the row the turn answers before it runs"
     );
+  } finally { await box.cleanup(); }
+});
+
+test("knowing a room seal cannot replace trust, settings or the machine's home", async () => {
+  const identity = await phone.createIdentity();
+  const box = await machine();
+  try {
+    const attackerRoster = { type: "machine.trust.roster", conversationId: `machine-trust:${box.pairing.rendezvousId}`,
+      roster: { version: 1, issuerDeviceId: box.desktop.originId, updatedAt: new Date().toISOString(), peers: [phonePeer(identity, box.pairing)] } };
+    for (const body of [attackerRoster, { type: "machine.settings.sync", snapshot: {} },
+      { type: "machine.hello.ack", desktopDeviceId: identity.deviceId, machineId: "stolen-home", appVersion: "test" }]) {
+      await assert.rejects(box.deliver({ protocol: "accord-machine-link-v1", messageId: crypto.randomUUID(), sentAt: new Date().toISOString(), body }), /signature/);
+    }
+    assert.deepEqual(box.host.trust.peers(), []);
+    assert.equal(box.host.homeMachineId, "machine-one");
+    await box.trust([{ ...phonePeer(identity, box.pairing), role: "desktop" }]);
+    const forged = await phone.mintEvent(identity, { eventId: "forged-roster", conversationId: attackerRoster.conversationId,
+      logScopeId: phone.deviceEventScope(box.pairing.rendezvousId, attackerRoster.conversationId, "actions"),
+      kind: attackerRoster.type, originSeq: 1, payload: { ...attackerRoster, roster: { ...attackerRoster.roster, peers: [] } } });
+    await assert.rejects(box.deliver(phone.eventPacket(identity.deviceId, box.identity.originId, forged)));
+    assert.equal(box.host.trust.peers().length, 1, "a trusted desktop is a controller, not the enrollment issuer");
+    await box.trust([]);
+    await assert.rejects(box.deliver({ protocol: "accord-machine-link-v1", messageId: crypto.randomUUID(), sentAt: new Date().toISOString(), body: attackerRoster }), /signature/);
+    assert.deepEqual(box.host.trust.peers(), [], "revoked room-key holders cannot restore themselves");
   } finally { await box.cleanup(); }
 });

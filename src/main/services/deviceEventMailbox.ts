@@ -7,6 +7,7 @@ import { mailboxAuthHeaders, mailboxEndpointForSealKey, registerMailboxForSealKe
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
 import type { StorageService } from "./storage";
 import { DeviceEventProjectionPendingError } from "../../shared/deviceEventDelivery";
+import { DevicePacketAuthenticationError } from "./devicePacketAuthentication";
 
 interface DeviceEventMailboxOptions {
   storage: StorageService;
@@ -14,6 +15,7 @@ interface DeviceEventMailboxOptions {
   localDeviceId: string;
   peerDeviceId: string;
   receive(packet: DeviceEventPacket): Promise<void>;
+  authenticate?(packet: DeviceEventPacket): Promise<DeviceEventPacket>;
   onError(error: Error): void;
   fetch?: typeof fetch;
 }
@@ -58,6 +60,7 @@ export class DeviceEventMailbox {
   }
 
   private async postPacket(packet: DeviceEventPacket): Promise<void> {
+    if (this.options.authenticate) packet = await this.options.authenticate(packet);
     const { pairing } = this.options;
     const packetJson = JSON.stringify(packet);
     const payloadHash = `sha256:${digest(packetJson)}`;
@@ -178,7 +181,10 @@ export class DeviceEventMailbox {
           if (packet.from === peerDeviceId && packet.to === localDeviceId) {
             try { await this.options.receive(packet); }
             catch (error) {
-              if (!(error instanceof DeviceEventProjectionPendingError)) throw error;
+              // Forged/obsolete unsigned controls cannot pin the cursor in
+              // front of valid traffic. No domain state or ACK is produced.
+              // Disk failures remain retryable and still hold this cursor.
+              if (!(error instanceof DeviceEventProjectionPendingError) && !(error instanceof DevicePacketAuthenticationError)) throw error;
               this.options.onError(error);
             }
           }

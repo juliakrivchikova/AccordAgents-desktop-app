@@ -3185,6 +3185,7 @@ export class SettingsService {
   /** The devices the User trusts with their machines. */
   async listTrustedDevices(): Promise<TrustedDeviceRecord[]> {
     const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
     return (stored.trustedDevices ?? []).filter(isTrustedDeviceRecord).map((record) => ({ ...record }));
   }
 
@@ -3201,18 +3202,20 @@ export class SettingsService {
       throw new Error("That device id does not match the public key it was given with.");
     }
     const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
     const records = (stored.trustedDevices ?? []).filter((entry) => entry.deviceId !== record.deviceId);
     records.push({ ...record });
     stored.trustedDevices = records;
-    await this.writeStored(stored);
+    await this.writeStored(stored, true);
     return records.map((entry) => ({ ...entry }));
   }
 
   async removeTrustedDevice(deviceId: string): Promise<TrustedDeviceRecord[]> {
     const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
     const records = (stored.trustedDevices ?? []).filter((entry) => entry.deviceId !== deviceId);
     stored.trustedDevices = records.length ? records : undefined;
-    await this.writeStored(stored);
+    await this.writeStored(stored, true);
     return records.map((entry) => ({ ...entry }));
   }
 
@@ -3300,6 +3303,7 @@ export class SettingsService {
       encryptedMachinePairings: _pairings,
       encryptedMachinePower: _power,
       machinePowerHandoffs: _powerHandoffs,
+      trustedDevices: _trustedDevices,
       lastRepoPath: _lastRepoPath,
       ...shareable
     } = stored;
@@ -3361,6 +3365,7 @@ export class SettingsService {
       encryptedMachinePairings: stored.encryptedMachinePairings,
       encryptedMachinePower: stored.encryptedMachinePower,
       machinePowerHandoffs: stored.machinePowerHandoffs,
+      trustedDevices: stored.trustedDevices,
       lastRepoPath: stored.lastRepoPath
     };
     // One atomic settings write replaces both configuration and environment.

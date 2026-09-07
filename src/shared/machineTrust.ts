@@ -15,8 +15,9 @@
  *
  * The seal key of a room is shared with the devices that need to reach it.
  * They are all the same person's devices, and the relay itself never holds a
- * key; a device outside the roster has neither the seal key nor a signing key
- * the machine will accept.
+ * key. A device outside the roster cannot authorize commands, even if it kept
+ * a room seal from before removal; revoking its access to ciphertext also
+ * requires rotating that seal.
  */
 
 export type TrustedPeerRole = "desktop" | "phone" | "machine";
@@ -30,6 +31,7 @@ export interface TrustedPeerAccess {
   relayUrl: string;
   rendezvousId: string;
   relaySealKeyBase64: string;
+  outboxUrl?: string;
   /** The room's capability fingerprint: the relay admits a connection only
    *  when it presents the one the room was opened with. */
   fingerprint?: string;
@@ -64,8 +66,8 @@ export function isMachineTrustRoster(value: unknown): value is MachineTrustRoste
     && Array.isArray(roster.peers) && roster.peers.every(isTrustedPeerAccess);
 }
 
-/** The roster as this machine should hold it: itself removed, one entry per
- *  device id, and the issuer kept so the owner is never locked out. */
+/** The roster as this machine should hold it. The enrollment separately keeps
+ * its issuer trusted; duplicate identities are rejected before normalization. */
 export function normalizeMachineTrustRoster(roster: MachineTrustRoster, selfDeviceId: string): MachineTrustRoster {
   const peers = new Map<string, TrustedPeerAccess>();
   for (const peer of roster.peers) {

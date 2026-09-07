@@ -69,6 +69,66 @@ rows; per-instance power claims contain identities only and stay in the host's
 coordination directory. Native closure receipts stay in that machine's SQLite
 process registry. No prompt or conversation snapshot is added to process argv.
 
+## Trust/channel integration follow-up — 2026-09-07
+
+Integrated Taylor's multi-device work through `ce443c9` in `0d8c0b6` and
+reviewed the changed trust, presence, event, mailbox and settings paths. This
+remains an unfinished transition checkpoint, not a clean full-branch review.
+
+- Roster authority now requires the enrollment issuer's signed durable event;
+  a second desktop cannot replace settings, the home identity or the roster,
+  including by embedding settings in a permitted turn. Ephemeral presence is
+  signed and bound to its sender, recipient and room. Possession of a room seal
+  alone grants no command or acknowledgement authority.
+- Roster comparison, persistence and publication serialize together; a failed
+  write preserves the old authority. The signed sequence survives restart and
+  unchanged rosters, and outranks wall clocks. Corrupt/unreadable files are not
+  treated as empty lists. Offline roster changes are queued and recovered at
+  desktop startup; trust metadata never travels in a settings snapshot.
+- ACK, repair and fragment packets carry sender signatures. An unsigned ACK
+  cannot release an outbox entry. Authentication failures cannot pin later
+  mailbox traffic; actual persistence failures still hold the transport cursor.
+  Shared chat-action history can repair through header probes too. Revoked
+  channels stop before applying their next ready event; changed peer rooms and
+  keys replace their connections and use their own mailbox endpoint.
+
+Verification: final main/renderer typechecks and full build passed; the rebuilt
+payload is 9 files / 6,396,431 bytes. Focused trust/settings/channel/mailbox/host
+tests passed; the final mailbox/channel set is 12/12, and the relay link/phone
+command component set 13/13 with native localhost/process permissions. The
+initial sandbox run's socket and process denials were not product failures.
+
+The original trust e2e accepted failed turns and counted a nonexistent log
+event. It now requires an actual Codex completed reply, Stop after real output
+starts, and unchanged native SQL executor generations after redelivering the
+original signed command and restarting the runtime. All passed on two built
+macOS runtimes and the reference relay with the owner link closed. A prompt
+asking for 100,000 lines instead finished with the provider's output-limit
+explanation; the final test asks for 500 and observes actual streaming before
+cancelling. This is not physical-phone or Linux acceptance.
+
+Real isolated Electron Settings, rebuilt runtime and public relay: grant a
+synthetic controller, observe the machine's persisted roster, remove the
+controller, and observe signed `applied` ACKs for both changes in the desktop's
+SQLite outbox (sequences 19/20). The final roster is 892 bytes for one issuer;
+it grows with devices, not conversation rows. A packet signature adds about
+100 JSON bytes; fragments remain bounded and no chat data enters argv. The
+earlier 14k-row / 41 MB conversation baseline is unchanged. Screenshot:
+`screenshots/qa-final-machine-trust.png` (local QA artifact, enrollment hidden).
+
+Additional open integration findings, to fix before cutover:
+
+- The PWA direct-machine sender has a separate best-effort metadata chain;
+  storing machine access resets that chain, and queue/sequence writes are not
+  one transaction. Its response/ACK/render path is not connected. A passing
+  command-signing helper does not prove a usable desktop-off phone workflow.
+- Removing a device rejects its commands but it retains old room seals;
+  confidential revocation also needs key rotation and retained-event handling.
+- The old Cloud Runs toggle/copy still advertises the deleted remote executor.
+- Taylor's host-power change `6371847` awaits integration/review; its report
+  explicitly does not prove real Linux or AWS Stop. Canonical action execution,
+  durable deletion and the remaining acceptance matrix above are still open.
+
 Decision events now carry their real answer/draft, so their size scales with
 that content. They enter the existing local SQLite event/outbox and sealed relay
 path; exact fragmentation and retention must be verified on the integrated

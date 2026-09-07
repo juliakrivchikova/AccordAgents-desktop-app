@@ -49,9 +49,22 @@ function stubClient() {
   };
 }
 
-async function envelope(body) {
+async function envelope(body, enrollment) {
   const { sealMobileRelayPayload } = await import("../dist/main/main/services/mobileRelaySealing.js");
-  return sealMobileRelayPayload({ protocol: "accord-machine-link-v1", messageId: `m-${Math.random()}`, sentAt: new Date().toISOString(), body }, SEAL_KEY);
+  const { isMachineDurableMessage } = await import("../dist/main/shared/machineLink.js");
+  const { signMachineControl } = await import("../dist/main/main/services/machineControlAuthentication.js");
+  let payload;
+  if (isMachineDurableMessage(body)) {
+    const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : body.conversationId;
+    const { event } = await desktopEvents.eventLog.appendLocalEvent({ conversationId,
+      logScopeId: `device:${enrollment.rendezvousId}:${JSON.stringify([conversationId, "actions"])}`, kind: body.type, payload: body,
+      ...(body.type === "machine.turn.request" ? { eventId: `machine-command:${body.runId}` } : {}) });
+    payload = { protocol: "accord-device-events-v1", type: "event", from: DESKTOP_ID, to: MACHINE_ID, event };
+  } else {
+    payload = signMachineControl({ protocol: "accord-machine-link-v1", messageId: `m-${Math.random()}`,
+      sentAt: new Date().toISOString(), body }, desktopEvents.identity, enrollment.rendezvousId, MACHINE_ID);
+  }
+  return sealMobileRelayPayload(payload, SEAL_KEY);
 }
 
 async function sentBodies(client) {
@@ -91,16 +104,16 @@ test("a turn waiting for a chat copy counts as held, and a stop removes it befor
   await host.start();
   await settle();
   const inbound = async (body) => {
-    client.emit("message", { ciphertext: await envelope(body) });
+    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
     await host.inbound;
     await host.outbound;
     await host.eventChannel.flush();
   };
-  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test" });
+  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
   const shell = { id: "conv-1", kind: "chat", title: "t", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] };
   await inbound({ type: "machine.conversation.sync", conversation: shell });
   // The copy is still arriving: the turn waits instead of running or failing.
-  await inbound({ type: "machine.turn.request", conversationId: "conv-1", participantId: "p1", participant: { id: "p1", handle: "bot" }, messageId: "m1", runId: "run-wait", pendingMessageId: "pending-wait", requestedAt: new Date().toISOString() });
+  await inbound({ type: "machine.turn.request", conversationId: "conv-1", participantId: "p1", participant: { id: "p1", handle: "bot", homeMachineId: "test-home" }, messageId: "m1", runId: "run-wait", pendingMessageId: "pending-wait", requestedAt: new Date().toISOString() });
   assert.deepEqual(runs, []);
   assert.ok(logs.some((entry) => entry.event === "machine-host.turn.awaiting-copy" && entry.payload?.runId === "run-wait"));
   // Asked about it, the machine holds it: no "unknown".
@@ -138,14 +151,14 @@ test("the machine's hello lists turns waiting for a copy as active", async () =>
   await host.start();
   await settle();
   const inbound = async (body) => {
-    client.emit("message", { ciphertext: await envelope(body) });
+    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
     await host.inbound;
     await host.outbound;
     await host.eventChannel.flush();
   };
-  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test" });
+  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
   await inbound({ type: "machine.conversation.sync", conversation: { id: "conv-2", kind: "chat", title: "t", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] } });
-  await inbound({ type: "machine.turn.request", conversationId: "conv-2", participantId: "p1", participant: { id: "p1", handle: "bot" }, messageId: "m1", runId: "run-listed", pendingMessageId: "pending-listed", requestedAt: new Date().toISOString() });
+  await inbound({ type: "machine.turn.request", conversationId: "conv-2", participantId: "p1", participant: { id: "p1", handle: "bot", homeMachineId: "test-home" }, messageId: "m1", runId: "run-listed", pendingMessageId: "pending-listed", requestedAt: new Date().toISOString() });
   // A fresh link announces itself again; the hello must list the waiting turn.
   client.emit("peer", { type: "ready", deviceId: MACHINE_ID, peerConnected: true, peers: [{ role: "desktop", deviceId: DESKTOP_ID }] });
   await settle();
@@ -236,8 +249,8 @@ test("a ChatService native resume is listed, stopped and delivered through the h
   await settle();
   let bodies = await sentBodies(client);
   assert.ok(bodies.find((body) => body.type === "machine.hello").activeRunIds.includes("native-resume"));
-  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.query", conversationId: "native-chat", runId: "native-resume" }) });
-  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.cancel", conversationId: "native-chat", runId: "native-resume" }) });
+  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.query", conversationId: "native-chat", runId: "native-resume" }, host.options.pairing) });
+  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.cancel", conversationId: "native-chat", runId: "native-resume" }, host.options.pairing) });
   await settle();
   assert.equal(controller.signal.aborted, true, "Stop reaches the actual ChatService controller");
   bodies = await sentBodies(client);
@@ -258,10 +271,10 @@ test("a ChatService native resume is listed, stopped and delivered through the h
   assert.ok(host.pendingTerminals.has("native-resume"), "result stays until the desktop acknowledges its saved copy");
   const newer = { ...terminal, receiptId: "newer-receipt", messages: [{ ...terminal.messages[0], content: "new result" }] };
   host.pendingTerminals.set("native-resume", newer);
-  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.finished.ack", conversationId: "native-chat", runId: "native-resume", receiptId: terminal.receiptId, finishedAt: terminal.finishedAt }) });
+  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.finished.ack", conversationId: "native-chat", runId: "native-resume", receiptId: terminal.receiptId, finishedAt: terminal.finishedAt }, host.options.pairing) });
   await settle();
   assert.equal(host.pendingTerminals.get("native-resume"), newer, "an old ACK cannot remove a newer result, even with an equal finish timestamp");
-  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.finished.ack", conversationId: "native-chat", runId: "native-resume", receiptId: newer.receiptId, finishedAt: newer.finishedAt }) });
+  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.finished.ack", conversationId: "native-chat", runId: "native-resume", receiptId: newer.receiptId, finishedAt: newer.finishedAt }, host.options.pairing) });
   await settle();
   assert.equal(host.pendingTerminals.has("native-resume"), false);
   host.close();

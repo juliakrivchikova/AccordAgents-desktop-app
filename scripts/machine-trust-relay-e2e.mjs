@@ -10,17 +10,15 @@
  *   - a NEW turn on machine one, with its result coming back;
  *   - a Stop for it;
  *   - the same turn command sent twice, which must run once;
- *   - a member request on machine one whose target lives on machine two,
- *     delegated machine-to-machine with no desktop in the room;
  *   - a device that is not in the roster, whose traffic is not answered;
  *   - machine one restarted, which must not re-run what it already finished.
  *
- * Nothing here is stubbed except the trigger of the member request, which an
- * agent would normally make through the App MCP tool: the delegation itself,
- * the channels, the relay, the runtimes and the storage are real.
+ * The controller uses MachineLinkService directly; the native Codex turn,
+ * channels, reference relay, runtimes and storage are real. This does not prove
+ * Electron UI, physical-phone control or machine-to-machine delegation.
  */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { mkdtemp, writeFile, rm, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -31,6 +29,7 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const { createReferenceRelayServer } = require(path.join(repoRoot, "scripts/relay-reference-server.cjs"));
 const { MachineLinkService } = require(path.join(repoRoot, "dist/main/main/services/machineLink.js"));
 const { StorageService } = require(path.join(repoRoot, "dist/main/main/services/storage.js"));
+const { sealMobileRelayPayload } = require(path.join(repoRoot, "dist/main/main/services/mobileRelaySealing.js"));
 const { ChatEventLogService } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
 
 // A failed run must not leave machine runtimes behind: they would sit on the
@@ -99,7 +98,9 @@ function desktopSettings(records, pairings) {
     exportMachineSettingsSnapshot: async () => ({
       version: 1,
       exportedAt: new Date().toISOString(),
-      settingsJson: JSON.stringify({ chatRoleConfigs: [] }),
+      settingsJson: JSON.stringify({ chatRoleConfigs: [{ id: "engineer", label: "Machine trust QA", version: 1,
+        instructions: "Follow the user request exactly. This is an isolated transport verification.",
+        updatedAt: "2026-09-07T00:00:00Z" }] }),
       agentEnvironment: []
     })
   };
@@ -195,7 +196,7 @@ async function main() {
   ];
   const conversation = {
     id: "trust-chat", kind: "chat", title: "Trust", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-    messages: [{ id: "msg-1", role: "user", content: "hello", status: "done", createdAt: new Date().toISOString() }],
+    messages: [{ id: "msg-1", role: "user", content: "Reply with exactly MACHINE_TRUST_EXECUTED and nothing else.", status: "done", createdAt: new Date().toISOString() }],
     findings: [], metadata: { participants }
   };
   await ownerLink.replicateConversation(conversation);
@@ -241,36 +242,47 @@ async function main() {
     console.error("second device log:", secondLogs.slice(-12).map((entry) => `${entry.event} ${JSON.stringify(entry.payload).slice(0, 120)}`).join("\n"));
     console.error("machine one turn lines:", text.split("\n").filter((line) => line.includes("turn") || line.includes("outbox") || line.includes("error")).slice(-12).join("\n"));
   }
-  assert.notEqual(outcome.kind, "timeout", "a new turn started by the second device was never answered");
+  assert.equal(outcome.kind, "result", "a new turn started by the second device was never answered");
+  assert.equal(outcome.value.status, "completed", JSON.stringify(outcome.value));
+  assert.ok(outcome.value.messages.some(message => message.status === "done" && message.content.includes("MACHINE_TRUST_EXECUTED")), "the native provider must actually answer");
+  await outcome.value.acknowledge?.();
   log("new turn answered:", JSON.stringify(outcome.value ?? outcome.error?.message).slice(0, 160));
 
   // Stop, from the same device, with the owner still gone.
   const stopRun = "run-second-stop";
+  const stopProgress = [];
+  const stopMessage = { ...conversation.messages[0], id: "stop-message", content: "Start your response with MACHINE_STOP_STARTED, then print the numbers from 1 to 500, one number per line. Print the numbers directly; no tools or explanation." };
+  const stopConversation = { ...conversation, messages: [...conversation.messages, stopMessage] };
   const stopping = secondLink.runTurn({
-    conversation, participant: participants[0], triggerMessage: conversation.messages[0],
+    conversation: stopConversation, participant: participants[0], triggerMessage: stopMessage,
+    progress: progress => stopProgress.push(progress),
     runId: stopRun, pendingMessageId: "pending-second-stop"
-  }).then(() => "finished").catch((error) => `error: ${error.message}`);
-  await wait(500);
+  });
+  await waitFor(() => stopProgress.some(progress => String(progress.agentProgress?.partialContent ?? "").includes("MACHINE_STOP_STARTED")), 120_000, "the native provider to stream before Stop");
   await secondLink.cancelMachineRun({ machineId: "machine-one", conversationId: conversation.id, runId: stopRun });
   const stopped = await Promise.race([stopping, wait(60_000).then(() => "timeout")]);
   log("stop answered with:", stopped);
   assert.notEqual(stopped, "timeout", "Stop from the second device was never answered");
+  assert.equal(stopped.status, "interrupted", JSON.stringify(stopped));
+  await stopped.acknowledge?.();
   // The machine's own record of the run, once its debug log has been flushed.
   await waitFor(async () => (await machineLog(machines[0])).includes(stopRun), 20_000,
     "machine one to record the stopped run in its own log");
 
   // The same command again: one execution, not two.
-  const runsBefore = (machines[0].output.join("").match(/machine-host\.turn\.start/g) ?? []).length;
-  const repeat = await Promise.race([
-    secondLink.runTurn({
-      conversation, participant: participants[0], triggerMessage: conversation.messages[0],
-      runId: "run-second", pendingMessageId: "pending-second"
-    }).then(() => "answered").catch((error) => `error: ${error.message}`),
-    wait(30_000).then(() => "timeout")
-  ]);
-  const runsAfter = (machines[0].output.join("").match(/machine-host\.turn\.start/g) ?? []).length;
-  log("repeat of the same run id:", repeat, "starts before/after:", runsBefore, runsAfter);
-  assert.equal(runsAfter, runsBefore, "the same run id must not start a second turn");
+  const admissions = () => JSON.parse(execFileSync("sqlite3", ["-json", path.join(machines[0].userData, "accordagents.sqlite3"),
+    "select run_id,phase,executor_generation from native_commands order by run_id;"], { encoding: "utf8" }));
+  const beforeReplay = admissions();
+  assert.equal(beforeReplay.length, 2);
+  assert.ok(beforeReplay.every(row => row.phase === "finished" && row.executor_generation > 0), "both requests crossed native admission");
+  const original = await secondStorage.getChatEvent("machine-command:run-second");
+  const connection = secondLink.connections.get("machine-one");
+  await connection.client.sendCiphertext({ logicalMessageId: "repeat-original-command", to: records[0].deviceId,
+    ciphertext: await sealMobileRelayPayload({ protocol: "accord-device-events-v1", type: "event",
+      from: second.originId, to: records[0].deviceId, event: original }, machines[0].pairing.relaySealKeyBase64) });
+  await wait(1000);
+  assert.deepEqual(admissions(), beforeReplay, "re-delivering the actual signed command cannot acquire another executor generation");
+  log("signed command redelivered; both native admissions unchanged");
 
   // A device the owner never trusted.
   const strangerLink = new MachineLinkService(desktopSettings(records, pairings), {
@@ -297,23 +309,22 @@ async function main() {
   strangerLink.close();
 
   // Machine one restarts: it must not re-run what it already finished.
-  const finishedBefore = (machines[0].output.join("").match(/machine-host\.turn\.start/g) ?? []).length;
+  const finishedBefore = admissions();
   machines[0].child.kill("SIGTERM");
   await waitFor(async () => machines[0].child.exitCode !== null, 30_000, "machine one to stop");
   machines[0].output.length = 0;
   startMachine(machines[0]);
   await waitFor(() => secondLink.isMachineConnected("machine-one"), 60_000, "machine one to come back");
   await wait(3_000);
-  const startedAfterRestart = (machines[0].output.join("").match(/machine-host\.turn\.start/g) ?? []).length;
-  log("turn starts after restart:", startedAfterRestart, "(before restart:", finishedBefore, ")");
-  assert.equal(startedAfterRestart, 0, "a restart must not re-run a finished turn");
+  assert.deepEqual(admissions(), finishedBefore, "a restart must not acquire another native execution generation");
+  log("native admissions unchanged after restart");
 
   secondLink.close();
   for (const machine of machines) machine.child.kill("SIGTERM");
   await wait(1_500);
   relay.close?.();
   await rm(dir, { recursive: true, force: true });
-  log("PASS");
+  log("PASS — native completed reply, native streaming Stop, replay and restart");
 }
 
-main().catch((error) => { console.error("[trust-e2e] FAILED", error); process.exit(1); });
+main().then(() => process.exit(0)).catch((error) => { console.error("[trust-e2e] FAILED", error); process.exit(1); });

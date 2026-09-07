@@ -232,3 +232,20 @@ async function devices() {
   };
   return pair;
 }
+
+test("a shared room key cannot forge another device's application ACK", async () => {
+  const pair = await devices();
+  try {
+    const event = await pair.a.publish({ conversationId: "ack-authority", kind: "message.created", payload: { text: "retained" } });
+    await pair.a.flush();
+    await pair.b.receive(pair.sentA.find(packet => packet.type === "event" && packet.event.eventId === event.eventId));
+    const ack = pair.sentB.find(packet => packet.type === "ack" && packet.receipt.eventId === event.eventId)!;
+    assert.ok(ack.signature);
+    const { signature: _signature, ...forged } = ack;
+    await assert.rejects(pair.a.receive(forged), /signature/);
+    await assert.rejects(pair.a.receive({ ...ack, deliveryId: "changed-after-signing" }), /signature/);
+    assert.equal((await pair.storageA.deviceEvents().listPending("room")).length, 1);
+    await pair.a.receive(ack);
+    assert.equal((await pair.storageA.deviceEvents().listPending("room")).length, 0);
+  } finally { await pair.cleanup(); }
+});

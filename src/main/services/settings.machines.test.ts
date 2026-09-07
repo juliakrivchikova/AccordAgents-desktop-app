@@ -201,3 +201,21 @@ test("a machine's install record never travels to a machine and dies with the ma
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("controller trust stays local when settings are exported or imported", async () => {
+  const { createChatEventDeviceIdentity } = await import("./chatEventLog");
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-trust-settings-"));
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const service = new SettingsService();
+  (service as any).settingsPath = path.join(dir, "settings.json");
+  try {
+    const identity = createChatEventDeviceIdentity(new Date().toISOString());
+    const record = { deviceId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64,
+      role: "desktop" as const, name: "Local controller", addedAt: identity.createdAt };
+    await service.saveTrustedDevice(record);
+    const snapshot = await service.exportMachineSettingsSnapshot();
+    assert.equal(JSON.parse(snapshot.settingsJson).trustedDevices, undefined);
+    await service.importMachineSettingsSnapshot({ ...snapshot, settingsJson: JSON.stringify({ trustedDevices: [] }) });
+    assert.deepEqual(await service.listTrustedDevices(), [record]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

@@ -28,6 +28,7 @@ import type { MachineTurnDispatchRequest, MachineTurnDispatchResult, MachineTurn
 import type { DebugLogService } from "./debugLogs";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
 import { RelayTunnelClient } from "./relayTunnelClient";
+import { signMachineControl, verifyMachineControl } from "./machineControlAuthentication";
 import type { SettingsService } from "./settings";
 import { isMachineDurableMessage, machineCommandId } from "../../shared/machineLink";
 import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
@@ -377,6 +378,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
       // The pinned identity lets the mailbox deliver without a new live hello.
       this.initializeEventChannel(connection, record.deviceId, record.lastHello.publicKeyDerBase64);
       connection.eventChannel?.start();
+      // Recover the latest local grant/revocation without waiting for a live
+      // machine, including a crash between settings and outbox persistence.
+      await this.sendTrustRoster(connection);
     }
     client.on("peer", (event) => {
       void this.debugLogs.write("machine-link.peer", {
@@ -477,6 +481,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
    * and only inside the enrolled channel, so a device cannot add itself.
    */
   private async sendTrustRoster(connection: MachineConnection): Promise<void> {
+    if (this.options.desktopDeviceId !== connection.pairing.issuer.originId) return;
     const build = this.options.trustedDevices;
     if (!build) return;
     try {
@@ -508,6 +513,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
           relayUrl: pairing.relayUrl,
           rendezvousId: pairing.rendezvousId,
           relaySealKeyBase64: pairing.relaySealKeyBase64,
+          outboxUrl: pairing.outboxUrl,
           fingerprint: pairing.fingerprint
         });
       }
@@ -534,14 +540,14 @@ export class MachineLinkService implements MachineTurnDispatcher {
         machineId: connection.record.id,
         message: error instanceof Error ? error.message : String(error)
       });
+      throw error;
     }
   }
 
-  /** Re-sends the roster to every connected machine: a new machine or a newly
-   *  paired phone must become reachable without waiting for a reconnection. */
+  /** Retains the roster for every enrolled machine, including offline ones. */
   async refreshTrustRosters(): Promise<void> {
     for (const connection of this.connections.values()) {
-      if (connection.machineDeviceId) await this.sendTrustRoster(connection);
+      if (connection.eventChannel) await this.sendTrustRoster(connection);
     }
   }
 
@@ -700,6 +706,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   async syncSettings(): Promise<void> {
     const snapshot = await this.settings.exportMachineSettingsSnapshot();
     for (const connection of this.connections.values()) {
+      if (this.options.desktopDeviceId !== connection.pairing.issuer.originId) continue;
       if (!connection.eventChannel) {
         connection.settingsSynced = false;
         continue;
@@ -782,7 +789,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
       // The request retains its settings even if neither endpoint is online
       // at the same time. Seal before the append: settings can contain secrets
       // and can exceed one relay frame on the User's actual skill catalogue.
-      const sealedSettings = await sealMobileRelayPayload(await this.settings.exportMachineSettingsSnapshot(), connection.pairing.relaySealKeyBase64);
+      const sealedSettings = this.options.desktopDeviceId === connection.pairing.issuer.originId
+        ? await sealMobileRelayPayload(await this.settings.exportMachineSettingsSnapshot(), connection.pairing.relaySealKeyBase64)
+        : undefined;
       if (request.signal?.aborted) {
         return interrupted;
       }
@@ -811,7 +820,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         messageId: request.triggerMessage.id,
         runId: request.runId,
         pendingMessageId: request.pendingMessageId,
-        sealedSettings,
+        ...(sealedSettings ? { sealedSettings } : {}),
         requestedAt: this.now().toISOString()
       }, () => {
         // Queueing and sealing are still preparation. This synchronous fence
@@ -974,6 +983,13 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
     if (!isMachineLinkEnvelope(payload)) {
       return;
+    }
+    const hello = payload.body.type === "machine.hello" ? payload.body : undefined;
+    const from = connection.record.deviceId || hello?.deviceId;
+    const key = connection.record.lastHello?.publicKeyDerBase64 ?? hello?.publicKeyDerBase64;
+    if (!from || !key || isMachineDurableMessage(payload.body) ||
+        !verifyMachineControl(payload, { from, publicKeyDerBase64: key, to: this.options.desktopDeviceId, room: connection.pairing.rendezvousId })) {
+      throw new Error("Machine presence requires its signing identity; results require durable events.");
     }
     if (this.seenMessageIds.has(payload.messageId)) {
       return;
@@ -1177,10 +1193,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
       pendingRuns: [...connection.pendingRuns.entries()].map(([runId, conversationId]) => ({ runId, conversationId }))
     };
     await this.persistCancels(connection, true);
-    await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion, machineId: connection.record.id });
-    await this.send(connection, { type: "machine.settings.sync", snapshot: await this.settings.exportMachineSettingsSnapshot() });
+    if (this.options.desktopDeviceId === connection.pairing.issuer.originId) {
+      await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion, machineId: connection.record.id });
+      await this.send(connection, { type: "machine.settings.sync", snapshot: await this.settings.exportMachineSettingsSnapshot() });
+      await this.sendTrustRoster(connection);
+    }
     connection.settingsSynced = true;
-    await this.sendTrustRoster(connection);
     connection.eventChannel?.start();
     this.emitStatus();
     // Machine setup waits for a hello that arrives AFTER it restarted the
@@ -1402,7 +1420,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
       sentAt: this.now().toISOString(),
       body
     };
-    const ciphertext = await sealMobileRelayPayload(envelope, connection.pairing.relaySealKeyBase64);
+    const signed = signMachineControl(envelope, await this.options.eventLog.getOrCreateDeviceIdentity(), connection.pairing.rendezvousId, to);
+    const ciphertext = await sealMobileRelayPayload(signed, connection.pairing.relaySealKeyBase64);
     beforeWrite?.();
     await connection.client.sendCiphertext({ logicalMessageId: envelope.messageId, ciphertext, to });
   }

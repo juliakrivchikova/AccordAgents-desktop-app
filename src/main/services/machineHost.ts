@@ -33,6 +33,8 @@ import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySea
 import { RelayTunnelClient } from "./relayTunnelClient";
 import { MachinePeerFabric } from "./machinePeerFabric";
 import { MachineTrustStore } from "./machineTrustStore";
+import { signMachineControl, verifyMachineControl, machineControlSender } from "./machineControlAuthentication";
+import { stableJson } from "../../shared/stableJson";
 import { userDataPath } from "../platform";
 import { isMachineTrustRoster, type TrustedPeerAccess } from "../../shared/machineTrust";
 import type { SettingsService } from "./settings";
@@ -236,7 +238,8 @@ export class MachineHostService {
     });
     this.trust = new MachineTrustStore(
       options.trustRosterPath ?? path.join(userDataPath(), "machine-trust-roster.json"),
-      options.deviceId
+      options.deviceId,
+      options.pairing.issuer.originId
     );
     // The owner's other devices reach this machine here. Each gets its own
     // sealed channel with its own signing key; anyone else is not answered.
@@ -278,11 +281,11 @@ export class MachineHostService {
       if (event.type === "ready") {
         // Own link (re)established: greet the desktop again even if it is
         // the same one, so stops and results held meanwhile are reconciled.
-        const desktop = event.peers.find((peer) => peer.role === "desktop");
+        const desktop = event.peers.find((peer) => peer.deviceId === options.pairing.issuer.originId);
         this.setDesktop(desktop?.deviceId, { announce: true });
-      } else if (event.type === "peer-connected" && event.peer.role === "desktop") {
+      } else if (event.type === "peer-connected" && event.peer.deviceId === options.pairing.issuer.originId) {
         this.setDesktop(event.peer.deviceId);
-      } else if (event.type === "peer-disconnected" && event.peer.role === "desktop") {
+      } else if (event.type === "peer-disconnected" && event.peer.deviceId === options.pairing.issuer.originId) {
         this.desktopDeviceId = undefined;
         void this.debugLogs.write("machine-host.desktop.away", { deviceId: event.peer.deviceId, pendingTerminals: this.pendingTerminals.size });
       }
@@ -521,7 +524,7 @@ export class MachineHostService {
     }
   }
 
-  private async sendHello(): Promise<void> {
+  private async sendHello(to?: string): Promise<void> {
     let providers: MachineHelloBody["providers"] = [];
     try {
       const agents = await this.options.detectProviders?.();
@@ -548,7 +551,7 @@ export class MachineHostService {
       ...(typeof this.instanceSequence === "number" ? { instanceSequence: this.instanceSequence } : {}),
       ...((this.outboxError || this.progressErrors.size) ? { outboxError: [this.outboxError, ...this.progressErrors.values()].filter(Boolean).join("; ") } : {}),
       ...(this.options.idleStopWarning?.() ? { idleStopWarning: this.options.idleStopWarning() } : {})
-    });
+    }, to);
   }
 
   /**
@@ -566,6 +569,7 @@ export class MachineHostService {
     peer?: TrustedPeerAccess
   ): Promise<DeviceEventApplyOutcome | "deferred" | DeferredWithDependency> {
     if (this.idleFenced) return "deferred";
+    if (peer && stableJson(this.trust.peer(peer.deviceId) ?? null) !== stableJson(peer)) throw new Error("Machine controller authorization changed.");
     // A chat action from any of the owner's devices is applied here as well,
     // so a signature or a superseded change is not something only the sender
     // knows about.
@@ -597,8 +601,8 @@ export class MachineHostService {
       return "deferred";
     } else if (envelope.body.type === "machine.turn.cancel") {
       await this.options.eventStorage.nativeCommands().cancel(envelope.body.runId, conversationId, event.eventId);
-      await this.handleBody(envelope.body, true);
-    } else await this.handleBody(envelope.body, true);
+      await this.handleBody(envelope.body, true, event);
+    } else await this.handleBody(envelope.body, true, event);
     return "applied";
   }
 
@@ -618,11 +622,13 @@ export class MachineHostService {
       case "machine.settings.sync":
       case "machine.settings.sealed":
       case "machine.trust.roster":
-        return role === "desktop";
+        return !peer;
       case "machine.participants.delegate":
         // This machine sends delegations to the member's home; it accepts one
         // only from another machine acting for a member of its own.
         return role === "machine";
+      case "machine.turn.request":
+        return !peer || !body.sealedSettings;
       default:
         return true;
     }
@@ -643,6 +649,15 @@ export class MachineHostService {
     if (!isMachineLinkEnvelope(payload) || this.seenMessageIds.has(payload.messageId)) {
       return;
     }
+    const from = machineControlSender(payload);
+    const peer = from === this.options.pairing.issuer.originId ? undefined : this.trust.peer(from ?? "");
+    const publicKey = from === this.options.pairing.issuer.originId ? this.options.pairing.issuer.publicKeyDerBase64 : peer?.publicKeyDerBase64;
+    if (!from || !publicKey || isMachineDurableMessage(payload.body) || payload.body.type === "machine.settings.sync" ||
+        (peer && !["machine.hello.request", "machine.turn.query"].includes(payload.body.type)) ||
+        !verifyMachineControl(payload, { from, to: this.options.deviceId,
+          room: this.options.pairing.rendezvousId, publicKeyDerBase64: publicKey })) {
+      throw new Error("Machine controls require the enrolled sender's signature; actions require durable events.");
+    }
     this.seenMessageIds.add(payload.messageId);
     if (this.seenMessageIds.size > 10_000) {
       const first = this.seenMessageIds.values().next().value;
@@ -650,10 +665,10 @@ export class MachineHostService {
         this.seenMessageIds.delete(first);
       }
     }
-    await this.handleBody(payload.body);
+    await this.handleBody(payload.body, false, undefined, from);
   }
 
-  private async handleBody(body: MachineLinkMessage, durable = false): Promise<void> {
+  private async handleBody(body: MachineLinkMessage, durable = false, event?: ChatEventEnvelope, replyTo = event?.originId): Promise<void> {
     if (this.idleFenced && body.type === "machine.turn.query") return;
     // Old, ephemeral frames cannot bypass the idle fence either. Current
     // peers use the durable inbox and retain these actions until apply.
@@ -668,8 +683,8 @@ export class MachineHostService {
       case "machine.trust.roster": {
         // Only the enrolling desktop reaches this (peerMayCommand), and only
         // inside its own sealed, signed channel.
-        if (!isMachineTrustRoster(body.roster)) throw new Error("Machine trust roster is malformed.");
-        const accepted = await this.trust.accept(body.roster);
+        if (!event || !isMachineTrustRoster(body.roster)) throw new Error("Machine trust roster requires its signed event.");
+        const accepted = await this.trust.accept(body.roster, event);
         await this.peers.reconcile(this.rosterPeersToConnect(accepted.roster.peers));
         void this.debugLogs.write("machine-host.trust.applied", {
           changed: accepted.changed,
@@ -691,7 +706,8 @@ export class MachineHostService {
       case "machine.hello.request":
         // A (re)started desktop asks to be greeted: the same reconciliation
         // as after a peer change, whether or not the relay reported one.
-        this.setDesktop(body.desktopDeviceId, { announce: true });
+        if (replyTo && replyTo !== this.options.pairing.issuer.originId) await this.sendHello(replyTo);
+        else this.setDesktop(this.options.pairing.issuer.originId, { announce: true });
         return;
       case "machine.settings.sync":
         await this.settings.importMachineSettingsSnapshot(body.snapshot);
@@ -780,7 +796,7 @@ export class MachineHostService {
           return;
         }
         if (!this.activeTurns.has(body.runId) && !this.pendingTerminals.has(body.runId) && !this.isQueuedRun(body.runId) && !this.settlingRuns.has(body.runId) && !this.chat.hasActiveRunForConversation?.(body.conversationId, body.runId)) {
-          await this.send({ type: "machine.turn.unknown", conversationId: body.conversationId, runId: body.runId }).catch(() => undefined);
+          await this.send({ type: "machine.turn.unknown", conversationId: body.conversationId, runId: body.runId }, replyTo).catch(() => undefined);
         }
         return;
       case "machine.turn.cancel": {
@@ -812,7 +828,7 @@ export class MachineHostService {
         if (!controller && !this.pendingTerminals.has(body.runId) && !this.settlingRuns.has(body.runId) && !this.chat.hasActiveRunForConversation?.(body.conversationId, body.runId)) {
           // Not running here and no result waiting: this runtime cannot
           // confirm anything about it (Rule 2), so it says so.
-          await this.send({ type: "machine.turn.unknown", conversationId: body.conversationId, runId: body.runId }).catch(() => undefined);
+          await this.send({ type: "machine.turn.unknown", conversationId: body.conversationId, runId: body.runId }, replyTo).catch(() => undefined);
           return;
         }
         controller?.abort();
@@ -1646,8 +1662,8 @@ export class MachineHostService {
     return run;
   }
 
-  private send(body: MachineLinkMessage): Promise<void> {
-    const run = this.outbound.then(() => this.sendNow(body));
+  private send(body: MachineLinkMessage, to?: string): Promise<void> {
+    const run = this.outbound.then(() => this.sendNow(body, to));
     this.outbound = run.then(() => undefined, () => undefined);
     return run;
   }
@@ -1686,7 +1702,7 @@ export class MachineHostService {
     sender.note(progress);
   }
 
-  private async sendNow(body: MachineLinkMessage): Promise<void> {
+  private async sendNow(body: MachineLinkMessage, recipient?: string): Promise<void> {
     if (this.closed) {
       return;
     }
@@ -1721,7 +1737,7 @@ export class MachineHostService {
       }
       return;
     }
-    const to = this.desktopDeviceId;
+    const to = recipient ?? this.desktopDeviceId;
     if (!to) {
       throw new Error("The desktop is not connected.");
     }
@@ -1731,7 +1747,8 @@ export class MachineHostService {
       sentAt: this.now().toISOString(),
       body
     };
-    const ciphertext = await sealMobileRelayPayload(envelope, this.options.pairing.relaySealKeyBase64);
+    const signed = signMachineControl(envelope, await this.options.eventLog.getOrCreateDeviceIdentity(), this.options.pairing.rendezvousId, to);
+    const ciphertext = await sealMobileRelayPayload(signed, this.options.pairing.relaySealKeyBase64);
     await this.client.sendCiphertext({ logicalMessageId: envelope.messageId, ciphertext, to });
   }
 }

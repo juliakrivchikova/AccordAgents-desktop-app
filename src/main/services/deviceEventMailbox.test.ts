@@ -1,3 +1,4 @@
+import { signDevicePacket } from "./devicePacketAuthentication";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,7 +11,7 @@ import { StorageService } from "./storage";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type { DeviceEventPacket } from "../../shared/deviceEventChannel";
 import { mailboxAuthHeaders } from "./mailboxAccess";
-import { openMobileRelayPayload } from "./mobileRelaySealing";
+import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
 
 test("mailbox catch-up works after sender exit; relay acceptance does not ACK the peer and cursor follows apply", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accord-device-mailbox-"));
@@ -51,6 +52,7 @@ test("mailbox catch-up works after sender exit; relay acceptance does not ACK th
   };
   const a = new DeviceEventMailbox({
     storage: sender, pairing, localDeviceId: identity.originId, peerDeviceId: "receiver",
+    authenticate: async packet => signDevicePacket(packet, identity),
     fetch: fakeFetch as typeof fetch, receive: async () => undefined, onError: () => undefined
   });
   let b = new DeviceEventMailbox(receiverOptions);
@@ -114,7 +116,7 @@ test("an applied receipt survives failed delivery and receiver restart without p
 test("header probes repair expired events and ACKs when enrolled peers never overlap online", async () => {
   const pair = await mailboxDevices();
   try {
-    const event = await pair.publish("chat", "message");
+    const event = await pair.publish("chat", "permission.decided", true);
     pair.expire(); // Relay accepted the event, but it expired before receiver returned.
     await pair.restartA();
     await pair.a.mailbox.flush(); // Only small headers, not the original body.
@@ -170,6 +172,7 @@ async function mailboxDevices() {
     const id = identities[index].originId;
     const peer = identities[1 - index];
     const mailbox: DeviceEventMailbox = new DeviceEventMailbox({ storage, pairing, localDeviceId: id, peerDeviceId: peer.originId,
+      authenticate: async packet => signDevicePacket(packet, identities[index]),
       fetch: fakeFetch as typeof fetch, receive: packet => channel.receive(packet), onError: () => undefined });
     const channel: DeviceEventChannel = new DeviceEventChannel({ storage, eventLog: new ChatEventLogService(storage), channelId: "room",
       localDeviceId: id, peerDeviceId: peer.originId, peerPublicKeyDerBase64: peer.publicKeyDerBase64,
@@ -188,11 +191,27 @@ async function mailboxDevices() {
     expire: () => { events.length = 0; },
     restartA: async () => { await stop(pair.a); pair.a = make(0); },
     restartB: async () => { await stop(pair.b); pair.b = make(1); },
-    publish: async (conversationId: string, kind: string) => {
-      const event = await pair.a.channel.publish({ conversationId, kind, payload: { text: "private" } });
+    inject: async (packet: DeviceEventPacket) => {
+      events.push({ eventId: `injected-${arrival + 1}`, arrivalSeq: ++arrival, kind: "device.channel.packet",
+        payload: JSON.parse(await sealMobileRelayPayload(packet, pairing.relaySealKeyBase64)) });
+    },
+    publish: async (conversationId: string, kind: string, sharedScope = false) => {
+      const event = await pair.a.channel.publish({ conversationId, kind, sharedScope, payload: { text: "private" } });
       await pair.a.channel.flush(); await pair.a.mailbox.flush(); return event;
     },
     close: async () => { await stop(pair.a); await stop(pair.b); await rm(directory, { recursive: true, force: true }); }
   };
   return pair;
 }
+
+test("an unsigned mailbox control cannot pin later authenticated delivery", async () => {
+  const pair = await mailboxDevices();
+  try {
+    await pair.inject({ protocol: "accord-device-events-v1", from: pair.a.id, to: pair.b.id, type: "probe", events: [] });
+    const event = await pair.publish("after-forgery", "message");
+    await pair.b.mailbox.poll();
+    await pair.a.mailbox.poll();
+    assert.deepEqual(pair.applied, [event.eventId]);
+    assert.equal((await pair.a.storage.deviceEvents().listPending("room")).length, 0);
+  } finally { await pair.close(); }
+});

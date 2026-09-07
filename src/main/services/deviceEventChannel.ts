@@ -13,6 +13,7 @@ import { ChatEventLogService, verifySignedChatEvent } from "./chatEventLog";
 import type { StorageService } from "./storage";
 import { DeviceEventMailbox } from "./deviceEventMailbox";
 import { DeviceEventBlobIncompleteError } from "./deviceEventBlobStorage";
+import { DevicePacketAuthenticationError, signDevicePacket, verifyDevicePacket } from "./devicePacketAuthentication";
 
 interface DeviceEventChannelOptions {
   storage: StorageService;
@@ -72,6 +73,7 @@ export class DeviceEventChannel {
       this.mailbox = new DeviceEventMailbox({
         storage: options.storage, pairing: options.pairing,
         localDeviceId: options.localDeviceId, peerDeviceId: options.peerDeviceId,
+        authenticate: packet => this.authenticate(packet),
         receive: (packet) => this.receive(packet), onError: options.onError
       });
     }
@@ -122,7 +124,12 @@ export class DeviceEventChannel {
     return this.enqueue(async () => {
       if (this.stopped) return;
       if (!isDeviceEventPacket(value) || value.from !== this.options.peerDeviceId || value.to !== this.options.localDeviceId) {
-        throw new Error("Device event packet is not addressed to this enrolled channel.");
+        throw new DevicePacketAuthenticationError("Device event packet is not addressed to this enrolled channel.");
+      }
+      // Bare events are verified by their immutable inner signature below.
+      // Transport receipts, repair requests and fragments have no such proof.
+      if (value.type !== "event" && !verifyDevicePacket(value, this.options.peerPublicKeyDerBase64)) {
+        throw new DevicePacketAuthenticationError("Device control packet signature is invalid.");
       }
       switch (value.type) {
         case "fragment":
@@ -135,7 +142,7 @@ export class DeviceEventChannel {
           if (!event || Buffer.byteLength(JSON.stringify(event), "utf8") > DEVICE_EVENT_INLINE_BYTES * 2 || event.originId !== value.from ||
               !this.inScope(event.logScopeId) ||
               !verifySignedChatEvent(event, this.options.peerPublicKeyDerBase64)) {
-            throw new Error("Device event signature or channel scope is invalid.");
+            throw new DevicePacketAuthenticationError("Device event signature or channel scope is invalid.");
           }
           const remembered = this.received.get(event.eventId);
           if (remembered && remembered.hash !== event.eventHash) throw new Error(`Conflicting device event ${event.eventId}.`);
@@ -191,7 +198,7 @@ export class DeviceEventChannel {
           for (const header of value.events) {
             if (!header || header.originId !== value.from || typeof header.eventId !== "string" ||
                 typeof header.eventHash !== "string" || typeof header.logScopeId !== "string" ||
-                !header.logScopeId.startsWith(`device:${this.options.channelId}:`) || !Number.isSafeInteger(header.originSeq) || header.originSeq < 1) {
+                !this.inScope(header.logScopeId) || !Number.isSafeInteger(header.originSeq) || header.originSeq < 1) {
               throw new Error("Invalid device event receipt probe identity.");
             }
             const receipt = await this.options.storage.deviceEvents().receipt(header.eventId);
@@ -267,7 +274,7 @@ export class DeviceEventChannel {
         const fragment = await this.options.storage.deviceEventBlobs().fragment(event.payload, index);
         if (!fragment) throw new Error(`Missing retained device event fragment ${index}.`);
         const packet = this.packet({ type: "fragment", fragment, ...(deliveryId ? { deliveryId } : {}) });
-        if (deliveryId) await this.sendControl(packet); else await this.options.send(packet);
+        if (deliveryId) await this.sendControl(packet); else await this.options.send(await this.authenticate(packet));
       }
     }
     if (!this.stopped) {
@@ -296,6 +303,7 @@ export class DeviceEventChannel {
         continue;
       }
       for (const event of ready) {
+        if (this.stopped) return;
         try {
           let payload: unknown;
           try { payload = await this.options.storage.deviceEventBlobs().hydrate(event.payload); }
@@ -310,6 +318,7 @@ export class DeviceEventChannel {
             }
             throw error;
           }
+          if (this.stopped) return;
           const outcome = await this.options.apply(event, payload);
           if (outcome === "deferred" || (typeof outcome === "object" && outcome.deferred)) {
             deferred = true;
@@ -393,12 +402,17 @@ export class DeviceEventChannel {
   }
 
   private async sendControl(packet: DeviceEventPacket): Promise<void> {
+    packet = await this.authenticate(packet);
     const writes: Promise<void>[] = this.options.isPeerConnected?.() === false ? [] : [this.options.send(packet)];
     if (this.mailbox) writes.push(this.mailbox.sendPacket(packet));
     if (!writes.length) throw new Error("The enrolled peer is unreachable.");
     // A slow HTTP mailbox cannot stall the live-room apply queue. Promise.any
     // observes failures in both paths while resolving on the first success.
     await Promise.any(writes);
+  }
+
+  private async authenticate(packet: DeviceEventPacket): Promise<DeviceEventPacket> {
+    return signDevicePacket(packet, await this.options.eventLog.getOrCreateDeviceIdentity());
   }
 
   private async repeatReceipt(receipt: DeviceEventReceipt): Promise<void> {
