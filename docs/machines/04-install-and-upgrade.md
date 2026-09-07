@@ -64,6 +64,44 @@ executors for the same participant session, and a second install under the
 default unit name would take over the first one's service. Both happened during
 QA before this was fixed.
 
+## Where the runtime payload comes from
+
+The desktop installs a payload it carries itself; there is no download and no
+source checkout involved.
+
+| Where the app runs | Payload directory | Source |
+|---|---|---|
+| Packaged application | `<App>.app/Contents/Resources/machine` (Windows: `resources/machine`) | `packaged` |
+| Checkout | `dist/machine` | `checkout` |
+| `ACCORDAGENTS_MACHINE_BUNDLE_DIR` set | that directory | `override` |
+
+It ships as a **loose resource, never inside the asar**: `rsync` copies real
+files to the machine and nothing inside an asar has a path on disk. Packaging
+excludes `dist/machine` from the asar so the same 6 MB is not shipped twice,
+and `npm run build` produces it, so every packaging path — `npm run package`,
+`npm run make`, and the signed release through `signed:mac-arm64` — includes it
+by construction rather than by remembering.
+
+`npm run build:machine` writes `payload.json` next to the bundle: the version
+and, for every file, its size and SHA-256. A packaged application cannot
+rebuild its payload, so it verifies it instead — exact file set, exact sizes,
+exact hashes — and refuses a payload that does not match the build rather than
+installing a runtime that cannot start. The manifest is excluded from the
+bundle digest that names the release directory on a machine, so adding it did
+not change how existing releases are identified.
+
+Two more refusals guard the same path. The payload's version must match the
+desktop's, so a stale payload cannot put a runtime on a machine that this
+desktop was never built against; and the manifest's version must match the
+payload's own `package.json`, which catches a payload assembled from two
+different builds. The override deliberately skips the version check, because
+that is what it exists for.
+
+Settings → Machines shows the result before anything is set up: *Runtime to
+install: 1.10.4-beta.2 · 8 files · 6.1 MB*, or, when the payload is missing or
+damaged, why — with "reinstall it from the release you downloaded" for a
+packaged application and "build it with `npm run build:machine`" for a checkout.
+
 ## Layout on the machine
 
 ```
@@ -158,8 +196,13 @@ pushes and opens pull requests from it.
 ## How large this gets, and where it ends up
 
 Measured on 2026-09-07 against the real `npm run build:machine` output at
-`1.10.4-beta.2`: **6.1 MB in 8 files**, of which 4.0 MB is the source map and
-2.0 MB the runtime bundle. Fingerprinting it takes 29 ms cold and 6 ms warm.
+`1.10.4-beta.2`: **6,397,743 bytes in 8 files**, of which 4.0 MB is the source
+map and 2.0 MB the runtime bundle. One verified read — per-file hashes for the
+manifest check and the release digest in the same pass — takes about 30 ms, and
+it runs once per install and once when the Machines screen opens.
+
+That payload is also what every packaged application now carries: 6.1 MB added
+to the app bundle once, not per machine and not per install.
 
 It travels as an `rsync -az` stream over SSH. It does not go through argv, a
 SQLite statement, a relay frame, a mailbox page, or an HTTP body. The remote
@@ -226,6 +269,31 @@ including betas, log redaction, interrupted-setup recovery, and the three mirror
 outcomes. Every generated script is parsed by a real `bash -n`, including with a
 hostile path containing a quote.
 
+### Packaged macOS application — 2026-09-07
+
+Built locally with `npm run build && npx electron-forge package
+--platform=darwin --arch=arm64`, launched from
+`out/AccordAgents-darwin-arm64/AccordAgents.app/Contents/MacOS/AccordAgents`
+with an isolated user-data directory and CDP port 9237, and read through the
+real Settings → Machines screen:
+
+- Healthy payload: *Runtime to install: 1.10.4-beta.2 · 8 files · 6.1 MB*,
+  `data-source="packaged"` — located and hashed from the application's own
+  resources, with no checkout involved.
+- `accordagents-machine.cjs` truncated to 200 bytes in the packaged app:
+  *"… is damaged: accordagents-machine.cjs does not match the build. This copy
+  of AccordAgents is incomplete; reinstall it from the release you downloaded."*
+- `Contents/Resources/machine` removed entirely: *"The machine runtime payload
+  is missing from … This copy of AccordAgents is incomplete; reinstall it…"*
+- Payload restored; the packaged-contents test passes again.
+
+Screenshots: `screenshots/qa-machine-payload-packaged.png`,
+`screenshots/qa-machine-payload-corrupt.png`.
+`scripts/packaged-app-contents.test.mjs` now checks any packaged application in
+`out/` for the payload, every file's size and hash against the manifest, and
+that the payload version equals the application version — and that the asar
+contains no `dist/machine` entry.
+
 ### Not verified
 
 - The interactive provider sign-in hand-off. The machine was already signed in,
@@ -235,12 +303,19 @@ hostile path containing a quote.
 - A user-scope (`systemctl --user`) install: this machine has passwordless
   sudo, so every real run took the system-unit path.
 - Windows and macOS as machine targets. This is Linux only.
+- **Installing onto a Linux machine from the packaged application.** The
+  packaged app was shown to locate, hash and version-check its payload through
+  the real Settings screen, and the transfer/drain/switch path was proven end to
+  end from a checkout against a real machine. Running that same install from the
+  packaged app needs an EC2 instance, which this session did not own.
+- Signing and notarization of the new loose resource. The local package is
+  unsigned (no identity available here), so the release path's `osxSign` step
+  over `Contents/Resources/machine` has not been exercised. An unsigned local
+  build also cannot use the macOS secret store, so adding a machine was not
+  possible in it; the payload is read before any secret is needed.
 
 ## Still open
 
-- Packaged builds ship no `dist/machine`. `readMachineBundle` fails with a clear
-  message and `ACCORDAGENTS_MACHINE_BUNDLE_DIR` overrides the location, but the
-  packaging step must include the bundle before this ships to a user.
 - A crash-looping release restarts every 3 s for the whole three-minute connect
   window (56 restarts observed) before the rollback. It is bounded and it
   recovers, but a start limit is worth considering.

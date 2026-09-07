@@ -3,7 +3,7 @@ import { Copy, Loader2, Plus, Server, Settings2, Trash2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { CreateMachineResult, MachineLinkStatus, MachineListResult, MachineRecord } from "../../../shared/machineLink";
-import type { MachineInstallRecord } from "../../../shared/machineInstall";
+import type { MachineInstallRecord, MachineRuntimePayloadInfo } from "../../../shared/machineInstall";
 import { writeClipboardText } from "../../../shared/clipboard";
 import { MachineSetupPanel } from "./machine-setup-panel";
 
@@ -12,6 +12,12 @@ import { MachineSetupPanel } from "./machine-setup-panel";
  * participants. Adding one mints an enrollment file; installing that file on
  * the computer connects it through the relay.
  */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const megabytes = bytes / (1024 * 1024);
+  return megabytes >= 1 ? `${megabytes.toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`;
+}
+
 export function MachinesSection(): JSX.Element {
   const [machines, setMachines] = useState<MachineRecord[]>([]);
   const [status, setStatus] = useState<MachineLinkStatus[]>([]);
@@ -22,6 +28,7 @@ export function MachinesSection(): JSX.Element {
   const [copied, setCopied] = useState(false);
   const [installs, setInstalls] = useState<MachineInstallRecord[]>([]);
   const [setupFor, setSetupFor] = useState<string | undefined>();
+  const [payload, setPayload] = useState<MachineRuntimePayloadInfo | undefined>();
 
   const refreshInstalls = (): void => {
     void window.consensus.listMachineInstalls().then(setInstalls).catch(() => undefined);
@@ -43,6 +50,12 @@ export function MachinesSection(): JSX.Element {
     });
     void window.consensus.listMachineInstalls().then((records) => {
       if (!cancelled) setInstalls(records);
+    }).catch(() => undefined);
+    // The runtime this app would put on a machine. Shown before a machine is
+    // added, so an incomplete copy of the app is visible before a setup that
+    // would fail halfway.
+    void window.consensus.machineRuntimePayload().then((info) => {
+      if (!cancelled) setPayload(info);
     }).catch(() => undefined);
     const off = window.consensus.onMachinesUpdated(apply);
     const offInstall = window.consensus.onMachineInstallProgress(() => {
@@ -159,6 +172,18 @@ export function MachinesSection(): JSX.Element {
             </button>
           </div>
         </div>
+        {payload ? (
+          <div
+            className={payload.ok ? "machines-payload" : "device-pairing-error"}
+            data-testid="machines-payload"
+            data-ok={payload.ok ? "true" : "false"}
+            data-source={payload.source}
+          >
+            {payload.ok
+              ? `Runtime to install: ${payload.version} · ${payload.files} files · ${formatBytes(payload.bytes)}`
+              : payload.message}
+          </div>
+        ) : null}
         {machines.length > 0 ? (
           <>
             <div className="gen-card-divider" />

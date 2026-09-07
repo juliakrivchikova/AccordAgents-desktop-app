@@ -13,6 +13,7 @@ import type {
   MachineInstallSnapshot,
   MachineMirrorBootstrapRequest,
   MachineMirrorBootstrapResult,
+  MachineRuntimePayloadInfo,
   MachineRuntimeProbe,
   MachineSshTarget,
   MachineUpgradeRequest
@@ -2738,6 +2739,8 @@ export interface AppBridge {
   upgradeMachine(request: MachineUpgradeRequest): Promise<MachineInstallResult>;
   bootstrapMachineProjectMirror(request: MachineMirrorBootstrapRequest): Promise<MachineMirrorBootstrapResult>;
   listMachineInstalls(): Promise<MachineInstallRecord[]>;
+  /** What runtime this desktop would install on a machine, or why it cannot. */
+  machineRuntimePayload(): Promise<MachineRuntimePayloadInfo>;
   onMachineInstallProgress(callback: (snapshot: MachineInstallSnapshot) => void): () => void;
   onReviewProgress(callback: (progress: ReviewProgress) => void): () => void;
   onConversationUpdated(callback: (conversation: ConversationUpdate) => void): () => void;

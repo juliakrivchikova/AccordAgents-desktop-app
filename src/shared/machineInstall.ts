@@ -166,6 +166,29 @@ export interface MachineRuntimeProbe {
   providerPids: number[];
 }
 
+/** Where the runtime payload the desktop would install comes from. */
+export type MachineRuntimePayloadSource = "override" | "packaged" | "checkout";
+
+/** What the desktop would install, or why it cannot. Shown in Settings so the
+ *  User can see the machine payload is present and which version it is before
+ *  starting a setup that would otherwise fail halfway. */
+export type MachineRuntimePayloadInfo =
+  | {
+    ok: true;
+    source: MachineRuntimePayloadSource;
+    dir: string;
+    version: string;
+    digest: string;
+    files: number;
+    bytes: number;
+  }
+  | {
+    ok: false;
+    source: MachineRuntimePayloadSource;
+    dir: string;
+    message: string;
+  };
+
 export interface MachineDrainReport {
   drained: boolean;
   /** What the service manager reports after the drain attempt. */

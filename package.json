@@ -9,7 +9,7 @@
   "repository": "https://github.com/juliakrivchikova/AccordAgents-desktop-app.git",
   "main": "dist/main/main/launcher.js",
   "scripts": {
-    "build": "npm run build:main && vite build && npm run build:mobile",
+    "build": "npm run build:main && vite build && npm run build:mobile && node scripts/build-machine-bundle.mjs",
     "build:main": "tsc -p tsconfig.main.json && node scripts/copy-main-assets.mjs",
     "build:mobile": "node scripts/build-mobile-shell.mjs",
     "build:machine": "npm run build:main && node scripts/build-machine-bundle.mjs",

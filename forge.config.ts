@@ -11,6 +11,10 @@ const iconBasePath = path.join(assetsDir, "icon");
 const iconPath = `${iconBasePath}.icns`;
 const windowsIconPath = `${iconBasePath}.ico`;
 const sqliteResourcePath = path.join(assetsDir, "sqlite");
+// The headless Linux runtime a machine is installed with. It ships as a loose
+// resource, never inside the asar: rsync copies real files to the machine and
+// nothing inside an asar has a real path on disk. `npm run build` produces it.
+const machinePayloadPath = path.resolve(__dirname, "dist", "machine");
 const dmgBackgroundPath = path.join(assetsDir, "dmg-background.png");
 const entitlementsPath = path.resolve(__dirname, "entitlements.mac.plist");
 const entitlementsInheritPath = path.resolve(__dirname, "entitlements.mac.inherit.plist");
@@ -78,7 +82,10 @@ const config = {
       ? { unpack: path.join("**", "node_modules", "node-pty", "prebuilds", "win32-x64", "**", "*.{node,dll,exe}") }
       : true,
     icon: process.platform === "win32" ? iconBasePath : iconPath,
-    ...(process.platform === "win32" ? { extraResource: [sqliteResourcePath] } : {}),
+    extraResource: [
+      ...(process.platform === "win32" ? [sqliteResourcePath] : []),
+      machinePayloadPath
+    ],
     extendInfo: {
       CFBundleDisplayName: productName,
       CFBundleName: productName,
@@ -117,6 +124,9 @@ const config = {
       ignoredRootFile("tsconfig.renderer.json"),
       ignoredRootFile("vite.config.mts"),
       ...(process.platform === "win32" ? [] : [ignoredRootDirectory("node_modules/node-pty")]),
+      // Shipped as a loose resource instead (machinePayloadPath); keeping it in
+      // the asar as well would ship the same 6 MB twice and still be unusable.
+      /^\/dist\/machine(?:\/|$)/,
       /^\/dist\/renderer-tests(?:-|\/|$)/,
       /^\/dist\/codex-approval-renderer-test(?:\/|$)/,
       /^\/dist\/.*\.d\.ts$/,

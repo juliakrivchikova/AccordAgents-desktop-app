@@ -3,7 +3,8 @@
 // this bundle, and its enrollment file. Electron never enters the bundle: the
 // runtime composes the same services through src/main/platform.ts.
 import { build } from "esbuild";
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -84,4 +85,40 @@ Install on a Linux computer that will host chat members:
 
 The runtime keeps its own data under the user-data directory: chats it hosts, provider sessions, settings copied from the desktop, and the machine secret key.
 `, "utf8");
-console.log(`machine bundle written to ${outdir}; external dependencies: ${Object.keys(dependencies).join(", ") || "(none)"}`);
+
+// The payload manifest. A desktop that ships this bundle inside its own
+// application resources cannot rebuild it, so it verifies it instead: every
+// file listed here must be present with exactly this size and hash, and no
+// other file may be there. A payload truncated by a partial download or a
+// half-finished copy is then refused before it reaches a machine, rather than
+// installed as a runtime that cannot start.
+//
+// payload.json itself is excluded from the listing (it cannot contain its own
+// hash) and from the bundle digest the installer computes, so adding it does
+// not change how a release is identified.
+const PAYLOAD_MANIFEST = "payload.json";
+async function manifestEntries(dir, prefix = "") {
+  const entries = [];
+  for (const entry of (await readdir(dir, { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+    if (entry.name === "node_modules" || (!prefix && entry.name === PAYLOAD_MANIFEST)) continue;
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      entries.push(...await manifestEntries(full, relative));
+    } else if (entry.isFile()) {
+      const contents = await readFile(full);
+      entries.push({ path: relative, bytes: contents.byteLength, sha256: createHash("sha256").update(contents).digest("hex") });
+    }
+  }
+  return entries;
+}
+const files = await manifestEntries(outdir);
+await writeFile(path.join(outdir, PAYLOAD_MANIFEST), `${JSON.stringify({
+  manifestVersion: 1,
+  version: pkg.version,
+  generatedAt: new Date().toISOString(),
+  files
+}, null, 2)}\n`, "utf8");
+
+const totalBytes = files.reduce((sum, file) => sum + file.bytes, 0);
+console.log(`machine bundle written to ${outdir}; ${files.length} files, ${totalBytes} bytes; external dependencies: ${Object.keys(dependencies).join(", ") || "(none)"}`);

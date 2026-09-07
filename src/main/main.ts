@@ -102,10 +102,12 @@ import type {
   MachineInstallResult,
   MachineMirrorBootstrapRequest,
   MachineMirrorBootstrapResult,
+  MachineRuntimePayloadInfo,
   MachineRuntimeProbe,
   MachineSshTarget,
   MachineUpgradeRequest
 } from "../shared/machineInstall";
+import type { MachineRuntimePayloadLocation } from "./services/machineInstaller";
 import { MobileProgressEnvelopeTracker } from "./services/mobileProgressEnvelopeTracker";
 import {
   MobileRelayControlService,
@@ -374,11 +376,20 @@ function requireMachineLink(): MachineLinkService {
   }
   return machineLinkService;
 }
-function machineRuntimeBundleDir(): string {
-  // Overridable so a QA run can install a specific build, and so a packaged
-  // app can be pointed at a bundle that does not ship inside the asar.
+function machineRuntimePayload(): MachineRuntimePayloadLocation {
+  // A packaged app ships the Linux runtime beside its asar, in
+  // Contents/Resources/machine: rsync has to read real files, and nothing
+  // inside an asar has a real path. A checkout uses what `npm run build`
+  // produced. The override exists for QA and for pointing a packaged app at a
+  // specific build; it deliberately skips the version check.
   const override = process.env.ACCORDAGENTS_MACHINE_BUNDLE_DIR?.trim();
-  return override || path.join(app.getAppPath(), "dist", "machine");
+  if (override) {
+    return { dir: override, source: "override" };
+  }
+  if (app.isPackaged) {
+    return { dir: path.join(process.resourcesPath, "machine"), source: "packaged", expectVersion: app.getVersion() };
+  }
+  return { dir: path.join(app.getAppPath(), "dist", "machine"), source: "checkout", expectVersion: app.getVersion() };
 }
 const machineInstallerService = new MachineInstallerService({
   store: settingsService,
@@ -386,7 +397,7 @@ const machineInstallerService = new MachineInstallerService({
   getEnrollmentJson: (machineId) => requireMachineLink().enrollmentJson(machineId),
   waitForConnected: (machineId, timeoutMs, expectAppVersion) =>
     requireMachineLink().waitForConnected(machineId, timeoutMs, expectAppVersion),
-  bundleDir: machineRuntimeBundleDir,
+  payload: machineRuntimePayload,
   machineName: async (machineId) => (await settingsService.listMachines()).find((machine) => machine.id === machineId)?.name,
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
@@ -2530,6 +2541,7 @@ function registerIpc(): void {
     return machineInstallerService.bootstrapProjectMirror({ machineId: assertMachineId(request?.machineId), localPath });
   });
   ipcMain.handle("machines:install-list", async (): Promise<MachineInstallRecord[]> => settingsService.listMachineInstalls());
+  ipcMain.handle("machines:install-payload", async (): Promise<MachineRuntimePayloadInfo> => machineInstallerService.readPayload());
   ipcMain.handle("machines:enrollment", async (_event, request: MachineEnrollmentRequest): Promise<CreateMachineResult> => {
     const id = typeof request?.id === "string" ? request.id.trim() : "";
     const machine = (await settingsService.listMachines()).find((item) => item.id === id);

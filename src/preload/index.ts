@@ -13,6 +13,7 @@ import type {
   MachineInstallSnapshot,
   MachineMirrorBootstrapRequest,
   MachineMirrorBootstrapResult,
+  MachineRuntimePayloadInfo,
   MachineRuntimeProbe,
   MachineSshTarget,
   MachineUpgradeRequest
@@ -229,6 +230,7 @@ const bridge: AppBridge = {
   bootstrapMachineProjectMirror: (request: MachineMirrorBootstrapRequest): Promise<MachineMirrorBootstrapResult> =>
     ipcRenderer.invoke("machines:bootstrap-mirror", request),
   listMachineInstalls: (): Promise<MachineInstallRecord[]> => ipcRenderer.invoke("machines:install-list"),
+  machineRuntimePayload: (): Promise<MachineRuntimePayloadInfo> => ipcRenderer.invoke("machines:install-payload"),
   onMachineInstallProgress: (callback: (snapshot: MachineInstallSnapshot) => void) => {
     const listener = (_event: unknown, snapshot: MachineInstallSnapshot): void => callback(snapshot);
     ipcRenderer.on("machines:install-progress", listener);

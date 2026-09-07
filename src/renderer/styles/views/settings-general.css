@@ -1037,3 +1037,9 @@
   border: 1px solid var(--border);
   border-radius: 8px;
 }
+
+.machines-payload {
+  padding: 0 16px 12px;
+  font-size: 12px;
+  color: var(--app-muted);
+}
