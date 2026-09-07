@@ -82,6 +82,15 @@ and `npm run build` produces it, so every packaging path — `npm run package`,
 `npm run make`, and the signed release through `signed:mac-arm64` — includes it
 by construction rather than by remembering.
 
+A payload may contain only regular files and directories. Anything else — a
+symbolic link, a pipe, a device — is **refused**, by the bundler when it builds
+the payload and by the desktop when it reads one. Skipping them, as both
+scanners first did, was a real hole: `rsync -a` copies a symbolic link to the
+machine as a link, so a payload could carry content that the manifest never
+described and the digest never covered. Verified on the real machine before the
+guard existed: a link `appSkills/escape.md` arrived and resolved to `/etc/hosts`
+there.
+
 `npm run build:machine` writes `payload.json` next to the bundle: the version
 and, for every file, its size and SHA-256. A packaged application cannot
 rebuild its payload, so it verifies it instead — exact file set, exact sizes,
@@ -294,6 +303,18 @@ Screenshots: `screenshots/qa-machine-payload-packaged.png`,
 that the payload version equals the application version — and that the asar
 contains no `dist/machine` entry.
 
+### Packaged payload onto the real machine — 2026-09-07
+
+A **component check**, not Settings UI QA: the same rsync invocation
+`defaultBundleUpload` builds (same helpers, same flags) copying
+`AccordAgents.app/Contents/Resources/machine` to a scratch directory on the
+User's EC2 (`i-0943b28f7231ab93c`, `100.48.98.97`). 6,397,257 bytes in 8 files
+arrived in 2.0 s; every file was re-hashed **on the machine** against
+`payload.json` with zero mismatches, and `find ! -type f ! -type d` found
+nothing. The scratch directory was removed afterwards. This proves the packaged
+resource directory is transferable and arrives intact; it does not prove the
+Settings flow, which is blocked below.
+
 ### Not verified
 
 - The interactive provider sign-in hand-off. The machine was already signed in,
@@ -303,16 +324,40 @@ contains no `dist/machine` entry.
 - A user-scope (`systemctl --user`) install: this machine has passwordless
   sudo, so every real run took the system-unit path.
 - Windows and macOS as machine targets. This is Linux only.
-- **Installing onto a Linux machine from the packaged application.** The
-  packaged app was shown to locate, hash and version-check its payload through
-  the real Settings screen, and the transfer/drain/switch path was proven end to
-  end from a checkout against a real machine. Running that same install from the
-  packaged app needs an EC2 instance, which this session did not own.
-- Signing and notarization of the new loose resource. The local package is
-  unsigned (no identity available here), so the release path's `osxSign` step
-  over `Contents/Resources/machine` has not been exercised. An unsigned local
-  build also cannot use the macOS secret store, so adding a machine was not
-  possible in it; the payload is read before any secret is needed.
+- **Installing onto a Linux machine from the packaged application, through
+  Settings.** Blocked on this Mac by the macOS secret store, not by the
+  installer. Details below.
+- Signing and notarization of the new loose resource: the release path's
+  `osxSign` pass over `Contents/Resources/machine` has not been exercised.
+
+#### The exact blocker for packaged-app pairing
+
+macOS keeps one safe-storage keychain item per application name. On this Mac
+`AccordAgents Safe Storage` / `AccordAgents Key` already exists in the login
+keychain (created 2026-06-07 by the installed, Developer-ID-signed app). A
+locally packaged build has a different code identity, so:
+
+- **Unsigned local package:** the lookup fails with
+  `errSecAuthFailed (-25293)`, `safeStorage.isEncryptionAvailable()` is false,
+  and `machines:create` refuses with "Machine enrollments need the system secret
+  store, which is not available on this computer." No machine can be added, so
+  no install can start.
+- **Ad-hoc signed local package:** macOS raises a modal Keychain authorization
+  dialog for that existing item and the app blocks before its debugging port is
+  reachable. Nothing in an unattended session can answer it, and answering it
+  would grant a locally built binary access to the real application's encrypted
+  settings.
+- **Renaming the product does not help.** A build packaged as `AccordAgentsQA`
+  with its own bundle id still reached the `AccordAgents` item and created no
+  item of its own, so a QA build cannot get a separate secret store this way.
+
+The unblock is a package signed with the same identity as the installed
+application (`Developer ID Application: … (VPQ8HUMJ2S)`, which is present in the
+keychain) and the same bundle identifier — that is, the real release path. That
+uses the User's signing key, so it is her call, not an engineer's. Everything on
+the installer side that does not need a secret is proven: the packaged app
+locates, hashes and version-checks its payload through the real Settings screen,
+and that payload transfers to the real machine intact.
 
 ## Still open
 

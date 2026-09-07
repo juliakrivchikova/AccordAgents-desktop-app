@@ -71,12 +71,25 @@ for (const resourcesDir of packagedResourceDirs()) {
       assert.equal(contents.byteLength, file.bytes, `${file.path} was truncated on the way into the package`);
       assert.equal(createHash("sha256").update(contents).digest("hex"), file.sha256, `${file.path} does not match the build`);
     }
+    // Packaging must not introduce a link the manifest does not describe:
+    // `rsync -a` would copy it to the machine unverified.
+    assert.deepEqual(nonRegularEntries(payloadDir), [], "the packaged payload must contain only regular files and directories");
     // The payload the app would install must be the version the app is.
     const appVersion = JSON.parse(readFileSync(path.join(rootDir, "package.json"), "utf8")).version;
     const payloadVersion = JSON.parse(readFileSync(path.join(payloadDir, "package.json"), "utf8")).version;
     assert.equal(payloadVersion, appVersion, "the packaged runtime payload is from a different build than the app");
     assert.equal(manifest.version, appVersion);
   });
+}
+
+function nonRegularEntries(dir, prefix = "") {
+  const found = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) found.push(...nonRegularEntries(path.join(dir, entry.name), relative));
+    else if (!entry.isFile()) found.push(relative);
+  }
+  return found;
 }
 
 function packageLabel(resourcesDir) {

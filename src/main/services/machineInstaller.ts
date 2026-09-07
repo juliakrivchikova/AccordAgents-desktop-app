@@ -858,7 +858,7 @@ export function readMachineBundle(bundleDir: string, options: ReadMachineBundleO
     throw new Error(`The machine runtime payload in ${dir} has no readable package.json. ${rebuild}`);
   }
 
-  const scan = scanBundle(dir);
+  const scan = scanBundle(dir, rebuild);
   const manifest = readPayloadManifest(dir, rebuild);
   verifyPayload(manifest, scan.files, dir, rebuild);
   if (manifest.version !== version) {
@@ -946,8 +946,9 @@ interface BundleFile {
 /** One pass over the payload: per-file hashes for the manifest check and the
  *  tree digest that names the release directory on the machine. `node_modules`
  *  (installed on the machine) and the manifest itself are excluded, so adding
- *  the manifest did not change how existing releases are identified. */
-function scanBundle(dir: string): { files: BundleFile[]; digest: string } {
+ *  the manifest did not change how existing releases are identified. Anything
+ *  that is not a regular file or a directory is refused, not skipped. */
+function scanBundle(dir: string, rebuild: string): { files: BundleFile[]; digest: string } {
   const hash = createHash("sha256");
   const files: BundleFile[] = [];
   const walk = (current: string, prefix: string): void => {
@@ -966,11 +967,30 @@ function scanBundle(dir: string): { files: BundleFile[]; digest: string } {
         hash.update(`f:${relative}\0`);
         hash.update(digest);
         files.push({ path: relative, bytes: contents.byteLength, sha256: digest.toString("hex") });
+      } else {
+        // Anything else is refused rather than skipped. `rsync -a` copies a
+        // symbolic link to the machine as a link, so a payload that merely
+        // ignored one would put content there that the manifest never
+        // described and the digest never covered — verified on a real machine:
+        // a link named appSkills/escape.md arrived and resolved to /etc/hosts.
+        throw new Error(
+          `The machine runtime payload in ${dir} contains ${relative}, which is ${describeEntry(entry)}. `
+          + "A payload may only contain regular files and directories, because anything else is copied to the "
+          + `machine without being covered by the manifest. ${rebuild}`
+        );
       }
     }
   };
   walk(dir, "");
   return { files, digest: hash.digest("hex") };
+}
+
+function describeEntry(entry: fs.Dirent): string {
+  if (entry.isSymbolicLink()) return "a symbolic link";
+  if (entry.isFIFO()) return "a named pipe";
+  if (entry.isSocket()) return "a socket";
+  if (entry.isBlockDevice() || entry.isCharacterDevice()) return "a device file";
+  return "not a regular file";
 }
 
 function workerSettingsFor(target: MachineSshTarget): CloudRunWorkerSettings {

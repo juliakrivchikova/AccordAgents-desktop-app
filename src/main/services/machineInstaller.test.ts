@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -346,6 +347,33 @@ test("a corrupt payload is refused before it can reach a machine", () => {
   const oldManifest = bundleFixture();
   fs.writeFileSync(path.join(oldManifest, "payload.json"), JSON.stringify({ manifestVersion: 9, version: "1.4.0", files: [] }));
   assert.throws(() => readMachineBundle(oldManifest), /not one this version understands/);
+});
+
+test("a payload that contains a symbolic link is refused, not silently skipped", () => {
+  // Reproduced on a real machine before this guard existed: both the bundler
+  // and the reader skipped links, so they never reached the manifest or the
+  // digest — while `rsync -a` copied them, and appSkills/escape.md resolved to
+  // /etc/hosts on the machine.
+  const dir = bundleFixture();
+  fs.symlinkSync("accordagents-machine.cjs", path.join(dir, "alias.cjs"));
+  assert.throws(
+    () => readMachineBundle(dir),
+    /contains alias\.cjs, which is a symbolic link[\s\S]*only contain regular files and directories/
+  );
+
+  const nested = bundleFixture();
+  fs.symlinkSync("../../../../etc/hosts", path.join(nested, "appSkills", "accord", "escape.md"));
+  assert.throws(() => readMachineBundle(nested), /appSkills\/accord\/escape\.md, which is a symbolic link/);
+
+  const pipe = bundleFixture();
+  execFileSync("mkfifo", [path.join(pipe, "pipe")]);
+  assert.throws(() => readMachineBundle(pipe), /which is a named pipe/);
+
+  // A link the manifest does not mention must not slip through by being added
+  // after the build either: the reader refuses before it compares anything.
+  const packaged = bundleFixture();
+  fs.symlinkSync("/etc/hosts", path.join(packaged, "late.md"));
+  assert.throws(() => readMachineBundle(packaged, { source: "packaged" }), /reinstall it from the release you downloaded/);
 });
 
 test("a payload built for another version of the desktop is refused", () => {

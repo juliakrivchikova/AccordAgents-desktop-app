@@ -108,6 +108,14 @@ async function manifestEntries(dir, prefix = "") {
     } else if (entry.isFile()) {
       const contents = await readFile(full);
       entries.push({ path: relative, bytes: contents.byteLength, sha256: createHash("sha256").update(contents).digest("hex") });
+    } else {
+      // `rsync -a` would copy a symbolic link to the machine as a link, so a
+      // bundle that merely skipped one would ship content the manifest never
+      // described. Fail the build instead of producing such a payload.
+      throw new Error(
+        `The machine bundle would contain ${relative}, which is not a regular file or directory. ` +
+        "A payload may only contain regular files and directories; remove it from the sources copied into dist/machine."
+      );
     }
   }
   return entries;
