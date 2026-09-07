@@ -618,19 +618,25 @@ async function main() {
     assert.ok(tapped, "the card offered nothing to tap");
     // Sent is not applied. The card states that it has handed the answer over
     // and is waiting, and never claims the member was told.
-    let state = "";
-    for (let attempt = 0; attempt < 60 && !/[Ss]ent|[Ww]aiting/.test(state); attempt += 1) {
-      state = await evaluate(`(() => {
+    // Every state the card shows before the machine says it acted has to be an
+    // honest one. Waiting for the "sent" wording itself would be a race the
+    // machine can win, so this reads what the card says until the machine has
+    // spoken and holds each reading to that rule.
+    let applied = false;
+    for (let attempt = 0; attempt < 240 && !applied; attempt += 1) {
+      const state = await evaluate(`(() => {
         const held = document.querySelector("#control-cards .control-card-state");
         return held ? held.innerText : "";
       })()`);
-      if (!/[Ss]ent|[Ww]aiting/.test(state)) await wait(500);
+      applied = (await machineLog(machineUserData, machineOutput)).includes("permission.decided");
+      if (!applied && state) {
+        assert.doesNotMatch(state, /applied|approved|answered/i,
+          `the card must not claim the member was told before the machine says so: ${state}`);
+        assert.match(state, /[Ss]ent|[Ww]aiting/, `an unconfirmed answer states that it is waiting: ${state}`);
+      }
+      if (!applied) await wait(500);
     }
-    assert.match(state, /[Ss]ent|[Ww]aiting/, `the card must say the answer was sent and is waiting: ${state}`);
-    assert.doesNotMatch(state, /applied|approved|answered/i,
-      "and must not claim the member was told before the machine says so");
-    await waitFor(async () => (await machineLog(machineUserData, machineOutput)).includes("permission.decided"), 120_000,
-      "the machine to receive the phone's permission answer");
+    assert.ok(applied, "the machine received the phone's permission answer");
     log("the machine applied the phone's permission answer");
     approvalProven = true;
   } else {
