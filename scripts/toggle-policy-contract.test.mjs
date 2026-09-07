@@ -13,19 +13,25 @@ const toggleCss = read("src/renderer/styles/views/content-markdown.css");
 const approvalCss = read("src/renderer/styles/views/chat-conversation.css");
 const generalCss = read("src/renderer/styles/views/settings-general.css");
 
-test("Remote Codex worker hides dependent settings while the toggle is off", () => {
-  assert.match(generalSettings, /data-testid="remote-codex-worker-toggle"/);
-  assert.match(generalSettings, /aria-expanded=\{draft\.enabled\}/);
-  assert.match(generalSettings, /\{draft\.enabled \? \(\s*<fieldset/);
-  assert.doesNotMatch(generalSettings, /disabled=\{!draft\.enabled\}/);
+test("the machine instance panel offers nothing the deleted worker used to need", () => {
+  // The per-turn worker is gone, and with it the toggle that switched it on,
+  // the SSH target and paths it ran through, its timeouts, and the doctor that
+  // checked them. What is left is the instance a machine is installed onto.
+  assert.match(generalSettings, /data-testid="machine-instance-settings"/);
+  assert.doesNotMatch(generalSettings, /data-testid="remote-codex-worker-toggle"/);
+  assert.doesNotMatch(generalSettings, /Worker source/);
+  assert.doesNotMatch(generalSettings, /placeholder="Worker root"/);
+  assert.doesNotMatch(generalSettings, /placeholder="Codex path"/);
+  assert.doesNotMatch(generalSettings, /diagnoseCloudRunWorker|setupCloudRunWorker/);
+  assert.doesNotMatch(generalSettings, /Cloud Runs \(beta\)/);
 });
 
-test("both worker copy buttons use guarded exact-payload clipboard writes", () => {
-  assert.equal(generalSettings.match(/writeClipboardText\(/g)?.length, 1);
+test("the surviving worker copy button uses a guarded exact-payload clipboard write", () => {
+  // The general settings copy button belonged to the deleted worker's device
+  // sign-in. The instance panel's remains, and its guarantee is unchanged.
+  assert.equal(generalSettings.match(/writeClipboardText\(/g)?.length, undefined);
   assert.equal(awsWorkerPanel.match(/writeClipboardText\(/g)?.length, 1);
-  assert.match(generalSettings, /writeClipboardText\(authCode,/);
   assert.match(awsWorkerPanel, /writeClipboardText\(command,/);
-  assert.equal(generalSettings.match(/\? "Copy failed"/g)?.length, 1);
   assert.equal(awsWorkerPanel.match(/\? "Copy failed"/g)?.length, 1);
   assert.doesNotMatch(generalSettings, /await navigator\.clipboard\.writeText/);
   assert.doesNotMatch(awsWorkerPanel, /await navigator\.clipboard\.writeText/);

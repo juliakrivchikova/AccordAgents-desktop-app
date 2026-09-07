@@ -1,15 +1,12 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, CheckCircle2, ChevronDown, Code2, Copy, ExternalLink, FolderOpen, HelpCircle, Server } from "lucide-react";
+import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle } from "lucide-react";
 
 import type {
   AgentHealth,
   ChatProviderKind,
   CloudRunsSettings,
   CloudRunsSettingsUpdate,
-  CloudRunWorkerDoctorReport,
-  CloudRunWorkerMode,
-  CloudRunWorkerSetupProgress,
   ChatPromptContextMode,
   ChatPromptContextScopeSettings,
   ChatPromptContextSettings,
@@ -33,7 +30,6 @@ import {
   CHAT_PROMPT_CONTEXT_LIMIT_MAX,
   normalizeChatPromptContextSettings
 } from "../../../shared/chatPromptContext";
-import { writeClipboardText, type ClipboardWriteResult } from "../../../shared/clipboard";
 import { AwsWorkerPanel as SharedAwsWorkerPanel } from "./aws-worker-panel";
 import { DevicePairingSection } from "./device-pairing-section";
 import { MachinesSection } from "./machines-section";
@@ -44,7 +40,6 @@ import { AppSelect } from "../primitives";
 const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive member-to-member request nesting, not repeated rounds by the same requester.";
 const PARTICIPANT_REQUEST_PROMPT_MAX_HELP = "Maximum characters accepted for each member request prompt. Longer prompts are rejected, not truncated.";
 const AUTO_WATCH_WAKE_LIMIT_HELP = "Pauses auto-watch after this many automatic watcher runs happen without a user message.";
-type ClipboardFeedback = "idle" | ClipboardWriteResult;
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
@@ -249,7 +244,7 @@ export function GeneralSettingsSection(props: {
       <MachinesSection />
 
       <section className="gen-section">
-        <h2 className="gen-section-title gen-section-title-solo">Cloud Runs (beta)</h2>
+        <h2 className="gen-section-title gen-section-title-solo">Machine instance (AWS)</h2>
         <CloudRunsControl settings={props.cloudRuns} onSave={props.saveCloudRunsSettings} />
       </section>
     </>
@@ -261,303 +256,38 @@ function CloudRunsControl(props: {
   onSave: (update: CloudRunsSettingsUpdate) => Promise<void>;
 }): JSX.Element {
   const [draft, setDraft] = useState<CloudRunsSettings>(props.settings);
-  const [status, setStatus] = useState<string>("");
-  const [busy, setBusy] = useState(false);
-  const [report, setReport] = useState<CloudRunWorkerDoctorReport | null>(null);
-  const [setupProgress, setSetupProgress] = useState<CloudRunWorkerSetupProgress | null>(null);
-  const [authCopyFeedback, setAuthCopyFeedback] = useState<ClipboardFeedback>("idle");
 
   useEffect(() => {
     setDraft(props.settings);
   }, [props.settings]);
 
-  useEffect(() => window.consensus.onCloudRunSetupProgress(setSetupProgress), []);
-
-  useEffect(() => {
-    setAuthCopyFeedback("idle");
-  }, [setupProgress?.authCode]);
-
   const patch = (update: CloudRunsSettingsUpdate): void => {
-    setDraft((current) => ({
-      ...current,
-      ...update,
-      worker: {
-        ...current.worker,
-        ...(update.worker ?? {})
-      }
-    }));
+    setDraft((current) => ({ ...current, ...update, worker: { ...current.worker, ...(update.worker ?? {}) } }));
+    void props.onSave(update).catch(() => { setDraft(props.settings); });
   };
-
-  const save = async (): Promise<void> => {
-    setBusy(true);
-    setStatus("");
-    try {
-      await props.onSave(draft);
-      setStatus("Saved.");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const savePatch = async (update: CloudRunsSettingsUpdate, successMessage?: string): Promise<void> => {
-    patch(update);
-    setBusy(true);
-    setStatus("");
-    try {
-      await props.onSave(update);
-      setStatus(successMessage ?? "Saved.");
-    } catch (error) {
-      setDraft(props.settings);
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const diagnose = async (): Promise<void> => {
-    setBusy(true);
-    setStatus("Checking worker...");
-    setReport(null);
-    try {
-      const result = await window.consensus.diagnoseCloudRunWorker(draft.mode === "aws" ? undefined : draft.worker);
-      setReport(result);
-      setStatus(result.message);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const setup = async (): Promise<void> => {
-    setBusy(true);
-    setStatus("Setting up worker...");
-    setSetupProgress(null);
-    try {
-      const result = await window.consensus.setupCloudRunWorker(draft.mode === "aws" ? undefined : draft.worker);
-      setReport(result);
-      setStatus(result.message);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-      setSetupProgress(null);
-    }
-  };
-
-  const setMode = (mode: CloudRunWorkerMode): void => {
-    void savePatch({ mode });
-  };
-
-  const copyAuthCode = async (): Promise<void> => {
-    const authCode = setupProgress?.authCode;
-    if (!authCode) {
-      return;
-    }
-    const result = await writeClipboardText(authCode, (value) => navigator.clipboard.writeText(value));
-    setAuthCopyFeedback(result);
-    window.setTimeout(() => setAuthCopyFeedback("idle"), 1400);
-  };
-
-  const authCopyLabel = authCopyFeedback === "copied"
-    ? "Copied"
-    : authCopyFeedback === "failed"
-      ? "Copy failed"
-      : "Copy";
-  const authCopyAriaLabel = authCopyFeedback === "copied"
-    ? "Copied device authentication code"
-    : authCopyFeedback === "failed"
-      ? "Copy device authentication code failed"
-      : "Copy device authentication code";
 
   return (
-    <div className="gen-card">
+    <div className="gen-card" data-testid="machine-instance-settings">
       <div className="gen-row">
         <div className="gen-row-text">
-          <div className="gen-row-title">Remote Codex worker</div>
-          <div className="gen-row-desc">Run Codex members marked remote on a worker instead of this machine.</div>
-        </div>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            data-testid="remote-codex-worker-toggle"
-            checked={draft.enabled}
-            disabled={busy}
-            aria-expanded={draft.enabled}
-            onChange={(event) => {
-              const enabled = event.target.checked;
-              void savePatch({ enabled });
-            }}
-          />
-          <span />
-        </label>
-      </div>
-      {draft.enabled ? (
-        <fieldset
-          className="gen-cloud-runs-settings"
-          data-testid="remote-codex-worker-settings"
-        >
-        <div className="gen-card-divider" />
-        <div className="gen-row">
-        <div className="gen-row-text">
-          <div className="gen-row-title">Worker source</div>
-          <div className="gen-row-desc">Let the app create and manage an EC2 worker, or point it at a box you own.</div>
-        </div>
-        <div className="gen-segmented" role="tablist" aria-label="Worker source">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={draft.mode === "aws"}
-            className={`gen-segment ${draft.mode === "aws" ? "is-active" : ""}`}
-            onClick={() => setMode("aws")}
-          >
-            App-managed (AWS)
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={draft.mode !== "aws"}
-            className={`gen-segment ${draft.mode !== "aws" ? "is-active" : ""}`}
-            onClick={() => setMode("ssh")}
-          >
-            My own box (SSH)
-          </button>
-        </div>
-      </div>
-      <div className="gen-card-divider" />
-      <div className="gen-row gen-row-stack">
-        <div className="gen-row-text">
-          <div className="gen-row-title">Portable user setup</div>
+          <div className="gen-row-title">Machine instance</div>
           <div className="gen-row-desc">
-            Qualifying global skills, their scripts and assets, global rules, and safe MCP/feature declarations are staged in the OS temporary directory, then copied to the worker at {draft.mode === "aws" ? "~/.accordagents/remote-runs/agent-setup" : "<worker root>/agent-setup"}. Replaced snapshots and unclaimed collision backups are retained for eight days; backups of replaced worker files remain until their managed link is removed. Known auth files, .env files, provider session state, and unsafe config declarations are excluded, but other files inside a skill are copied verbatim, so do not store secrets in skill directories.
+            The computer a machine runs on, created and stopped from here. Members choose the machine
+            they live on; this is where that machine&apos;s instance comes from.
           </div>
         </div>
       </div>
       <div className="gen-card-divider" />
-      {draft.mode === "aws" ? (
-        <SharedAwsWorkerPanel
-          settings={draft}
-          onInstanceTypeChange={(value) => patch({ awsInstanceType: value })}
-          onDiskSizeChange={(value) => patch({ awsRootVolumeSizeGb: value })}
-          onDeleted={() => props.onSave({ mode: "ssh" })}
-        />
-      ) : null}
-      <div className={draft.mode === "aws" ? "gen-collapsed" : ""} hidden={draft.mode === "aws"}>
-        <div className="gen-row gen-row-stack">
-          <div className="gen-row-text">
-            <div className="gen-row-title">SSH target</div>
-            <div className="gen-row-desc">Host is required; other fields inherit ssh defaults when empty.</div>
-          </div>
-          <div className="gen-grid-form">
-            <input className="gen-input" placeholder="Host" value={draft.worker.host ?? ""} onChange={(event) => patch({ worker: { host: event.target.value } })} />
-            <input className="gen-input" placeholder="User" value={draft.worker.user ?? ""} onChange={(event) => patch({ worker: { user: event.target.value } })} />
-            <input
-              className="gen-input"
-              placeholder="Port"
-              inputMode="numeric"
-              value={draft.worker.port ?? ""}
-              onChange={(event) => patch({ worker: { port: event.target.value ? Number(event.target.value) : undefined } })}
-            />
-            <input className="gen-input" placeholder="Identity file" value={draft.worker.identityFile ?? ""} onChange={(event) => patch({ worker: { identityFile: event.target.value } })} />
-            <input className="gen-input" placeholder="Worker root" value={draft.worker.workerRoot ?? ""} onChange={(event) => patch({ worker: { workerRoot: event.target.value } })} />
-            <input className="gen-input" placeholder="Remote repo/cwd" value={draft.worker.remoteCwd ?? ""} onChange={(event) => patch({ worker: { remoteCwd: event.target.value } })} />
-            <input className="gen-input" placeholder="Codex path" value={draft.worker.codexPath ?? ""} onChange={(event) => patch({ worker: { codexPath: event.target.value } })} />
-            <input className="gen-input" placeholder="Claude path" value={draft.worker.claudePath ?? ""} onChange={(event) => patch({ worker: { claudePath: event.target.value } })} />
-          </div>
-        </div>
-        <div className="gen-card-divider" />
-        <div className="gen-row gen-row-stack">
-          <div className="gen-row-text">
-            <div className="gen-row-title">Runtime</div>
-            <div className="gen-row-desc">Detached worker timeout and desktop reconnect polling.</div>
-          </div>
-          <div className="gen-grid-form gen-grid-form-compact">
-            <input
-              className="gen-input"
-              aria-label="Maximum runtime minutes"
-              inputMode="numeric"
-              value={Math.round(draft.maxRuntimeMs / 60_000)}
-              onChange={(event) => patch({ maxRuntimeMs: Math.max(1, Number(event.target.value) || 1) * 60_000 })}
-            />
-            <input
-              className="gen-input"
-              aria-label="Poll interval milliseconds"
-              inputMode="numeric"
-              value={draft.pollIntervalMs}
-              onChange={(event) => patch({ pollIntervalMs: Math.max(500, Number(event.target.value) || 500) })}
-            />
-          </div>
-        </div>
-      </div>
-      {draft.mode !== "aws" ? <><div className="gen-card-divider" />
-      <div className="gen-row">
-        <div className="gen-row-text">
-          <div className="gen-row-title">{(busy && setupProgress?.message) || status || "Ready"}</div>
-          {busy && setupProgress?.authUrl && (
-            <div className="gen-row-desc">
-              <button
-                type="button"
-                className="gen-doctor-auth-link"
-                onClick={() => void window.consensus.openExternal(setupProgress.authUrl as string)}
-              >
-                Open the sign-in page
-              </button>
-              {setupProgress.authCode ? (
-                <>
-                  {" and enter code "}
-                  <code className="gen-doctor-auth-code" data-testid="cloud-run-device-auth-code">
-                    {setupProgress.authCode}
-                  </code>
-                  <button
-                    type="button"
-                    className="gen-doctor-auth-copy"
-                    data-testid="cloud-run-device-auth-copy"
-                    aria-label={authCopyAriaLabel}
-                    onClick={() => void copyAuthCode()}
-                  >
-                    {authCopyFeedback === "copied"
-                      ? <CheckCircle2 size={13} aria-hidden />
-                      : <Copy size={13} aria-hidden />}
-                    <span aria-live="polite">{authCopyLabel}</span>
-                  </button>
-                </>
-              ) : null}
-            </div>
-          )}
-        </div>
-        <div className="gen-actions">
-          <button type="button" className="gen-pill" disabled={busy} onClick={() => void diagnose()}>
-            <span className="gen-pill-lead"><Server size={16} /></span>
-            <span className="gen-pill-label">Check</span>
-          </button>
-          <button type="button" className="gen-pill" disabled={busy} onClick={() => void setup()}>
-            <span className="gen-pill-label">Set up</span>
-          </button>
-          <button type="button" className="gen-pill" disabled={busy} onClick={() => void save()}>
-            <span className="gen-pill-label">Save</span>
-          </button>
-        </div>
-      </div>
-      </> : null}
-      {report && (
-        <>
-          <div className="gen-card-divider" />
-          <ul className="gen-doctor-list" aria-label="Worker checks">
-            {report.checks.map((check) => (
-              <li key={check.id} className={`gen-doctor-item is-${check.status}`}>
-                <span className="gen-doctor-mark" aria-hidden="true">
-                  {check.status === "pass" ? "✓" : check.status === "warn" ? "!" : "✕"}
-                </span>
-                <span className="gen-doctor-label">{check.label}</span>
-                {check.detail && <span className="gen-doctor-detail">{check.detail}</span>}
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-        </fieldset>
-      ) : null}
+      {/* What stood beside this configured the per-turn worker that no longer
+          exists: an SSH target and its paths, its timeouts, a staging
+          directory on it, and a doctor that checked all of them. Offering
+          those described something the app can no longer do. */}
+      <SharedAwsWorkerPanel
+        settings={draft}
+        onInstanceTypeChange={(value) => patch({ awsInstanceType: value })}
+        onDiskSizeChange={(value) => patch({ awsRootVolumeSizeGb: value })}
+        onDeleted={() => props.onSave({ mode: "aws" })}
+      />
     </div>
   );
 }

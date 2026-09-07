@@ -186,3 +186,70 @@ test("an answer whose request has not arrived yet waits for it", async () => {
     assert.deepEqual(held.answered, []);
   } finally { await held.cleanup(); }
 });
+
+test("a disk that refuses the claim keeps the answer instead of acting without one", async () => {
+  const held = await box();
+  try {
+    const answer = await held.answer("a");
+    // The claim is the admission. A disk that cannot record it has not
+    // admitted anything, and acting anyway is exactly the double effect the
+    // row exists to prevent.
+    const broken = {
+      getChatEvent: (id: string) => held.storage.getChatEvent(id),
+      nativeCommands: () => ({
+        ...held.storage.nativeCommands(),
+        claimTarget: async () => { throw new Error("SQLITE_FULL: database or disk is full"); }
+      })
+    } as unknown as Parameters<typeof createNativeTargetClaims>[0]["storage"];
+    const effects = createChatActionEffects({
+      chat: {
+        respondToAppToolApproval: async () => held.conversation,
+        respondToChoice: async () => { held.answered.push("acted-without-a-claim"); },
+        cancelRun: () => true,
+        conversationIdForRun: () => CONVERSATION
+      },
+      emitter: { beginExecution: async () => true, recordExecution: async () => undefined },
+      storage: { getConversation: async () => held.conversation },
+      nativeClaims: createNativeTargetClaims({ storage: broken, runtimeIdentity: async () => ({ runtimeId: "r", pid: 1, startedAt: "s" }) })
+    });
+    const result = await new ChatActionApplier({ effects }).apply(answer);
+    assert.equal(result.status, "deferred", "a real decision is kept for a runtime that can record it");
+    assert.deepEqual(held.answered, [], "and nothing is told to the provider without an admission");
+
+    // The disk recovers and the same signed answer is delivered again.
+    const recovered = await new ChatActionApplier({ effects: held.build() }).apply(answer);
+    assert.equal(recovered.status, "applied");
+    assert.deepEqual(held.answered, [`${CHOICE}:a`], "the answer is carried out once, when it can be");
+  } finally { await held.cleanup(); }
+});
+
+test("a receipt that cannot be written does not make the answer repeatable", async () => {
+  const held = await box();
+  try {
+    const answer = await held.answer("a");
+    // The effect happened; recording it failed. The claim row is the only
+    // thing standing between that and telling the provider a second time.
+    const effects = createChatActionEffects({
+      chat: {
+        respondToAppToolApproval: async () => held.conversation,
+        respondToChoice: async (request) => { held.answered.push(`${request.choiceId}:${request.selectedOptionId ?? ""}`); },
+        cancelRun: () => true,
+        conversationIdForRun: () => CONVERSATION
+      },
+      emitter: {
+        beginExecution: async () => true,
+        recordExecution: async () => { throw new Error("SQLITE_FULL: database or disk is full"); }
+      },
+      storage: { getConversation: async () => held.conversation },
+      nativeClaims: createNativeTargetClaims({ storage: held.storage, runtimeIdentity: async () => ({ runtimeId: "r", pid: 1, startedAt: "s" }) })
+    });
+    await assert.rejects(() => new ChatActionApplier({ effects }).apply(answer));
+    assert.deepEqual(held.answered, [`${CHOICE}:a`]);
+
+    // Redelivered after a restart, with the disk working again.
+    const again = await new ChatActionApplier({ effects: held.build({ runtimeId: "runtime-c" }) }).apply(answer);
+    assert.equal(again.status, "applied");
+    assert.equal(held.answered.length, 1, "a receipt this device could not write is not permission to act again");
+    assert.match(again.detail ?? "", /not repeated/);
+  } finally { await held.cleanup(); }
+});

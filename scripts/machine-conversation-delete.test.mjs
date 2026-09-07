@@ -211,3 +211,22 @@ test("a trusted phone may drive members but cannot delete the owner's chat", asy
     "destroying the owner's chat is not something a driving device may do");
   assert.equal(await box.storage.conversationTombstones().isDeleted(CONVERSATION), false);
 });
+
+test("a machine that was off when the chat was deleted is told when it comes back", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-delete-offline-"));
+  const first = await machine(dir);
+  await first.deliver({ type: "machine.conversation.sync", conversation: conversation() });
+  assert.ok(await first.storage.getConversation(CONVERSATION));
+  // The machine goes away. The deletion happens while it is not there.
+  await first.close();
+
+  const second = await machine(dir);
+  t.after(async () => { await second.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5 }); });
+  assert.ok(await second.storage.getConversation(CONVERSATION), "it still holds the chat when it returns");
+
+  // The desktop's channel retained the command and delivers it on reconnect.
+  await second.deliver({ type: "machine.conversation.deleted", conversationId: CONVERSATION, deletedAt: new Date().toISOString() });
+  assert.equal(await second.storage.getConversation(CONVERSATION), undefined,
+    "a deletion is not lost because the machine was off when it was made");
+  assert.deepEqual(second.closed, [CONVERSATION], "and the providers it held are closed on return");
+});
