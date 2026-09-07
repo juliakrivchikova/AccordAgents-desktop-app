@@ -425,6 +425,36 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }));
   }
 
+  /**
+   * Publishes one chat action to every machine that holds this chat, through
+   * the same sealed device-event channel messages use — same HLC, same
+   * immutable log, same gap rules, no second protocol.
+   *
+   * Each channel appends its own recipient row, so a machine that is offline
+   * keeps the event in this desktop's outbox until it acknowledges it; the
+   * retention policy decides when it may be forgotten. With no machine
+   * enrolled the action is still written locally and simply has nobody to
+   * deliver to.
+   */
+  async publishChatAction(request: { conversationId: string; kind: string; payload: unknown; eventId?: string }): Promise<number> {
+    let published = 0;
+    for (const connection of this.connections.values()) {
+      const channel = connection.eventChannel;
+      if (!channel) continue;
+      try {
+        await channel.publish({ ...request, scope: "actions" });
+        published += 1;
+      } catch (error) {
+        void this.debugLogs.write("machine-link.action.publish-error", {
+          machineId: connection.record.id,
+          kind: request.kind,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return published;
+  }
+
   isMachineConnected(machineId: string): boolean {
     return Boolean(this.connections.get(machineId)?.machineDeviceId);
   }

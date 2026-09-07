@@ -463,13 +463,20 @@ const artifactService = new ArtifactService({
   // a re-emission after a restart is folded once as a duplicate rather than as
   // a second revision.
   emitAction: async (action) => {
-    await chatEventLogService.appendLocalEvent({
+    const request = {
       conversationId: action.conversationId,
-      logScopeId: CHAT_ACTION_LOG_SCOPE,
       kind: action.kind,
-      payload: action.payload,
+      payload: action.payload as unknown,
       eventId: `chat-action:${action.payload.operationId}`
-    });
+    };
+    // Every enrolled machine that holds this chat becomes a recipient, so the
+    // event stays in the outbox until it acknowledges. With no machine
+    // enrolled the action is still written locally, for this desktop's own
+    // projection and for a machine that enrols later.
+    const published = (await machineLinkService?.publishChatAction(request)) ?? 0;
+    if (published === 0) {
+      await chatEventLogService.appendLocalEvent({ ...request, logScopeId: CHAT_ACTION_LOG_SCOPE });
+    }
   }
 });
 chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
