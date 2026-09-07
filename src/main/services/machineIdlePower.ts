@@ -5,6 +5,8 @@ import { assertCurrentAwsMachine } from "./awsMachineIdentity";
 import type { CliAgentRunner } from "./cliAgents";
 import type { MachineHostService } from "./machineHost";
 import { MachineIdleScheduler } from "./machineIdle";
+import { MachineHostPowerRegistry } from "./machineHostPower";
+import { userDataPath } from "../platform";
 import type { MachinePowerStore } from "./machinePowerStore";
 import { nativeHostIdentity, verifiedNativeHostReboot, type NativeHostIdentity } from "./nativeHostIdentity";
 import { NativeProcessRegistry } from "./nativeProcessRegistry";
@@ -20,6 +22,9 @@ export class MachineIdlePower {
   private stopping = false;
   private lastWarning?: string;
   private hostIdentity?: NativeHostIdentity;
+  /** Every deployment on this instance publishes what it is doing here.
+   *  Idle is measured per profile; the instance is shared. */
+  private hostPower?: MachineHostPowerRegistry;
   private readonly client: Pick<AwsMachinePowerClient, "stopAfterDrain" | "close">;
 
   constructor(private readonly options: {
@@ -28,6 +33,8 @@ export class MachineIdlePower {
     host: Pick<MachineHostService, "hasWorkForIdleStop" | "prepareIdleStop" | "retainIdleFence" | "publishPowerStatus" | "shutdown">;
     runner: Pick<CliAgentRunner, "hasActiveNativeWork" | "fenceIdleNativeAdmissions" | "shutdownWarmAgents">;
     nativeProcessDbPath: string;
+    /** This deployment's user-data directory; identifies it host-wide. */
+    profilePath?: string;
     log(event: string, payload: Record<string, unknown>): void;
   }, private readonly environment: {
     identity(): Promise<NativeHostIdentity | undefined>;
@@ -58,17 +65,41 @@ export class MachineIdlePower {
     if (previous?.bootId !== bootId) {
       await this.options.store.write({ version: 1, bootId, idleSinceMs: this.environment.uptimeMs() });
     }
+    // Other deployments on this same instance measure idle independently and
+    // cannot see this one's work. Without a shared claim, whichever of them
+    // reaches three hours first would stop the instance underneath the others.
+    try {
+      this.hostPower = new MachineHostPowerRegistry({
+        profilePath: this.options.profilePath ?? userDataPath(),
+        bootId,
+        uptimeMs: this.environment.uptimeMs
+      });
+      this.hostPower.publish(true);
+    } catch (error) {
+      // Fail closed: without coordination a stop could destroy another
+      // deployment's work, so auto-stop is suspended instead of taken blind.
+      this.hostPower = undefined;
+      this.setWarning(`Automatic idle stop is suspended: this machine's deployments cannot coordinate (${errorText(error)}).`);
+      return;
+    }
     // A machine metadata outage suspends only auto-stop; native work can still
     // run, and the visible warning must not disappear just because a poll ran.
     this.scheduler = new MachineIdleScheduler({ state: this.options.store, bootId, uptimeMs: this.environment.uptimeMs,
       isBusy: async () => {
-        if (this.options.runner.hasActiveNativeWork() || await this.options.host.hasWorkForIdleStop()) return true;
-        if (!await this.options.store.hasMaintenance(bootId, this.environment.uptimeMs())) return false;
-        await new MachineMaintenance(this.options.store, this.options.nativeProcessDbPath).recover(this.hostIdentity!);
-        return this.options.store.hasMaintenance(bootId, this.environment.uptimeMs());
+        const busy = await this.localBusy(bootId);
+        // Publish before answering, so a deployment deciding to stop right now
+        // reads this one's current state rather than a stale claim.
+        try { this.hostPower?.publish(busy); }
+        catch (error) { this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`); }
+        return busy;
       },
       prepareStop: async since => {
+        const blocked = this.blockedByAnotherDeployment();
+        if (blocked) return undefined;
         await this.environment.verifyAws(this.options.config);
+        // Re-read after the AWS round trip: it is the longest step before the
+        // fence, and another deployment may have started work during it.
+        if (this.blockedByAnotherDeployment()) return undefined;
         const drain = await this.options.host.prepareIdleStop({ bootId, uptimeMs: this.environment.uptimeMs(), idleSinceMs: since,
           fenceNative: () => this.options.runner.fenceIdleNativeAdmissions(), stopProviders: () => this.options.runner.shutdownWarmAgents() });
         if (!drain) return undefined;
@@ -92,9 +123,32 @@ export class MachineIdlePower {
 
   close(): void {
     this.closed = true;
+    this.hostPower?.release();
     this.scheduler?.close();
     if (this.retry) clearTimeout(this.retry);
     this.client.close();
+  }
+
+  private async localBusy(bootId: string): Promise<boolean> {
+    if (this.options.runner.hasActiveNativeWork() || await this.options.host.hasWorkForIdleStop()) return true;
+    if (!await this.options.store.hasMaintenance(bootId, this.environment.uptimeMs())) return false;
+    await new MachineMaintenance(this.options.store, this.options.nativeProcessDbPath).recover(this.hostIdentity!);
+    return this.options.store.hasMaintenance(bootId, this.environment.uptimeMs());
+  }
+
+  /** True when another deployment on this instance is running work or holding
+   *  a maintenance lease. Its warning names the directory, so the User can see
+   *  which deployment is keeping the machine awake. */
+  private blockedByAnotherDeployment(): boolean {
+    let reason: string | undefined;
+    try {
+      reason = this.hostPower?.blockingReason();
+    } catch (error) {
+      reason = `This machine's deployments cannot be read (${errorText(error)}).`;
+    }
+    if (!reason) return false;
+    this.setWarning(`The machine stays awake: ${reason}`);
+    return true;
   }
 
   private async stopAws(): Promise<void> {

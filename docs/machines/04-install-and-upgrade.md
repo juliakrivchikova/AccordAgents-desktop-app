@@ -359,6 +359,46 @@ the installer side that does not need a secret is proven: the packaged app
 locates, hashes and version-checks its payload through the real Settings screen,
 and that payload transfers to the real machine intact.
 
+## Automatic idle stop on a shared instance
+
+Idle is measured per deployment: each has its own user-data directory, its own
+SQLite and its own scheduler. The instance they run on is shared. Without
+coordination the first deployment to reach three hours idle would stop the
+instance underneath another deployment's provider turn or maintenance lease,
+destroying work it cannot see.
+
+Every runtime publishes one claim file in `/tmp/accordagents-host-power`
+(cleared on boot, readable across OS users) saying what it is doing, refreshes
+it on every idle poll, and reads the others before it allows a stop. The rules
+are deliberately one-sided: a claim from another boot or from a process that is
+gone is pruned, and a claim whose process is alive but has stopped refreshing
+counts as **busy**. A machine that never stops is a visible cost; a stop that
+kills another deployment's turn is lost work. If the directory cannot be used
+at all, automatic stop is suspended with a visible warning rather than taken
+without coordination.
+
+**Residual, stated rather than hidden:** the check runs immediately before the
+local fence, so the window in which another deployment could start work
+unnoticed is sub-second rather than hours. Closing it completely needs a
+host-wide admission lock that every deployment consults before admitting native
+work; that is not in this change.
+
+## Upgrading a release that predates maintenance
+
+`--maintenance` did not always exist. An older runtime's argument parser
+ignores unknown flags, so `node <old runtime> --maintenance --user-data <dir>
+-- <command>` would not run the command at all — it would start a **second
+runtime on that user-data directory**, which is the duplicate executor the
+transport forbids.
+
+Every payload now ships a `maintenance-v1` marker, the probe reports whether
+the installed release has one, and the wrapper refuses rather than exec a
+release without it. An upgrade from an older release is still protected: the
+steps before staging only create a new release directory — they cannot disturb
+a running runtime or an existing stop fence — and from the drain onward the
+wrapper uses the release that was just staged, which always understands the
+flag. The User sees a warning saying exactly that.
+
 ## Still open
 
 - A crash-looping release restarts every 3 s for the whole three-minute connect

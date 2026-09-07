@@ -191,6 +191,10 @@ export function machineProbeScript(options: {
     `if [ -L "$ROOT/current" ]; then printf 'active-release=%s\\n' "$(basename "$(readlink "$ROOT/current")")"; fi`,
     `if [ -d "$ROOT/releases" ]; then for d in "$ROOT/releases"/*; do [ -d "$d" ] && printf 'release=%s\\n' "$(basename "$d")"; done; fi`,
     `if [ -f "$ROOT/enrollment.json" ]; then printf 'enrollment=present\\n'; else printf 'enrollment=absent\\n'; fi`,
+    // A release that ships this file understands `--maintenance`; one that
+    // does not must never be exec'd with it, because its argument parser would
+    // ignore the flag and start a second runtime on this user data.
+    `if [ -f "$ROOT/current/maintenance-v1" ]; then printf 'maintenance=v1\\n'; fi`,
     `if command -v systemctl >/dev/null 2>&1; then`,
     `  if systemctl cat "$SVC.service" >/dev/null 2>&1; then`,
     `    printf 'service-scope=system\\n'; printf 'service-state=%s\\n' "$(systemctl is-active "$SVC.service" 2>/dev/null || true)"`,
@@ -206,6 +210,8 @@ export function machineProbeScript(options: {
 }
 
 export interface ParsedMachineProbe extends MachineRuntimeProbe {
+  /** The installed release understands `--maintenance`. */
+  maintenanceCapable: boolean;
   home: string;
   installRoot: string;
   userDataDir: string;
@@ -262,6 +268,7 @@ export function parseMachineProbe(stdout: string): ParsedMachineProbe {
     activeRelease: values.get("active-release") || undefined,
     releases,
     enrollmentPresent: values.get("enrollment") === "present",
+    maintenanceCapable: values.get("maintenance") === "v1",
     serviceScope: scope === "system" || scope === "user" ? scope : undefined,
     serviceState: values.get("service-state") || undefined,
     runtimePids: parsePids(values.get("runtime-pids")),

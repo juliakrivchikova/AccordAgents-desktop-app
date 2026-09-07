@@ -4,6 +4,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { MachineIdlePower, assertNativeRegistryClosed } from "./machineIdlePower";
+import { MachineHostPowerRegistry } from "./machineHostPower";
 import { assertCurrentAwsMachine } from "./awsMachineIdentity";
 import { StorageService } from "./storage";
 import { NativeProcessRegistry } from "./nativeProcessRegistry";
@@ -89,4 +90,68 @@ test("idle recovery accepts a verified host reboot but refuses missing native pr
     await assertNativeRegistryClosed(registryPath, { ...identity, boot: "b".repeat(32) });
     assert.equal((await registry.get("chat:member"))?.shutdownReason, "host-rebooted");
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a deployment sharing this instance keeps it awake, and its own claim is published", async () => {
+  // Idle is measured per profile, the instance is shared. Before this, the
+  // first profile to reach three hours would have stopped the instance under
+  // another profile's provider turn or maintenance lease.
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-shared-"));
+  const shared = path.join(dir, "host-power");
+  const dbPath = path.join(dir, "state.sqlite3");
+  const store = new StorageService({ dbPath }).machinePower();
+  let stops = 0;
+  const host = {
+    hasWorkForIdleStop: async () => false,
+    retainIdleFence: () => undefined,
+    publishPowerStatus: async () => undefined,
+    shutdown: async () => undefined,
+    prepareIdleStop: async () => async () => undefined
+  };
+  const runner = {
+    hasActiveNativeWork: () => false,
+    shutdownWarmAgents: async () => undefined,
+    fenceIdleNativeAdmissions: () => () => undefined
+  };
+  const neighbour = new MachineHostPowerRegistry({
+    dir: shared, profilePath: "/home/ubuntu/.accordagents/other", bootId: identity.boot,
+    uptimeMs: () => MACHINE_IDLE_STOP_MS + 100, pid: 4321, isAlive: () => true
+  });
+  const power = new MachineIdlePower({
+    config, store, host, runner, nativeProcessDbPath: path.join(dir, "native.sqlite3"),
+    profilePath: "/home/ubuntu/.accordagents/mine", log: () => undefined
+  }, {
+    identity: async () => identity, verifyAws: async () => undefined,
+    uptimeMs: () => MACHINE_IDLE_STOP_MS + 100,
+    client: { close: () => undefined, stopAfterDrain: async () => { stops++; return { instanceId: config.instanceId, state: "stopping" }; } }
+  });
+  (power as unknown as { hostPower?: unknown }).hostPower = undefined;
+  try {
+    await store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
+    await power.start();
+    // Point this deployment's registry at the shared test directory.
+    (power as unknown as { hostPower: MachineHostPowerRegistry }).hostPower = new MachineHostPowerRegistry({
+      dir: shared, profilePath: "/home/ubuntu/.accordagents/mine", bootId: identity.boot,
+      uptimeMs: () => MACHINE_IDLE_STOP_MS + 100, pid: process.pid, isAlive: () => true
+    });
+
+    neighbour.publish(true);
+    await (power as unknown as { scheduler: { check(): Promise<void> } }).scheduler.check();
+    assert.equal(stops, 0, "a busy deployment on the same instance must prevent the stop");
+    assert.match(power.warning() ?? "", /stays awake/);
+    assert.match(power.warning() ?? "", /\/home\/ubuntu\/\.accordagents\/other/);
+
+    // This deployment's own state is visible to the others.
+    const mine = neighbour.others().find((claim) => claim.profilePath === "/home/ubuntu/.accordagents/mine");
+    assert.ok(mine, "the deployment publishes its own claim for the others to read");
+    assert.equal(mine?.busy, false);
+
+    neighbour.publish(false);
+    await (power as unknown as { scheduler: { check(): Promise<void> } }).scheduler.check();
+    assert.equal(stops, 1, "once the neighbour is idle the stop proceeds");
+  } finally {
+    power.close();
+    neighbour.release();
+    await rm(dir, { recursive: true, force: true });
+  }
 });

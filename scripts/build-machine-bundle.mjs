@@ -73,6 +73,12 @@ await writeFile(path.join(outdir, "package.json"), `${JSON.stringify({
   dependencies
 }, null, 2)}\n`, "utf8");
 await cp(path.join(repoRoot, "src/main/appSkills"), path.join(outdir, "appSkills"), { recursive: true });
+// A release that carries this file understands `--maintenance`. An older
+// release does not, and running `node <old runtime> --maintenance ...` would
+// not run the wrapped command at all: the old argument parser ignores unknown
+// flags and would start a SECOND machine runtime on that user-data directory.
+// The wrapper checks for this marker instead of assuming.
+await writeFile(path.join(outdir, "maintenance-v1"), "1\n", "utf8");
 await writeFile(path.join(outdir, "README.md"), `# AccordAgents machine runtime ${pkg.version}
 
 Install on a Linux computer that will host chat members:

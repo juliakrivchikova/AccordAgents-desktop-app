@@ -337,7 +337,13 @@ export class MachineInstallerService {
       await emit("preflight", "Checking the machine…");
       const initial = await this.probe(request.target, { installRoot: record.installRoot || undefined,
         userDataDir: record.userDataDir || undefined, serviceName: request.serviceName });
-      maintenance = maintenanceFor(initial);
+      // A release older than maintenance would be started, not asked to hold a
+      // lease, so it is never used as the wrapper. The steps before staging
+      // then run unwrapped — they only create a NEW release directory and
+      // cannot disturb a running runtime or an existing stop fence — and
+      // everything from the drain onward is wrapped by the release just
+      // staged, which does understand it.
+      maintenance = initial.maintenanceCapable ? maintenanceFor(initial) : undefined;
       let report = await this.options.doctor.diagnose(worker, { requiredProviderKind: request.requiredProvider, maintenance });
       if (!report.ok) {
         // Doctor progress is synchronous and each frame saves a snapshot, so
@@ -449,6 +455,18 @@ export class MachineInstallerService {
           `Installing the runtime's dependencies on the machine failed. The machine needs network access and build tools (python3, make, a C++ compiler) to compile node-pty. ${errorMessage(error)}`
         );
       }
+
+      // The staged release is on disk and complete. From here everything
+      // mutates what runs, so it is wrapped by that release's runtime — which
+      // always understands `--maintenance`, even when the installed one does
+      // not.
+      if (!probe.maintenanceCapable) {
+        warnings.push(
+          "The installed runtime is older than machine maintenance, so the checks before the copy ran without a maintenance lease. "
+          + "Everything that replaces the runtime is protected by the release just copied."
+        );
+      }
+      maintenance = maintenanceForStagedRelease(layout, release);
 
       // 4. Enrollment. Written from stdin; the relay key never reaches a
       //    command line or a log. An upgrade keeps the pairing that is there.
@@ -745,7 +763,25 @@ function isTerminalPhase(phase: MachineInstallPhase): boolean {
 
 function maintenanceFor(layout: { installRoot: string; userDataDir: string }): MachineMaintenanceTarget {
   if (!layout.installRoot || !layout.userDataDir) throw new Error("The machine did not report its maintenance paths.");
-  return { runtimePath: `${layout.installRoot}/current/accordagents-machine.cjs`, userDataDir: layout.userDataDir };
+  return {
+    runtimePath: `${layout.installRoot}/current/accordagents-machine.cjs`,
+    userDataDir: layout.userDataDir,
+    capabilityPath: `${layout.installRoot}/current/maintenance-v1`
+  };
+}
+
+/** The release just staged, used as the maintenance runtime for everything
+ *  from the drain onward. It always understands `--maintenance`, so an upgrade
+ *  from a release that predates maintenance is still protected. */
+function maintenanceForStagedRelease(
+  layout: { releasesDir: string; userDataDir: string },
+  release: string
+): MachineMaintenanceTarget {
+  return {
+    runtimePath: `${layout.releasesDir}/${release}/accordagents-machine.cjs`,
+    userDataDir: layout.userDataDir,
+    capabilityPath: `${layout.releasesDir}/${release}/maintenance-v1`
+  };
 }
 
 function missingRequirements(probe: ParsedMachineProbe): string[] {
