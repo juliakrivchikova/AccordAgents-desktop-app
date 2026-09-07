@@ -1,6 +1,6 @@
 (function () {
   const DB_NAME = "accordagents-mobile-control";
-  const DB_VERSION = 4;
+  const DB_VERSION = 5;
   const META_STORE = "meta";
   const SEALED_STORE = "sealedEnvelopes";
   const MAILBOX_ACCESS_META_KEY = "mailboxAccess";
@@ -8,6 +8,15 @@
   // W: this device's own durable event log. The phone is an emitter, not a
   // remote control, so what it did has to survive being closed mid-action.
   const EVENT_STORE = "events";
+  // The machine journal is kept apart from the desktop mailbox queue: the two
+  // have different recipients and different acknowledgements, and a flush of
+  // one must never pick up the other's work.
+  const MACHINE_EVENT_STORE = "machineEvents";
+  const MACHINE_OUTBOX_STORE = "machineOutbox";
+  const MACHINE_BLOB_STORE = "machineBlobs";
+  // What a machine's channel accepts inside one event (DEVICE_EVENT_INLINE_BYTES
+  // * 2 in src/main/services/deviceEventChannel.ts), less room for the envelope.
+  const MACHINE_EVENT_MAX_BYTES = 48 * 1024;
   const TIMELINE_STORE = "timeline";
   const PAIRING_KEY = "accordagents.mobile.pairing.v1";
   const ACTIVE_CONVERSATION_KEY = "accordagents.mobile.activeConversationId.v1";
@@ -547,6 +556,18 @@
           store.createIndex("origin", ["originId", "logScopeId", "originSeq"], { unique: false });
           store.createIndex("conversationId", "conversationId", { unique: false });
         }
+        // The phone's own journal towards the machines it may command, and the
+        // bodies too large to travel inside one event.
+        if (!db.objectStoreNames.contains(MACHINE_EVENT_STORE)) {
+          const store = db.createObjectStore(MACHINE_EVENT_STORE, { keyPath: "eventId" });
+          store.createIndex("origin", ["originId", "logScopeId", "originSeq"], { unique: false });
+        }
+        if (!db.objectStoreNames.contains(MACHINE_OUTBOX_STORE)) {
+          db.createObjectStore(MACHINE_OUTBOX_STORE, { keyPath: "eventId" });
+        }
+        if (!db.objectStoreNames.contains(MACHINE_BLOB_STORE)) {
+          db.createObjectStore(MACHINE_BLOB_STORE, { keyPath: "key" });
+        }
       };
       request.onerror = function () {
         reject(request.error || new Error("IndexedDB open failed."));
@@ -886,23 +907,25 @@
   const MACHINE_ACCESS_META_KEY = "machine-access";
 
   async function readMetaRecord(key) {
-    try {
-      return await withNamedStore(META_STORE, "readonly", function (store) {
-        return requestToPromise(store.get(key));
-      });
-    } catch {
-      return undefined;
-    }
+    return withNamedStore(META_STORE, "readonly", function (store) {
+      return requestToPromise(store.get(key));
+    });
   }
 
+  /**
+   * A record this phone cannot lose quietly.
+   *
+   * This used to swallow its errors. A failed write of the signing identity
+   * meant a phone that minted a new key on the next reload, which every
+   * machine then refused because the roster names the old one; a failed write
+   * of the machine list meant a phone that silently forgot where to send. Both
+   * are visible now, and the caller decides.
+   */
   async function writeMetaRecord(key, value) {
-    try {
-      await withNamedStore(META_STORE, "readwrite", function (store) {
-        store.put({ ...value, key });
-      });
-    } catch {
-      // Best effort: without it the phone mints a key again next time.
-    }
+    const existing = (await readMetaRecord(key)) || {};
+    await withNamedStore(META_STORE, "readwrite", function (store) {
+      store.put({ ...existing, ...value, key });
+    });
   }
 
   const machineCommandStore = {
@@ -918,148 +941,532 @@
     if (!api) return Promise.resolve(undefined);
     machineIdentityPromise ??= api.ensureIdentity(machineCommandStore).catch(function (error) {
       machineIdentityPromise = undefined;
-      recordRelayDebug({ event: "machine-identity-unavailable", message: String(error && error.message || error) });
+      machineUnavailableReason = String((error && error.message) || error);
+      recordRelayDebug({ event: "machine-identity-unavailable", message: machineUnavailableReason });
       return undefined;
     });
     return machineIdentityPromise;
   }
 
+  /**
+   * Records where this phone may reach each machine.
+   *
+   * Only the list of machines is replaced. Everything else under this key --
+   * in particular anything the delivery path keeps -- is left alone: learning
+   * the machines again is a routine refresh, not a reason to forget what has
+   * not been delivered yet.
+   */
   async function storeMachineAccess(machines) {
-    await writeMetaRecord(MACHINE_ACCESS_META_KEY, { machines: Array.isArray(machines) ? machines : [] });
+    const list = Array.isArray(machines) ? machines : [];
+    await writeMetaRecord(MACHINE_ACCESS_META_KEY, { machines: list });
+    await machineChannels().then(function (channels) {
+      if (channels) channels.setMachines(list);
+    }).catch(function (error) {
+      recordRelayDebug({ event: "machine-channels-unavailable", message: String(error && error.message || error) });
+    });
+    return list;
+  }
+
+  async function machineAccessList() {
+    const record = await readMetaRecord(MACHINE_ACCESS_META_KEY);
+    return (record && record.machines) || [];
   }
 
   async function machineAccessFor(machineId) {
-    const record = await readMetaRecord(MACHINE_ACCESS_META_KEY);
-    const machines = (record && record.machines) || [];
+    const machines = await machineAccessList();
     return machineId ? machines.find((machine) => machine.machineId === machineId) : machines[0];
+  }
+
+  /** One IndexedDB transaction over the phone's machine journal. */
+  function machineLogPort() {
+    return {
+      runAtomic: function (names, work) {
+        return eventLogPort().runAtomic(names.map(storeName), function (tx) {
+          return work({
+            get: function (name, key) { return tx.get(storeName(name), key); },
+            getAll: function (name) { return tx.getAll(storeName(name)); },
+            put: function (name, entry) { return tx.put(storeName(name), entry); },
+            remove: function (name, key) { return tx.remove(storeName(name), key); }
+          });
+        });
+      }
+    };
+    // The journal names its stores logically; this is the one place that
+    // knows which physical store each of them is. Idempotent, so a caller that
+    // already speaks the physical names is not mapped a second time into the
+    // wrong store -- which is exactly what silently sent every event into the
+    // meta store, where it has no key at all.
+    function storeName(name) {
+      if (name === "events" || name === MACHINE_EVENT_STORE) return MACHINE_EVENT_STORE;
+      if (name === "outbox" || name === MACHINE_OUTBOX_STORE) return MACHINE_OUTBOX_STORE;
+      return META_STORE;
+    }
+  }
+
+  /**
+   * Bodies too large to travel inside one event.
+   *
+   * A long reply is sent as fragments and only becomes readable once every one
+   * of them has arrived and the whole thing hashes to what the event claims.
+   * An incomplete body is not applied and not acknowledged, so the machine
+   * keeps it and sends the rest.
+   */
+  function machineBlobStore(api) {
+    function key(reference, index) { return "blob:" + reference.blobHash + ":" + index; }
+    return {
+      store: function (fragment) {
+        if (!fragment || !fragment.reference || typeof fragment.bytesBase64 !== "string") {
+          return Promise.reject(new Error("Invalid machine event fragment."));
+        }
+        return withNamedStore(MACHINE_BLOB_STORE, "readwrite", function (store) {
+          store.put({ key: key(fragment.reference, fragment.index), bytesBase64: fragment.bytesBase64 });
+        });
+      },
+      take: async function (reference) {
+        const parts = [];
+        for (let index = 0; index < reference.fragments; index += 1) {
+          const held = await withNamedStore(MACHINE_BLOB_STORE, "readonly", function (store) {
+            return requestToPromise(store.get(key(reference, index)));
+          });
+          if (!held) return undefined;
+          parts.push(api.base64ToBytes(held.bytesBase64));
+        }
+        const total = parts.reduce(function (sum, part) { return sum + part.length; }, 0);
+        if (total !== reference.byteLength) return undefined;
+        const bytes = new Uint8Array(total);
+        let at = 0;
+        for (const part of parts) { bytes.set(part, at); at += part.length; }
+        if ("sha256:" + await api.sha256Hex(bytes) !== reference.blobHash) return undefined;
+        const body = JSON.parse(new TextDecoder().decode(bytes));
+        for (let index = 0; index < reference.fragments; index += 1) {
+          await withNamedStore(MACHINE_BLOB_STORE, "readwrite", function (store) {
+            store.delete(key(reference, index));
+          });
+        }
+        return body;
+      }
+    };
+  }
+
+  let machineChannelsPromise;
+  /** Said plainly when this phone cannot reach a machine at all. */
+  let machineUnavailableReason;
+
+  /**
+   * This phone's connections to the machines it may command.
+   *
+   * Built once the signing identity exists, because every event it emits and
+   * every acknowledgement it makes is signed with that key, and the machine
+   * decides what to accept by it.
+   */
+  function machineChannels() {
+    const api = globalThis.AccordMachineCommand;
+    const channelApi = globalThis.AccordMachineChannel;
+    const logApi = globalThis.AccordMobileEventLog;
+    if (!api || !channelApi || !logApi) return Promise.resolve(undefined);
+    machineChannelsPromise ??= (async function () {
+      const identity = await machineCommandIdentity();
+      if (!identity) return undefined;
+      const log = logApi.createMobileEventLog({
+        port: machineLogPort(),
+        originId: identity.deviceId,
+        stores: { events: MACHINE_EVENT_STORE, outbox: MACHINE_OUTBOX_STORE, meta: META_STORE },
+        keyId: identity.keyId,
+        hashPayload: async function (payload) { return "sha256:" + await api.sha256Hex(api.textBytes(api.stableJson(payload))); },
+        hashEvent: async function (unsigned) { return "sha256:" + await api.sha256Hex(api.textBytes(api.stableJson(unsigned))); },
+        sign: async function (eventHash) { return api.signEventHash(identity, eventHash); }
+      });
+      await log.restore();
+      const channels = channelApi.createMachineChannels({
+        api: api,
+        identity: identity,
+        log: log,
+        blobs: machineBlobStore(api),
+        seal: sealRelayPayload,
+        open: openRelayPayload,
+        chunk: chunkRelayCiphertext,
+        reassemble: reassembleRelayCiphertext,
+        connect: function (machine) {
+          return openRelaySocket(machine.relayUrl, {
+            rendezvousId: machine.rendezvousId,
+            fingerprint: machine.fingerprint || "",
+            routingId: machine.rendezvousId,
+            deviceId: identity.deviceId,
+            expectDeviceId: machine.deviceId
+          });
+        },
+        apply: applyMachineEvent,
+        onAcknowledged: noteMachineDelivered,
+        debug: recordRelayDebug
+      });
+      channels.setMachines(await machineAccessList());
+      machineUnavailableReason = undefined;
+      return { channels: channels, log: log, identity: identity };
+    })().catch(function (error) {
+      machineChannelsPromise = undefined;
+      machineUnavailableReason = String((error && error.message) || error);
+      recordRelayDebug({ event: "machine-channels-unavailable", message: machineUnavailableReason });
+      return undefined;
+    });
+    return machineChannelsPromise.then(function (built) { return built && built.channels; });
+  }
+
+  function machineJournal() {
+    return machineChannels().then(function () { return machineChannelsPromise; }).then(function (built) { return built; });
+  }
+
+  /**
+   * What a machine sends back, carried out here.
+   *
+   * A result is a message in this chat, so it goes through the same projection
+   * the desktop's timeline uses -- one shape, one dedupe rule, one render. A
+   * kind this build does not show yet is still applied, because refusing it
+   * would leave the machine holding it forever; what it must never do is claim
+   * to have shown something it did not.
+   */
+  async function applyMachineEvent(event, payload, machine) {
+    const body = payload && typeof payload === "object" ? payload : {};
+    const conversationId = event.conversationId;
+    if (body.type === "machine.turn.finished") {
+      await handleRelayTimelinePayload({
+        type: "mobile.timeline.events",
+        conversationId: conversationId,
+        events: (body.messages || []).map(function (message) {
+          return machineTimelineEvent(message, body.status === "failed" ? "error" : "done", body.runId);
+        }).concat((body.warnings || []).map(function (warning, index) {
+          return { id: "machine-warning:" + body.runId + ":" + index, role: "system", content: warning,
+            status: "done", createdAt: body.finishedAt };
+        })).concat(body.error
+          ? [{ id: "machine-error:" + body.runId, role: "system", content: body.error, status: "error", createdAt: body.finishedAt }]
+          : [])
+      }, conversationId);
+      noteMachineRunSettled(body.runId, body.status);
+      return "applied";
+    }
+    if (body.type === "machine.turn.started") {
+      noteMachineRunStarted(body.runId, machine);
+      // The same in-progress row the desktop shows, so a member working on a
+      // machine looks like a member working anywhere else.
+      await handleRelayTimelinePayload({
+        type: "mobile.timeline.events", conversationId: conversationId,
+        events: [{
+          id: "machine-run:" + body.runId, messageId: "machine-run:" + body.runId, role: "participant",
+          participantLabel: machineRunLabel(body.runId), content: machineRunLabel(body.runId) + " is running...",
+          status: "pending", createdAt: body.startedAt, runId: body.runId
+        }]
+      }, conversationId);
+      return "applied";
+    }
+    if (body.type === "machine.turn.progress.delta") {
+      // Streamed text, accumulated the way the desktop accumulates it: the
+      // frame carries how much of the previous text to keep and what to add.
+      const held = machineRunStreams.get(body.runId) || "";
+      const retain = body.content && Number.isSafeInteger(body.content.retain) ? body.content.retain : held.length;
+      const next = held.slice(0, Math.max(0, Math.min(retain, held.length))) + ((body.content && body.content.append) || "");
+      machineRunStreams.set(body.runId, next);
+      if (next.trim()) {
+        await handleRelayTimelinePayload({
+          type: "mobile.timeline.events", conversationId: conversationId,
+          events: [{
+            id: "machine-run:" + body.runId, messageId: "machine-run:" + body.runId, role: "participant",
+            participantLabel: machineRunLabel(body.runId), content: next,
+            status: "pending", createdAt: new Date().toISOString(), runId: body.runId
+          }]
+        }, conversationId);
+      }
+      return "applied";
+    }
+    if (body.type === "machine.conversation.backdelta") {
+      await handleRelayTimelinePayload({
+        type: "mobile.timeline.events",
+        conversationId: conversationId,
+        events: (body.messages || []).map(function (message) { return machineTimelineEvent(message, "done"); })
+      }, conversationId);
+      return "applied";
+    }
+    if (body.type === "machine.approval.requested" || body.type === "machine.approval.updated") {
+      mergeControlCard(conversationId, machineApprovalCard(body.approval));
+      await render("synced");
+      return "applied";
+    }
+    if (body.type === "machine.approval.result") {
+      noteMachineApprovalResult(body);
+      return "applied";
+    }
+    recordRelayDebug({ event: "machine-event-unshown", kind: event.kind });
+    return "applied";
+  }
+
+  function machineTimelineEvent(message, status, runId) {
+    const content = typeof message.content === "string" ? message.content : "";
+    return {
+      id: message.id,
+      messageId: message.id,
+      role: message.role === "user" ? "you" : message.role === "system" ? "system" : "participant",
+      participantLabel: message.participantHandle || message.participantName,
+      content: content,
+      status: status,
+      createdAt: message.createdAt || nowIso(),
+      ...(runId ? { runId: runId } : {}),
+      ...(message.threadRootId ? { threadRootId: message.threadRootId } : {})
+    };
+  }
+
+  /** One card in, the rest left alone: replacing the list would erase the
+   *  cards this phone already knows about from the desktop or another run. */
+  function mergeControlCard(conversationId, card) {
+    if (!conversationId || !card || !card.id) return false;
+    const cards = controlCardsFor(conversationId).slice();
+    const at = cards.findIndex(function (existing) { return existing && existing.id === card.id; });
+    if (at >= 0) cards[at] = { ...cards[at], ...card };
+    else cards.push(card);
+    return storeControlCards(conversationId, cards);
+  }
+
+  function machineApprovalCard(approval) {
+    return {
+      id: approval.id,
+      kind: "approval",
+      title: approval.request && approval.request.title,
+      body: approval.request && approval.request.summary,
+      status: approval.status,
+      createdAt: approval.requestedAt || nowIso()
+    };
   }
 
   /**
    * Asks a machine to run a member's turn, with nothing else in between.
    *
-   * The command is signed by this phone and sealed for that machine's room;
-   * the run id is the command's identity, so the machine runs it once whether
-   * this arrives now or after a reconnection.
+   * The ask is minted into this phone's journal -- its identity, its place in
+   * this device's sequence, its hash chain, its signature and its delivery row
+   * in one write -- and only then offered to the machine. It stays there until
+   * the machine acknowledges it, so a reload, a dead connection or a closed tab
+   * in the middle is a delivery that resumes, not a turn the User never got.
    */
   async function commandMachineTurn(request) {
-    const api = globalThis.AccordMachineCommand;
-    const identity = await machineCommandIdentity();
+    const built = await machineJournal();
     const machine = await machineAccessFor(request.machineId);
-    if (!api || !identity || !machine) {
-      throw new Error("This phone cannot reach that machine directly yet.");
-    }
+    if (!built || !machine) throw new Error("This phone cannot reach that machine directly yet.");
+    const api = globalThis.AccordMachineCommand;
     const scope = api.deviceEventScope(machine.rendezvousId, request.conversationId, "actions");
-    const stored = (await readMetaRecord(MACHINE_ACCESS_META_KEY)) || {};
-    const chains = stored.chains || {};
-    let previous = chains[scope] || { seq: 0 };
-    const packets = [];
+    // An event larger than a machine will accept is refused here, plainly. The
+    // phone does not split a body across fragments the way a desktop does, so
+    // queueing one would be a message retried forever and never delivered.
+    const messageBytes = request.message ? new TextEncoder().encode(JSON.stringify(request.message)).length : 0;
+    if (messageBytes > MACHINE_EVENT_MAX_BYTES) {
+      throw new Error("This message is too long to send straight to a machine from this phone (" +
+        Math.round(messageBytes / 1024) + " KB). Send it when the desktop is reachable.");
+    }
     // The machine runs against its own copy of the chat, so the row the turn
     // answers travels with the command rather than being assumed to be there.
     if (request.message) {
-      const delta = await api.mintEvent(identity, {
+      await built.log.append({
         eventId: "phone-delta-" + request.runId,
         conversationId: request.conversationId,
         logScopeId: scope,
         kind: "machine.conversation.delta",
-        originSeq: previous.seq + 1,
-        ...(previous.hash ? { prevHash: previous.hash } : {}),
+        recipients: [machine.deviceId],
         payload: {
           type: "machine.conversation.delta",
           conversationId: request.conversationId,
           messages: [request.message],
-          updatedAt: new Date().toISOString()
+          updatedAt: nowIso()
         }
       });
-      packets.push(api.eventPacket(identity.deviceId, machine.deviceId, delta));
-      previous = { seq: delta.originSeq, hash: delta.eventHash };
     }
-    const event = await api.mintEvent(identity, {
+    const event = await built.log.append({
       eventId: api.machineCommandEventId(request.runId),
       conversationId: request.conversationId,
       logScopeId: scope,
       kind: "machine.turn.request",
-      originSeq: previous.seq + 1,
-      ...(previous.hash ? { prevHash: previous.hash } : {}),
+      recipients: [machine.deviceId],
       payload: api.turnRequest(request)
     });
-    packets.push(api.eventPacket(identity.deviceId, machine.deviceId, event));
-    chains[scope] = { seq: event.originSeq, hash: event.eventHash };
-    await writeMetaRecord(MACHINE_ACCESS_META_KEY, { machines: stored.machines || [], chains });
-    // Kept until the machine's answer shows up: a send that fails now is
-    // retried later rather than a turn the User asked for being lost.
-    await rememberMachineCommand({
-      machineId: machine.machineId,
-      conversationId: request.conversationId,
-      runId: request.runId,
-      pendingMessageId: request.pendingMessageId,
-      packets
+    await built.channels.deliver(machine.machineId).catch(function (error) {
+      // Held, not lost: the connection retries and the journal still owes it.
+      recordRelayDebug({ event: "machine-command-holding", runId: request.runId, message: String(error && error.message || error) });
     });
-    await flushMachineCommands();
     return event.eventId;
   }
 
-  const MACHINE_COMMAND_QUEUE_KEY = "machine-command-queue";
-
-  async function rememberMachineCommand(entry) {
-    const stored = (await readMetaRecord(MACHINE_COMMAND_QUEUE_KEY)) || {};
-    const queue = (stored.queue || []).filter(function (item) { return item.runId !== entry.runId; });
-    queue.push({ ...entry, queuedAt: new Date().toISOString() });
-    await writeMetaRecord(MACHINE_COMMAND_QUEUE_KEY, { queue });
-  }
-
-  async function forgetMachineCommand(runId) {
-    const stored = (await readMetaRecord(MACHINE_COMMAND_QUEUE_KEY)) || {};
-    const queue = (stored.queue || []).filter(function (item) { return item.runId !== runId; });
-    await writeMetaRecord(MACHINE_COMMAND_QUEUE_KEY, { queue });
-  }
-
   /**
-   * Re-offers every command the machine has not answered yet.
+   * Asks a machine to stop a run.
    *
-   * A command carries its own id, so a machine that already has it does
-   * nothing with the copy; that is what makes retrying safe rather than a way
-   * to run a member twice.
+   * Recorded and delivered the same way, which is the point: until the machine
+   * acknowledges it, the User is told the stop is being delivered. Calling it
+   * stopped at the moment of sending would be a claim this phone cannot make.
    */
-  async function flushMachineCommands() {
-    const stored = (await readMetaRecord(MACHINE_COMMAND_QUEUE_KEY)) || {};
-    const queue = stored.queue || [];
-    for (const entry of queue) {
-      const machine = await machineAccessFor(entry.machineId);
-      if (!machine) continue;
-      try {
-        for (const packet of entry.packets) await sendSealedToMachine(machine, packet);
-      } catch (error) {
-        recordRelayDebug({ event: "machine-command-retry", runId: entry.runId, message: String(error && error.message || error) });
-      }
-    }
-    return queue.length;
-  }
-
-  /**
-   * One sealed frame into a machine's own room.
-   *
-   * Nothing is awaited from the machine here: its answer comes back as chat,
-   * and the command carries its own id, so re-sending it after a dropped
-   * connection is the same command and not a second turn.
-   */
-  async function sendSealedToMachine(machine, packet) {
-    const ciphertext = await sealRelayPayload(packet, machine.relaySealKeyBase64);
-    const socket = await openRelaySocket(machine.relayUrl, {
-      rendezvousId: machine.rendezvousId,
-      fingerprint: machine.fingerprint || "",
-      routingId: machine.rendezvousId
+  async function commandMachineCancel(request) {
+    const built = await machineJournal();
+    const machine = await machineAccessFor(request.machineId);
+    if (!built || !machine) throw new Error("This phone cannot reach that machine directly yet.");
+    const api = globalThis.AccordMachineCommand;
+    const event = await built.log.append({
+      eventId: api.machineCancelEventId(request.runId),
+      conversationId: request.conversationId,
+      logScopeId: api.deviceEventScope(machine.rendezvousId, request.conversationId, "actions"),
+      kind: "machine.turn.cancel",
+      recipients: [machine.deviceId],
+      payload: api.cancelRequest(request)
     });
-    try {
-      const frames = chunkRelayCiphertext({
-        streamId: machine.rendezvousId + ":phone",
-        logicalMessageId: packet.event.eventId,
-        ciphertext,
-        to: machine.deviceId
-      });
-      for (const frame of frames) socket.send(JSON.stringify(frame));
-    } finally {
-      socket.close(1000, "machine command sent");
+    await built.channels.deliver(machine.machineId).catch(function (error) {
+      recordRelayDebug({ event: "machine-cancel-holding", runId: request.runId, message: String(error && error.message || error) });
+    });
+    return event.eventId;
+  }
+
+  /**
+   * Drives a machine for what the desktop did not take.
+   *
+   * The desktop is asked first: it owns the chat and does the routing. When it
+   * is not there, a member that lives on a machine can still be asked, by this
+   * phone, over the machine's own channel. The two are exclusive on purpose --
+   * the same message going down both paths would be two runs of the member.
+   */
+  async function driveMachineForPendingMessages(conversationId) {
+    const entries = (await listOutboxEntries()).filter(function (entry) {
+      return entry.status !== "acked" && entry.conversationId === conversationId && isMessageOutboxEntry(entry);
+    });
+    let driven = 0;
+    for (const entry of entries) {
+      const content = (entry.payload && entry.payload.content) || "";
+      const member = machineMemberFor(conversationId, content);
+      if (!member) continue;
+      const machine = await machineAccessFor(member.homeMachineId);
+      if (!machine) {
+        machineUnavailableReason = "This phone has not been told how to reach " + member.displayName + "'s machine.";
+        continue;
+      }
+      const runId = "mobile-" + entry.eventId;
+      machineRunState.set(runId, { status: "requested", machineId: machine.machineId,
+        participantLabel: "@" + member.handle, conversationId: conversationId });
+      try {
+        await commandMachineTurn({
+          machineId: machine.machineId,
+          conversationId: conversationId,
+          participant: member.participant,
+          runId: runId,
+          messageId: entry.eventId,
+          pendingMessageId: "pending-" + entry.eventId,
+          requestedAt: entry.createdAt,
+          message: {
+            id: entry.eventId,
+            role: "user",
+            content: content,
+            createdAt: entry.createdAt,
+            status: "done"
+          }
+        });
+      } catch (error) {
+        const message = String((error && error.message) || error);
+        recordRelayDebug({ event: "machine-drive-failed", eventId: entry.eventId, message: message });
+        machineUnavailableReason = message;
+        await putOutboxEntry({ ...entry, lastError: message, updatedAt: nowIso() });
+        continue;
+      }
+      // Handed to the machine, so it does not also go to the desktop: the
+      // desktop learns this message from the machine's own copy. It is not
+      // called delivered until the machine acknowledges the command.
+      await putOutboxEntry({ ...entry, status: "syncing", deliveredVia: "machine", machineId: machine.machineId,
+        machineRunId: runId, updatedAt: nowIso() });
+      driven += 1;
     }
+    return driven;
+  }
+
+  /**
+   * The machine confirmed it has the ask. Only now is the message delivered.
+   *
+   * Until this, the entry stays pending and is offered again -- which is what
+   * makes a dropped connection a delivery that resumes. Marking it at the
+   * moment of sending would both lie to the User and make the phone re-mint an
+   * ask the machine already holds.
+   */
+  async function noteMachineDelivered(receipt) {
+    const entries = await listOutboxEntries();
+    for (const entry of entries) {
+      if (!entry.machineRunId || entry.status === "acked") continue;
+      const api = globalThis.AccordMachineCommand;
+      if (receipt.eventId !== api.machineCommandEventId(entry.machineRunId)) continue;
+      await putOutboxEntry({ ...entry, status: "acked", ack: { ackRole: "machine", eventIds: [receipt.eventId] },
+        updatedAt: nowIso(), lastError: undefined });
+      await render("synced");
+    }
+  }
+
+  /** A run this phone asked a machine for, rather than the desktop. */
+  async function machineRunForCancel(conversationId, runId) {
+    const entries = await listOutboxEntries();
+    const entry = entries.find(function (item) { return item.machineRunId === runId; });
+    if (entry) return { machineId: entry.machineId, runId: runId };
+    const chat = loadChats().find(function (item) { return item.id === conversationId; });
+    const members = ((chat && chat.members) || []).filter(function (member) { return member.homeMachineId; });
+    return members.length === 1 ? { machineId: members[0].homeMachineId, runId: runId } : undefined;
+  }
+
+  /** Answers a card on the machine that raised it, as the same chat action
+   *  every device emits, so one answer is one decision wherever it is applied. */
+  async function commandMachineAction(conversationId, decision) {
+    const built = await machineJournal();
+    if (!built) throw new Error("This phone cannot reach a machine directly yet.");
+    const roster = built.channels.roster();
+    if (!roster.length) throw new Error("This phone has no machine to answer on.");
+    const event = await built.log.append({
+      eventId: "phone-action:" + decision.payload.operationId,
+      conversationId: conversationId,
+      logScopeId: "chat:actions",
+      kind: decision.kind,
+      recipients: roster,
+      payload: decision.payload
+    });
+    await built.channels.deliver().catch(function (error) {
+      recordRelayDebug({ event: "machine-action-holding", operationId: decision.payload.operationId,
+        message: String(error && error.message || error) });
+    });
+    return event.eventId;
+  }
+
+  const machineRunState = new Map();
+  const machineRunStreams = new Map();
+
+  function noteMachineRunStarted(runId, machine) {
+    const held = machineRunState.get(runId) || {};
+    machineRunState.set(runId, { ...held, status: "running", machineId: machine && machine.machineId });
+  }
+
+  function noteMachineRunSettled(runId, status) {
+    const held = machineRunState.get(runId) || {};
+    machineRunState.set(runId, { ...held, status: status || "completed" });
+    machineRunStreams.delete(runId);
+  }
+
+  /** Who the row belongs to. This phone knows for a run it asked for itself;
+   *  for anything else it says nothing rather than naming the wrong member. */
+  function machineRunLabel(runId) {
+    const held = machineRunState.get(runId);
+    return (held && held.participantLabel) || "Agent";
+  }
+
+  /**
+   * What the machine made of an answer, rather than that it was sent.
+   *
+   * `ok` false is the owner's own apply error and is shown as one. An
+   * uncertain outcome is neither: the card says it is not settled rather than
+   * claiming an answer that may not have taken.
+   */
+  function noteMachineApprovalResult(body) {
+    if (!body || !body.approvalId) return;
+    if (body.ok === false) {
+      controlCardSent.delete(body.approvalId);
+      controlCardErrors.set(body.approvalId, body.error || "The machine could not apply this answer.");
+      return;
+    }
+    if (body.uncertain) {
+      controlCardErrors.set(body.approvalId, "The machine has not confirmed this answer yet.");
+      return;
+    }
+    controlCardErrors.delete(body.approvalId);
+    if (body.approval) mergeControlCard(body.conversationId, machineApprovalCard(body.approval));
   }
 
   async function readMailboxAccessMeta() {
@@ -1414,8 +1821,27 @@
         : "@" + handle,
       roleLabel: typeof value.roleLabel === "string" ? value.roleLabel.trim() : "",
       kind: typeof value.kind === "string" ? value.kind : "",
-      avatarId: typeof value.avatarId === "string" ? value.avatarId : undefined
+      avatarId: typeof value.avatarId === "string" ? value.avatarId : undefined,
+      // Where this member actually runs, and what that machine needs to run
+      // it. Present only for members that live on a machine.
+      homeMachineId: typeof value.homeMachineId === "string" ? value.homeMachineId : undefined,
+      participant: value.participant && typeof value.participant === "object" ? value.participant : undefined
     };
+  }
+
+  /** The member a message is addressed to, when that member lives on a
+   *  machine this phone can reach itself. */
+  function machineMemberFor(conversationId, content) {
+    const chat = loadChats().find(function (item) { return item.id === conversationId; });
+    const members = (chat && chat.members) || [];
+    const mentioned = String(content || "").match(/(?:^|\s)@([A-Za-z0-9_-]+)/g) || [];
+    const handles = mentioned.map(function (raw) { return raw.trim().replace(/^@/, "").toLowerCase(); });
+    const candidates = members.filter(function (member) { return member.homeMachineId && member.participant; });
+    if (!candidates.length) return undefined;
+    if (!handles.length) return candidates.length === 1 ? candidates[0] : undefined;
+    return candidates.find(function (member) {
+      return handles.indexOf(member.handle.toLowerCase()) >= 0 || handles.indexOf(member.mentionHandle.toLowerCase()) >= 0;
+    });
   }
 
   function activeMentionQuery(value) {
@@ -1947,6 +2373,18 @@
     await enqueueRunCancel({ conversationId, runId: runId.trim() });
     await render("waiting-to-sync");
     const flushResult = await flushOutbox();
+    if (desktopDidNotTake(flushResult.status)) {
+      // A stop this phone could not hand over is held, not done. The row keeps
+      // saying "Stopping" until the machine acknowledges the cancel; calling
+      // it stopped here would be a claim about a member still running.
+      const target = await machineRunForCancel(conversationId, runId.trim());
+      if (target && target.machineId) {
+        await commandMachineCancel({ machineId: target.machineId, conversationId: conversationId, runId: target.runId })
+          .catch(function (error) {
+            recordRelayDebug({ event: "machine-cancel-failed", runId: target.runId, message: String(error && error.message || error) });
+          });
+      }
+    }
     await pollMailboxTimeline().catch(function () {
       return 0;
     });
@@ -2160,6 +2598,11 @@
     url.searchParams.set("rid", pairing.rendezvousId);
     url.searchParams.set("role", "phone");
     url.searchParams.set("cap", pairing.fingerprint);
+    // A phone that does not name itself is seated under the role name, and a
+    // frame addressed to this device is then delivered to nobody. That is fine
+    // for the two-party desktop pairing, and wrong for a machine's room, where
+    // everything is addressed.
+    if (pairing.deviceId) url.searchParams.set("did", pairing.deviceId);
     return new Promise(function (resolve, reject) {
       const socket = new globalThis.WebSocket(url.toString());
       // The relay forwards frames as binary, and a browser WebSocket hands
@@ -2204,6 +2647,26 @@
           peerConnected: parsed?.peerConnected,
           role: parsed?.role
         });
+        // Waiting for a particular device: a machine's arrival is not
+        // announced to phones, so its presence is read from the room roster
+        // and a room without it fails now and is retried, rather than hanging
+        // until the connect timeout.
+        if (pairing.expectDeviceId) {
+          if (parsed?.type === "relay.ready") {
+            const present = (parsed.peers || []).some(function (peer) { return peer && peer.deviceId === pairing.expectDeviceId; });
+            if (present) resolveReady("expected-device-present");
+            else {
+              cleanup();
+              socket.close(1000, "expected device is not in the room");
+              reject(new Error("That machine is not connected right now."));
+            }
+            return;
+          }
+          if (parsed?.type === "relay.peer-connected" && parsed.deviceId === pairing.expectDeviceId) {
+            resolveReady("expected-device-connected");
+            return;
+          }
+        }
         if (parsed?.type === "relay.ready" && parsed.peerConnected === true) {
           resolveReady("peer-connected-at-ready");
         } else if (parsed?.type === "relay.peer-connected") {
@@ -3007,6 +3470,12 @@
   }
 
   function connectionStatusText(status) {
+    // What this phone cannot do at all outranks what it is waiting for: a
+    // browser without Ed25519 will never reach a machine, and saying "waiting
+    // to sync" forever would be a lie the User cannot act on.
+    if (machineUnavailableReason && (status === "waiting-to-sync" || status === "waiting-for-desktop" || status === "tunnel-reconnecting")) {
+      return machineUnavailableReason;
+    }
     if (status === "tunnel-reconnecting") {
       return "Tunnel reconnecting";
     }
@@ -3700,8 +4169,21 @@
     controlCardSent.add(card.id);
     await render("waiting-to-sync");
     const flushResult = await flushOutbox();
+    if (desktopDidNotTake(flushResult.status)) {
+      await commandMachineAction(conversationId, decision).catch(function (error) {
+        // Sent is not applied: if it could not even be handed over, the card
+        // says so rather than showing an answer that went nowhere.
+        controlCardSent.delete(card.id);
+        controlCardErrors.set(card.id, "Not delivered yet: " + String(error && error.message || error));
+      });
+    }
     await pollMailboxTimeline().catch(function () { return 0; });
     await render(flushResult.status);
+  }
+
+  /** The desktop did not take this: it is not there, or its tunnel is down. */
+  function desktopDidNotTake(status) {
+    return status === "waiting-for-desktop" || status === "tunnel-reconnecting" || status === "waiting-to-sync";
   }
 
   function enqueueDecision(input) {
@@ -4791,6 +5273,13 @@
         // Sending is a deliberate action, so following it is expected.
         scrollToLatestWhenSettled("auto");
         const flushResult = await flushOutbox();
+        // The desktop first; if it is not there, the member's own machine.
+        if (desktopDidNotTake(flushResult.status)) {
+          await driveMachineForPendingMessages(conversationId).catch(function (error) {
+            recordRelayDebug({ event: "machine-drive-failed", message: String(error && error.message || error) });
+            return 0;
+          });
+        }
         await pollMailboxTimeline().catch(function () {
           return 0;
         });
@@ -4798,6 +5287,15 @@
       });
     }
     await render();
+    // The connections to this phone's machines come up first and independently
+    // of the desktop. Waiting for the desktop here is what made a closed
+    // desktop a phone that could do nothing: everything the machine owes this
+    // phone, and everything this phone still owes the machine, is settled on
+    // this connection whether or not the desktop is anywhere.
+    void machineChannels().then(function (channels) {
+      if (channels) return channels.deliver().catch(function () { return undefined; });
+      return undefined;
+    }).catch(function () { return undefined; });
     const pairing = loadPairing();
     if (pairing && relayCanSync(pairing)) {
       try {
@@ -4805,8 +5303,6 @@
         // While the desktop is here: register this phone's signing key and
         // pick up the machines it may reach when the desktop is not.
         await announceMachineIdentityViaRelay(pairing).catch(function () { return undefined; });
-        // Anything a machine has not answered yet is offered again.
-        await flushMachineCommands().catch(function () { return 0; });
         await render("synced");
         const conversationId = selectedConversationId();
         if (conversationId) {
@@ -4854,8 +5350,13 @@
     requestChatListViaRelay,
     announceMachineIdentityViaRelay,
     commandMachineTurn,
-    flushMachineCommands,
-    forgetMachineCommand,
+    commandMachineCancel,
+    commandMachineAction,
+    driveMachineForPendingMessages,
+    machineMemberFor,
+    machineChannels,
+    machineAccessList,
+    storeMachineAccess,
     machineCommandIdentity,
     requestTimelineViaRelay,
     openRelayPayload,

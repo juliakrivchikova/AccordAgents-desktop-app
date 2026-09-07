@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ChatMessage, Conversation, ReviewProgress, SendChatMessageRequest, StartReviewResult } from "../../shared/types";
+import type { ChatMessage, ChatParticipant, Conversation, ReviewProgress, SendChatMessageRequest, StartReviewResult } from "../../shared/types";
 import {
   chatMessageVisualThreadRootId,
   chatParticipantRequestReplyRootMap
@@ -103,6 +103,12 @@ export interface MobileRelayChatMember {
   roleLabel: string;
   kind: "claude-code" | "codex-cli" | "gemini-cli";
   avatarId?: string;
+  /** The machine this member runs on, when it is not this desktop. Carried so
+   *  the phone can reach that machine itself with the desktop closed. */
+  homeMachineId?: string;
+  /** The member record a machine needs to run a turn. Sent only for members
+   *  with a home machine, so the list does not grow for every local member. */
+  participant?: ChatParticipant;
 }
 
 export interface MobileRelayChatCatalog {

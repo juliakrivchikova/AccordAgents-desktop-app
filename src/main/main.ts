@@ -1849,7 +1849,13 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
             displayName: mobileParticipantDisplayName(participant),
             roleLabel: roleLabels.get(participant.roleConfigId) ?? participant.roleConfigId,
             kind: participant.kind,
-            ...(participant.avatarId ? { avatarId: participant.avatarId } : {})
+            ...(participant.avatarId ? { avatarId: participant.avatarId } : {}),
+            // A member that lives on a machine travels with what that machine
+            // needs to run it, so the phone can ask the machine itself when
+            // this desktop is closed. Local members carry nothing extra.
+            ...(participant.homeMachineId
+              ? { homeMachineId: participant.homeMachineId, participant }
+              : {})
           }))
         });
       }

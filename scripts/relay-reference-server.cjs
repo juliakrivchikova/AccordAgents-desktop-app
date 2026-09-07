@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const http = require("node:http");
+const https = require("node:https");
 const { URL } = require("node:url");
 const { WebSocket, WebSocketServer } = require("ws");
 
@@ -20,7 +21,10 @@ const DEFAULT_MAX_FRAME_BYTES = 10_240;
 function createReferenceRelayServer(options = {}) {
   const maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
   const rooms = new Map();
-  const server = http.createServer((request, response) => {
+  // The phone reaches a relay over wss: its own content policy allows nothing
+  // else, so a browser check has to speak the same scheme the phone does.
+  const tls = options.tls;
+  const handler = (request, response) => {
     if (request.url === "/healthz") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ ok: true, rooms: rooms.size }));
@@ -28,7 +32,8 @@ function createReferenceRelayServer(options = {}) {
     }
     response.writeHead(404, { "content-type": "application/json" });
     response.end(JSON.stringify({ ok: false, error: "not found" }));
-  });
+  };
+  const server = tls ? https.createServer(tls, handler) : http.createServer(handler);
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (request, socket, head) => {
@@ -61,7 +66,7 @@ function createReferenceRelayServer(options = {}) {
         }
         resolve({
           port: address.port,
-          url: `ws://${host}:${address.port}/v1/relay`
+          url: `${tls ? "wss" : "ws"}://${host}:${address.port}/v1/relay`
         });
       });
     }),
