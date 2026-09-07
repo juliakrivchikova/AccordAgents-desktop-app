@@ -3,135 +3,152 @@ import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { createNativeTargetClaims } from "./chatActionNativeClaims";
-import { createChatActionEffects } from "./chatActionEffects";
-import { ChatActionApplier } from "./chatActionApplier";
-import { chatActionReceiptEventId } from "./chatActionEmitter";
+import { MachineChoiceExecutor, machineChoiceResultId } from "./chatActionNativeClaims";
+import { ChatChoicePersistenceError } from "./chat";
 import { StorageService } from "./storage";
 import { ChatEventLogService } from "./chatEventLog";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import type { Conversation } from "../../shared/types";
+import type { MachineChoiceResultBody } from "../../shared/machineLink";
+import type { RespondToChatChoiceRequest } from "../../shared/types";
+import type { ChatActionPayload } from "../../shared/chatActionEvents";
 
 const CONVERSATION = "choice-chat";
 const CHOICE = "choice-7";
 const TARGET = `choice:${CHOICE}`;
+const SOURCE = "m1";
 
 /**
- * A choice used to be admitted by asking whether a receipt event existed.
- * That is a read, not a claim: two answers arriving together both saw no
- * receipt and both told the provider, and a crash between telling it and
- * writing the receipt told it again on the next start.
+ * Answering a choice wakes a member that is waiting, and that can happen once.
+ *
+ * It used to be admitted by asking whether a receipt event existed, which is a
+ * read and not a claim: two answers arriving together both continued the turn,
+ * and a crash between continuing it and writing the receipt continued it again
+ * on the next start. The desktop's own IPC answered directly *and* published
+ * the canonical action, so the member's home ran it a second time.
+ *
+ * These drive the real executor against real SQLite. The chat is a faithful
+ * stand-in for the guard contract ChatService implements: the answer is saved
+ * before anything native is claimed, the claim happens inside `beforeApply`,
+ * and a disk that refuses the save is a distinct failure from one that refuses
+ * the claim.
  */
-async function box() {
-  const dir = await mkdtemp(path.join(tmpdir(), "accord-choice-claim-"));
+async function box(options: { failSave?: () => boolean } = {}) {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-choice-executor-"));
   const storage = new StorageService({ dbPath: path.join(dir, "state.sqlite3") });
   const eventLog = new ChatEventLogService(storage);
-  const answered: string[] = [];
-  const conversation: Conversation = {
-    id: CONVERSATION, kind: "chat", title: "Choice", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-    messages: [{
-      id: "m1", role: "participant", participantId: "p1", participantLabel: "@one",
-      content: "Which one?", createdAt: new Date().toISOString(), status: "done",
-      metadata: { runId: "run-1", pendingChoice: { id: CHOICE, status: "pending", options: [{ id: "a", label: "A" }] } }
-    }],
-    findings: [],
-    // A choice belongs to the member that raised it, so the copy has to hold
-    // that member: this is what says whether this peer answers for it.
-    metadata: { participants: [{ id: "p1", handle: "one", kind: "codex-cli", roleConfigId: "engineer" }] }
-  } as unknown as Conversation;
+  const device = await eventLog.getOrCreateDeviceIdentity();
+  const continued: string[] = [];
+  const published: MachineChoiceResultBody[] = [];
+  let saves = 0;
 
-  const owner = { runtimeId: "runtime-a", pid: 4321, startedAt: "synthetic-start" };
-  const build = (options: { runtimeId?: string; canApply?: () => boolean } = {}) => createChatActionEffects({
-    chat: {
-      respondToAppToolApproval: async () => conversation,
-      respondToChoice: async (request) => { answered.push(`${request.choiceId}:${request.selectedOptionId ?? ""}`); },
-      cancelRun: () => true,
-      conversationIdForRun: (runId) => (runId === "run-1" ? CONVERSATION : undefined)
-    },
-    emitter: {
-      beginExecution: async (targetKey) => !(await storage.getChatEvent(chatActionReceiptEventId(targetKey))),
-      recordExecution: async (request) => {
-        await eventLog.appendLocalEvent({
-          conversationId: request.conversationId, logScopeId: "chat:actions", kind: "execution.receipt",
-          eventId: chatActionReceiptEventId(request.targetKey),
-          payload: { operationId: `receipt:${request.targetKey}`, targetKey: request.targetKey, stateId: "done" }
-        });
-      }
-    },
-    storage: { getConversation: async () => conversation },
-    nativeClaims: createNativeTargetClaims({
-      storage,
-      runtimeIdentity: async () => ({ ...owner, ...(options.runtimeId ? { runtimeId: options.runtimeId } : {}) }),
-      ...(options.canApply ? { canApply: options.canApply } : {})
-    })
+  const chat = {
+    respondToChoice: async (
+      request: RespondToChatChoiceRequest,
+      _signal?: AbortSignal,
+      _progress?: unknown,
+      execution?: { decisionEventId: string; beforeApply(participantId: string): Promise<void> }
+    ) => {
+      // The order the real service uses: validate, save, then admit.
+      if (options.failSave?.()) throw new ChatChoicePersistenceError("database or disk is full");
+      saves += 1;
+      await execution?.beforeApply("p1");
+      continued.push(`${request.choiceId}:${request.selectedOptionId ?? ""}`);
+      return {
+        conversation: {
+          id: CONVERSATION, kind: "chat", messages: [{
+            id: SOURCE, role: "participant", participantId: "p1", content: "Which one?",
+            createdAt: new Date().toISOString(), status: "done",
+            metadata: { pendingChoice: { id: CHOICE, status: "selected", options: [], selectedOptionId: request.selectedOptionId } }
+          }]
+        },
+        warnings: []
+      } as never;
+    }
+  };
+
+  const build = (settings: { runtimeId?: string; canApply?: () => boolean } = {}) => new MachineChoiceExecutor({
+    storage, deviceId: device.originId, chat: chat as never,
+    runtimeIdentity: async () => ({ runtimeId: settings.runtimeId ?? "runtime-a", pid: 4321, startedAt: "synthetic-start" }),
+    ...(settings.canApply ? { canApply: settings.canApply } : {}),
+    publish: async (body) => {
+      published.push(body);
+      await eventLog.appendLocalEvent({
+        conversationId: body.conversationId, logScopeId: `choice:${body.choiceId}`,
+        kind: body.type, eventId: machineChoiceResultId(body.decisionId), payload: body
+      });
+    }
   });
 
-  /** A real signed answer, so the claim's SQL can find its event. */
+  /** A real signed answer, so the claim's SQL finds its event. */
   const answer = async (optionId: string) => {
     const { event } = await eventLog.appendLocalEvent({
       conversationId: CONVERSATION, logScopeId: "chat:actions", kind: "choice.answered",
       payload: { operationId: `choice:${CHOICE}:${optionId}`, targetKey: TARGET, stateId: optionId,
-        detail: { sourceMessageId: "m1", selectedOptionId: optionId } }
+        detail: { sourceMessageId: SOURCE, selectedOptionId: optionId } }
     });
     return event as ChatEventEnvelope;
   };
 
   return {
-    storage, eventLog, answered, conversation, build, answer,
+    storage, eventLog, continued, published, build, answer,
+    saves: () => saves,
     cleanup: async () => { await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
   };
 }
 
-test("two answers to the same choice tell the provider once", async () => {
+function payloadOf(event: ChatEventEnvelope): ChatActionPayload {
+  return event.payload as ChatActionPayload;
+}
+
+test("two answers to the same choice continue the member once", async () => {
   const held = await box();
   try {
-    const applier = new ChatActionApplier({ effects: held.build() });
+    const executor = held.build();
     const first = await held.answer("a");
     const second = await held.answer("b");
-    const [one, two] = await Promise.all([applier.apply(first), applier.apply(second)]);
-    assert.equal(one.status, "applied");
-    assert.equal(two.status, "applied");
-    assert.equal(held.answered.length, 1, `the provider is told once: ${JSON.stringify(held.answered)}`);
-    // The one that lost says so rather than claiming it was carried out.
-    const loser = [one, two].find((result) => !/answered the choice/.test(result.detail ?? ""));
-    assert.ok(loser, "one of the two answers must state that it did not act");
-    assert.match(loser.detail ?? "", /already acted on here|not repeated/);
+    const [one, two] = await Promise.all([
+      executor.applyAction(first, payloadOf(first)),
+      executor.applyAction(second, payloadOf(second))
+    ]);
+    assert.equal(held.continued.length, 1, `the member is continued once: ${JSON.stringify(held.continued)}`);
+    const loser = [one, two].find((result) => !result.ok);
+    assert.ok(loser, "the answer that lost says so rather than claiming it was carried out");
+    assert.match(loser.error ?? "", /already been answered|not repeated|claimed this choice/);
   } finally { await held.cleanup(); }
 });
 
-test("a crash between telling the provider and writing the receipt does not tell it again", async () => {
+test("a crash between continuing the member and writing the result does not continue it again", async () => {
   const held = await box();
   try {
     const answer = await held.answer("a");
-    // The claim is on disk and the receipt is not: exactly the state a process
-    // that died inside the effect leaves behind.
-    const claimed = await held.storage.nativeCommands().claimTarget({
+    // A claim on disk with no result: exactly what a process that died inside
+    // the continuation leaves behind.
+    assert.equal(await held.storage.nativeCommands().claimTarget({
       runtimeId: "runtime-gone", pid: 999, startedAt: "gone",
       eventId: answer.eventId, conversationId: CONVERSATION, targetKey: TARGET, participantId: "p1"
-    });
-    assert.equal(claimed, true);
+    }), true);
 
-    const result = await new ChatActionApplier({ effects: held.build() }).apply(answer);
-    assert.equal(result.status, "applied");
-    assert.deepEqual(held.answered, [], "the provider must not be told a second time");
-    assert.match(result.detail ?? "", /not repeated/,
-      "and the answer says its delivery was never confirmed, rather than claiming success");
+    const result = await held.build().applyAction(answer, payloadOf(answer));
+    assert.equal(result.ok, false);
+    assert.equal(result.uncertain, true, "an unconfirmed continuation is reported as such, not as success");
+    assert.deepEqual(held.continued, [], "and the member is not woken a second time");
   } finally { await held.cleanup(); }
 });
 
-test("an answer already carried out here is not carried out again after a restart", async () => {
+test("the same signed answer redelivered after a restart is not carried out again", async () => {
   const held = await box();
   try {
     const answer = await held.answer("a");
-    const first = await new ChatActionApplier({ effects: held.build() }).apply(answer);
-    assert.equal(first.status, "applied");
-    assert.deepEqual(held.answered, [`${CHOICE}:a`]);
+    const first = await held.build().applyAction(answer, payloadOf(answer));
+    assert.equal(first.ok, true);
+    assert.deepEqual(held.continued, [`${CHOICE}:a`]);
 
-    // A new runtime over the same disk, replaying the same signed answer.
-    const again = await new ChatActionApplier({ effects: held.build({ runtimeId: "runtime-b" }) }).apply(answer);
-    assert.equal(again.status, "applied");
-    assert.equal(held.answered.length, 1, "a restart replays the event, not the effect");
-    assert.match(again.detail ?? "", /already acted on here/);
+    // A new runtime over the same disk, replaying the same event.
+    const again = await held.build({ runtimeId: "runtime-b" }).applyAction(answer, payloadOf(answer));
+    assert.equal(again.ok, true, "the stored result is returned rather than recomputed");
+    assert.equal(held.continued.length, 1, "a restart replays the event, not the continuation");
+    assert.equal(held.published.length, 1,
+      "and the result is not published twice: the one already in the log is what the asker is owed");
   } finally { await held.cleanup(); }
 });
 
@@ -139,171 +156,44 @@ test("a runtime that is shutting down keeps the answer instead of half-applying 
   const held = await box();
   try {
     const answer = await held.answer("a");
-    const result = await new ChatActionApplier({ effects: held.build({ canApply: () => false }) }).apply(answer);
-    assert.equal(result.status, "deferred", "the answer is kept for a runtime that can carry it out");
-    assert.deepEqual(held.answered, []);
+    await assert.rejects(() => held.build({ canApply: () => false }).applyAction(answer, payloadOf(answer)),
+      /remains queued/, "the answer is kept for a runtime that can carry it out");
+    assert.deepEqual(held.continued, []);
     assert.equal(await held.storage.nativeCommands().targetEffect(CONVERSATION, TARGET), undefined,
       "and nothing was claimed on the way out");
   } finally { await held.cleanup(); }
 });
 
-test("a copy the member does not live on does not answer its choice", async () => {
-  const held = await box();
-  try {
-    // The same replicated conversation on a peer that is not the member's
-    // home. Any active run in the chat used to be enough to claim ownership.
-    const effects = createChatActionEffects({
-      homeMachineId: () => "machine-elsewhere",
-      chat: {
-        respondToAppToolApproval: async () => held.conversation,
-        respondToChoice: async () => { held.answered.push("wrong-peer"); },
-        cancelRun: () => true,
-        conversationIdForRun: () => CONVERSATION
-      },
-      emitter: { beginExecution: async () => true, recordExecution: async () => undefined },
-      storage: { getConversation: async () => held.conversation },
-      nativeClaims: createNativeTargetClaims({ storage: held.storage, runtimeIdentity: async () => ({ runtimeId: "r", pid: 1, startedAt: "s" }) })
-    });
-    const result = await new ChatActionApplier({ effects }).apply(await held.answer("a"));
-    assert.equal(result.status, "applied");
-    assert.deepEqual(held.answered, [], "a peer that does not run the turn records the answer without acting");
-  } finally { await held.cleanup(); }
-});
-
-test("an answer whose request has not arrived yet waits for it", async () => {
-  const held = await box();
-  try {
-    const empty = { ...held.conversation, messages: [] } as Conversation;
-    const effects = createChatActionEffects({
-      chat: {
-        respondToAppToolApproval: async () => empty,
-        respondToChoice: async () => { held.answered.push("too-early"); },
-        cancelRun: () => true,
-        conversationIdForRun: () => CONVERSATION
-      },
-      emitter: { beginExecution: async () => true, recordExecution: async () => undefined },
-      storage: { getConversation: async () => empty },
-      nativeClaims: createNativeTargetClaims({ storage: held.storage, runtimeIdentity: async () => ({ runtimeId: "r", pid: 1, startedAt: "s" }) })
-    });
-    const result = await new ChatActionApplier({ effects }).apply(await held.answer("a"));
-    assert.equal(result.status, "deferred");
-    assert.deepEqual(held.answered, []);
-  } finally { await held.cleanup(); }
-});
-
-test("a disk that refuses the claim keeps the answer instead of acting without one", async () => {
-  const held = await box();
+test("a disk that cannot save the answer is a held answer, not a lost one", async () => {
+  let broken = true;
+  const held = await box({ failSave: () => broken });
   try {
     const answer = await held.answer("a");
-    // The claim is the admission. A disk that cannot record it has not
-    // admitted anything, and acting anyway is exactly the double effect the
-    // row exists to prevent.
-    const broken = {
-      getChatEvent: (id: string) => held.storage.getChatEvent(id),
-      nativeCommands: () => ({
-        ...held.storage.nativeCommands(),
-        claimTarget: async () => { throw new Error("SQLITE_FULL: database or disk is full"); }
-      })
-    } as unknown as Parameters<typeof createNativeTargetClaims>[0]["storage"];
-    const effects = createChatActionEffects({
-      chat: {
-        respondToAppToolApproval: async () => held.conversation,
-        respondToChoice: async () => { held.answered.push("acted-without-a-claim"); },
-        cancelRun: () => true,
-        conversationIdForRun: () => CONVERSATION
-      },
-      emitter: { beginExecution: async () => true, recordExecution: async () => undefined },
-      storage: { getConversation: async () => held.conversation },
-      nativeClaims: createNativeTargetClaims({ storage: broken, runtimeIdentity: async () => ({ runtimeId: "r", pid: 1, startedAt: "s" }) })
-    });
-    const result = await new ChatActionApplier({ effects }).apply(answer);
-    assert.equal(result.status, "deferred", "a real decision is kept for a runtime that can record it");
-    assert.deepEqual(held.answered, [], "and nothing is told to the provider without an admission");
+    await assert.rejects(() => held.build().applyAction(answer, payloadOf(answer)), ChatChoicePersistenceError,
+      "a save that failed is not turned into a terminal refusal of a real decision");
+    assert.deepEqual(held.continued, []);
+    assert.equal(await held.storage.nativeCommands().targetEffect(CONVERSATION, TARGET), undefined,
+      "nothing is claimed for an answer that was never saved");
+    assert.deepEqual(held.published, [], "and nothing is published about it either");
 
-    // The disk recovers and the same signed answer is delivered again.
-    const recovered = await new ChatActionApplier({ effects: held.build() }).apply(answer);
-    assert.equal(recovered.status, "applied");
-    assert.deepEqual(held.answered, [`${CHOICE}:a`], "the answer is carried out once, when it can be");
+    broken = false;
+    const recovered = await held.build().applyAction(answer, payloadOf(answer));
+    assert.equal(recovered.ok, true);
+    assert.deepEqual(held.continued, [`${CHOICE}:a`], "it is carried out once, when the disk allows it");
   } finally { await held.cleanup(); }
 });
 
-test("a receipt that cannot be written does not make the answer repeatable", async () => {
+test("an answer with no source message is refused before anything is claimed", async () => {
   const held = await box();
   try {
-    const answer = await held.answer("a");
-    // The effect happened; recording it failed. The claim row is the only
-    // thing standing between that and telling the provider a second time.
-    const effects = createChatActionEffects({
-      chat: {
-        respondToAppToolApproval: async () => held.conversation,
-        respondToChoice: async (request) => { held.answered.push(`${request.choiceId}:${request.selectedOptionId ?? ""}`); },
-        cancelRun: () => true,
-        conversationIdForRun: () => CONVERSATION
-      },
-      emitter: {
-        beginExecution: async () => true,
-        recordExecution: async () => { throw new Error("SQLITE_FULL: database or disk is full"); }
-      },
-      storage: { getConversation: async () => held.conversation },
-      nativeClaims: createNativeTargetClaims({ storage: held.storage, runtimeIdentity: async () => ({ runtimeId: "r", pid: 1, startedAt: "s" }) })
+    const { event } = await held.eventLog.appendLocalEvent({
+      conversationId: CONVERSATION, logScopeId: "chat:actions", kind: "choice.answered",
+      payload: { operationId: "choice:broken", targetKey: TARGET, stateId: "a", detail: {} }
     });
-    await assert.rejects(() => new ChatActionApplier({ effects }).apply(answer));
-    assert.deepEqual(held.answered, [`${CHOICE}:a`]);
-
-    // Redelivered after a restart, with the disk working again.
-    const again = await new ChatActionApplier({ effects: held.build({ runtimeId: "runtime-c" }) }).apply(answer);
-    assert.equal(again.status, "applied");
-    assert.equal(held.answered.length, 1, "a receipt this device could not write is not permission to act again");
-    assert.match(again.detail ?? "", /not repeated/);
-  } finally { await held.cleanup(); }
-});
-
-test("a choice is still answered after the turn that raised it has ended", async () => {
-  const held = await box();
-  try {
-    // The User answers when the member has stopped working; the run is gone
-    // from everywhere. Tying ownership to that run would leave the member
-    // waiting for an answer nobody would ever apply.
-    const effects = createChatActionEffects({
-      chat: {
-        respondToAppToolApproval: async () => held.conversation,
-        respondToChoice: async (request) => { held.answered.push(`${request.choiceId}:${request.selectedOptionId ?? ""}`); },
-        cancelRun: () => true,
-        conversationIdForRun: () => undefined
-      },
-      emitter: { beginExecution: async () => true, recordExecution: async () => undefined },
-      storage: { getConversation: async () => held.conversation },
-      nativeClaims: createNativeTargetClaims({ storage: held.storage, runtimeIdentity: async () => ({ runtimeId: "r", pid: 1, startedAt: "s" }) })
-    });
-    const result = await new ChatActionApplier({ effects }).apply(await held.answer("a"));
-    assert.equal(result.status, "applied");
-    assert.deepEqual(held.answered, [`${CHOICE}:a`], "the member gets the answer it is waiting for");
-  } finally { await held.cleanup(); }
-});
-
-test("an answer whose request names no member is kept, not called already answered", async () => {
-  const held = await box();
-  try {
-    const anonymous = {
-      ...held.conversation,
-      messages: [{ ...held.conversation.messages[0], participantId: undefined }]
-    } as unknown as Conversation;
-    const effects = createChatActionEffects({
-      chat: {
-        respondToAppToolApproval: async () => anonymous,
-        respondToChoice: async () => { held.answered.push("claimed-against-nobody"); },
-        cancelRun: () => true,
-        conversationIdForRun: () => CONVERSATION
-      },
-      emitter: { beginExecution: async () => true, recordExecution: async () => undefined },
-      storage: { getConversation: async () => anonymous },
-      nativeClaims: createNativeTargetClaims({ storage: held.storage, runtimeIdentity: async () => ({ runtimeId: "r", pid: 1, startedAt: "s" }) })
-    });
-    const result = await new ChatActionApplier({ effects }).apply(await held.answer("a"));
-    // Nobody can say whose request this is, so nobody acts on it and nobody
-    // claims it was answered. The member keeps waiting, visibly.
-    assert.deepEqual(held.answered, []);
-    assert.doesNotMatch(result.detail ?? "", /already acted on/,
-      "not knowing who to claim against is not the same as it having been answered");
+    // Rejected before any work: the guard is in applyAction itself, so it
+    // throws on the way in rather than returning a failed result.
+    await assert.rejects(async () => held.build().applyAction(event as ChatEventEnvelope,
+      payloadOf(event as ChatEventEnvelope)), /invalid identities/);
+    assert.equal(await held.storage.nativeCommands().targetEffect(CONVERSATION, TARGET), undefined);
   } finally { await held.cleanup(); }
 });
