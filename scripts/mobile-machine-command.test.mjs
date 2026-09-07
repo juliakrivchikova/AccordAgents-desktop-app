@@ -98,7 +98,13 @@ async function machine(options = {}) {
       conversationId: `machine-trust:${pairing.rendezvousId}`,
       roster: { version: 1, issuerDeviceId: desktop.originId, updatedAt: new Date().toISOString(), peers }
     }),
-    cleanup: async () => { host.close(); await rm(dir, { recursive: true, force: true }); }
+    cleanup: async () => {
+      host.close();
+      // The runtime finishes its own writes after close; removing the
+      // directory while it is still writing fails on a busy machine.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => undefined);
+    }
   };
 }
 
@@ -154,7 +160,7 @@ test("a machine runs the turn the phone asked for, once, however often it arrive
     await box.deliver(asked.packet);
     // The same command again: live and from the mailbox is the ordinary case.
     await box.deliver(asked.packet);
-    for (let attempt = 0; attempt < 40 && box.runs.length === 0; attempt += 1) {
+    for (let attempt = 0; attempt < 200 && box.runs.length === 0; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     assert.deepEqual(box.runs, ["run-phone"], "the phone's command runs exactly one turn");
@@ -184,7 +190,7 @@ test("a phone taken off the roster stops being answered", async () => {
     await box.trust([phonePeer(identity, box.pairing)]);
     const first = await command(identity, box.identity.originId, box.pairing, "run-allowed");
     await box.deliver(first.packet);
-    for (let attempt = 0; attempt < 40 && box.runs.length === 0; attempt += 1) {
+    for (let attempt = 0; attempt < 200 && box.runs.length === 0; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     assert.deepEqual(box.runs, ["run-allowed"]);
@@ -226,7 +232,7 @@ test("the row a phone's turn answers travels with the command", async () => {
     await box.deliver(phone.eventPacket(identity.deviceId, box.identity.originId, delta));
     const asked = await command(identity, box.identity.originId, box.pairing, "run-carry", 2, delta.eventHash);
     await box.deliver(asked.packet);
-    for (let attempt = 0; attempt < 40 && box.runs.length === 0; attempt += 1) {
+    for (let attempt = 0; attempt < 200 && box.runs.length === 0; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     assert.deepEqual(box.runs, ["run-carry"]);

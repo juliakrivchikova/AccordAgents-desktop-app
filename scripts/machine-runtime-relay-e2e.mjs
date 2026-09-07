@@ -19,6 +19,19 @@ const { StorageService } = require(path.join(repoRoot, "dist/main/main/services/
 const { ChatEventLogService } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
 
 const SEAL_KEY = Buffer.alloc(32, 7).toString("base64url");
+// A failed run must not leave machine runtimes behind: they would sit on the
+// relay and make the next run flaky for reasons that have nothing to do with
+// the code under test.
+const spawned = new Set();
+function stopSpawned() {
+  for (const child of spawned) {
+    try { child.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+  spawned.clear();
+}
+process.on("exit", stopSpawned);
+for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => { stopSpawned(); process.exit(1); });
+
 const log = (...args) => console.log("[e2e]", ...args);
 
 async function main() {
@@ -54,6 +67,7 @@ async function main() {
     "--user-data", machineUserData,
     "--name", "E2E machine"
   ], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ACCORD_AGENTS_DEBUG_LOGS: "0" } });
+  spawned.add(child);
   const machineOutput = [];
   child.stdout.on("data", (chunk) => { machineOutput.push(String(chunk)); });
   child.stderr.on("data", (chunk) => { machineOutput.push(String(chunk)); });

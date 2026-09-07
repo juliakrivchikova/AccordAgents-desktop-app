@@ -33,6 +33,19 @@ const { MachineLinkService } = require(path.join(repoRoot, "dist/main/main/servi
 const { StorageService } = require(path.join(repoRoot, "dist/main/main/services/storage.js"));
 const { ChatEventLogService } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
 
+// A failed run must not leave machine runtimes behind: they would sit on the
+// relay and make the next run flaky for reasons that have nothing to do with
+// the code under test.
+const spawned = new Set();
+function stopSpawned() {
+  for (const child of spawned) {
+    try { child.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+  spawned.clear();
+}
+process.on("exit", stopSpawned);
+for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => { stopSpawned(); process.exit(1); });
+
 const log = (...args) => console.log("[trust-e2e]", ...args);
 
 /** What a machine recorded about itself: its own debug log, on its own disk. */
@@ -135,6 +148,7 @@ async function main() {
     child.stdout.on("data", (chunk) => machine.output.push(String(chunk)));
     child.stderr.on("data", (chunk) => machine.output.push(String(chunk)));
     machine.child = child;
+    spawned.add(child);
     return child;
   };
   for (const machine of machines) startMachine(machine);
@@ -229,6 +243,21 @@ async function main() {
   }
   assert.notEqual(outcome.kind, "timeout", "a new turn started by the second device was never answered");
   log("new turn answered:", JSON.stringify(outcome.value ?? outcome.error?.message).slice(0, 160));
+
+  // Stop, from the same device, with the owner still gone.
+  const stopRun = "run-second-stop";
+  const stopping = secondLink.runTurn({
+    conversation, participant: participants[0], triggerMessage: conversation.messages[0],
+    runId: stopRun, pendingMessageId: "pending-second-stop"
+  }).then(() => "finished").catch((error) => `error: ${error.message}`);
+  await wait(500);
+  await secondLink.cancelMachineRun({ machineId: "machine-one", conversationId: conversation.id, runId: stopRun });
+  const stopped = await Promise.race([stopping, wait(60_000).then(() => "timeout")]);
+  log("stop answered with:", stopped);
+  assert.notEqual(stopped, "timeout", "Stop from the second device was never answered");
+  // The machine's own record of the run, once its debug log has been flushed.
+  await waitFor(async () => (await machineLog(machines[0])).includes(stopRun), 20_000,
+    "machine one to record the stopped run in its own log");
 
   // The same command again: one execution, not two.
   const runsBefore = (machines[0].output.join("").match(/machine-host\.turn\.start/g) ?? []).length;

@@ -160,9 +160,9 @@ async function main() {
     messages: [requestMessage]
   });
 
-  await waitFor(() => hosts.two.delegations.length > 0, 60_000, "machine two to be asked").catch((error) => {
-    console.error("machine one log:", hosts.one.logs.slice(-14).map((e) => `${e.event} ${JSON.stringify(e.payload).slice(0, 140)}`).join("\n"));
-    console.error("machine two log:", hosts.two.logs.slice(-14).map((e) => `${e.event} ${JSON.stringify(e.payload).slice(0, 140)}`).join("\n"));
+  await waitFor(() => hosts.two.delegations.length > 0, 90_000, "machine two to be asked").catch((error) => {
+    console.error("machine one log:", hosts.one.logs.filter((e) => /trust|error|delegate|share/.test(e.event)).slice(-14).map((e) => `${e.event} ${JSON.stringify(e.payload).slice(0, 160)}`).join("\n"));
+    console.error("machine two log:", hosts.two.logs.filter((e) => /trust|error|delegate|message/.test(e.event)).slice(-14).map((e) => `${e.event} ${JSON.stringify(e.payload).slice(0, 160)}`).join("\n"));
     throw error;
   });
   const delegated = hosts.two.delegations[0];

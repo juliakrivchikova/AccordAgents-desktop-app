@@ -1600,15 +1600,18 @@ export class MachineHostService {
       ? this.eventChannel
       : this.peers.channel(deviceId);
     if (!channel) throw new Error("That device is not in this machine's trust roster.");
+    void this.debugLogs.write("machine-host.delegate.publish", { deviceId, kind: body.type, eventId });
     await channel.publish({
       conversationId,
       kind: body.type,
       payload: body,
+      // The room this peer's channel actually speaks in: a row written for
+      // any other room would sit in the outbox forever.
       recipients: [{
         deviceId,
         channelId: deviceId === this.options.pairing.issuer.originId
           ? this.options.pairing.rendezvousId
-          : this.trust.peer(deviceId)?.rendezvousId ?? this.options.pairing.rendezvousId
+          : this.peers.roomFor(deviceId) ?? this.options.pairing.rendezvousId
       }],
       ...(eventId ? { eventId } : {})
     });

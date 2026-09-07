@@ -76,6 +76,13 @@ export class MachinePeerFabric {
     return this.connections.get(deviceId)?.channel;
   }
 
+  /** The room a peer's channel speaks in. A delivery row has to name the same
+   *  room the channel flushes, or nothing is ever sent. */
+  roomFor(deviceId: string): string | undefined {
+    const connection = this.connections.get(deviceId);
+    return connection ? this.channelIdFor(connection.peer) : undefined;
+  }
+
   /** Everyone a result should be delivered to, as outbox recipients. */
   recipients(): Array<{ deviceId: string; channelId: string }> {
     return [...this.connections.values()].map((connection) => ({
@@ -143,6 +150,9 @@ export class MachinePeerFabric {
             });
           });
           client.on("error", (error) => { this.options.onError(error instanceof Error ? error : new Error(String(error))); });
+          client.on("state", (state) => {
+            this.options.logger("machine-host.trust.room-state", { rendezvousId: room.rendezvousId, state });
+          });
           await client.connect().catch((error) => {
             this.options.logger("machine-host.trust.connect-retrying", {
               rendezvousId: room.rendezvousId,
@@ -154,7 +164,7 @@ export class MachinePeerFabric {
       this.connections.set(peer.deviceId, {
         peer,
         client,
-        channel: this.buildChannel(peer, room.sealKeyBase64, client)
+        channel: this.buildChannel(peer, room, client)
       });
       // Whatever this room still owes anyone is owed to this device too:
       // a result published while it was not yet trusted must still reach it.
@@ -240,9 +250,13 @@ export class MachinePeerFabric {
       };
   }
 
-  private buildChannel(peer: TrustedPeerAccess, sealKeyBase64: string, client: RelayTunnelClient | undefined): DeviceEventChannel {
+  private buildChannel(
+    peer: TrustedPeerAccess,
+    room: { rendezvousId: string; sealKeyBase64: string },
+    client: RelayTunnelClient | undefined
+  ): DeviceEventChannel {
     const send = async (packet: DeviceEventPacket): Promise<void> => {
-      const ciphertext = await sealMobileRelayPayload(packet, sealKeyBase64);
+      const ciphertext = await sealMobileRelayPayload(packet, room.sealKeyBase64);
       const transport = client ?? this.options.homeClient;
       await transport.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: peer.deviceId });
     };
@@ -251,7 +265,7 @@ export class MachinePeerFabric {
       eventLog: this.options.eventLog,
       // The mailbox of the room this peer is met in, so a device that is not
       // online right now still receives what it was sent.
-      pairing: { ...this.options.home, rendezvousId: peer.rendezvousId, relaySealKeyBase64: sealKeyBase64 },
+      pairing: { ...this.options.home, rendezvousId: room.rendezvousId, relaySealKeyBase64: room.sealKeyBase64 },
       channelId: this.channelIdFor(peer),
       localDeviceId: this.options.selfDeviceId,
       peerDeviceId: peer.deviceId,
