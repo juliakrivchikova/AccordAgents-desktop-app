@@ -23,6 +23,31 @@ function makeRunner(): CliAgentRunner {
   return new CliAgentRunner();
 }
 
+test("idle accounts for native operations before a warm session exists and releases failed operations", async () => {
+  const runner = makeRunner();
+  const participant = { id: "idle-native", kind: "codex-cli" as const, label: "Codex" };
+  let finish!: (value: Awaited<ReturnType<CliAgentRunner["run"]>>) => void;
+  let fail!: (error: Error) => void;
+  const pending = new Promise<Awaited<ReturnType<CliAgentRunner["run"]>>>((resolve, reject) => { finish = resolve; fail = reject; });
+  let calls = 0;
+  const native = runner as unknown as { runCodex(): ReturnType<CliAgentRunner["run"]>; compactCodexSession(): ReturnType<CliAgentRunner["compactSession"]> };
+  native.runCodex = () => { calls++; return pending; };
+  const running = runner.run(participant, "native goal", undefined, undefined, "chat");
+  assert.equal(runner.hasActiveNativeWork(), true);
+  assert.equal(runner.fenceIdleNativeAdmissions(), undefined);
+  finish({ participant, ok: true, content: "complete" }); await running;
+  assert.equal(runner.hasActiveNativeWork(), false);
+  const release = runner.fenceIdleNativeAdmissions()!;
+  assert.equal((await runner.run(participant, "held", undefined, undefined, "chat")).ok, false);
+  assert.equal((await runner.compactSession(participant, undefined, undefined, "chat", undefined, { sessionId: "s" })).ok, false);
+  assert.equal(calls, 1);
+  release();
+  native.runCodex = () => new Promise((_resolve, reject) => { fail = reject; });
+  const failed = runner.run(participant, "fails", undefined, undefined, "chat");
+  fail(new Error("native setup failed")); await assert.rejects(failed, /native setup failed/);
+  assert.equal(runner.hasActiveNativeWork(), false);
+});
+
 async function writeCodexAppServerFixture(fixtureDir: string, source: string): Promise<string> {
   await writeFile(path.join(fixtureDir, "app-server"), source, "utf8");
   return process.execPath;
@@ -3239,6 +3264,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.equal(startedPids.length, participants.length, "both agent responses should be active before app shutdown");
+  assert.equal(runner.hasActiveNativeWork(), true);
+  assert.equal(runner.fenceIdleNativeAdmissions(), undefined, "idle stop cannot fence active provider responses");
 
   await runner.shutdownWarmAgents();
   const results = await Promise.all(runs);
@@ -3246,6 +3273,14 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   for (const pid of startedPids) {
     await assertFixtureProcessStops(pid);
   }
+  assert.equal(runner.hasActiveNativeWork(), false);
+  const releaseIdle = runner.fenceIdleNativeAdmissions();
+  assert.equal(typeof releaseIdle, "function");
+  const refused = await runner.runCodexAppServerWarmOrOneShot(participants[0], "Must stay queued.", fixtureDir, undefined,
+    "chat", undefined, { agentMode: "default", warm: { conversationId: "idle-fenced", participantId: participants[0].id, contextKey: "idle-fenced", idleTimeoutMs: 60_000 } });
+  assert.equal(refused.ok, false);
+  assert.equal((await readFile(pidFile, "utf8")).trim().split(/\r?\n/).length, participants.length, "a fenced command never spawns a replacement provider");
+  releaseIdle();
 });
 
 function testProcessExists(pid: number): boolean {
@@ -3336,6 +3371,8 @@ input.on("line", () => {
     });
     await held;
     helperPid = Number.parseInt((await readFile(helperPidFile, "utf8")).trim(), 10);
+    assert.equal(runner.hasActiveNativeWork(), true, "native background work keeps the machine busy");
+    assert.equal(runner.fenceIdleNativeAdmissions(), undefined);
     controller.abort(new Error("Stopped by user."));
     const first = await firstRun;
     assert.equal(first.ok, true, JSON.stringify(first));

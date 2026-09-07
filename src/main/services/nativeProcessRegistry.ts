@@ -36,6 +36,12 @@ export class NativeProcessRegistry {
     return rows[0] ? readLease(rows[0].receipt) : undefined;
   }
 
+  async openLeases(afterScope = ""): Promise<NativeProcessLease[]> {
+    const rows = await this.query<{ receipt: string }>(`select receipt from native_provider_processes
+      where phase!='closed' and scope>${quote(afterScope)} order by scope limit 100;`);
+    return rows.map(row => readLease(row.receipt));
+  }
+
   async acquire(input: Omit<NativeProcessLease, "generation" | "phase" | "descendants" | "provider">): Promise<NativeProcessLease | undefined> {
     const receipt = JSON.stringify({ ...input, phase: "launching", descendants: [] });
     const rows = await this.query<{ receipt: string }>(`begin immediate;

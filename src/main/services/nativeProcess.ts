@@ -61,7 +61,7 @@ class NativeProcessHandle extends EventEmitter {
   private resolveClosed!: () => void;
   private rejectClosed!: (error: Error) => void;
   readonly closed = new Promise<void>((resolve, reject) => { this.resolveClosed = resolve; this.rejectClosed = reject; });
-  constructor(private readonly send: Send) {
+  constructor(private readonly send: Send, endInputWithoutStopping = false) {
     super();
     void this.closed.catch(() => undefined);
     this.stdout = new NativeOutput(send, "stdout");
@@ -82,7 +82,10 @@ class NativeProcessHandle extends EventEmitter {
         };
         next();
       },
-      final: (callback) => { this.stop(); callback(); }
+      final: (callback) => {
+        if (endInputWithoutStopping) send({ type: "inputEnd" }, callback);
+        else { this.stop(); callback(); }
+      }
     });
     this.stdin.on("error", () => undefined);
   }
@@ -177,7 +180,7 @@ class NativeProcessGuardian {
       this.child.send({ id, ...message }, (error) => callback?.(error));
     };
     return new Promise((resolve, reject) => {
-      const handle = new NativeProcessHandle(send);
+      const handle = new NativeProcessHandle(send, config.endInputWithoutStopping);
       const timer = setTimeout(() => { handle.stop(); reject(new NativeProcessUnavailableError("Native process ownership was not confirmed; no command was sent.")); }, 35_000);
       timer.unref();
       this.sessions.set(id, { handle, ready: false, resolve, reject, timer });
@@ -189,6 +192,9 @@ class NativeProcessGuardian {
 export async function spawnNativeProcess(options: {
   scope: string; dbPath: string; command: string; args: string[];
   cwd?: string; env: NodeJS.ProcessEnv; sqliteExecutable?: string;
+  /** Maintenance pipes end normally; resident provider stdin retains its Stop semantics. */
+  endInputWithoutStopping?: boolean;
+  maintenancePowerDbPath?: string;
 }): Promise<ChildProcessWithoutNullStreams> {
   const key = path.resolve(options.dbPath);
   let guardian = guardians.get(key);

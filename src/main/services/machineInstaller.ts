@@ -19,6 +19,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
 import fs from "node:fs";
 import path from "node:path";
 import type { CloudRunWorkerDoctorReport, CloudRunWorkerSettings, CloudRunWorkerSetupProgress } from "../../shared/types";
@@ -87,6 +88,7 @@ export interface MachineSshExecRequest {
    *  so it is never logged and never placed on a command line. */
   input?: string;
   onStdout?: (chunk: string) => void;
+  maintenance?: MachineMaintenanceTarget;
 }
 
 export type MachineSshExec = (request: MachineSshExecRequest) => Promise<string>;
@@ -96,6 +98,7 @@ export type MachineBundleUpload = (request: {
   localDir: string;
   remoteDir: string;
   timeoutMs: number;
+  maintenance?: MachineMaintenanceTarget;
 }) => Promise<void>;
 
 /** The slice of `SettingsService` this service needs. */
@@ -110,11 +113,11 @@ export interface MachineInstallStore {
  *  and a worker cannot drift apart, and so provider credentials are never
  *  copied from this desktop: `setup` performs a native device-auth login. */
 export interface MachineDoctor {
-  diagnose(settings: CloudRunWorkerSettings, options?: { requiredProviderKind?: "codex-cli" | "claude-code" }): Promise<CloudRunWorkerDoctorReport>;
+  diagnose(settings: CloudRunWorkerSettings, options?: { requiredProviderKind?: "codex-cli" | "claude-code"; maintenance?: MachineMaintenanceTarget }): Promise<CloudRunWorkerDoctorReport>;
   setup(
     settings: CloudRunWorkerSettings,
     onProgress?: (progress: CloudRunWorkerSetupProgress) => void,
-    options?: { requiredProviderKind?: "codex-cli" | "claude-code" }
+    options?: { requiredProviderKind?: "codex-cli" | "claude-code"; maintenance?: MachineMaintenanceTarget }
   ): Promise<CloudRunWorkerDoctorReport>;
 }
 
@@ -272,6 +275,8 @@ export class MachineInstallerService {
     let activated = false;
     let stagedVersion: string | undefined;
     let record = await this.recordFor(request);
+    let maintenance: MachineMaintenanceTarget | undefined;
+    const exec = (input: MachineSshExecRequest): Promise<string> => this.sshExec({ ...input, maintenance });
     let snapshot: MachineInstallSnapshot = {
       machineId: request.machineId,
       operationId: request.operationId,
@@ -330,7 +335,10 @@ export class MachineInstallerService {
       // 1. Preflight. The doctor installs node/git/sqlite3, fixes the Codex
       //    sandbox setting, and performs the provider sign-in ON the machine.
       await emit("preflight", "Checking the machine…");
-      let report = await this.options.doctor.diagnose(worker, { requiredProviderKind: request.requiredProvider });
+      const initial = await this.probe(request.target, { installRoot: record.installRoot || undefined,
+        userDataDir: record.userDataDir || undefined, serviceName: request.serviceName });
+      maintenance = maintenanceFor(initial);
+      let report = await this.options.doctor.diagnose(worker, { requiredProviderKind: request.requiredProvider, maintenance });
       if (!report.ok) {
         // Doctor progress is synchronous and each frame saves a snapshot, so
         // the writes are chained: an out-of-order save would leave the record
@@ -341,7 +349,7 @@ export class MachineInstallerService {
             authUrl: progress.authUrl,
             authCode: progress.authCode
           }));
-        }, { requiredProviderKind: request.requiredProvider });
+        }, { requiredProviderKind: request.requiredProvider, maintenance });
         await progressWrites;
       }
       if (!report.ok) {
@@ -379,6 +387,7 @@ export class MachineInstallerService {
         serviceName: probe.serviceName || DEFAULT_MACHINE_SERVICE_NAME,
         serviceScope: probe.serviceScope ?? (probe.hasPasswordlessSudo ? "system" : "user")
       });
+      maintenance = maintenanceFor(layout);
       record = {
         ...record,
         installRoot: layout.installRoot,
@@ -416,18 +425,19 @@ export class MachineInstallerService {
 
       // 3. Stage the new release beside the running one. Nothing that runs is
       //    touched yet, so a failure here leaves the machine exactly as it was.
-      await this.sshExec({ target: request.target, script: machinePrepareDirectoriesScript(layout), timeoutMs: SHORT_TIMEOUT_MS });
+      await exec({ target: request.target, script: machinePrepareDirectoriesScript(layout), timeoutMs: SHORT_TIMEOUT_MS });
       await emit("transfer", `Copying runtime ${bundle.version} to the machine…`);
       await this.uploadBundle({
         target: request.target,
         localDir: bundle.dir,
         remoteDir: `${layout.releasesDir}/${release}`,
-        timeoutMs: TRANSFER_TIMEOUT_MS
+        timeoutMs: TRANSFER_TIMEOUT_MS,
+        maintenance
       });
 
       await emit("dependencies", "Installing runtime dependencies on the machine…");
       try {
-        await this.sshExec({
+        await exec({
           target: request.target,
           script: machineInstallDependenciesScript(layout, release),
           timeoutMs: DEPENDENCIES_TIMEOUT_MS
@@ -445,7 +455,7 @@ export class MachineInstallerService {
       if (!probe.enrollmentPresent || kind === "install") {
         await emit("enroll", "Installing the enrollment…");
         const enrollmentJson = await this.options.getEnrollmentJson(request.machineId);
-        await this.sshExec({
+        await exec({
           target: request.target,
           script: writeFileFromStdinScript(layout.enrollmentPath, "600"),
           input: enrollmentJson,
@@ -471,7 +481,7 @@ export class MachineInstallerService {
       await emit("drain", wasRunning
         ? "Stopping the running runtime and its provider processes…"
         : "Checking that nothing from an earlier install is still running…");
-      const drain = parseMachineDrainReport(await this.sshExec({
+      const drain = parseMachineDrainReport(await exec({
         target: request.target,
         script: machineDrainScript(layout),
         timeoutMs: DRAIN_TIMEOUT_MS
@@ -504,7 +514,7 @@ export class MachineInstallerService {
       await emit("activate", `Switching the machine to ${bundle.version}…`);
       const installedAt = this.now().toISOString();
       switchAttempted = true;
-      await this.sshExec({
+      await exec({
         target: request.target,
         script: machineActivateReleaseScript(layout, release, {
           version: bundle.version, digest: bundle.digest, installedAt
@@ -523,7 +533,7 @@ export class MachineInstallerService {
         nodePath: probe.nodePath ?? "/usr/bin/node",
         path: probe.loginPath
       });
-      const serviceOutput = await this.sshExec({
+      const serviceOutput = await exec({
         target: request.target,
         script: machineInstallServiceScript(layout, request.target.user ?? "ubuntu"),
         input: unit,
@@ -534,7 +544,7 @@ export class MachineInstallerService {
       }
 
       await emit("starting", "Starting the machine runtime…");
-      await this.sshExec({
+      await exec({
         target: request.target,
         script: machineStartServiceScript(layout),
         timeoutMs: SHORT_TIMEOUT_MS
@@ -606,12 +616,14 @@ export class MachineInstallerService {
     probe: ParsedMachineProbe
   ): Promise<boolean> {
     try {
+      const maintenance = { ...maintenanceFor(layout), runtimePath: `${layout.releasesDir}/${previousRelease}/accordagents-machine.cjs` };
       const drain = parseMachineDrainReport(await this.sshExec({
-        target, script: machineDrainScript(layout), timeoutMs: DRAIN_TIMEOUT_MS
+        target, script: machineDrainScript(layout), timeoutMs: DRAIN_TIMEOUT_MS, maintenance
       }));
       if (!drain.drained) return false;
       await this.sshExec({
         target,
+        maintenance,
         script: machineActivateReleaseScript(layout, previousRelease, {
           version: probe.installedVersion ?? previousRelease,
           digest: probe.installedDigest ?? "",
@@ -619,7 +631,7 @@ export class MachineInstallerService {
         }),
         timeoutMs: SHORT_TIMEOUT_MS
       });
-      await this.sshExec({ target, script: machineStartServiceScript(layout), timeoutMs: SHORT_TIMEOUT_MS });
+      await this.sshExec({ target, script: machineStartServiceScript(layout), timeoutMs: SHORT_TIMEOUT_MS, maintenance });
       return true;
     } catch (error) {
       this.options.logger?.("machines.install.rollback-failed", { error: errorMessage(error) });
@@ -706,7 +718,8 @@ export class MachineInstallerService {
     await this.mirrorSync.syncUp({
       worker: { ...record.target, host: record.target.host },
       localPath: request.localPath,
-      remotePath: repoPath
+      remotePath: repoPath,
+      maintenance: maintenanceFor(record)
     });
     return {
       inspection: await this.inspectProjectMirror(request.machineId, request.localPath),
@@ -728,6 +741,11 @@ export class MachineInstallerService {
 
 function isTerminalPhase(phase: MachineInstallPhase): boolean {
   return phase === "ready" || phase === "error" || phase === "needs-attention";
+}
+
+function maintenanceFor(layout: { installRoot: string; userDataDir: string }): MachineMaintenanceTarget {
+  if (!layout.installRoot || !layout.userDataDir) throw new Error("The machine did not report its maintenance paths.");
+  return { runtimePath: `${layout.installRoot}/current/accordagents-machine.cjs`, userDataDir: layout.userDataDir };
 }
 
 function missingRequirements(probe: ParsedMachineProbe): string[] {
@@ -1014,7 +1032,7 @@ async function defaultMachineSshExec(request: MachineSshExecRequest): Promise<st
   const result = await runCommand("ssh", [
     ...cloudRunSshOptionArgs(worker),
     buildCloudRunSshTarget(worker),
-    remoteCommand
+    machineMaintenanceCommand(request.maintenance, remoteCommand)
   ], {
     input: request.input ?? request.script,
     timeoutMs: request.timeoutMs,
@@ -1028,11 +1046,13 @@ async function defaultBundleUpload(request: {
   localDir: string;
   remoteDir: string;
   timeoutMs: number;
+  maintenance?: MachineMaintenanceTarget;
 }): Promise<void> {
   const worker = workerSettingsFor(request.target) as CloudRunWorkerSettings & { host: string };
   const sshArgs = cloudRunSshOptionArgs(worker);
   const target = buildCloudRunSshTarget(worker);
-  await runCommand("ssh", [...sshArgs, target, `umask 077; mkdir -p ${shellQuotePosix(request.remoteDir)}`], {
+  await runCommand("ssh", [...sshArgs, target, machineMaintenanceCommand(request.maintenance,
+    `bash -c ${shellQuotePosix(`umask 077; mkdir -p ${shellQuotePosix(request.remoteDir)}`)}`)], {
     timeoutMs: 60_000
   });
   await runCommand("rsync", [
@@ -1041,6 +1061,7 @@ async function defaultBundleUpload(request: {
     // Dependencies are installed inside the release directory on the machine;
     // deleting them on every re-upload would reinstall them for nothing.
     "--exclude=node_modules",
+    ...(request.maintenance ? ["--rsync-path", machineMaintenanceCommand(request.maintenance, "rsync")] : []),
     "-e",
     rsyncRshCommand(sshArgs),
     `${path.resolve(request.localDir)}/`,

@@ -1018,6 +1018,9 @@ export class CliAgentRunner {
   private readonly nativeProcessDbPath?: string;
   private readonly warmAgentCreations = new Map<string, Promise<WarmAgentEntry>>();
   private warmShutdown?: Promise<void>;
+  private warmOperations = 0;
+  private nativeOperations = 0;
+  private nativeAdmissionsFenced = false;
 
   constructor(
     private readonly debugLogs?: CliAgentDebugLogger,
@@ -1132,6 +1135,7 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
+    if (this.nativeAdmissionsFenced) return this.failed(participant, new Error("The machine is stopping after idle; this native command did not start."));
     const effectiveRepoPath = this.repoPathForRun(repoPath, diffMode, kind);
     const idleMonitor = options.nativeGoal
       ? this.createNativeGoalIdleMonitor(participant, options.onOutput)
@@ -1147,6 +1151,7 @@ export class CliAgentRunner {
           }
         }
       : options;
+    this.nativeOperations++;
     try {
       if (participant.kind === "codex-cli") {
         return await this.runCodex(participant, prompt, effectiveRepoPath, diffMode, kind, signal, effectiveOptions);
@@ -1159,6 +1164,7 @@ export class CliAgentRunner {
       }
       return { participant, ok: false, content: "", error: `${participant.label} is not a CLI agent.` };
     } finally {
+      this.nativeOperations--;
       idleMonitor?.close();
     }
   }
@@ -1171,20 +1177,37 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<CliAgentCompactResult> {
+    if (this.nativeAdmissionsFenced) return { participant, ok: false, error: "The machine is stopping after idle; compaction did not start." };
     if (!options.sessionId) {
       return { participant, ok: false, error: `${participant.label} does not have an active CLI session to compact.` };
     }
     const effectiveRepoPath = this.repoPathForRun(repoPath, diffMode, kind);
-    if (participant.kind === "codex-cli") {
-      return this.compactCodexSession(participant, effectiveRepoPath, diffMode, kind, signal, options);
-    }
-    if (participant.kind === "claude-code") {
-      return this.compactClaudeSession(participant, effectiveRepoPath, kind, signal, options);
-    }
-    if (participant.kind === "gemini-cli") {
-      return this.compactGeminiSession(participant, effectiveRepoPath, kind, signal, options);
-    }
-    return { participant, ok: false, error: `${participant.label} is not a CLI agent.` };
+    this.nativeOperations++;
+    try {
+      if (participant.kind === "codex-cli") {
+        return await this.compactCodexSession(participant, effectiveRepoPath, diffMode, kind, signal, options);
+      }
+      if (participant.kind === "claude-code") {
+        return await this.compactClaudeSession(participant, effectiveRepoPath, kind, signal, options);
+      }
+      if (participant.kind === "gemini-cli") {
+        return await this.compactGeminiSession(participant, effectiveRepoPath, kind, signal, options);
+      }
+      return { participant, ok: false, error: `${participant.label} is not a CLI agent.` };
+    } finally { this.nativeOperations--; }
+  }
+
+  hasActiveNativeWork(): boolean {
+    return this.nativeOperations > 0 || this.warmOperations > 0 || this.warmAgentCreations.size > 0 || this.closingWarmAgents.size > 0 ||
+      [...this.warmAgents.values()].some(entry => !entry.closed && entry.hasLiveBackgroundWork?.());
+  }
+
+  /** Idle power-off must not race a queued turn/compaction. The caller can
+   * release this gate only before committing its durable power-stop fence. */
+  fenceIdleNativeAdmissions(): (() => void) | undefined {
+    if (this.nativeAdmissionsFenced || this.warmShutdown || this.hasActiveNativeWork()) return undefined;
+    this.nativeAdmissionsFenced = true;
+    return () => { this.nativeAdmissionsFenced = false; };
   }
 
   shutdownWarmAgents(): Promise<void> {
@@ -5806,12 +5829,15 @@ export class CliAgentRunner {
   }
 
   private enqueueWarmRun<T>(entry: WarmAgentEntry, task: () => Promise<T>): Promise<T> {
-    const run = entry.queue.catch(() => undefined).then(task);
+    if (this.nativeAdmissionsFenced) return Promise.reject(new Error("The machine is stopping after idle; this native command did not start."));
+    this.warmOperations++;
+    const run = entry.queue.catch(() => undefined).then(task).finally(() => { this.warmOperations--; });
     entry.queue = run.then(() => undefined, () => undefined);
     return run;
   }
 
   private createTrackedWarmAgent(key: string, construct: () => Promise<WarmAgentEntry>): Promise<WarmAgentEntry> {
+    if (this.nativeAdmissionsFenced) return Promise.reject(new Error("The machine is stopping after idle; this native session did not start."));
     if (this.warmShutdown) return Promise.reject(new Error("The native sessions are shutting down; this command did not start."));
     const existing = this.warmAgentCreations.get(key);
     if (existing) return existing;

@@ -418,7 +418,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
       deviceId: connection.machineDeviceId ?? connection.record.deviceId ?? undefined,
       lastSeenAt: connection.record.lastSeenAt,
       lastHello: connection.record.lastHello,
-      ...(connection.record.lastHello?.outboxError ? { warning: `Results on ${connection.record.name} are not kept on disk: ${connection.record.lastHello.outboxError}` } : {})
+      ...((connection.record.lastHello?.outboxError || connection.record.lastHello?.idleStopWarning) ? {
+        warning: [connection.record.lastHello.outboxError ? `Results on ${connection.record.name} are not kept on disk: ${connection.record.lastHello.outboxError}` : undefined,
+          connection.record.lastHello.idleStopWarning].filter(Boolean).join("; ")
+      } : {})
     }));
   }
 

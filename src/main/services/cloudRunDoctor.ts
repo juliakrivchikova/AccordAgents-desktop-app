@@ -15,6 +15,7 @@ import {
 import { runCommand } from "./command";
 import { isTransientSshError, runWithSshRetries } from "./sshRetry";
 import type { RemoteRunWorkerTarget } from "./remoteRuns";
+import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
 
 const PROBE_TIMEOUT_MS = 25_000;
 const FIX_TIMEOUT_MS = 5 * 60_000;
@@ -51,10 +52,11 @@ const CHECK_LABELS: Record<CloudRunWorkerCheckId, string> = {
 interface CloudRunDoctorOptions {
   requirePersistentStorage?: boolean;
   requiredProviderKind?: ChatProviderKind;
+  maintenance?: MachineMaintenanceTarget;
 }
 
 export interface CloudRunSshExecRequest {
-  worker: RemoteRunWorkerTarget;
+  worker: RemoteRunWorkerTarget & { maintenance?: MachineMaintenanceTarget };
   command: string;
   timeoutMs: number;
   onStdout?: (chunk: string) => void;
@@ -87,7 +89,7 @@ export class CloudRunDoctorService {
     settings: CloudRunWorkerSettings,
     options: CloudRunDoctorOptions = {}
   ): Promise<CloudRunWorkerDoctorReport> {
-    const worker = workerTarget(settings);
+    const worker = workerTarget(settings, options.maintenance);
     if (!worker) {
       return failedReport("connect", "Worker host is not configured.");
     }
@@ -119,7 +121,7 @@ export class CloudRunDoctorService {
     onProgress?: (progress: CloudRunWorkerSetupProgress) => void,
     options: CloudRunDoctorOptions = {}
   ): Promise<CloudRunWorkerDoctorReport> {
-    const worker = workerTarget(settings);
+    const worker = workerTarget(settings, options.maintenance);
     if (!worker) {
       return failedReport("connect", "Worker host is not configured.");
     }
@@ -275,9 +277,9 @@ function stripAnsi(value: string): string {
   return value.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
-function workerTarget(settings: CloudRunWorkerSettings): RemoteRunWorkerTarget | undefined {
+function workerTarget(settings: CloudRunWorkerSettings, maintenance?: MachineMaintenanceTarget): (RemoteRunWorkerTarget & { maintenance?: MachineMaintenanceTarget }) | undefined {
   const normalized = normalizeCloudRunWorkerSettings(settings);
-  return normalized.host ? (normalized as RemoteRunWorkerTarget & { host: string }) : undefined;
+  return normalized.host ? { ...normalized, host: normalized.host, maintenance } : undefined;
 }
 
 // One SSH round-trip probing everything; each line is `key=value`.
@@ -442,13 +444,15 @@ async function defaultSshExec(request: CloudRunSshExecRequest): Promise<string> 
     () => runCommand("ssh", [
       ...sshArgs,
       target,
-      request.command
+      request.worker.maintenance
+        ? machineMaintenanceCommand(request.worker.maintenance, `bash -c ${shellQuotePosix(request.command)}`)
+        : request.command
     ], {
       timeoutMs: request.timeoutMs,
       onStdout
     }),
     {
-      attempts: request.retryAttempts,
+      attempts: request.worker.maintenance ? 1 : request.retryAttempts,
       isTransient: (error) => !producedOutput && isTransientSshError(error)
     }
   );

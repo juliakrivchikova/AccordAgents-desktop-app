@@ -68,6 +68,9 @@ export interface MachineHostOptions {
   createClient?: (pairing: MobilePairingPackage) => RelayTunnelClient;
   now?: () => Date;
   nativeProcessDbPath?: string;
+  /** Commit idle accounting before a completed native run stops being busy. */
+  onNativeActivitySettled?: () => Promise<void>;
+  idleStopWarning?: () => string | undefined;
 }
 
 /** Conversation metadata the machine owns and never takes from the desktop:
@@ -89,6 +92,7 @@ export class MachineHostService {
   /** Finished turns the desktop has not acknowledged (resent on every hello,
    *  kept on disk when an outbox path is configured). */
   private readonly pendingTerminals = new Map<string, MachineTurnFinishedBody>();
+  private readonly durableTerminalIds = new Set<string>();
   /** Conversations that have raised approvals; re-forwarded after a reconnect. */
   private readonly approvalConversations = new Set<string>();
   /** Changes when this runtime starts: the desktop tells a restart from a reconnect by it. */
@@ -131,6 +135,7 @@ export class MachineHostService {
   private unsubscribeRunSettled?: () => void;
   private closed = false;
   private draining = false;
+  private idleFenced = false;
   private readonly turnTasks = new Set<Promise<void>>();
   private readonly commandTasks = new Map<string, Promise<void>>();
   private readonly commandSessions = new Map<string, Promise<void>>();
@@ -182,6 +187,7 @@ export class MachineHostService {
         await this.client.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: pairing.issuer.originId });
       },
       apply: async (event, body) => {
+        if (this.idleFenced) return "deferred";
         const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
         if (!isMachineLinkEnvelope(envelope) || !isMachineDurableMessage(envelope.body) ||
             envelope.body.type === "machine.conversation.backdelta" || envelope.body.type === "machine.turn.finished" || envelope.body.type === "machine.turn.started" ||
@@ -211,7 +217,7 @@ export class MachineHostService {
     this.approvalExecutor = new MachineApprovalExecutor({
       storage: options.eventStorage, deviceId: options.deviceId, chat, getConversation: id => storage.getConversation(id),
       runtimeIdentity: () => this.getRuntimeIdentity(), nativeProcessDbPath: options.nativeProcessDbPath,
-      canApply: () => !this.closed && !this.draining,
+      canApply: () => !this.closed && !this.draining && !this.idleFenced,
       publish: body => this.send(body)
     });
     this.client.on("peer", (event) => {
@@ -251,6 +257,9 @@ export class MachineHostService {
 
   async start(): Promise<void> {
     this.closed = false;
+    for (const eventId of await this.options.eventStorage.storedChatEventIds([...this.pendingTerminals.values()].map(terminalEventId))) {
+      this.durableTerminalIds.add(eventId);
+    }
     for (const state of await this.options.eventStorage.deviceEvents().replicaState(this.options.pairing.rendezvousId)) {
       this.knownMessages.set(state.conversationId, state.messages);
       if (state.syncing) this.syncing.add(state.conversationId);
@@ -287,7 +296,7 @@ export class MachineHostService {
   /** Keep result delivery alive while providers finish closing. In particular,
    * don't turn a runtime shutdown into a User Stop or exit before the result
    * has entered the durable channel. */
-  async shutdown(stopProviders: () => Promise<void>): Promise<void> {
+  async shutdown(stopProviders: () => Promise<void>, closeLink = true): Promise<void> {
     this.draining = true;
     for (const waiting of this.turnsAwaitingCopy.values()) {
       for (const request of waiting) await this.finishQueuedTurn(request, "failed", "The machine shut down before this turn started.");
@@ -305,11 +314,58 @@ export class MachineHostService {
     await this.outbound;
     if ([...this.progressSenders.values()].some(sender => sender.hasPending())) throw new Error("The machine's progress has not been stored; shutdown is not complete.");
     if (this.settlingRuns.size || !this.persistOutbox()) throw new Error("The machine's final results have not been stored; shutdown is not complete.");
-    this.close();
+    if (closeLink) this.close();
   }
+
+  /** Installed before start() when this boot retained an uncertain AWS Stop.
+   * The link can report the warning, but no native or replicated action runs. */
+  retainIdleFence(): void { this.idleFenced = true; }
+
+  publishPowerStatus(): Promise<void> { return this.sendHello(); }
 
   isDesktopConnected(): boolean {
     return Boolean(this.desktopDeviceId);
+  }
+
+  /** All work owned by this runtime, including native continuations and
+   * incomplete copies. Stored, acknowledged-later results do not keep an idle
+   * EC2 box running indefinitely; an unpersisted result does. */
+  async hasWorkForIdleStop(): Promise<boolean> {
+    if (this.closed || this.draining || this.activeTurns.size || this.turnTasks.size || this.commandTasks.size ||
+        this.settlingRuns.size || this.settlingInFlight.size || this.turnsAwaitingCopy.size || this.syncing.size ||
+        this.approvalExecutor.hasActiveWork() || (this.chat.activeParticipantRuns?.().length ?? 0) ||
+        this.outboxError || this.progressErrors.size || [...this.progressSenders.values()].some(sender => sender.hasPending())) return true;
+    if ([...this.pendingTerminals.values()].some(terminal => !this.durableTerminalIds.has(terminalEventId(terminal)))) return true;
+    return (await this.options.eventStorage.nativeCommands().pending()).length > 0;
+  }
+
+  /** The transient gate makes already received events wait in the durable
+   * inbox; they must not fail or be acknowledged as applied during idle drain. */
+  async prepareIdleStop(request: {
+    bootId: string; uptimeMs: number; idleSinceMs: number;
+    fenceNative(): (() => void) | undefined;
+    stopProviders(): Promise<void>;
+  }): Promise<(() => Promise<void>) | undefined> {
+    if (this.idleFenced || await this.hasWorkForIdleStop()) return undefined;
+    this.idleFenced = true;
+    let releaseNative: (() => void) | undefined;
+    let committed = false;
+    try {
+      await this.inbound;
+      await this.eventChannel.flush();
+      if (await this.hasWorkForIdleStop()) return undefined;
+      releaseNative = request.fenceNative();
+      if (!releaseNative) return undefined;
+      committed = await this.options.eventStorage.machinePower().tryFence(request.bootId, request.uptimeMs, randomUUID(), request.idleSinceMs);
+      if (!committed) return undefined;
+      return () => this.shutdown(request.stopProviders, false);
+    } finally {
+      if (!committed) {
+        releaseNative?.();
+        this.idleFenced = false;
+        void this.eventChannel.flush().catch(error => { void this.debugLogs.write("machine-host.idle.resume-error", { message: errorMessage(error) }); });
+      }
+    }
   }
 
   /** Called on every conversation mutation on this machine: approvals raised
@@ -429,7 +485,8 @@ export class MachineHostService {
       instanceId: this.instanceId,
       instanceStartedAt: this.instanceStartedAt,
       ...(typeof this.instanceSequence === "number" ? { instanceSequence: this.instanceSequence } : {}),
-      ...((this.outboxError || this.progressErrors.size) ? { outboxError: [this.outboxError, ...this.progressErrors.values()].filter(Boolean).join("; ") } : {})
+      ...((this.outboxError || this.progressErrors.size) ? { outboxError: [this.outboxError, ...this.progressErrors.values()].filter(Boolean).join("; ") } : {}),
+      ...(this.options.idleStopWarning?.() ? { idleStopWarning: this.options.idleStopWarning() } : {})
     });
   }
 
@@ -453,6 +510,12 @@ export class MachineHostService {
   }
 
   private async handleBody(body: MachineLinkMessage, durable = false): Promise<void> {
+    if (this.idleFenced && body.type === "machine.turn.query") return;
+    // Old, ephemeral frames cannot bypass the idle fence either. Current
+    // peers use the durable inbox and retain these actions until apply.
+    if (this.idleFenced && (isMachineDurableMessage(body) || body.type === "machine.settings.sync")) {
+      throw new Error("The machine is stopping after idle; this action must remain queued.");
+    }
     void this.debugLogs.write("machine-host.message", {
       type: body.type,
       ...("conversationId" in body ? { conversationId: body.conversationId } : {})
@@ -610,6 +673,7 @@ export class MachineHostService {
             this.pendingTerminals.set(body.runId, stored);
             throw new Error("The machine could not persist the terminal acknowledgement.");
           }
+          this.durableTerminalIds.delete(terminalEventId(stored));
           void this.debugLogs.write("machine-host.terminal.acked", { runId: body.runId, at: this.now().toISOString() });
         }
         return;
@@ -1015,7 +1079,7 @@ export class MachineHostService {
   }
 
   private async recoverCommands(): Promise<void> {
-    if (this.closed || this.draining || !this.homeMachineId) return;
+    if (this.closed || this.draining || this.idleFenced || !this.homeMachineId) return;
     let cursor: { commandId: string; logicalTs: string } | undefined;
     for (;;) {
       const commands = await this.options.eventStorage.nativeCommands().pending(cursor);
@@ -1349,13 +1413,17 @@ export class MachineHostService {
       return;
     }
     if (isMachineDurableMessage(body)) {
+      if (body.type === "machine.turn.finished" && !this.durableTerminalIds.has(terminalEventId(body))) {
+        await this.options.onNativeActivitySettled?.();
+      }
       if (body.type === "machine.turn.finished") await this.progressSenders.get(body.runId)?.finish();
       const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : "conversationId" in body ? body.conversationId : "";
       const published = await this.eventChannel.publish({ conversationId, kind: body.type, payload: body,
         ...(body.type === "machine.approval.requested" || body.type === "machine.approval.updated" ? { scope: `approval:${body.approval.id}` } : {}),
         ...(body.type === "machine.approval.result" && body.decisionId ? { eventId: machineApprovalResultId(body.decisionId), scope: `approval:${body.approvalId}` } : {}),
         ...(body.type === "machine.turn.started" ? { eventId: `machine-started:${body.runId}`, scope: `terminal:${body.runId}` } : {}),
-        ...(body.type === "machine.turn.finished" ? { eventId: `machine-terminal:${body.receiptId ?? `${body.runId}:${body.finishedAt}`}`, scope: `terminal:${body.runId}` } : {}) });
+        ...(body.type === "machine.turn.finished" ? { eventId: terminalEventId(body), scope: `terminal:${body.runId}` } : {}) });
+      if (body.type === "machine.turn.finished") this.durableTerminalIds.add(published.eventId);
       if (body.type === "machine.turn.finished") await this.options.eventStorage.nativeCommands().recordOutcome(body.runId, published.eventId);
       if (body.type === "machine.turn.finished" && body.receiptId === machineCommandId(body.runId) && await this.options.eventStorage.nativeCommands().forRun(body.runId)) {
         await this.options.eventStorage.nativeCommands().finish(machineCommandId(body.runId));
@@ -1379,6 +1447,10 @@ export class MachineHostService {
     const ciphertext = await sealMobileRelayPayload(envelope, this.options.pairing.relaySealKeyBase64);
     await this.client.sendCiphertext({ logicalMessageId: envelope.messageId, ciphertext, to });
   }
+}
+
+function terminalEventId(body: MachineTurnFinishedBody): string {
+  return `machine-terminal:${body.receiptId ?? `${body.runId}:${body.finishedAt}`}`;
 }
 
 export function machineMessagesForRun(conversation: Conversation, participantId: string, runId: string): ChatMessage[] {

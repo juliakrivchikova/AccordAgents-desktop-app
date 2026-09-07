@@ -4,6 +4,7 @@ import path from "node:path";
 import { hostPlatform, userDataPath } from "../platform";
 import type { MachineRecord, MachineSettingsSnapshot } from "../../shared/machineLink";
 import type { MachineInstallRecord } from "../../shared/machineInstall";
+import { assertAwsMachinePowerConfig, type AwsMachinePowerConfig } from "../../shared/machinePower";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type {
   StoredMobilePairedDevice,
@@ -142,6 +143,8 @@ interface StoredSettings {
    *  relay seal keys and are stored sealed, keyed by MachineRecord.pairingKey. */
   machines?: MachineRecord[];
   encryptedMachinePairings?: string;
+  /** This host's power key is never part of participant settings replication. */
+  encryptedMachinePower?: string;
   /** How each machine was installed from THIS desktop (SSH access, install
    *  root, service, installed version). Never travels to a machine: it carries
    *  this desktop's way in. */
@@ -1756,6 +1759,7 @@ export class SettingsService {
   private readonly remoteSessionCleanupPath: string;
   private remoteSessionCleanupMutation: Promise<void> = Promise.resolve();
   private storedState: StoredSettings | undefined;
+  private storedReadError?: unknown;
   private storedLoad: Promise<StoredSettings> | undefined;
   private storedWriteQueue: Promise<void> = Promise.resolve();
   private assistantProviderMutation: Promise<void> = Promise.resolve();
@@ -2674,6 +2678,9 @@ export class SettingsService {
         try {
           const raw = await readFile(this.settingsPath, "utf8");
           const parsed = JSON.parse(raw) as StoredSettings;
+          if (Object.hasOwn(parsed, "encryptedMachinePower") && (typeof parsed.encryptedMachinePower !== "string" || !parsed.encryptedMachinePower.trim())) {
+            throw new Error("The stored machine power key has an invalid format.");
+          }
           const merged = this.mergeDefaults(parsed);
           this.storedState = merged;
           if (this.hasLegacyProviderData(parsed)) {
@@ -2684,7 +2691,8 @@ export class SettingsService {
             });
           }
           return merged;
-        } catch {
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.storedReadError = error;
           const fallback = this.mergeDefaults({ settingsVersion: 1, roundLimitDefault: 1, providers: DEFAULT_PROVIDERS });
           this.storedState = fallback;
           return fallback;
@@ -2785,6 +2793,8 @@ export class SettingsService {
       ),
       machines: this.normalizeMachines(settings.machines),
       machineInstalls: this.normalizeMachineInstalls(settings.machineInstalls),
+      encryptedMachinePower: typeof settings.encryptedMachinePower === "string" && settings.encryptedMachinePower.trim()
+        ? settings.encryptedMachinePower : undefined,
       encryptedMachinePairings: typeof settings.encryptedMachinePairings === "string" && settings.encryptedMachinePairings.trim()
         ? settings.encryptedMachinePairings
         : undefined
@@ -3344,6 +3354,22 @@ export class SettingsService {
     return this.readMachinePairings(stored)[pairingKey];
   }
 
+  async getMachinePower(): Promise<AwsMachinePowerConfig | undefined> {
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Machine power settings could not be read; an unreadable file is not an absent power key.");
+    if (!stored.encryptedMachinePower) return undefined;
+    const config: unknown = JSON.parse(this.openJson(stored.encryptedMachinePower));
+    assertAwsMachinePowerConfig(config);
+    return config;
+  }
+
+  async saveMachinePower(config: AwsMachinePowerConfig): Promise<void> {
+    assertAwsMachinePowerConfig(config);
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Machine power settings could not be read; the existing file was left untouched.");
+    await this.writeStored({ ...stored, encryptedMachinePower: this.sealJson(JSON.stringify(config)) }, true);
+  }
+
   /** What a machine needs to run participants exactly like this desktop:
    *  roles, rules, saved prompts, participant presets, prompt-context and
    *  limit settings, and the manually configured agent environment values.
@@ -3367,6 +3393,7 @@ export class SettingsService {
       machines: _machines,
       machineInstalls: _machineInstalls,
       encryptedMachinePairings: _pairings,
+      encryptedMachinePower: _power,
       remoteSessionCleanupTombstones: _tombstones,
       lastRepoPath: _lastRepoPath,
       ...shareable
@@ -3427,6 +3454,7 @@ export class SettingsService {
       machines: stored.machines,
       machineInstalls: stored.machineInstalls,
       encryptedMachinePairings: stored.encryptedMachinePairings,
+      encryptedMachinePower: stored.encryptedMachinePower,
       remoteSessionCleanupTombstones: stored.remoteSessionCleanupTombstones,
       lastRepoPath: stored.lastRepoPath
     };

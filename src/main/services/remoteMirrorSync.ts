@@ -4,6 +4,7 @@ import path from "node:path";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, shellQuotePosix } from "./cloudRunWorkers";
 import { CommandError, runCommand } from "./command";
 import type { RemoteRunWorkerTarget } from "./remoteRuns";
+import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
 
 export const REMOTE_MIRROR_DIRNAME = "mirrors";
 export const REMOTE_MIRROR_SYNC_TIMEOUT_MS = 30 * 60_000;
@@ -51,6 +52,7 @@ export interface RemoteMirrorSyncRequest {
   worker: RemoteRunWorkerTarget;
   localPath: string;
   remotePath: string;
+  maintenance?: MachineMaintenanceTarget;
   signal?: AbortSignal;
   timeoutMs?: number;
   contentMode?: "repository" | "exact";
@@ -216,7 +218,7 @@ export const defaultRemoteMirrorSync: RemoteMirrorSyncRunner = {
       await runCommand("ssh", [
         ...sshArgs,
         target,
-        `umask 077; mkdir -p ${shellQuotePosix(request.remotePath)}`
+        machineMaintenanceCommand(request.maintenance, `bash -c ${shellQuotePosix(`umask 077; mkdir -p ${shellQuotePosix(request.remotePath)}`)}`)
       ], {
         timeoutMs: 30_000,
         signal: request.signal
@@ -227,7 +229,8 @@ export const defaultRemoteMirrorSync: RemoteMirrorSyncRunner = {
         rshCommand: rsyncRshCommand(sshArgs),
         source: `${localDir}/`,
         destination: `${target}:${escapeRemoteRsyncPath(request.remotePath)}/`,
-        contentMode: request.contentMode
+        contentMode: request.contentMode,
+        rsyncPath: request.maintenance ? machineMaintenanceCommand(request.maintenance, "rsync") : undefined
       }), {
         timeoutMs: request.timeoutMs ?? REMOTE_MIRROR_SYNC_TIMEOUT_MS,
         signal: request.signal,
@@ -519,7 +522,8 @@ async function queryRemoteMirrorUsage(
     `du -sk ${quotedPath} 2>/dev/null | awk '{print "used_kb="$1}' || printf 'used_kb=0\\n'`
   ].join("; ");
   try {
-    const result = await runCommand("ssh", [...sshArgs, target, command], {
+    const result = await runCommand("ssh", [...sshArgs, target,
+      machineMaintenanceCommand(request.maintenance, `bash -c ${shellQuotePosix(command)}`)], {
       timeoutMs: 30_000,
       signal: request.signal
     });
@@ -662,11 +666,13 @@ export function buildMirrorUpSyncRsyncArgs(params: {
   source: string;
   destination: string;
   contentMode?: "repository" | "exact";
+  rsyncPath?: string;
 }): string[] {
   if (params.contentMode === "exact") {
     return [
       "-az",
       "--delete",
+      ...(params.rsyncPath ? ["--rsync-path", params.rsyncPath] : []),
       ...params.progressArgs,
       "-e",
       params.rshCommand,
@@ -678,6 +684,7 @@ export function buildMirrorUpSyncRsyncArgs(params: {
     "-az",
     "--delete",
     "--delete-excluded",
+    ...(params.rsyncPath ? ["--rsync-path", params.rsyncPath] : []),
     ...params.progressArgs,
     ...REMOTE_MIRROR_UP_SYNC_PROTECT_FILTERS,
     ...UP_SYNC_EXCLUDE_ARGS,

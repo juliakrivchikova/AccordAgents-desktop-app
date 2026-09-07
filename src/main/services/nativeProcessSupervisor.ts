@@ -7,6 +7,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { Writable, type Duplex } from "node:stream";
 import { NativeProcessRegistry, type NativeProcessLease } from "./nativeProcessRegistry";
+import { openMachinePowerStore } from "./machinePowerStore";
 import { nativeHostIdentity, verifiedNativeHostReboot, type NativeHostIdentity } from "./nativeHostIdentity";
 import {
   capturePosixDescendantsFromTable, capturePosixProcessIdentity, hasLiveCapturedPosixProcesses,
@@ -24,6 +25,8 @@ export interface NativeSupervisorStart {
   args: string[];
   cwd?: string;
   electronRunAsNode?: string;
+  endInputWithoutStopping?: boolean;
+  maintenancePowerDbPath?: string;
   env: NodeJS.ProcessEnv;
 }
 
@@ -33,6 +36,7 @@ interface SessionIO {
   stop: () => void;
   stopRequested: boolean;
   input?: (data: Buffer, sequence: number) => void;
+  inputEnd?: () => void;
   resumeOutput(stream: string, sequence: number): void;
   report(message: object): Promise<void>;
 }
@@ -59,6 +63,7 @@ export async function supervise(config: NativeSupervisorStart, io: SessionIO): P
   let stdinClosed = false;
   let exitCode: number | null = null;
   let exitSignal: NodeJS.Signals | null = null;
+  const power = config.maintenancePowerDbPath ? openMachinePowerStore(config.maintenancePowerDbPath, config.sqliteExecutable) : undefined;
   const stop = (): void => {
     io.stopRequested = true;
     if (!stopping) { stopping = true; stoppedAt = Date.now(); }
@@ -75,6 +80,14 @@ export async function supervise(config: NativeSupervisorStart, io: SessionIO): P
   if (!process.connected || io.stopRequested) stop();
   if (!stopping) {
     try {
+      // The guardian already owns a durable native receipt. Its power hold can
+      // therefore never be left with an ambiguous "not launched yet" owner.
+      // A stop that won the race refuses this hold before any shell is spawned.
+      if (power && !await power.acquireGuardedMaintenance({ leaseId: config.scope, scope: config.scope,
+        owner: supervisor, host, registryPath: config.dbPath })) {
+        throw new Error("The machine is already stopping; maintenance was not started.");
+      }
+      if (!process.connected || io.stopRequested) throw new Error("The maintenance controller disconnected before admission.");
       const env = { ...config.env };
       if (config.electronRunAsNode === undefined) delete env.ELECTRON_RUN_AS_NODE;
       else env.ELECTRON_RUN_AS_NODE = config.electronRunAsNode;
@@ -104,6 +117,11 @@ export async function supervise(config: NativeSupervisorStart, io: SessionIO): P
         io.input = (data, sequence) => {
           if (!child || stopping) { void io.report({ type: "inputAck", sequence, error: "The native process is closing." }); return; }
           child.stdin.write(data, (error) => { void io.report({ type: "inputAck", sequence, ...(error ? { error: error.message } : {}) }); });
+        };
+        io.inputEnd = () => {
+          if (!config.endInputWithoutStopping) return;
+          stdinClosed = true;
+          child?.stdin.end();
         };
         void io.report({ type: "ready", provider, generation: lease.generation });
       }
@@ -144,6 +162,14 @@ export async function supervise(config: NativeSupervisorStart, io: SessionIO): P
             await Promise.all([flush(io.stdout), flush(io.stderr)]);
           }
           await registry.update({ ...lease, phase: "closed", shutdownReason: "processes-gone" });
+          // Closure is durable first. A disk outage here keeps this guardian
+          // and the power hold alive; retrying cleanup never re-executes work.
+          if (power) {
+            for (;;) {
+              try { await power.releaseMaintenance(config.scope, host.boot); break; }
+              catch (error) { await io.report({ type: "error", message: text(error) }); await delay(500); }
+            }
+          }
           await io.report({ type: "closed", exitCode, signal: exitSignal });
           child?.stdout.unpipe(io.stdout);
           child?.stderr.unpipe(io.stderr);
@@ -252,6 +278,7 @@ if (require.main === module) {
     const existing = sessions.get(message.id);
     if (message.type !== "start") {
       if ((message.type as string) === "stop") existing?.stop();
+      else if ((message.type as string) === "inputEnd") existing?.inputEnd?.();
       else if ((message.type as string) === "input" && message.data && typeof message.sequence === "number") existing?.input?.(message.data, message.sequence);
       else if ((message.type as string) === "outputAck" && message.stream && typeof message.sequence === "number") existing?.resumeOutput(message.stream, message.sequence);
       return;

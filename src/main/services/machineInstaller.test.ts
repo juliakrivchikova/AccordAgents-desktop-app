@@ -125,7 +125,7 @@ function harness(options: {
   const progress: MachineInstallSnapshot[] = [];
   const logged: Array<Record<string, unknown>> = [];
   const syncedUp: string[] = [];
-  let probeCalls = 0;
+  let activated = false;
   const doctorCalls: Array<{ call: string; options?: { requiredProviderKind?: string } }> = [];
   let waitedForVersion: string | undefined;
   const bundleDir = options.bundleDir ?? bundleFixture();
@@ -156,9 +156,9 @@ function harness(options: {
     logger: (event, payload) => logged.push({ event, ...payload }),
     sshExec: async (request) => {
       calls.push(request);
+      if (request.script.includes("mv -Tf")) activated = true;
       if (request.script.includes("printf 'home=%s")) {
-        probeCalls += 1;
-        if (probeCalls > 1) {
+        if (activated) {
           return options.probeAfter ?? probeOutput({
             state: JSON.stringify({ version: "1.4.0", digest: "new" }),
             "active-release": activeReleaseAfter ?? "",

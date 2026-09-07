@@ -39,6 +39,7 @@ import { DEVICE_EVENT_SCHEMA_SQL, DeviceEventStorage, deviceEventAppendSql } fro
 import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEventBlobStorage";
 import { NATIVE_COMMAND_SCHEMA_SQL, NativeCommandStore } from "./nativeCommandStore";
 import { MACHINE_PROGRESS_SCHEMA, MachineProgressStore } from "./machineProgressStore";
+import { MACHINE_POWER_SCHEMA, MachinePowerStore } from "./machinePowerStore";
 
 const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
 const MAX_MESSAGE_PAGE_LIMIT = 200;
@@ -399,6 +400,7 @@ export class StorageService {
       ${DEVICE_EVENT_BLOB_SCHEMA_SQL}
       ${NATIVE_COMMAND_SCHEMA_SQL}
       ${MACHINE_PROGRESS_SCHEMA}
+      ${MACHINE_POWER_SCHEMA}
     `);
     await this.pruneStaleRunCancelRequests();
     await this.ensureColumn("conversations", "body_json", "text");
@@ -1508,6 +1510,10 @@ export class StorageService {
     });
   }
 
+  machinePower(): MachinePowerStore {
+    return new MachinePowerStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
+  }
+
   deviceEventBlobs(): DeviceEventBlobStorage {
     return new DeviceEventBlobStorage({
       init: () => this.init(),
@@ -1687,6 +1693,19 @@ export class StorageService {
       `select hex(envelope_json) as envelopeHex from chat_events where event_id = ${sqlString(eventId)} limit 1;`
     );
     return rows[0] ? parseHexJson<ChatEventEnvelope>(rows[0].envelopeHex, `chat event ${eventId}`) : undefined;
+  }
+
+  /** Identity-only lookup: checking retained outcomes must not load growing
+   * conversation/terminal payloads. SQL stays on stdin in bounded pages. */
+  async storedChatEventIds(eventIds: readonly string[]): Promise<Set<string>> {
+    await this.init();
+    const found = new Set<string>();
+    for (let offset = 0; offset < eventIds.length; offset += 100) {
+      const page = eventIds.slice(offset, offset + 100);
+      const rows = await this.queryJson<{ eventId: string }>(`select event_id as eventId from chat_events where event_id in (${page.map(sqlString).join(",")});`);
+      for (const row of rows) found.add(row.eventId);
+    }
+    return found;
   }
 
   async hasChatEvent(conversationId: string, eventId: string): Promise<boolean> {

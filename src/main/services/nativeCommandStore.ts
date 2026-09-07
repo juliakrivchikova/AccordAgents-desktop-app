@@ -89,6 +89,7 @@ export class NativeCommandStore {
       select conversation_id, ${quote(effect.approvalId)}, ${quote(effect.participantId)}, event_id,
         ${quote(effect.runtimeId)}, ${effect.pid}, ${quote(effect.startedAt)} from chat_events
       where event_id = ${quote(effect.eventId)} and conversation_id = ${quote(effect.conversationId)} and kind = 'machine.approval.decision'
+        and not exists(select 1 from machine_power_state where stop_fence is not null)
       on conflict(conversation_id, approval_id) do nothing returning event_id as eventId;`));
     if (!rows.length && !await this.approvalEffect(effect.conversationId, effect.approvalId)) throw new Error("The signed approval decision is not stored.");
     return rows.length === 1;
@@ -103,6 +104,7 @@ export class NativeCommandStore {
         ${quote(command.runId)}, ${quote(command.terminalEventId)}, 'queued',
         exists(select 1 from native_run_cancellations where run_id = ${quote(command.runId)} and conversation_id = ${quote(command.conversationId)})
       from chat_events where event_id = ${quote(command.eventId)} and conversation_id = ${quote(command.conversationId)}
+        and not exists(select 1 from machine_power_state where stop_fence is not null)
       on conflict(command_id) do update set event_id = case
         when event_id = excluded.event_id and conversation_id = excluded.conversation_id
           and participant_id = excluded.participant_id and run_id = excluded.run_id
@@ -138,6 +140,7 @@ export class NativeCommandStore {
       insert into native_session_executors(conversation_id, participant_id, generation, runtime_id, pid, started_at)
       select conversation_id, participant_id, 1, ${quote(owner.runtimeId)}, ${owner.pid}, ${quote(owner.startedAt)}
         from native_commands where command_id = ${quote(commandId)} and phase = 'queued' and cancelled = 0
+          and not exists(select 1 from machine_power_state where stop_fence is not null)
       on conflict(conversation_id, participant_id) do update set
         generation = generation + 1, runtime_id = excluded.runtime_id, pid = excluded.pid, started_at = excluded.started_at, released = 0
         where released = 1;
@@ -145,6 +148,7 @@ export class NativeCommandStore {
         executor_generation = (select generation from native_session_executors s
           where s.conversation_id = native_commands.conversation_id and s.participant_id = native_commands.participant_id)
       where command_id = ${quote(commandId)} and phase = 'queued' and cancelled = 0
+        and not exists(select 1 from machine_power_state where stop_fence is not null)
         and exists(select 1 from native_session_executors s where s.conversation_id = native_commands.conversation_id
           and s.participant_id = native_commands.participant_id and s.runtime_id = ${quote(owner.runtimeId)}
           and s.pid = ${owner.pid} and s.started_at = ${quote(owner.startedAt)} and s.released = 0)

@@ -8,6 +8,39 @@ import { createHeadlessPlatform, setHostPlatform } from "../platform";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+test("a machine power key stays sealed and local through settings export/import and secret-store failures", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-power-settings-"));
+  const config = { version: 1 as const, instanceId: "i-0123456789abcdef0",
+    credentials: { accessKeyId: "AKIAFAKEMACHINEPOWER1", secretAccessKey: "synthetic-power-secret", region: "us-east-1" } };
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  try {
+    await make().saveMachinePower(config);
+    const raw = await readFile(path.join(dir, "settings.json"), "utf8");
+    assert.equal(raw.includes(config.credentials.secretAccessKey), false);
+    assert.equal(raw.includes(config.credentials.accessKeyId), false);
+    assert.ok(JSON.parse(raw).encryptedMachinePower.startsWith("sealed:"));
+    assert.deepEqual(await make().getMachinePower(), config);
+    const snapshot = await make().exportMachineSettingsSnapshot();
+    assert.equal(snapshot.settingsJson.includes("MachinePower"), false);
+    assert.equal(JSON.stringify(snapshot).includes(config.credentials.secretAccessKey), false);
+    await make().importMachineSettingsSnapshot({ ...snapshot, settingsJson: JSON.stringify({
+      ...JSON.parse(snapshot.settingsJson), encryptedMachinePower: "a different machine's key"
+    }) });
+    assert.deepEqual(await make().getMachinePower(), config);
+    const platform = createHeadlessPlatform({ userDataDir: dir, appVersion: "test" });
+    setHostPlatform({ ...platform, secrets: { ...platform.secrets, isEncryptionAvailable: () => false } });
+    await assert.rejects(make().getMachinePower(), /secret store/);
+    await assert.rejects(make().saveMachinePower(config), /secret store/);
+    const disk = JSON.parse(await readFile(path.join(dir, "settings.json"), "utf8"));
+    assert.equal(disk.encryptedMachinePower, JSON.parse(raw).encryptedMachinePower, "failed writes never erase the existing key");
+    await writeFile(path.join(dir, "settings.json"), "damaged-settings");
+    await assert.rejects(make().getMachinePower(), /could not be read/);
+    await assert.rejects(make().saveMachinePower(config), /left untouched/);
+    assert.equal(await readFile(path.join(dir, "settings.json"), "utf8"), "damaged-settings");
+  } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
+});
+
 test("machine run intents and held stops survive a fresh SettingsService reading the disk", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-settings-"));
   const file = path.join(dir, "settings.json");

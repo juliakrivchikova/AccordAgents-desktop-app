@@ -37,6 +37,7 @@ export interface MachineSettingsSnapshot {
 }
 
 export interface MachineHelloBody {
+  idleStopWarning?: string;
   type: "machine.hello";
   deviceId: string;
   machineName: string;

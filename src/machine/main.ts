@@ -30,6 +30,11 @@ import { CliAgentRunner } from "../main/services/cliAgents";
 import { setCommandDebugLogger } from "../main/services/command";
 import { DebugLogService } from "../main/services/debugLogs";
 import { MachineHostService } from "../main/services/machineHost";
+import { MachineIdlePower } from "../main/services/machineIdlePower";
+import { MachineMaintenance } from "../main/services/machineMaintenance";
+import { nativeHostIdentity } from "../main/services/nativeHostIdentity";
+import { assertAwsMachinePowerConfig } from "../shared/machinePower";
+import { assertCurrentAwsMachine } from "../main/services/awsMachineIdentity";
 import { PluginService } from "../main/services/plugins";
 import { SettingsService } from "../main/services/settings";
 import { StorageService } from "../main/services/storage";
@@ -39,12 +44,17 @@ interface MachineArgs {
   enrollmentPath: string;
   userDataDir?: string;
   machineName?: string;
+  configurePower?: boolean;
+  maintenanceCommand?: string[];
 }
 
 function parseArgs(argv: string[]): MachineArgs {
   let enrollmentPath = process.env.ACCORDAGENTS_MACHINE_ENROLLMENT?.trim() ?? "";
   let userDataDir = process.env.ACCORDAGENTS_USER_DATA_DIR?.trim() || undefined;
   let machineName = process.env.ACCORDAGENTS_MACHINE_NAME?.trim() || undefined;
+  let configurePower = false;
+  let maintenance = false;
+  let maintenanceCommand: string[] | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const next = (): string => {
@@ -55,21 +65,64 @@ function parseArgs(argv: string[]): MachineArgs {
       index += 1;
       return value;
     };
-    if (arg === "--enrollment") {
+    if (arg === "--" && maintenance) {
+      maintenanceCommand = argv.slice(index + 1);
+      break;
+    } else if (arg === "--maintenance") {
+      maintenance = true;
+    } else if (arg === "--enrollment") {
       enrollmentPath = next();
     } else if (arg === "--user-data") {
       userDataDir = next();
     } else if (arg === "--name") {
       machineName = next();
+    } else if (arg === "--configure-power") {
+      configurePower = true;
     } else if (arg === "--help" || arg === "-h") {
-      console.log("Usage: accordagents-machine --enrollment <pairing.json> [--user-data <dir>] [--name <machine name>]");
+      console.log("Usage: accordagents-machine --enrollment <pairing.json> [--user-data <dir>] [--name <machine name>]\nSetup only: accordagents-machine --configure-power --user-data <dir> (bounded JSON on stdin; keys never in argv)");
       process.exit(0);
     }
   }
-  if (!enrollmentPath) {
+  if (maintenance && (!maintenanceCommand?.length || !userDataDir || configurePower)) {
+    throw new Error("Maintenance requires --user-data <dir> -- <command> [args] and cannot configure power at the same time.");
+  }
+  if (!enrollmentPath && !configurePower && !maintenance) {
     throw new Error("A machine enrollment file is required (--enrollment <pairing.json> or ACCORDAGENTS_MACHINE_ENROLLMENT).");
   }
-  return { enrollmentPath: path.resolve(enrollmentPath), userDataDir, machineName };
+  return { enrollmentPath: path.resolve(enrollmentPath), userDataDir, machineName, configurePower, maintenanceCommand };
+}
+
+async function runMachineMaintenance(args: MachineArgs): Promise<void> {
+  setHostPlatform(createHeadlessPlatform({ userDataDir: args.userDataDir }));
+  const storage = new StorageService({ sqliteExecutable: "sqlite3" });
+  await storage.init();
+  const maintenance = new MachineMaintenance(storage.machinePower(), path.join(userDataPath(), "native-processes.sqlite3"),
+    path.join(userDataPath(), "accordagents.sqlite3"));
+  const [command, ...commandArgs] = args.maintenanceCommand!;
+  const code = await maintenance.run({ command, args: commandArgs, env: process.env,
+    stdin: process.stdin, stdout: process.stdout, stderr: process.stderr });
+  process.exit(code);
+}
+
+/** Installer-only key hand-off: the same host secret store seals it before
+ * acknowledging success. Participant configuration cannot invoke this path. */
+async function configureMachinePower(args: MachineArgs): Promise<void> {
+  if (process.platform !== "linux") throw new Error("AWS machine power is configured on its Linux host.");
+  const chunks: Buffer[] = []; let bytes = 0;
+  for await (const chunk of process.stdin) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > 16 * 1024) throw new Error("The machine power setup payload is too large.");
+    chunks.push(buffer);
+  }
+  let config: unknown;
+  try { config = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+  catch { throw new Error("The machine power setup payload is invalid JSON."); }
+  assertAwsMachinePowerConfig(config);
+  await assertCurrentAwsMachine(config);
+  setHostPlatform(createHeadlessPlatform({ userDataDir: args.userDataDir }));
+  await new SettingsService().saveMachinePower(config);
+  console.log("Machine power configured.");
 }
 
 function readEnrollment(enrollmentPath: string): MobilePairingPackage {
@@ -168,6 +221,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   const identity = await chatEventLogService.getOrCreateDeviceIdentity();
   await storageService.machineProgress().recoverLocal(identity.originId);
 
+  let idlePower: MachineIdlePower | undefined;
   const host = new MachineHostService(chatService, storageService, settingsService, debugLogService, {
     pairing: enrollment,
     deviceId: identity.originId,
@@ -179,6 +233,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     outboxPath: path.join(userDataPath(), "machine-outbox.json"),
     nativeProcessDbPath: path.join(userDataPath(), "native-processes.sqlite3"),
     detectProviders: () => cliAgentRunner.detectAgents(),
+    onNativeActivitySettled: () => idlePower?.noteActivity() ?? Promise.resolve(),
+    idleStopWarning: () => idlePower?.warning(),
     onSettingsImported: async () => {
       cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());
     },
@@ -187,18 +243,40 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     }
   });
   hostRef = host;
+  const powerConfig = await settingsService.getMachinePower();
+  if (!powerConfig) {
+    const priorPower = await storageService.machinePower().read();
+    if (priorPower && await storageService.machinePower().stopFence(priorPower.bootId)) {
+      const hostIdentity = await nativeHostIdentity();
+      if (!hostIdentity || hostIdentity.boot === priorPower.bootId) {
+        throw new Error("This machine has an unresolved idle stop but its power configuration is missing; native work remains held.");
+      }
+      await storageService.machinePower().write({ version: 1, bootId: hostIdentity.boot, idleSinceMs: null });
+    }
+  }
+  if (powerConfig) {
+    idlePower = new MachineIdlePower({ config: powerConfig, store: storageService.machinePower(), host,
+      runner: cliAgentRunner, nativeProcessDbPath: path.join(userDataPath(), "native-processes.sqlite3"),
+      log: (event, payload) => { void debugLogService.write(event, payload); } });
+    await idlePower.start();
+  }
   await host.start();
+  idlePower?.ready();
   console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.relayUrl} (user data: ${userDataPath()})`);
 
   return async () => {
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
+    idlePower?.close();
     await appMcpService.stop();
   };
 }
 
 if (require.main === module) {
-  startMachine(parseArgs(process.argv.slice(2)))
+  const args = parseArgs(process.argv.slice(2));
+  (args.maintenanceCommand ? runMachineMaintenance(args).then(() => undefined) :
+    args.configurePower ? configureMachinePower(args).then(() => undefined) : startMachine(args))
     .then((stop) => {
+      if (!stop) return;
       let stopping = false;
       const shutdown = (): void => {
         if (stopping) return;

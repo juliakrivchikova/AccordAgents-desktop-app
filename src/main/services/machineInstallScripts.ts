@@ -69,10 +69,17 @@ const PREAMBLE = [
  *  parent: the pattern is part of our own command line, so an unfiltered
  *  `pgrep -f` would report the drain script as the runtime it is draining. */
 const PROCESS_HELPERS = [
+  // A guarded drain is itself below a maintenance controller and guardian.
+  // Exclude its actual ancestors, never a name-based class of other runtimes.
+  "SELF_ANCESTORS=' '",
+  "ancestor=$$",
+  "while [ \"$ancestor\" -gt 1 ] 2>/dev/null; do",
+  "  SELF_ANCESTORS=\"$SELF_ANCESTORS$ancestor \"",
+  "  ancestor=$(awk '/^PPid:/ {print $2}' \"/proc/$ancestor/status\" 2>/dev/null) || break",
+  "done",
   "own_pids() {",
   "  pgrep -f \"$1\" 2>/dev/null | while read -r p; do",
-  "    [ \"$p\" = \"$$\" ] && continue",
-  "    [ \"$p\" = \"$PPID\" ] && continue",
+  "    case \"$SELF_ANCESTORS\" in *\" $p \"*) continue ;; esac",
   "    printf '%s\\n' \"$p\"",
   "  done",
   "}",
