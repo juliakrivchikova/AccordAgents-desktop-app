@@ -36,6 +36,7 @@ import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventCh
 import type { ChatEventLogService } from "./chatEventLog";
 import type { StorageService } from "./storage";
 import type { ChatActionApplier } from "./chatActionApplier";
+import { permissionDecisionAction, chatActionEventId } from "./chatActionEmitter";
 import type { ChatActionDependency } from "../../shared/deviceEventChannel";
 import type { MachineTrustRoster, TrustedPeerAccess } from "../../shared/machineTrust";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
@@ -264,13 +265,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (!connection?.eventChannel) {
       throw new Error("The machine that raised this approval has not introduced its durable channel.");
     }
-    const decisionId = `machine-approval:${request.approvalId}:${createHash("sha256").update(JSON.stringify({ approve: request.approve, scope: request.scope,
-      draftOverride: request.draftOverride, codexDecisionId: request.codexDecisionId })).digest("hex")}`;
+    const action = permissionDecisionAction({ ...request, decisionId: request.codexDecisionId });
+    const decisionId = chatActionEventId(action.payload.operationId);
     const previous = await this.options.eventStorage.getChatEvent(decisionId);
-    if (previous && (previous.originId !== this.options.desktopDeviceId || previous.kind !== "machine.approval.decision" || previous.conversationId !== request.conversationId)) {
+    if (previous && (previous.originId !== this.options.desktopDeviceId || previous.kind !== action.kind || previous.conversationId !== request.conversationId)) {
       throw new Error("The retained approval decision has inconsistent ownership.");
     }
-    const retained = previous ? await this.options.eventStorage.deviceEventBlobs().hydrate(previous.payload) as import("../../shared/machineLink").MachineApprovalDecisionBody : undefined;
     // The call resolves with the machine's outcome: an edited proposal or a
     // native decision the machine rejects is an error here, not a silent no-op.
     let waiter!: { resolve: () => void; reject: (error: Error) => void };
@@ -291,23 +291,16 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }, APPROVAL_RESULT_TIMEOUT_MS);
     timeout.unref?.();
     try {
-      await this.send(connection, retained ?? {
-        type: "machine.approval.decision",
-        decisionId,
-        conversationId: request.conversationId,
-        approvalId: request.approvalId,
-        approve: request.approve,
-        ...(request.scope ? { scope: request.scope } : {}),
-        ...(request.draftOverride ? { draftOverride: request.draftOverride } : {}),
-        ...(request.codexDecisionId ? { codexDecisionId: request.codexDecisionId } : {}),
-        decidedAt: this.now().toISOString()
-      });
+      // The journal action is the command. Do not also send an independent
+      // machine approval RPC: either could execute first and reject the other.
+      const publication = { ...action, eventId: decisionId };
+      await connection.eventChannel.publish({ ...publication, sharedScope: true });
+      await this.publishChatAction(publication);
       await request.onQueued?.(decisionId, connection.record.name);
       const savedResult = await this.options.eventStorage.getChatEvent(`machine-approval-result:${decisionId}`);
       if (savedResult && savedResult.originId === connection.record.deviceId && savedResult.kind === "machine.approval.result" && savedResult.conversationId === request.conversationId) {
         await this.handleBody(connection, await this.options.eventStorage.deviceEventBlobs().hydrate(savedResult.payload) as import("../../shared/machineLink").MachineApprovalResultBody);
       }
-      if (request.onQueued) return;
       await outcome;
     } finally {
       clearTimeout(timeout);

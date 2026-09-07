@@ -1,9 +1,9 @@
 /**
  * What a peer actually does when a decision made somewhere else arrives.
  *
- * Only the peer that holds the pending request acts on it, and only once. The
- * claim is the receipt in the event log, so the guarantee survives a restart
- * as well as a second answer from another device.
+ * Only the peer that holds the request acts on it. Native approvals claim the
+ * shared execution ledger before applying and keep their result for retries;
+ * an event-log receipt by itself is not an execution lock.
  *
  * Built once and shared by the desktop and the machine runtime, so a card
  * answered from the phone is applied the same way wherever the member lives.
@@ -12,8 +12,12 @@
 import type { ChatActionEffectPort } from "./chatActionApplier";
 import type { ChatActionEmitter } from "./chatActionEmitter";
 import type { Conversation, RespondToChatAppToolApprovalRequest } from "../../shared/types";
+import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import type { ChatActionPayload } from "../../shared/chatActionEvents";
+import type { MachineApprovalResultBody } from "../../shared/machineLink";
 
 export interface ChatActionEffectChat {
+  ownsAppToolApproval?(conversationId: string, approvalId: string): Promise<boolean | undefined>;
   respondToAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;
   respondToChoice(request: {
     conversationId: string;
@@ -36,13 +40,25 @@ export function createChatActionEffects(deps: {
   chat: ChatActionEffectChat;
   emitter: Pick<ChatActionEmitter, "beginExecution" | "recordExecution">;
   storage: ChatActionEffectStorage;
+  applyApproval?: (event: ChatEventEnvelope, payload: ChatActionPayload) => Promise<MachineApprovalResultBody>;
 }): ChatActionEffectPort {
   return {
+    ...(deps.applyApproval ? { applyApproval: async (event: ChatEventEnvelope, payload: ChatActionPayload) => {
+      const result = await deps.applyApproval!(event, payload);
+      const effect = result.ok ? `${payload.detail?.approve === true ? "allowed" : "denied"} the app tool request`
+        : result.error ?? "The approval's application was not confirmed.";
+      if ((result.ok || result.uncertain) && await deps.emitter.beginExecution(payload.targetKey)) {
+        await deps.emitter.recordExecution({ conversationId: event.conversationId, targetKey: payload.targetKey,
+          effect, ...(result.uncertain ? { uncertain: true } : {}) });
+      }
+      return effect;
+    } } : {}),
     async owns(conversationId, targetKey) {
       const run = /^run:(.+)$/.exec(targetKey);
       if (run) return deps.chat.conversationIdForRun(run[1]) !== undefined;
       const approval = /^approval:(.+)$/.exec(targetKey);
       if (approval) {
+        if (deps.chat.ownsAppToolApproval) return deps.chat.ownsAppToolApproval(conversationId, approval[1]);
         const conversation = await deps.storage.getConversation(conversationId);
         const pending = (conversation?.metadata as { pendingAppToolApprovals?: Array<{ id: string; status: string }> } | undefined)
           ?.pendingAppToolApprovals ?? [];

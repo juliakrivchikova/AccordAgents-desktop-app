@@ -93,8 +93,10 @@ export interface ChatActionApplyResult {
 /** What this peer can actually do when a decision from elsewhere arrives.
  *  Only the peer that owns the native request executes it, and only once. */
 export interface ChatActionEffectPort {
+  /** Uses the shared native approval ledger; a receipt lookup alone is not an execution claim. */
+  applyApproval?(event: ChatEventEnvelope, payload: ChatActionPayload): Promise<string>;
   /** True when the pending request behind this target lives on this peer. */
-  owns(conversationId: string, targetKey: string): Promise<boolean>;
+  owns(conversationId: string, targetKey: string): Promise<boolean | undefined>;
   /** Claims the right to perform the effect. False when a receipt already
    *  exists: the provider has been told and cannot be told again. */
   claim(targetKey: string): Promise<boolean>;
@@ -168,8 +170,16 @@ export class ChatActionApplier {
   ): Promise<ChatActionApplyResult> {
     const effects = this.deps.effects;
     if (!effects) return { ...base, status: "applied" };
-    if (!await effects.owns(event.conversationId, payload.targetKey)) {
+    const owns = await effects.owns(event.conversationId, payload.targetKey);
+    if (owns === undefined) return { ...base, status: "deferred", detail: "The request this answer belongs to has not arrived yet." };
+    if (!owns) {
       return { ...base, status: "applied" };
+    }
+    if (kind === "permission.decided" && effects.applyApproval) {
+      // Every answer needs its own delivery result, including an answer which
+      // lost to another device. The native ledger admits at most one effect.
+      const detail = await effects.applyApproval(event, payload);
+      return { ...base, status: "applied", detail };
     }
     if (!await effects.claim(payload.targetKey)) {
       return {

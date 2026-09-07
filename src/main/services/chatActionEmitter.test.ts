@@ -142,6 +142,16 @@ test("an answer to a request this peer never saw opened is superseded, not inven
   assert.equal(folded.superseded[0].reason, "state-changed");
 });
 
+test("concurrent delivery callbacks publish one immutable execution receipt", async () => {
+  let writes = 0;
+  const emitter = new ChatActionEmitter({ executedBy: "owner", hasEvent: async () => writes > 0,
+    publish: async () => { await new Promise<void>(resolve => setImmediate(resolve)); writes++; } });
+  const result = { conversationId: "chat", targetKey: "approval:one", effect: "allowed" };
+  await Promise.all([emitter.recordExecution(result), emitter.recordExecution(result)]);
+  await emitter.recordExecution(result);
+  assert.equal(writes, 1);
+});
+
 test("a failed publish is reported and never pretends the decision was recorded", async () => {
   const h = harness({ failPublish: true });
   let providerCalled = false;

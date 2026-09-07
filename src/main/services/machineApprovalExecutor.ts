@@ -5,6 +5,7 @@ import type { ChatAppToolApproval, ChatAppToolApprovalPolicy, Conversation } fro
 import type { ChatService } from "./chat";
 import type { StorageService } from "./storage";
 import { verifyNativeExecutorGone } from "./nativeExecutorRecovery";
+import type { ChatActionPayload } from "../../shared/chatActionEvents";
 
 export function machineApprovalResultId(decisionId: string): string { return `machine-approval-result:${decisionId}`; }
 
@@ -12,7 +13,7 @@ export function machineApprovalResultId(decisionId: string): string { return `ma
  * validation runs before the SQL claim, and a native decision waits for the
  * provider adapter's delivery receipt before success is published. */
 export class MachineApprovalExecutor {
-  private readonly active = new Map<string, Promise<void>>();
+  private readonly active = new Map<string, Promise<MachineApprovalResultBody>>();
   private readonly results = new Map<string, MachineApprovalResultBody>();
   private readonly outcomes = new Map<string, Pick<MachineApprovalResultBody, "ok" | "error" | "uncertain">>();
 
@@ -20,6 +21,7 @@ export class MachineApprovalExecutor {
     storage: StorageService;
     deviceId: string;
     chat: Pick<ChatService, "respondToAppToolApproval">;
+    progress?: (progress: import("../../shared/types").ReviewProgress) => void;
     getConversation(id: string): Promise<Conversation | undefined>;
     runtimeIdentity(): Promise<NativeRuntimeIdentity>;
     canApply?: () => boolean;
@@ -29,9 +31,9 @@ export class MachineApprovalExecutor {
 
   hasActiveWork(): boolean { return this.active.size > 0; }
 
-  private async hasResult(decisionId: string, conversationId: string, approvalId: string): Promise<boolean> {
+  private async hasResult(decisionId: string, conversationId: string, approvalId: string): Promise<MachineApprovalResultBody | undefined> {
     const event = await this.options.storage.getChatEvent(machineApprovalResultId(decisionId));
-    if (!event) return false;
+    if (!event) return undefined;
     if (event.originId !== this.options.deviceId || event.kind !== "machine.approval.result" || event.conversationId !== conversationId) {
       throw new Error("The retained approval receipt has inconsistent ownership.");
     }
@@ -39,10 +41,26 @@ export class MachineApprovalExecutor {
     if (body?.type !== event.kind || body.conversationId !== conversationId || body.approvalId !== approvalId || body.decisionId !== decisionId || typeof body.ok !== "boolean") {
       throw new Error("The retained approval receipt has inconsistent identities.");
     }
-    return true;
+    return body as MachineApprovalResultBody;
   }
 
-  apply(event: ChatEventEnvelope, decision: MachineApprovalDecisionBody): Promise<void> {
+  applyAction(event: ChatEventEnvelope, payload: ChatActionPayload): Promise<MachineApprovalResultBody> {
+    const detail = payload.detail;
+    if (event.kind !== "permission.decided" || !payload.targetKey?.startsWith("approval:") ||
+        !payload.targetKey.slice(9) || !detail || typeof detail.approve !== "boolean") {
+      throw new Error("The approval action has invalid identities or an invalid answer.");
+    }
+    return this.apply(event, {
+      type: "machine.approval.decision", decisionId: event.eventId, conversationId: event.conversationId,
+      approvalId: payload.targetKey.slice(9), approve: detail.approve, decidedAt: "",
+      ...(detail.scope === "once" || detail.scope === "chat" ? { scope: detail.scope } : {}),
+      ...(typeof detail.codexDecisionId === "string" ? { codexDecisionId: detail.codexDecisionId } : {}),
+      ...(detail.draftOverride && typeof detail.draftOverride === "object"
+        ? { draftOverride: detail.draftOverride as MachineApprovalDecisionBody["draftOverride"] } : {})
+    });
+  }
+
+  apply(event: ChatEventEnvelope, decision: MachineApprovalDecisionBody): Promise<MachineApprovalResultBody> {
     const current = this.active.get(event.eventId);
     if (current) return current;
     const work = this.applyOnce(event, decision);
@@ -51,18 +69,20 @@ export class MachineApprovalExecutor {
     return work;
   }
 
-  private async applyOnce(event: ChatEventEnvelope, decision: MachineApprovalDecisionBody): Promise<void> {
-    if (!decision.decisionId || decision.decisionId !== event.eventId || event.kind !== decision.type || event.conversationId !== decision.conversationId) {
+  private async applyOnce(event: ChatEventEnvelope, decision: MachineApprovalDecisionBody): Promise<MachineApprovalResultBody> {
+    if (!decision.decisionId || decision.decisionId !== event.eventId ||
+        (event.kind !== decision.type && event.kind !== "permission.decided") || event.conversationId !== decision.conversationId) {
       throw new Error("The approval decision has inconsistent identities.");
     }
     const { storage } = this.options;
-    if (await this.hasResult(event.eventId, decision.conversationId, decision.approvalId)) return;
+    const saved = await this.hasResult(event.eventId, decision.conversationId, decision.approvalId);
+    if (saved) return saved;
     const retained = this.results.get(event.eventId);
     if (retained) {
       await this.options.publish(retained);
       this.results.delete(event.eventId);
       this.outcomes.delete(event.eventId);
-      return;
+      return retained;
     }
     const owner = await this.options.runtimeIdentity();
     const previous = await storage.nativeCommands().approvalEffect(decision.conversationId, decision.approvalId);
@@ -85,7 +105,7 @@ export class MachineApprovalExecutor {
         const conversation = await this.options.chat.respondToAppToolApproval({
           conversationId: decision.conversationId, approvalId: decision.approvalId,
           approve: decision.approve, scope: decision.scope, draftOverride: decision.draftOverride, codexDecisionId: decision.codexDecisionId
-        }, undefined, {
+        }, this.options.progress, {
           awaitNativeDelivery: true,
           beforeApply: async (approval) => {
             try {
@@ -120,5 +140,6 @@ export class MachineApprovalExecutor {
     await this.options.publish(body);
     this.results.delete(event.eventId);
     this.outcomes.delete(event.eventId);
+    return body;
   }
 }

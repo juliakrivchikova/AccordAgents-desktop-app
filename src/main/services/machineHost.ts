@@ -155,6 +155,10 @@ export class MachineHostService {
     return outcome.dependency ? { deferred: true, dependency: outcome.dependency } : "deferred";
   }
 
+  applyApprovalAction(event: ChatEventEnvelope, payload: import("../../shared/chatActionEvents").ChatActionPayload): Promise<import("../../shared/machineLink").MachineApprovalResultBody> {
+    return this.approvalExecutor.applyAction(event, payload);
+  }
+
   private outboxUnreadable = false;
   /** Why the outbox is not on disk right now (write failed / unreadable);
    *  travels in hello so the desktop can show it. */
@@ -598,6 +602,15 @@ export class MachineHostService {
     // before any application when the machine becomes available again.
     if (this.idleFenced || this.options.hostStopCommitted?.()) return "deferred";
     if (peer && stableJson(this.trust.peer(peer.deviceId) ?? null) !== stableJson(peer)) throw new Error("Machine controller authorization changed.");
+    if (event.kind === "permission.decided" && this.options.chatActions?.handles(event, body)) {
+      // Delivery to a provider may wait; keep Stop and other chats moving.
+      void this.applyChatAction(event, body).then(outcome => {
+        if (outcome === "applied") return channel?.confirmApplied(event);
+      }).catch(error => {
+        void this.debugLogs.write("machine-host.approval.retry-pending", { eventId: event.eventId, message: errorMessage(error) });
+      });
+      return "deferred";
+    }
     // A chat action from any of the owner's devices is applied here as well,
     // so a signature or a superseded change is not something only the sender
     // knows about.

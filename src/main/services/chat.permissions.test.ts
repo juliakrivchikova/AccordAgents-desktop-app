@@ -9861,6 +9861,18 @@ test("startAccord creates structured accord skill mention and dispatches only th
   assert.equal(result.sourceMessageId, userMessage.id);
 });
 
+test("only the participant's home owns an approval, including completed receipts", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-home" };
+  const conversation = chatConversation([participant]);
+  conversation.metadata.pendingAppToolApprovals = [permissionApproval(participant,
+    { kind: "portable", permissions: ["repoRead"], reason: "Read the project" }, { id: "owner-card", status: "approved" })];
+  const { service } = testService({ conversation });
+  assert.equal(await service.ownsAppToolApproval(conversation.id, "owner-card"), false);
+  service.setHostMachineId("machine-home");
+  assert.equal(await service.ownsAppToolApproval(conversation.id, "owner-card"), true);
+  assert.equal(await service.ownsAppToolApproval(conversation.id, "not-arrived"), undefined);
+});
+
 test("startAccord rejects Chat Assistant as facilitator", async () => {
   const assistant = {
     ...chatParticipant("codex-cli"),

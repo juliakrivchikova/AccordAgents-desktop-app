@@ -21,6 +21,24 @@ function event(kind: string, payload: ChatActionPayload): ChatEventEnvelope {
   };
 }
 
+test("an answer arriving before its request remains pending, while a foreign owner's answer does not execute here", async () => {
+  let owner: boolean | undefined;
+  let applied = 0;
+  const applier = new ChatActionApplier({ effects: {
+    owns: async () => owner, claim: async () => { throw new Error("A receipt lookup is not admission"); },
+    perform: async () => { throw new Error("Must use the native approval executor"); }, record: async () => {},
+    applyApproval: async () => { applied++; return "allowed"; }
+  } });
+  const answer = event("permission.decided", { operationId: "answer", targetKey: "approval:card", detail: { approve: true } });
+  assert.equal((await applier.apply(answer)).status, "deferred");
+  owner = false;
+  assert.equal((await applier.apply(answer)).status, "applied");
+  assert.equal(applied, 0);
+  owner = true;
+  assert.equal((await applier.apply(answer)).status, "applied");
+  assert.equal(applied, 1);
+});
+
 function artifacts(revisions: Record<string, { version: number; contentHash: string; superseded: boolean }>) {
   const inserted: Array<Record<string, unknown>> = [];
   const seen = new Set<string>();

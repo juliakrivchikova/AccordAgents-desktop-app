@@ -11,8 +11,8 @@
  * The once-only rule is per TARGET, not per operation. A card answered "allow"
  * and then "deny" from another device produces two decisions, and both stay
  * visible, but only the first is executed: the provider was already told, and
- * a second answer cannot un-tell it. `beginExecution` is the guard, and it is
- * durable, so it still holds after a restart.
+ * a second answer cannot un-tell it. Native approvals use the durable command
+ * ledger before execution. Receipt lookup here is only a projection check.
  */
 
 import type { ChatActionKind, ChatActionPayload } from "../../shared/chatActionEvents";
@@ -53,6 +53,23 @@ export function approvalTarget(approvalId: string): string {
   return `approval:${approvalId}`;
 }
 
+export function permissionDecisionAction(request: {
+  conversationId: string; approvalId: string; approve: boolean; scope?: string;
+  decisionId?: string; draftOverride?: ChatAppToolApprovalRequest;
+}): ChatActionEmission {
+  const detail = {
+    approve: request.approve,
+    ...(request.scope ? { scope: request.scope } : {}),
+    ...(request.decisionId ? { codexDecisionId: request.decisionId } : {}),
+    ...(request.draftOverride ? { draftOverride: request.draftOverride } : {})
+  };
+  return { conversationId: request.conversationId, kind: "permission.decided", payload: {
+    operationId: `permission:${request.approvalId}:${request.approve ? "allow" : "deny"}${
+      request.scope || request.decisionId || request.draftOverride ? `:${answerHash(detail)}` : ""}`,
+    targetKey: approvalTarget(request.approvalId), stateId: request.approve ? "approved" : "denied", detail
+  } };
+}
+
 export function choiceTarget(choiceId: string): string {
   return `choice:${choiceId}`;
 }
@@ -66,6 +83,7 @@ export function runTarget(runId: string): string {
 }
 
 export class ChatActionEmitter {
+  private readonly receiptWrites = new Map<string, Promise<void>>();
   constructor(private readonly deps: ChatActionEmitterDeps) {}
 
   private now(): string {
@@ -84,26 +102,9 @@ export class ChatActionEmitter {
     decisionId?: string;
     draftOverride?: ChatAppToolApprovalRequest;
   }): Promise<string> {
-    const targetKey = approvalTarget(request.approvalId);
-    const answer = {
-      approve: request.approve,
-      ...(request.scope ? { scope: request.scope } : {}),
-      ...(request.decisionId ? { codexDecisionId: request.decisionId } : {}),
-      ...(request.draftOverride ? { draftOverride: request.draftOverride } : {})
-    };
-    const operationId = `permission:${request.approvalId}:${request.approve ? "allow" : "deny"}${
-      request.scope || request.decisionId || request.draftOverride ? `:${answerHash(answer)}` : ""}`;
-    await this.emit({
-      conversationId: request.conversationId,
-      kind: "permission.decided",
-      payload: {
-        operationId,
-        targetKey,
-        stateId: request.approve ? "approved" : "denied",
-        detail: answer
-      }
-    });
-    return targetKey;
+    const action = permissionDecisionAction(request);
+    await this.emit(action);
+    return action.payload.targetKey;
   }
 
   async choiceAnswered(request: {
@@ -200,11 +201,11 @@ export class ChatActionEmitter {
   }
 
   /**
-   * Claims the right to perform the external effect for a target.
+   * Checks whether an execution receipt already exists for a target.
    *
    * Returns false when a receipt for that target is already in the log: the
-   * provider has been told, and the caller must not tell it again. Durable, so
-   * a restart between the decision and the effect does not answer twice.
+   * provider has been told. This read is not an atomic execution claim and
+   * cannot guard a native effect on its own.
    */
   async beginExecution(targetKey: string): Promise<boolean> {
     const already = await this.deps.hasEvent(chatActionReceiptEventId(targetKey));
@@ -228,18 +229,27 @@ export class ChatActionEmitter {
     effect: string;
     uncertain?: boolean;
   }): Promise<void> {
-    await this.emit({
-      conversationId: request.conversationId,
-      kind: "execution.receipt",
-      payload: {
-        operationId: `receipt:${request.targetKey}`,
-        targetKey: request.targetKey,
-        effect: request.effect,
-        executedBy: this.deps.executedBy,
-        executedAt: this.now(),
-        ...(request.uncertain ? { uncertain: true } : {})
-      } as ChatActionPayload
-    });
+    const current = this.receiptWrites.get(request.targetKey);
+    if (current) return current;
+    const write = (async () => {
+      if (await this.deps.hasEvent(chatActionReceiptEventId(request.targetKey))) return;
+      await this.emit({
+        conversationId: request.conversationId,
+        kind: "execution.receipt",
+        payload: {
+          operationId: `receipt:${request.targetKey}`,
+          targetKey: request.targetKey,
+          effect: request.effect,
+          executedBy: this.deps.executedBy,
+          executedAt: this.now(),
+          ...(request.uncertain ? { uncertain: true } : {})
+        } as ChatActionPayload
+      });
+    })();
+    this.receiptWrites.set(request.targetKey, write);
+    try { await write; } finally {
+      if (this.receiptWrites.get(request.targetKey) === write) this.receiptWrites.delete(request.targetKey);
+    }
   }
 
   /** A failed local commit must stop the caller before it performs an effect.

@@ -69,6 +69,21 @@ const COMMAND_COLUMNS = `command_id as commandId, event_id as eventId, conversat
 export class NativeCommandStore {
   constructor(private readonly database: Database) {}
 
+  /** Headers only: recover this device's recorded answers without loading the
+   * chat or scanning every message body into memory. Results from the owning
+   * machine also retire the corresponding local recovery candidate. */
+  async pendingApprovalActions(originId: string, afterSeq = 0): Promise<Array<{ eventId: string; originSeq: number }>> {
+    if (!originId || !Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("Invalid approval recovery cursor.");
+    await this.database.init();
+    return this.database.query(`select e.event_id as eventId, e.origin_seq as originSeq from chat_events e
+      where e.origin_id = ${quote(originId)} and e.log_scope_id = 'chat:actions' and e.kind = 'permission.decided'
+        and e.origin_seq > ${afterSeq}
+        and (not exists(select 1 from chat_events r where r.event_id = 'machine-approval-result:' || e.event_id)
+          or exists(select 1 from native_approval_effects a where a.event_id = e.event_id
+            and not exists(select 1 from chat_events r where r.event_id = 'chat-action:receipt:approval:' || a.approval_id)))
+      order by e.origin_seq limit 100;`);
+  }
+
   async approvalEffect(conversationId: string, approvalId: string): Promise<NativeApprovalEffect | undefined> {
     await this.database.init();
     return (await this.database.query<NativeApprovalEffect>(`select conversation_id as conversationId,
@@ -88,7 +103,7 @@ export class NativeCommandStore {
       conversation_id, approval_id, participant_id, event_id, runtime_id, pid, started_at)
       select conversation_id, ${quote(effect.approvalId)}, ${quote(effect.participantId)}, event_id,
         ${quote(effect.runtimeId)}, ${effect.pid}, ${quote(effect.startedAt)} from chat_events
-      where event_id = ${quote(effect.eventId)} and conversation_id = ${quote(effect.conversationId)} and kind = 'machine.approval.decision'
+      where event_id = ${quote(effect.eventId)} and conversation_id = ${quote(effect.conversationId)} and kind in ('machine.approval.decision', 'permission.decided')
         and not exists(select 1 from machine_power_state where stop_fence is not null)
       on conflict(conversation_id, approval_id) do nothing returning event_id as eventId;`));
     if (!rows.length && !await this.approvalEffect(effect.conversationId, effect.approvalId)) throw new Error("The signed approval decision is not stored.");

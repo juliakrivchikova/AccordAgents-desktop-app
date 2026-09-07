@@ -9,6 +9,74 @@ import { MachineApprovalExecutor, machineApprovalResultId } from "./machineAppro
 import type { MachineApprovalDecisionBody, MachineApprovalResultBody } from "../../shared/machineLink";
 import type { ChatApprovalExecutionGuard } from "./chat";
 import type { ChatAppToolApproval, Conversation } from "../../shared/types";
+import { permissionDecisionAction, chatActionEventId } from "./chatActionEmitter";
+
+test("a canonical permission and a legacy delivery share one durable effect boundary", async () => {
+  const f = await fixture();
+  try {
+    const action = await f.action();
+    const first = await f.executor.applyAction(action, action.payload);
+    assert.equal(first.ok, true);
+    const legacy = await f.decision("legacy-second", false);
+    await f.executor.apply(legacy, legacy.payload);
+    assert.equal(f.applied(), 1);
+    f.restart();
+    assert.deepEqual(await f.executor.applyAction(action, action.payload), first);
+    assert.equal(f.applied(), 1);
+    assert.equal((await f.result("legacy-second"))?.ok, false);
+  } finally { await f.close(); }
+});
+
+test("restart recovers a recorded local answer whose native execution never began", async () => {
+  const f = await fixture();
+  try {
+    const event = await f.action();
+    f.restart();
+    const rows = await f.storage.nativeCommands().pendingApprovalActions(event.originId);
+    assert.deepEqual(rows, [{ eventId: event.eventId, originSeq: event.originSeq }]);
+    for (const row of rows) {
+      const stored = await f.storage.getChatEvent(row.eventId);
+      await f.executor.applyAction(stored!, stored!.payload as import("../../shared/chatActionEvents").ChatActionPayload);
+    }
+    assert.equal(f.applied(), 1);
+    assert.equal((await f.storage.nativeCommands().pendingApprovalActions(event.originId)).length, 1,
+      "the execution receipt is also repaired after its write was lost");
+    await new ChatEventLogService(f.storage).appendLocalEvent({ conversationId: event.conversationId,
+      logScopeId: "chat:actions", eventId: "chat-action:receipt:approval:approval", kind: "execution.receipt", payload: {} });
+    assert.deepEqual(await f.storage.nativeCommands().pendingApprovalActions(event.originId), []);
+  } finally { await f.close(); }
+});
+
+test("canonical decision retries a failed receipt without reapplying, and survives result delivery loss", async () => {
+  const f = await fixture();
+  try {
+    const event = await f.action();
+    await f.sql("create trigger reject_result before insert on chat_events when new.kind = 'machine.approval.result' begin select raise(abort, 'SQLITE_FULL'); end;");
+    await assert.rejects(f.executor.applyAction(event, event.payload), /SQLITE_FULL/);
+    await assert.rejects(f.executor.applyAction(event, event.payload), /SQLITE_FULL/);
+    assert.equal(f.applied(), 1);
+    await f.sql("drop trigger reject_result;");
+    const result = await f.executor.applyAction(event, event.payload);
+    assert.equal(result.ok, true);
+    f.restart();
+    assert.deepEqual(await f.executor.applyAction(event, event.payload), result);
+    assert.equal(f.applied(), 1);
+  } finally { await f.close(); }
+});
+
+test("canonical claim failure never reaches the provider and remains retryable", async () => {
+  const f = await fixture();
+  try {
+    const event = await f.action();
+    await f.sql("create trigger reject_claim before insert on native_approval_effects begin select raise(abort, 'SQLITE_FULL'); end;");
+    await assert.rejects(f.executor.applyAction(event, event.payload), /SQLITE_FULL/);
+    assert.equal(f.applied(), 0);
+    assert.equal(await f.result(event.eventId), undefined);
+    await f.sql("drop trigger reject_claim;");
+    assert.equal((await f.executor.applyAction(event, event.payload)).ok, true);
+    assert.equal(f.applied(), 1);
+  } finally { await f.close(); }
+});
 
 test("an approval effect executes once across duplicate decisions and executor restart", async () => {
   const f = await fixture();
@@ -126,6 +194,11 @@ async function fixture() {
   return { storage, get executor() { return executor; }, applied: () => applied,
     setCanApply: (value: boolean) => { canApply = value; },
     restart: () => { instance++; executor = create(); },
+    action: async () => {
+      const action = permissionDecisionAction({ conversationId: "chat", approvalId: "approval", approve: true,
+        decisionId: "native-allow", scope: "once" });
+      return (await log.appendLocalEvent({ ...action, logScopeId: "chat:actions", eventId: chatActionEventId(action.payload.operationId) })).event;
+    },
     decision: async (id: string, approve = true, codexDecisionId?: string) => (await log.appendLocalEvent<MachineApprovalDecisionBody>({
       conversationId: "chat", logScopeId: "decisions", kind: "machine.approval.decision", eventId: id,
       payload: { type: "machine.approval.decision", conversationId: "chat", approvalId: "approval", decisionId: id,
