@@ -36,6 +36,7 @@ import type { ChatEventLogService } from "./chatEventLog";
 import type { StorageService } from "./storage";
 import type { ChatActionApplier } from "./chatActionApplier";
 import type { ChatActionDependency } from "../../shared/deviceEventChannel";
+import type { MachineTrustRoster, TrustedPeerAccess } from "../../shared/machineTrust";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 
 export interface MachineLinkOptions {
@@ -49,6 +50,15 @@ export interface MachineLinkOptions {
   /** Applies chat actions that arrive from a machine. Without it an action is
    *  stored but never reaches this desktop's own state. */
   chatActions?: ChatActionApplier;
+  /** The owner's devices that are not machines (paired phones, other
+   *  desktops). They are met in the room of the machine they are talking to,
+   *  which is why the room is handed in. */
+  trustedDevices?: (room: {
+    relayUrl: string;
+    rendezvousId: string;
+    relaySealKeyBase64: string;
+    fingerprint: string;
+  }) => Promise<TrustedPeerAccess[]>;
   /** Produces the state a peer says a held action of its own is waiting for,
    *  by re-emitting the action that carries it. */
   serveChatActionDependency?: (dependency: ChatActionDependency) => Promise<boolean>;
@@ -152,7 +162,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private readonly lateTerminalListeners: Array<(event: MachineLateTerminalEvent) => Promise<void> | void> = [];
   private readonly runStartedListeners: Array<(event: { conversationId: string; runId: string }) => Promise<void> | void> = [];
   private readonly progressListeners: Array<(progress: ReviewProgress) => void> = [];
-  private readonly participantRequestListeners: Array<(request: { machineId: string; conversationId: string; requestMessageId: string; depth: number }) => Promise<void> | void> = [];
+  private readonly participantRequestListeners: Array<(request: { machineId: string; conversationId: string; requestMessageId: string; depth: number; targetParticipantIds?: string[] }) => Promise<void> | void> = [];
   private readonly backDeltaListeners: Array<(delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void> = [];
   private conversationLoader?: (conversationId: string) => Promise<Conversation | undefined>;
   private readonly connections = new Map<string, MachineConnection>();
@@ -191,7 +201,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   /** A member on a machine asked other members to answer. The listener runs
    *  them here, where the roster and every member's home are known. */
-  onParticipantRequest(listener: (request: { machineId: string; conversationId: string; requestMessageId: string; depth: number }) => Promise<void> | void): () => void {
+  onParticipantRequest(listener: (request: { machineId: string; conversationId: string; requestMessageId: string; depth: number; targetParticipantIds?: string[] }) => Promise<void> | void): () => void {
     this.participantRequestListeners.push(listener);
     return () => {
       const index = this.participantRequestListeners.indexOf(listener);
@@ -456,6 +466,83 @@ export class MachineLinkService implements MachineTurnDispatcher {
       recipients.push({ deviceId, channelId: connection.record.pairingKey });
     }
     return recipients;
+  }
+
+  /**
+   * Tells a machine who else may command it.
+   *
+   * This is what lets the machine keep working when this desktop is closed:
+   * the owner's other devices are named here, each with the room to meet it in
+   * and the key its events are signed with. Only this desktop sends a roster,
+   * and only inside the enrolled channel, so a device cannot add itself.
+   */
+  private async sendTrustRoster(connection: MachineConnection): Promise<void> {
+    const build = this.options.trustedDevices;
+    if (!build) return;
+    try {
+      const identity = await this.options.eventLog.getOrCreateDeviceIdentity();
+      const machines = await this.settings.listMachines();
+      const peers: TrustedPeerAccess[] = [{
+        deviceId: identity.originId,
+        publicKeyDerBase64: identity.publicKeyDerBase64,
+        role: "desktop",
+        name: "This computer",
+        // A device is reached in its own room; this desktop is met in the
+        // room of the machine it is talking to.
+        relayUrl: connection.pairing.relayUrl ?? "",
+        rendezvousId: connection.pairing.rendezvousId,
+        relaySealKeyBase64: connection.pairing.relaySealKeyBase64,
+        fingerprint: connection.pairing.fingerprint
+      }];
+      for (const machine of machines) {
+        if (machine.id === connection.record.id || !machine.deviceId) continue;
+        const pairing = await this.settings.getMachinePairing(machine.pairingKey);
+        const publicKeyDerBase64 = machine.lastHello?.publicKeyDerBase64;
+        if (!pairing?.relayUrl || !publicKeyDerBase64) continue;
+        peers.push({
+          deviceId: machine.deviceId,
+          publicKeyDerBase64,
+          role: "machine",
+          name: machine.name,
+          machineId: machine.id,
+          relayUrl: pairing.relayUrl,
+          rendezvousId: pairing.rendezvousId,
+          relaySealKeyBase64: pairing.relaySealKeyBase64,
+          fingerprint: pairing.fingerprint
+        });
+      }
+      peers.push(...await build({
+        relayUrl: connection.pairing.relayUrl ?? "",
+        rendezvousId: connection.pairing.rendezvousId,
+        relaySealKeyBase64: connection.pairing.relaySealKeyBase64,
+        fingerprint: connection.pairing.fingerprint
+      }));
+      const roster: MachineTrustRoster = {
+        version: 1,
+        issuerDeviceId: identity.originId,
+        updatedAt: this.now().toISOString(),
+        peers
+      };
+      await this.send(connection, {
+        type: "machine.trust.roster",
+        conversationId: `machine-trust:${connection.pairing.rendezvousId}`,
+        roster
+      });
+      void this.debugLogs.write("machine-link.trust.sent", { machineId: connection.record.id, peers: peers.length });
+    } catch (error) {
+      void this.debugLogs.write("machine-link.trust.error", {
+        machineId: connection.record.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  /** Re-sends the roster to every connected machine: a new machine or a newly
+   *  paired phone must become reachable without waiting for a reconnection. */
+  async refreshTrustRosters(): Promise<void> {
+    for (const connection of this.connections.values()) {
+      if (connection.machineDeviceId) await this.sendTrustRoster(connection);
+    }
   }
 
   /** Serves a machine the state a held action of its own is waiting for. The
@@ -969,7 +1056,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
           machineId: connection.record.id,
           conversationId: body.conversationId,
           requestMessageId: body.requestMessageId,
-          depth: body.depth
+          depth: body.depth,
+          ...(body.targetParticipantIds ? { targetParticipantIds: body.targetParticipantIds } : {})
         })));
         return;
       }
@@ -1092,6 +1180,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion, machineId: connection.record.id });
     await this.send(connection, { type: "machine.settings.sync", snapshot: await this.settings.exportMachineSettingsSnapshot() });
     connection.settingsSynced = true;
+    await this.sendTrustRoster(connection);
     connection.eventChannel?.start();
     this.emitStatus();
     // Machine setup waits for a hello that arrives AFTER it restarted the

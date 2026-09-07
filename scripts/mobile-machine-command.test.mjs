@@ -1,0 +1,194 @@
+/**
+ * The phone commanding a machine directly.
+ *
+ * The phone signs with its own key now, so what it sends is a device event
+ * like any other. These drive a real MachineHostService with events minted by
+ * the phone's own module: the machine runs the turn when the phone is in its
+ * trust roster, once however often the command is redelivered, and not at all
+ * when the phone is not in it.
+ */
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import path from "node:path";
+import { tmpdir } from "node:os";
+import test from "node:test";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const repoRoot = path.resolve(import.meta.dirname, "..");
+const phone = require(path.join(repoRoot, "src/mobile/mobile-machine-command.js"));
+const { verifySignedChatEvent } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
+const { MachineHostService } = require(path.join(repoRoot, "dist/main/main/services/machineHost.js"));
+const { StorageService } = require(path.join(repoRoot, "dist/main/main/services/storage.js"));
+const { ChatEventLogService } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
+const { sealMobileRelayPayload } = require(path.join(repoRoot, "dist/main/main/services/mobileRelaySealing.js"));
+
+const CONVERSATION = "phone-chat";
+const PARTICIPANT = { id: "p1", handle: "bot", kind: "codex-cli", roleConfigId: "engineer", homeMachineId: "machine-one" };
+
+function stubClient() {
+  return {
+    on: () => () => undefined,
+    connect: async () => undefined,
+    close: () => undefined,
+    sendCiphertext: async () => []
+  };
+}
+
+async function machine(options = {}) {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-phone-command-"));
+  const storage = new StorageService({ dbPath: path.join(dir, "machine.sqlite3") });
+  const eventLog = new ChatEventLogService(storage);
+  const identity = await eventLog.getOrCreateDeviceIdentity();
+  const desktopStorage = new StorageService({ dbPath: path.join(dir, "desktop.sqlite3") });
+  const desktopLog = new ChatEventLogService(desktopStorage);
+  const desktop = await desktopLog.getOrCreateDeviceIdentity();
+  const pairing = {
+    version: 1, purpose: "machine-host",
+    issuer: { originId: desktop.originId, keyId: desktop.keyId, publicKeyDerBase64: desktop.publicKeyDerBase64 },
+    rendezvousId: "phone-room", stableRoutingId: "phone-route",
+    relaySealKeyBase64: Buffer.alloc(32, 17).toString("base64url"),
+    relayUrl: "ws://127.0.0.1:1/v1/relay",
+    capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }],
+    fingerprint: "PHONE-TEST", createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString()
+  };
+  const runs = [];
+  const logs = [];
+  const host = new MachineHostService(
+    {
+      runMachineHostedTurn: async (request) => {
+        runs.push(request.runId);
+        return { messages: [], warnings: [] };
+      },
+      cancelRun: () => true,
+      respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined
+    },
+    {
+      getConversation: async () => ({
+        id: CONVERSATION, kind: "chat", messages: [], metadata: { participants: [PARTICIPANT] }
+      })
+    },
+    { importMachineSettingsSnapshot: async () => undefined },
+    { write: async (event, payload) => { logs.push({ event, payload }); } },
+    {
+      pairing, deviceId: identity.originId, appVersion: "phone-test",
+      eventStorage: storage, eventLog, publicKeyDerBase64: identity.publicKeyDerBase64,
+      outboxPath: path.join(dir, "outbox.json"),
+      trustRosterPath: path.join(dir, "trust.json"),
+      createClient: () => stubClient(),
+      createPeerClient: () => stubClient(),
+      ...options
+    }
+  );
+  await host.start();
+  await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: desktop.originId, appVersion: "phone-test", machineId: "machine-one" });
+  return {
+    host, runs, logs, pairing, identity, desktop, dir,
+    // The real ingress: a sealed frame off the relay, routed by who sent it.
+    deliver: async (packet) => host.handleMessage(await sealMobileRelayPayload(packet, pairing.relaySealKeyBase64)),
+    trust: async (peers) => host.handleBody({
+      type: "machine.trust.roster",
+      conversationId: `machine-trust:${pairing.rendezvousId}`,
+      roster: { version: 1, issuerDeviceId: desktop.originId, updatedAt: new Date().toISOString(), peers }
+    }),
+    cleanup: async () => { host.close(); await rm(dir, { recursive: true, force: true }); }
+  };
+}
+
+function phonePeer(identity, pairing) {
+  return {
+    deviceId: identity.deviceId,
+    publicKeyDerBase64: identity.publicKeyDerBase64,
+    role: "phone",
+    name: "Phone",
+    relayUrl: pairing.relayUrl,
+    rendezvousId: pairing.rendezvousId,
+    relaySealKeyBase64: pairing.relaySealKeyBase64,
+    fingerprint: pairing.fingerprint
+  };
+}
+
+async function command(identity, machineDeviceId, pairing, runId, originSeq = 1, prevHash) {
+  const event = await phone.mintEvent(identity, {
+    eventId: phone.machineCommandEventId(runId),
+    conversationId: CONVERSATION,
+    logScopeId: phone.deviceEventScope(pairing.rendezvousId, CONVERSATION, "actions"),
+    kind: "machine.turn.request",
+    originSeq,
+    ...(prevHash ? { prevHash } : {}),
+    payload: phone.turnRequest({
+      conversationId: CONVERSATION,
+      participant: PARTICIPANT,
+      messageId: "msg-1",
+      runId,
+      pendingMessageId: `pending-${runId}`
+    })
+  });
+  return { event, packet: phone.eventPacket(identity.deviceId, machineDeviceId, event) };
+}
+
+test("what the phone signs is what every other device verifies", async () => {
+  const identity = await phone.createIdentity();
+  const { event } = await command(identity, "device-x", { rendezvousId: "room" }, "run-verify");
+  assert.equal(verifySignedChatEvent(event, identity.publicKeyDerBase64), true);
+  const hash = createHash("sha256").update(Buffer.from(identity.publicKeyDerBase64, "base64")).digest("hex");
+  assert.equal(identity.deviceId, `device-${hash.slice(0, 32)}`, "a device is named by its key, not by a label");
+  // Another key must not pass: the signature is the whole point.
+  const other = await phone.createIdentity();
+  assert.equal(verifySignedChatEvent(event, other.publicKeyDerBase64), false);
+});
+
+test("a machine runs the turn the phone asked for, once, however often it arrives", async () => {
+  const identity = await phone.createIdentity();
+  const box = await machine();
+  try {
+    await box.trust([phonePeer(identity, box.pairing)]);
+    const asked = await command(identity, box.identity.originId, box.pairing, "run-phone");
+    await box.deliver(asked.packet);
+    // The same command again: live and from the mailbox is the ordinary case.
+    await box.deliver(asked.packet);
+    for (let attempt = 0; attempt < 40 && box.runs.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.deepEqual(box.runs, ["run-phone"], "the phone's command runs exactly one turn");
+  } finally { await box.cleanup(); }
+});
+
+test("a phone the owner has not allowed is not answered", async () => {
+  const identity = await phone.createIdentity();
+  const box = await machine();
+  try {
+    // No roster: this phone is a stranger.
+    const asked = await command(identity, box.identity.originId, box.pairing, "run-stranger");
+    await box.deliver(asked.packet);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual(box.runs, [], "and nothing it sent is run");
+    assert.ok(
+      box.logs.some((entry) => entry.event === "machine-host.trust.rejected"),
+      "the refusal is recorded, not silent"
+    );
+  } finally { await box.cleanup(); }
+});
+
+test("a phone taken off the roster stops being answered", async () => {
+  const identity = await phone.createIdentity();
+  const box = await machine();
+  try {
+    await box.trust([phonePeer(identity, box.pairing)]);
+    const first = await command(identity, box.identity.originId, box.pairing, "run-allowed");
+    await box.deliver(first.packet);
+    for (let attempt = 0; attempt < 40 && box.runs.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.deepEqual(box.runs, ["run-allowed"]);
+
+    await box.trust([]);
+    const second = await command(identity, box.identity.originId, box.pairing, "run-after-removal", 2, first.event.eventHash);
+    await box.deliver(second.packet);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual(box.runs, ["run-allowed"]);
+  } finally { await box.cleanup(); }
+});

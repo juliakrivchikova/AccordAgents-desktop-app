@@ -22,6 +22,21 @@ export interface MobileRelayControlOptions {
   /** Called when a frame from the phone is decrypted, which proves the device
    *  holds the pairing key. Reading counts, not just sending. */
   onPhoneActivity?: () => void;
+  /** The phone announcing the signing key it commands machines with. Stored
+   *  by the desktop and named to the machines in their trust roster. */
+  onPhoneIdentity?: (identity: { deviceId: string; publicKeyDerBase64: string; name: string }) => Promise<void>;
+  /** The machines this phone may command, with the way into each room. */
+  machineAccess?: () => Promise<Array<{
+    machineId: string;
+    name: string;
+    deviceId: string;
+    publicKeyDerBase64: string;
+    relayUrl: string;
+    rendezvousId: string;
+    relaySealKeyBase64: string;
+    fingerprint?: string;
+    outboxUrl?: string;
+  }>>;
 }
 
 export interface MobileRelayChatSender {
@@ -519,6 +534,22 @@ export class MobileRelayControlService {
       await this.sendAttachment(payload, `${message.logicalMessageId}:attachment`);
       return;
     }
+    if (isMobileDeviceIdentity(payload)) {
+      // The phone has a signing key of its own now. Registering it is what
+      // lets a machine accept a command from the phone with this desktop
+      // closed; it is stored on this desktop and named to the machines.
+      await this.options.onPhoneIdentity?.({
+        deviceId: payload.deviceId,
+        publicKeyDerBase64: payload.publicKeyDerBase64,
+        name: payload.name?.trim() || "Phone"
+      });
+      await this.sendMachineAccess(`${message.logicalMessageId}:machines`);
+      return;
+    }
+    if (isMobileMachineAccessRequest(payload)) {
+      await this.sendMachineAccess(`${message.logicalMessageId}:machines`);
+      return;
+    }
     const accepted = await this.prepareMobileOutboxRequest(assertMobileOutboxRequest(payload));
     await this.deliverAcceptedCancellationEvents(accepted);
     await this.sendAck(message.logicalMessageId, accepted);
@@ -529,6 +560,15 @@ export class MobileRelayControlService {
     void this.deliverAcceptedMessageEvents(message.logicalMessageId, accepted).catch(() => {
       // The phone may have gone away after ack; durable sync remains the source of truth.
     });
+  }
+
+  /** The machines this phone may command, and the way into each of their
+   *  rooms. Sent after the phone registers its key and on request. */
+  private async sendMachineAccess(logicalMessageId: string): Promise<void> {
+    if (!this.isActive()) return;
+    const machines = await this.options.machineAccess?.() ?? [];
+    const ciphertext = await sealMobileRelayPayload({ type: "mobile.machines", machines }, this.options.relaySealKeyBase64);
+    await this.client.sendCiphertext({ logicalMessageId, ciphertext });
   }
 
   private async prepareMobileOutboxRequest(request: MobileOutboxRequest): Promise<MobileRelayAcceptedDetail> {
@@ -1099,6 +1139,18 @@ function timelineEventDeliverySignature(event: MobileTimelineEvent): string {
     status: event.status,
     runId: event.runId ?? ""
   });
+}
+
+function isMobileDeviceIdentity(value: unknown): value is { type: "mobile.device.identity"; deviceId: string; publicKeyDerBase64: string; name?: string } {
+  if (!value || typeof value !== "object") return false;
+  const record = value as { type?: unknown; deviceId?: unknown; publicKeyDerBase64?: unknown };
+  return record.type === "mobile.device.identity"
+    && typeof record.deviceId === "string" && record.deviceId.trim().length > 0
+    && typeof record.publicKeyDerBase64 === "string" && record.publicKeyDerBase64.trim().length > 0;
+}
+
+function isMobileMachineAccessRequest(value: unknown): value is { type: "mobile.machines.request" } {
+  return Boolean(value) && typeof value === "object" && (value as { type?: unknown }).type === "mobile.machines.request";
 }
 
 function isMobileChatListRequest(value: unknown): value is MobileChatListRequest {

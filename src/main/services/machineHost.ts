@@ -31,10 +31,15 @@ import { messageBatches, messageStamp } from "./machineLink";
 import { advanceInstanceSequence, isStoredTerminal } from "./machineTurnOutcome";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
 import { RelayTunnelClient } from "./relayTunnelClient";
+import { MachinePeerFabric } from "./machinePeerFabric";
+import { MachineTrustStore } from "./machineTrustStore";
+import { userDataPath } from "../platform";
+import { isMachineTrustRoster, type TrustedPeerAccess } from "../../shared/machineTrust";
 import type { SettingsService } from "./settings";
 import type { StorageService } from "./storage";
 import type { ChatEventLogService } from "./chatEventLog";
 import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
+import type { DeviceEventApplyOutcome } from "../../shared/deviceEventDelivery";
 import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { isMachineDurableMessage } from "../../shared/machineLink";
 import { NativeProcessUnavailableError } from "./nativeProcess";
@@ -54,6 +59,11 @@ export interface MachineHostOptions {
   /** Produces the state a peer says a held action of its own is waiting for,
    *  by re-emitting the action that carries it. */
   serveChatActionDependency?: (dependency: ChatActionDependency) => Promise<boolean>;
+  /** Where the trust roster is kept between runs. Defaults to the machine's
+   *  own user data directory. */
+  trustRosterPath?: string;
+  /** Test seam: opens a connection to another device's room. */
+  createPeerClient?: (room: { relayUrl: string; rendezvousId: string; sealKeyBase64: string; fingerprint?: string; deviceId: string }) => RelayTunnelClient;
   pairing: MobilePairingPackage;
   deviceId: string;
   machineName?: string;
@@ -166,6 +176,10 @@ export class MachineHostService {
   private commandRetry?: ReturnType<typeof setTimeout>;
   private runtimeIdentity?: Promise<NativeRuntimeIdentity>;
   private readonly approvalExecutor: MachineApprovalExecutor;
+  /** The owner's other devices, and the channels to them. Without this a
+   *  machine answers only the desktop that enrolled it. */
+  private readonly trust: MachineTrustStore;
+  private readonly peers: MachinePeerFabric;
 
   /** approval id -> last status + updatedAt forwarded to the desktop. */
   private readonly forwardedApprovals = new Map<string, string>();
@@ -174,7 +188,7 @@ export class MachineHostService {
   private readonly knownMessages = new Map<string, Map<string, string>>();
 
   constructor(
-    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult">>,
+    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest">>,
     private readonly storage: Pick<StorageService, "getConversation">,
     private readonly settings: Pick<SettingsService, "importMachineSettingsSnapshot">,
     private readonly debugLogs: Pick<DebugLogService, "write">,
@@ -217,40 +231,42 @@ export class MachineHostService {
       onDependencyUnavailable: (dependency) => {
         void this.debugLogs.write("machine-host.action.dependency-unavailable", { ...dependency });
       },
-      apply: async (event, body) => {
-        if (this.idleFenced) return "deferred";
-        // A chat action from the desktop or another machine is applied here as
-        // well, so a signature or a superseded change is not something only the
-        // sender knows about.
-        const action = await this.applyChatAction(event, body);
-        if (action) return action;
-        const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
-        if (!isMachineLinkEnvelope(envelope) || !isMachineDurableMessage(envelope.body) ||
-            envelope.body.type === "machine.conversation.backdelta" || envelope.body.type === "machine.turn.finished" || envelope.body.type === "machine.turn.started" ||
-            envelope.body.type === "machine.approval.requested" || envelope.body.type === "machine.approval.updated" || envelope.body.type === "machine.approval.result" ||
-            envelope.body.type === "machine.turn.progress.delta" ||
-            // This machine sends delegations; it never receives them.
-            envelope.body.type === "machine.participants.delegate") {
-          throw new Error("Unexpected machine replication event.");
-        }
-        const conversationId = envelope.body.type === "machine.conversation.sync" ? envelope.body.conversation.id : "conversationId" in envelope.body ? envelope.body.conversationId : "";
-        if (event.kind !== envelope.body.type || event.conversationId !== conversationId) throw new Error("Machine replication event has the wrong chat identity.");
-        if (envelope.body.type === "machine.turn.request") {
-          await this.acceptCommand(event, envelope.body);
-        } else if (envelope.body.type === "machine.approval.decision") {
-          // Do not hold the ingress queue while a native decision is delivered:
-          // Stop and other conversations must still be able to arrive.
-          void this.approvalExecutor.apply(event, envelope.body).then(() => this.eventChannel.confirmApplied(event)).catch(error => {
-            void this.debugLogs.write("machine-host.approval.retry-pending", { approvalId: envelope.body.type === "machine.approval.decision" ? envelope.body.approvalId : "", message: errorMessage(error) });
-          });
-          return "deferred";
-        } else if (envelope.body.type === "machine.turn.cancel") {
-          await this.options.eventStorage.nativeCommands().cancel(envelope.body.runId, conversationId, event.eventId);
-          await this.handleBody(envelope.body, true);
-        } else await this.handleBody(envelope.body, true);
-        return "applied";
-      },
+      apply: (event, body) => this.applyDeviceEvent(event, body, this.eventChannel),
       onError: (error) => { void this.debugLogs.write("machine-host.events.error", { message: error.message }); }
+    });
+    this.trust = new MachineTrustStore(
+      options.trustRosterPath ?? path.join(userDataPath(), "machine-trust-roster.json"),
+      options.deviceId
+    );
+    // The owner's other devices reach this machine here. Each gets its own
+    // sealed channel with its own signing key; anyone else is not answered.
+    this.peers = new MachinePeerFabric({
+      selfDeviceId: options.deviceId,
+      storage: options.eventStorage,
+      eventLog: options.eventLog,
+      home: pairing,
+      homeClient: this.client,
+      createClient: (room) => options.createPeerClient?.({ ...room, deviceId: options.deviceId }) ?? new RelayTunnelClient({
+        relayUrl: room.relayUrl,
+        rendezvousId: room.rendezvousId,
+        role: "machine",
+        deviceId: options.deviceId,
+        // The room's own fingerprint: the relay admits a connection only with
+        // the capability the room was opened with.
+        capability: room.fingerprint ?? pairing.fingerprint,
+        streamId: `${room.rendezvousId}:machine-peer`,
+        reconnectDelayMs: options.reconnectDelayMs
+      }),
+      isPeerConnected: () => true,
+      apply: (event, body, peer) => this.applyDeviceEvent(event, body, this.peers.channel(peer.deviceId), peer),
+      ...(options.serveChatActionDependency ? {
+        serveDependency: async (dependency) => {
+          try { return await options.serveChatActionDependency?.(dependency) ?? false; }
+          catch { return false; }
+        }
+      } : {}),
+      onError: (error) => { void this.debugLogs.write("machine-host.trust.error", { message: error.message }); },
+      logger: (event, payload) => { void this.debugLogs.write(event, payload); }
     });
     this.approvalExecutor = new MachineApprovalExecutor({
       storage: options.eventStorage, deviceId: options.deviceId, chat, getConversation: id => storage.getConversation(id),
@@ -302,6 +318,12 @@ export class MachineHostService {
       this.knownMessages.set(state.conversationId, state.messages);
       if (state.syncing) this.syncing.add(state.conversationId);
     }
+    const roster = await this.trust.load();
+    if (roster) {
+      await this.peers.reconcile(this.rosterPeersToConnect(roster.peers));
+      void this.debugLogs.write("machine-host.trust.restored", { peers: roster.peers.length, updatedAt: roster.updatedAt });
+    }
+    this.peers.start();
     const homeMachineId = await this.options.eventStorage.deviceEvents().hostMachineId(this.options.pairing.rendezvousId);
     if (homeMachineId) {
       this.homeMachineId = homeMachineId;
@@ -317,6 +339,7 @@ export class MachineHostService {
   close(): void {
     this.closed = true;
     for (const sender of this.progressSenders.values()) sender.close();
+    this.peers.close();
     this.eventChannel.close();
     this.unsubscribeRunSettled?.();
     if (this.commandRetry) clearTimeout(this.commandRetry);
@@ -528,10 +551,93 @@ export class MachineHostService {
     });
   }
 
+  /**
+   * One path for everything a trusted device sends, whichever device it is.
+   *
+   * The desktop that enrolled this machine is simply the peer whose key is in
+   * the enrollment; the owner's other devices arrive here through the roster.
+   * Sharing this path is what keeps a turn from being run twice: every command
+   * goes through the same durable command record, whoever sent it.
+   */
+  private async applyDeviceEvent(
+    event: ChatEventEnvelope,
+    body: unknown,
+    channel: DeviceEventChannel | undefined,
+    peer?: TrustedPeerAccess
+  ): Promise<DeviceEventApplyOutcome | "deferred" | DeferredWithDependency> {
+    if (this.idleFenced) return "deferred";
+    // A chat action from any of the owner's devices is applied here as well,
+    // so a signature or a superseded change is not something only the sender
+    // knows about.
+    const action = await this.applyChatAction(event, body);
+    if (action) return action;
+    const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
+    if (!isMachineLinkEnvelope(envelope) || !isMachineDurableMessage(envelope.body) ||
+        envelope.body.type === "machine.conversation.backdelta" || envelope.body.type === "machine.turn.finished" || envelope.body.type === "machine.turn.started" ||
+        envelope.body.type === "machine.approval.requested" || envelope.body.type === "machine.approval.updated" || envelope.body.type === "machine.approval.result" ||
+        envelope.body.type === "machine.turn.progress.delta" ||
+        !this.peerMayCommand(envelope.body, peer)) {
+      throw new Error("Unexpected machine replication event.");
+    }
+    const conversationId = envelope.body.type === "machine.conversation.sync"
+      ? envelope.body.conversation.id
+      : "conversationId" in envelope.body ? envelope.body.conversationId : "";
+    if (event.kind !== envelope.body.type || event.conversationId !== conversationId) {
+      throw new Error("Machine replication event has the wrong chat identity.");
+    }
+    if (envelope.body.type === "machine.turn.request") {
+      await this.acceptCommand(event, envelope.body);
+    } else if (envelope.body.type === "machine.approval.decision") {
+      // Do not hold the ingress queue while a native decision is delivered:
+      // Stop and other conversations must still be able to arrive.
+      const decision = envelope.body;
+      void this.approvalExecutor.apply(event, decision).then(() => channel?.confirmApplied(event)).catch((error) => {
+        void this.debugLogs.write("machine-host.approval.retry-pending", { approvalId: decision.approvalId, message: errorMessage(error) });
+      });
+      return "deferred";
+    } else if (envelope.body.type === "machine.turn.cancel") {
+      await this.options.eventStorage.nativeCommands().cancel(envelope.body.runId, conversationId, event.eventId);
+      await this.handleBody(envelope.body, true);
+    } else await this.handleBody(envelope.body, true);
+    return "applied";
+  }
+
+  /**
+   * What a device is allowed to ask for, by what it is.
+   *
+   * Every device in the roster may drive members: send a turn, stop one,
+   * answer an approval, deliver chat. Ownership is narrower — settings, the
+   * machine's identity and the roster itself come only from the desktop that
+   * installed this machine, so no phone or second machine can re-point it.
+   * A delegation is the one thing only another machine sends.
+   */
+  private peerMayCommand(body: MachineLinkMessage, peer?: TrustedPeerAccess): boolean {
+    const role = peer?.role ?? "desktop";
+    switch (body.type) {
+      case "machine.hello.ack":
+      case "machine.settings.sync":
+      case "machine.settings.sealed":
+      case "machine.trust.roster":
+        return role === "desktop";
+      case "machine.participants.delegate":
+        // This machine sends delegations to the member's home; it accepts one
+        // only from another machine acting for a member of its own.
+        return role === "machine";
+      default:
+        return true;
+    }
+  }
+
   private async handleMessage(ciphertext: string): Promise<void> {
     const payload = await openMobileRelayPayload<unknown>(ciphertext, this.options.pairing.relaySealKeyBase64);
     if (isDeviceEventPacket(payload)) {
-      await this.eventChannel.receive(payload);
+      // The enrolling desktop keeps its own channel; every other device is
+      // answered only if the roster says so.
+      if (payload.from === this.options.pairing.issuer.originId) {
+        await this.eventChannel.receive(payload);
+      } else if (!await this.peers.receive(payload)) {
+        void this.debugLogs.write("machine-host.trust.unknown-peer", { from: payload.from, type: payload.type });
+      }
       return;
     }
     if (!isMachineLinkEnvelope(payload) || this.seenMessageIds.has(payload.messageId)) {
@@ -559,6 +665,19 @@ export class MachineHostService {
       ...("conversationId" in body ? { conversationId: body.conversationId } : {})
     });
     switch (body.type) {
+      case "machine.trust.roster": {
+        // Only the enrolling desktop reaches this (peerMayCommand), and only
+        // inside its own sealed, signed channel.
+        if (!isMachineTrustRoster(body.roster)) throw new Error("Machine trust roster is malformed.");
+        const accepted = await this.trust.accept(body.roster);
+        await this.peers.reconcile(this.rosterPeersToConnect(accepted.roster.peers));
+        void this.debugLogs.write("machine-host.trust.applied", {
+          changed: accepted.changed,
+          peers: accepted.roster.peers.length,
+          updatedAt: accepted.roster.updatedAt
+        });
+        return;
+      }
       case "machine.hello.ack":
         this.desktopDeviceId = body.desktopDeviceId || this.desktopDeviceId;
         if (body.machineId) {
@@ -620,6 +739,16 @@ export class MachineHostService {
       }
       case "machine.conversation.delta":
         await this.applyConversationDelta(body, durable);
+        return;
+      case "machine.participants.delegate":
+        // Another machine's member asked for members that live here. Only the
+        // ones named are run, and the request message travelled ahead of this.
+        await this.chat.runDelegatedParticipantRequest?.({
+          conversationId: body.conversationId,
+          requestMessageId: body.requestMessageId,
+          depth: body.depth,
+          ...(body.targetParticipantIds ? { targetParticipantIds: body.targetParticipantIds } : {})
+        });
         return;
       case "machine.turn.request":
         if (this.activeTurns.has(body.runId) || this.pendingTerminals.has(body.runId) || this.isQueuedRun(body.runId)) return;
@@ -1417,14 +1546,101 @@ export class MachineHostService {
     requestMessageId: string;
     batchId: string;
     depth: number;
+    homeMachineId?: string;
+    targetParticipantIds: string[];
+    messages: ChatMessage[];
   }): Promise<void> {
-    return this.send({
-      type: "machine.participants.delegate",
-      conversationId: request.conversationId,
-      requestMessageId: request.requestMessageId,
-      batchId: request.batchId,
-      depth: request.depth
+    // Exactly one device is asked for each group of members: the machine they
+    // live on, or the desktop. Nobody else is told to run them, so two devices
+    // cannot start the same member.
+    const peer = request.homeMachineId
+      ? this.trust.peers().find((candidate) => candidate.role === "machine" && candidate.machineId === request.homeMachineId)
+      : undefined;
+    if (request.homeMachineId && !peer) {
+      return Promise.reject(new Error(`The machine ${request.homeMachineId} is not in this machine's trust roster.`));
+    }
+    return this.enqueueOutbound(async () => {
+      if (peer) {
+        // That machine may never have seen this request: carry the rows it
+        // needs before asking it to act on them.
+        if (request.messages.length) {
+          await this.publishToPeer(peer.deviceId, {
+            type: "machine.conversation.delta",
+            conversationId: request.conversationId,
+            messages: request.messages,
+            updatedAt: this.now().toISOString()
+          });
+        }
+        await this.publishToPeer(peer.deviceId, {
+          type: "machine.participants.delegate",
+          conversationId: request.conversationId,
+          requestMessageId: request.requestMessageId,
+          batchId: request.batchId,
+          depth: request.depth,
+          targetParticipantIds: request.targetParticipantIds
+        }, `machine-participants:${request.requestMessageId}:${peer.deviceId}`);
+        return;
+      }
+      await this.publishToPeer(this.options.pairing.issuer.originId, {
+        type: "machine.participants.delegate",
+        conversationId: request.conversationId,
+        requestMessageId: request.requestMessageId,
+        batchId: request.batchId,
+        depth: request.depth,
+        targetParticipantIds: request.targetParticipantIds
+      }, `machine-participants:${request.requestMessageId}:desktop`);
     });
+  }
+
+  /** Publishes one durable message to a single device. Used where a message
+   *  must have exactly one executor rather than reaching everyone. */
+  private async publishToPeer(deviceId: string, body: MachineLinkMessage, eventId?: string): Promise<void> {
+    const conversationId = "conversationId" in body ? body.conversationId : "";
+    const channel = deviceId === this.options.pairing.issuer.originId
+      ? this.eventChannel
+      : this.peers.channel(deviceId);
+    if (!channel) throw new Error("That device is not in this machine's trust roster.");
+    await channel.publish({
+      conversationId,
+      kind: body.type,
+      payload: body,
+      recipients: [{
+        deviceId,
+        channelId: deviceId === this.options.pairing.issuer.originId
+          ? this.options.pairing.rendezvousId
+          : this.trust.peer(deviceId)?.rendezvousId ?? this.options.pairing.rendezvousId
+      }],
+      ...(eventId ? { eventId } : {})
+    });
+  }
+
+  /** The devices that need a channel of their own. The desktop that enrolled
+   *  this machine already has one — the enrollment channel — so it is not
+   *  given a second. */
+  private rosterPeersToConnect(peers: readonly TrustedPeerAccess[]): TrustedPeerAccess[] {
+    return peers.filter((peer) => peer.deviceId !== this.options.pairing.issuer.originId);
+  }
+
+  /**
+   * Who a result is delivered to: the enrolling desktop and every other device
+   * of the owner that is met in this machine's own room.
+   *
+   * A machine in another room is deliberately not on this list. An event is
+   * scoped to the room it was minted in, and another machine is a peer for
+   * asking members to run, not an audience for this machine's results.
+   */
+  private resultRecipients(): Array<{ deviceId: string; channelId: string }> {
+    const room = this.options.pairing.rendezvousId;
+    const issuer = { deviceId: this.options.pairing.issuer.originId, channelId: room };
+    const peers = this.peers.recipients()
+      .filter((peer) => peer.channelId === room && peer.deviceId !== issuer.deviceId);
+    return [issuer, ...peers];
+  }
+
+  private enqueueOutbound(task: () => Promise<void>): Promise<void> {
+    const run = this.outbound.then(task);
+    this.outbound = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   private send(body: MachineLinkMessage): Promise<void> {
@@ -1478,6 +1694,9 @@ export class MachineHostService {
       if (body.type === "machine.turn.finished") await this.progressSenders.get(body.runId)?.finish();
       const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : "conversationId" in body ? body.conversationId : "";
       const published = await this.eventChannel.publish({ conversationId, kind: body.type, payload: body,
+        // One result, delivered to every device the owner has: whichever of
+        // them is online gets it, and the outbox holds it for the others.
+        recipients: this.resultRecipients(),
         ...(body.type === "machine.approval.requested" || body.type === "machine.approval.updated" ? { scope: `approval:${body.approval.id}` } : {}),
         ...(body.type === "machine.approval.result" && body.decisionId ? { eventId: machineApprovalResultId(body.decisionId), scope: `approval:${body.approvalId}` } : {}),
         ...(body.type === "machine.turn.started" ? { eventId: `machine-started:${body.runId}`, scope: `terminal:${body.runId}` } : {}),

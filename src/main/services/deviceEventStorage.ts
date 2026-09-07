@@ -422,6 +422,29 @@ export class DeviceEventStorage {
     return { ...decision, truncated };
   }
 
+  /**
+   * Gives a device that has just become trusted the events this room still
+   * owes anyone.
+   *
+   * A result published before that device was known has no delivery row for
+   * it, and repair only serves what a peer was already a recipient of. Without
+   * this, a device added while a turn was running would never see its result —
+   * which is exactly the case where the desktop that started the turn is gone.
+   */
+  async shareUnacknowledged(channelId: string, deviceId: string): Promise<number> {
+    await this.database.init();
+    await this.database.execute(`
+      insert or ignore into device_event_outbox(event_id, device_id, channel_id)
+      select distinct o.event_id, ${quote(deviceId)}, ${quote(channelId)}
+      from device_event_outbox o
+      where o.channel_id = ${quote(channelId)} and o.acknowledged_at is null and o.device_id <> ${quote(deviceId)};
+    `);
+    return (await this.database.query<{ shared: number }>(`
+      select count(*) as shared from device_event_outbox
+      where channel_id = ${quote(channelId)} and device_id = ${quote(deviceId)} and acknowledged_at is null;
+    `))[0]?.shared ?? 0;
+  }
+
   async pressure(channelId: string): Promise<{ events: number; bytes: number; recipients: number }> {
     await this.database.init();
     return (await this.database.query<{ events: number; bytes: number; recipients: number }>(`

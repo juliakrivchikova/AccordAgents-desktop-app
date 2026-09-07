@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { hostPlatform, userDataPath } from "../platform";
 import type { MachineRecord, MachineSettingsSnapshot } from "../../shared/machineLink";
+import { isTrustedDeviceRecord, trustedDeviceIdMatchesKey, type TrustedDeviceRecord } from "../../shared/machineTrust";
 import type { MachineInstallRecord } from "../../shared/machineInstall";
 import { assertAwsMachinePowerConfig, type AwsMachinePowerConfig } from "../../shared/machinePower";
 import { normalizeMachinePowerHandoffRecords, type MachinePowerHandoffRecord } from "../../shared/machinePowerHandoff";
@@ -151,6 +152,10 @@ interface StoredSettings {
    *  root, service, installed version). Never travels to a machine: it carries
    *  this desktop's way in. */
   machineInstalls?: MachineInstallRecord[];
+  /** Devices the User has said may use this desktop's machines. Their public
+   *  keys are what a machine checks a command's signature against; there is
+   *  nothing secret in them. */
+  trustedDevices?: TrustedDeviceRecord[];
 }
 
 
@@ -3177,6 +3182,40 @@ export class SettingsService {
   /** Machine install records (machines transport, install/upgrade). Kept next
    *  to the machine records but deliberately outside the settings snapshot a
    *  machine receives. */
+  /** The devices the User trusts with their machines. */
+  async listTrustedDevices(): Promise<TrustedDeviceRecord[]> {
+    const stored = await this.readStored();
+    return (stored.trustedDevices ?? []).filter(isTrustedDeviceRecord).map((record) => ({ ...record }));
+  }
+
+  /**
+   * Adds or replaces a trusted device.
+   *
+   * The id has to be the one its key produces: a device is identified by its
+   * signing key, and accepting a mismatched pair would trust a name rather
+   * than a key.
+   */
+  async saveTrustedDevice(record: TrustedDeviceRecord): Promise<TrustedDeviceRecord[]> {
+    if (!isTrustedDeviceRecord(record)) throw new Error("A trusted device needs a device id, a public key, a role and a name.");
+    if (!trustedDeviceIdMatchesKey(record, (bytes) => createHash("sha256").update(bytes).digest("hex"))) {
+      throw new Error("That device id does not match the public key it was given with.");
+    }
+    const stored = await this.readStored();
+    const records = (stored.trustedDevices ?? []).filter((entry) => entry.deviceId !== record.deviceId);
+    records.push({ ...record });
+    stored.trustedDevices = records;
+    await this.writeStored(stored);
+    return records.map((entry) => ({ ...entry }));
+  }
+
+  async removeTrustedDevice(deviceId: string): Promise<TrustedDeviceRecord[]> {
+    const stored = await this.readStored();
+    const records = (stored.trustedDevices ?? []).filter((entry) => entry.deviceId !== deviceId);
+    stored.trustedDevices = records.length ? records : undefined;
+    await this.writeStored(stored);
+    return records.map((entry) => ({ ...entry }));
+  }
+
   async listMachineInstalls(): Promise<MachineInstallRecord[]> {
     const stored = await this.readStored();
     return (stored.machineInstalls ?? []).map((record) => ({ ...record }));

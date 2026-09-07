@@ -4,6 +4,8 @@ import type {
   CreateMachineResult,
   MachineEnrollmentRequest,
   MachineListResult,
+  MachineTrustedDevicesResult,
+  SaveTrustedDeviceRequest,
   RemoveMachineRequest
 } from "./machineLink";
 import type {
@@ -2739,6 +2741,9 @@ export interface AppBridge {
   upgradeMachine(request: MachineUpgradeRequest): Promise<MachineInstallResult>;
   bootstrapMachineProjectMirror(request: MachineMirrorBootstrapRequest): Promise<MachineMirrorBootstrapResult>;
   listMachineInstalls(): Promise<MachineInstallRecord[]>;
+  listTrustedDevices(): Promise<MachineTrustedDevicesResult>;
+  trustDevice(request: SaveTrustedDeviceRequest): Promise<MachineTrustedDevicesResult>;
+  untrustDevice(deviceId: string): Promise<MachineTrustedDevicesResult>;
   /** What runtime this desktop would install on a machine, or why it cannot. */
   machineRuntimePayload(): Promise<MachineRuntimePayloadInfo>;
   onMachineInstallProgress(callback: (snapshot: MachineInstallSnapshot) => void): () => void;

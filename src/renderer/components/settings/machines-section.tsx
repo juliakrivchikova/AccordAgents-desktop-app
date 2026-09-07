@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { CreateMachineResult, MachineLinkStatus, MachineListResult, MachineRecord } from "../../../shared/machineLink";
 import type { MachineInstallRecord, MachineRuntimePayloadInfo } from "../../../shared/machineInstall";
+import type { MachineTrustedDevicesResult } from "../../../shared/machineLink";
 import { writeClipboardText } from "../../../shared/clipboard";
 import { MachineSetupPanel } from "./machine-setup-panel";
 
@@ -29,6 +30,10 @@ export function MachinesSection(): JSX.Element {
   const [installs, setInstalls] = useState<MachineInstallRecord[]>([]);
   const [setupFor, setSetupFor] = useState<string | undefined>();
   const [payload, setPayload] = useState<MachineRuntimePayloadInfo | undefined>();
+  const [trust, setTrust] = useState<MachineTrustedDevicesResult | undefined>();
+  const [trustDraft, setTrustDraft] = useState({ name: "", deviceId: "", publicKeyDerBase64: "" });
+  const [trustError, setTrustError] = useState<string | undefined>();
+  const [identityCopied, setIdentityCopied] = useState(false);
 
   const refreshInstalls = (): void => {
     void window.consensus.listMachineInstalls().then(setInstalls).catch(() => undefined);
@@ -56,6 +61,9 @@ export function MachinesSection(): JSX.Element {
     // would fail halfway.
     void window.consensus.machineRuntimePayload().then((info) => {
       if (!cancelled) setPayload(info);
+    }).catch(() => undefined);
+    void window.consensus.listTrustedDevices().then((result) => {
+      if (!cancelled) setTrust(result);
     }).catch(() => undefined);
     const off = window.consensus.onMachinesUpdated(apply);
     const offInstall = window.consensus.onMachineInstallProgress(() => {
@@ -128,6 +136,31 @@ export function MachinesSection(): JSX.Element {
     if (result !== "copied") {
       setError("Copy failed.");
     }
+  }
+
+  async function addTrustedDevice(): Promise<void> {
+    setTrustError(undefined);
+    try {
+      setTrust(await window.consensus.trustDevice({
+        deviceId: trustDraft.deviceId.trim(),
+        publicKeyDerBase64: trustDraft.publicKeyDerBase64.trim(),
+        role: "desktop",
+        name: trustDraft.name.trim() || "Another device"
+      }));
+      setTrustDraft({ name: "", deviceId: "", publicKeyDerBase64: "" });
+    } catch (addError) {
+      setTrustError(addError instanceof Error ? addError.message : String(addError));
+    }
+  }
+
+  async function copyIdentity(): Promise<void> {
+    if (!trust) return;
+    const result = await writeClipboardText(JSON.stringify({
+      deviceId: trust.thisDevice.deviceId,
+      publicKeyDerBase64: trust.thisDevice.publicKeyDerBase64
+    }, null, 2), (value) => navigator.clipboard.writeText(value));
+    setIdentityCopied(result === "copied");
+    window.setTimeout(() => setIdentityCopied(false), 1_500);
   }
 
   const statusById = new Map(status.map((item) => [item.machineId, item]));
@@ -274,6 +307,92 @@ export function MachinesSection(): JSX.Element {
           </>
         ) : null}
         {error ? <div className="device-pairing-error" data-testid="machines-error">{error}</div> : null}
+      </div>
+      <div className="gen-card" data-testid="machines-trust">
+        <div className="gen-row">
+          <div className="gen-row-text">
+            <div className="gen-row-title">Devices that may use your machines</div>
+            <div className="gen-row-desc">
+              A machine answers these devices, so your work continues on it when this computer is closed. Each device
+              shows its own identity below; paste another device&apos;s identity here to let it in, and remove it to
+              take that away.
+            </div>
+          </div>
+          <div className="gen-row-control">
+            <button type="button" className="gen-pill" onClick={() => void copyIdentity()} data-testid="machines-copy-identity">
+              <span className="gen-pill-lead"><Copy size={14} aria-hidden /></span>
+              <span className="gen-pill-label">{identityCopied ? "Copied" : "Copy this device"}</span>
+            </button>
+          </div>
+        </div>
+        {trust ? (
+          <div className="gen-row">
+            <div className="gen-row-text">
+              <div className="gen-row-title">This device</div>
+              <div className="gen-row-desc"><code>{trust.thisDevice.deviceId}</code></div>
+            </div>
+          </div>
+        ) : null}
+        {(trust?.devices ?? []).map((device) => (
+          <div className="gen-row" key={device.deviceId}>
+            <div className="gen-row-text">
+              <div className="gen-row-title">{device.name}</div>
+              <div className="gen-row-desc"><code>{device.deviceId}</code> · added {new Date(device.addedAt).toLocaleDateString()}</div>
+            </div>
+            <div className="gen-row-control">
+              <button
+                type="button"
+                className="gen-pill"
+                data-testid={`machines-untrust-${device.deviceId}`}
+                onClick={() => void window.consensus.untrustDevice(device.deviceId).then(setTrust).catch((removeError) => {
+                  setTrustError(removeError instanceof Error ? removeError.message : String(removeError));
+                })}
+              >
+                <span className="gen-pill-lead"><Trash2 size={14} aria-hidden /></span>
+                <span className="gen-pill-label">Remove</span>
+              </button>
+            </div>
+          </div>
+        ))}
+        <div className="gen-row">
+          <div className="gen-row-control machines-add">
+            <Label htmlFor="trust-device-name" className="sr-only">Device name</Label>
+            <Input
+              id="trust-device-name"
+              value={trustDraft.name}
+              placeholder="Device name"
+              data-testid="machines-trust-name"
+              onChange={(event) => setTrustDraft({ ...trustDraft, name: event.target.value })}
+            />
+            <Label htmlFor="trust-device-id" className="sr-only">Device id</Label>
+            <Input
+              id="trust-device-id"
+              value={trustDraft.deviceId}
+              placeholder="device-…"
+              data-testid="machines-trust-id"
+              onChange={(event) => setTrustDraft({ ...trustDraft, deviceId: event.target.value })}
+            />
+            <Label htmlFor="trust-device-key" className="sr-only">Public key</Label>
+            <Input
+              id="trust-device-key"
+              value={trustDraft.publicKeyDerBase64}
+              placeholder="Public key"
+              data-testid="machines-trust-key"
+              onChange={(event) => setTrustDraft({ ...trustDraft, publicKeyDerBase64: event.target.value })}
+            />
+            <button
+              type="button"
+              className="gen-pill"
+              data-testid="machines-trust-add"
+              disabled={!trustDraft.deviceId.trim() || !trustDraft.publicKeyDerBase64.trim()}
+              onClick={() => void addTrustedDevice()}
+            >
+              <span className="gen-pill-lead"><Plus size={16} aria-hidden /></span>
+              <span className="gen-pill-label">Allow device</span>
+            </button>
+          </div>
+        </div>
+        {trustError ? <div className="device-pairing-error" data-testid="machines-trust-error">{trustError}</div> : null}
       </div>
     </section>
   );
