@@ -82,7 +82,6 @@ test("stale readiness refreshes before creating without a per-chat provider over
     agents: [staleReadyAgent("claude-code"), staleReadyAgent("codex-cli")],
     settings: currentSettings,
     selectedChatParticipantConfigIds: new Set<string>(),
-    selectedChatParticipantRunLocations: {},
     selectedChatParticipantRuntimeOverrides: {},
     startingChatRef: { current: false },
     repoPath: "",
@@ -167,7 +166,6 @@ test("New Chat runtime overrides are sent for edited Assistant and selected save
     agents: [readyAgent("codex-cli")],
     settings: currentSettings,
     selectedChatParticipantConfigIds: new Set<string>(["member-codex"]),
-    selectedChatParticipantRunLocations: {},
     selectedChatParticipantRuntimeOverrides: {
       "__new-chat-assistant__": {
         model: "assistant-model",
@@ -217,6 +215,8 @@ test("New Chat runtime overrides are sent for edited Assistant and selected save
   assert.equal(member?.reasoningEffort, "low");
   assert.equal(member?.agentMode, "auto");
   assert.equal(member?.permissions?.workspaceWrite, true);
+  // A member still carrying the old cloud-worker flag keeps it: it is what
+  // marks the member as one that needs a machine, and nothing rewrites it.
   assert.equal(member?.remoteExecution, "remote");
   assert.equal(member?.skipToolchainPreflight, true);
   assert.equal(member?.autoWatch, true);
@@ -239,7 +239,6 @@ test("stale New Chat readiness refresh failure fails closed and preserves the co
     agents: [staleReadyAgent()],
     settings: { ...settings(), assistantProviderKind: "claude-code" },
     selectedChatParticipantConfigIds: new Set<string>(),
-    selectedChatParticipantRunLocations: {},
     selectedChatParticipantRuntimeOverrides: {},
     newChatPendingImages: [{ id: "image", filename: "qa.png", mimeType: "image/png", sizeBytes: 3, dataBase64: "YWJj", status: "ready" }],
     newChatRepoFileMentions: [{ path: "src/main.ts" }],
@@ -275,7 +274,6 @@ test("stale New Chat readiness refresh failure fails closed and preserves the co
   assert.equal(state.question, "/office-hours #src/main.ts Draft");
   assert.equal(state.newChatPendingImages.length, 1);
   assert.deepEqual(state.newChatRepoFileMentions, [{ path: "src/main.ts" }]);
-  assert.deepEqual(state.selectedChatParticipantRunLocations, {});
   renderer.unmount();
 });
 

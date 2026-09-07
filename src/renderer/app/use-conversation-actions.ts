@@ -569,7 +569,6 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setChatMessageDraft("");
     state.setChatAddParticipantDraft(defaultChatParticipantDraft(state.settings));
     state.setSelectedChatParticipantConfigIds(defaultSelectedChatParticipantConfigIds());
-    state.setSelectedChatParticipantRunLocations({});
     state.setKind("chat");
     state.setQuestion("");
     state.setNewChatPendingImages((current) => {

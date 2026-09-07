@@ -4,8 +4,7 @@ import type {
   AppSettings,
   ChatParticipant,
   ChatParticipantConfig,
-  ChatParticipantWatcherState,
-  CloudRunRemoteExecutionMode
+  ChatParticipantWatcherState
 } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
@@ -22,7 +21,6 @@ import {
   addableSavedParticipantConfigs,
   activeChatRoleConfigs,
   chatParticipantPermissionSummary,
-  chatRunLocationLabel,
   labelForProviderKind,
   normalizedChatDrafts,
   validateChatCliAgents,
@@ -46,7 +44,7 @@ export function ChatParticipantMenu(props: {
   onDraftChange: (value: string) => void;
   onAddParticipantDraftChange: (draft: ChatParticipantDraft) => void;
   onAddParticipant: () => void;
-  onAddSavedParticipant: (participant: ChatParticipantConfig, remoteExecution?: CloudRunRemoteExecutionMode) => void;
+  onAddSavedParticipant: (participant: ChatParticipantConfig) => void;
   onUpdateParticipantRuntime: (
     participantId: string,
     patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">
@@ -117,7 +115,7 @@ export function ChatParticipantMenu(props: {
 function savedParticipantSummary(settings: AppSettings, participant: ChatParticipantConfig, autoWatchConflictReason?: string): string {
   return [
     labelForProviderKind(settings.providers, participant.kind),
-    participant.kind === "codex-cli" ? `run ${chatRunLocationLabel(participant.remoteExecution).toLowerCase()}` : "",
+
     participant.model,
     participant.reasoningEffort ? `reasoning ${chatReasoningEffortLabel(participant.reasoningEffort)}` : "",
     participant.autoWatchEnabled ? (autoWatchConflictReason ? "auto-watch off: watcher already set" : "auto-watch") : "",

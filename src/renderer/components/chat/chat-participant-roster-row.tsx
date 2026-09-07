@@ -12,7 +12,7 @@ import type {
 import { IconButton } from "../primitives";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { ParticipantRuntimeControls } from "./chat-participant-runtime-controls";
-import { chatCliProviderLabel, normalizeChatRunLocation, type ChatParticipantRuntimeOverride } from "./chat-participant-drafts";
+import { chatCliProviderLabel, type ChatParticipantRuntimeOverride } from "./chat-participant-drafts";
 import { RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-roster-status";
 
 type ParticipantRuntimePatch = Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">;
@@ -136,7 +136,6 @@ export function ChatParticipantSelectableRosterRow(props: {
   runtimeOverride?: ChatParticipantRuntimeOverride;
   renderParticipantAvatar: (participant: ChatParticipantConfig) => React.ReactNode;
   onToggleSelected: (participantId: string) => void;
-  onRunLocationChange: (participant: ChatParticipantConfig, remoteExecution: Exclude<ChatParticipant["remoteExecution"], undefined | "inherit">) => void;
   onRuntimeChange: (participant: ChatParticipantConfig, patch: ParticipantRuntimePatch) => void;
 }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
@@ -149,7 +148,7 @@ export function ChatParticipantSelectableRosterRow(props: {
     reasoningEffort: "reasoningEffort" in runtimeOverride ? runtimeOverride.reasoningEffort : props.participant.reasoningEffort,
     agentMode: runtimeOverride.agentMode ?? props.participant.agentMode,
     permissions: runtimeOverride.permissions ?? props.participant.permissions,
-    remoteExecution: normalizeChatRunLocation(runtimeOverride.remoteExecution ?? props.remoteExecution ?? props.participant.remoteExecution),
+    remoteExecution: runtimeOverride.remoteExecution ?? props.remoteExecution ?? props.participant.remoteExecution,
     homeMachineId: "homeMachineId" in runtimeOverride ? runtimeOverride.homeMachineId : props.participant.homeMachineId,
     skipToolchainPreflight: runtimeOverride.skipToolchainPreflight ?? props.participant.skipToolchainPreflight,
     autoWatch: runtimeOverride.autoWatch ?? props.participant.autoWatchEnabled
@@ -212,10 +211,7 @@ export function ChatParticipantSelectableRosterRow(props: {
             participant={participant}
             disabled={Boolean(props.disabledReason)}
             runLocationLocked={false}
-            onUpdate={(_participantId, patch) => {
-              props.onRuntimeChange(props.participant, patch);
-              props.onRunLocationChange(props.participant, normalizeChatRunLocation(patch.remoteExecution));
-            }}
+            onUpdate={(_participantId, patch) => props.onRuntimeChange(props.participant, patch)}
           />
         )}
       </div>

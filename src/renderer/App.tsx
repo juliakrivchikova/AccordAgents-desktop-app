@@ -249,7 +249,7 @@ function App(): JSX.Element {
             onDraftChange={state.setChatMessageDraft}
             onAddParticipantDraftChange={state.setChatAddParticipantDraft}
             onAddParticipant={() => void chatActions.addChatParticipant()}
-            onAddSavedParticipant={(participant, remoteExecution) => void chatActions.addSavedChatParticipant(participant, remoteExecution)}
+            onAddSavedParticipant={(participant) => void chatActions.addSavedChatParticipant(participant)}
             onUpdateParticipantRuntime={(participantId, patch) => void chatActions.updateChatParticipantRuntime(participantId, patch)}
             onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
             onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
@@ -482,7 +482,6 @@ function App(): JSX.Element {
                 repoPath={state.repoPath}
                 repoInfo={state.repoInfo}
                 selectedParticipantIds={state.selectedChatParticipantConfigIds}
-                selectedParticipantRunLocations={state.selectedChatParticipantRunLocations}
                 selectedParticipantRuntimeOverrides={state.selectedChatParticipantRuntimeOverrides}
                 settings={state.settings}
                 summaries={state.summaries}
@@ -506,7 +505,6 @@ function App(): JSX.Element {
                 onRepoBlur={(path) => void conversationActions.inspectRepo(path)}
                 onSelectRepo={() => void conversationActions.selectRepo()}
                 onSelectedParticipantIdsChange={conversationActions.updateSelectedChatParticipantConfigIds}
-                onSelectedParticipantRunLocationsChange={state.setSelectedChatParticipantRunLocations}
                 onSelectedParticipantRuntimeOverridesChange={state.setSelectedChatParticipantRuntimeOverrides}
                 onOpenParticipantsSettings={() => openSettingsSection("participants")}
                 onOpenProviderSettings={() => openSettingsSection("general")}

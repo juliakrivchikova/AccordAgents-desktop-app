@@ -4,7 +4,6 @@ import type {
   AppSettings,
   ChatActivityItem,
   ChatSkillMention,
-  CloudRunRemoteExecutionMode,
   Conversation,
   ConversationKind,
   ConversationMessagePageInfo,
@@ -115,8 +114,6 @@ export interface AppState {
   setPlanCorrectionDraft: StateSetter<string>;
   selectedChatParticipantConfigIds: Set<string>;
   setSelectedChatParticipantConfigIds: StateSetter<Set<string>>;
-  selectedChatParticipantRunLocations: Record<string, CloudRunRemoteExecutionMode>;
-  setSelectedChatParticipantRunLocations: StateSetter<Record<string, CloudRunRemoteExecutionMode>>;
   selectedChatParticipantRuntimeOverrides: Record<string, ChatParticipantRuntimeOverride>;
   setSelectedChatParticipantRuntimeOverrides: StateSetter<Record<string, ChatParticipantRuntimeOverride>>;
   chatMessageDraft: string;
@@ -187,7 +184,6 @@ export function useAppState(): AppState {
   const [planItemReviewDrafts, setPlanItemReviewDrafts] = useState<Record<string, string>>({});
   const [planCorrectionDraft, setPlanCorrectionDraft] = useState("");
   const [selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds] = useState<Set<string>>(new Set());
-  const [selectedChatParticipantRunLocations, setSelectedChatParticipantRunLocations] = useState<Record<string, CloudRunRemoteExecutionMode>>({});
   const [selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides] = useState<Record<string, ChatParticipantRuntimeOverride>>({});
   const [chatMessageDraft, setChatMessageDraft] = useState("");
   const [chatAddParticipantDraft, setChatAddParticipantDraft] = useState<ChatParticipantDraft | undefined>();
@@ -239,7 +235,6 @@ export function useAppState(): AppState {
     setResolvedDecisionThreads, clarificationDrafts, setClarificationDrafts, pendingClarifications,
     setPendingClarifications, planItemReviewDrafts, setPlanItemReviewDrafts, planCorrectionDraft,
     setPlanCorrectionDraft, selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds,
-    selectedChatParticipantRunLocations, setSelectedChatParticipantRunLocations,
     selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides,
     chatMessageDraft, setChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,

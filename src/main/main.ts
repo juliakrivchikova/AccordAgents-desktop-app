@@ -163,9 +163,8 @@ import { AwsWorkerSetupService } from "./services/awsWorkerSetup";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
 import { ProviderRunner } from "./services/providers";
-import { RemoteRunService } from "./services/remoteRuns";
 import { DefaultRemoteAgentSetupSync } from "./services/remoteAgentSetup";
-import { RemoteRunCoordinator } from "./services/remoteRunCoordinator";
+import { acquireWorkerOperationLease, renewWorkerOperationLease, releaseWorkerOperationLease } from "./services/remoteWorkerLease";
 import { LocalFileOpenerService } from "./services/localFileOpener";
 import { SettingsService } from "./services/settings";
 import { StorageService } from "./services/storage";
@@ -335,16 +334,6 @@ function emitReviewProgress(progress: ReviewProgress): void {
   }
 }
 
-const remoteRunService = new RemoteRunService(chatService, {
-  agentSetupSync: new DefaultRemoteAgentSetupSync({
-    logger: (event, payload) => {
-      void debugLogService.write(event, payload);
-    }
-  }),
-  syncLogger: (event, payload) => {
-    void debugLogService.write(event, payload);
-  }
-});
 const cloudRunDoctorService = new CloudRunDoctorService({
   openExternal: (url) => {
     void openExternalUrl(url);
@@ -354,7 +343,18 @@ const cloudRunDoctorService = new CloudRunDoctorService({
   }
 });
 const cloudRunAwsService = new CloudRunAwsService(settingsService, {
-  automaticStopGate: remoteRunService,
+  // The box is no longer asked over SSH whether a turn is running on it: the
+  // machine on it reports its own work over the link, and an idle stop waits
+  // while any of it is in flight.
+  automaticStopGate: {
+    authorizeAutomaticWorkerStop: async () => machineLinkService?.hasActiveMachineWork()
+      ? { allowed: false, reason: "A machine is still working." }
+      : { allowed: true, lease: { leaseId: "machine-idle", expiresAt: new Date(Date.now() + 30_000).toISOString() } },
+    renewAutomaticWorkerStopLease: async (_worker, lease) => machineLinkService?.hasActiveMachineWork()
+      ? Promise.reject(new Error("A machine started working; the automatic stop is abandoned."))
+      : { ...lease, expiresAt: new Date(Date.now() + 30_000).toISOString() },
+    releaseAutomaticWorkerStopLease: async () => undefined
+  },
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
   }
@@ -425,9 +425,6 @@ async function machinePowerHandoffForPairing(pairing: MobilePairingPackage): Pro
 }
 chatService.setCloudRunAwsService(cloudRunAwsService);
 chatService.setCloudRunDoctorService(cloudRunDoctorService);
-const remoteRunCoordinator = new RemoteRunCoordinator(remoteRunService, chatService, settingsService, debugLogService);
-chatService.setRemoteRunService(remoteRunService);
-chatService.setRemoteRunCoordinator(remoteRunCoordinator);
 wireChatAppToolHandlers(appMcpService, chatService);
 // Artifacts persist in their own tables of the same SQLite database as
 // conversations, but independently of conversation payloads.
@@ -756,13 +753,9 @@ async function withCloudRunWorker<T>(
     if (!worker) {
       throw new Error("The AWS worker did not provide a valid SSH target.");
     }
-    const lease = await remoteRunService.acquireWorkerOperationLease(
-      worker,
-      operationId,
-      "settings-worker-operation"
-    );
+    const lease = await acquireWorkerOperationLease(worker, operationId, "settings-worker-operation");
     const renewalTimer = setInterval(() => {
-      void remoteRunService.renewWorkerOperationLease(worker, lease).then((renewed) => {
+      void renewWorkerOperationLease(worker, lease).then((renewed) => {
         lease.expiresAt = renewed.expiresAt;
       }).catch((error) => {
         void debugLogService.write("cloud-runs.operation-lease.renew-error", {
@@ -775,7 +768,7 @@ async function withCloudRunWorker<T>(
       return await action(workerSettings);
     } finally {
       clearInterval(renewalTimer);
-      await remoteRunService.releaseWorkerOperationLease(worker, lease).catch((error) => {
+      await releaseWorkerOperationLease(worker, lease).catch((error) => {
         void debugLogService.write("cloud-runs.operation-lease.release-error", {
           message: error instanceof Error ? error.message : String(error)
         });
@@ -1993,28 +1986,19 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:save-cloud-runs", (_event, update: CloudRunsSettingsUpdate) => settingsService.saveCloudRunsSettings(update));
   ipcMain.handle("cloud-runs:test-worker", async (_event, request?: CloudRunWorkerSettings) => {
-    const result = await withCloudRunWorker(request, testCloudRunWorker);
-    remoteRunService.clearToolchainPreflightCache();
-    await remoteRunService.clearMirrorSyncState();
-    return result;
+    return withCloudRunWorker(request, testCloudRunWorker);
   });
   ipcMain.handle("cloud-runs:diagnose-worker", async (_event, request?: CloudRunWorkerSettings) => {
     const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
-    const result = await withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker, {
+    return withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker, {
       requirePersistentStorage: managedAws
     }));
-    remoteRunService.clearToolchainPreflightCache();
-    await remoteRunService.clearMirrorSyncState();
-    return result;
   });
   ipcMain.handle("cloud-runs:setup-worker", async (_event, request?: CloudRunWorkerSettings) => {
     const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
-    const result = await withCloudRunWorker(request, (worker) => cloudRunDoctorService.setup(worker, (progress) => {
+    return withCloudRunWorker(request, (worker) => cloudRunDoctorService.setup(worker, (progress) => {
       sendToMainWindow("cloud-runs:setup-progress", progress);
     }, { requirePersistentStorage: managedAws }));
-    remoteRunService.clearToolchainPreflightCache();
-    await remoteRunService.clearMirrorSyncState();
-    return result;
   });
   ipcMain.handle("cloud-runs:aws-bootstrap-command", (_event, region: string) =>
     cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1"));
@@ -3003,16 +2987,6 @@ void app.whenReady().then(async () => {
       message: error instanceof Error ? error.message : String(error)
     });
   });
-  await chatService.reconcileTerminalRemoteRunState().catch((error) => {
-    void debugLogService.write("chat.remote-run.reconcile-terminal-state.error", {
-      message: error instanceof Error ? error.message : String(error)
-    });
-  });
-  void remoteRunCoordinator.start().catch((error) => {
-    void debugLogService.write("remote-run.coordinator.start.error", {
-      message: error instanceof Error ? error.message : String(error)
-    });
-  });
   createWindow();
   void ensureLoginShellEnvPrimed();
   await detectAgentsWithAppSkills().catch((error) => {
@@ -3063,7 +3037,6 @@ app.on("before-quit", (event) => {
   }
   quitCleanupStarted = true;
   const cleanup = Promise.allSettled([
-    remoteRunCoordinator.shutdownIdleSessions(),
     cliAgentRunner.shutdownWarmAgents(),
     appMcpService.stop()
   ]);

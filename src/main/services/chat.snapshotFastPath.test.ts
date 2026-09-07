@@ -89,12 +89,6 @@ function testService(conversationList: Conversation[]): {
     async getPublicSettings(): Promise<{ chatRoleConfigs: ChatRoleConfig[]; chatParticipantConfigs: [] }> {
       return { chatRoleConfigs: [ROLE], chatParticipantConfigs: [] };
     },
-    async enqueueRemoteSessionCleanup(
-      handle: RemoteSessionCleanupTombstone["handle"],
-      reason: RemoteSessionCleanupTombstone["reason"]
-    ): Promise<RemoteSessionCleanupTombstone> {
-      return { id: "cleanup-1", handle, reason, createdAt: NOW };
-    },
     async removeRemoteSessionCleanupTombstone(): Promise<void> {
       return undefined;
     }

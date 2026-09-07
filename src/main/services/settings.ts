@@ -43,7 +43,6 @@ import type {
   ProviderSettingsUpdate,
   RepoFileOpenAction,
   RemoteParticipantSessionHandle,
-  RemoteSessionCleanupTombstone,
   SaveAgentEnvironmentVariableRequest
 } from "../../shared/types";
 import {
@@ -139,7 +138,6 @@ interface StoredSettings {
   chatSavedPrompts?: ChatSavedPromptConfig[];
   chatParticipantConfigs?: ChatParticipantConfig[];
   chatParticipantSeedState?: ChatParticipantSeedState;
-  remoteSessionCleanupTombstones?: RemoteSessionCleanupTombstone[];
   /** Enrolled machines (machines transport). The pairing packages carry the
    *  relay seal keys and are stored sealed, keyed by MachineRecord.pairingKey. */
   machines?: MachineRecord[];
@@ -155,12 +153,6 @@ interface StoredSettings {
   machineInstalls?: MachineInstallRecord[];
 }
 
-function isRemoteSessionCleanupReason(value: unknown): value is RemoteSessionCleanupTombstone["reason"] {
-  return value === "participant-removed" ||
-    value === "chat-archived" ||
-    value === "chat-deleted" ||
-    value === "app-quit";
-}
 
 const DEFAULT_PROVIDERS: ProviderSettings[] = [
   { kind: "codex-cli", label: CLI_PROVIDER_SETUP["codex-cli"].label, enabled: true },
@@ -1760,8 +1752,6 @@ export class SettingsService {
   private readonly settingsPath: string;
   private readonly mobilePairedDevicesPath: string;
   private readonly pendingMailboxRevocationsPath: string;
-  private readonly remoteSessionCleanupPath: string;
-  private remoteSessionCleanupMutation: Promise<void> = Promise.resolve();
   private storedState: StoredSettings | undefined;
   private storedReadError?: unknown;
   private storedLoad: Promise<StoredSettings> | undefined;
@@ -1770,7 +1760,6 @@ export class SettingsService {
 
   constructor() {
     this.settingsPath = path.join(userDataPath(), "settings.json");
-    this.remoteSessionCleanupPath = path.join(userDataPath(), "remote-session-cleanup.json");
     this.mobilePairedDevicesPath = path.join(userDataPath(), "mobile-paired-devices.json");
     this.pendingMailboxRevocationsPath = path.join(userDataPath(), "pending-mailbox-revocations.json");
   }
@@ -1803,59 +1792,6 @@ export class SettingsService {
         model: provider.model
       }))
     };
-  }
-
-  async listRemoteSessionCleanupTombstones(): Promise<RemoteSessionCleanupTombstone[]> {
-    return this.withRemoteSessionCleanupMutation(async () => this.readRemoteSessionCleanupTombstones());
-  }
-
-  async enqueueRemoteSessionCleanup(
-    handle: RemoteParticipantSessionHandle,
-    reason: RemoteSessionCleanupTombstone["reason"],
-    details: Pick<RemoteSessionCleanupTombstone,
-      "conversationId" | "participantId" | "runIds" | "providerSessionIds" | "removeArtifacts"> = {}
-  ): Promise<RemoteSessionCleanupTombstone> {
-    return this.withRemoteSessionCleanupMutation(async () => {
-      const current = await this.readRemoteSessionCleanupTombstones();
-      const existing = current.find((item) =>
-        item.handle.sessionKey === handle.sessionKey && item.handle.sessionDir === handle.sessionDir
-      );
-      if (existing) {
-        const merged: RemoteSessionCleanupTombstone = {
-          ...existing,
-          ...details,
-          reason,
-          runIds: this.normalizedStringList([...(existing.runIds ?? []), ...(details.runIds ?? [])]),
-          providerSessionIds: this.normalizedStringList([
-            ...(existing.providerSessionIds ?? []),
-            ...(details.providerSessionIds ?? [])
-          ]),
-          removeArtifacts: existing.removeArtifacts === true || details.removeArtifacts === true
-        };
-        await this.writeRemoteSessionCleanupTombstones(
-          current.map((item) => item.id === existing.id ? merged : item)
-        );
-        return merged;
-      }
-      const tombstone: RemoteSessionCleanupTombstone = {
-        id: randomUUID(),
-        handle,
-        reason,
-        createdAt: new Date().toISOString(),
-        ...details,
-        runIds: this.normalizedStringList(details.runIds),
-        providerSessionIds: this.normalizedStringList(details.providerSessionIds)
-      };
-      await this.writeRemoteSessionCleanupTombstones([...current, tombstone]);
-      return tombstone;
-    });
-  }
-
-  async removeRemoteSessionCleanupTombstone(id: string): Promise<void> {
-    await this.withRemoteSessionCleanupMutation(async () => {
-      const current = await this.readRemoteSessionCleanupTombstones();
-      await this.writeRemoteSessionCleanupTombstones(current.filter((item) => item.id !== id));
-    });
   }
 
   async updateProvider(update: ProviderSettingsUpdate): Promise<AppSettings> {
@@ -2792,9 +2728,6 @@ export class SettingsService {
         { migrateWorkflowManagerParticipantManagement }
       ),
       chatParticipantSeedState: this.normalizeSeedState(settings.chatParticipantSeedState),
-      remoteSessionCleanupTombstones: this.normalizeRemoteSessionCleanupTombstones(
-        settings.remoteSessionCleanupTombstones
-      ),
       machines: this.normalizeMachines(settings.machines),
       machineInstalls: this.normalizeMachineInstalls(settings.machineInstalls),
       encryptedMachinePower: typeof settings.encryptedMachinePower === "string" && settings.encryptedMachinePower.trim()
@@ -3062,35 +2995,6 @@ export class SettingsService {
     return hostPlatform().secrets.isEncryptionAvailable();
   }
 
-  private async withRemoteSessionCleanupMutation<T>(action: () => Promise<T>): Promise<T> {
-    const previous = this.remoteSessionCleanupMutation ?? Promise.resolve();
-    let release!: () => void;
-    const step = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    this.remoteSessionCleanupMutation = previous.catch(() => undefined).then(() => step);
-    await previous.catch(() => undefined);
-    try {
-      return await action();
-    } finally {
-      release();
-    }
-  }
-
-  private async readRemoteSessionCleanupTombstones(): Promise<RemoteSessionCleanupTombstone[]> {
-    try {
-      const raw = await readFile(this.remoteSessionCleanupPath, "utf8");
-      return this.normalizeRemoteSessionCleanupTombstones(JSON.parse(raw));
-    } catch {
-      const stored = await this.readStored();
-      const migrated = this.normalizeRemoteSessionCleanupTombstones(stored.remoteSessionCleanupTombstones);
-      if (migrated.length > 0) {
-        await this.writeRemoteSessionCleanupTombstones(migrated);
-      }
-      return migrated;
-    }
-  }
-
   // A phone that has actually connected is remembered until the user revokes
   // it, so one install keeps working across desktop restarts. The short-lived
   // pairing link stays short-lived: it carries a key in a URL.
@@ -3149,13 +3053,6 @@ export class SettingsService {
     return this.decodeAgentEnvironmentValue({ key: "mobile-pairing", encryptedValue, protection } as StoredAgentEnvironmentVariable);
   }
 
-  private async writeRemoteSessionCleanupTombstones(items: RemoteSessionCleanupTombstone[]): Promise<void> {
-    await mkdir(path.dirname(this.remoteSessionCleanupPath), { recursive: true });
-    const temporaryPath = `${this.remoteSessionCleanupPath}.${randomUUID()}.tmp`;
-    await writeFile(temporaryPath, `${JSON.stringify(items, null, 2)}\n`, "utf8");
-    await rename(temporaryPath, this.remoteSessionCleanupPath);
-  }
-
   private normalizedStringList(value: unknown): string[] {
     if (!Array.isArray(value)) {
       return [];
@@ -3163,56 +3060,6 @@ export class SettingsService {
     return [...new Set(value.flatMap((item) =>
       typeof item === "string" && item.trim() ? [item.trim()] : []
     ))];
-  }
-
-  private normalizeRemoteSessionCleanupTombstones(value: unknown): RemoteSessionCleanupTombstone[] {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-    const normalized: RemoteSessionCleanupTombstone[] = [];
-    for (const item of value) {
-      if (!item || typeof item !== "object" || Array.isArray(item)) {
-        continue;
-      }
-      const record = item as Partial<RemoteSessionCleanupTombstone>;
-      const handle = record.handle;
-      if (!handle || typeof handle !== "object" || Array.isArray(handle)) {
-        continue;
-      }
-      const worker = normalizeCloudRunWorkerSettings(handle.worker);
-      if (
-        typeof record.id !== "string" || !record.id.trim() ||
-        typeof record.createdAt !== "string" ||
-        typeof handle.sessionKey !== "string" || !handle.sessionKey.trim() ||
-        typeof handle.sessionDir !== "string" || !handle.sessionDir.trim() ||
-        typeof handle.runtimeFingerprint !== "string" || !handle.runtimeFingerprint.trim() ||
-        typeof handle.protocolVersion !== "number" || !Number.isFinite(handle.protocolVersion) ||
-        typeof handle.updatedAt !== "string" ||
-        !worker.host ||
-        !isRemoteSessionCleanupReason(record.reason)
-      ) {
-        continue;
-      }
-      normalized.push({
-        id: record.id,
-        reason: record.reason,
-        createdAt: record.createdAt,
-        conversationId: typeof record.conversationId === "string" ? record.conversationId.trim() || undefined : undefined,
-        participantId: typeof record.participantId === "string" ? record.participantId.trim() || undefined : undefined,
-        runIds: this.normalizedStringList(record.runIds),
-        providerSessionIds: this.normalizedStringList(record.providerSessionIds),
-        removeArtifacts: record.removeArtifacts === true,
-        handle: {
-          sessionKey: handle.sessionKey,
-          sessionDir: handle.sessionDir,
-          worker,
-          protocolVersion: Math.max(1, Math.floor(handle.protocolVersion)),
-          runtimeFingerprint: handle.runtimeFingerprint,
-          updatedAt: handle.updatedAt
-        }
-      });
-    }
-    return normalized;
   }
 
   private normalizeCloudRunsSettings(stored: StoredSettings): CloudRunsSettings {
@@ -3414,7 +3261,6 @@ export class SettingsService {
       encryptedMachinePairings: _pairings,
       encryptedMachinePower: _power,
       machinePowerHandoffs: _powerHandoffs,
-      remoteSessionCleanupTombstones: _tombstones,
       lastRepoPath: _lastRepoPath,
       ...shareable
     } = stored;
@@ -3476,7 +3322,6 @@ export class SettingsService {
       encryptedMachinePairings: stored.encryptedMachinePairings,
       encryptedMachinePower: stored.encryptedMachinePower,
       machinePowerHandoffs: stored.machinePowerHandoffs,
-      remoteSessionCleanupTombstones: stored.remoteSessionCleanupTombstones,
       lastRepoPath: stored.lastRepoPath
     };
     // One atomic settings write replaces both configuration and environment.

@@ -24,11 +24,14 @@ import type {
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import {
   CHAT_AGENT_MODE_OPTIONS,
-  chatProviderSupportsCloudRun,
   chatCliProviderLabel,
-  chatInheritedCliSettingLabel,
-  normalizeChatRunLocation
+  chatInheritedCliSettingLabel
 } from "./chat-participant-drafts";
+import {
+  CHAT_PARTICIPANT_HOME_UNASSIGNED_LABEL,
+  chatParticipantHome,
+  chatParticipantHomeUnassignedMessage
+} from "../../../shared/chatParticipantHome";
 
 const REASONING_DEFAULT_VALUE = "__default__";
 const MODEL_DEFAULT_VALUE = "__default_model__";
@@ -51,6 +54,8 @@ export function ParticipantRuntimeControls(props: {
   autoWatchPausedReason?: ChatParticipantWatcherPausedReason;
   roleParticipantDefaults?: ChatRoleParticipantDefaults;
   runLocationLocked: boolean;
+  /** Name of an enrolled machine, when the surface knows the roster. */
+  machineName?: (machineId: string) => string | undefined;
   onUpdate: (
     participantId: string,
     patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">
@@ -58,7 +63,6 @@ export function ParticipantRuntimeControls(props: {
 }): JSX.Element {
   const participant = props.participant;
   const mode = normalizeChatAgentMode(participant.agentMode);
-  const runLocation = normalizeChatRunLocation(participant.remoteExecution);
   const reasoningValue = participant.reasoningEffort ?? REASONING_DEFAULT_VALUE;
   const cliSettingLabel = chatInheritedCliSettingLabel(participant.kind);
   const providerLabel = chatCliProviderLabel(participant.kind);
@@ -96,28 +100,22 @@ export function ParticipantRuntimeControls(props: {
     ?? autoWatchPausedTooltip
     ?? (autoWatchOn ? "Auto-watch is enabled for this member." : "Let this member watch new chat messages and decide whether to act.");
   const autoWatchDisabled = props.disabled || Boolean(props.autoWatchDisabledReason);
-  const cloudRunOn = runLocation === "remote";
-  const cloudRunSupported = chatProviderSupportsCloudRun(participant.kind);
-  const cloudRunDisabled = props.disabled || props.runLocationLocked || !cloudRunSupported;
-  const cloudRunTooltip = props.runLocationLocked
-    ? `Run location is locked because @${participant.handle} has already run in this chat.`
-    : !cloudRunSupported
-    ? "Cloud Runs currently supports Codex and Claude members only."
-    : cloudRunOn
-    ? "Run this member on the Cloud Runs worker."
-    : "Run this member locally.";
+  const home = chatParticipantHome(participant);
+  const homeLabel = home.kind === "machine"
+    ? (props.machineName?.(home.machineId) ?? "Machine")
+    : home.kind === "unassigned" ? CHAT_PARTICIPANT_HOME_UNASSIGNED_LABEL : "This computer";
+  const homeTooltip = home.kind === "unassigned"
+    ? chatParticipantHomeUnassignedMessage(participant.handle)
+    : `@${participant.handle} runs on ${homeLabel}. Its machine is chosen in member settings.`;
 
   return (
     <div className="chat-runtime-controls" aria-label={`Runtime controls for ${chatParticipantDisplayName(participant)}`}>
       <div className="chat-rt-toggleline">
-        <span className="chat-rt-toggle-label">Cloud Run:</span>
-        <PopoverSwitch
-          checked={cloudRunOn}
-          disabled={cloudRunDisabled}
-          ariaLabel="Cloud Run"
-          tooltip={cloudRunTooltip}
-          onChange={(checked) => update({ remoteExecution: checked ? "remote" : "local" })}
-        />
+        <span className="chat-rt-toggle-label">Machine:</span>
+        <span
+          className={`chat-rt-toggle-value ${home.kind === "unassigned" ? "is-warning" : ""}`}
+          title={homeTooltip}
+        >{homeLabel}</span>
       </div>
 
       <div className="chat-rt-group">

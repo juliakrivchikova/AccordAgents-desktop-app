@@ -7,15 +7,10 @@ import type {
   ChatParticipant,
   ChatParticipantConfig,
   ChatRoleParticipantDefaults,
-  ChatParticipantWatcherState,
-  CloudRunRemoteExecutionMode
+  ChatParticipantWatcherState
 } from "../../../shared/types";
 import { CHAT_ASSISTANT_ROLE_ID, chatParticipantMentionHandle } from "../conversation/conversation-display";
 import {
-  CHAT_RUN_LOCATION_OPTIONS,
-  chatProviderSupportsCloudRun,
-  chatRunLocationLabel,
-  normalizeChatRunLocation,
   type AddableSavedParticipantConfig
 } from "./chat-participant-drafts";
 import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
@@ -41,7 +36,7 @@ export interface ChatParticipantMenuViewProps {
   savedParticipantSummary: (participant: ChatParticipantConfig) => string;
   onDraftChange: (value: string) => void;
   onAddParticipant: () => void;
-  onAddSavedParticipant: (participant: ChatParticipantConfig, remoteExecution?: CloudRunRemoteExecutionMode) => void;
+  onAddSavedParticipant: (participant: ChatParticipantConfig) => void;
   onUpdateParticipantRuntime: (
     participantId: string,
     patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">
@@ -56,7 +51,6 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"roster" | "create">("roster");
   const [showSaved, setShowSaved] = useState(false);
-  const [savedRunLocations, setSavedRunLocations] = useState<Record<string, CloudRunRemoteExecutionMode>>({});
   const participantCountLabel = `${props.participants.length} ${props.participants.length === 1 ? "member" : "members"}`;
   const activeWatcher = props.participants.find((participant) => participant.autoWatch === true);
 
@@ -90,10 +84,6 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
       return "The last member cannot be removed";
     }
     return undefined;
-  }
-
-  function savedRunLocation(participant: ChatParticipantConfig): CloudRunRemoteExecutionMode {
-    return normalizeChatRunLocation(savedRunLocations[participant.id] ?? participant.remoteExecution);
   }
 
   return (
@@ -213,32 +203,11 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                         <span>{props.savedParticipantRoleLabel(config)} · {props.savedParticipantSummary(config)}</span>
                         {invalidReason && <small>{invalidReason}</small>}
                       </span>
-                      {chatProviderSupportsCloudRun(config.kind) && (
-                        <label className="chat-saved-run-location" title={`Run ${chatRunLocationLabel(savedRunLocation(config)).toLowerCase()}`}>
-                          <span>Run</span>
-                          <select
-                            aria-label={`Run location for @${config.handle}`}
-                            value={savedRunLocation(config)}
-                            disabled={Boolean(invalidReason) || props.isRunning}
-                            onChange={(event) => {
-                              const remoteExecution = event.currentTarget.value as CloudRunRemoteExecutionMode;
-                              setSavedRunLocations((current) => ({
-                                ...current,
-                                [config.id]: normalizeChatRunLocation(remoteExecution)
-                              }));
-                            }}
-                          >
-                            {CHAT_RUN_LOCATION_OPTIONS.map((option) => (
-                              <option value={option.value} key={option.value}>{option.label}</option>
-                            ))}
-                          </select>
-                        </label>
-                      )}
                       <Button
                         variant="outline"
                         size="sm"
                         disabled={Boolean(invalidReason) || props.isRunning}
-                        onClick={() => props.onAddSavedParticipant(config, savedRunLocation(config))}
+                        onClick={() => props.onAddSavedParticipant(config)}
                       >
                         <Plus size={16} />
                         Add

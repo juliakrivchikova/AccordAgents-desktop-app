@@ -521,6 +521,20 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return published;
   }
 
+  /** True while any connected machine says it is working. The AWS idle stop
+   *  asks this before stopping a box: an instance that is running a member's
+   *  turn must not be stopped underneath it. */
+  hasActiveMachineWork(): boolean {
+    for (const connection of this.connections.values()) {
+      if (!connection.machineDeviceId) continue;
+      const hello = connection.record.lastHello;
+      if ((hello?.activeRunIds?.length ?? 0) > 0 || (hello?.pendingTerminalRunIds?.length ?? 0) > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   isMachineConnected(machineId: string): boolean {
     return Boolean(this.connections.get(machineId)?.machineDeviceId);
   }

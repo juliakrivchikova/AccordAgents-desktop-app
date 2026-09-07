@@ -11,7 +11,6 @@ import type {
   AgentHealth,
   AppSettings,
   ChatAgentMode,
-  CloudRunRemoteExecutionMode,
   ChatProviderKind,
   ProviderKind
 } from "../../../shared/types";
@@ -32,11 +31,8 @@ import {
 import type { ChatParticipantDraft } from "./chat-participant-drafts";
 import {
   CHAT_AGENT_MODE_OPTIONS,
-  CHAT_RUN_LOCATION_OPTIONS,
   WORKFLOW_MANAGER_ROLE_ID,
   activeChatRoleConfigs,
-  chatProviderSupportsCloudRun,
-  normalizeChatRunLocation,
   updateChatParticipantDraft
 } from "./chat-participant-drafts";
 
@@ -109,19 +105,6 @@ export function ChatParticipantDraftRow(props: {
           onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { kind: value as ChatProviderKind }))}
         />
       </FormRow>
-      {chatProviderSupportsCloudRun(props.draft.kind) && (
-        <FormRow label="Run location">
-          <AppSelect
-            value={normalizeChatRunLocation(props.draft.remoteExecution)}
-            placeholder="Select run location"
-            ariaLabel="Member run location"
-            options={CHAT_RUN_LOCATION_OPTIONS}
-            onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, {
-              remoteExecution: value as CloudRunRemoteExecutionMode
-            }))}
-          />
-        </FormRow>
-      )}
       <FormRow label="Model">
         <ChatModelPicker
           kind={props.draft.kind}

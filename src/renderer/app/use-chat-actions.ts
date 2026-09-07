@@ -4,7 +4,6 @@ import type {
   ChatImageInput,
   ChatParticipant,
   ChatParticipantConfig,
-  CloudRunRemoteExecutionMode,
   ChatSkillMention,
   RepoFileMention
 } from "../../shared/types";
@@ -56,7 +55,7 @@ export interface ChatActions {
   toggleChatReaction: (messageId: string, emoji: string) => Promise<void>;
   respondToChatChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => Promise<void>;
   addChatParticipant: () => Promise<void>;
-  addSavedChatParticipant: (config: ChatParticipantConfig, remoteExecution?: CloudRunRemoteExecutionMode) => Promise<void>;
+  addSavedChatParticipant: (config: ChatParticipantConfig) => Promise<void>;
   updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">) => Promise<void>;
   removeChatParticipant: (participantId: string) => Promise<void>;
   compactChatParticipant: (participantId: string, options?: ChatRunScopeOptions) => Promise<boolean>;
@@ -145,7 +144,6 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         state.settings.chatParticipantConfigs,
         state.selectedChatParticipantConfigIds,
         initialMessage,
-        state.selectedChatParticipantRunLocations,
         state.selectedChatParticipantRuntimeOverrides
       )
     ];
@@ -197,7 +195,6 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setNewChatRepoFileMentions([]);
       state.setNewChatSkillMentions([]);
       state.setNewChatPluginMentions([]);
-      state.setSelectedChatParticipantRunLocations({});
       state.setSelectedChatParticipantRuntimeOverrides({});
       await conversationActions.refreshConversations();
       return true;
@@ -412,12 +409,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
   }
 
-  async function addSavedChatParticipant(config: ChatParticipantConfig, remoteExecution?: CloudRunRemoteExecutionMode): Promise<void> {
-    const draft = chatParticipantConfigToDraft(config);
-    const participant = normalizedChatDrafts([{
-      ...draft,
-      remoteExecution: remoteExecution ?? draft.remoteExecution
-    }])[0];
+  async function addSavedChatParticipant(config: ChatParticipantConfig): Promise<void> {
+    const participant = normalizedChatDrafts([chatParticipantConfigToDraft(config)])[0];
     await commitChatParticipant(participant);
   }
 
