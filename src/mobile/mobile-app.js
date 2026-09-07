@@ -949,9 +949,30 @@
       throw new Error("This phone cannot reach that machine directly yet.");
     }
     const scope = api.deviceEventScope(machine.rendezvousId, request.conversationId, "actions");
-    const chain = (await readMetaRecord(MACHINE_ACCESS_META_KEY)) || {};
-    const chains = chain.chains || {};
-    const previous = chains[scope] || { seq: 0 };
+    const stored = (await readMetaRecord(MACHINE_ACCESS_META_KEY)) || {};
+    const chains = stored.chains || {};
+    let previous = chains[scope] || { seq: 0 };
+    const packets = [];
+    // The machine runs against its own copy of the chat, so the row the turn
+    // answers travels with the command rather than being assumed to be there.
+    if (request.message) {
+      const delta = await api.mintEvent(identity, {
+        eventId: "phone-delta-" + request.runId,
+        conversationId: request.conversationId,
+        logScopeId: scope,
+        kind: "machine.conversation.delta",
+        originSeq: previous.seq + 1,
+        ...(previous.hash ? { prevHash: previous.hash } : {}),
+        payload: {
+          type: "machine.conversation.delta",
+          conversationId: request.conversationId,
+          messages: [request.message],
+          updatedAt: new Date().toISOString()
+        }
+      });
+      packets.push(api.eventPacket(identity.deviceId, machine.deviceId, delta));
+      previous = { seq: delta.originSeq, hash: delta.eventHash };
+    }
     const event = await api.mintEvent(identity, {
       eventId: api.machineCommandEventId(request.runId),
       conversationId: request.conversationId,
@@ -961,11 +982,57 @@
       ...(previous.hash ? { prevHash: previous.hash } : {}),
       payload: api.turnRequest(request)
     });
-    const packet = api.eventPacket(identity.deviceId, machine.deviceId, event);
-    await sendSealedToMachine(machine, packet);
+    packets.push(api.eventPacket(identity.deviceId, machine.deviceId, event));
     chains[scope] = { seq: event.originSeq, hash: event.eventHash };
-    await writeMetaRecord(MACHINE_ACCESS_META_KEY, { machines: chain.machines || [], chains });
+    await writeMetaRecord(MACHINE_ACCESS_META_KEY, { machines: stored.machines || [], chains });
+    // Kept until the machine's answer shows up: a send that fails now is
+    // retried later rather than a turn the User asked for being lost.
+    await rememberMachineCommand({
+      machineId: machine.machineId,
+      conversationId: request.conversationId,
+      runId: request.runId,
+      pendingMessageId: request.pendingMessageId,
+      packets
+    });
+    await flushMachineCommands();
     return event.eventId;
+  }
+
+  const MACHINE_COMMAND_QUEUE_KEY = "machine-command-queue";
+
+  async function rememberMachineCommand(entry) {
+    const stored = (await readMetaRecord(MACHINE_COMMAND_QUEUE_KEY)) || {};
+    const queue = (stored.queue || []).filter(function (item) { return item.runId !== entry.runId; });
+    queue.push({ ...entry, queuedAt: new Date().toISOString() });
+    await writeMetaRecord(MACHINE_COMMAND_QUEUE_KEY, { queue });
+  }
+
+  async function forgetMachineCommand(runId) {
+    const stored = (await readMetaRecord(MACHINE_COMMAND_QUEUE_KEY)) || {};
+    const queue = (stored.queue || []).filter(function (item) { return item.runId !== runId; });
+    await writeMetaRecord(MACHINE_COMMAND_QUEUE_KEY, { queue });
+  }
+
+  /**
+   * Re-offers every command the machine has not answered yet.
+   *
+   * A command carries its own id, so a machine that already has it does
+   * nothing with the copy; that is what makes retrying safe rather than a way
+   * to run a member twice.
+   */
+  async function flushMachineCommands() {
+    const stored = (await readMetaRecord(MACHINE_COMMAND_QUEUE_KEY)) || {};
+    const queue = stored.queue || [];
+    for (const entry of queue) {
+      const machine = await machineAccessFor(entry.machineId);
+      if (!machine) continue;
+      try {
+        for (const packet of entry.packets) await sendSealedToMachine(machine, packet);
+      } catch (error) {
+        recordRelayDebug({ event: "machine-command-retry", runId: entry.runId, message: String(error && error.message || error) });
+      }
+    }
+    return queue.length;
   }
 
   /**
@@ -4738,6 +4805,8 @@
         // While the desktop is here: register this phone's signing key and
         // pick up the machines it may reach when the desktop is not.
         await announceMachineIdentityViaRelay(pairing).catch(function () { return undefined; });
+        // Anything a machine has not answered yet is offered again.
+        await flushMachineCommands().catch(function () { return 0; });
         await render("synced");
         const conversationId = selectedConversationId();
         if (conversationId) {
@@ -4785,6 +4854,8 @@
     requestChatListViaRelay,
     announceMachineIdentityViaRelay,
     commandMachineTurn,
+    flushMachineCommands,
+    forgetMachineCommand,
     machineCommandIdentity,
     requestTimelineViaRelay,
     openRelayPayload,

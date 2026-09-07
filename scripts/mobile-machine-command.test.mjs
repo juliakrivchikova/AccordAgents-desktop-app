@@ -56,6 +56,7 @@ async function machine(options = {}) {
   };
   const runs = [];
   const logs = [];
+  const replicated = [];
   const host = new MachineHostService(
     {
       runMachineHostedTurn: async (request) => {
@@ -64,7 +65,10 @@ async function machine(options = {}) {
       },
       cancelRun: () => true,
       respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async () => undefined
+      applyReplicatedConversation: async (conversationId, merge) => {
+        const next = merge({ id: conversationId, kind: "chat", messages: [], metadata: { participants: [PARTICIPANT] } });
+        if (next) replicated.push(...(next.messages ?? []));
+      }
     },
     {
       getConversation: async () => ({
@@ -86,7 +90,7 @@ async function machine(options = {}) {
   await host.start();
   await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: desktop.originId, appVersion: "phone-test", machineId: "machine-one" });
   return {
-    host, runs, logs, pairing, identity, desktop, dir,
+    host, runs, logs, replicated, pairing, identity, desktop, dir,
     // The real ingress: a sealed frame off the relay, routed by who sent it.
     deliver: async (packet) => host.handleMessage(await sealMobileRelayPayload(packet, pairing.relaySealKeyBase64)),
     trust: async (peers) => host.handleBody({
@@ -190,5 +194,45 @@ test("a phone taken off the roster stops being answered", async () => {
     await box.deliver(second.packet);
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.deepEqual(box.runs, ["run-allowed"]);
+  } finally { await box.cleanup(); }
+});
+
+test("the row a phone's turn answers travels with the command", async () => {
+  // A machine runs against its own copy of the chat. The phone carries the
+  // message it is asking about, so the turn is not run against a chat that
+  // does not have it.
+  const identity = await phone.createIdentity();
+  const box = await machine();
+  try {
+    await box.trust([phonePeer(identity, box.pairing)]);
+    const scope = phone.deviceEventScope(box.pairing.rendezvousId, CONVERSATION, "actions");
+    const message = {
+      id: "phone-msg-1", role: "user", content: "from the phone",
+      status: "done", createdAt: new Date().toISOString()
+    };
+    const delta = await phone.mintEvent(identity, {
+      eventId: "phone-delta-run-carry",
+      conversationId: CONVERSATION,
+      logScopeId: scope,
+      kind: "machine.conversation.delta",
+      originSeq: 1,
+      payload: {
+        type: "machine.conversation.delta",
+        conversationId: CONVERSATION,
+        messages: [message],
+        updatedAt: new Date().toISOString()
+      }
+    });
+    await box.deliver(phone.eventPacket(identity.deviceId, box.identity.originId, delta));
+    const asked = await command(identity, box.identity.originId, box.pairing, "run-carry", 2, delta.eventHash);
+    await box.deliver(asked.packet);
+    for (let attempt = 0; attempt < 40 && box.runs.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.deepEqual(box.runs, ["run-carry"]);
+    assert.ok(
+      box.replicated.some((row) => row.id === "phone-msg-1"),
+      "the machine has the row the turn answers before it runs"
+    );
   } finally { await box.cleanup(); }
 });
