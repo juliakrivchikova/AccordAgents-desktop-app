@@ -1,7 +1,7 @@
 const ASSET_VERSION = "2026-09-01-picture-rows-v1";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
-const CACHE_NAME = `accordagents-mobile-shell-v66-${ASSET_VERSION}`;
+const CACHE_NAME = `accordagents-mobile-shell-v67-${ASSET_VERSION}`;
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -15,6 +15,7 @@ const APP_SHELL = [
   `./mobile-event-log.js?v=${ASSET_VERSION}`,
   `./mobile-machine-wake.js?v=${ASSET_VERSION}`,
   `./mobile-machine-command.js?v=${ASSET_VERSION}`,
+  "./mobile-machine-sealing.js?v=2026-09-07-pair-sealing-v1",
   `./mobile-machine-channel.js?v=${ASSET_VERSION}`,
   "./manifest.webmanifest",
   "./assets/accordagents-mark.png"

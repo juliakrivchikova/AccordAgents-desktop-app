@@ -29,7 +29,9 @@ import type { ChatParticipantRun, ChatService } from "./chat";
 import type { DebugLogService } from "./debugLogs";
 import { messageBatches, messageStamp } from "./machineLink";
 import { advanceInstanceSequence, isStoredTerminal } from "./machineTurnOutcome";
-import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
+import { openMobileRelayPayload } from "./mobileRelaySealing";
+import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
+import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
 import { RelayTunnelClient } from "./relayTunnelClient";
 import { MachinePeerFabric } from "./machinePeerFabric";
 import { MachineTrustStore } from "./machineTrustStore";
@@ -52,6 +54,7 @@ import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
 import { readPosixProcessTableAsync } from "./processTermination";
 import { verifyNativeExecutorGone } from "./nativeExecutorRecovery";
 import { MachineApprovalExecutor, machineApprovalResultId } from "./machineApprovalExecutor";
+import { MachineChoiceExecutor, machineChoiceResultId } from "./chatActionNativeClaims";
 import type { ChatActionApplier } from "./chatActionApplier";
 import type { ChatActionDependency } from "../../shared/deviceEventChannel";
 
@@ -107,7 +110,7 @@ const MAX_RESYNC_ATTEMPTS = 3;
 
 export class MachineHostService {
   private readonly failedDeltaWasSyncing = new Map<string, boolean>();
-  private readonly eventChannel: DeviceEventChannel;
+  private eventChannel!: DeviceEventChannel;
   private readonly client: RelayTunnelClient;
   private readonly now: () => Date;
   private readonly seenMessageIds = new Set<string>();
@@ -155,6 +158,10 @@ export class MachineHostService {
     return outcome.dependency ? { deferred: true, dependency: outcome.dependency } : "deferred";
   }
 
+  applyChoiceAction(event: ChatEventEnvelope, payload: import("../../shared/chatActionEvents").ChatActionPayload): Promise<import("../../shared/machineLink").MachineChoiceResultBody> {
+    return this.choiceExecutor.applyAction(event, payload);
+  }
+
   applyApprovalAction(event: ChatEventEnvelope, payload: import("../../shared/chatActionEvents").ChatActionPayload): Promise<import("../../shared/machineLink").MachineApprovalResultBody> {
     return this.approvalExecutor.applyAction(event, payload);
   }
@@ -199,11 +206,14 @@ export class MachineHostService {
   private draining = false;
   private idleFenced = false;
   private readonly turnTasks = new Set<Promise<void>>();
+  private readonly deletingConversationIds = new Set<string>();
+  private readonly activeTurnConversations = new Map<string, string>();
   private readonly commandTasks = new Map<string, Promise<void>>();
   private readonly commandSessions = new Map<string, Promise<void>>();
   private commandRetry?: ReturnType<typeof setTimeout>;
   private runtimeIdentity?: Promise<NativeRuntimeIdentity>;
   private readonly approvalExecutor: MachineApprovalExecutor;
+  private readonly choiceExecutor: MachineChoiceExecutor;
   /** The owner's other devices, and the channels to them. Without this a
    *  machine answers only the desktop that enrolled it. */
   private readonly trust: MachineTrustStore;
@@ -216,7 +226,7 @@ export class MachineHostService {
   private readonly knownMessages = new Map<string, Map<string, string>>();
 
   constructor(
-    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions">>,
+    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions">>,
     private readonly storage: Pick<StorageService, "getConversation"> & Partial<Pick<StorageService, "deleteConversation">>,
     private readonly settings: Pick<SettingsService, "importMachineSettingsSnapshot">,
     private readonly debugLogs: Pick<DebugLogService, "write">,
@@ -241,26 +251,6 @@ export class MachineHostService {
       capability: pairing.fingerprint,
       streamId: `${pairing.stableRoutingId}:machine`,
       reconnectDelayMs: options.reconnectDelayMs
-    });
-    this.eventChannel = new DeviceEventChannel({
-      storage: options.eventStorage, eventLog: options.eventLog,
-      pairing,
-      isPeerConnected: () => Boolean(this.desktopDeviceId),
-      channelId: pairing.rendezvousId, localDeviceId: options.deviceId,
-      peerDeviceId: pairing.issuer.originId, peerPublicKeyDerBase64: pairing.issuer.publicKeyDerBase64,
-      send: async (packet) => {
-        const ciphertext = await sealMobileRelayPayload(packet, pairing.relaySealKeyBase64);
-        await this.client.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: pairing.issuer.originId });
-      },
-      serveDependency: async (dependency) => {
-        try { return await options.serveChatActionDependency?.(dependency) ?? false; }
-        catch { return false; }
-      },
-      onDependencyUnavailable: (dependency) => {
-        void this.debugLogs.write("machine-host.action.dependency-unavailable", { ...dependency });
-      },
-      apply: (event, body) => this.applyDeviceEvent(event, body, this.eventChannel),
-      onError: (error) => { void this.debugLogs.write("machine-host.events.error", { message: error.message }); }
     });
     this.trust = new MachineTrustStore(
       options.trustRosterPath ?? path.join(userDataPath(), "machine-trust-roster.json"),
@@ -296,6 +286,12 @@ export class MachineHostService {
       } : {}),
       onError: (error) => { void this.debugLogs.write("machine-host.trust.error", { message: error.message }); },
       logger: (event, payload) => { void this.debugLogs.write(event, payload); }
+    });
+    this.choiceExecutor = new MachineChoiceExecutor({
+      storage: options.eventStorage, deviceId: options.deviceId, chat,
+      progress: (progress, conversationId) => this.noteProgress(conversationId, progress),
+      runtimeIdentity: () => this.getRuntimeIdentity(), nativeProcessDbPath: options.nativeProcessDbPath,
+      canApply: () => this.canApplyNativeEffects(), publish: body => this.send(body)
     });
     this.approvalExecutor = new MachineApprovalExecutor({
       storage: options.eventStorage, deviceId: options.deviceId, chat, getConversation: id => storage.getConversation(id),
@@ -338,7 +334,35 @@ export class MachineHostService {
     });
   }
 
+  private async initializeOwnerChannel(): Promise<void> {
+    if (this.eventChannel) return;
+    const options = this.options;
+    const pairing = options.pairing;
+    const identity = await options.eventLog.getOrCreateDeviceIdentity();
+    this.eventChannel = new DeviceEventChannel({
+      storage: options.eventStorage, eventLog: options.eventLog,
+      pairing: { ...pairing, relaySealKeyBase64: deriveMachineChannelKey(identity, pairing.issuer.publicKeyDerBase64, pairing.rendezvousId) },
+      isPeerConnected: () => Boolean(this.desktopDeviceId),
+      channelId: pairing.rendezvousId, localDeviceId: options.deviceId,
+      peerDeviceId: pairing.issuer.originId, peerPublicKeyDerBase64: pairing.issuer.publicKeyDerBase64,
+      send: async (packet) => {
+        const ciphertext = await sealMachineRelayPayload(packet, identity, pairing.issuer.publicKeyDerBase64, pairing.rendezvousId);
+        await this.client.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: pairing.issuer.originId });
+      },
+      serveDependency: async (dependency) => {
+        try { return await options.serveChatActionDependency?.(dependency) ?? false; }
+        catch { return false; }
+      },
+      onDependencyUnavailable: (dependency) => {
+        void this.debugLogs.write("machine-host.action.dependency-unavailable", { ...dependency });
+      },
+      apply: (event, body) => this.applyDeviceEvent(event, body, this.eventChannel),
+      onError: (error) => { void this.debugLogs.write("machine-host.events.error", { message: error.message }); }
+    });
+  }
+
   async start(): Promise<void> {
+    await this.initializeOwnerChannel();
     this.closed = false;
     for (const eventId of await this.options.eventStorage.storedChatEventIds([...this.pendingTerminals.values()].map(terminalEventId))) {
       this.durableTerminalIds.add(eventId);
@@ -353,6 +377,11 @@ export class MachineHostService {
       void this.debugLogs.write("machine-host.trust.restored", { peers: roster.peers.length, updatedAt: roster.updatedAt });
     }
     this.peers.start();
+    await this.reconcileDeletedConversations().catch(error => {
+      void this.debugLogs.write("machine-host.conversation.delete-recovery-error", { message: errorMessage(error) });
+      this.retryCommands();
+    });
+
     const homeMachineId = await this.options.eventStorage.deviceEvents().hostMachineId(this.options.pairing.rendezvousId);
     if (homeMachineId) {
       this.homeMachineId = homeMachineId;
@@ -369,7 +398,7 @@ export class MachineHostService {
     this.closed = true;
     for (const sender of this.progressSenders.values()) sender.close();
     this.peers.close();
-    this.eventChannel.close();
+    this.eventChannel?.close();
     this.unsubscribeRunSettled?.();
     if (this.commandRetry) clearTimeout(this.commandRetry);
     if (this.outboxRetryTimer) {
@@ -393,7 +422,7 @@ export class MachineHostService {
     }
     this.turnsAwaitingCopy.clear();
     await stopProviders();
-    while (this.turnTasks.size || this.approvalExecutor.hasActiveWork() || this.settlingInFlight.size || (this.chat.activeParticipantRuns?.().length ?? 0)) {
+    while (this.turnTasks.size || (this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork()) || this.settlingInFlight.size || (this.chat.activeParticipantRuns?.().length ?? 0)) {
       // A turn may still be preparing its workspace when shutdown begins.
       // Close an executor created by that preparation before waiting again.
       await stopProviders();
@@ -423,7 +452,7 @@ export class MachineHostService {
   async hasWorkForIdleStop(): Promise<boolean> {
     if (this.closed || this.draining || this.activeTurns.size || this.turnTasks.size || this.commandTasks.size ||
         this.settlingRuns.size || this.settlingInFlight.size || this.turnsAwaitingCopy.size || this.syncing.size ||
-        this.approvalExecutor.hasActiveWork() || (this.chat.activeParticipantRuns?.().length ?? 0) ||
+        (this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork()) || (this.chat.activeParticipantRuns?.().length ?? 0) ||
         this.outboxError || this.progressErrors.size || [...this.progressSenders.values()].some(sender => sender.hasPending())) return true;
     if ([...this.pendingTerminals.values()].some(terminal => !this.durableTerminalIds.has(terminalEventId(terminal)))) return true;
     return (await this.options.eventStorage.nativeCommands().pending()).length > 0;
@@ -620,7 +649,8 @@ export class MachineHostService {
     // before any application when the machine becomes available again.
     if (this.idleFenced || this.options.hostStopCommitted?.()) return "deferred";
     if (peer && stableJson(this.trust.peer(peer.deviceId) ?? null) !== stableJson(peer)) throw new Error("Machine controller authorization changed.");
-    if (event.kind === "permission.decided" && this.options.chatActions?.handles(event, body)) {
+    if (this.options.chatActions?.handles(event, body) && await this.isConversationDeleted(event.conversationId)) return "applied";
+    if ((event.kind === "permission.decided" || event.kind === "choice.answered") && this.options.chatActions?.handles(event, body)) {
       // Delivery to a provider may wait; keep Stop and other chats moving.
       void this.applyChatAction(event, body).then(outcome => {
         if (outcome === "applied") return channel?.confirmApplied(event);
@@ -637,7 +667,7 @@ export class MachineHostService {
     const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
     if (!isMachineLinkEnvelope(envelope) || !isMachineDurableMessage(envelope.body) ||
         envelope.body.type === "machine.conversation.backdelta" || envelope.body.type === "machine.turn.finished" || envelope.body.type === "machine.turn.started" ||
-        envelope.body.type === "machine.approval.requested" || envelope.body.type === "machine.approval.updated" || envelope.body.type === "machine.approval.result" ||
+        envelope.body.type === "machine.approval.requested" || envelope.body.type === "machine.approval.updated" || envelope.body.type === "machine.approval.result" || envelope.body.type === "machine.choice.result" ||
         envelope.body.type === "machine.turn.progress.delta" ||
         !this.peerMayCommand(envelope.body, peer)) {
       throw new Error("Unexpected machine replication event.");
@@ -651,6 +681,7 @@ export class MachineHostService {
     if (envelope.body.type === "machine.turn.request") {
       await this.acceptCommand(event, envelope.body);
     } else if (envelope.body.type === "machine.approval.decision") {
+      if (await this.isConversationDeleted(conversationId)) return "applied";
       // Do not hold the ingress queue while a native decision is delivered:
       // Stop and other conversations must still be able to arrive.
       const decision = envelope.body;
@@ -694,9 +725,7 @@ export class MachineHostService {
   }
 
   private async handleMessage(ciphertext: string): Promise<void> {
-    // Each trusted device seals with its own key now, so a frame in this room
-    // may not open with the room's. Try the room key first (the enrolling
-    // desktop and anything not yet re-keyed) and then the devices' own.
+    // Content is sealed to these two identities; the room capability grants no reading.
     const payload = await this.openHomeFrame(ciphertext);
     if (isDeviceEventPacket(payload)) {
       // The enrolling desktop keeps its own channel; every other device is
@@ -730,14 +759,31 @@ export class MachineHostService {
     await this.handleBody(payload.body, false, undefined, from);
   }
 
-  /** The room's key, then each trusted device's own. */
   private async openHomeFrame(ciphertext: string): Promise<unknown> {
-    try {
-      return await openMobileRelayPayload<unknown>(ciphertext, this.options.pairing.relaySealKeyBase64);
-    } catch (error) {
-      const packet = await this.peers.openHomeFrame(ciphertext, this.options.pairing.relaySealKeyBase64);
-      if (packet) return packet;
-      throw error;
+    const header = JSON.parse(ciphertext) as { senderPublicKeyDerBase64?: unknown };
+    if (!header.senderPublicKeyDerBase64) {
+      const bootstrap = await openMobileRelayPayload<unknown>(ciphertext, this.options.pairing.relaySealKeyBase64);
+      if (isMachineLinkEnvelope(bootstrap) && bootstrap.body.type === "machine.hello.request") return bootstrap;
+      throw new Error("Legacy machine content sealing is unsupported; update this device to reconnect.");
+    }
+    return openMachineRelayPayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
+      [this.options.pairing.issuer.publicKeyDerBase64, ...this.trust.peers().map(peer => peer.publicKeyDerBase64)],
+      this.options.pairing.rendezvousId);
+  }
+
+  private async ownerSealKey(): Promise<string> {
+    return deriveMachineChannelKey(await this.options.eventLog.getOrCreateDeviceIdentity(),
+      this.options.pairing.issuer.publicKeyDerBase64, this.options.pairing.rendezvousId);
+  }
+
+  private async openRetainedSettings(ciphertext: string): Promise<unknown> {
+    try { return await openMobileRelayPayload(ciphertext, await this.ownerSealKey()); }
+    catch {
+      // Pre-upgrade immutable signed events may retain an inner settings
+      // cipher. Their outer transport is already pair-sealed and authenticated;
+      // reading the historical inner cipher prevents pinning the event stream.
+      // Newly emitted settings never use this legacy key.
+      return openMobileRelayPayload(ciphertext, this.options.pairing.relaySealKeyBase64);
     }
   }
 
@@ -789,7 +835,7 @@ export class MachineHostService {
         return;
       case "machine.settings.sealed": {
         if (body.conversationId !== `machine-settings:${this.options.pairing.rendezvousId}`) throw new Error("Settings target the wrong enrolled machine.");
-        const snapshot = await openMobileRelayPayload(body.ciphertext, this.options.pairing.relaySealKeyBase64);
+        const snapshot = await this.openRetainedSettings(body.ciphertext);
         await this.settings.importMachineSettingsSnapshot(snapshot as import("../../shared/machineLink").MachineSettingsSnapshot);
         await this.options.onSettingsImported?.();
         return;
@@ -803,7 +849,7 @@ export class MachineHostService {
       case "machine.conversation.sync":
         // A snapshot of a chat the owner deleted is stale by definition; it
         // cannot be told apart from a new one except by the tombstone.
-        if (await this.options.eventStorage.conversationTombstones().isDeleted(body.conversation.id)) {
+        if (await this.isConversationDeleted(body.conversation.id)) {
           void this.debugLogs.write("machine-host.conversation.deleted-copy-refused",
             { conversationId: body.conversation.id, type: body.type });
           return;
@@ -816,6 +862,7 @@ export class MachineHostService {
         await this.applyConversationSync(body.conversation, durable);
         return;
       case "machine.conversation.sync.done": {
+        if (await this.isConversationDeleted(body.conversationId)) return;
         if (this.failedSync.has(body.conversationId)) {
           // A batch of this copy was not stored: the copy is not complete,
           // and comparing against it would send stale rows back. Ask again,
@@ -840,7 +887,7 @@ export class MachineHostService {
         return;
       }
       case "machine.conversation.delta":
-        if (await this.options.eventStorage.conversationTombstones().isDeleted(body.conversationId)) {
+        if (await this.isConversationDeleted(body.conversationId)) {
           void this.debugLogs.write("machine-host.conversation.deleted-copy-refused",
             { conversationId: body.conversationId, type: body.type });
           return;
@@ -852,6 +899,7 @@ export class MachineHostService {
         await this.applyConversationDelta(body, durable, replyTo === undefined || replyTo === this.options.pairing.issuer.originId);
         return;
       case "machine.participants.delegate":
+        if (await this.isConversationDeleted(body.conversationId)) return;
         // Another machine's member asked for members that live here. Only the
         // ones named are run, and the request message travelled ahead of this.
         await this.chat.runDelegatedParticipantRequest?.({
@@ -863,7 +911,7 @@ export class MachineHostService {
         return;
       case "machine.turn.request":
         if (this.activeTurns.has(body.runId) || this.pendingTerminals.has(body.runId) || this.isQueuedRun(body.runId)) return;
-        if (await this.options.eventStorage.conversationTombstones().isDeleted(body.conversationId)) {
+        if (await this.isConversationDeleted(body.conversationId)) {
           await this.finishQueuedTurn(body, "failed", "This chat was deleted; the turn did not run.");
           return;
         }
@@ -1101,26 +1149,48 @@ export class MachineHostService {
    * leave the chat deletable, never resurrectable.
    */
   private async deleteReplicatedConversation(conversationId: string, deletedAt: string): Promise<void> {
+    this.deletingConversationIds.add(conversationId);
     const tombstones = this.options.eventStorage.conversationTombstones();
     await tombstones.mark(conversationId, deletedAt);
     this.syncing.delete(conversationId);
     this.failedSync.delete(conversationId);
+    const waiting = this.turnsAwaitingCopy.get(conversationId) ?? [];
     this.turnsAwaitingCopy.delete(conversationId);
     this.knownMessages.delete(conversationId);
     // Anything of this chat still in flight is stopped and waited for. A
     // provider left running against a deleted chat is exactly the process
     // nobody would ever come looking for.
     for (const [runId, controller] of this.activeTurns) {
-      if (this.chat.conversationIdForRun?.(runId) === conversationId) controller.abort();
+      if (this.activeTurnConversations.get(runId) === conversationId || this.chat.conversationIdForRun?.(runId) === conversationId) controller.abort();
     }
-    await this.chat.closeReplicatedConversationSessions?.(conversationId);
+    for (const request of waiting) await this.finishQueuedTurn(request, "failed", "This chat was deleted; the turn did not run.");
+    if (!this.chat.closeReplicatedConversationSessions || !this.storage.deleteConversation) {
+      throw new Error("The machine cannot prove that this chat's providers and stored copy were deleted.");
+    }
+    await this.chat.closeReplicatedConversationSessions(conversationId);
     if (this.storage.deleteConversation) {
       await this.storage.deleteConversation(conversationId).catch((error: unknown) => {
         void this.debugLogs.write("machine-host.conversation.delete-error", { conversationId, message: errorMessage(error) });
         throw error;
       });
     }
+    // The owner's other devices need the same absence. Retained fanout uses
+    // one stable event; replay after a crash cannot create a delete loop.
+    await this.send({ type: "machine.conversation.deleted", conversationId, deletedAt: (await tombstones.deletedAt(conversationId))! });
     void this.debugLogs.write("machine-host.conversation.deleted", { conversationId, deletedAt });
+  }
+
+  private async isConversationDeleted(conversationId: string): Promise<boolean> {
+    const deleted = await this.options.eventStorage.conversationTombstones().isDeleted(conversationId);
+    return deleted || this.deletingConversationIds.has(conversationId);
+  }
+
+  private async reconcileDeletedConversations(): Promise<void> {
+    for (;;) {
+      const pending = await this.options.eventStorage.conversationTombstones().pendingCopies();
+      for (const row of pending) await this.deleteReplicatedConversation(row.conversationId, row.deletedAt);
+      if (pending.length < 100) return;
+    }
   }
 
   private async applyConversationDelta(delta: MachineConversationDeltaBody, durable = false, fromDesktop = true): Promise<void> {
@@ -1350,6 +1420,11 @@ export class MachineHostService {
 
   private async admitTurn(request: MachineTurnRequestBody): Promise<void> {
     if (this.closed) return;
+    // Recheck at admission, after any earlier turn in this participant's
+    // queue. The receive-time check may have preceded deletion by minutes.
+    if (await this.isConversationDeleted(request.conversationId)) {
+      return this.finishQueuedTurn(request, "failed", "This chat was deleted; the turn did not run.");
+    }
     const commands = this.options.eventStorage.nativeCommands();
     const command = await commands.forRun(request.runId);
     if (!command) {
@@ -1429,7 +1504,7 @@ export class MachineHostService {
     if (this.commandRetry || this.closed || this.draining) return;
     this.commandRetry = setTimeout(() => {
       this.commandRetry = undefined;
-      void this.recoverCommands().catch((error) => {
+      void this.reconcileDeletedConversations().then(() => this.recoverCommands()).catch((error) => {
         void this.debugLogs.write("machine-host.command.recovery-error", { message: errorMessage(error) });
         this.retryCommands();
       });
@@ -1438,17 +1513,24 @@ export class MachineHostService {
   }
 
   private async executeTurn(request: MachineTurnRequestBody): Promise<void> {
+    if (await this.isConversationDeleted(request.conversationId)) {
+      return this.finishQueuedTurn(request, "failed", "This chat was deleted; the turn did not run.");
+    }
     const controller = new AbortController();
     this.activeTurns.set(request.runId, controller);
+    this.activeTurnConversations.set(request.runId, request.conversationId);
     const progress = (update: ReviewProgress): void => {
       this.noteProgress(request.conversationId, update);
     };
     let terminal: MachineTurnFinishedBody;
     try {
       if (request.sealedSettings) {
-        const snapshot = await openMobileRelayPayload(request.sealedSettings, this.options.pairing.relaySealKeyBase64);
+        const snapshot = await this.openRetainedSettings(request.sealedSettings);
         await this.settings.importMachineSettingsSnapshot(snapshot as import("../../shared/machineLink").MachineSettingsSnapshot);
         await this.options.onSettingsImported?.();
+      }
+      if (controller.signal.aborted || await this.isConversationDeleted(request.conversationId)) {
+        throw new Error("This chat was deleted or its turn was cancelled before admission.");
       }
       const result = await this.chat.runMachineHostedTurn(
         {
@@ -1486,6 +1568,7 @@ export class MachineHostService {
       };
     } finally {
       this.activeTurns.delete(request.runId);
+      this.activeTurnConversations.delete(request.runId);
     }
     // The result is kept (on disk when configured) until the desktop
     // acknowledges it: a desktop that is away, a relay that drops the frame,
@@ -1849,7 +1932,9 @@ export class MachineHostService {
         // them is online gets it, and the outbox holds it for the others.
         recipients: this.resultRecipients(),
         ...(body.type === "machine.approval.requested" || body.type === "machine.approval.updated" ? { scope: `approval:${body.approval.id}` } : {}),
+        ...(body.type === "machine.choice.result" ? { eventId: machineChoiceResultId(body.decisionId), scope: `choice:${body.choiceId}` } : {}),
         ...(body.type === "machine.approval.result" && body.decisionId ? { eventId: machineApprovalResultId(body.decisionId), scope: `approval:${body.approvalId}` } : {}),
+        ...(body.type === "machine.conversation.deleted" ? { eventId: `machine-delete:${JSON.stringify([this.options.deviceId, conversationId])}`, scope: "deletion" } : {}),
         ...(body.type === "machine.turn.started" ? { eventId: `machine-started:${body.runId}`, scope: `terminal:${body.runId}` } : {}),
         // One request message, one delegation: a redelivery or a restart is
         // the same event, not a second run of the same members. It stays on
@@ -1880,7 +1965,11 @@ export class MachineHostService {
       body
     };
     const signed = signMachineControl(envelope, await this.options.eventLog.getOrCreateDeviceIdentity(), this.options.pairing.rendezvousId, to);
-    const ciphertext = await sealMobileRelayPayload(signed, this.options.pairing.relaySealKeyBase64);
+    const peerKey = to === this.options.pairing.issuer.originId
+      ? this.options.pairing.issuer.publicKeyDerBase64 : this.trust.peer(to)?.publicKeyDerBase64;
+    if (!peerKey) throw new Error("That device is no longer trusted.");
+    const ciphertext = await sealMachineRelayPayload(signed, await this.options.eventLog.getOrCreateDeviceIdentity(),
+      peerKey, this.options.pairing.rendezvousId);
     await this.client.sendCiphertext({ logicalMessageId: envelope.messageId, ciphertext, to });
   }
 }

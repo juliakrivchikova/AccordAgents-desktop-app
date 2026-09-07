@@ -50,7 +50,7 @@ function stubClient() {
 }
 
 async function envelope(body, enrollment) {
-  const { sealMobileRelayPayload } = await import("../dist/main/main/services/mobileRelaySealing.js");
+  const { sealMachineRelayPayload } = await import("../dist/main/main/services/machineRelaySealing.js");
   const { isMachineDurableMessage } = await import("../dist/main/shared/machineLink.js");
   const { signMachineControl } = await import("../dist/main/main/services/machineControlAuthentication.js");
   let payload;
@@ -64,14 +64,16 @@ async function envelope(body, enrollment) {
     payload = signMachineControl({ protocol: "accord-machine-link-v1", messageId: `m-${Math.random()}`,
       sentAt: new Date().toISOString(), body }, desktopEvents.identity, enrollment.rendezvousId, MACHINE_ID);
   }
-  return sealMobileRelayPayload(payload, SEAL_KEY);
+  return sealMachineRelayPayload(payload, desktopEvents.identity, hostEvents.identity.publicKeyDerBase64, enrollment.rendezvousId);
 }
 
-async function sentBodies(client) {
+async function sentBodies(client, enrollment) {
+  const { openMachineRelayPayload } = await import("../dist/main/main/services/machineRelaySealing.js");
   const { openMobileRelayPayload } = await import("../dist/main/main/services/mobileRelaySealing.js");
   const bodies = [];
   for (const request of client.sent) {
-    const payload = await openMobileRelayPayload(request.ciphertext, SEAL_KEY);
+    await assert.rejects(() => openMobileRelayPayload(request.ciphertext, SEAL_KEY), "the enrolling desktop channel never emits future content under the legacy room seal");
+    const payload = await openMachineRelayPayload(request.ciphertext, desktopEvents.identity, [hostEvents.identity.publicKeyDerBase64], enrollment.rendezvousId);
     if (payload.protocol === "accord-device-events-v1") {
       if (payload.type === "event") bodies.push(await hostEvents.eventStorage.deviceEventBlobs().hydrate(payload.event.payload));
     } else bodies.push(payload.body);
@@ -118,11 +120,11 @@ test("a turn waiting for a chat copy counts as held, and a stop removes it befor
   assert.ok(logs.some((entry) => entry.event === "machine-host.turn.awaiting-copy" && entry.payload?.runId === "run-wait"));
   // Asked about it, the machine holds it: no "unknown".
   await inbound({ type: "machine.turn.query", conversationId: "conv-1", runId: "run-wait" });
-  let bodies = await sentBodies(client);
+  let bodies = await sentBodies(client, host.options.pairing);
   assert.ok(!bodies.some((body) => body.type === "machine.turn.unknown"), "a waiting turn is held, not unknown");
   // Stop while waiting: a confirmed interruption is stored and reported, and the copy completing must not start it.
   await inbound({ type: "machine.turn.cancel", conversationId: "conv-1", runId: "run-wait" });
-  bodies = await sentBodies(client);
+  bodies = await sentBodies(client, host.options.pairing);
   const terminal = bodies.find((body) => body.type === "machine.turn.finished" && body.runId === "run-wait");
   assert.ok(terminal, "a stopped waiting turn reports a result");
   assert.equal(terminal.status, "interrupted");
@@ -162,7 +164,7 @@ test("the machine's hello lists turns waiting for a copy as active", async () =>
   // A fresh link announces itself again; the hello must list the waiting turn.
   client.emit("peer", { type: "ready", deviceId: MACHINE_ID, peerConnected: true, peers: [{ role: "desktop", deviceId: DESKTOP_ID }] });
   await settle();
-  const bodies = await sentBodies(client);
+  const bodies = await sentBodies(client, host.options.pairing);
   const hello = bodies.filter((body) => body.type === "machine.hello").pop();
   assert.ok(hello.activeRunIds.includes("run-listed"));
   host.close();
@@ -247,13 +249,13 @@ test("a ChatService native resume is listed, stopped and delivered through the h
   await host.start();
   client.emit("peer", { type: "ready", peers: [{ role: "desktop", deviceId: DESKTOP_ID }] });
   await settle();
-  let bodies = await sentBodies(client);
+  let bodies = await sentBodies(client, host.options.pairing);
   assert.ok(bodies.find((body) => body.type === "machine.hello").activeRunIds.includes("native-resume"));
   client.emit("message", { ciphertext: await envelope({ type: "machine.turn.query", conversationId: "native-chat", runId: "native-resume" }, host.options.pairing) });
   client.emit("message", { ciphertext: await envelope({ type: "machine.turn.cancel", conversationId: "native-chat", runId: "native-resume" }, host.options.pairing) });
   await settle();
   assert.equal(controller.signal.aborted, true, "Stop reaches the actual ChatService controller");
-  bodies = await sentBodies(client);
+  bodies = await sentBodies(client, host.options.pairing);
   assert.equal(bodies.filter((body) => body.type === "machine.turn.unknown").length, 0);
   assert.equal(bodies.filter((body) => body.type === "machine.turn.finished").length, 0, "abort is not completion");
   chat.unregisterTargetRun("native-resume", controller);
@@ -264,7 +266,7 @@ test("a ChatService native resume is listed, stopped and delivered through the h
   }
   await host.outbound;
   await host.eventChannel.flush();
-  bodies = await sentBodies(client);
+  bodies = await sentBodies(client, host.options.pairing);
   const terminal = bodies.find((body) => body.type === "machine.turn.finished");
   assert.equal(terminal.status, "interrupted");
   assert.equal(terminal.messages[0].content, "partial");

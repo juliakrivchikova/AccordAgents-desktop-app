@@ -29,14 +29,17 @@ const { ChatEventLogService } = require(path.join(repoRoot, "dist/main/main/serv
 const { sealMobileRelayPayload, openMobileRelayPayload } =
   require(path.join(repoRoot, "dist/main/main/services/mobileRelaySealing.js"));
 
+const { deriveMachineChannelKey } = require(path.join(repoRoot, "dist/main/shared/machineChannelKey.js"));
+const { sealMachineRelayPayload } = require(path.join(repoRoot, "dist/main/main/services/machineRelaySealing.js"));
+
 const CONVERSATION = "phone-chat";
 const PARTICIPANT = { id: "p1", handle: "bot", kind: "codex-cli", roleConfigId: "engineer", homeMachineId: "machine-one" };
 const SEAL_KEY = Buffer.alloc(32, 23).toString("base64url");
 
 /** A store the tests can break on demand, with real transaction semantics. */
 function memoryPort() {
-  const stores = new Map([["events", new Map()], ["outbox", new Map()], ["meta", new Map()]]);
-  const keyOf = (store, value) => (store === "meta" ? value.key : value.eventId);
+  const stores = new Map([["events", new Map()], ["outbox", new Map()], ["meta", new Map()], ["blobs", new Map()]]);
+  const keyOf = (store, value) => (store === "meta" || store === "blobs" ? value.key : value.eventId);
   const port = {
     failOn: null,
     async runAtomic(names, work) {
@@ -155,7 +158,7 @@ async function machineBox(options = {}) {
     },
     { getConversation: async () => ({ id: CONVERSATION, kind: "chat", messages: [], metadata: { participants: [PARTICIPANT] } }) },
     { importMachineSettingsSnapshot: async () => undefined },
-    { write: async () => undefined },
+    { write: async (event, payload) => { if (process.env.MACHINE_CHANNEL_DEBUG) console.error(event, payload); } },
     {
       pairing, deviceId: identity.originId, appVersion: "phone-channel-test",
       eventStorage: storage, eventLog, publicKeyDerBase64: identity.publicKeyDerBase64,
@@ -188,8 +191,8 @@ async function machineBox(options = {}) {
         roster: { version: 1, issuerDeviceId: desktop.originId, updatedAt: new Date().toISOString(), peers } };
       const { event } = await desktopLog.appendLocalEvent({ conversationId: body.conversationId,
         logScopeId: phone.deviceEventScope(pairing.rendezvousId, body.conversationId, "actions"), kind: body.type, payload: body });
-      await host.handleMessage(await sealMobileRelayPayload(
-        phone.eventPacket(desktop.originId, identity.originId, event), SEAL_KEY));
+      await host.handleMessage(await sealMachineRelayPayload(
+        phone.eventPacket(desktop.originId, identity.originId, event), desktop, identity.publicKeyDerBase64, pairing.rendezvousId));
     },
     cleanup: async () => {
       host.close();
@@ -217,7 +220,7 @@ function phonePeer(identity, pairing) {
 
 function phoneLog(port, identity) {
   return createMobileEventLog({
-    port, originId: identity.deviceId, keyId: identity.keyId,
+    port, originId: identity.deviceId, keyId: identity.keyId, stores: { blobs: "blobs" },
     hashPayload: async (payload) => "sha256:" + await phone.sha256Hex(phone.textBytes(phone.stableJson(payload))),
     hashEvent: async (unsigned) => "sha256:" + await phone.sha256Hex(phone.textBytes(phone.stableJson(unsigned))),
     sign: (eventHash) => phone.signEventHash(identity, eventHash)
@@ -226,38 +229,41 @@ function phoneLog(port, identity) {
 
 /** The phone's body store, with the rule that matters: an incomplete or
  *  altered body does not read back as a body at all. */
-function memoryBlobs() {
-  const parts = new Map();
+function memoryBlobs(port = memoryPort()) {
+  let received = 0;
+  const key = (reference, index) => "blob:" + reference.blobHash + ":" + index;
   return {
-    store: async (fragment) => {
-      parts.set(fragment.reference.blobHash + ":" + fragment.index, Buffer.from(fragment.bytesBase64, "base64"));
+    port,
+    store: async fragment => {
+      received += 1;
+      await port.runAtomic(["blobs"], tx => tx.put("blobs", {
+        key: key(fragment.reference, fragment.index), bytesBase64: fragment.bytesBase64
+      }));
     },
     fragment: async (reference, index) => {
-      const part = parts.get(reference.blobHash + ":" + index);
-      return part ? { reference, index, bytesBase64: part.toString("base64") } : undefined;
+      const row = await port.runAtomic(["blobs"], tx => tx.get("blobs", key(reference, index)));
+      return row ? { reference, index, bytesBase64: row.bytesBase64 } : undefined;
     },
-    release: async (reference) => {
-      for (let index = 0; index < reference.fragments; index += 1) parts.delete(reference.blobHash + ":" + index);
-    },
-    take: async (reference) => {
-      const held = [];
+    take: async reference => {
+      const parts = [];
       for (let index = 0; index < reference.fragments; index += 1) {
-        const part = parts.get(reference.blobHash + ":" + index);
-        if (!part) return undefined;
-        held.push(part);
+        const row = await port.runAtomic(["blobs"], tx => tx.get("blobs", key(reference, index)));
+        if (!row) return undefined;
+        parts.push(Buffer.from(row.bytesBase64, "base64"));
       }
-      const bytes = Buffer.concat(held);
+      const bytes = Buffer.concat(parts);
       if (bytes.byteLength !== reference.byteLength) return undefined;
       if ("sha256:" + createHash("sha256").update(bytes).digest("hex") !== reference.blobHash) return undefined;
       return JSON.parse(bytes.toString("utf8"));
     },
-    count: () => parts.size
+    count: () => port.dump("blobs").length,
+    received: () => received
   };
 }
 
 /** The phone, its journal and its connection, wired to a machine's ingress. */
 async function phoneOn(box, identity, options = {}) {
-  const port = options.port || memoryPort();
+  const port = options.port || options.blobs?.port || memoryPort();
   const log = phoneLog(port, identity);
   await log.restore();
   const applied = [];
@@ -268,8 +274,8 @@ async function phoneOn(box, identity, options = {}) {
   };
   box.hooks.onOutbound = undefined;
   const channels = createMachineChannels({
-    api: phone, identity, log,
-    blobs: options.blobs || memoryBlobs(),
+    api: phone, identity, log, deriveChannelKey: deriveMachineChannelKey,
+    blobs: options.blobs || memoryBlobs(port),
     seal: (payload, key) => sealMobileRelayPayload(payload, key),
     open: (ciphertext, key) => openMobileRelayPayload(ciphertext, key),
     chunk, reassemble,
@@ -282,7 +288,7 @@ async function phoneOn(box, identity, options = {}) {
       applied.push({ kind: event.kind, payload });
       return "applied";
     },
-    debug: () => undefined
+    debug: (event) => { if (process.env.MACHINE_CHANNEL_DEBUG) console.error(event); }
   });
   channels.setMachines([machineAccess(box)]);
   return { port, log, channels, applied, socket };
@@ -436,7 +442,7 @@ test("an acknowledgement from the wrong key releases nothing", async () => {
       protocol: "accord-device-events-v1", from: box.identity.originId, to: identity.deviceId, type: "ack",
       receipt: { eventId: event.eventId, eventHash: event.eventHash, outcome: "applied", appliedAt: new Date().toISOString() }
     });
-    await device.channels.receiveSealed("machine-one", await sealMobileRelayPayload(forged, SEAL_KEY));
+    await device.channels.receiveSealed("machine-one", await sealMobileRelayPayload(forged, deriveMachineChannelKey(identity, box.identity.publicKeyDerBase64, box.pairing.rendezvousId)));
     assert.equal((await device.log.pendingFor(box.identity.originId)).length, 1,
       "a signature that is not the machine's does not release this phone's history");
   } finally { await box.cleanup(); }
@@ -496,7 +502,8 @@ test("a reply too large for one event arrives in fragments and is put back toget
       "a long reply must still reach the phone");
     const finished = device.applied.find((entry) => entry.kind === "machine.turn.finished");
     assert.equal(finished.payload.messages[0].content, long, "and it must be the whole reply, not a truncated one");
-    assert.ok(blobs.count() > 1, `it really did travel as more than one fragment (${blobs.count()})`);
+    assert.ok(blobs.received() > 1, `it really did travel as more than one fragment (${blobs.received()})`);
+    assert.equal(blobs.count(), 0, "applied receipt and final body cleanup commit together");
   } finally { await box.cleanup(); }
 });
 
@@ -656,7 +663,7 @@ test("a message too long for one event is sent in fragments and arrives whole", 
     });
     assert.equal(payload.type, "device.event.blob", "a body this size does not travel inside the event");
     assert.ok(payload.fragments > 1, `and it takes more than one fragment (${payload.fragments})`);
-    await device.log.append({
+    await device.channels.append({
       eventId: "phone-delta-run-long-out", conversationId: CONVERSATION, logScopeId: scope,
       kind: "machine.conversation.delta", recipients: [box.identity.originId], payload: payload
     });
@@ -680,19 +687,14 @@ test("a message too long for one event is sent in fragments and arrives whole", 
   } finally { await box.cleanup(); }
 });
 
-test("a paste no phone should try to send is refused with a reason, not queued forever", async () => {
+test("a paste above the former phone-only limit uses the same fragments as desktop", async () => {
   const identity = await phone.createIdentity();
   const box = await machineBox();
   try {
-    await box.trust([phonePeer(identity, box.pairing)]);
     const device = await phoneOn(box, identity);
-    device.identityId = identity.deviceId;
-    await assert.rejects(
-      () => device.channels.prepare({ type: "machine.conversation.delta", conversationId: CONVERSATION,
-        messages: [{ id: "huge", role: "user", content: "q".repeat(9 * 1024 * 1024), createdAt: new Date().toISOString() }],
-        updatedAt: new Date().toISOString() }),
-      /too long to send from this phone/,
-      "the User is told why, rather than watching a message never arrive"
-    );
+    const payload = await device.channels.prepare({ text: "q".repeat(9 * 1024 * 1024) });
+    assert.ok(payload.fragments > 20);
+    assert.equal(device.port.dump("blobs").length, 0, "preparation cannot leave orphaned persisted fragments");
+    device.channels.close();
   } finally { await box.cleanup(); }
 });

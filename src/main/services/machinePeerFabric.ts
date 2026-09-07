@@ -29,7 +29,8 @@ import type { TrustedPeerAccess } from "../../shared/machineTrust";
 import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
 import type { ChatEventLogService } from "./chatEventLog";
 import type { RelayTunnelClient } from "./relayTunnelClient";
-import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
+import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
+import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
 import type { StorageService } from "./storage";
 
 export interface MachinePeerFabricOptions {
@@ -143,7 +144,7 @@ export class MachinePeerFabric {
     }
     for (const peer of wanted.values()) {
       if (this.connections.has(peer.deviceId)) continue;
-      const room = this.meetingRoom(peer);
+      const room = await this.meetingRoom(peer);
       let client: RelayTunnelClient | undefined;
       let connect = false;
       if (!room.here) {
@@ -159,7 +160,7 @@ export class MachinePeerFabric {
           this.rooms.set(key, client);
           let inbound: Promise<void> = Promise.resolve();
           client.on("message", (message) => {
-            inbound = inbound.then(() => this.receiveSealed(message.ciphertext, room.sealKeyBase64)).catch((error) => {
+            inbound = inbound.then(() => this.receiveSealed(message.ciphertext, room.rendezvousId)).catch((error) => {
               this.options.logger("machine-host.trust.receive-error", {
                 rendezvousId: room.rendezvousId,
                 message: error instanceof Error ? error.message : String(error)
@@ -233,38 +234,18 @@ export class MachinePeerFabric {
     return true;
   }
 
-  private async receiveSealed(ciphertext: string, sealKeyBase64: string): Promise<void> {
-    const payload = await openMobileRelayPayload<unknown>(ciphertext, sealKeyBase64);
-    if (isDeviceEventPacket(payload)) {
-      await this.receive(payload);
-    }
+  private async receiveSealed(ciphertext: string, room: string): Promise<void> {
+    const payload = await openMachineRelayPayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
+      [...this.connections.values()].map(connection => connection.peer.publicKeyDerBase64), room);
+    if (isDeviceEventPacket(payload)) await this.receive(payload);
   }
 
-  /**
-   * Opens a frame from the machine's own room, trying each trusted device's
-   * key and then the room's.
-   *
-   * Outbound sealing is per device, so a revoked device cannot read what the
-   * others are sent. Inbound has to accept whichever key the sender holds:
-   * a device that has not yet picked up its own key is still one of the
-   * owner's, and refusing it would lock a working device out rather than
-   * revoke a removed one. Authority is decided by the roster and the
-   * signatures, not by which key opened the envelope.
-   */
-  async openHomeFrame(ciphertext: string, roomKeyBase64: string): Promise<DeviceEventPacket | undefined> {
-    const keys = [roomKeyBase64, ...[...this.connections.values()]
-      .map((connection) => connection.peer.relaySealKeyBase64)
-      .filter((key): key is string => Boolean(key))];
-    for (const key of new Set(keys)) {
-      try {
-        const payload = await openMobileRelayPayload<unknown>(ciphertext, key);
-        if (isDeviceEventPacket(payload)) return payload;
-        return undefined;
-      } catch {
-        // Sealed for someone else, or with a key this machine no longer holds.
-      }
-    }
-    return undefined;
+  async openHomeFrame(ciphertext: string, _legacyRoomKey?: string): Promise<DeviceEventPacket | undefined> {
+    try {
+      const payload = await openMachineRelayPayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
+        [...this.connections.values()].map(connection => connection.peer.publicKeyDerBase64), this.options.home.rendezvousId);
+      return isDeviceEventPacket(payload) ? payload : undefined;
+    } catch { return undefined; }
   }
 
   /**
@@ -281,27 +262,16 @@ export class MachinePeerFabric {
   }
 
   /** The room, sealing key and capability a peer is met with. */
-  private meetingRoom(peer: TrustedPeerAccess): { rendezvousId: string; relayUrl: string; sealKeyBase64: string; fingerprint?: string; here: boolean } {
-    const here = this.channelIdFor(peer) === this.options.home.rendezvousId;
-    return here
-      ? {
-        rendezvousId: this.options.home.rendezvousId,
-        relayUrl: this.options.home.relayUrl ?? peer.relayUrl,
-        // The device's own key, not the room's. The room is shared because the
-        // relay is a room; the sealing is not, so a device the owner revokes
-        // cannot read what the devices that stayed are sent. Falls back to the
-        // room key only for a peer enrolled before keys were per device.
-        sealKeyBase64: peer.relaySealKeyBase64 || this.options.home.relaySealKeyBase64,
-        fingerprint: this.options.home.fingerprint,
-        here: true
-      }
-      : {
-        rendezvousId: peer.rendezvousId,
-        relayUrl: peer.relayUrl,
-        sealKeyBase64: peer.relaySealKeyBase64,
-        ...(peer.fingerprint ? { fingerprint: peer.fingerprint } : {}),
-        here: false
-      };
+  private async meetingRoom(peer: TrustedPeerAccess): Promise<{ rendezvousId: string; relayUrl: string; sealKeyBase64: string; fingerprint?: string; here: boolean }> {
+    const room = this.channelIdFor(peer);
+    const here = room === this.options.home.rendezvousId;
+    return {
+      rendezvousId: room,
+      relayUrl: here ? this.options.home.relayUrl ?? peer.relayUrl : peer.relayUrl,
+      sealKeyBase64: deriveMachineChannelKey(await this.options.eventLog.getOrCreateDeviceIdentity(), peer.publicKeyDerBase64, room),
+      fingerprint: here ? this.options.home.fingerprint : peer.fingerprint,
+      here
+    };
   }
 
   private buildChannel(
@@ -310,7 +280,7 @@ export class MachinePeerFabric {
     client: RelayTunnelClient | undefined
   ): DeviceEventChannel {
     const send = async (packet: DeviceEventPacket): Promise<void> => {
-      const ciphertext = await sealMobileRelayPayload(packet, room.sealKeyBase64);
+      const ciphertext = await sealMachineRelayPayload(packet, await this.options.eventLog.getOrCreateDeviceIdentity(), peer.publicKeyDerBase64, room.rendezvousId);
       const transport = client ?? this.options.homeClient;
       await transport.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: peer.deviceId });
     };

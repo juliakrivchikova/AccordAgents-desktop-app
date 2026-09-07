@@ -43,10 +43,6 @@
   // BLOB_FRAGMENT_MAX_BYTES); a body split any other way is refused there.
   const INLINE_BYTES = 32 * 1024;
   const FRAGMENT_BYTES = 384 * 1024;
-  // Past this a paste is refused with a reason rather than fragmented. There
-  // is no point holding tens of megabytes of base64 in a phone's storage and
-  // pushing thousands of relay frames at a machine for one message.
-  const MAX_BODY_BYTES = 8 * 1024 * 1024;
   const RESEND_MIN_MS = 5000;
   const RESEND_MAX_MS = 300000;
   const TICK_MS = 5000;
@@ -67,8 +63,11 @@
   }
 
   function createMachineChannels(options) {
+    const preparedBodies = new WeakMap();
     const api = options.api;
     const identity = options.identity;
+    const deriveChannelKey = options.deriveChannelKey || (globalThis.AccordMachineSealing && globalThis.AccordMachineSealing.deriveMachineChannelKey);
+    if (!deriveChannelKey) throw new Error("Machine encryption is unavailable; update this device to reconnect.");
     const log = options.log;
     const blobs = options.blobs;
     const debug = options.debug || function () {};
@@ -101,7 +100,10 @@
     function setMachines(list) {
       const wanted = new Map();
       for (const machine of list || []) {
-        if (machine && machine.machineId && machine.deviceId && machine.rendezvousId) wanted.set(machine.machineId, machine);
+        if (machine && machine.machineId && machine.deviceId && machine.rendezvousId) {
+          wanted.set(machine.machineId, { ...machine,
+            relaySealKeyBase64: deriveChannelKey(identity, machine.publicKeyDerBase64, machine.rendezvousId) });
+        }
       }
       for (const entry of [...connections]) {
         const machineId = entry[0];
@@ -158,24 +160,29 @@
       if (json === undefined) throw new Error("A machine event needs a JSON payload.");
       const bytes = new TextEncoder().encode(json);
       if (bytes.byteLength <= INLINE_BYTES) return payload;
-      if (bytes.byteLength > MAX_BODY_BYTES) {
-        throw new Error("This message is too long to send from this phone (" +
-          Math.round(bytes.byteLength / (1024 * 1024)) + " MB). Send it from the desktop.");
-      }
       const reference = {
         type: "device.event.blob",
         blobHash: "sha256:" + await api.sha256Hex(bytes),
         byteLength: bytes.byteLength,
         fragments: Math.ceil(bytes.byteLength / FRAGMENT_BYTES)
       };
+      const fragments = [];
       for (let index = 0; index < reference.fragments; index += 1) {
-        await blobs.store({
+        fragments.push({
           reference: reference,
           index: index,
           bytesBase64: api.bytesToBase64(bytes.subarray(index * FRAGMENT_BYTES, (index + 1) * FRAGMENT_BYTES))
         });
       }
+      preparedBodies.set(reference, fragments);
       return reference;
+    }
+
+    async function append(request) {
+      const fragments = preparedBodies.get(request.payload);
+      const event = await log.append({ ...request, ...(fragments ? { blobFragments: fragments } : {}) });
+      preparedBodies.delete(request.payload);
+      return event;
     }
 
     // ---- transport -------------------------------------------------------
@@ -249,7 +256,8 @@
       const machine = connection.machine;
       const authenticated = packet.type === "event" ? packet : await api.signPacket(identity, packet);
       const socket = await ensureSocket(connection);
-      const ciphertext = await options.seal(authenticated, machine.relaySealKeyBase64);
+      const sealed = await options.seal(authenticated, machine.relaySealKeyBase64);
+      const ciphertext = JSON.stringify({ ...JSON.parse(sealed), senderPublicKeyDerBase64: identity.publicKeyDerBase64 });
       const frames = options.chunk({
         streamId: machine.rendezvousId + ":phone",
         logicalMessageId: packetId(authenticated),
@@ -329,11 +337,6 @@
           }
           await log.acknowledge(packet.from, receipt.eventId);
           connection.lastSent.delete(receipt.eventId);
-          // Acknowledged: the machine has the body, so this phone stops
-          // carrying it. Held until now so a re-send has the same bytes.
-          if (held && held.payload && held.payload.type === "device.event.blob" && blobs.release) {
-            await blobs.release(held.payload).catch(function () { return undefined; });
-          }
           if (options.onAcknowledged) await options.onAcknowledged(receipt, connection.machine);
           await release();
           return;
@@ -496,12 +499,12 @@
     return {
       setMachines: setMachines,
       prepare: prepare,
-      /** Drops a prepared body whose event was never recorded. Without this a
-       *  failed write leaves its fragments behind with nothing to release
-       *  them, and a retry leaves another set. */
+      append: append,
+      /** Preparation is memory only; the journal stores fragments, event and
+       * delivery row together. Failed persistence cannot orphan fragments. */
       discard: function (payload) {
-        if (!payload || payload.type !== "device.event.blob" || !blobs.release) return Promise.resolve();
-        return blobs.release(payload).catch(function () { return undefined; });
+        preparedBodies.delete(payload);
+        return Promise.resolve();
       },
       roster: roster,
       status: statusFor,

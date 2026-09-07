@@ -517,7 +517,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
 
 test("outgoing commands preserve order and Stop fences dispatch even when a write fails", async () => {
   const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
-  const { openMobileRelayPayload } = await import("../dist/main/main/services/mobileRelaySealing.js");
+  const { openMachineRelayPayload } = await import("../dist/main/main/services/machineRelaySealing.js");
   const pairing = machinePairing("ws://unused/v1/relay");
   const record = { id: "machine-fence", name: "Fence box", pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
   const writes = [];
@@ -526,7 +526,7 @@ test("outgoing commands preserve order and Stop fences dispatch even when a writ
   const client = {
     on() {}, connect: async () => undefined, close() {},
     sendCiphertext: async ({ ciphertext }) => {
-      const envelope = await openMobileRelayPayload(ciphertext, pairing.relaySealKeyBase64);
+      const envelope = await openMachineRelayPayload(ciphertext, hostEvents.identity, [desktopEvents.identity.publicKeyDerBase64], pairing.rendezvousId);
       writes.push(envelope.body);
       await onWrite(envelope.body);
     }
@@ -538,7 +538,8 @@ test("outgoing commands preserve order and Stop fences dispatch even when a writ
   }, { write: async () => undefined }, { ...desktopEvents, appVersion: "test", desktopDeviceId: "desktop-fence", createClient: () => client });
   await link.start();
   const connection = link.connections.get(record.id);
-  connection.machineDeviceId = "machine-device";
+  connection.machineDeviceId = MACHINE_ID;
+  connection.record.lastHello = { publicKeyDerBase64: hostEvents.identity.publicKeyDerBase64 };
   // This probe isolates the native dispatch fence after an already completed
   // copy; the real SQLite event channel is exercised by the link probe above.
   connection.eventChannel = { publish: async ({ payload }) => { writes.push(payload); await onWrite(payload); }, flush: async () => undefined, close() {} };

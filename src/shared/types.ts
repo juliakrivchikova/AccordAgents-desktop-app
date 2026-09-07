@@ -816,6 +816,10 @@ export interface ChatPendingChoice {
   note?: string;
   selectedAt?: string;
   cancelledAt?: string;
+  /** The durable answer which saved this selection, before native admission. */
+  decisionEventId?: string;
+  responseMessageId?: string;
+  responseRunId?: string;
 }
 
 export type ChatRosterChangeOperationType = "add";
@@ -2748,5 +2752,6 @@ export interface AppBridge {
   machineRuntimePayload(): Promise<MachineRuntimePayloadInfo>;
   onMachineInstallProgress(callback: (snapshot: MachineInstallSnapshot) => void): () => void;
   onReviewProgress(callback: (progress: ReviewProgress) => void): () => void;
+  onConversationDeleted(callback: (conversationId: string) => void): () => void;
   onConversationUpdated(callback: (conversation: ConversationUpdate) => void): () => void;
 }

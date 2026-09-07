@@ -14,7 +14,7 @@ import type { ChatActionEmitter } from "./chatActionEmitter";
 import type { Conversation, RespondToChatAppToolApprovalRequest } from "../../shared/types";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ChatActionPayload } from "../../shared/chatActionEvents";
-import type { MachineApprovalResultBody } from "../../shared/machineLink";
+import type { MachineApprovalResultBody, MachineChoiceResultBody } from "../../shared/machineLink";
 
 export interface ChatActionEffectChat {
   ownsAppToolApproval?(conversationId: string, approvalId: string): Promise<boolean | undefined>;
@@ -36,28 +36,12 @@ export interface ChatActionEffectStorage {
   getConversation(conversationId: string): Promise<Conversation | undefined>;
 }
 
-/**
- * The durable boundary an answer with a native effect crosses.
- *
- * "taken" means this runtime may act. "already-acted" means someone else did
- * and its outcome stands. "uncertain" means a claim exists with no receipt --
- * the effect may or may not have reached the provider, and repeating it is the
- * one thing that must not happen.
- */
-export type NativeTargetClaim = "taken" | "already-acted" | "uncertain";
-
-export interface ChatActionNativeClaims {
-  claimTarget(event: ChatEventEnvelope, targetKey: string, participantId: string): Promise<NativeTargetClaim>;
-}
-
 export function createChatActionEffects(deps: {
   chat: ChatActionEffectChat;
   emitter: Pick<ChatActionEmitter, "beginExecution" | "recordExecution">;
   storage: ChatActionEffectStorage;
   applyApproval?: (event: ChatEventEnvelope, payload: ChatActionPayload) => Promise<MachineApprovalResultBody>;
-  /** Absent only where nothing native can be reached; then a receipt lookup is
-   *  all there is, and that is stated rather than assumed to be a lock. */
-  nativeClaims?: ChatActionNativeClaims;
+  applyChoice?: (event: ChatEventEnvelope, payload: ChatActionPayload) => Promise<MachineChoiceResultBody>;
   /** This machine's enrolled id, on a machine runtime; absent on a desktop.
    *  A member with no home machine lives on the desktop, so the two answer the
    *  same question from opposite sides without either guessing. */
@@ -80,6 +64,14 @@ export function createChatActionEffects(deps: {
         await deps.emitter.recordExecution({ conversationId: event.conversationId, targetKey: payload.targetKey,
           effect, ...(result.uncertain ? { uncertain: true } : {}) });
       }
+      return effect;
+    } } : {}),
+    ...(deps.applyChoice ? { applyChoice: async (event: ChatEventEnvelope, payload: ChatActionPayload) => {
+      const result = await deps.applyChoice!(event, payload);
+      const effect = result.ok ? (payload.detail?.cancel === true ? "cancelled the choice" : "answered the choice")
+        : result.error ?? "The choice continuation was not confirmed.";
+      if (result.ok || result.uncertain) await deps.emitter.recordExecution({ conversationId: event.conversationId,
+        targetKey: payload.targetKey, effect, ...(result.uncertain ? { uncertain: true } : {}) });
       return effect;
     } } : {}),
     async owns(conversationId, targetKey) {
@@ -108,25 +100,7 @@ export function createChatActionEffects(deps: {
       return false;
     },
 
-    async claim(targetKey, event) {
-      const choice = /^choice:(.+)$/.exec(targetKey);
-      if (!choice || !deps.nativeClaims || !event) return deps.emitter.beginExecution(targetKey);
-
-      // The same admission an approval takes, for the same reason: the answer
-      // wakes a native request that is waiting, and that can happen once.
-      const conversation = await deps.storage.getConversation(event.conversationId);
-      const message = (conversation?.messages ?? []).find((item) => item.metadata?.pendingChoice?.id === choice[1]);
-      const participantId = message?.participantId ?? "";
-      // Not knowing whose request this is means not being able to claim it.
-      // Returning false here would tell the User it had already been acted on,
-      // which is a different and untrue thing.
-      if (!participantId) throw new Error("This answer's request has no member to claim it against.");
-      const outcome = await deps.nativeClaims.claimTarget(event, targetKey, participantId);
-      if (outcome === "taken") return true;
-      if (outcome === "uncertain") return { uncertain: true,
-        detail: "This answer already crossed its execution boundary; delivery was not confirmed and it was not repeated." };
-      return false;
-    },
+    async claim(targetKey) { return deps.emitter.beginExecution(targetKey); },
 
     async perform(request) {
       const detail = (request.payload.detail ?? {}) as Record<string, unknown>;
@@ -144,19 +118,7 @@ export function createChatActionEffects(deps: {
         });
         return `${detail.approve === true ? "allowed" : "denied"} the app tool request`;
       }
-      if (request.kind === "choice.answered") {
-        const choiceId = request.targetKey.replace(/^choice:/, "");
-        await deps.chat.respondToChoice({
-          conversationId: request.conversationId,
-          sourceMessageId: typeof detail.sourceMessageId === "string" ? detail.sourceMessageId : "",
-          choiceId,
-          ...(typeof detail.selectedOptionId === "string" ? { selectedOptionId: detail.selectedOptionId } : {}),
-          ...(typeof detail.customAnswer === "string" ? { customAnswer: detail.customAnswer } : {}),
-          ...(typeof detail.note === "string" ? { note: detail.note } : {}),
-          ...(detail.cancel === true ? { cancel: true } : {})
-        });
-        return detail.cancel === true ? "cancelled the choice" : "answered the choice";
-      }
+      if (request.kind === "choice.answered") throw new Error("The durable choice executor is not available.");
       if (request.kind === "turn.stop.requested") {
         const runId = request.targetKey.replace(/^run:/, "");
         const stopped = deps.chat.cancelRun(runId);

@@ -95,6 +95,7 @@ export interface ChatActionApplyResult {
 export interface ChatActionEffectPort {
   /** Uses the shared native approval ledger; a receipt lookup alone is not an execution claim. */
   applyApproval?(event: ChatEventEnvelope, payload: ChatActionPayload): Promise<string>;
+  applyChoice?(event: ChatEventEnvelope, payload: ChatActionPayload): Promise<string>;
   /** True when the pending request behind this target lives on this peer. */
   owns(conversationId: string, targetKey: string): Promise<boolean | undefined>;
   /** Claims the right to perform the effect. False when a receipt already
@@ -186,6 +187,9 @@ export class ChatActionApplier {
       // lost to another device. The native ledger admits at most one effect.
       const detail = await effects.applyApproval(event, payload);
       return { ...base, status: "applied", detail };
+    }
+    if (kind === "choice.answered" && effects.applyChoice) {
+      return { ...base, status: "applied", detail: await effects.applyChoice(event, payload) };
     }
     let claim: boolean | { uncertain: true; detail: string };
     try {

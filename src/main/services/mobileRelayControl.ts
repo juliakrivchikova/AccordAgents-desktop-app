@@ -33,7 +33,7 @@ export interface MobileRelayControlOptions {
     publicKeyDerBase64: string;
     relayUrl: string;
     rendezvousId: string;
-    relaySealKeyBase64: string;
+    relaySealKeyBase64?: string;
     fingerprint?: string;
     outboxUrl?: string;
   }>>;

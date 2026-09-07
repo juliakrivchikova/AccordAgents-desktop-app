@@ -198,6 +198,16 @@ async function main() {
 
   assert.deepEqual(hosts.one.delegations, [], "machine one must not run the members it asked for");
 
+  // Both directions must agree on the room AND the identity-derived key.
+  // The previous per-controller change selected different keys at each end.
+  await hosts.two.service.delegateParticipantRequest({
+    conversationId: CONVERSATION, requestMessageId: "request-reverse", batchId: "batch-reverse", depth: 1,
+    homeMachineId: "machine-one", targetParticipantIds: ["p-one"], messages: []
+  });
+  await waitFor(() => hosts.one.delegations.length === 1, 30_000, "reverse machine delegation");
+  assert.equal(hosts.one.delegations[0].requestMessageId, "request-reverse");
+  log("both machine directions share the correct pair key");
+
   for (const name of ["one", "two"]) hosts[name].service.close();
   relay.close?.();
   await rm(dir, { recursive: true, force: true });

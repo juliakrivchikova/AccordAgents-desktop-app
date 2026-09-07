@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { AgentDetectionRequest, Conversation } from "../../shared/types";
 import {
   buildChatActivityItemsForConversationUpdate,
@@ -37,6 +37,31 @@ export function useAppEffects(
   refreshActivity: () => Promise<void>,
   markConversationViewed: (conversation: Conversation) => void
 ): void {
+  const deletedConversationIds = useRef(new Set<string>());
+
+  useEffect(() => window.consensus.onConversationDeleted(conversationId => {
+    deletedConversationIds.current.add(conversationId);
+    state.archivedConversationIdsRef.current.delete(conversationId);
+    state.activityRevisionByConversationRef.current = {
+      ...state.activityRevisionByConversationRef.current,
+      [conversationId]: (state.activityRevisionByConversationRef.current[conversationId] ?? 0) + 1
+    };
+    state.setUnreadConversationIds(current => { const next = new Set(current); next.delete(conversationId); return next; });
+    const { [conversationId]: _removed, ...lastViewed } = state.lastViewedAtRef.current;
+    state.lastViewedAtRef.current = lastViewed;
+    persistLastViewedAt(lastViewed);
+    state.setSummaries(current => current.filter(summary => summary.id !== conversationId));
+    state.setActivityItems(current => current.filter(item => item.conversationId !== conversationId));
+    state.setSelectedActivityItem(current => current?.conversationId === conversationId ? undefined : current);
+    if (state.conversation?.id === conversationId) {
+      state.setConversation(undefined);
+      state.setMessagePage(undefined);
+      state.setSelectedThreadId(undefined);
+      state.setFocusedThreadId(undefined);
+      state.setChatMessageDraft("");
+    }
+  }), [state.conversation?.id]);
+
   useEffect(() => {
     void refreshAll();
   }, []);
@@ -125,6 +150,7 @@ export function useAppEffects(
 
   useEffect(() => {
     return window.consensus.onConversationUpdated((update) => {
+      if (deletedConversationIds.current.has(update.id)) return;
       const updatedConversation = conversationFromUpdate(update);
       const archived = update.archived === true || update.metadata.archived === true;
       state.activityRevisionByConversationRef.current = {

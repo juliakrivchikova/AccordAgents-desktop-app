@@ -94,6 +94,7 @@
     const EVENTS = stores.events || DEFAULT_STORES.events;
     const OUTBOX = stores.outbox || DEFAULT_STORES.outbox;
     const META = stores.meta || DEFAULT_STORES.meta;
+    const BLOBS = stores.blobs;
     const port = options.port;
     const originId = options.originId;
     const now = options.now || function () { return Date.now(); };
@@ -246,9 +247,16 @@
       if (options.hashEvent) event.eventHash = await options.hashEvent(unsignedBytes(event));
       const recipients = (request.recipients || []).slice();
       let stored = true;
-      await port.runAtomic([EVENTS, OUTBOX, META], async function (tx) {
+      await port.runAtomic([EVENTS, OUTBOX, META, ...(BLOBS ? [BLOBS] : [])], async function (tx) {
         const existing = await tx.get(EVENTS, event.eventId);
         if (existing) { stored = false; return; }
+        if (request.blobFragments) {
+          if (!BLOBS) throw new Error("The machine journal has no fragment store.");
+          for (const fragment of request.blobFragments) {
+            await tx.put(BLOBS, { key: "blob:" + fragment.reference.blobHash + ":" + fragment.index,
+              bytesBase64: fragment.bytesBase64 });
+          }
+        }
         await tx.put(EVENTS, event);
         await tx.put(OUTBOX, {
           eventId: event.eventId,
@@ -356,7 +364,10 @@
       const pending = new Map();
       let heldBytes = 0;
       for (const entry of entries) {
-        const awaiting = peers.filter(function (peer) { return entry.acknowledgedBy.indexOf(peer) < 0; });
+        const recipients = entry.recipients || [];
+        const awaiting = peers.filter(function (peer) {
+          return (!recipients.length || recipients.indexOf(peer) >= 0) && entry.acknowledgedBy.indexOf(peer) < 0;
+        });
         if (!awaiting.length) { releasable.push(entry.eventId); continue; }
         retained.push({ eventId: entry.eventId, awaiting: awaiting });
         heldBytes += entry.bytes || 0;
@@ -391,7 +402,7 @@
         appliedAt: appliedAt || new Date(now()).toISOString()
       };
       const key = appliedKey(event.originId, event.logScopeId);
-      await port.runAtomic([EVENTS, META], async function (tx) {
+      await port.runAtomic([EVENTS, META, ...(BLOBS ? [BLOBS] : [])], async function (tx) {
         const stored = (await tx.get(META, key)) || { key: key, head: { seq: 0 } };
         const held = (await tx.get(META, receiptKey(event.originId))) || { key: receiptKey(event.originId), receipts: [] };
         const existing = held.receipts.find(function (item) { return item.eventId === receipt.eventId; });
@@ -405,6 +416,7 @@
           await tx.put(META, stored);
         }
         await tx.remove(EVENTS, event.eventId);
+        await releaseUnusedBodies(tx, [event.payload]);
       });
       const current = appliedHeads.get(key) || { seq: 0 };
       if (event.originSeq > current.seq) appliedHeads.set(key, { seq: event.originSeq, hash: event.eventHash });
@@ -449,15 +461,35 @@
     async function release(roster) {
       const decision = await retention(roster);
       if (!decision.releasable.length) return decision;
-      await port.runAtomic([OUTBOX, EVENTS], async function (tx) {
+      await port.runAtomic([OUTBOX, EVENTS, ...(BLOBS ? [BLOBS] : [])], async function (tx) {
+        const bodies = [];
         for (const eventId of decision.releasable) {
+          const event = await tx.get(EVENTS, eventId);
+          if (event) bodies.push(event.payload);
           await tx.remove(OUTBOX, eventId);
           // Every device has it; this copy is history, and the head keeps the
           // sequence going. Holding it would grow without bound.
           await tx.remove(EVENTS, eventId);
         }
+        await releaseUnusedBodies(tx, bodies);
       });
       return decision;
+    }
+
+    // A shared content hash may belong to several incoming/outgoing events.
+    // Erase its bytes in the same transaction as its final reference, so an
+    // ACK, a second tab and a newly queued copy cannot race the cleanup.
+    async function releaseUnusedBodies(tx, bodies) {
+      if (!BLOBS) return;
+      const references = bodies.filter(body => body && body.type === "device.event.blob");
+      if (!references.length) return;
+      const held = new Set((await tx.getAll(EVENTS)).map(event => event.payload && event.payload.blobHash));
+      for (const reference of references) {
+        if (held.has(reference.blobHash)) continue;
+        for (let index = 0; index < reference.fragments; index += 1) {
+          await tx.remove(BLOBS, "blob:" + reference.blobHash + ":" + index);
+        }
+      }
     }
 
     return {

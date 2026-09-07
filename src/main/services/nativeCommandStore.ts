@@ -84,6 +84,18 @@ export class NativeCommandStore {
       order by e.origin_seq limit 100;`);
   }
 
+  async pendingChoiceActions(originId: string, afterSeq = 0): Promise<Array<{ eventId: string; originSeq: number }>> {
+    if (!originId || !Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("Invalid choice recovery cursor.");
+    await this.database.init();
+    return this.database.query(`select e.event_id as eventId, e.origin_seq as originSeq from chat_events e
+      where e.origin_id = ${quote(originId)} and e.log_scope_id = 'chat:actions' and e.kind = 'choice.answered'
+        and e.origin_seq > ${afterSeq}
+        and (not exists(select 1 from chat_events r where r.event_id = 'machine-choice-result:' || e.event_id)
+          or exists(select 1 from native_approval_effects a where a.event_id = e.event_id
+            and not exists(select 1 from chat_events r where r.event_id = 'chat-action:receipt:' || a.approval_id)))
+      order by e.origin_seq limit 100;`);
+  }
+
   async approvalEffect(conversationId: string, approvalId: string): Promise<NativeApprovalEffect | undefined> {
     await this.database.init();
     return (await this.database.query<NativeApprovalEffect>(`select conversation_id as conversationId,

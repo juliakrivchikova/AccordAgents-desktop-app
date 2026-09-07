@@ -1,6 +1,7 @@
 import { cp, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -10,6 +11,10 @@ const assetTarget = path.join(target, "assets");
 
 await rm(target, { recursive: true, force: true });
 await cp(source, target, { recursive: true });
+// One crypto implementation for native devices and the offline PWA.
+await build({ entryPoints: [path.join(repoRoot, "src/shared/machineChannelKey.ts")],
+  outfile: path.join(target, "mobile-machine-sealing.js"), bundle: true,
+  format: "iife", globalName: "AccordMachineSealing", platform: "browser", target: "es2022" });
 await mkdir(assetTarget, { recursive: true });
 await cp(
   path.join(repoRoot, "src/renderer/assets/accordagents-mark.png"),

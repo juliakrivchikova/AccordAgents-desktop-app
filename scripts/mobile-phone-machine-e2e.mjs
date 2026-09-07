@@ -22,7 +22,7 @@
  * reference relay on this machine.
  */
 import assert from "node:assert/strict";
-import { spawn, execFileSync, execSync } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { createServer } from "node:https";
 import { mkdtemp, writeFile, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
@@ -39,8 +39,6 @@ const { StorageService } = require(path.join(repoRoot, "dist/main/main/services/
 const { ChatEventLogService } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
 const { readPosixProcessTableSync } = require(path.join(repoRoot, "dist/main/main/services/processTermination.js"));
 
-const SITE_PORT = 8188;
-const CDP_PORT = 9372;
 const CHROME = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const CONVERSATION = "phone-machine-chat";
 const MACHINE_ID = "machine-one";
@@ -161,8 +159,9 @@ async function main() {
 
   const headers = loadMobileOriginHeaders(path.join(repoRoot, "dist/mobile"));
   const site = staticSite(path.join(repoRoot, "dist/mobile"), tls, headers);
-  await new Promise((resolve) => site.listen(SITE_PORT, "127.0.0.1", resolve));
-  log("site https://127.0.0.1:" + SITE_PORT);
+  await new Promise((resolve) => site.listen(0, "127.0.0.1", resolve));
+  const sitePort = site.address().port;
+  log("site https://127.0.0.1:" + sitePort);
 
   const ownerStorage = new StorageService({ dbPath: path.join(dir, "owner.sqlite3") });
   const ownerLog = new ChatEventLogService(ownerStorage);
@@ -196,23 +195,26 @@ async function main() {
   };
   let machineChild = startMachine();
 
-  try { execSync(`lsof -ti tcp:${CDP_PORT} -sTCP:LISTEN | xargs kill -9`, { stdio: "ignore" }); } catch { /* nothing listening */ }
   const profile = await mkdtemp(path.join(tmpdir(), "aa-phone-e2e-chrome-"));
   const chrome = spawn(CHROME, [
     "--headless=new", "--no-first-run", "--no-default-browser-check", "--ignore-certificate-errors",
-    `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${profile}`,
-    "--window-size=430,860", `https://127.0.0.1:${SITE_PORT}/?qa=1`
+    "--remote-debugging-port=0", `--user-data-dir=${profile}`,
+    "--window-size=430,860", `https://127.0.0.1:${sitePort}/?qa=1`
   ], { stdio: "ignore" });
   spawned.add(chrome);
 
   let app;
   let attachError;
+  let cdpPort;
   for (let attempt = 0; attempt < 60 && !app; attempt += 1) {
-    try { app = await attach({ port: CDP_PORT, title: "AccordAgents" }); }
+    try {
+      cdpPort = Number((await readFile(path.join(profile, "DevToolsActivePort"), "utf8")).split("\n")[0]);
+      app = await attach({ port: cdpPort, title: "AccordAgents" });
+    }
     catch (error) { attachError = error; await wait(500); }
   }
   if (!app) {
-    const targets = await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`).then((response) => response.json()).catch(() => []);
+    const targets = cdpPort ? await fetch(`http://127.0.0.1:${cdpPort}/json/list`).then((response) => response.json()).catch(() => []) : [];
     console.error("[phone-e2e] targets:", targets.map((target) => `${target.type} ${target.title} ${target.url}`).join("\n"));
     console.error("[phone-e2e] last attach error:", attachError?.message);
   }
@@ -225,7 +227,7 @@ async function main() {
 
   const seedPairing = (participant) => `(() => {
     localStorage.setItem("accordagents.mobile.pairing.v1", JSON.stringify({
-      endpoint: "https://127.0.0.1:${SITE_PORT}/",
+      endpoint: "https://127.0.0.1:${sitePort}/",
       relaySealKeyBase64: ${JSON.stringify(pairing.relaySealKeyBase64)},
       pairedAt: new Date(0).toISOString()
     }));
@@ -243,7 +245,7 @@ async function main() {
     roleLabel: "Engineer", kind: "codex-cli" }));
   await evaluate("location.reload()");
   await wait(2500);
-  app = await attach({ port: CDP_PORT, title: "AccordAgents" });
+  app = await attach({ port: cdpPort, title: "AccordAgents" });
 
   const readIdentity = `(async () => {
     const db = await new Promise((resolve, reject) => {
@@ -329,7 +331,7 @@ async function main() {
         machineId: MACHINE_ID, name: "Machine one", deviceId: machineDeviceId,
         publicKeyDerBase64: records[0].lastHello?.publicKeyDerBase64,
         relayUrl: address.url, rendezvousId: ROOM,
-        relaySealKeyBase64: pairing.relaySealKeyBase64, fingerprint: pairing.fingerprint
+        fingerprint: pairing.fingerprint
       })}] });
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
@@ -339,7 +341,7 @@ async function main() {
   })()`);
   await evaluate("location.reload()");
   await wait(3000);
-  app = await attach({ port: CDP_PORT, title: "AccordAgents" });
+  app = await attach({ port: cdpPort, title: "AccordAgents" });
 
   // --- 1. A message typed on the phone runs a real turn on the machine ------
   const ask = "Reply with exactly PHONE_MACHINE_EXECUTED and nothing else.";
@@ -445,7 +447,7 @@ async function main() {
   const runsBefore = await runCount();
   await evaluate("location.reload()");
   await wait(3000);
-  app = await attach({ port: CDP_PORT, title: "AccordAgents" });
+  app = await attach({ port: cdpPort, title: "AccordAgents" });
   await waitFor(() => participantSaid("PHONE_MACHINE_EXECUTED"), 30_000, "the answer to survive a reload");
   await wait(4000);
   const runsAfter = await runCount();
@@ -549,7 +551,7 @@ async function main() {
   // A reload must not resurrect a control for a run that has ended.
   await evaluate("location.reload()");
   await wait(3000);
-  app = await attach({ port: CDP_PORT, title: "AccordAgents" });
+  app = await attach({ port: cdpPort, title: "AccordAgents" });
   await waitFor(async () => (await screen()).length > 0, 30_000, "the phone to come back after the reload");
   const revived = await evaluate(`document.querySelectorAll("#message-list .message-stop:not([disabled])").length`);
   assert.equal(revived, 0, "a finished run must not be offered for stopping again after a reload");
@@ -619,7 +621,7 @@ async function main() {
 
   // A second tab over the same storage, and a reload: neither re-runs held work.
   const runsBeforeTab = await runCount();
-  await app.send("Target.createTarget", { url: `https://127.0.0.1:${SITE_PORT}/?qa=1` });
+  await app.send("Target.createTarget", { url: `https://127.0.0.1:${sitePort}/?qa=1` });
   await wait(6000);
   assert.equal(await runCount(), runsBeforeTab, "a second tab must not re-run anything the first one holds");
   log("a second tab ran nothing again");
@@ -695,7 +697,7 @@ async function main() {
     const input = document.getElementById("composer-input");
     input.value = ${JSON.stringify([
       "@one End your reply with exactly these three lines, as plain text, not inside a code block",
-      "and with nothing after them:",
+      "and with nothing after them. When I later answer, reply exactly CHOICE_NATIVE_ORCHID:",
       "user choice: Which colour?",
       "O1: Orchid",
       "O2: Indigo"
@@ -735,7 +737,25 @@ async function main() {
     const claims = query("accordagents.sqlite3",
       "select approval_id as approvalId, runtime_id as runtimeId from native_approval_effects where approval_id like 'choice:%';");
     assert.equal(claims.length, 1, "one answer, one claim");
-    log("the machine admitted and applied the phone's choice answer:", claims[0].approvalId);
+    // Admission alone precedes validation/dispatch in old builds and cannot
+    // prove the choice resumed a provider. Require its saved selection, a
+    // non-uncertain receipt and the provider's new answer after this tap.
+    await waitFor(() => query("accordagents.sqlite3", `select message_id from conversation_messages
+      where conversation_id=${sqlText(CONVERSATION)}
+        and json_extract(payload_json, '$.metadata.pendingChoice.id')=${sqlText(shown.id)}
+        and json_extract(payload_json, '$.metadata.pendingChoice.status')='answered';`).length === 1,
+      120_000, "the chosen option to be saved by its home machine");
+    await waitFor(() => query("accordagents.sqlite3", `select event_id from chat_events
+      where event_id=${sqlText("chat-action:receipt:" + claims[0].approvalId)}
+        and coalesce(json_extract(payload_json, '$.uncertain'), 0)=0;`).length === 1,
+      120_000, "the machine's confirmed choice execution receipt");
+    await waitFor(() => query("accordagents.sqlite3", `select message_id from conversation_messages
+      where conversation_id=${sqlText(CONVERSATION)}
+        and json_extract(payload_json, '$.role')='participant'
+        and json_extract(payload_json, '$.content') like '%CHOICE_NATIVE_ORCHID%'
+        and json_extract(payload_json, '$.metadata.pendingChoice.id') is null;`).length > 0,
+      120_000, "the provider's new response after applying the phone's choice");
+    log("the machine saved and applied the phone's choice answer:", claims[0].approvalId);
     choiceProven = true;
   } else {
     // Say what the member actually wrote, so this is diagnosable rather than
@@ -781,7 +801,10 @@ async function main() {
   }
   returningLink.close();
 
-  log("PASS - phone drove a real machine turn, answer, acknowledgement, reload and Stop with the desktop closed");
+  assert.ok(approvalProven, "the machine-raised permission card was not exercised");
+  assert.ok(choiceProven, "the machine-raised choice card was not exercised");
+  assert.ok(learned, "the returning desktop did not receive the phone's message");
+  log("PASS - phone turn, acknowledgement, reload, Stop, permission and choice with the desktop closed");
   if (!learned) log("REMAINDER: the returning desktop did not pick up the phone's message in this run");
   machineChild.kill("SIGTERM");
   chrome.kill("SIGTERM");

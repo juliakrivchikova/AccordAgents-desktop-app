@@ -373,6 +373,26 @@ export class StorageService {
         conversation_id text primary key,
         deleted_at text not null
       );
+      -- Targets remain until the existing device-event outbox owns delivery.
+      create table if not exists conversation_deletion_targets (
+        conversation_id text not null,
+        machine_id text not null,
+        primary key (conversation_id, machine_id)
+      );
+      -- Enforce absence inside the write transaction, including stale writers
+      -- in other processes and snapshots queued before deletion started.
+      create trigger if not exists deleted_conversation_insert before insert on conversations
+        when exists (select 1 from deleted_conversations where conversation_id = new.id)
+        begin select raise(abort, 'Chat was permanently deleted.'); end;
+      create trigger if not exists deleted_conversation_update before update on conversations
+        when exists (select 1 from deleted_conversations where conversation_id = new.id)
+        begin select raise(abort, 'Chat was permanently deleted.'); end;
+      create trigger if not exists deleted_message_insert before insert on conversation_messages
+        when exists (select 1 from deleted_conversations where conversation_id = new.conversation_id)
+        begin select raise(abort, 'Chat was permanently deleted.'); end;
+      create trigger if not exists deleted_message_update before update on conversation_messages
+        when exists (select 1 from deleted_conversations where conversation_id = new.conversation_id)
+        begin select raise(abort, 'Chat was permanently deleted.'); end;
       create table if not exists chat_events (
         event_id text primary key,
         conversation_id text not null,
@@ -1514,17 +1534,17 @@ export class StorageService {
    * the difference, and it has to outlive the rows and the process.
    */
   conversationTombstones(): {
-    mark(conversationId: string, deletedAt: string): Promise<void>;
+    mark(conversationId: string, deletedAt: string, machineIds?: string[]): Promise<void>;
     isDeleted(conversationId: string): Promise<boolean>;
     deletedAt(conversationId: string): Promise<string | undefined>;
+    pendingCopies(): Promise<Array<{ conversationId: string; deletedAt: string }>>;
+    pendingDeliveries(after?: { conversationId: string; machineId: string }): Promise<Array<{ conversationId: string; machineId: string; deletedAt: string }>>;
+    delivered(conversationId: string, machineId: string): Promise<void>;
   } {
     return {
-      mark: async (conversationId, deletedAt) => {
-        if (!conversationId.trim() || !deletedAt.trim()) throw new Error("A deletion tombstone requires stable identities.");
+      mark: async (conversationId, deletedAt, machineIds = []) => {
         await this.init();
-        await this.runSql(`insert into deleted_conversations(conversation_id, deleted_at)
-          values (${sqlString(conversationId)}, ${sqlString(deletedAt)})
-          on conflict(conversation_id) do nothing;`);
+        await this.runSql(`begin immediate; ${this.conversationDeletionSql(conversationId, deletedAt, machineIds)} commit;`);
       },
       isDeleted: async (conversationId) => Boolean(await this.conversationTombstones().deletedAt(conversationId)),
       deletedAt: async (conversationId) => {
@@ -1532,8 +1552,33 @@ export class StorageService {
         const rows = await this.queryJson<{ deletedAt: string }>(
           `select deleted_at as deletedAt from deleted_conversations where conversation_id = ${sqlString(conversationId)};`);
         return rows[0]?.deletedAt;
+      },
+      pendingCopies: async () => {
+        await this.init();
+        return this.queryJson<{ conversationId: string; deletedAt: string }>(`select d.conversation_id as conversationId, d.deleted_at as deletedAt
+          from deleted_conversations d join conversations c on c.id = d.conversation_id order by d.conversation_id limit 100;`);
+      },
+      pendingDeliveries: async (after) => {
+        await this.init();
+        return this.queryJson<{ conversationId: string; machineId: string; deletedAt: string }>(`select t.conversation_id as conversationId,
+          t.machine_id as machineId, d.deleted_at as deletedAt from conversation_deletion_targets t
+          join deleted_conversations d on d.conversation_id = t.conversation_id
+          ${after ? `where (t.conversation_id, t.machine_id) > (${sqlString(after.conversationId)}, ${sqlString(after.machineId)})` : ""}
+          order by t.conversation_id, t.machine_id limit 100;`);
+      },
+      delivered: async (conversationId, machineId) => {
+        await this.init();
+        await this.runSql(`delete from conversation_deletion_targets where conversation_id = ${sqlString(conversationId)} and machine_id = ${sqlString(machineId)};`);
       }
     };
+  }
+
+  private conversationDeletionSql(conversationId: string, deletedAt: string, machineIds: string[]): string {
+    if (!conversationId.trim() || !deletedAt.trim()) throw new Error("A deletion tombstone requires stable identities.");
+    return `insert into deleted_conversations(conversation_id, deleted_at)
+      values (${sqlString(conversationId)}, ${sqlString(deletedAt)}) on conflict(conversation_id) do nothing;
+      ${[...new Set(machineIds.filter(id => id.trim()))].map(machineId => `insert into conversation_deletion_targets(conversation_id, machine_id)
+        values (${sqlString(conversationId)}, ${sqlString(machineId)}) on conflict do nothing;`).join("\n")}`;
   }
 
   nativeCommands(): NativeCommandStore {
@@ -1947,7 +1992,7 @@ export class StorageService {
     return backupPath;
   }
 
-  async deleteConversation(id: string): Promise<boolean> {
+  async deleteConversation(id: string, options: { machineIds?: string[] } = {}): Promise<boolean> {
     await this.init();
     const exists = await this.queryText(
       `select id from conversations where id = ${sqlString(id)} limit 1;`
@@ -1956,7 +2001,8 @@ export class StorageService {
       return false;
     }
     await this.runSql(`
-      begin;
+      begin immediate;
+      ${this.conversationDeletionSql(id, new Date().toISOString(), options.machineIds ?? [])}
       delete from conversation_messages where conversation_id = ${sqlString(id)};
       delete from conversations where id = ${sqlString(id)};
       commit;

@@ -93,7 +93,7 @@ export class MachineTrustStore {
     for (const peer of roster.peers) {
       if (seen.has(peer.deviceId) || !trustedDeviceIdMatchesKey(peer, bytes => createHash("sha256").update(bytes).digest("hex")) ||
           createPublicKey({ key: Buffer.from(peer.publicKeyDerBase64, "base64"), format: "der", type: "spki" }).asymmetricKeyType !== "ed25519" ||
-          Buffer.from(peer.relaySealKeyBase64, "base64url").length !== 32 || !["wss:", "ws:"].includes(new URL(peer.relayUrl).protocol)) {
+          !["wss:", "ws:"].includes(new URL(peer.relayUrl).protocol)) {
         throw new Error("Invalid machine trust peer identity or room.");
       }
       seen.add(peer.deviceId);

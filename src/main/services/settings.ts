@@ -1,5 +1,5 @@
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { hostPlatform, userDataPath } from "../platform";
 import type { MachineRecord, MachineSettingsSnapshot } from "../../shared/machineLink";
@@ -156,6 +156,9 @@ interface StoredSettings {
    *  keys are what a machine checks a command's signature against; there is
    *  nothing secret in them. */
   trustedDevices?: TrustedDeviceRecord[];
+  machinePairingBindings?: Record<string, string>;
+  revokedMachinePairingKeys?: string[];
+  machineDeviceRevocations?: Record<string, string>;
 }
 
 
@@ -3186,17 +3189,7 @@ export class SettingsService {
   async listTrustedDevices(): Promise<TrustedDeviceRecord[]> {
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
-    const records = (stored.trustedDevices ?? []).filter(isTrustedDeviceRecord);
-    // A device trusted before keys were per device gets one now, once, and
-    // keeps it. Without this an old record would keep sharing the room key,
-    // which is the thing a revoked device must not still be holding.
-    const missing = records.filter((record) => !record.channelSealKeyBase64);
-    if (missing.length) {
-      for (const record of missing) record.channelSealKeyBase64 = randomBytes(32).toString("base64url");
-      stored.trustedDevices = records;
-      await this.writeStored(stored, true);
-    }
-    return records.map((record) => ({ ...record }));
+    return (stored.trustedDevices ?? []).filter(isTrustedDeviceRecord).map(({ channelSealKeyBase64: _legacyKey, ...record }) => record);
   }
 
   /**
@@ -3206,33 +3199,82 @@ export class SettingsService {
    * signing key, and accepting a mismatched pair would trust a name rather
    * than a key.
    */
-  async saveTrustedDevice(record: TrustedDeviceRecord): Promise<TrustedDeviceRecord[]> {
-    if (!isTrustedDeviceRecord(record)) throw new Error("A trusted device needs a device id, a public key, a role and a name.");
-    if (!trustedDeviceIdMatchesKey(record, (bytes) => createHash("sha256").update(bytes).digest("hex"))) {
-      throw new Error("That device id does not match the public key it was given with.");
-    }
-    const stored = await this.readStored();
-    if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
-    const previous = (stored.trustedDevices ?? []).find((entry) => entry.deviceId === record.deviceId);
-    const records = (stored.trustedDevices ?? []).filter((entry) => entry.deviceId !== record.deviceId);
-    // Re-trusting the same device keeps its key, so re-announcing an identity
-    // does not lock a working device out of what it is already reading.
-    records.push({
-      ...record,
-      channelSealKeyBase64: record.channelSealKeyBase64 ?? previous?.channelSealKeyBase64 ?? randomBytes(32).toString("base64url")
-    });
-    stored.trustedDevices = records;
-    await this.writeStored(stored, true);
-    return records.map((entry) => ({ ...entry }));
+  private trustedDeviceQueue?: Promise<void>;
+
+  private serializeDeviceTrust<T>(work: () => Promise<T>): Promise<T> {
+    const next = (this.trustedDeviceQueue ?? Promise.resolve()).then(work);
+    this.trustedDeviceQueue = next.then(() => undefined, () => undefined);
+    return next;
   }
 
-  async removeTrustedDevice(deviceId: string): Promise<TrustedDeviceRecord[]> {
+  saveTrustedDevice(record: TrustedDeviceRecord, pairing?: { key: string; createdAt: string }): Promise<TrustedDeviceRecord[]> {
+    return this.serializeDeviceTrust(async () => {
+      if (!isTrustedDeviceRecord(record) || !trustedDeviceIdMatchesKey(record, bytes => createHash("sha256").update(bytes).digest("hex"))) {
+        throw new Error("The trusted device identity does not match its signing key.");
+      }
+      const stored = await this.readStored();
+      if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
+      if (pairing) {
+        const bound = stored.machinePairingBindings?.[pairing.key];
+        if (stored.revokedMachinePairingKeys?.includes(pairing.key) || (bound && bound !== record.deviceId)) {
+          throw new Error("This pairing cannot authorize that device; pair again from Settings.");
+        }
+        const lastRevocation = Math.max(0, ...Object.values(stored.machineDeviceRevocations ?? {}).map(value => Date.parse(value)));
+        const created = Date.parse(pairing.createdAt);
+        const alreadyTrusted = (stored.trustedDevices ?? []).some(device => device.deviceId === record.deviceId);
+        // An old, not-yet-bound pairing may recover an existing identity, but
+        // cannot enroll a removed identity or a freshly minted alias after a
+        // revocation. Only a new invitation created by the owner can do that.
+        if (!Number.isFinite(created) || (!alreadyTrusted && created <= lastRevocation)) {
+          throw new Error("This device was removed; pair again with a new link from Settings.");
+        }
+        stored.machinePairingBindings = { ...stored.machinePairingBindings, [pairing.key]: record.deviceId };
+      }
+      const records = (stored.trustedDevices ?? []).filter(entry => entry.deviceId !== record.deviceId);
+      const { channelSealKeyBase64: _legacyKey, ...publicRecord } = record;
+      records.push(publicRecord);
+      stored.trustedDevices = records;
+      await this.writeStored(stored, true);
+      return records.map(entry => ({ ...entry }));
+    });
+  }
+
+  private removeDeviceTrust(stored: StoredSettings, deviceId: string): void {
+    stored.trustedDevices = (stored.trustedDevices ?? []).filter(entry => entry.deviceId !== deviceId);
+    stored.machineDeviceRevocations = { ...stored.machineDeviceRevocations, [deviceId]: new Date().toISOString() };
+    stored.revokedMachinePairingKeys = [...new Set([...(stored.revokedMachinePairingKeys ?? []),
+      ...Object.entries(stored.machinePairingBindings ?? {}).filter(([, id]) => id === deviceId).map(([key]) => key)])];
+  }
+
+  removeTrustedDevice(deviceId: string): Promise<TrustedDeviceRecord[]> {
+    return this.serializeDeviceTrust(async () => {
+      const stored = await this.readStored();
+      if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
+      this.removeDeviceTrust(stored, deviceId);
+      await this.writeStored(stored, true);
+      return (stored.trustedDevices ?? []).map(entry => ({ ...entry }));
+    });
+  }
+
+  revokeMachinePairingTrust(key: string): Promise<void> {
+    return this.serializeDeviceTrust(async () => {
+      const stored = await this.readStored();
+      if (this.storedReadError) throw new Error("Device pairing trust could not be read.");
+      const deviceId = stored.machinePairingBindings?.[key];
+      if (deviceId) this.removeDeviceTrust(stored, deviceId);
+      stored.revokedMachinePairingKeys = [...new Set([...(stored.revokedMachinePairingKeys ?? []), key])];
+      await this.writeStored(stored, true);
+    });
+  }
+
+  async machinePairingTrust(): Promise<{ authorizedKeys: string[]; revokedKeys: string[] }> {
+    await this.trustedDeviceQueue;
     const stored = await this.readStored();
-    if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
-    const records = (stored.trustedDevices ?? []).filter((entry) => entry.deviceId !== deviceId);
-    stored.trustedDevices = records.length ? records : undefined;
-    await this.writeStored(stored, true);
-    return records.map((entry) => ({ ...entry }));
+    if (this.storedReadError) throw new Error("Device pairing trust could not be read.");
+    const revokedKeys = stored.revokedMachinePairingKeys ?? [];
+    const trusted = new Set((stored.trustedDevices ?? []).map(device => device.deviceId));
+    return { revokedKeys, authorizedKeys: Object.entries(stored.machinePairingBindings ?? {})
+      .filter(([key, device]) => !revokedKeys.includes(key) && trusted.has(device)).map(([key]) => key) };
   }
 
   async listMachineInstalls(): Promise<MachineInstallRecord[]> {
@@ -3320,6 +3362,9 @@ export class SettingsService {
       encryptedMachinePower: _power,
       machinePowerHandoffs: _powerHandoffs,
       trustedDevices: _trustedDevices,
+      machinePairingBindings: _machinePairingBindings,
+      revokedMachinePairingKeys: _revokedMachinePairingKeys,
+      machineDeviceRevocations: _machineDeviceRevocations,
       lastRepoPath: _lastRepoPath,
       ...shareable
     } = stored;
@@ -3382,6 +3427,9 @@ export class SettingsService {
       encryptedMachinePower: stored.encryptedMachinePower,
       machinePowerHandoffs: stored.machinePowerHandoffs,
       trustedDevices: stored.trustedDevices,
+      machinePairingBindings: stored.machinePairingBindings,
+      revokedMachinePairingKeys: stored.revokedMachinePairingKeys,
+      machineDeviceRevocations: stored.machineDeviceRevocations,
       lastRepoPath: stored.lastRepoPath
     };
     // One atomic settings write replaces both configuration and environment.

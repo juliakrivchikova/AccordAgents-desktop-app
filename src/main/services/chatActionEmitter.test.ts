@@ -187,6 +187,11 @@ test("an emitted answer reaches the receiving owner with the full native decisio
     }
   } as unknown as Conversation;
   const effects = createChatActionEffects({
+    applyChoice: async (event, payload) => {
+      choices.push(payload.detail!);
+      return { type: "machine.choice.result", conversationId: event.conversationId, choiceId: "choice",
+        sourceMessageId: "message", decisionId: event.eventId, ok: true };
+    },
     emitter: h.emitter,
     storage: { getConversation: async () => conversation },
     chat: {

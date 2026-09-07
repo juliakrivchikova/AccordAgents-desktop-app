@@ -584,6 +584,14 @@ export interface ChatApprovalExecutionGuard {
   awaitNativeDelivery?: boolean;
 }
 
+export interface ChatChoiceExecutionGuard {
+  decisionEventId: string;
+  /** Called after the validated answer is durably saved, before continuation. */
+  beforeApply(participantId: string): Promise<void>;
+}
+
+export class ChatChoicePersistenceError extends Error {}
+
 /** How often a machine looks at its own copy while the desktop runs the
  *  targets, and how long it keeps looking before answering with what it has. */
 const DELEGATED_PARTICIPANT_REQUEST_POLL_MS = 1_000;
@@ -1231,7 +1239,11 @@ export class ChatService {
         await (this.chatMutationQueues.get(conversation.id) ?? Promise.resolve()).catch(() => undefined);
         await this.waitForQueuedSave(conversation.id);
         const cleanupMarker = await this.enqueueDeletedConversationArtifactCleanup(conversation);
-        const deleted = await this.storage.deleteConversation(conversation.id);
+        // The tombstone and target identities commit with row deletion. A
+        // crash before the transport is ready must not forget who holds a copy.
+        const machineIds = this.chatParticipants(conversation).map(participant => participant.homeMachineId)
+          .filter((id): id is string => typeof id === "string" && id.length > 0);
+        const deleted = await this.storage.deleteConversation(conversation.id, { machineIds });
         if (!deleted) {
           await rm(cleanupMarker, { force: true });
           this.deletedConversationIds.delete(conversation.id);
@@ -1269,8 +1281,8 @@ export class ChatService {
     });
   }
 
-  /** Told after a chat is deleted here, so the machines holding a copy of it
-   *  are told too. Set by the composition root. */
+  /** Wake delivery after storage atomically retained the tombstone and targets.
+   *  A callback failure cannot discard that durable intent. */
   private onConversationDeleted?: (conversation: Pick<Conversation, "id" | "metadata">) => Promise<unknown>;
 
   setConversationDeletedHandler(handler: (conversation: Pick<Conversation, "id" | "metadata">) => Promise<unknown>): void {
@@ -1340,6 +1352,9 @@ export class ChatService {
         if (typeof record.conversationId !== "string") {
           continue;
         }
+        // A marker may have been written before the deletion transaction
+        // failed. Never remove artifacts from a conversation that still exists.
+        if (await this.storage.getConversation(record.conversationId)) continue;
         const runIds = Array.isArray(record.runIds)
           ? record.runIds.filter((value): value is string => typeof value === "string")
           : [];
@@ -5029,93 +5044,92 @@ export class ChatService {
     return { conversation: ingest.conversation, warnings };
   }
 
-  async respondToChoice(request: RespondToChatChoiceRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
-    const runId = request.runId ?? randomUUID();
+  async respondToChoice(request: RespondToChatChoiceRequest, signal?: AbortSignal, progress?: ProgressCallback,
+    execution?: ChatChoiceExecutionGuard): Promise<StartReviewResult> {
+    let runId = request.runId ?? randomUUID();
     const warnings: string[] = [];
     const ingest = await this.withChatRunLock(request.conversationId, async () => {
       const conversation = await this.requireChat(request.conversationId);
-      const sourceMessage = conversation.messages.find((message) => message.id === request.sourceMessageId);
-      if (!sourceMessage) {
-        throw new Error("Source message was not found.");
-      }
-      const choice = sourceMessage.metadata?.pendingChoice;
-      if (!choice || choice.id !== request.choiceId) {
-        throw new Error("Choice request was not found.");
-      }
-      if (choice.status !== "pending") {
-        throw new Error("Choice request has already been answered.");
-      }
-      if (request.cancel === true) {
-        await this.withChatMutation(conversation, async () => {
-          const latestSourceMessage = conversation.messages.find((message) => message.id === request.sourceMessageId);
-          if (!latestSourceMessage) {
-            throw new Error("Source message was not found.");
-          }
-          const latestChoice = latestSourceMessage.metadata?.pendingChoice;
-          if (!latestChoice || latestChoice.id !== request.choiceId) {
-            throw new Error("Choice request was not found.");
-          }
-          if (latestChoice.status !== "pending") {
-            throw new Error("Choice request has already been answered.");
-          }
-          this.updatePendingChoiceCancellation(latestSourceMessage, latestChoice.id);
-          conversation.updatedAt = new Date().toISOString();
-          this.queueSnapshot(conversation);
-        });
-        await this.waitForQueuedSave(conversation.id);
-        return { conversation, requester: undefined, userMessage: undefined };
-      }
-      const selectedOptionId = request.selectedOptionId?.trim();
-      const customAnswer = request.customAnswer?.trim();
-      const note = request.note?.trim();
-      const isCustomAnswer = selectedOptionId === CHAT_CUSTOM_CHOICE_OPTION_ID;
-      const selectedOption = isCustomAnswer ? undefined : choice.options.find((option) => option.id === selectedOptionId);
-      if (isCustomAnswer && !customAnswer) {
-        throw new Error("Custom choice answer is required.");
-      }
-      if (!isCustomAnswer && !selectedOption) {
-        throw new Error("Selected option was not found.");
-      }
-      if (!sourceMessage.participantId) {
-        throw new Error("Choice request is not attached to a chat member.");
-      }
-      const requester = this.chatParticipants(conversation).find((participant) => participant.id === sourceMessage.participantId);
-      if (!requester) {
-        throw new Error("Choice requester is no longer in this chat.");
-      }
-
-      this.updatePendingChoiceSelection(sourceMessage, choice.id, selectedOption?.id ?? CHAT_CUSTOM_CHOICE_OPTION_ID, customAnswer, note);
-      const rootId = sourceMessage.metadata?.chatThreadRootId ?? sourceMessage.id;
-      const userMessage = this.message("user", this.formatChoiceSelectionForChat(sourceMessage, choice, selectedOption, customAnswer, note), undefined, {
-        threadId: sourceMessage.metadata?.threadId ?? rootId,
-        parentMessageId: sourceMessage.id,
-        chatThreadRootId: rootId,
-        sourceMessageId: sourceMessage.id,
-        hiddenFromTimeline: true
-      });
-      conversation.messages.push(userMessage);
-      await this.beginChatRun(conversation, runId);
-      await this.waitForQueuedSave(conversation.id);
-      return { conversation, requester, userMessage };
-    });
-
-    const dispatchWarnings: string[] = [];
-    if (!ingest.requester || !ingest.userMessage) {
-      return { conversation: ingest.conversation, warnings };
-    }
-
-    void this.runChoiceResponseFlow(ingest.conversation, ingest.requester, ingest.userMessage, runId, signal, progress, dispatchWarnings)
-      .catch((error) => {
-        void this.debugLogs.write("chat.choice-response.background.error", {
-          conversationId: ingest.conversation.id,
-          runId,
-          message: error instanceof Error ? error.message : String(error)
-        });
-      })
-      .finally(async () => {
-        if (dispatchWarnings.length > 0) {
-          await this.appendConversationWarnings(ingest.conversation, dispatchWarnings);
+      return this.withChatMutation(conversation, async () => {
+        const sourceMessage = conversation.messages.find(message => message.id === request.sourceMessageId);
+        if (!sourceMessage) throw new Error("Source message was not found.");
+        const choice = sourceMessage.metadata?.pendingChoice;
+        if (!choice || choice.id !== request.choiceId) throw new Error("Choice request was not found.");
+        // Saving the answer precedes native admission. After a crash in between,
+        // only this exact signed decision may resume that saved continuation.
+        const resume = Boolean(execution && choice.decisionEventId === execution.decisionEventId);
+        if (choice.status !== "pending" && !resume) throw new Error("Choice request has already been answered.");
+        const selectedOptionId = request.selectedOptionId?.trim();
+        const customAnswer = request.customAnswer?.trim();
+        const note = request.note?.trim();
+        const isCustomAnswer = selectedOptionId === CHAT_CUSTOM_CHOICE_OPTION_ID;
+        const selectedOption = isCustomAnswer ? undefined : choice.options.find(option => option.id === selectedOptionId);
+        if (!request.cancel) {
+          if (isCustomAnswer && !customAnswer) throw new Error("Custom choice answer is required.");
+          if (!isCustomAnswer && !selectedOption) throw new Error("Selected option was not found.");
         }
+        if (!sourceMessage.participantId) throw new Error("Choice request is not attached to a chat member.");
+        const requester = this.chatParticipants(conversation).find(participant => participant.id === sourceMessage.participantId);
+        if (!requester) throw new Error("Choice requester is no longer in this chat.");
+        if (execution && requester.homeMachineId && requester.homeMachineId !== this.hostMachineId) {
+          throw new Error("This choice is owned by another machine.");
+        }
+        if (!request.cancel && conversation.metadata.archived === true) throw new Error("Unarchive the chat before starting a member.");
+        if (signal?.aborted) throw new Error("Choice response was cancelled before execution.");
+        let userMessage: ChatMessage | undefined;
+        if (resume) {
+          runId = choice.responseRunId ?? runId;
+          userMessage = conversation.messages.find(message => message.id === choice.responseMessageId);
+          if (!request.cancel && !userMessage) throw new Error("The saved choice continuation is missing.");
+        } else if (request.cancel) {
+          this.updatePendingChoiceCancellation(sourceMessage, choice.id);
+        } else {
+          this.updatePendingChoiceSelection(sourceMessage, choice.id, selectedOption?.id ?? CHAT_CUSTOM_CHOICE_OPTION_ID, customAnswer, note);
+          const rootId = sourceMessage.metadata?.chatThreadRootId ?? sourceMessage.id;
+          userMessage = this.message("user", this.formatChoiceSelectionForChat(sourceMessage, choice, selectedOption, customAnswer, note), undefined, {
+            threadId: sourceMessage.metadata?.threadId ?? rootId,
+            parentMessageId: sourceMessage.id, chatThreadRootId: rootId,
+            sourceMessageId: sourceMessage.id, hiddenFromTimeline: true
+          });
+          conversation.messages.push(userMessage);
+        }
+        if (execution) {
+          Object.assign(sourceMessage.metadata!.pendingChoice!, {
+            decisionEventId: execution.decisionEventId,
+            ...(userMessage ? { responseMessageId: userMessage.id, responseRunId: runId } : {})
+          });
+        }
+        if (!request.cancel) {
+          this.rememberActiveChatRun(conversation.id, runId);
+          conversation.metadata = this.metadataWithLiveRunState(conversation.id, { ...conversation.metadata, runId }, undefined, runId);
+        }
+        conversation.updatedAt = new Date().toISOString();
+        try {
+          // A queued-save wait suppresses disk errors. Native work needs the
+          // actual write result, and mutation ownership must cover that write.
+          await this.saveConversation(conversation);
+        } catch (error) {
+          if (!request.cancel) this.forgetActiveChatRun(conversation.id, runId);
+          this.snapshotRowStates.delete(conversation.id);
+          throw new ChatChoicePersistenceError(error instanceof Error ? error.message : String(error));
+        }
+        try { await execution?.beforeApply(requester.id); }
+        catch (error) {
+          if (!request.cancel) this.forgetActiveChatRun(conversation.id, runId);
+          throw error;
+        }
+        return { conversation, requester: request.cancel ? undefined : requester, userMessage };
+      });
+    });
+    if (!ingest.requester || !ingest.userMessage) return { conversation: ingest.conversation, warnings };
+    const dispatchWarnings: string[] = [];
+    void this.runChoiceResponseFlow(ingest.conversation, ingest.requester, ingest.userMessage, runId, signal, progress, dispatchWarnings)
+      .catch(error => {
+        void this.debugLogs.write("chat.choice-response.background.error", {
+          conversationId: ingest.conversation.id, runId, message: error instanceof Error ? error.message : String(error)
+        });
+      }).finally(async () => {
+        if (dispatchWarnings.length) await this.appendConversationWarnings(ingest.conversation, dispatchWarnings);
       });
     return { conversation: ingest.conversation, warnings };
   }
@@ -5814,13 +5828,50 @@ export class ChatService {
    * process nobody would ever come looking for.
    */
   async closeReplicatedConversationSessions(conversationId: string): Promise<void> {
+    // The caller stored the tombstone first. Fence every mutation and future
+    // admission before cancelling existing work; retain the fence on failure.
+    this.deletedConversationIds.add(conversationId);
+    this.snapshotRowStates.delete(conversationId);
+    this.lastSavedSnapshots.delete(conversationId);
+    for (const [runId, meta] of this.chatRunMeta) {
+      if (meta.conversationId === conversationId) this.cancelRun(runId);
+    }
     await this.cliRunner.closeConversationSessions(conversationId);
+    await (this.chatMutationQueues.get(conversationId) ?? Promise.resolve()).catch(() => undefined);
+    await this.waitForQueuedSave(conversationId);
+  }
+
+  async applyReplicatedConversationDeletion(conversationId: string, deletedAt: string): Promise<void> {
+    const conversation = await this.storage.getConversation(conversationId);
+    const marker = conversation ? await this.enqueueDeletedConversationArtifactCleanup(conversation) : undefined;
+    const machineIds = conversation ? this.chatParticipants(conversation).map(participant => participant.homeMachineId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+    await this.storage.conversationTombstones().mark(conversationId, deletedAt, machineIds);
+    await this.closeReplicatedConversationSessions(conversationId);
+    await this.storage.deleteConversation(conversationId);
+    if (conversation) {
+      await this.cleanupDeletedConversationArtifacts(conversation).then(async () => {
+        if (marker) await rm(marker, { force: true });
+      }).catch(error => {
+        void this.debugLogs.write("chat.delete.artifacts.error", { conversationId, message: error instanceof Error ? error.message : String(error) });
+      });
+      await this.onConversationDeleted?.(conversation);
+    }
+  }
+
+  async reconcileConversationDeletions(): Promise<void> {
+    for (;;) {
+      const pending = await this.storage.conversationTombstones().pendingCopies();
+      for (const row of pending) await this.applyReplicatedConversationDeletion(row.conversationId, row.deletedAt);
+      if (pending.length < 100) return;
+    }
   }
 
   async applyReplicatedConversation(
     conversationId: string,
     merge: (existing: Conversation | undefined) => Conversation | undefined
   ): Promise<void> {
+    if (this.deletedConversationIds.has(conversationId) || await this.storage.conversationTombstones?.().isDeleted(conversationId)) return;
     const existing = await this.storage.getConversation(conversationId);
     if (!existing) {
       const created = merge(undefined);
@@ -5852,6 +5903,7 @@ export class ChatService {
    *  that started on a machine (a member resumed after an approval, a member
    *  request run there) land in this desktop's copy under their own ids. */
   async applyMachineBackDelta(request: { conversationId: string; messages: ChatMessage[] }): Promise<Conversation | undefined> {
+    if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return undefined;
     const conversation = await this.storage.getConversation(request.conversationId);
     if (!conversation || conversation.kind !== "chat") {
       return conversation;
@@ -5896,6 +5948,7 @@ export class ChatService {
   }
 
   async applyMachineRunStarted(request: { conversationId: string; runId: string }): Promise<void> {
+    if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return;
     const conversation = await this.requireChat(request.conversationId);
     await this.withChatMutation(conversation, async () => {
       for (const message of conversation.messages) {
@@ -5924,6 +5977,9 @@ export class ChatService {
     receiptId?: string;
     machineName: string;
   }): Promise<void> {
+    // The tombstone is a durable disposition of a late result: acknowledge it
+    // without reviving a deleted chat or retaining its delivery forever.
+    if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return;
     const conversation = await this.storage.getConversation(request.conversationId);
     if (!conversation || conversation.kind !== "chat") {
       throw new Error(`The chat for the result from machine ${request.machineName} is unavailable; the result has not been stored.`);
@@ -16358,6 +16414,9 @@ export class ChatService {
   }
 
   private async requireChat(conversationId: string): Promise<Conversation> {
+    if (this.deletedConversationIds.has(conversationId) || await this.storage.conversationTombstones?.().isDeleted(conversationId)) {
+      throw new Error("Chat was permanently deleted.");
+    }
     const conversation = await this.storage.getConversation(conversationId);
     if (!conversation || conversation.kind !== "chat") {
       throw new Error("Chat conversation was not found.");

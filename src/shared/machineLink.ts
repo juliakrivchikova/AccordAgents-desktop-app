@@ -277,6 +277,18 @@ export interface MachineConversationDeletedBody {
   deletedAt: string;
 }
 
+export interface MachineChoiceResultBody {
+  type: "machine.choice.result";
+  conversationId: string;
+  choiceId: string;
+  sourceMessageId: string;
+  decisionId: string;
+  ok: boolean;
+  error?: string;
+  uncertain?: boolean;
+  choice?: import("./types").ChatPendingChoice;
+}
+
 export interface MachineChoiceAnswerBody {
   type: "machine.choice.answer";
   conversationId: string;
@@ -346,7 +358,8 @@ export type MachineLinkMessage =
   | MachineConversationResyncBody
   | MachineTrustRosterBody
   | MachineParticipantsDelegateBody
-  | MachineChoiceAnswerBody;
+  | MachineChoiceAnswerBody
+  | MachineChoiceResultBody;
 
 export type MachineLinkMessageType = MachineLinkMessage["type"];
 
@@ -358,7 +371,7 @@ export function isMachineReplicationMessage(body: MachineLinkMessage): boolean {
 export function isMachineDurableMessage(body: MachineLinkMessage): boolean {
   return isMachineReplicationMessage(body) || body.type === "machine.turn.finished" || body.type === "machine.turn.finished.ack" ||
     body.type === "machine.turn.request" || body.type === "machine.turn.cancel" || body.type === "machine.settings.sealed" || body.type === "machine.turn.started" ||
-    body.type === "machine.approval.requested" || body.type === "machine.approval.updated" || body.type === "machine.approval.decision" || body.type === "machine.approval.result" ||
+    body.type === "machine.approval.requested" || body.type === "machine.approval.updated" || body.type === "machine.approval.decision" || body.type === "machine.approval.result" || body.type === "machine.choice.result" ||
     body.type === "machine.turn.progress.delta" || body.type === "machine.participants.delegate" ||
     body.type === "machine.conversation.deleted" || body.type === "machine.trust.roster";
 }
@@ -393,6 +406,7 @@ const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.hello.request",
   "machine.conversation.sync.done",
   "machine.conversation.resync",
+  "machine.choice.result",
   "machine.choice.answer"
 ]);
 

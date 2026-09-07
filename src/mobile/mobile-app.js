@@ -556,7 +556,19 @@
               get: function (name, key) { return requestToPromise(stores[name].get(key)); },
               getAll: function (name) { return requestToPromise(stores[name].getAll()); },
               put: function (name, entry) { return requestToPromise(stores[name].put(entry)); },
-              remove: function (name, key) { return requestToPromise(stores[name].delete(key)); }
+              remove: function (name, key) { return requestToPromise(stores[name].delete(key)); },
+              removeWhere: function (name, matches) {
+                return new Promise(function (resolve, reject) {
+                  const request = stores[name].openCursor();
+                  request.onerror = () => reject(request.error);
+                  request.onsuccess = function () {
+                    const cursor = request.result;
+                    if (!cursor) { resolve(); return; }
+                    if (matches(cursor.value)) cursor.delete();
+                    cursor.continue();
+                  };
+                });
+              }
             };
             Promise.resolve()
               .then(function () { return work(handle); })
@@ -625,7 +637,7 @@
   function withTimeline(mode, fn) {
     return openDb().then(function (db) {
       return new Promise(function (resolve, reject) {
-        const tx = db.transaction(TIMELINE_STORE, mode);
+        const tx = db.transaction([TIMELINE_STORE, META_STORE], mode);
         const store = tx.objectStore(TIMELINE_STORE);
         let value;
         tx.onerror = function () {
@@ -636,7 +648,7 @@
           db.close();
         };
         try {
-          value = fn(store);
+          value = fn(store, tx.objectStore(META_STORE));
         } catch (error) {
           tx.abort();
           reject(error);
@@ -672,8 +684,12 @@
   // transactions on the store, so deciding here cannot interleave.
   function putTimelineEntryDeduped(entry) {
     const key = timelineEntryDedupeKey(entry);
-    return withTimeline("readwrite", function (store) {
-      return requestToPromise(store.getAll()).then(function (entries) {
+    return withTimeline("readwrite", function (store, meta) {
+      // Same transaction as the timeline write: a concurrent deletion cannot
+      // land between a separate check and this stale message's insertion.
+      return requestToPromise(meta.get("conversation-deleted:" + entry.conversationId)).then(function (deleted) {
+        if (deleted) return 0;
+        return requestToPromise(store.getAll()).then(function (entries) {
         const others = entries.filter(function (existing) {
           return existing && existing.id !== entry.id;
         });
@@ -697,6 +713,7 @@
         });
         return Promise.all(deletes).then(function () {
           return requestToPromise(store.put(entry));
+        });
         });
       });
     });
@@ -954,6 +971,7 @@
     function storeName(name) {
       if (name === "events" || name === MACHINE_EVENT_STORE) return MACHINE_EVENT_STORE;
       if (name === "outbox" || name === MACHINE_OUTBOX_STORE) return MACHINE_OUTBOX_STORE;
+      if (name === MACHINE_BLOB_STORE) return MACHINE_BLOB_STORE;
       return META_STORE;
     }
   }
@@ -984,14 +1002,6 @@
         });
         return held ? { reference: reference, index: index, bytesBase64: held.bytesBase64 } : undefined;
       },
-      /** Dropped once the machine has acknowledged the event that names it. */
-      release: async function (reference) {
-        for (let index = 0; index < reference.fragments; index += 1) {
-          await withNamedStore(MACHINE_BLOB_STORE, "readwrite", function (store) {
-            store.delete(key(reference, index));
-          });
-        }
-      },
       take: async function (reference) {
         const parts = [];
         for (let index = 0; index < reference.fragments; index += 1) {
@@ -1008,11 +1018,6 @@
         for (const part of parts) { bytes.set(part, at); at += part.length; }
         if ("sha256:" + await api.sha256Hex(bytes) !== reference.blobHash) return undefined;
         const body = JSON.parse(new TextDecoder().decode(bytes));
-        for (let index = 0; index < reference.fragments; index += 1) {
-          await withNamedStore(MACHINE_BLOB_STORE, "readwrite", function (store) {
-            store.delete(key(reference, index));
-          });
-        }
         return body;
       }
     };
@@ -1040,7 +1045,7 @@
       const log = logApi.createMobileEventLog({
         port: machineLogPort(),
         originId: identity.deviceId,
-        stores: { events: MACHINE_EVENT_STORE, outbox: MACHINE_OUTBOX_STORE, meta: META_STORE },
+        stores: { events: MACHINE_EVENT_STORE, outbox: MACHINE_OUTBOX_STORE, meta: META_STORE, blobs: MACHINE_BLOB_STORE },
         keyId: identity.keyId,
         hashPayload: async function (payload) { return "sha256:" + await api.sha256Hex(api.textBytes(api.stableJson(payload))); },
         hashEvent: async function (unsigned) { return "sha256:" + await api.sha256Hex(api.textBytes(api.stableJson(unsigned))); },
@@ -1094,6 +1099,47 @@
    * would leave the machine holding it forever; what it must never do is claim
    * to have shown something it did not.
    */
+  const deletedMachineConversations = new Set();
+  let deletedMachineConversationsLoaded;
+
+  function loadDeletedMachineConversations() {
+    if (!deletedMachineConversationsLoaded) {
+      deletedMachineConversationsLoaded = withNamedStore(META_STORE, "readonly", store => requestToPromise(store.getAll(IDBKeyRange.bound("conversation-deleted:", "conversation-deleted:\uffff"))))
+        .then(records => {
+          for (const record of records) {
+            if (typeof record.key === "string" && record.key.startsWith("conversation-deleted:")) {
+              deletedMachineConversations.add(record.key.slice("conversation-deleted:".length));
+            }
+          }
+        }).catch(error => { deletedMachineConversationsLoaded = undefined; throw error; });
+    }
+    return deletedMachineConversationsLoaded;
+  }
+
+  async function isMachineConversationDeleted(conversationId) {
+    if (deletedMachineConversations.has(conversationId)) return true;
+    const deleted = await readMetaRecord("conversation-deleted:" + conversationId);
+    if (deleted) deletedMachineConversations.add(conversationId);
+    return Boolean(deleted);
+  }
+
+  async function applyMachineConversationDeletion(conversationId, deletedAt) {
+    // Keep the receipt journal/outbox for replay and ACKs; erase only the
+    // visible projection together with its permanent resurrection barrier.
+    await eventLogPort().runAtomic([META_STORE, TIMELINE_STORE], async tx => {
+      const key = "conversation-deleted:" + conversationId;
+      if (!await tx.get(META_STORE, key)) await tx.put(META_STORE, { key, conversationId, deletedAt });
+      await tx.removeWhere(TIMELINE_STORE, entry => entry.conversationId === conversationId);
+    });
+    deletedMachineConversations.add(conversationId);
+    saveChats(loadChats().filter(chat => chat.id !== conversationId));
+    const cards = loadControlCards();
+    delete cards[conversationId];
+    saveControlCards(cards);
+    if (selectedConversationId() === conversationId) localStorage.setItem(ACTIVE_CONVERSATION_KEY, "unpaired");
+    await render("synced");
+  }
+
   async function applyMachineEvent(event, payload, machine) {
     const body = payload && typeof payload === "object" ? payload : {};
     // What this phone was actually handed, when the QA flag is on. Reading the
@@ -1102,6 +1148,12 @@
     recordRelayDebug({ event: "machine-event-applying", kind: event.kind, bodyType: body.type,
       messages: Array.isArray(body.messages) ? body.messages.length : undefined, status: body.status });
     const conversationId = event.conversationId;
+    if (body.type === "machine.conversation.deleted") {
+      if (body.conversationId !== conversationId || typeof body.deletedAt !== "string") throw new Error("Invalid chat deletion identity.");
+      await applyMachineConversationDeletion(conversationId, body.deletedAt);
+      return "applied";
+    }
+    if (await isMachineConversationDeleted(conversationId)) return "applied";
     if (body.type === "machine.turn.finished") {
       const stopped = body.status === "interrupted";
       const events = (body.messages || []).map(function (message) {
@@ -1128,6 +1180,15 @@
       }
       await handleRelayTimelinePayload({ type: "mobile.timeline.events", conversationId: conversationId, events: events },
         conversationId);
+      // A member raises a choice by writing one in its own reply, so the
+      // question arrives with the answer's own message rather than in a later
+      // conversation delta. Looking for it only in deltas meant a choice the
+      // member asked at the end of its turn was never shown, and it waited for
+      // an answer the User was never offered the chance to give.
+      for (const message of body.messages || []) {
+        const card = machineChoiceCard(conversationId, message);
+        if (card) mergeControlCard(conversationId, card);
+      }
       noteMachineRunSettled(body.runId, body.status);
       // The terminal outlives this page: a reload must not resurrect a Stop
       // control for a run the machine has already finished.
@@ -1193,6 +1254,21 @@
     }
     if (body.type === "machine.approval.requested" || body.type === "machine.approval.updated") {
       mergeControlCard(conversationId, machineApprovalCard(conversationId, body.approval, machine && machine.name));
+      await render("synced");
+      return "applied";
+    }
+    if (body.type === "machine.choice.result") {
+      controlCardSent.delete(body.choiceId);
+      const card = controlCardsFor(conversationId).find(item => item.id === body.choiceId);
+      if (card && body.choice) {
+        const selected = (body.choice.options || []).find(option => option.id === body.choice.selectedOptionId);
+        mergeControlCard(conversationId, { ...card,
+          status: body.choice.status === "pending" ? "pending" : "answered",
+          outcome: body.choice.status === "cancelled" ? "Cancelled" : body.choice.customAnswer || selected?.label || "Answered"
+        });
+      }
+      if (!body.ok || body.uncertain) controlCardErrors.set(body.choiceId, body.error || "The machine has not confirmed this answer.");
+      else controlCardErrors.delete(body.choiceId);
       await render("synced");
       return "applied";
     }
@@ -1294,6 +1370,7 @@
    * in the middle is a delivery that resumes, not a turn the User never got.
    */
   async function commandMachineTurn(request) {
+    if (await isMachineConversationDeleted(request.conversationId)) throw new Error("This chat was permanently deleted.");
     const built = await machineJournal();
     const machine = await machineAccessFor(request.machineId);
     if (!built || !machine) throw new Error("This phone cannot reach that machine directly yet.");
@@ -1312,7 +1389,7 @@
         updatedAt: nowIso()
       });
       try {
-        await built.log.append({
+        await built.channels.append({
           eventId: "phone-delta-" + request.runId,
           conversationId: request.conversationId,
           logScopeId: scope,
@@ -1863,7 +1940,7 @@
     try {
       const raw = localStorage.getItem(CHAT_LIST_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed) ? parsed : [];
+      return Array.isArray(parsed) ? parsed.filter(chat => !deletedMachineConversations.has(chat.id)) : [];
     } catch {
       return [];
     }
@@ -2142,7 +2219,7 @@
 
   function selectedConversationId() {
     const active = localStorage.getItem(ACTIVE_CONVERSATION_KEY) || loadPairing()?.conversationId;
-    return active && active !== "unpaired" ? active : undefined;
+    return active && active !== "unpaired" && !deletedMachineConversations.has(active) ? active : undefined;
   }
 
   async function createOutboxEvent(input) {
@@ -2150,6 +2227,7 @@
     const eventId = input.eventId || createEventId();
     const createdAt = input.createdAt || nowIso();
     const conversationId = activeConversationId(input.conversationId);
+    if (await isMachineConversationDeleted(conversationId)) throw new Error("This chat was permanently deleted.");
     const logScopeId = input.logScopeId || conversationId;
     const originId = await mobileOriginId(pairing);
     const originSeq = await nextOriginSeq(originId, logScopeId);
@@ -3300,7 +3378,7 @@
     // conversation it belongs to used to be filed under whatever the user was
     // looking at, which is how another chat's messages appeared in this one.
     const conversationId = payload.conversationId || fallbackConversationId;
-    if (!conversationId) {
+    if (!conversationId || await isMachineConversationDeleted(conversationId)) {
       return 0;
     }
     let stored = 0;
@@ -4215,7 +4293,7 @@
   /** The chat action a tapped card produces. The shape is the one every device
    *  emits, so the desktop records and applies it exactly as it would its own —
    *  including the native identifiers the provider needs back. */
-  function decisionEventForCard(card, answer) {
+  async function decisionEventForCard(card, answer) {
     if (card.kind === "permission") {
       const approve = answer.optionId === "allow";
       return {
@@ -4233,16 +4311,19 @@
       };
     }
     const value = answer.cancel ? "cancelled" : answer.optionId || (answer.customAnswer ? "custom" : "empty");
+    const identity = answer.customAnswer !== undefined || answer.note !== undefined
+      ? value + ":" + await sha256Hex(stableJson({ customAnswer: answer.customAnswer, note: answer.note })) : value;
     return {
       kind: "choice.answered",
       payload: {
-        operationId: "choice:" + card.id + ":" + value,
+        operationId: "choice:" + card.id + ":" + identity,
         targetKey: "choice:" + card.id,
         stateId: value,
         detail: {
           sourceMessageId: card.sourceMessageId || "",
           ...(answer.optionId ? { selectedOptionId: answer.optionId } : {}),
-          ...(answer.customAnswer ? { customAnswer: answer.customAnswer } : {}),
+          ...(answer.customAnswer !== undefined ? { customAnswer: answer.customAnswer } : {}),
+          ...(answer.note !== undefined ? { note: answer.note } : {}),
           ...(answer.cancel ? { cancel: true } : {})
         }
       }
@@ -4257,7 +4338,7 @@
   async function answerControlCard(card, answer) {
     const conversationId = card.conversationId || selectedConversationId();
     if (!conversationId) return;
-    const decision = decisionEventForCard(card, answer);
+    const decision = await decisionEventForCard(card, answer);
     try {
       await enqueueDecision({ conversationId: conversationId, kind: decision.kind, payload: decision.payload });
     } catch (error) {
@@ -4475,6 +4556,7 @@
   }
 
   async function render(connectionStatus) {
+    await loadDeletedMachineConversations();
     const state = document.getElementById("connection-state");
     const list = document.getElementById("message-list");
     const chatsScreen = document.getElementById("chats-screen");

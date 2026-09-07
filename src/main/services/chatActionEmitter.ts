@@ -74,6 +74,22 @@ export function choiceTarget(choiceId: string): string {
   return `choice:${choiceId}`;
 }
 
+export function choiceDecisionAction(request: {
+  conversationId: string; choiceId: string; sourceMessageId: string;
+  selectedOptionId?: string; customAnswer?: string; note?: string; cancel?: boolean;
+}): ChatActionEmission {
+  const state = request.cancel ? "cancelled" : request.selectedOptionId ?? (request.customAnswer !== undefined ? "custom" : "empty");
+  const answer = request.customAnswer !== undefined || request.note !== undefined
+    ? `${state}:${answerHash({ customAnswer: request.customAnswer, note: request.note })}` : state;
+  return { conversationId: request.conversationId, kind: "choice.answered", payload: {
+    operationId: `choice:${request.choiceId}:${answer}`, targetKey: choiceTarget(request.choiceId), stateId: state,
+    detail: { sourceMessageId: request.sourceMessageId,
+      ...(request.selectedOptionId ? { selectedOptionId: request.selectedOptionId } : {}),
+      ...(request.customAnswer !== undefined ? { customAnswer: request.customAnswer } : {}),
+      ...(request.note !== undefined ? { note: request.note } : {}), ...(request.cancel ? { cancel: true } : {}) }
+  } };
+}
+
 export function participantRequestTarget(requestId: string): string {
   return `request:${requestId}`;
 }
@@ -116,29 +132,9 @@ export class ChatActionEmitter {
     note?: string;
     cancel?: boolean;
   }): Promise<string> {
-    const targetKey = choiceTarget(request.choiceId);
-    const state = request.cancel
-      ? "cancelled"
-      : request.selectedOptionId ?? (request.customAnswer !== undefined ? "custom" : "empty");
-    const answer = request.customAnswer !== undefined || request.note !== undefined
-      ? `${state}:${answerHash({ customAnswer: request.customAnswer, note: request.note })}` : state;
-    await this.emit({
-      conversationId: request.conversationId,
-      kind: "choice.answered",
-      payload: {
-        operationId: `choice:${request.choiceId}:${answer}`,
-        targetKey,
-        stateId: state,
-        detail: {
-          sourceMessageId: request.sourceMessageId,
-          ...(request.selectedOptionId ? { selectedOptionId: request.selectedOptionId } : {}),
-          ...(request.customAnswer !== undefined ? { customAnswer: request.customAnswer } : {}),
-          ...(request.note !== undefined ? { note: request.note } : {}),
-          ...(request.cancel ? { cancel: true } : {})
-        }
-      }
-    });
-    return targetKey;
+    const action = choiceDecisionAction(request);
+    await this.emit(action);
+    return action.payload.targetKey;
   }
 
   async participantRequestOpened(request: {

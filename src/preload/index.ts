@@ -258,6 +258,11 @@ const bridge: AppBridge = {
     ipcRenderer.on("conversations:review-progress", listener);
     return () => ipcRenderer.removeListener("conversations:review-progress", listener);
   },
+  onConversationDeleted: (callback: (conversationId: string) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, conversationId: string) => callback(conversationId);
+    ipcRenderer.on("conversations:deleted", listener);
+    return () => ipcRenderer.removeListener("conversations:deleted", listener);
+  },
   onConversationUpdated: (callback: (conversation: ConversationUpdate) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, conversation: ConversationUpdate) => callback(conversation);
     ipcRenderer.on("conversations:updated", listener);

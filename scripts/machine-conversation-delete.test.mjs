@@ -25,7 +25,9 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const { MachineHostService } = require(path.join(repoRoot, "dist/main/main/services/machineHost.js"));
 const { StorageService } = require(path.join(repoRoot, "dist/main/main/services/storage.js"));
 const { ChatEventLogService } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
-const { sealMobileRelayPayload } = require(path.join(repoRoot, "dist/main/main/services/mobileRelaySealing.js"));
+const { sealMachineRelayPayload } = require(path.join(repoRoot, "dist/main/main/services/machineRelaySealing.js"));
+const { MachineLinkService } = require(path.join(repoRoot, "dist/main/main/services/machineLink.js"));
+const { ChatService } = require(path.join(repoRoot, "dist/main/main/services/chat.js"));
 const { machineCommandId } = require(path.join(repoRoot, "dist/main/shared/machineLink.js"));
 const phone = require(path.join(repoRoot, "src/mobile/mobile-machine-command.js"));
 
@@ -39,7 +41,7 @@ function stubClient(sent) {
   };
 }
 
-async function machine(dir) {
+async function machine(dir, controls = {}) {
   const storage = new StorageService({ dbPath: path.join(dir, "machine.sqlite3") });
   const eventLog = new ChatEventLogService(storage);
   const identity = await eventLog.getOrCreateDeviceIdentity();
@@ -61,11 +63,11 @@ async function machine(dir) {
   const sent = [];
   const host = new MachineHostService(
     {
-      runMachineHostedTurn: async (request) => { runs.push(request.runId); return { messages: [], warnings: [] }; },
+      runMachineHostedTurn: async (request, signal) => { runs.push(request.runId); await controls.run?.(request, signal); return { messages: [], warnings: [] }; },
       cancelRun: () => true,
       respondToAppToolApproval: async () => undefined,
       conversationIdForRun: () => CONVERSATION,
-      closeReplicatedConversationSessions: async (id) => { closed.push(id); },
+      closeReplicatedConversationSessions: async (id) => { await controls.close?.(id); closed.push(id); },
       applyReplicatedConversation: async (conversationId, merge) => {
         const existing = await storage.getConversation(conversationId);
         const next = merge(existing ?? undefined);
@@ -96,8 +98,8 @@ async function machine(dir) {
       ...(body.type === "machine.turn.request" ? { eventId: machineCommandId(body.runId) } : {})
     });
     const packet = { protocol: "accord-device-events-v1", from: desktop.originId, to: identity.originId, type: "event", event };
-    if (options.raw) return host.handleMessage(await sealMobileRelayPayload(packet, pairing.relaySealKeyBase64));
-    return host.handleMessage(await sealMobileRelayPayload(packet, pairing.relaySealKeyBase64));
+    if (options.raw) return host.handleMessage(await sealMachineRelayPayload(packet, desktop, identity.publicKeyDerBase64, pairing.rendezvousId));
+    return host.handleMessage(await sealMachineRelayPayload(packet, desktop, identity.publicKeyDerBase64, pairing.rendezvousId));
   };
 
   return {
@@ -108,9 +110,9 @@ async function machine(dir) {
       const { event } = await desktopLog.appendLocalEvent({ conversationId: body.conversationId,
         logScopeId: `device:${pairing.rendezvousId}:${JSON.stringify([body.conversationId, "actions"])}`,
         kind: body.type, payload: body });
-      await host.handleMessage(await sealMobileRelayPayload(
+      await host.handleMessage(await sealMachineRelayPayload(
         { protocol: "accord-device-events-v1", from: desktop.originId, to: identity.originId, type: "event", event },
-        pairing.relaySealKeyBase64));
+        desktop, identity.publicKeyDerBase64, pairing.rendezvousId));
     },
     close: async () => { host.close(); await new Promise((resolve) => setTimeout(resolve, 200)); }
   };
@@ -211,8 +213,8 @@ test("a device the owner trusts can delete a chat from the machine, like any oth
     logScopeId: phone.deviceEventScope(box.pairing.rendezvousId, CONVERSATION, "actions"),
     kind: body.type, originSeq: 1, payload: body
   });
-  await box.host.handleMessage(await sealMobileRelayPayload(
-    phone.eventPacket(phoneIdentity.deviceId, box.identity.originId, event), box.pairing.relaySealKeyBase64));
+  await box.host.handleMessage(await sealMachineRelayPayload(
+    phone.eventPacket(phoneIdentity.deviceId, box.identity.originId, event), phoneIdentity, box.identity.publicKeyDerBase64, box.pairing.rendezvousId));
   await new Promise((resolve) => setTimeout(resolve, 600));
 
   assert.equal(await box.storage.getConversation(CONVERSATION), undefined,
@@ -227,8 +229,8 @@ test("a device the owner trusts can delete a chat from the machine, like any oth
     kind: body.type, originSeq: 1,
     payload: { ...body, conversationId: "other-chat" }
   });
-  await box.host.handleMessage(await sealMobileRelayPayload(
-    phone.eventPacket(stranger.deviceId, box.identity.originId, strangerEvent), box.pairing.relaySealKeyBase64)).catch(() => undefined);
+  await box.host.handleMessage(await sealMachineRelayPayload(
+    phone.eventPacket(stranger.deviceId, box.identity.originId, strangerEvent), stranger, box.identity.publicKeyDerBase64, box.pairing.rendezvousId)).catch(() => undefined);
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(await box.storage.conversationTombstones().isDeleted("other-chat"), false,
     "a device the owner never trusted deletes nothing");
@@ -325,4 +327,122 @@ test("a device taken off the roster stops being owed the room's history", async 
   // What the enrolling desktop is owed is untouched.
   const owedToDesktop = await events.listPending(box.pairing.rendezvousId, 0, box.desktop.originId);
   assert.ok(owedToDesktop.length > 0, "revoking one device does not discard another's retention");
+});
+
+function desktopChat(storage, dir, close = async () => undefined) {
+  const chat = new ChatService(storage, { getPublicSettings: async () => ({}) },
+    { closeConversationSessions: close }, { write: async () => undefined });
+  chat.chatUserDataPath = () => dir;
+  return chat;
+}
+
+function desktopLink(storage, eventLog, identity) {
+  return new MachineLinkService({ listMachines: async () => [] }, { write: async () => undefined }, {
+    appVersion: "test", desktopDeviceId: identity.originId, eventStorage: storage, eventLog,
+    createClient: () => stubClient([])
+  });
+}
+
+test("desktop row deletion and remote intent commit together; failed outbox writes survive restart", async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-delete-intent-"));
+  const storage = new StorageService({ dbPath: path.join(dir, "desktop.sqlite3") });
+  const log = new ChatEventLogService(storage), identity = await log.getOrCreateDeviceIdentity();
+  const initial = { ...conversation(), metadata: { ...conversation().metadata, archived: true } };
+  await storage.saveConversation(initial);
+  const first = desktopLink(storage, log, identity);
+  const chat = desktopChat(storage, dir);
+  chat.setConversationDeletedHandler(value => first.deleteConversationOnMachines(value));
+  t.after(async () => { first.close(); await rm(dir, { recursive: true, force: true }); });
+  // No connection exists at deletion time, including no channel/outbox yet.
+  assert.equal(await chat.deleteConversation({ conversationId: CONVERSATION }), true);
+  assert.equal(await storage.getConversation(CONVERSATION), undefined);
+  assert.equal((await storage.conversationTombstones().pendingDeliveries()).length, 1);
+  first.close();
+
+  const restarted = new StorageService({ dbPath: path.join(dir, "desktop.sqlite3") });
+  const second = desktopLink(restarted, new ChatEventLogService(restarted), identity);
+  t.after(() => second.close());
+  const { DeviceEventChannel } = require(path.join(repoRoot, "dist/main/main/services/deviceEventChannel.js"));
+  const peerLog = new ChatEventLogService(new StorageService({ dbPath: path.join(dir, "peer.sqlite3") }));
+  const peer = await peerLog.getOrCreateDeviceIdentity();
+  const channel = new DeviceEventChannel({ storage: restarted, eventLog: new ChatEventLogService(restarted),
+    channelId: "delete-intent-room", localDeviceId: identity.originId,
+    peerDeviceId: peer.originId, peerPublicKeyDerBase64: peer.publicKeyDerBase64,
+    send: async () => undefined, apply: async () => "applied", isPeerConnected: () => false });
+  const connection = { record: { id: "machine-one" }, eventChannel: channel, outbound: Promise.resolve() };
+  second.connections.set("machine-one", connection);
+  const publish = channel.publish.bind(channel);
+  channel.publish = async () => { throw new Error("SQLITE_FULL before outbox persistence"); };
+  assert.equal(await second.deliverPendingConversationDeletions(), 0);
+  assert.equal((await restarted.conversationTombstones().pendingDeliveries()).length, 1);
+  channel.publish = publish;
+  assert.equal(await second.deliverPendingConversationDeletions(), 1);
+  const eventId = `machine-delete:${JSON.stringify([identity.originId, "machine-one", CONVERSATION])}`;
+  assert.ok(await restarted.getChatEvent(eventId), "outbox owns the immutable delete before intent removal");
+  assert.equal((await restarted.conversationTombstones().pendingDeliveries()).length, 0);
+  assert.equal((await restarted.deviceEvents().listPending("delete-intent-room", 0, peer.originId)).length, 1);
+  second.connections.clear(); channel.close();
+});
+
+test("failed deletion transaction leaves rows and artifacts live, with no remote intent", async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-delete-rollback-"));
+  const storage = new StorageService({ dbPath: path.join(dir, "desktop.sqlite3") });
+  await storage.saveConversation({ ...conversation(), metadata: { participants: [PARTICIPANT], archived: true } });
+  const chat = desktopChat(storage, dir);
+  let cleanups = 0;
+  chat.setArtifactCleanup(async () => { cleanups++; });
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await storage.runSql("create trigger reject_delete before delete on conversations begin select raise(abort,'injected delete failure'); end;");
+  await assert.rejects(chat.deleteConversation({ conversationId: CONVERSATION }), /injected delete failure/);
+  assert.ok(await storage.getConversation(CONVERSATION));
+  assert.equal(await storage.conversationTombstones().isDeleted(CONVERSATION), false);
+  assert.deepEqual(await storage.conversationTombstones().pendingDeliveries(), []);
+  await chat.reconcileDeletedConversationArtifacts();
+  assert.equal(cleanups, 0, "a pre-transaction marker must not erase a surviving chat's artifacts");
+});
+
+test("tombstones fence independent stale writers and desktop replication after restart", async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-delete-writer-"));
+  const dbPath = path.join(dir, "desktop.sqlite3");
+  const storage = new StorageService({ dbPath }), staleWriter = new StorageService({ dbPath });
+  const stale = conversation();
+  await staleWriter.saveConversation(stale);
+  await storage.deleteConversation(CONVERSATION);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await assert.rejects(staleWriter.saveConversation(stale), /permanently deleted/);
+  const restarted = new StorageService({ dbPath });
+  const chat = desktopChat(restarted, dir);
+  await chat.applyReplicatedConversation(CONVERSATION, () => stale);
+  assert.equal(await chat.applyMachineBackDelta({ conversationId: CONVERSATION, messages: stale.messages }), undefined);
+  await chat.applyMachineLateTerminal({ conversationId: CONVERSATION, runId: "late", status: "completed", messages: stale.messages, machineName: "peer" });
+  assert.equal(await restarted.getConversation(CONVERSATION), undefined);
+});
+
+test("a failed provider closure is unacknowledged and retries after machine restart", async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-delete-close-"));
+  const first = await machine(dir, { close: async () => { throw new Error("native descendants still live"); } });
+  await first.deliver({ type: "machine.conversation.sync", conversation: conversation() });
+  await assert.rejects(first.deliver({ type: "machine.conversation.deleted", conversationId: CONVERSATION, deletedAt: new Date().toISOString() }), /native descendants still live/);
+  assert.ok(await first.storage.getConversation(CONVERSATION), "rows survive until closure can be proved");
+  assert.equal(await first.storage.conversationTombstones().isDeleted(CONVERSATION), true);
+  await first.close();
+  const second = await machine(dir);
+  t.after(async () => { await second.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5 }); });
+  assert.equal(await second.storage.getConversation(CONVERSATION), undefined, "startup finishes the tombstoned copy before admitting work");
+  assert.ok(second.closed.length >= 1 && second.closed.every(id => id === CONVERSATION), "startup and ingress replay may both prove closure");
+});
+
+test("a turn already waiting behind another participant turn cannot start after deletion", async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-delete-queue-"));
+  const box = await machine(dir);
+  t.after(async () => { await box.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5 }); });
+  await box.deliver({ type: "machine.conversation.sync", conversation: conversation() });
+  let release;
+  box.host.commandSessions.set(`${CONVERSATION}:${PARTICIPANT.id}`, new Promise(resolve => { release = resolve; }));
+  const pending = box.host.runTurn({ type: "machine.turn.request", conversationId: CONVERSATION,
+    participantId: PARTICIPANT.id, participant: PARTICIPANT, runId: "queued-before-delete", messageId: "m1", pendingMessageId: "p" });
+  await box.deliver({ type: "machine.conversation.deleted", conversationId: CONVERSATION, deletedAt: new Date().toISOString() });
+  release();
+  await pending;
+  assert.deepEqual(box.runs, []);
 });

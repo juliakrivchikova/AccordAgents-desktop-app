@@ -97,11 +97,11 @@ import { MachineLinkService } from "./services/machineLink";
 import { MachineInstallerService } from "./services/machineInstaller";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
 import { ChatActionApplier } from "./services/chatActionApplier";
-import { ChatActionEmitter, permissionDecisionAction, chatActionEventId } from "./services/chatActionEmitter";
+import { ChatActionEmitter, permissionDecisionAction, choiceDecisionAction, chatActionEventId } from "./services/chatActionEmitter";
 import { MachineApprovalExecutor, machineApprovalResultId } from "./services/machineApprovalExecutor";
 import { readPosixProcessTableAsync } from "./services/processTermination";
 import { createChatActionEffects } from "./services/chatActionEffects";
-import { createNativeTargetClaims } from "./services/chatActionNativeClaims";
+import { MachineChoiceExecutor, machineChoiceResultId } from "./services/chatActionNativeClaims";
 import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
@@ -479,6 +479,7 @@ chatService.setArtifactCleanup((conversationId) => artifactService.deleteConvers
 // A deleted chat is deleted on the machines that host its members too, durably
 // and with a tombstone, so a snapshot still in flight cannot bring it back.
 chatService.setConversationDeletedHandler(async (conversation) => {
+  sendToMainWindow("conversations:deleted", conversation.id);
   await machineLinkService?.deleteConversationOnMachines(conversation);
 });
 const dispatchArtifactTool = createArtifactToolDispatcher(artifactService);
@@ -491,12 +492,7 @@ const localChatActionEffects = createChatActionEffects({
   emitter: { beginExecution: (target) => chatActionEmitter.beginExecution(target), recordExecution: (request) => chatActionEmitter.recordExecution(request) },
   storage: { getConversation: (id) => storageService.getConversation(id) },
   applyApproval: async (event, payload) => (await localApprovalExecutor()).applyAction(event, payload),
-  // A choice wakes a native request that is waiting, exactly as an approval
-  // does, so it crosses the same durable row before the effect.
-  nativeClaims: createNativeTargetClaims({
-    storage: storageService,
-    runtimeIdentity: () => localRuntimeIdentity()
-  })
+  applyChoice: async (event, payload) => (await localChoiceExecutor()).applyAction(event, payload)
 });
 const chatActionApplier = new ChatActionApplier({
   effects: localChatActionEffects,
@@ -645,6 +641,48 @@ function localApprovalExecutor(): Promise<MachineApprovalExecutor> {
   })();
   void pending.catch(() => { if (approvalExecutor === pending) approvalExecutor = undefined; });
   return pending;
+}
+
+let choiceExecutor: Promise<MachineChoiceExecutor> | undefined;
+function localChoiceExecutor(): Promise<MachineChoiceExecutor> {
+  const pending = choiceExecutor ??= (async () => {
+    const device = await chatEventLogService.getOrCreateDeviceIdentity();
+    return new MachineChoiceExecutor({ storage: storageService, deviceId: device.originId, chat: chatService,
+      progress: progress => emitReviewProgress(progress), runtimeIdentity: () => localRuntimeIdentity(),
+      nativeProcessDbPath: path.join(app.getPath("userData"), "native-processes.sqlite3"),
+      publish: async body => {
+        const request = { conversationId: body.conversationId, kind: body.type,
+          eventId: machineChoiceResultId(body.decisionId), payload: body };
+        if (!await machineLinkService?.publishChatAction(request)) {
+          await chatEventLogService.appendLocalEvent({ ...request, logScopeId: `choice:${body.choiceId}` });
+        }
+      }
+    });
+  })();
+  void pending.catch(() => { if (choiceExecutor === pending) choiceExecutor = undefined; });
+  return pending;
+}
+
+async function recoverLocalChoiceActions(): Promise<void> {
+  const device = await chatEventLogService.getOrCreateDeviceIdentity();
+  let cursor = 0;
+  for (;;) {
+    const rows = await storageService.nativeCommands().pendingChoiceActions(device.originId, cursor);
+    if (!rows.length) return;
+    for (const row of rows) {
+      cursor = row.originSeq;
+      try {
+        const event = await storageService.getChatEvent(row.eventId);
+        if (!event) continue;
+        const payload = await storageService.deviceEventBlobs().hydrate(event.payload) as import("../shared/chatActionEvents").ChatActionPayload;
+        const claim = await storageService.nativeCommands().targetEffect(event.conversationId, payload.targetKey);
+        if (claim?.eventId === event.eventId && localChatActionEffects.applyChoice) await localChatActionEffects.applyChoice(event, payload);
+        else await chatActionApplier.apply(event, payload);
+      } catch (error) {
+        await debugLogService.write("chat.choice.recovery-pending", { eventId: row.eventId, message: error instanceof Error ? error.message : String(error) });
+      }
+    }
+  }
 }
 
 async function recoverLocalApprovalActions(): Promise<void> {
@@ -989,7 +1027,7 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
         const trusted = deviceId
           ? (await settingsService.listTrustedDevices()).find((device) => device.deviceId === deviceId)
           : undefined;
-        const phoneChannelKey = trusted?.channelSealKeyBase64;
+        if (!trusted) return [];
         const access = [];
         for (const machine of machines) {
           const machinePairing = await settingsService.getMachinePairing(machine.pairingKey);
@@ -1002,10 +1040,6 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
             publicKeyDerBase64,
             relayUrl: machinePairing.relayUrl,
             rendezvousId: machinePairing.rendezvousId,
-            // The phone's own key for this room, handed over the same way its
-            // access always was. A device the User later revokes cannot read
-            // what this one is sent, because it never had this key.
-            relaySealKeyBase64: phoneChannelKey ?? machinePairing.relaySealKeyBase64,
             fingerprint: machinePairing.fingerprint,
             ...(machinePairing.outboxUrl ? { outboxUrl: machinePairing.outboxUrl } : {})
           });
@@ -2502,43 +2536,24 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("chat:respond-to-choice", async (_event, request: RespondToChatChoiceRequest) => {
-    const runId = request.runId ?? randomUUID();
-    const controller = new AbortController();
-    activeReviews.set(runId, controller);
-
-    try {
-      const target = await chatActionEmitter.choiceAnswered({
-        conversationId: request.conversationId,
-        choiceId: request.choiceId,
-        sourceMessageId: request.sourceMessageId,
-        selectedOptionId: request.selectedOptionId,
-        customAnswer: request.customAnswer,
-        note: request.note,
-        cancel: request.cancel
-      });
-      const answered = await chatService.respondToChoice(
-        { ...request, runId },
-        controller.signal,
-        (progress) => emitReviewProgress(progress)
-      );
-      await chatActionEmitter.recordExecution({
-        conversationId: request.conversationId,
-        targetKey: target,
-        effect: request.cancel ? "cancelled the choice" : "answered the choice"
-      });
-      return answered;
-    } catch (error) {
-      const phase = controller.signal.aborted ? "cancelled" : "error";
-      sendToMainWindow("conversations:review-progress", {
-        runId,
-        phase,
-        message: error instanceof Error ? error.message : String(error),
-        createdAt: new Date().toISOString()
-      });
-      throw error;
-    } finally {
-      activeReviews.delete(runId);
+    const conversation = await storageService.getConversation(request.conversationId);
+    const source = conversation?.messages.find(message => message.id === request.sourceMessageId);
+    const participants = conversation?.metadata.participants as import("../shared/types").ChatParticipant[] | undefined;
+    const participant = participants?.find(item => item.id === source?.participantId);
+    if (participant?.homeMachineId) {
+      if (!machineLinkService) throw new Error("The choice's machine link is not available.");
+      await machineLinkService.respondToMachineChoice({ ...request, machineId: participant.homeMachineId });
+    } else {
+      const action = choiceDecisionAction(request);
+      await publishChatAction(action);
+      const event = await storageService.getChatEvent(chatActionEventId(action.payload.operationId));
+      if (!event) throw new Error("The choice decision could not be stored.");
+      await chatActionApplier.apply(event, action.payload);
+      const receipt = await storageService.getChatEvent(machineChoiceResultId(event.eventId));
+      const result = receipt ? await storageService.deviceEventBlobs().hydrate(receipt.payload) as import("../shared/machineLink").MachineChoiceResultBody : undefined;
+      if (!result?.ok) throw new Error(result?.error ?? "The choice's application is not confirmed yet.");
     }
+    return { conversation: await storageService.getConversation(request.conversationId), warnings: [] };
   });
   ipcMain.handle("chat:respond-to-app-tool-approval", async (_event, request: RespondToChatAppToolApprovalRequest) => {
     if (!await chatService.ownsAppToolApproval(request.conversationId, request.approvalId)) {
@@ -3027,6 +3042,9 @@ void app.whenReady().then(async () => {
   bootstrapAppUpdater(debugLogService, betaUpdates);
   await appMcpService.start();
   await storageService.init();
+  void recoverLocalChoiceActions().catch(error => {
+    void debugLogService.write("chat.choice.recovery-pending", { message: error instanceof Error ? error.message : String(error) });
+  });
   void recoverLocalApprovalActions().catch(error => {
     void debugLogService.write("chat.approval.recovery-error", { message: error instanceof Error ? error.message : String(error) });
   });
@@ -3070,16 +3088,13 @@ void app.whenReady().then(async () => {
         name: device.name,
         relayUrl: room.relayUrl,
         rendezvousId: room.rendezvousId,
-        // This device's own key, not the room's. Every trusted device used to
-        // be handed the same one, so taking a device off the roster ended its
-        // authority and left it reading everything the others were sent.
-        relaySealKeyBase64: device.channelSealKeyBase64 ?? room.relaySealKeyBase64,
         fingerprint: room.fingerprint
       }))
     });
     machineLinkService.onStatus(() => {
       void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
     });
+    machineLinkService.onConversationDeleted((event) => chatService.applyReplicatedConversationDeletion(event.conversationId, event.deletedAt));
     machineLinkService.onConversationBackDelta((delta) => {
       // The machine keeps the result until the desktop has stored it.
       return chatService.applyMachineBackDelta({ conversationId: delta.conversationId, messages: delta.messages })
@@ -3160,6 +3175,9 @@ void app.whenReady().then(async () => {
     void debugLogService.write("artifacts.outbox.startup-error", {
       message: error instanceof Error ? error.message : String(error)
     });
+  });
+  await chatService.reconcileConversationDeletions().catch((error) => {
+    void debugLogService.write("chat.delete.reconcile-error", { message: error instanceof Error ? error.message : String(error) });
   });
   await chatService.reconcileDeletedConversationArtifacts().catch((error) => {
     void debugLogService.write("chat.delete.artifacts.reconcile-error", {

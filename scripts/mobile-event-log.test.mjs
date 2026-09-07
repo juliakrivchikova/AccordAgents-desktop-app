@@ -17,8 +17,8 @@ const { createMobileEventLog, parseHlc } = require(path.resolve(import.meta.dirn
 /** A store the tests can break on demand, with real transaction semantics:
  *  a thrown error inside runAtomic discards every write it made. */
 function memoryPort() {
-  const stores = new Map([["events", new Map()], ["outbox", new Map()], ["meta", new Map()]]);
-  const keyOf = (store, value) => (store === "meta" ? value.key : value.eventId);
+  const stores = new Map([["events", new Map()], ["outbox", new Map()], ["meta", new Map()], ["blobs", new Map()]]);
+  const keyOf = (store, value) => (store === "meta" || store === "blobs" ? value.key : value.eventId);
   const port = {
     failOn: null,
     async runAtomic(names, work) {
@@ -44,6 +44,7 @@ function memoryPort() {
 
 const log = (port, options = {}) => createMobileEventLog({
   port,
+  stores: options.stores,
   originId: options.originId || "phone",
   now: options.now || (() => 1_700_000_000_000),
   newId: options.newId
@@ -146,4 +147,46 @@ test("an event that is already held is not queued twice", async () => {
   assert.equal(port.dump("events").length, 1);
   assert.equal(port.dump("outbox").length, 1);
   assert.equal(phone.sequence(), 1, "a retry of the same action does not consume another sequence number");
+});
+
+test("fragment bytes and outgoing event roll back together, then survive a partial roster ACK", async () => {
+  const port = memoryPort();
+  const phone = log(port, { stores: { blobs: "blobs" } });
+  const payload = { type: "device.event.blob", blobHash: "sha256:" + "a".repeat(64), fragments: 2, byteLength: 400000 };
+  const request = { eventId: "large", conversationId: "chat", kind: "message", payload,
+    recipients: ["one", "two"], blobFragments: [0, 1].map(index => ({ reference: payload, index, bytesBase64: "eA==" })) };
+  port.failOn = "outbox";
+  await assert.rejects(phone.append(request), /QuotaExceeded/);
+  assert.equal(port.dump("blobs").length, 0);
+  assert.equal(port.dump("events").length, 0);
+  port.failOn = null;
+  await phone.append(request);
+  await phone.acknowledge("one", "large");
+  await phone.release(["one", "two"]);
+  assert.equal(port.dump("blobs").length, 2, "offline peer is still owed every fragment");
+  const restarted = log(port, { stores: { blobs: "blobs" } });
+  await restarted.restore();
+  await restarted.acknowledge("two", "large");
+  await restarted.release(["one", "two"]);
+  assert.equal(port.dump("blobs").length, 0);
+});
+
+test("applying an incoming body cannot delete the same body still owed to another peer", async () => {
+  const port = memoryPort();
+  const phone = log(port, { stores: { blobs: "blobs" } });
+  const payload = { type: "device.event.blob", blobHash: "sha256:" + "b".repeat(64), fragments: 1, byteLength: 1 };
+  await phone.append({ eventId: "outgoing", conversationId: "chat", kind: "message", payload,
+    blobFragments: [{ reference: payload, index: 0, bytesBase64: "eA==" }], recipients: ["one"] });
+  const incoming = { eventId: "incoming", originId: "two", logScopeId: "chat:actions", originSeq: 1,
+    logicalTs: "0000000000001:000000:two", kind: "message", conversationId: "chat", payload, eventHash: "hash" };
+  await phone.receive(incoming);
+  port.failOn = "meta";
+  await assert.rejects(phone.markApplied(incoming), /QuotaExceeded/);
+  assert.equal(port.dump("blobs").length, 1, "failed receipt keeps the body available for retry");
+  port.failOn = null;
+  await phone.markApplied(incoming);
+  assert.equal(port.dump("blobs").length, 1, "successful incoming receipt cannot release outgoing ownership");
+  await phone.acknowledge("one", "outgoing");
+  await phone.release(["one", "two"]);
+  assert.equal(port.dump("blobs").length, 0, "non-recipient does not hold a private room event forever");
 });
