@@ -14954,7 +14954,15 @@ export class ChatService {
         }
       }
       const batch = metadata.participantRequest;
-      if (batch?.requesterParticipantId === participantId && this.participantRequestHasUnfinishedItems(batch)) {
+      if (batch?.requesterParticipantId === participantId
+        && this.participantRequestHasUnfinishedItems(batch)
+        // A new turn from the requester does not cancel a delegation that is
+        // still being worked on. Asking a member for its status IS a new turn,
+        // and this used to mark every request it had issued as interrupted —
+        // the work carried on while the User was told it had been interrupted.
+        // Only an interaction that can no longer make progress is closed here;
+        // an explicit Stop still closes it through its own path.
+        && !this.participantRequestIsStillRunning(conversation, batch)) {
         const nextBatch = this.terminalParticipantRequestBatch(batch, "interrupted", reason, now);
         if (nextBatch !== batch) {
           metadata = {
@@ -15297,6 +15305,22 @@ export class ChatService {
     return conversation.messages
       .map((message) => message.metadata?.participantRequest)
       .filter((batch): batch is ChatParticipantRequestBatch => Boolean(batch));
+  }
+
+  /** True while a target of this request still has a live run in this chat: the
+   *  delegation is being worked on right now, whatever the requester is doing. */
+  private participantRequestIsStillRunning(
+    conversation: Conversation,
+    batch: ChatParticipantRequestBatch
+  ): boolean {
+    const working = new Set<string>();
+    for (const meta of this.chatRunMeta.values()) {
+      if (meta.conversationId === conversation.id) working.add(meta.participantId);
+    }
+    if (working.size === 0) return false;
+    return batch.items.some((item) =>
+      (item.status === "pending_approval" || item.status === "running" || item.status === "resuming_requester")
+      && working.has(item.targetParticipantId));
   }
 
   private participantRequestHasUnfinishedItems(batch: ChatParticipantRequestBatch): boolean {
