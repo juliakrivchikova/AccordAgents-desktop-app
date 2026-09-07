@@ -11370,7 +11370,9 @@ function participantRequestApproval(
 
 test("a late machine result is not acknowledged when its chat is absent", async () => {
   const service = Object.create(ChatService.prototype) as ChatService;
-  Object.assign(service, { storage: { getConversation: async () => undefined } });
+  // A late result is first held against the chats this process knows are
+  // deleted, so the stand-in has to carry that set the way a real service does.
+  Object.assign(service, { storage: { getConversation: async () => undefined }, deletedConversationIds: new Set<string>() });
   await assert.rejects(service.applyMachineLateTerminal({
     conversationId: "missing-chat", runId: "run-1", status: "completed",
     messages: [], machineName: "Box"
