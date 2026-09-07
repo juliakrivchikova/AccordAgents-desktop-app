@@ -38,7 +38,11 @@ export async function collectMobileMailboxOutboxEvents(
     if (await selection.hasAcceptedMobileEvent(outboxEvent.conversationId, outboxEvent.eventId)) {
       continue;
     }
-    if (outboxEvent.kind === "run.cancel.requested") {
+    if (outboxEvent.kind === "run.cancel.requested"
+      || outboxEvent.kind === "permission.decided" || outboxEvent.kind === "choice.answered") {
+      // A decision is not a run: it neither starts one nor needs an execution
+      // claim here. The desktop records it and the peer holding the request
+      // acts on it once.
       events.push(outboxEvent);
       continue;
     }
@@ -186,7 +190,8 @@ export function mailboxEnvelopeToMobileOutboxEvent(value: unknown): MobileOutbox
     return undefined;
   }
   const envelope = value as Record<string, unknown>;
-  if (envelope.kind !== "message.created" && envelope.kind !== "run.cancel.requested") {
+  if (envelope.kind !== "message.created" && envelope.kind !== "run.cancel.requested"
+    && envelope.kind !== "permission.decided" && envelope.kind !== "choice.answered") {
     return undefined;
   }
   const eventId = typeof envelope.eventId === "string" ? envelope.eventId.trim() : "";
@@ -194,6 +199,28 @@ export function mailboxEnvelopeToMobileOutboxEvent(value: unknown): MobileOutbox
   const payload = envelope.payload;
   if (!eventId || !conversationId || !payload || typeof payload !== "object" || Array.isArray(payload)) {
     return undefined;
+  }
+  if (envelope.kind === "permission.decided" || envelope.kind === "choice.answered") {
+    const decision = payload as { operationId?: unknown; targetKey?: unknown; stateId?: unknown; detail?: unknown };
+    const operationId = typeof decision.operationId === "string" ? decision.operationId.trim() : "";
+    const targetKey = typeof decision.targetKey === "string" ? decision.targetKey.trim() : "";
+    if (!operationId || !targetKey) {
+      return undefined;
+    }
+    return {
+      eventId,
+      conversationId,
+      kind: envelope.kind,
+      ...(typeof envelope.createdAt === "string" ? { createdAt: envelope.createdAt } : {}),
+      payload: {
+        operationId,
+        targetKey,
+        ...(typeof decision.stateId === "string" ? { stateId: decision.stateId } : {}),
+        ...(decision.detail && typeof decision.detail === "object" && !Array.isArray(decision.detail)
+          ? { detail: decision.detail as Record<string, unknown> }
+          : {})
+      }
+    };
   }
   if (envelope.kind === "run.cancel.requested") {
     const runId = typeof (payload as { runId?: unknown }).runId === "string"

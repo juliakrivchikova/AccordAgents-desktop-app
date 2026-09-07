@@ -20,6 +20,9 @@
   const CHAT_LIST_KEY = "accordagents.mobile.chatList.v1";
   const MAILBOX_CURSOR_KEY = "accordagents.mobile.mailboxCursor.v1";
   const TERMINAL_RUNS_KEY = "accordagents.mobile.terminalRuns.v1";
+  // Cards a member is waiting on, per chat, as the desktop last stated them.
+  // Kept so closing the app does not lose a question that is still open.
+  const CONTROL_CARDS_KEY = "accordagents.mobile.controlCards.v1";
   const TERMINAL_RUNS_MAX = 600;
   const DEFAULT_MANAGED_RELAY_URL = "wss://relay.accordagents.com/v1/relay";
   const RELAY_PROTOCOL = "accord-relay-v1";
@@ -2469,6 +2472,52 @@
     return node;
   }
 
+  function loadControlCards() {
+    try {
+      const raw = localStorage.getItem(CONTROL_CARDS_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveControlCards(byConversation) {
+    try {
+      localStorage.setItem(CONTROL_CARDS_KEY, JSON.stringify(byConversation));
+    } catch {
+      // A full quota must not lose the timeline; the cards arrive again with
+      // the next batch.
+    }
+  }
+
+  function controlCardsFor(conversationId) {
+    const stored = loadControlCards()[conversationId];
+    return Array.isArray(stored) ? stored : [];
+  }
+
+  /** The desktop states the whole set for a chat, so it replaces rather than
+   *  merges: a card it no longer lists has been answered or withdrawn. */
+  function storeControlCards(conversationId, cards) {
+    if (!conversationId || !Array.isArray(cards)) return false;
+    const all = loadControlCards();
+    const before = JSON.stringify(all[conversationId] || []);
+    const after = JSON.stringify(cards);
+    if (before === after) return false;
+    all[conversationId] = cards;
+    saveControlCards(all);
+    // A card the desktop no longer lists has been answered or withdrawn, so the
+    // "sent" mark for it goes too: the next card with that id is a new question.
+    const live = new Set(cards.map(function (card) { return card && card.id; }));
+    for (const id of Array.from(controlCardSent)) {
+      if (!live.has(id)) controlCardSent.delete(id);
+    }
+    for (const id of Array.from(controlCardErrors.keys())) {
+      if (!live.has(id)) controlCardErrors.delete(id);
+    }
+    return true;
+  }
+
   async function handleRelayTimelinePayload(payload, fallbackConversationId, options) {
     if (payload?.type !== "mobile.timeline.events" || !Array.isArray(payload.events)) {
       return 0;
@@ -2481,6 +2530,9 @@
       return 0;
     }
     let stored = 0;
+    if (Array.isArray(payload.cards) && storeControlCards(conversationId, payload.cards)) {
+      stored += 1;
+    }
     for (const event of payload.events) {
       if (!event || typeof event !== "object") {
         continue;
@@ -3377,6 +3429,258 @@
     requestAnimationFrame(tick);
   }
 
+
+  // --- cards a member is waiting on -----------------------------------------
+
+  /** The chat action a tapped card produces. The shape is the one every device
+   *  emits, so the desktop records and applies it exactly as it would its own —
+   *  including the native identifiers the provider needs back. */
+  function decisionEventForCard(card, answer) {
+    if (card.kind === "permission") {
+      const approve = answer.optionId === "allow";
+      return {
+        kind: "permission.decided",
+        payload: {
+          operationId: "permission:" + card.id + ":" + (approve ? "allow" : "deny"),
+          targetKey: "approval:" + card.id,
+          stateId: approve ? "approved" : "denied",
+          detail: {
+            approve: approve,
+            ...(card.codexDecisionId ? { codexDecisionId: card.codexDecisionId } : {}),
+            ...(card.draftOverride ? { draftOverride: card.draftOverride } : {})
+          }
+        }
+      };
+    }
+    const value = answer.cancel ? "cancelled" : answer.optionId || (answer.customAnswer ? "custom" : "empty");
+    return {
+      kind: "choice.answered",
+      payload: {
+        operationId: "choice:" + card.id + ":" + value,
+        targetKey: "choice:" + card.id,
+        stateId: value,
+        detail: {
+          sourceMessageId: card.sourceMessageId || "",
+          ...(answer.optionId ? { selectedOptionId: answer.optionId } : {}),
+          ...(answer.customAnswer ? { customAnswer: answer.customAnswer } : {}),
+          ...(answer.cancel ? { cancel: true } : {})
+        }
+      }
+    };
+  }
+
+  /**
+   * Answering a card: the event and the queue entry are written in one
+   * IndexedDB transaction, then the queue is flushed. A tap is not the answer
+   * being applied — the card says "sent" until the desktop states it answered.
+   */
+  async function answerControlCard(card, answer) {
+    const conversationId = card.conversationId || selectedConversationId();
+    if (!conversationId) return;
+    const decision = decisionEventForCard(card, answer);
+    try {
+      await enqueueDecision({ conversationId: conversationId, kind: decision.kind, payload: decision.payload });
+    } catch (error) {
+      controlCardErrors.set(card.id, "Could not save your answer on this phone. Try again.");
+      await render("waiting-to-sync");
+      return;
+    }
+    controlCardErrors.delete(card.id);
+    controlCardSent.add(card.id);
+    await render("waiting-to-sync");
+    const flushResult = await flushOutbox();
+    await pollMailboxTimeline().catch(function () { return 0; });
+    await render(flushResult.status);
+  }
+
+  function enqueueDecision(input) {
+    return createOutboxEvent({
+      conversationId: input.conversationId,
+      kind: input.kind,
+      payload: input.payload
+    }).then(persistOutboundEvent);
+  }
+
+  const controlCardSent = new Set();
+  const controlCardErrors = new Map();
+
+  function renderControlCards(conversationId) {
+    const host = document.getElementById("control-cards");
+    if (!host) return;
+    const cards = controlCardsFor(conversationId).filter(function (card) {
+      return card && card.status === "pending";
+    });
+    host.replaceChildren();
+    host.hidden = cards.length === 0;
+    for (const card of cards) {
+      host.append(controlCardElement(card));
+    }
+  }
+
+  function controlCardElement(card) {
+    const wrap = document.createElement("article");
+    wrap.className = "control-card";
+    wrap.dataset.cardId = card.id;
+    wrap.dataset.cardKind = card.kind;
+
+    const head = document.createElement("div");
+    head.className = "control-card-head";
+    const title = document.createElement("span");
+    title.className = "control-card-title";
+    title.textContent = card.title || (card.kind === "permission" ? "Permission request" : "Choice");
+    head.append(title);
+    if (card.requesterLabel || card.machineName) {
+      const who = document.createElement("span");
+      who.className = "control-card-who";
+      who.textContent = [card.requesterLabel, card.machineName].filter(Boolean).join(" · ");
+      head.append(who);
+    }
+    wrap.append(head);
+
+    if (card.summary) {
+      const summary = document.createElement("p");
+      summary.className = "control-card-summary";
+      summary.textContent = card.summary;
+      wrap.append(summary);
+    }
+
+    const sent = controlCardSent.has(card.id);
+    const options = document.createElement("div");
+    options.className = "control-card-options";
+    for (const option of Array.isArray(card.options) ? card.options : []) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "control-card-option";
+      button.dataset.optionId = option.id;
+      button.textContent = option.label || option.id;
+      button.disabled = sent;
+      button.addEventListener("click", function () {
+        void answerControlCard(card, { optionId: option.id });
+      });
+      options.append(button);
+    }
+    if (card.allowsCancel) {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "control-card-option";
+      cancel.dataset.optionId = "cancel";
+      cancel.textContent = "Cancel";
+      cancel.disabled = sent;
+      cancel.addEventListener("click", function () {
+        void answerControlCard(card, { cancel: true });
+      });
+      options.append(cancel);
+    }
+    wrap.append(options);
+
+    if (card.allowsCustomAnswer) {
+      const custom = document.createElement("div");
+      custom.className = "control-card-custom";
+      const input = document.createElement("input");
+      input.type = "text";
+      input.placeholder = "Answer in your own words";
+      input.setAttribute("aria-label", "Answer in your own words");
+      input.disabled = sent;
+      const send = document.createElement("button");
+      send.type = "button";
+      send.className = "control-card-option";
+      send.textContent = "Send";
+      send.disabled = sent;
+      send.addEventListener("click", function () {
+        const text = input.value.trim();
+        if (!text) return;
+        void answerControlCard(card, { customAnswer: text });
+      });
+      custom.append(input, send);
+      wrap.append(custom);
+    }
+
+    const state = document.createElement("p");
+    state.className = "control-card-state";
+    const failure = controlCardErrors.get(card.id);
+    state.textContent = failure
+      ? failure
+      : sent
+        // Deliberately not "answered": the phone knows it sent the answer, not
+        // that the provider was told. The card leaves when the desktop says so.
+        ? "Answer sent. Waiting for the machine to apply it."
+        : "";
+    state.hidden = !state.textContent;
+    wrap.append(state);
+    return wrap;
+  }
+
+
+  // --- waking the machine ----------------------------------------------------
+
+  let machineWakeState = { status: "idle", detail: "" };
+
+  /** The scoped key this device was handed at pairing, or undefined when the
+   *  desktop manages no AWS machine. It never leaves this device. */
+  function machinePowerHandoff() {
+    const pairing = loadPairing();
+    const power = pairing && pairing.power;
+    return power && power.instanceId && power.credentials ? power : undefined;
+  }
+
+  async function callMachinePower(action) {
+    const power = machinePowerHandoff();
+    const wake = self.AccordMobileMachineWake;
+    if (!power || !wake || !globalThis.crypto || !globalThis.crypto.subtle) {
+      throw new Error("This phone has no key for that machine.");
+    }
+    const request = await wake.machineWakeRequest({
+      action: action,
+      instanceId: power.instanceId,
+      credentials: power.credentials,
+      crypto: wake.webCrypto(globalThis.crypto.subtle)
+    });
+    const response = await fetch(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error("AWS refused the request (" + response.status + ").");
+    }
+    return text;
+  }
+
+  async function wakeMachineFromPhone() {
+    machineWakeState = { status: "waking", detail: "Asking AWS to start the machine…" };
+    await render();
+    try {
+      await callMachinePower("start");
+      // Started is not ready: the runtime still has to boot and connect, and
+      // saying otherwise would be the same lie as calling a tap an answer.
+      machineWakeState = { status: "started", detail: "Start requested. The machine appears once its runtime connects." };
+    } catch (error) {
+      machineWakeState = { status: "error", detail: String(error && error.message ? error.message : error) };
+    }
+    await render();
+    await pollMailboxTimeline().catch(function () { return 0; });
+  }
+
+  function renderMachineWake() {
+    const host = document.getElementById("machine-wake");
+    if (!host) return;
+    const power = machinePowerHandoff();
+    host.replaceChildren();
+    host.hidden = !power;
+    if (!power) return;
+    const label = document.createElement("span");
+    label.textContent = machineWakeState.detail || "Machine asleep? Wake it to keep working.";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = machineWakeState.status === "waking" ? "Waking…" : "Wake machine";
+    button.disabled = machineWakeState.status === "waking";
+    button.addEventListener("click", function () {
+      void wakeMachineFromPhone();
+    });
+    host.append(label, button);
+  }
+
   async function render(connectionStatus) {
     const state = document.getElementById("connection-state");
     const list = document.getElementById("message-list");
@@ -3440,6 +3744,8 @@
       }
     }
     renderChatList();
+    renderControlCards(activeId);
+    renderMachineWake();
     chatsScreen.classList.toggle("is-active", !activeId);
     timelineScreen.classList.toggle("is-active", Boolean(activeId));
     if (!activeId) {

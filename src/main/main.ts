@@ -138,6 +138,7 @@ import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
 import { acquireMobileMailboxExecutionClaim } from "./services/mobileMailboxClaims";
+import { controlCardsFromConversation } from "../shared/mobileControlCards";
 import {
   deleteMailboxEvents,
   mailboxAccessForSealKey,
@@ -512,6 +513,34 @@ async function publishChatAction(action: { conversationId: string; kind: string;
   }
 }
 
+/**
+ * A card answered on the phone.
+ *
+ * It takes exactly the path a desktop answer takes: the decision becomes a
+ * durable event first, then the peer that holds the request acts on it once.
+ * Delivery from the phone is not the answer being applied, and this is where
+ * that distinction is kept.
+ */
+async function applyMobileDecision(request: {
+  conversationId: string;
+  kind: "permission.decided" | "choice.answered";
+  payload: { operationId: string; targetKey: string; stateId?: string; detail?: Record<string, unknown> };
+}): Promise<void> {
+  await publishChatAction({ conversationId: request.conversationId, kind: request.kind, payload: request.payload });
+  const event = await storageService.getChatEvent(`chat-action:${request.payload.operationId}`);
+  if (!event) {
+    throw new Error("The answer from the phone could not be recorded.");
+  }
+  const outcome = await chatActionApplier.apply(event);
+  if (outcome.status === "deferred") {
+    // Kept for retry rather than reported as answered: the peer that holds the
+    // request could not act on it yet.
+    void debugLogService.write("mobile.decision.deferred", {
+      conversationId: request.conversationId, targetKey: request.payload.targetKey
+    });
+  }
+}
+
 async function chatActionEventExists(eventId: string): Promise<boolean> {
   return Boolean(await storageService.getChatEvent(eventId));
 }
@@ -839,6 +868,7 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
       tryAcquireMobileEventExecution: (event, runId) =>
         acquireDesktopMobileExecutionClaim(pairing, event.conversationId, event.eventId, runId),
       cancelRun: (conversationId, runId) => cancelMobileChatRun(conversationId, runId),
+      applyMobileDecision: (request) => applyMobileDecision(request),
       conversationIdForRun: (runId) => chatService.conversationIdForRun(runId)
     },
     mobileRelayChatCatalog(),
@@ -1984,6 +2014,12 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
         });
       }
       return items;
+    },
+    async listControlCards(conversationId: string) {
+      // Straight from the stored conversation, so a card cannot exist on the
+      // phone that does not exist on the machine that raised it.
+      const conversation = await storageService.getConversation(conversationId);
+      return conversation && conversation.kind === "chat" ? controlCardsFromConversation(conversation) : [];
     },
     async listTimeline(conversationId: string) {
       const opened = await storageService.openConversation(conversationId, 80);

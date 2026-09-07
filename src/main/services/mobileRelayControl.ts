@@ -6,6 +6,7 @@ import {
 } from "../../shared/chatParticipantRequestThreads";
 import { RelayTunnelClient, type RelayTunnelMessage } from "./relayTunnelClient";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
+import { sameControlCards, type MobileControlCard } from "../../shared/mobileControlCards";
 
 type ProgressCallback = (progress: ReviewProgress) => void;
 
@@ -33,6 +34,13 @@ export interface MobileRelayChatSender {
   hasMobileMailboxResultForMobileEvent?(conversationId: string, eventId: string): Promise<boolean>;
   tryAcquireMobileEventExecution?(event: MobileOutboxEvent, runId: string): Promise<boolean>;
   cancelRun?(conversationId: string, runId: string): Promise<boolean> | boolean;
+  /** A card answered on the phone. Recording and applying it is the desktop's
+   *  job, on the same path any device's answer takes. */
+  applyMobileDecision?(request: {
+    conversationId: string;
+    kind: "permission.decided" | "choice.answered";
+    payload: { operationId: string; targetKey: string; stateId?: string; detail?: Record<string, unknown> };
+  }): Promise<void>;
   /** Which conversation a run belongs to, answered by the service that owns the
    *  runs. Progress arrives with no conversation on it, so without this the
    *  control has to guess — and guessing meant attributing another chat's run
@@ -55,6 +63,7 @@ interface MobileRelayAcceptedDetail extends MobileRelayAcceptedResult {
   outboxEvents: Array<
     | { kind: "message"; event: MobileMessageOutboxEvent; runId: string }
     | { kind: "cancel"; event: MobileRunCancelOutboxEvent }
+    | { kind: "decision"; event: MobileDecisionOutboxEvent }
   >;
   runningBatches: MobileTimelineEvents[];
 }
@@ -84,6 +93,8 @@ export interface MobileRelayChatMember {
 export interface MobileRelayChatCatalog {
   listChats(): Promise<MobileRelayChatListItem[]>;
   listTimeline(conversationId: string): Promise<MobileTimelineEvent[]>;
+  /** Cards a member is waiting on in this chat. */
+  listControlCards?(conversationId: string): Promise<MobileControlCard[]>;
   isConversationAllowed?(conversationId: string): Promise<boolean> | boolean;
 }
 
@@ -115,7 +126,20 @@ export interface MobileRunCancelOutboxEvent extends MobileOutboxEventBase {
   };
 }
 
-export type MobileOutboxEvent = MobileMessageOutboxEvent | MobileRunCancelOutboxEvent;
+/** A permission or a choice answered on the phone. The payload is the chat
+ *  action itself, so the desktop records and applies exactly what any other
+ *  device would - including the native identifiers the provider needs. */
+export interface MobileDecisionOutboxEvent extends MobileOutboxEventBase {
+  kind: "permission.decided" | "choice.answered";
+  payload: {
+    operationId: string;
+    targetKey: string;
+    stateId?: string;
+    detail?: Record<string, unknown>;
+  };
+}
+
+export type MobileOutboxEvent = MobileMessageOutboxEvent | MobileRunCancelOutboxEvent | MobileDecisionOutboxEvent;
 
 interface MobileOutboxAck {
   type: "mobile.outbox.ack";
@@ -158,6 +182,10 @@ export interface MobileTimelineEvents {
   type: "mobile.timeline.events";
   conversationId?: string;
   events: MobileTimelineEvent[];
+  /** Permissions and choices a member is waiting on. Sent with the timeline so
+   *  the phone shows the same cards the desktop does, and sent even when the
+   *  message rows deduplicate to nothing: a card appearing is news by itself. */
+  cards?: MobileControlCard[];
 }
 
 export interface MobileTimelineSink {
@@ -523,6 +551,12 @@ export class MobileRelayControlService {
       }
       this.acceptingMobileEventKeys.add(mobileEventKey);
       try {
+        if (isMobileDecisionEvent(event)) {
+          this.acceptedMobileEventKeys.add(mobileEventKey);
+          outboxEvents.push({ kind: "decision", event });
+          eventIds.push(event.eventId);
+          continue;
+        }
         if (isMobileRunCancelEvent(event)) {
           this.acceptedMobileEventKeys.add(mobileEventKey);
           outboxEvents.push({ kind: "cancel", event });
@@ -559,8 +593,33 @@ export class MobileRelayControlService {
     logicalMessageId: string,
     accepted: MobileRelayAcceptedDetail
   ): Promise<void> {
+    await this.deliverAcceptedDecisionEvents(accepted);
     await this.deliverAcceptedCancellationEvents(accepted);
     await this.deliverAcceptedMessageEvents(logicalMessageId, accepted);
+  }
+
+  /** A card answered on the phone. The desktop records it as the same chat
+   *  action any device would and lets the peer that holds the request act on it
+   *  once; delivery here is not the answer being applied. */
+  private async deliverAcceptedDecisionEvents(accepted: MobileRelayAcceptedDetail): Promise<void> {
+    for (const item of accepted.outboxEvents) {
+      if (item.kind !== "decision") {
+        continue;
+      }
+      if (!this.chat.applyMobileDecision) {
+        throw new Error("Answering a card from a phone is unavailable.");
+      }
+      try {
+        await this.chat.applyMobileDecision({
+          conversationId: item.event.conversationId,
+          kind: item.event.kind,
+          payload: item.event.payload
+        });
+      } catch (error) {
+        this.acceptedMobileEventKeys.delete(mobileEventScopeKey(item.event.conversationId, item.event.eventId));
+        throw error;
+      }
+    }
   }
 
   private async deliverAcceptedCancellationEvents(accepted: MobileRelayAcceptedDetail): Promise<void> {
@@ -936,6 +995,18 @@ export class MobileRelayControlService {
     });
   }
 
+  private readonly lastControlCardsByConversation = new Map<string, MobileControlCard[]>();
+
+  /** The cards for a chat, or undefined when this control cannot read them. */
+  private async controlCardsFor(conversationId?: string): Promise<MobileControlCard[] | undefined> {
+    if (!conversationId || !this.catalog?.listControlCards) return undefined;
+    try {
+      return await this.catalog.listControlCards(conversationId);
+    } catch {
+      return undefined;
+    }
+  }
+
   private async sendTimelineBatch(
     logicalMessageId: string,
     timeline: MobileTimelineEvents,
@@ -953,7 +1024,16 @@ export class MobileRelayControlService {
       this.lastTimelineSignatureById.set(id, signature);
       return true;
     });
-    if (events.length === 0) {
+    // A card that appeared, changed or was answered is news even when every
+    // message row has already been delivered: without this the phone would
+    // never learn that a member is waiting on it.
+    const cards = await this.controlCardsFor(timeline.conversationId);
+    const cardsChanged = cards !== undefined
+      && !sameControlCards(this.lastControlCardsByConversation.get(timeline.conversationId ?? "") ?? [], cards);
+    if (cardsChanged) {
+      this.lastControlCardsByConversation.set(timeline.conversationId ?? "", cards);
+    }
+    if (events.length === 0 && !cardsChanged) {
       if (options?.liveOnly === true) {
         this.onLiveDiagnostic?.({ kind: "empty-after-dedup", logicalMessageId, events: 0, bytes: 0, rendezvousId: this.options.rendezvousId });
       }
@@ -961,7 +1041,8 @@ export class MobileRelayControlService {
     }
     const ciphertext = await sealMobileRelayPayload({
       ...timeline,
-      events
+      events,
+      ...(cards ? { cards } : {})
     }, this.options.relaySealKeyBase64);
     if (this.timelineSink && options?.liveOnly !== true) {
       const newlyFinishedRunIds = options?.markTerminalParticipant === true
@@ -1081,6 +1162,10 @@ function isMobileTimelineRequest(value: unknown): value is MobileTimelineRequest
     (value as Partial<MobileTimelineRequest>).conversationId?.trim());
 }
 
+function isMobileDecisionEvent(event: MobileOutboxEvent): event is MobileDecisionOutboxEvent {
+  return event.kind === "permission.decided" || event.kind === "choice.answered";
+}
+
 function assertMobileOutboxRequest(value: unknown): MobileOutboxRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Mobile relay request must be an object.");
@@ -1110,6 +1195,12 @@ function assertMobileOutboxEvent(value: unknown): asserts value is MobileOutboxE
   }
   if (event.kind === "run.cancel.requested") {
     assertNonEmptyString((event.payload as Partial<MobileRunCancelOutboxEvent["payload"]>).runId, "payload.runId");
+    return;
+  }
+  if (event.kind === "permission.decided" || event.kind === "choice.answered") {
+    const payload = event.payload as Partial<MobileDecisionOutboxEvent["payload"]>;
+    assertNonEmptyString(payload.operationId, "payload.operationId");
+    assertNonEmptyString(payload.targetKey, "payload.targetKey");
     return;
   }
   if (event.kind !== undefined && event.kind !== "message.created") {

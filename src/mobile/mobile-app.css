@@ -1204,3 +1204,109 @@ textarea {
 .message-row[data-streamable="1"] .message-copy {
   cursor: pointer;
 }
+
+
+/* Cards a member is waiting on: the phone shows the same question the desktop
+   does, and answering here has the same effect. Kept above the composer so it
+   cannot be missed, and never covering the last message. */
+.control-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px 0;
+}
+
+.control-card {
+  border: 1px solid var(--mobile-border, rgba(0, 0, 0, 0.12));
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--mobile-surface, #fff);
+}
+
+.control-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.control-card-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.control-card-who {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.control-card-summary {
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.control-card-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.control-card-option {
+  border: 1px solid var(--mobile-border, rgba(0, 0, 0, 0.12));
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 13px;
+  background: transparent;
+  color: inherit;
+}
+
+.control-card-option[disabled] {
+  opacity: 0.5;
+}
+
+.control-card-custom {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+.control-card-custom input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--mobile-border, rgba(0, 0, 0, 0.12));
+  border-radius: 10px;
+  padding: 8px 10px;
+  font: inherit;
+  background: transparent;
+  color: inherit;
+}
+
+.control-card-state {
+  margin-top: 8px;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+/* Waking a stopped machine, from the same place its members are used. */
+.machine-wake {
+  margin: 8px 12px 0;
+  border: 1px solid var(--mobile-border, rgba(0, 0, 0, 0.12));
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.machine-wake button {
+  border: 1px solid var(--mobile-border, rgba(0, 0, 0, 0.12));
+  border-radius: 999px;
+  padding: 6px 14px;
+  font: inherit;
+  background: transparent;
+  color: inherit;
+}

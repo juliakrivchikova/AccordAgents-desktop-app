@@ -75,6 +75,12 @@
             </header>
             <div id="stream-body" class="stream-view-body mscroll"></div>
           </section>
+          <!-- Permissions and choices a member is waiting on. The same cards
+               the desktop shows, answered from here with the same effect. -->
+          <section id="control-cards" class="control-cards" aria-label="Waiting for you" hidden></section>
+          <!-- Rule 3: the phone wakes its machine itself, with the scoped key
+               handed over sealed at pairing. -->
+          <section id="machine-wake" class="machine-wake" aria-label="Machine power" hidden></section>
           <button id="jump-to-latest" class="jump-to-latest" type="button" aria-label="Jump to latest message">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 5v14M19 12l-7 7-7-7"></path>
@@ -108,6 +114,7 @@
     </div>
     <script src="jsqr.js?v=2026-09-01-picture-rows-v1" defer></script>
     <script src="mobile-event-log.js?v=2026-09-07-event-log-v1" defer></script>
+    <script src="mobile-machine-wake.js?v=2026-09-07-wake-v1" defer></script>
     <script src="mobile-app.js?v=2026-09-01-picture-rows-v1" defer></script>
   </body>
 </html>
