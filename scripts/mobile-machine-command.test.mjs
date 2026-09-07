@@ -23,7 +23,7 @@ const { signDevicePacket, verifyDevicePacket } = require(path.join(repoRoot, "di
 const { MachineHostService } = require(path.join(repoRoot, "dist/main/main/services/machineHost.js"));
 const { StorageService } = require(path.join(repoRoot, "dist/main/main/services/storage.js"));
 const { ChatEventLogService } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
-const { sealMobileRelayPayload } = require(path.join(repoRoot, "dist/main/main/services/mobileRelaySealing.js"));
+const { sealMachineRelayPayload } = require(path.join(repoRoot, "dist/main/main/services/machineRelaySealing.js"));
 
 const CONVERSATION = "phone-chat";
 const PARTICIPANT = { id: "p1", handle: "bot", kind: "codex-cli", roleConfigId: "engineer", homeMachineId: "machine-one" };
@@ -45,6 +45,7 @@ async function machine(options = {}) {
   const desktopStorage = new StorageService({ dbPath: path.join(dir, "desktop.sqlite3") });
   const desktopLog = new ChatEventLogService(desktopStorage);
   const desktop = await desktopLog.getOrCreateDeviceIdentity();
+  const desktopIdentity = { publicKeyDerBase64: desktop.publicKeyDerBase64, privateKeyDerBase64: desktop.privateKeyDerBase64 };
   const pairing = {
     version: 1, purpose: "machine-host",
     issuer: { originId: desktop.originId, keyId: desktop.keyId, publicKeyDerBase64: desktop.publicKeyDerBase64 },
@@ -93,13 +94,18 @@ async function machine(options = {}) {
   return {
     host, runs, logs, replicated, pairing, identity, desktop, dir,
     // The real ingress: a sealed frame off the relay, routed by who sent it.
-    deliver: async (packet) => host.handleMessage(await sealMobileRelayPayload(packet, pairing.relaySealKeyBase64)),
+    // Sealed to this machine by the sender's own identity. A shared room key
+    // is no longer a way to put content into a machine's room: it never proved
+    // who sent it, and every device that had ever been in the room held it.
+    deliver: async (packet, sender = desktopIdentity) =>
+      host.handleMessage(await sealMachineRelayPayload(packet, sender, identity.publicKeyDerBase64, pairing.rendezvousId)),
     trust: async (peers) => {
       const body = { type: "machine.trust.roster", conversationId: `machine-trust:${pairing.rendezvousId}`,
         roster: { version: 1, issuerDeviceId: desktop.originId, updatedAt: new Date().toISOString(), peers } };
       const { event } = await desktopLog.appendLocalEvent({ conversationId: body.conversationId,
         logScopeId: phone.deviceEventScope(pairing.rendezvousId, body.conversationId, "actions"), kind: body.type, payload: body });
-      await host.handleMessage(await sealMobileRelayPayload(phone.eventPacket(desktop.originId, identity.originId, event), pairing.relaySealKeyBase64));
+      await host.handleMessage(await sealMachineRelayPayload(
+        phone.eventPacket(desktop.originId, identity.originId, event), desktopIdentity, identity.publicKeyDerBase64, pairing.rendezvousId));
     },
     cleanup: async () => {
       host.close();
