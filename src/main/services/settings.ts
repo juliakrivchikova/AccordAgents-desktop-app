@@ -1814,7 +1814,9 @@ export class SettingsService {
   // Generated avatars are stored as files next to the settings file: a base64 PNG
   // inside settings.json would be read on every getSettings and grow it without limit.
   private customAvatarDir(): string {
-    return path.join(app.getPath("userData"), "avatars");
+    // userDataPath, not electron's app: this service also runs on a machine,
+    // where there is no Electron to ask.
+    return path.join(userDataPath(), "avatars");
   }
 
   private customAvatarPath(id: string, mediaType: AvatarImageMediaType): string {

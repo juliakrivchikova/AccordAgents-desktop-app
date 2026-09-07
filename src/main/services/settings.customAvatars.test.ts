@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { SettingsService } from "./settings";
+import { createHeadlessPlatform, setHostPlatform } from "../platform";
 
 // A real service against a real settings file: the studio's whole promise is that
 // a drawn avatar is still there after a restart, and only a round trip proves it.
@@ -12,6 +13,9 @@ import { SettingsService } from "./settings";
 async function service(userData?: string): Promise<{ settings: SettingsService; userData: string }> {
   const dir = userData ?? await mkdtemp(path.join(tmpdir(), "accord-settings-avatars-"));
   process.env.ACCORD_TEST_USER_DATA = dir;
+  // Settings reaches its directory through the host platform, so the test says
+  // where that is the way the machine runtime does rather than through Electron.
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   return { settings: new SettingsService(), userData: dir };
 }
 
