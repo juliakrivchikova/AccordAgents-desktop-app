@@ -1,3 +1,4 @@
+import { assertMachinePowerHandoff, type MachinePowerHandoff } from "./machinePowerHandoff";
 export const MOBILE_PAIRING_VERSION = 1;
 
 /** phone-control: a phone drives this desktop; person-invite: another person
@@ -43,6 +44,11 @@ export interface MobilePairingPackage {
   outboxUrl?: string;
   staticOriginUrl?: string;
   capabilities: MobilePairingCapability[];
+  /** Rule 3: the scoped key that lets this device wake a stopped AWS machine
+   *  by itself. It travels sealed with the pairing and nowhere else — the
+   *  relay never sees it, and there is no wake broker to ask. Absent when the
+   *  machine has no power configuration. */
+  power?: MachinePowerHandoff;
   fingerprint: string;
   createdAt: string;
   expiresAt: string;
@@ -82,6 +88,12 @@ export interface RevokeMobilePairingResult {
   rendezvousId?: string;
   revokedAt: string;
   reason: string;
+  /** Set when this device had been handed the machine's scoped power key.
+   *  Revoking the pairing stops this desktop offering it again, but the device
+   *  kept a copy of a key every device shares: only rotating it in AWS ends
+   *  that access, and this says so rather than implying the revoke was enough. */
+  powerKeyRotationRequired?: boolean;
+  powerKeyRotationDetail?: string;
 }
 
 export interface MobileControlEndpointDefaults {
@@ -239,6 +251,9 @@ export function assertMobilePairingPackage(value: unknown, now?: Date): asserts 
   }
   if (typeof value.staticOriginUrl === "string") {
     assertHttpsUrl(value.staticOriginUrl, "staticOriginUrl");
+  }
+  if (value.power !== undefined) {
+    assertMachinePowerHandoff(value.power);
   }
   if (!Array.isArray(value.capabilities) || value.capabilities.length === 0) {
     throw new Error("Mobile pairing package requires at least one capability.");

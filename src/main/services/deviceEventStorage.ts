@@ -1,4 +1,5 @@
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import { decideChatEventRetention, type ChatEventRetentionDecision } from "../../shared/chatEventRetention";
 import {
   DEVICE_EVENT_PAGE_BYTES,
   DEVICE_EVENT_PAGE_COUNT,
@@ -330,6 +331,61 @@ export class DeviceEventStorage {
 
   /** Logical queued bytes across recipient deliveries, including referenced
    * bodies. Physical blob storage is shared; this is not a database file size. */
+  /**
+   * What this emitter may forget, and who is holding it back.
+   *
+   * The relay buffers briefly and then forgets; an event is released only when
+   * every machine in the roster has acknowledged it, so catch-up past the
+   * relay's buffer is a resend from here. The decision itself lives in
+   * `decideChatEventRetention`, shared with the phone's outbox, so the two
+   * cannot disagree about when it is safe to forget something.
+   *
+   * Bounded: at most `limit` unacknowledged rows are examined, and
+   * `truncated` says when there were more. On the User's largest chat the
+   * outbox is per undelivered event, not per message in history.
+   */
+  async retention(channelId: string, roster?: readonly string[], limit = 5_000): Promise<ChatEventRetentionDecision & { truncated: boolean }> {
+    await this.database.init();
+    // Every outbox row, acknowledged or not: "may this be forgotten?" can only
+    // be answered by looking at all of an event's recipients, not at the ones
+    // that are still behind.
+    const rows = await this.database.query<{
+      eventId: string; deviceId: string; bytes: number; logicalTs: string; createdAt: string; acknowledged: number;
+    }>(`
+      select o.event_id as eventId, o.device_id as deviceId,
+        length(cast(e.envelope_json as blob)) as bytes,
+        e.logical_ts as logicalTs, e.received_at as createdAt,
+        case when o.acknowledged_at is null then 0 else 1 end as acknowledged
+      from device_event_outbox o join chat_events e on e.event_id = o.event_id
+      where o.channel_id = ${quote(channelId)}
+      order by o.rowid limit ${Math.max(1, Math.floor(limit)) + 1};
+    `);
+    const truncated = rows.length > limit;
+    const examined = truncated ? rows.slice(0, limit) : rows;
+    const entries = new Map<string, { eventId: string; bytes: number; logicalTs: string; createdAt: string }>();
+    const ackedByDevice = new Map<string, Set<string>>();
+    const recipients = new Set<string>();
+    for (const row of examined) {
+      entries.set(row.eventId, {
+        eventId: row.eventId, bytes: row.bytes ?? 0,
+        logicalTs: row.logicalTs ?? "", createdAt: row.createdAt ?? ""
+      });
+      recipients.add(row.deviceId);
+      if (row.acknowledged) {
+        const acked = ackedByDevice.get(row.deviceId) ?? new Set<string>();
+        acked.add(row.eventId);
+        ackedByDevice.set(row.deviceId, acked);
+      }
+    }
+    const peers = roster?.length ? [...roster] : [...recipients];
+    const decision = decideChatEventRetention({
+      entries: [...entries.values()],
+      roster: peers,
+      acknowledgements: peers.map((peerId) => ({ peerId, eventIds: [...(ackedByDevice.get(peerId) ?? [])] }))
+    });
+    return { ...decision, truncated };
+  }
+
   async pressure(channelId: string): Promise<{ events: number; bytes: number; recipients: number }> {
     await this.database.init();
     return (await this.database.query<{ events: number; bytes: number; recipients: number }>(`

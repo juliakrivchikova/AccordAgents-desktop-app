@@ -39,6 +39,10 @@ import {
   type ChatEventVisibleScopeGap
 } from "./chatEventProjection";
 
+/** The log scope canonical actions are appended to. One scope, so gap repair
+ *  and ordering treat every action of an origin as one contiguous run. */
+export const CHAT_ACTION_LOG_SCOPE = "chat:actions";
+
 export type ChatActionKind =
   | "artifact.revision.created"
   | "artifact.signature.added"

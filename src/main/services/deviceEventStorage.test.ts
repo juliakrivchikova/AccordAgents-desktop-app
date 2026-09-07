@@ -185,6 +185,55 @@ test("queue pressure includes large referenced bodies for every pending recipien
   } finally { await db.cleanup(); }
 });
 
+test("the outbox forgets an event only when every roster machine has it, and names who is behind", async () => {
+  const db = await database();
+  try {
+    const log = new ChatEventLogService(db.storage);
+    const first = (await log.appendLocalEvent({
+      ...action(), eventId: "retain-1",
+      recipients: [recipient, { ...recipient, deviceId: "cloud-box" }]
+    })).event;
+    const second = (await log.appendLocalEvent({
+      ...action(), eventId: "retain-2",
+      recipients: [recipient, { ...recipient, deviceId: "cloud-box" }]
+    })).event;
+
+    const events = db.storage.deviceEvents();
+    const before = await events.retention("room");
+    assert.deepEqual(before.releasable, [], "nothing is releasable while both peers are behind");
+    assert.deepEqual(before.pressure.map((peer) => peer.peerId).sort(), ["cloud-box", "peer"]);
+    assert.match(before.warning ?? "", /not caught up/);
+    assert.equal(before.truncated, false);
+
+    // One peer applies both; the relay may well have forgotten them by now.
+    for (const event of [first, second]) {
+      await events.acknowledge("peer", {
+        eventId: event.eventId, eventHash: event.eventHash, outcome: "applied", appliedAt: now
+      });
+    }
+    const partial = await events.retention("room");
+    assert.deepEqual(partial.releasable, [], "one machine's acknowledgement is not every machine's");
+    assert.deepEqual(partial.pressure.map((peer) => peer.peerId), ["cloud-box"]);
+    assert.equal(partial.pressure[0].pendingEvents, 2);
+    assert.ok(partial.heldBytes > 0);
+
+    await events.acknowledge("cloud-box", {
+      eventId: first.eventId, eventHash: first.eventHash, outcome: "applied", appliedAt: now
+    });
+    const nearly = await events.retention("room");
+    assert.deepEqual(nearly.releasable, ["retain-1"]);
+    assert.deepEqual(nearly.retained, [{ eventId: "retain-2", awaiting: ["cloud-box"] }]);
+
+    await events.acknowledge("cloud-box", {
+      eventId: second.eventId, eventHash: second.eventHash, outcome: "applied", appliedAt: now
+    });
+    const done = await events.retention("room");
+    assert.deepEqual(done.releasable.sort(), ["retain-1", "retain-2"], "with every machine caught up the emitter may forget both");
+    assert.deepEqual(done.retained, []);
+    assert.equal(done.warning, undefined, "with everyone caught up there is nothing to warn about");
+  } finally { await db.cleanup(); }
+});
+
 function action() {
   return { conversationId: "chat", logScopeId: "chat", kind: "message.created", payload: { text: "hello" } };
 }

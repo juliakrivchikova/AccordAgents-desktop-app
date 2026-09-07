@@ -31,6 +31,7 @@ import type {
   WithdrawArtifactDraftRequest
 } from "../../shared/types";
 import { ARTIFACT_USER_MEMBER } from "../../shared/types";
+import type { ChatActionPayload } from "../../shared/chatActionEvents";
 import {
   ARTIFACT_CONTENT_MAX_BYTES,
   ARTIFACT_LABEL_MAX_LENGTH,
@@ -68,6 +69,22 @@ export interface ArtifactServiceDeps {
   onChanged?(conversationId: string): void;
   logger?(event: string, payload: Record<string, unknown>): void;
   now?(): string;
+  /** Emits the shared action event for a signature or a revision, so other
+   *  peers fold the same decision instead of each rewriting their own copy.
+   *  Optional: an emitter that is not wired leaves this machine's behaviour
+   *  exactly as before, it just does not converge with the others. */
+  emitAction?(action: ArtifactActionEmission): Promise<void>;
+}
+
+export interface ArtifactActionEmission {
+  conversationId: string;
+  kind: "artifact.revision.created" | "artifact.signature.added";
+  payload: ChatActionPayload;
+}
+
+/** One target key per artifact, so every peer folds the same target. */
+export function artifactActionTarget(artifactId: string): string {
+  return `artifact:${artifactId}`;
 }
 
 interface ArtifactContext {
@@ -96,6 +113,40 @@ export class ArtifactService {
   private readonly mutationQueues = new Map<string, Promise<unknown>>();
 
   constructor(private readonly deps: ArtifactServiceDeps) {}
+
+  /** The action that establishes an artifact's first projected state. Without
+   *  it a peer folding the log has no state for the target, and the first
+   *  revision would look superseded against an empty target. */
+  private async emitInitialRevisionAction(conversationId: string, artifactId: string, version: number): Promise<void> {
+    if (!this.deps.emitAction) return;
+    const written = await this.deps.store.getVersion(artifactId, version);
+    if (!written) return;
+    await this.emitAction({
+      conversationId,
+      kind: "artifact.revision.created",
+      payload: {
+        operationId: `artifact-revision:${artifactId}:${written.versionEventId}`,
+        targetKey: artifactActionTarget(artifactId),
+        stateId: written.versionEventId,
+        contentHash: written.contentHash
+      }
+    });
+  }
+
+  /** Never lets a delivery problem undo a change that already succeeded: the
+   *  local apply is committed, and a failed emission is reported, not thrown. */
+  private async emitAction(action: ArtifactActionEmission): Promise<void> {
+    if (!this.deps.emitAction) return;
+    try {
+      await this.deps.emitAction(action);
+    } catch (error) {
+      this.deps.logger?.("artifact.action.emit-failed", {
+        conversationId: action.conversationId,
+        kind: action.kind,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
 
   async deleteConversationArtifacts(conversationId: string): Promise<void> {
     await this.withMutation(conversationId, () => this.deps.store.deleteByConversation(conversationId));
@@ -413,6 +464,7 @@ export class ArtifactService {
       }
       this.notifyChanged(request.conversationId);
       await this.flushPendingArtifactEvents();
+      await this.emitInitialRevisionAction(request.conversationId, record.id, 1);
       return this.read(actorRaw, { conversationId: request.conversationId, artifactId: record.id });
     });
   }
@@ -487,6 +539,26 @@ export class ArtifactService {
       }
       this.notifyChanged(request.conversationId);
       await this.flushPendingArtifactEvents();
+      const written = await this.deps.store.getVersion(record.id, nextVersion);
+      if (written) {
+        // The precondition is the revision this author actually read. A peer
+        // whose base has since been replaced is projected as superseded rather
+        // than silently overwriting the winner.
+        await this.emitAction({
+          conversationId: request.conversationId,
+          kind: "artifact.revision.created",
+          payload: {
+            operationId: `artifact-revision:${record.id}:${written.versionEventId}`,
+            targetKey: artifactActionTarget(record.id),
+            stateId: written.versionEventId,
+            contentHash: written.contentHash,
+            precondition: {
+              expectedStateId: baseRevision.versionEventId,
+              expectedContentHash: baseRevision.contentHash
+            }
+          }
+        });
+      }
       return this.read(actorRaw, { conversationId: request.conversationId, artifactId: record.id });
     });
   }
@@ -618,6 +690,19 @@ export class ArtifactService {
         this.notifyChanged(request.conversationId);
         const summaryAfter = await this.summaryResult(record.id);
         await this.flushPendingArtifactEvents();
+        // The signature binds to the revision it read, by id and by hash, so
+        // it stays with that content if a competing revision wins the race.
+        await this.emitAction({
+          conversationId: request.conversationId,
+          kind: "artifact.signature.added",
+          payload: {
+            operationId: `artifact-signature:${record.id}:${versionRecord.versionEventId}:${actor}`,
+            targetKey: artifactActionTarget(record.id),
+            signer: actor,
+            signedStateId: versionRecord.versionEventId,
+            signedContentHash: versionRecord.contentHash
+          } as ChatActionPayload
+        });
         return summaryAfter;
       }
       return this.summaryResult(record.id);
@@ -1554,6 +1639,7 @@ export class ArtifactService {
       }
       this.notifyChanged(request.conversationId);
       await this.flushPendingArtifactEvents();
+      await this.emitInitialRevisionAction(request.conversationId, durable.value.value.summary.id, 1);
       return ok(durable.value.value);
     });
   }

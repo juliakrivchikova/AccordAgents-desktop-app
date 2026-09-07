@@ -95,6 +95,7 @@ import { ChatService } from "./services/chat";
 import { MobilePairingService } from "./services/mobilePairing";
 import { MachineLinkService } from "./services/machineLink";
 import { MachineInstallerService } from "./services/machineInstaller";
+import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
 import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, RemoveMachineRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
@@ -127,6 +128,7 @@ import {
   chatParticipantRequestReplyRootMap
 } from "../shared/chatParticipantRequestThreads";
 import type { ChatEventEnvelope } from "../shared/chatEvents";
+import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
 import { readActiveRunIds } from "../shared/chatRunState";
 import type { ChatDeviceCapabilityGrantPayload, ChatDeviceCapabilityRevokedPayload } from "../shared/chatDeviceCapabilities";
 import { CliAgentRunner } from "./services/cliAgents";
@@ -404,6 +406,32 @@ const machineInstallerService = new MachineInstallerService({
   }
 });
 void machineInstallerService.recoverInterruptedOperation();
+// Rule 3: a device wakes a stopped AWS machine itself with a narrowly scoped
+// key handed to it sealed at pairing. Nothing else in the app may hand that
+// key out, and revoking a pairing goes through here so the User is told the
+// key still has to be rotated.
+const machinePowerHandoffService = new MachinePowerHandoffService(settingsService);
+
+/** The handoff a new phone pairing carries, or undefined when this desktop
+ *  manages no AWS machine. A failure to mint one never blocks pairing: the
+ *  phone still controls the desktop, it just cannot wake the machine. */
+async function machinePowerHandoffForPairing(pairing: MobilePairingPackage): Promise<MobilePairingPackage> {
+  if (pairing.purpose !== "phone-control") return pairing;
+  try {
+    const machines = await settingsService.listMachines();
+    const machineId = machines.length === 1 ? machines[0].id : "";
+    const power = await machinePowerHandoffService.issue({
+      machineId: machineId || "aws-machine",
+      issuedTo: pairing.stableRoutingId
+    });
+    return { ...pairing, power };
+  } catch (error) {
+    void debugLogService.write("machine.power.handoff.skipped", {
+      reason: error instanceof Error ? error.message : String(error)
+    });
+    return pairing;
+  }
+}
 chatService.setCloudRunAwsService(cloudRunAwsService);
 chatService.setCloudRunDoctorService(cloudRunDoctorService);
 const remoteRunCoordinator = new RemoteRunCoordinator(remoteRunService, chatService, settingsService, debugLogService);
@@ -428,6 +456,20 @@ const artifactService = new ArtifactService({
   },
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
+  },
+  // Canonical action events for artifact work. The local change is already
+  // committed when this runs; the event is what lets other peers fold the same
+  // decision. `operationId` is derived from the immutable revision identity, so
+  // a re-emission after a restart is folded once as a duplicate rather than as
+  // a second revision.
+  emitAction: async (action) => {
+    await chatEventLogService.appendLocalEvent({
+      conversationId: action.conversationId,
+      logScopeId: CHAT_ACTION_LOG_SCOPE,
+      kind: action.kind,
+      payload: action.payload,
+      eventId: `chat-action:${action.payload.operationId}`
+    });
   }
 });
 chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
@@ -801,12 +843,33 @@ async function recordMobilePairingCapabilityGrant(pairing: MobilePairingPackage)
   }
 }
 
+/** Takes back the power handoff this pairing carried. It cannot make the copy
+ *  the device kept stop working — only rotating the key does — so the outcome
+ *  is returned to the caller instead of being swallowed. */
+async function revokeMachinePowerForPairing(
+  pairing: MobilePairingPackage,
+  reason: string
+): Promise<{ required: boolean; detail?: string }> {
+  const handoffId = pairing.power?.handoffId;
+  if (!handoffId) return { required: false };
+  try {
+    const outcome = await machinePowerHandoffService.revoke(handoffId, reason);
+    return { required: outcome.keyRotationRequired, detail: outcome.detail };
+  } catch (error) {
+    void debugLogService.write("machine.power.handoff.revoke-error", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+    return { required: false };
+  }
+}
+
 async function revokeMobilePairingInternal(
   pairing: MobilePairingPackage,
   reason: string
 ): Promise<RevokeMobilePairingResult> {
   const key = mobilePairingKey(pairing);
   const revokedAt = new Date().toISOString();
+  const powerRevocation = await revokeMachinePowerForPairing(pairing, reason);
   mobileRevokedPairingKeys.add(key);
   mobileClaimedPairingKeys.delete(key);
   mobilePairingsByKey.delete(key);
@@ -838,7 +901,10 @@ async function revokeMobilePairingInternal(
     stableRoutingId: pairing.stableRoutingId,
     rendezvousId: pairing.rendezvousId,
     revokedAt,
-    reason
+    reason,
+    ...(powerRevocation.required
+      ? { powerKeyRotationRequired: true, powerKeyRotationDetail: powerRevocation.detail }
+      : {})
   };
 }
 
@@ -2503,6 +2569,14 @@ function registerIpc(): void {
       throw new Error("Machine id is required.");
     }
     await machineLinkService?.disconnectMachine(id);
+    // Every device that was handed this machine's power key loses the handoff
+    // with the machine; the key itself still needs rotating, and the outcome
+    // is written to the debug log rather than lost.
+    for (const outcome of await machinePowerHandoffService.revokeForMachine(id, "machine-removed")) {
+      void debugLogService.write("machine.power.handoff.revoked", {
+        handoffId: outcome.handoffId, keyRotationRequired: outcome.keyRotationRequired, detail: outcome.detail
+      });
+    }
     await settingsService.removeMachine(id);
     const result = await machineListResult();
     sendToMainWindow("machines:updated", result);
@@ -2556,9 +2630,11 @@ function registerIpc(): void {
   });
   ipcMain.handle("mobile:create-pairing", async (_event, request: CreateMobilePairingRequest) => {
     const settings = await settingsService.getPublicSettings();
-    const result = await mobilePairingService.createPairing(
+    const minted = await mobilePairingService.createPairing(
       mobilePairingRequestWithEndpointDefaults(request, settings.mobileControl.defaults)
     );
+    // The scoped power key travels sealed with the pairing and nowhere else.
+    const result = { ...minted, package: await machinePowerHandoffForPairing(minted.package) };
     // Lock the mailbox before the link leaves this machine: registration is
     // trust-on-first-use, and only this process knows the scope id until the
     // link is shown. A failure is surfaced on the result and retried both
