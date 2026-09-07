@@ -2745,7 +2745,20 @@ export class SettingsService {
         : undefined,
       encryptedMachinePairings: typeof settings.encryptedMachinePairings === "string" && settings.encryptedMachinePairings.trim()
         ? settings.encryptedMachinePairings
-        : undefined
+        : undefined,
+      // Read back, not rebuilt. This function returns an explicit object, so a
+      // field missing from it is dropped every time settings are read from
+      // disk -- and these four were. The roster was written and then forgotten
+      // on the next start: every device the owner trusted stopped being
+      // trusted, machines were handed an empty roster, and a revocation the
+      // owner made was forgotten just as completely.
+      trustedDevices: (settings.trustedDevices ?? []).filter(isTrustedDeviceRecord).map(record => ({ ...record })),
+      machinePairingBindings: settings.machinePairingBindings && typeof settings.machinePairingBindings === "object"
+        ? { ...settings.machinePairingBindings } : undefined,
+      revokedMachinePairingKeys: Array.isArray(settings.revokedMachinePairingKeys)
+        ? [...new Set(settings.revokedMachinePairingKeys.filter(key => typeof key === "string" && key))] : undefined,
+      machineDeviceRevocations: settings.machineDeviceRevocations && typeof settings.machineDeviceRevocations === "object"
+        ? { ...settings.machineDeviceRevocations } : undefined
     };
   }
 

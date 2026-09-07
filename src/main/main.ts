@@ -1011,13 +1011,16 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
       // The phone's own signing key: stored here and named to every machine,
       // so a machine answers the phone when this desktop is closed.
       onPhoneIdentity: async (identity) => {
+        // Named with the pairing it arrived on. Without this the stored rules
+        // never ran, and a device the owner had just removed re-granted itself
+        // simply by announcing its key again on the pairing it still held.
         await settingsService.saveTrustedDevice({
           deviceId: identity.deviceId,
           publicKeyDerBase64: identity.publicKeyDerBase64,
           role: "phone",
           name: identity.name,
           addedAt: new Date().toISOString()
-        });
+        }, { key: mobilePairingKey(pairing), createdAt: pairing.createdAt });
         await machineLinkService?.refreshTrustRosters();
         await debugLogService.write("mobile.device.identity", { deviceId: identity.deviceId });
       },
@@ -1316,6 +1319,27 @@ function scheduleMobilePairingExpiry(pairing: MobilePairingPackage): void {
   }, Math.max(0, expiresAtMs - Date.now()));
   timer.unref?.();
   mobilePairingExpiryTimers.set(key, timer);
+}
+
+/**
+ * Brings the durable record of revoked pairings into this process.
+ *
+ * The in-memory set alone forgets everything on restart, so a pairing the
+ * owner revoked came back the next time the app started.
+ */
+async function applyStoredMobilePairingRevocations(): Promise<void> {
+  const trust = await settingsService.machinePairingTrust().catch(() => undefined);
+  if (!trust) return;
+  for (const key of trust.revokedKeys) {
+    if (mobileRevokedPairingKeys.has(key)) continue;
+    mobileRevokedPairingKeys.add(key);
+    mobileClaimedPairingKeys.delete(key);
+    const pairing = mobilePairingsByKey.get(key);
+    if (!pairing) continue;
+    mobileRelayControls.get(pairing.rendezvousId)?.close();
+    mobileRelayControls.delete(pairing.rendezvousId);
+    mobilePairingsByKey.delete(key);
+  }
 }
 
 function isMobilePairingActive(pairing: MobilePairingPackage): boolean {
@@ -2690,6 +2714,11 @@ function registerIpc(): void {
   });
   ipcMain.handle("machines:untrust-device", async (_event, deviceId: string): Promise<MachineTrustedDevicesResult> => {
     await settingsService.removeTrustedDevice(String(deviceId ?? "").trim());
+    // Removing the device also closes the pairing it was speaking on. Leaving
+    // it open meant a revoked phone kept receiving this desktop's timeline and
+    // could re-announce itself; the store records the revocation, and this
+    // makes it true for the connection that is live right now.
+    await applyStoredMobilePairingRevocations();
     await machineLinkService?.refreshTrustRosters();
     return trustedDevicesResult();
   });
@@ -3042,6 +3071,12 @@ void app.whenReady().then(async () => {
   bootstrapAppUpdater(debugLogService, betaUpdates);
   await appMcpService.start();
   await storageService.init();
+  // Before any pairing is restored: a revocation the owner made is a fact
+  // about this device, not about the process that was running when it happened.
+  await applyStoredMobilePairingRevocations().catch(error => {
+    void debugLogService.write("mobile.pairing.revocation-restore-error",
+      { message: error instanceof Error ? error.message : String(error) });
+  });
   void recoverLocalChoiceActions().catch(error => {
     void debugLogService.write("chat.choice.recovery-pending", { message: error instanceof Error ? error.message : String(error) });
   });

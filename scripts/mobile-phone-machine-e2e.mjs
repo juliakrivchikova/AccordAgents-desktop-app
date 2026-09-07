@@ -614,10 +614,14 @@ async function main() {
   await waitFor(async () => JSON.parse(await longRowBytes()).bytes > 800 * 1024, 300_000,
     "the whole long body to come back through the phone's fragment store");
   const longRow = JSON.parse(await longRowBytes());
-  assert.equal(longRow.heldFragments, 0,
-    "no fragments are kept once the body is whole and the event that named it is acknowledged");
   await waitFor(async () => (await owed()) === 0, 90_000, "the long message to be fully acknowledged");
-  log("a", longRow.bytes, "byte body came back through the phone's fragment store and was applied");
+  // The same body went out and came back, so one set of bytes is named by two
+  // events. They are kept while either still needs them -- deleting them on
+  // the first acknowledgement is what used to lose a body still being applied
+  // -- and released when the last reference is gone.
+  await waitFor(async () => JSON.parse(await longRowBytes()).heldFragments === 0, 120_000,
+    "the fragments to be released once no event still names them");
+  log("a", longRow.bytes, "byte body came back through the phone's fragment store, was applied, and its fragments released");
 
   // A second tab over the same storage, and a reload: neither re-runs held work.
   const runsBeforeTab = await runCount();

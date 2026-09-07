@@ -219,3 +219,79 @@ test("controller trust stays local when settings are exported or imported", asyn
     assert.deepEqual(await service.listTrustedDevices(), [record]);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("a removed device cannot let itself back in on the pairing it still holds", async () => {
+  const { createChatEventDeviceIdentity } = await import("./chatEventLog");
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-trust-revoke-"));
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const service = new SettingsService();
+  (service as any).settingsPath = path.join(dir, "settings.json");
+  try {
+    const phone = createChatEventDeviceIdentity(new Date().toISOString());
+    const pairing = { key: "route\u0000room", createdAt: new Date(Date.now() - 60_000).toISOString() };
+    const record = { deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64,
+      role: "phone" as const, name: "Phone", addedAt: phone.createdAt };
+    await service.saveTrustedDevice(record, pairing);
+    assert.equal((await service.machinePairingTrust()).authorizedKeys.includes(pairing.key), true);
+
+    // The owner removes it. Announcing the same key on the same pairing is
+    // exactly what a phone does on every reconnect, and it used to be enough
+    // to put the device straight back in the roster.
+    await service.removeTrustedDevice(phone.originId);
+    await assert.rejects(() => service.saveTrustedDevice(record, pairing), /pair again/);
+    assert.deepEqual(await service.listTrustedDevices(), []);
+
+    // A fresh identity on that same pairing is the same move under a new name.
+    const alias = createChatEventDeviceIdentity(new Date().toISOString());
+    await assert.rejects(() => service.saveTrustedDevice({
+      deviceId: alias.originId, publicKeyDerBase64: alias.publicKeyDerBase64,
+      role: "phone" as const, name: "Phone", addedAt: alias.createdAt
+    }, pairing), /pair again/);
+
+    // The revocation is a fact on disk, so a restarted app still refuses it.
+    const restarted = new SettingsService();
+    (restarted as any).settingsPath = path.join(dir, "settings.json");
+    assert.equal((await restarted.machinePairingTrust()).revokedKeys.includes(pairing.key), true);
+    await assert.rejects(() => restarted.saveTrustedDevice(record, pairing), /pair again/);
+
+    // And a new invitation the owner makes lets the device pair again.
+    const fresh = { key: "route-2\u0000room-2", createdAt: new Date().toISOString() };
+    await restarted.saveTrustedDevice(record, fresh);
+    assert.deepEqual((await restarted.listTrustedDevices()).map(device => device.deviceId), [phone.originId]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("the devices the owner trusts, and the ones removed, survive a restart", async () => {
+  const { createChatEventDeviceIdentity } = await import("./chatEventLog");
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-trust-restart-"));
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const settingsPath = path.join(dir, "settings.json");
+  const service = new SettingsService();
+  (service as any).settingsPath = settingsPath;
+  try {
+    const phone = createChatEventDeviceIdentity(new Date().toISOString());
+    const laptop = createChatEventDeviceIdentity(new Date().toISOString());
+    const pairing = { key: "route-a\u0000room-a", createdAt: new Date(Date.now() - 60_000).toISOString() };
+    await service.saveTrustedDevice({ deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64,
+      role: "phone" as const, name: "Phone", addedAt: phone.createdAt }, pairing);
+    await service.saveTrustedDevice({ deviceId: laptop.originId, publicKeyDerBase64: laptop.publicKeyDerBase64,
+      role: "desktop" as const, name: "Laptop", addedAt: laptop.createdAt });
+    await service.removeTrustedDevice(laptop.originId);
+
+    // Settings are rebuilt field by field when they are read, so anything the
+    // rebuild forgets is written to disk and then dropped on the next start.
+    // The roster went that way: every trusted device stopped being trusted
+    // after a restart, machines were handed an empty roster, and the owner's
+    // removals were forgotten just as completely.
+    const restarted = new SettingsService();
+    (restarted as any).settingsPath = settingsPath;
+    assert.deepEqual((await restarted.listTrustedDevices()).map(device => device.deviceId), [phone.originId]);
+    const trust = await restarted.machinePairingTrust();
+    assert.deepEqual(trust.authorizedKeys, [pairing.key], "the pairing the phone is bound to is still its own");
+    await assert.rejects(() => restarted.saveTrustedDevice({
+      deviceId: laptop.originId, publicKeyDerBase64: laptop.publicKeyDerBase64,
+      role: "desktop" as const, name: "Laptop", addedAt: laptop.createdAt
+    }, { key: "route-b\u0000room-b", createdAt: new Date(Date.now() - 120_000).toISOString() }),
+      /pair again/, "a device removed before the restart is still removed after it");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
