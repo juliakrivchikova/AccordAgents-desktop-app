@@ -20,7 +20,7 @@ import { CommandError, runCommand } from "./command";
 import type { CommandOptions, CommandResult } from "./command";
 import { defaultRemoteMirrorSync } from "./remoteMirrorSync";
 import type { RemoteMirrorSyncRunner } from "./remoteMirrorSync";
-import type { RemoteRunWorkerTarget } from "./remoteRuns";
+import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
 
 export const PORTABLE_AGENT_SETUP_VERSION = 1;
 const PORTABLE_SETUP_DIRNAME = "agent-setup";

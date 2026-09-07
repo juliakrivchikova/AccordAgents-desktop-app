@@ -162,16 +162,6 @@ import { CloudRunAwsService } from "./services/cloudRunAws";
 import { AwsWorkerSetupService } from "./services/awsWorkerSetup";
 import { DebugLogService } from "./services/debugLogs";
 import { GitService } from "./services/git";
-import {
-  MOBILE_RUNNER_CONTEXT_KIND,
-  MOBILE_RUNNER_POLICY_KIND,
-  mobileMailboxRunnerContextDelivery,
-  enqueueLatestMobileMailboxRunnerPublish,
-  mobileMailboxRunnerInstallCommand,
-  mobileMailboxRunnerPolicyFromConversation,
-  type MobileMailboxRunnerContextDeliveryState,
-  type MobileMailboxRunnerLatestQueue
-} from "./services/mobileMailboxRunner";
 import { ProviderRunner } from "./services/providers";
 import { RemoteRunService } from "./services/remoteRuns";
 import { DefaultRemoteAgentSetupSync } from "./services/remoteAgentSetup";
@@ -313,9 +303,6 @@ const mobileProgressEnvelopes = new MobileProgressEnvelopeTracker();
 // These survive restarts and never expire on a timer; only an explicit revoke
 // removes them.
 const mobileClaimedPairingKeys = new Map<string, string>();
-const mobileMailboxRunnerStarts = new Map<string, Promise<boolean>>();
-const mobileMailboxRunnerContextStates = new Map<string, MobileMailboxRunnerContextDeliveryState>();
-const mobileMailboxRunnerPolicyQueues = new Map<string, MobileMailboxRunnerLatestQueue<Conversation>>();
 const mobilePairingExpiryTimers = new Map<string, NodeJS.Timeout>();
 const mobileRevokedPairingKeys = new Set<string>();
 let mobileMailboxOwnerActionBackoffUntil = 0;
@@ -328,7 +315,6 @@ const chatService = new ChatService(storageService, settingsService, cliAgentRun
   for (const control of mobileRelayControls.values()) {
     control.pushConversationSnapshot(conversation);
   }
-  void publishMobileRunnerPoliciesForConversation(conversation);
   void machineLinkService?.replicateConversation(conversation).catch(() => undefined);
 }, userSkillsService, (progress) => emitReviewProgress(progress), chatEventMirrorService, (conversation, messages) => {
   // W-C: an interrupted run's recovered terminals are the only thing that will
@@ -825,7 +811,6 @@ async function handleRemoteMailboxRevoked(pairing: MobilePairingPackage): Promis
   mobileClaimedPairingKeys.delete(key);
   mobilePairingsByKey.delete(key);
   mobileMailboxCursors.delete(key);
-  clearMobileMailboxRunnerContextState(pairing);
   mobileRelayControls.get(pairing.rendezvousId)?.close();
   mobileRelayControls.delete(pairing.rendezvousId);
   const poller = mobileMailboxPollers.get(key);
@@ -1016,7 +1001,6 @@ async function revokeMobilePairingInternal(
   mobileClaimedPairingKeys.delete(key);
   mobilePairingsByKey.delete(key);
   mobileMailboxCursors.delete(key);
-  clearMobileMailboxRunnerContextState(pairing);
   mobileProgressEnvelopes.forgetPairing(key);
   mobileRelayControls.get(pairing.rendezvousId)?.close();
   mobileRelayControls.delete(pairing.rendezvousId);
@@ -1382,255 +1366,8 @@ function prepareMobileControlForPairing(pairing: MobilePairingPackage): void {
   });
 }
 
-function prepareMobileCloudFallbackForPairing(pairing: MobilePairingPackage): void {
-  void ensureMobileCloudFallbackReadyForPairing(pairing).catch((error) => {
-    void debugLogService.write("mobile.runner.background-ready-error", {
-      routingId: pairing.stableRoutingId,
-      message: error instanceof Error ? error.message : String(error)
-    });
-  });
-}
-
-async function ensureMobileCloudFallbackReadyForPairing(pairing: MobilePairingPackage): Promise<void> {
-  if (pairing.purpose !== "phone-control" || !pairing.outboxUrl || !pairingCanRunCloudParticipants(pairing)) {
-    return;
-  }
-  const started = await ensureMobileMailboxRunnerForPairing(pairing);
-  if (!started) {
-    return;
-  }
-  // A successful ensure can be the first contact with a replacement worker.
-  // Forget desktop delivery state so that worker always receives a complete
-  // reset instead of a delta based on state the replacement cannot have.
-  clearMobileMailboxRunnerContextState(pairing);
-  await publishMobileRunnerPoliciesForPairing(pairing);
-  await debugLogService.write("mobile.runner.ready", {
-    routingId: pairing.stableRoutingId
-  });
-}
-
-function ensureMobileMailboxRunnerForPairing(pairing: MobilePairingPackage): Promise<boolean> {
-  const existing = mobileMailboxRunnerStarts.get(pairing.stableRoutingId);
-  if (existing) {
-    return existing;
-  }
-  const promise = startMobileMailboxRunnerForPairing(pairing).finally(() => {
-    mobileMailboxRunnerStarts.delete(pairing.stableRoutingId);
-  });
-  mobileMailboxRunnerStarts.set(pairing.stableRoutingId, promise);
-  return promise;
-}
-
-async function startMobileMailboxRunnerForPairing(pairing: MobilePairingPackage): Promise<boolean> {
-  if (pairing.purpose !== "phone-control" || !pairing.outboxUrl || !pairingCanRunCloudParticipants(pairing)) {
-    return false;
-  }
-  const settings = await settingsService.getPublicSettings();
-  if (!settings.cloudRuns.enabled) {
-    await debugLogService.write("mobile.runner.not-started", {
-      routingId: pairing.stableRoutingId,
-      reason: "cloud-runs-disabled"
-    });
-    return false;
-  }
-  await withCloudRunWorker(undefined, async (workerSettings) => {
-    const worker = cloudRunWorkerTargetFromSettings(workerSettings);
-    if (!worker) {
-      throw new Error("Cloud Runs worker does not have a valid SSH target.");
-    }
-    validateCloudRunSshWorkerFields(worker);
-    const target = buildCloudRunSshTarget(worker);
-    const command = mobileMailboxRunnerInstallCommand({
-      routeId: pairing.stableRoutingId,
-      mailboxUrl: pairing.outboxUrl ? mailboxEndpointForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64) : "",
-      mailboxToken: mailboxAccessForSealKey(pairing.relaySealKeyBase64).token,
-      relaySealKeyBase64: pairing.relaySealKeyBase64,
-      workerRoot: workerSettings.workerRoot,
-      codexPath: workerSettings.codexPath,
-      claudePath: workerSettings.claudePath,
-      pollIntervalMs: 2_500,
-      timeoutMs: settings.cloudRuns.maxRuntimeMs
-    });
-    const result = await runCommand("ssh", [
-      ...cloudRunSshOptionArgs(worker),
-      target,
-      command
-    ], { timeoutMs: 60_000 });
-    await debugLogService.write("mobile.runner.started", {
-      routingId: pairing.stableRoutingId,
-      stdout: result.stdout.trim()
-    });
-  }).catch(async (error) => {
-    await debugLogService.write("mobile.runner.start-error", {
-      routingId: pairing.stableRoutingId,
-      message: error instanceof Error ? error.message : String(error),
-      exitCode: error instanceof CommandError ? error.result.exitCode : undefined,
-      timedOut: error instanceof CommandError ? error.result.timedOut : undefined,
-      stdout: error instanceof CommandError ? error.result.stdout.slice(-4000) : undefined,
-      stderr: error instanceof CommandError ? error.result.stderr.slice(-4000) : undefined
-    });
-    throw error;
-  });
-  return true;
-}
-
 function pairingCanRunCloudParticipants(pairing: MobilePairingPackage): boolean {
   return pairing.capabilities.some((capability) => capability.canRunCloudParticipants === true);
-}
-
-async function publishMobileRunnerPoliciesForConversation(conversation: Conversation): Promise<void> {
-  if (conversation.kind !== "chat" || mobilePairingsByKey.size === 0) {
-    return;
-  }
-  for (const pairing of mobilePairingsByKey.values()) {
-    await publishMobileRunnerPolicyForPairing(pairing, conversation);
-  }
-}
-
-async function publishMobileRunnerPoliciesForPairing(pairing: MobilePairingPackage): Promise<void> {
-  if (!pairing.outboxUrl || !pairingCanRunCloudParticipants(pairing)) {
-    return;
-  }
-  if (isMobileMailboxOwnerActionBackoffActive()) {
-    return;
-  }
-  const summaries = await storageService.listConversations();
-  for (const summary of summaries.filter((item) => item.kind === "chat" && item.archived !== true).slice(0, 100)) {
-    if (isMobileMailboxOwnerActionBackoffActive()) {
-      return;
-    }
-    const conversation = await storageService.getConversation(summary.id);
-    if (conversation && conversation.kind === "chat") {
-      await publishMobileRunnerPolicyForPairing(pairing, conversation);
-    }
-  }
-}
-
-async function publishMobileRunnerPolicyForPairing(
-  pairing: MobilePairingPackage,
-  conversation: Conversation
-): Promise<void> {
-  if (!pairing.outboxUrl || !pairingCanRunCloudParticipants(pairing) || !pairingCanAccessConversation(pairing, conversation.id)) {
-    return;
-  }
-  const contextKey = `${mobilePairingKey(pairing)}\0${conversation.id}`;
-  // Conversation updates can arrive for every streamed frame. Keep the most
-  // recent snapshot only; publishing every intermediate state multiplies
-  // snapshot, SQLite, encryption and mailbox work without adding context.
-  return enqueueLatestMobileMailboxRunnerPublish(
-    mobileMailboxRunnerPolicyQueues,
-    contextKey,
-    conversation,
-    (latest) => publishMobileRunnerPolicyNow(pairing, latest, contextKey)
-  );
-}
-
-async function publishMobileRunnerPolicyNow(
-  pairing: MobilePairingPackage,
-  conversation: Conversation,
-  contextKey: string
-): Promise<void> {
-  try {
-    const previousState = mobileMailboxRunnerContextStates.get(contextKey);
-    const contextSnapshot = await chatService.mobileMailboxRunnerContextSnapshot(
-      conversation,
-      previousState?.attachmentBase64Lengths
-    );
-    const delivery = mobileMailboxRunnerContextDelivery(
-      contextSnapshot,
-      previousState
-    );
-    const policy = mobileMailboxRunnerPolicyFromConversation(conversation, pairing, delivery.ref);
-    const { updatedAt: _updatedAt, ...semanticPolicy } = policy;
-    const policyHash = sha256Hex(JSON.stringify(semanticPolicy));
-    if (delivery.chunks.length === 0 && previousState?.policyHash === policyHash) {
-      return;
-    }
-    const append = await chatEventLogService.appendLocalEvent({
-      conversationId: conversation.id,
-      logScopeId: conversation.id,
-      kind: MOBILE_RUNNER_POLICY_KIND,
-      payload: policy
-    });
-    // Context bodies are transport data, not durable chat history. Persisting
-    // each chunk in chat_events stored two multi-megabyte copies locally. The
-    // compact signed policy remains on the shared log; its referenced chunks
-    // travel once through the pairing's authenticated, sealed mailbox.
-    const events = [
-      ...mobileRunnerContextTransportEvents(conversation.id, delivery.chunks),
-      append.event
-    ];
-    await postMailboxEvents(pairing, events);
-    if (isMobilePairingActive(pairing) && mobilePairingsByKey.has(mobilePairingKey(pairing))) {
-      mobileMailboxRunnerContextStates.set(contextKey, {
-        ...delivery.nextState,
-        policyHash
-      });
-    }
-    await debugLogService.write("mobile.runner.policy-published", {
-      routingId: pairing.stableRoutingId,
-      conversationId: conversation.id,
-      policyBytes: Buffer.byteLength(JSON.stringify(policy), "utf8"),
-      contextEventCount: delivery.chunks.length,
-      contextBytes: delivery.chunks.reduce((total, chunk) => total + Buffer.byteLength(JSON.stringify(chunk), "utf8"), 0)
-    });
-  } catch (error) {
-    if (isOwnerActionMailboxError(error)) {
-      recordMobileMailboxOwnerActionBackoff();
-    }
-    await debugLogService.write("mobile.runner.policy-publish-error", {
-      routingId: pairing.stableRoutingId,
-      conversationId: conversation.id,
-      message: error instanceof Error ? error.message : String(error)
-    });
-  }
-}
-
-function mobileRunnerContextTransportEvents(
-  conversationId: string,
-  chunks: ReturnType<typeof mobileMailboxRunnerContextDelivery>["chunks"]
-): unknown[] {
-  const originId = `mobile-runner-context-${randomUUID()}`;
-  return chunks.map((payload, index) => {
-    const originSeq = index + 1;
-    const eventId = `${originId}-${originSeq}`;
-    const createdAt = new Date().toISOString();
-    const payloadHash = `sha256:${sha256Hex(stableJson(payload))}`;
-    const unsigned = {
-      eventId,
-      conversationId,
-      logScopeId: conversationId,
-      originId,
-      originSeq,
-      logicalTs: `${String(originSeq).padStart(16, "0")}:${originId}:${conversationId}`,
-      kind: MOBILE_RUNNER_CONTEXT_KIND,
-      payloadHash,
-      prevHash: null,
-      keyId: originId,
-      createdAt
-    };
-    return {
-      ...unsigned,
-      prevHash: undefined,
-      payload,
-      eventHash: `sha256:${sha256Hex(stableJson(unsigned))}`,
-      signature: "transport-sealed",
-    };
-  });
-}
-
-function clearMobileMailboxRunnerContextState(pairing: MobilePairingPackage): void {
-  const prefix = `${mobilePairingKey(pairing)}\0`;
-  for (const key of mobileMailboxRunnerContextStates.keys()) {
-    if (key.startsWith(prefix)) {
-      mobileMailboxRunnerContextStates.delete(key);
-    }
-  }
-  for (const [key, queue] of mobileMailboxRunnerPolicyQueues) {
-    if (key.startsWith(prefix)) {
-      queue.latest = undefined;
-    }
-  }
 }
 
 function pairingCanAccessConversation(pairing: MobilePairingPackage, conversationId: string): boolean {
@@ -2826,7 +2563,6 @@ function registerIpc(): void {
     const mailboxRegistered = await ensureMailboxRegisteredForPairing(result.package);
     await recordMobilePairingCapabilityGrant(result.package);
     prepareMobileControlForPairing(result.package);
-    prepareMobileCloudFallbackForPairing(result.package);
     return { ...result, mailboxRegistered };
   });
   ipcMain.handle("mobile:revoke-pairing", async (_event, request: RevokeMobilePairingRequest): Promise<RevokeMobilePairingResult> => {

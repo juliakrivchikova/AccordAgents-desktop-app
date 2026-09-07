@@ -37,7 +37,7 @@ import type {
   RemoteRunWorkerTarget,
   RemoteWorkerStopAuthorization,
   RemoteWorkerStopLease
-} from "./remoteRuns";
+} from "./remoteWorkerTarget";
 
 const WORKER_SSH_USER = "ubuntu";
 const WORKER_ROOT = "~/.accordagents/remote-runs";

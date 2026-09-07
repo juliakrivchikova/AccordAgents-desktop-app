@@ -1,13 +1,12 @@
 // Canonical mailbox crypto contract (W4). THIS FILE IS THE SINGLE SOURCE:
 // scripts/generate-mailbox-crypto.mjs copies it verbatim into the PWA
-// (src/mobile/mobile-app.js, between the generated markers), into the cloud
-// runner script (src/main/services/mobileMailboxRunnerCrypto.generated.ts),
+// (src/mobile/mobile-app.js, between the generated markers)
 // and regenerates the known-answer fixture
 // (scripts/mailbox-contract-vectors.json). Edit here, run the generator, and
 // commit the regenerated outputs together — a stale copy is a review failure.
 //
 // Plain JS with zero imports so the same text runs in the browser page, the
-// phone's service worker, and the cloud runner (Node >= 18.17 exposes
+// phone's service worker and the desktop (Node >= 18.17 exposes
 // globalThis.crypto). Constants must match src/shared/mailboxSealedPayload.ts;
 // the generator refuses to run when they drift.
 (function () {

@@ -9499,31 +9499,6 @@ export class ChatService {
     return { attachments, omittedCount };
   }
 
-  async mobileMailboxRunnerContextSnapshot(
-    conversation: Conversation,
-    knownAttachmentBase64Lengths?: Readonly<Record<string, number>>
-  ): Promise<Record<string, unknown>> {
-    const triggerMessage = conversation.messages[conversation.messages.length - 1];
-    if (!triggerMessage) {
-      return {
-        conversationId: conversation.id,
-        title: conversation.title,
-        repoPath: conversation.repoPath,
-        messages: [],
-        attachments: [],
-        attachmentWindow: {
-          omittedCount: 0,
-          limit: ChatService.REMOTE_SNAPSHOT_ATTACHMENT_LIMIT
-        },
-        messageWindow: {
-          maxSequence: -1,
-          totalMessages: 0
-        },
-        participants: this.remoteRunSnapshotParticipants(conversation)
-      };
-    }
-    return this.remoteRunContextSnapshotBase(conversation, triggerMessage, knownAttachmentBase64Lengths);
-  }
 
   private async remoteRunContextSnapshot(
     conversation: Conversation,

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import path from "node:path";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, shellQuotePosix } from "./cloudRunWorkers";
 import { CommandError, runCommand } from "./command";
-import type { RemoteRunWorkerTarget } from "./remoteRuns";
+import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
 import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
 
 export const REMOTE_MIRROR_DIRNAME = "mirrors";

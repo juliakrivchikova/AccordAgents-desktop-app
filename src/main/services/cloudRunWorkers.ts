@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { CloudRunWorkerSettings } from "../../shared/types";
-import type { RemoteRunWorkerTarget } from "./remoteRuns";
+import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
 
 export function normalizeCloudRunWorkerSettings(value: unknown): CloudRunWorkerSettings {
   const record = value && typeof value === "object" && !Array.isArray(value)

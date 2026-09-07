@@ -6,7 +6,7 @@ import type {
 import { hostPlatform } from "../platform";
 import { filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
 import { commandEnvironment, ensureLoginShellEnvPrimed } from "./command";
-import { forwardedDesktopEnvironment } from "./remoteRuns";
+import { forwardedDesktopEnvironment } from "./remoteWorkerTarget";
 import type { SettingsService } from "./settings";
 
 export const AGENT_ENVIRONMENT_LOCAL_DISCLOSURE =

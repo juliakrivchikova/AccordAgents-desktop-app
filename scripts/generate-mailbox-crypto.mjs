@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // W4 generator: src/shared/mailboxCryptoContract.js is the single source for
 // the mailbox seal/derive contract. This script copies it verbatim into the
-// PWA (between generated markers), emits the runner's embedded copy, and
-// regenerates the known-answer fixture. Run after any contract edit and
+// PWA (between generated markers) and regenerates the known-answer fixture.
+// Run after any contract edit and
 // commit the outputs together; `--check` fails when any output is stale.
 import { readFile, writeFile } from "node:fs/promises";
 import { webcrypto } from "node:crypto";
@@ -13,7 +13,6 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const canonicalPath = path.join(repoRoot, "src/shared/mailboxCryptoContract.js");
 const sharedContractPath = path.join(repoRoot, "src/shared/mailboxSealedPayload.ts");
 const mobileAppPath = path.join(repoRoot, "src/mobile/mobile-app.js");
-const runnerGeneratedPath = path.join(repoRoot, "src/main/services/mobileMailboxRunnerCrypto.generated.ts");
 const vectorsPath = path.join(repoRoot, "scripts/mailbox-contract-vectors.json");
 
 const BEGIN_MARKER = "// >>> generated: mailbox-crypto (edit src/shared/mailboxCryptoContract.js, then run scripts/generate-mailbox-crypto.mjs)";
@@ -86,14 +85,6 @@ function injectMobileBlock(mobileApp, canonical) {
   return `${mobileApp.slice(0, begin + BEGIN_MARKER.length)}\n${indented}\n  ${mobileApp.slice(end)}`;
 }
 
-function runnerGeneratedSource(canonical) {
-  return `// GENERATED FILE — do not edit. Source: src/shared/mailboxCryptoContract.js
-// Regenerate with: node scripts/generate-mailbox-crypto.mjs
-
-export const MOBILE_MAILBOX_RUNNER_CRYPTO_SNIPPET: string = ${JSON.stringify(canonical.trimEnd())};
-`;
-}
-
 async function main() {
   const check = process.argv.includes("--check");
   const canonical = await readFile(canonicalPath, "utf8");
@@ -103,8 +94,6 @@ async function main() {
   const outputs = [];
   const mobileApp = await readFile(mobileAppPath, "utf8");
   outputs.push([mobileAppPath, injectMobileBlock(mobileApp, canonical), mobileApp]);
-  const runnerCurrent = await readFile(runnerGeneratedPath, "utf8").catch(() => "");
-  outputs.push([runnerGeneratedPath, runnerGeneratedSource(canonical), runnerCurrent]);
   const vectors = `${JSON.stringify(await computeVectors(canonical), null, 2)}\n`;
   const vectorsCurrent = await readFile(vectorsPath, "utf8").catch(() => "");
   outputs.push([vectorsPath, vectors, vectorsCurrent]);

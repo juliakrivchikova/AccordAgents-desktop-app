@@ -41,6 +41,4 @@ test("the PWA and runner embed the canonical contract verbatim", async () => {
   const mobileApp = await readFile(path.join(repoRoot, "src/mobile/mobile-app.js"), "utf8");
   const indented = body.split("\n").map((line) => (line ? `  ${line}` : line)).join("\n");
   assert.ok(mobileApp.includes(indented), "mobile-app.js must contain the canonical contract text");
-  const runnerGenerated = await readFile(path.join(repoRoot, "src/main/services/mobileMailboxRunnerCrypto.generated.ts"), "utf8");
-  assert.ok(runnerGenerated.includes(JSON.stringify(body)), "runner generated module must embed the canonical contract text");
 });

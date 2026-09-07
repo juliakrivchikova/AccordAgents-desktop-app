@@ -14,7 +14,7 @@ import {
 } from "./cloudRunWorkers";
 import { runCommand } from "./command";
 import { isTransientSshError, runWithSshRetries } from "./sshRetry";
-import type { RemoteRunWorkerTarget } from "./remoteRuns";
+import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
 import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
 
 const PROBE_TIMEOUT_MS = 25_000;
