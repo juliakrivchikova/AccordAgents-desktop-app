@@ -30,6 +30,7 @@ import { CliAgentRunner } from "../main/services/cliAgents";
 import { setCommandDebugLogger } from "../main/services/command";
 import { DebugLogService } from "../main/services/debugLogs";
 import { MachineHostService } from "../main/services/machineHost";
+import { ChatActionApplier } from "../main/services/chatActionApplier";
 import { MachineIdlePower } from "../main/services/machineIdlePower";
 import { MachineMaintenance } from "../main/services/machineMaintenance";
 import { nativeHostIdentity } from "../main/services/nativeHostIdentity";
@@ -223,6 +224,22 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
 
   let idlePower: MachineIdlePower | undefined;
   const host = new MachineHostService(chatService, storageService, settingsService, debugLogService, {
+    // A signature or a superseded change that arrives here has to become part
+    // of this machine's own state, not just a stored event.
+    chatActions: new ChatActionApplier({
+      artifacts: {
+        getRevision: async (artifactId, versionEventId) => {
+          const revision = await artifactStore.getRevision(artifactId, versionEventId);
+          return revision
+            ? { version: revision.version, contentHash: revision.contentHash, superseded: revision.superseded }
+            : undefined;
+        },
+        insertSignature: (record) => artifactStore.insertSignature(record)
+      },
+      logger: (event, payload) => {
+        void debugLogService.write(event, payload);
+      }
+    }),
     pairing: enrollment,
     deviceId: identity.originId,
     machineName: args.machineName,

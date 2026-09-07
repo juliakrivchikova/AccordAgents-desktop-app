@@ -96,6 +96,7 @@ import { MobilePairingService } from "./services/mobilePairing";
 import { MachineLinkService } from "./services/machineLink";
 import { MachineInstallerService } from "./services/machineInstaller";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
+import { ChatActionApplier } from "./services/chatActionApplier";
 import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, RemoveMachineRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
@@ -462,6 +463,7 @@ const artifactService = new ArtifactService({
   // decision. `operationId` is derived from the immutable revision identity, so
   // a re-emission after a restart is folded once as a duplicate rather than as
   // a second revision.
+  hasEmittedAction: async (eventId) => Boolean(await storageService.getChatEvent(eventId)),
   emitAction: async (action) => {
     const request = {
       conversationId: action.conversationId,
@@ -482,6 +484,23 @@ const artifactService = new ArtifactService({
 chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
 const dispatchArtifactTool = createArtifactToolDispatcher(artifactService);
 wireArtifactToolHandler(appMcpService, chatService, dispatchArtifactTool);
+// Applies chat actions that arrive from a machine. Emitting an action is half
+// a user scenario; without this a signature made on a machine would be stored
+// and never become visible here.
+const chatActionApplier = new ChatActionApplier({
+  artifacts: {
+    getRevision: async (artifactId, versionEventId) => {
+      const revision = await artifactStore.getRevision(artifactId, versionEventId);
+      return revision
+        ? { version: revision.version, contentHash: revision.contentHash, superseded: revision.superseded }
+        : undefined;
+    },
+    insertSignature: (record) => artifactStore.insertSignature(record)
+  },
+  logger: (event, payload) => {
+    void debugLogService.write(event, payload);
+  }
+});
 const activeReviews = new Map<string, AbortController>();
 
 function appSkillsSourceRoot(): string {
@@ -2965,9 +2984,28 @@ void app.whenReady().then(async () => {
   bootstrapAppUpdater(debugLogService, betaUpdates);
   await appMcpService.start();
   await storageService.init();
+  // A change committed here whose outgoing event did not survive would leave
+  // peers permanently unaware of it. Recovery is idempotent: the operation ids
+  // come from the immutable revision identity, so this is safe every start.
+  void (async () => {
+    try {
+      const summaries = await storageService.listConversations();
+      let recovered = 0;
+      for (const summary of summaries) {
+        if (summary.kind !== "chat") continue;
+        recovered += await artifactService.recoverActionEvents(summary.id);
+      }
+      if (recovered) await debugLogService.write("artifact.action.recovered-at-start", { recovered });
+    } catch (error) {
+      await debugLogService.write("artifact.action.recover-failed", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  })();
   try {
     const desktopIdentity = await chatEventLogService.getOrCreateDeviceIdentity();
     machineLinkService = new MachineLinkService(settingsService, debugLogService, {
+      chatActions: chatActionApplier,
       appVersion: app.getVersion(),
       desktopDeviceId: desktopIdentity.originId,
       eventStorage: storageService,

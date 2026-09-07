@@ -34,6 +34,8 @@ import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { DeviceEventChannel } from "./deviceEventChannel";
 import type { ChatEventLogService } from "./chatEventLog";
 import type { StorageService } from "./storage";
+import type { ChatActionApplier } from "./chatActionApplier";
+import type { ChatEventEnvelope } from "../../shared/chatEvents";
 
 export interface MachineLinkOptions {
   appVersion: string;
@@ -43,6 +45,9 @@ export interface MachineLinkOptions {
   reconnectDelayMs?: number;
   /** Test seam: builds the relay client for one machine room. */
   createClient?: (pairing: MobilePairingPackage) => RelayTunnelClient;
+  /** Applies chat actions that arrive from a machine. Without it an action is
+   *  stored but never reaches this desktop's own state. */
+  chatActions?: ChatActionApplier;
   now?: () => Date;
 }
 
@@ -423,6 +428,21 @@ export class MachineLinkService implements MachineTurnDispatcher {
           connection.record.lastHello.idleStopWarning].filter(Boolean).join("; ")
       } : {})
     }));
+  }
+
+  /** Applies an incoming chat action, or undefined when the event is not one.
+   *  A `deferred` outcome keeps the event for retry: this peer does not hold
+   *  what the action refers to yet, and dropping it would lose the action. */
+  private async applyChatAction(event: ChatEventEnvelope): Promise<"applied" | "deferred" | undefined> {
+    const applier = this.options.chatActions;
+    if (!applier?.handles(event)) return undefined;
+    const outcome = await applier.apply(event);
+    if (outcome.detail) {
+      void this.debugLogs.write("machine-link.action.applied", {
+        kind: outcome.kind, targetKey: outcome.targetKey, status: outcome.status, detail: outcome.detail
+      });
+    }
+    return outcome.status === "deferred" ? "deferred" : "applied";
   }
 
   /**
@@ -906,6 +926,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
           await connection.client.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: deviceId });
         },
         apply: async (event, body) => {
+          // Chat actions from another machine are applied here, not rejected:
+          // a signature made there has to become visible here, and a change
+          // made on state this desktop has replaced has to be shown as
+          // superseded rather than silently written over the winner.
+          const action = await this.applyChatAction(event);
+          if (action) return action;
           const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
           if (!isMachineLinkEnvelope(envelope) || !["machine.conversation.backdelta", "machine.turn.finished", "machine.turn.started",
             "machine.approval.requested", "machine.approval.updated", "machine.approval.result", "machine.turn.progress.delta"].includes(envelope.body.type) ||

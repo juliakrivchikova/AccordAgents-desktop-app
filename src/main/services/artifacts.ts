@@ -74,6 +74,10 @@ export interface ArtifactServiceDeps {
    *  Optional: an emitter that is not wired leaves this machine's behaviour
    *  exactly as before, it just does not converge with the others. */
   emitAction?(action: ArtifactActionEmission): Promise<void>;
+  /** True when this action's event is already in the log. Used to re-emit an
+   *  action whose event was lost — a disk failure between the committed change
+   *  and its outgoing write — instead of leaving peers permanently unaware. */
+  hasEmittedAction?(eventId: string): Promise<boolean>;
 }
 
 export interface ArtifactActionEmission {
@@ -146,6 +150,65 @@ export class ArtifactService {
         message: error instanceof Error ? error.message : String(error)
       });
     }
+  }
+
+  /**
+   * Re-emits action events for changes that are already committed here but
+   * whose outgoing write did not survive.
+   *
+   * The local change and its event are two writes; a disk failure or a crash
+   * between them would otherwise leave a revision or a signature that no peer
+   * ever hears about. Because every operation id is derived from the immutable
+   * revision identity, re-emitting is folded once as a duplicate, so this is
+   * safe to run on every start.
+   *
+   * Returns how many were re-emitted.
+   */
+  async recoverActionEvents(conversationId: string): Promise<number> {
+    if (!this.deps.emitAction || !this.deps.hasEmittedAction) return 0;
+    let recovered = 0;
+    for (const record of await this.deps.store.listByConversation(conversationId)) {
+      // A recovered revision is emitted without a precondition: the change is
+      // already committed here, and re-deriving a base it might no longer hold
+      // would fabricate a conflict that never happened.
+      const metas = await this.deps.store.listVersionMetas(record.id);
+      for (const meta of metas) {
+        recovered += await this.recoverOne(conversationId, {
+          kind: "artifact.revision.created",
+          payload: {
+            operationId: `artifact-revision:${record.id}:${meta.versionEventId}`,
+            targetKey: artifactActionTarget(record.id),
+            stateId: meta.versionEventId,
+            contentHash: meta.contentHash
+          }
+        });
+      }
+      for (const signature of await this.deps.store.listSignatures(record.id)) {
+        recovered += await this.recoverOne(conversationId, {
+          kind: "artifact.signature.added",
+          payload: {
+            operationId: `artifact-signature:${record.id}:${signature.versionEventId}:${signature.signer}`,
+            targetKey: artifactActionTarget(record.id),
+            signer: signature.signer,
+            signedStateId: signature.versionEventId,
+            signedContentHash: signature.contentHash
+          } as ChatActionPayload
+        });
+      }
+    }
+    if (recovered) {
+      this.deps.logger?.("artifact.action.recovered", { conversationId, recovered });
+    }
+    return recovered;
+  }
+
+  private async recoverOne(
+    conversationId: string,
+    action: Omit<ArtifactActionEmission, "conversationId">
+  ): Promise<number> {
+    if (await this.deps.hasEmittedAction?.(`chat-action:${action.payload.operationId}`)) return 0;
+    await this.emitAction({ conversationId, ...action });
+    return 1;
   }
 
   async deleteConversationArtifacts(conversationId: string): Promise<void> {

@@ -45,8 +45,11 @@ import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
 import { readPosixProcessTableAsync } from "./processTermination";
 import { verifyNativeExecutorGone } from "./nativeExecutorRecovery";
 import { MachineApprovalExecutor, machineApprovalResultId } from "./machineApprovalExecutor";
+import type { ChatActionApplier } from "./chatActionApplier";
 
 export interface MachineHostOptions {
+  /** Applies chat actions that arrive from the desktop or another machine. */
+  chatActions?: ChatActionApplier;
   pairing: MobilePairingPackage;
   deviceId: string;
   machineName?: string;
@@ -115,6 +118,21 @@ export class MachineHostService {
   private readonly turnsAwaitingCopy = new Map<string, MachineTurnRequestBody[]>();
   /** True when the outbox file exists but could not be read: it is then
    *  never overwritten, so a result on disk is not lost to a bad read. */
+  /** Applies an incoming chat action, or undefined when the event is not one.
+   *  `deferred` keeps the event for retry rather than losing the action when
+   *  what it refers to has not reached this machine yet. */
+  private async applyChatAction(event: ChatEventEnvelope): Promise<"applied" | "deferred" | undefined> {
+    const applier = this.options.chatActions;
+    if (!applier?.handles(event)) return undefined;
+    const outcome = await applier.apply(event);
+    if (outcome.detail) {
+      void this.debugLogs.write("machine-host.action.applied", {
+        kind: outcome.kind, targetKey: outcome.targetKey, status: outcome.status, detail: outcome.detail
+      });
+    }
+    return outcome.status === "deferred" ? "deferred" : "applied";
+  }
+
   private outboxUnreadable = false;
   /** Why the outbox is not on disk right now (write failed / unreadable);
    *  travels in hello so the desktop can show it. */
@@ -188,6 +206,11 @@ export class MachineHostService {
       },
       apply: async (event, body) => {
         if (this.idleFenced) return "deferred";
+        // A chat action from the desktop or another machine is applied here as
+        // well, so a signature or a superseded change is not something only the
+        // sender knows about.
+        const action = await this.applyChatAction(event);
+        if (action) return action;
         const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
         if (!isMachineLinkEnvelope(envelope) || !isMachineDurableMessage(envelope.body) ||
             envelope.body.type === "machine.conversation.backdelta" || envelope.body.type === "machine.turn.finished" || envelope.body.type === "machine.turn.started" ||

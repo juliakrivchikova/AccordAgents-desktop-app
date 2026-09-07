@@ -128,6 +128,43 @@ test("a second machine revising the same base is folded as superseded, not as an
   } finally { await h.cleanup(); }
 });
 
+test("an action whose outgoing write was lost is re-emitted on the next start", async () => {
+  // Two writes: the change here, and the event peers learn from. A disk
+  // failure between them must not leave a revision nobody else ever hears of.
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-artifact-recover-"));
+  try {
+    const store = new ArtifactStore(path.join(dir, "accordagents.sqlite3"), "sqlite3");
+    const emitted: ArtifactActionEmission[] = [];
+    let disk: "broken" | "healthy" = "broken";
+    const service = new ArtifactService({
+      store,
+      getMembers: async () => members,
+      hasEmittedAction: async (eventId) => emitted.some((action) => `chat-action:${action.payload.operationId}` === eventId),
+      emitAction: async (action) => {
+        if (disk === "broken") throw new Error("SQLITE_FULL");
+        emitted.push(action);
+      }
+    });
+    const created = await service.create("user", { conversationId: "chat", name: "plan", content: "v1", requiredSigners: ["drew"] });
+    const artifactId = created.ok ? created.value.summary.id : "";
+    await service.sign("drew", { conversationId: "chat", artifactId });
+    await service.revise("user", { conversationId: "chat", artifactId, baseVersion: 1, content: "v2" });
+    assert.equal(emitted.length, 0, "nothing reached the log while the disk was failing");
+
+    // The next start finds the committed changes and re-emits their events.
+    disk = "healthy";
+    const recovered = await service.recoverActionEvents("chat");
+    assert.equal(recovered, 3, "both revisions and the signature are recovered");
+    assert.deepEqual(emitted.map((action) => action.kind).sort(),
+      ["artifact.revision.created", "artifact.revision.created", "artifact.signature.added"]);
+
+    // Running it again emits nothing: the operation ids are derived from the
+    // immutable revision identity, so recovery is safe on every start.
+    assert.equal(await service.recoverActionEvents("chat"), 0);
+    assert.equal(emitted.length, 3);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("a failing emitter never undoes a change the User already made", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-artifact-emit-fail-"));
   try {
