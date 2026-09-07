@@ -31,10 +31,11 @@ import { RelayTunnelClient } from "./relayTunnelClient";
 import type { SettingsService } from "./settings";
 import { isMachineDurableMessage, machineCommandId } from "../../shared/machineLink";
 import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
-import { DeviceEventChannel } from "./deviceEventChannel";
+import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
 import type { ChatEventLogService } from "./chatEventLog";
 import type { StorageService } from "./storage";
 import type { ChatActionApplier } from "./chatActionApplier";
+import type { ChatActionDependency } from "../../shared/deviceEventChannel";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 
 export interface MachineLinkOptions {
@@ -48,6 +49,9 @@ export interface MachineLinkOptions {
   /** Applies chat actions that arrive from a machine. Without it an action is
    *  stored but never reaches this desktop's own state. */
   chatActions?: ChatActionApplier;
+  /** Produces the state a peer says a held action of its own is waiting for,
+   *  by re-emitting the action that carries it. */
+  serveChatActionDependency?: (dependency: ChatActionDependency) => Promise<boolean>;
   now?: () => Date;
 }
 
@@ -443,19 +447,37 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return recipients;
   }
 
+  /** Serves a machine the state a held action of its own is waiting for. The
+   *  action is re-emitted with the same operation id, so the machine receives
+   *  that event rather than a second copy of it. */
+  private async serveChatActionDependency(dependency: ChatActionDependency): Promise<boolean> {
+    const serve = this.options.serveChatActionDependency;
+    if (!serve) return false;
+    try {
+      return await serve(dependency);
+    } catch (error) {
+      void this.debugLogs.write("machine-link.action.dependency-error", {
+        ...dependency, message: error instanceof Error ? error.message : String(error)
+      });
+      return false;
+    }
+  }
+
   /** Applies an incoming chat action, or undefined when the event is not one.
    *  A `deferred` outcome keeps the event for retry: this peer does not hold
    *  what the action refers to yet, and dropping it would lose the action. */
-  private async applyChatAction(event: ChatEventEnvelope): Promise<"applied" | "deferred" | undefined> {
+  private async applyChatAction(event: ChatEventEnvelope, hydrated?: unknown): Promise<"applied" | "deferred" | DeferredWithDependency | undefined> {
     const applier = this.options.chatActions;
-    if (!applier?.handles(event)) return undefined;
-    const outcome = await applier.apply(event);
+    if (!applier?.handles(event, hydrated)) return undefined;
+    const outcome = await applier.apply(event, hydrated);
     if (outcome.detail) {
       void this.debugLogs.write("machine-link.action.applied", {
         kind: outcome.kind, targetKey: outcome.targetKey, status: outcome.status, detail: outcome.detail
       });
     }
-    return outcome.status === "deferred" ? "deferred" : "applied";
+    if (outcome.status !== "deferred") return "applied";
+    // Named, so the channel can ask the peer for exactly what is missing.
+    return outcome.dependency ? { deferred: true, dependency: outcome.dependency } : "deferred";
   }
 
   /**
@@ -475,7 +497,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       const channel = connection.eventChannel;
       if (!channel) continue;
       try {
-        await channel.publish({ ...request, scope: "actions" });
+        await channel.publish({ ...request, sharedScope: true });
         published += 1;
       } catch (error) {
         void this.debugLogs.write("machine-link.action.publish-error", {
@@ -938,12 +960,16 @@ export class MachineLinkService implements MachineTurnDispatcher {
           const ciphertext = await sealMobileRelayPayload(packet, connection.pairing.relaySealKeyBase64);
           await connection.client.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: deviceId });
         },
+        serveDependency: (dependency) => this.serveChatActionDependency(dependency),
+        onDependencyUnavailable: (dependency) => {
+          void this.debugLogs.write("machine-link.action.dependency-unavailable", { ...dependency, machineId: connection.record.id });
+        },
         apply: async (event, body) => {
           // Chat actions from another machine are applied here, not rejected:
           // a signature made there has to become visible here, and a change
           // made on state this desktop has replaced has to be shown as
           // superseded rather than silently written over the winner.
-          const action = await this.applyChatAction(event);
+          const action = await this.applyChatAction(event, body);
           if (action) return action;
           const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
           if (!isMachineLinkEnvelope(envelope) || !["machine.conversation.backdelta", "machine.turn.finished", "machine.turn.started",

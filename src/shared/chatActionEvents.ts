@@ -84,9 +84,38 @@ export interface ChatActionPayload {
   /** The state id this action establishes when it applies. */
   stateId?: string;
   contentHash?: string;
+  /** The body this state is, when the action carries it. */
+  revision?: ChatRevisionContent;
   /** Free-form action detail; the projection never interprets it beyond the
    *  fields above, so a new action kind does not need a new projection. */
   detail?: Record<string, unknown>;
+}
+
+/**
+ * The immutable body a revision event carries, so a peer that does not hold the
+ * revision can apply it instead of waiting for it forever.
+ *
+ * It travels as part of the event payload, which means it goes through the same
+ * preparation, fragmentation and size limits as any other payload; a body large
+ * enough becomes fragments the receiver assembles before the event is applied.
+ * The hash is checked against the content before anything is stored, so a body
+ * that does not match its identity is refused rather than written.
+ */
+export interface ChatRevisionContent {
+  content: string;
+  author: string;
+  note?: string;
+  createdAt: string;
+  version: number;
+  /** Enough to create the artifact on a peer that has never seen it. */
+  artifact?: {
+    name: string;
+    owner: string;
+    contributors: string[];
+    requiredSigners: string[];
+    labels: string[];
+    createdAt: string;
+  };
 }
 
 /** A signature binds to the revision it read, by id and by content hash. */

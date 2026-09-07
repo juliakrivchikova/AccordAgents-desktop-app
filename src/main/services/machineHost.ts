@@ -34,7 +34,7 @@ import { RelayTunnelClient } from "./relayTunnelClient";
 import type { SettingsService } from "./settings";
 import type { StorageService } from "./storage";
 import type { ChatEventLogService } from "./chatEventLog";
-import { DeviceEventChannel } from "./deviceEventChannel";
+import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
 import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { isMachineDurableMessage } from "../../shared/machineLink";
 import { NativeProcessUnavailableError } from "./nativeProcess";
@@ -46,10 +46,14 @@ import { readPosixProcessTableAsync } from "./processTermination";
 import { verifyNativeExecutorGone } from "./nativeExecutorRecovery";
 import { MachineApprovalExecutor, machineApprovalResultId } from "./machineApprovalExecutor";
 import type { ChatActionApplier } from "./chatActionApplier";
+import type { ChatActionDependency } from "../../shared/deviceEventChannel";
 
 export interface MachineHostOptions {
   /** Applies chat actions that arrive from the desktop or another machine. */
   chatActions?: ChatActionApplier;
+  /** Produces the state a peer says a held action of its own is waiting for,
+   *  by re-emitting the action that carries it. */
+  serveChatActionDependency?: (dependency: ChatActionDependency) => Promise<boolean>;
   pairing: MobilePairingPackage;
   deviceId: string;
   machineName?: string;
@@ -121,16 +125,18 @@ export class MachineHostService {
   /** Applies an incoming chat action, or undefined when the event is not one.
    *  `deferred` keeps the event for retry rather than losing the action when
    *  what it refers to has not reached this machine yet. */
-  private async applyChatAction(event: ChatEventEnvelope): Promise<"applied" | "deferred" | undefined> {
+  private async applyChatAction(event: ChatEventEnvelope, hydrated?: unknown): Promise<"applied" | "deferred" | DeferredWithDependency | undefined> {
     const applier = this.options.chatActions;
-    if (!applier?.handles(event)) return undefined;
-    const outcome = await applier.apply(event);
+    if (!applier?.handles(event, hydrated)) return undefined;
+    const outcome = await applier.apply(event, hydrated);
     if (outcome.detail) {
       void this.debugLogs.write("machine-host.action.applied", {
         kind: outcome.kind, targetKey: outcome.targetKey, status: outcome.status, detail: outcome.detail
       });
     }
-    return outcome.status === "deferred" ? "deferred" : "applied";
+    if (outcome.status !== "deferred") return "applied";
+    // Named, so the channel can ask the peer for exactly what is missing.
+    return outcome.dependency ? { deferred: true, dependency: outcome.dependency } : "deferred";
   }
 
   private outboxUnreadable = false;
@@ -204,12 +210,19 @@ export class MachineHostService {
         const ciphertext = await sealMobileRelayPayload(packet, pairing.relaySealKeyBase64);
         await this.client.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: pairing.issuer.originId });
       },
+      serveDependency: async (dependency) => {
+        try { return await options.serveChatActionDependency?.(dependency) ?? false; }
+        catch { return false; }
+      },
+      onDependencyUnavailable: (dependency) => {
+        void this.debugLogs.write("machine-host.action.dependency-unavailable", { ...dependency });
+      },
       apply: async (event, body) => {
         if (this.idleFenced) return "deferred";
         // A chat action from the desktop or another machine is applied here as
         // well, so a signature or a superseded change is not something only the
         // sender knows about.
-        const action = await this.applyChatAction(event);
+        const action = await this.applyChatAction(event, body);
         if (action) return action;
         const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
         if (!isMachineLinkEnvelope(envelope) || !isMachineDurableMessage(envelope.body) ||

@@ -43,6 +43,7 @@ import { PluginService } from "../main/services/plugins";
 import { SettingsService } from "../main/services/settings";
 import { StorageService } from "../main/services/storage";
 import { UserSkillsService } from "../main/services/userSkills";
+import { artifactNameKey } from "../shared/artifacts";
 
 interface MachineArgs {
   enrollmentPath: string;
@@ -261,12 +262,53 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
             ? { version: revision.version, contentHash: revision.contentHash, superseded: revision.superseded }
             : undefined;
         },
-        insertSignature: (record) => artifactStore.insertSignature(record)
+        insertSignature: (record) => artifactStore.insertSignature(record),
+        hasArtifact: async (artifactId) => Boolean(await artifactStore.getById(artifactId)),
+        createArtifact: async (request) => {
+          await artifactStore.insertArtifact({
+            id: request.artifactId,
+            conversationId: request.conversationId,
+            name: request.name,
+            owner: request.owner,
+            contributors: request.contributors,
+            requiredSigners: request.requiredSigners,
+            labels: request.labels,
+            lifecycle: "published",
+            allowedDraftAuthors: [],
+            requiredDraftAuthors: [],
+            audiencePolicyByAuthor: {},
+            draftRosterRevision: 0,
+            headVersion: request.revision.version,
+            createdAt: request.createdAt,
+            updatedAt: request.revision.createdAt
+          }, artifactNameKey(request.name), {
+            artifactId: request.artifactId,
+            version: request.revision.version,
+            versionEventId: request.revision.versionEventId,
+            content: request.revision.content,
+            author: request.revision.author,
+            note: request.revision.note,
+            createdAt: request.revision.createdAt
+          });
+        },
+        retainRevision: (request) => artifactStore.retainProjectedRevision({
+          artifactId: request.artifactId,
+          versionEventId: request.versionEventId,
+          baseVersionEventId: request.baseVersionEventId,
+          version: request.version,
+          content: request.content,
+          contentHash: "",
+          author: request.author,
+          note: request.note,
+          createdAt: request.createdAt
+        })
       },
       logger: (event, payload) => {
         void debugLogService.write(event, payload);
       }
     }),
+    serveChatActionDependency: async (dependency) => dependency.targetKey.startsWith("artifact:")
+      && artifactService.emitRevisionActionFor(dependency.targetKey.slice("artifact:".length), dependency.stateId),
     pairing: enrollment,
     deviceId: identity.originId,
     machineName: args.machineName,

@@ -139,17 +139,72 @@ export class ArtifactService {
   private async emitInitialRevisionAction(conversationId: string, artifactId: string, version: number): Promise<void> {
     if (!this.deps.emitAction) return;
     const written = await this.deps.store.getVersion(artifactId, version);
-    if (!written) return;
-    await this.emitAction({
+    if (!written?.versionEventId) return;
+    const action = await this.buildRevisionAction(conversationId, artifactId, { ...written, versionEventId: written.versionEventId });
+    if (action) await this.emitAction(action);
+  }
+
+
+  /** The one action that carries a revision. Built in a single place because
+   *  the operation id is the revision's own identity: two emissions of it must
+   *  be byte-for-byte the same event, whether it comes from a change made
+   *  here, from start-up recovery, or from a peer asking for it. */
+  private async buildRevisionAction(
+    conversationId: string,
+    artifactId: string,
+    revision: { versionEventId: string; version: number; contentHash?: string; baseVersionEventId?: string; content: string; author: string; note?: string; createdAt: string }
+  ): Promise<ArtifactActionEmission | undefined> {
+    const record = await this.deps.store.getById(artifactId);
+    if (!record) return undefined;
+    const base = revision.baseVersionEventId
+      ? await this.deps.store.getRevision(artifactId, revision.baseVersionEventId)
+      : undefined;
+    return {
       conversationId,
       kind: "artifact.revision.created",
       payload: {
-        operationId: `artifact-revision:${artifactId}:${written.versionEventId}`,
+        operationId: `artifact-revision:${artifactId}:${revision.versionEventId}`,
         targetKey: artifactActionTarget(artifactId),
-        stateId: written.versionEventId,
-        contentHash: written.contentHash
+        stateId: revision.versionEventId,
+        contentHash: revision.contentHash ?? artifactContentHash(revision.content),
+        // The body travels with the event through the same preparation and
+        // fragmentation any payload uses, so a peer that lacks this revision
+        // can apply it instead of waiting for it forever.
+        revision: {
+          content: revision.content,
+          author: revision.author,
+          ...(revision.note ? { note: revision.note } : {}),
+          createdAt: revision.createdAt,
+          version: revision.version,
+          // The first state carries the artifact itself, so a machine that has
+          // never seen it can hold this revision and the signatures that follow.
+          ...(revision.version === 1 ? {
+            artifact: {
+              name: record.name,
+              owner: record.owner,
+              contributors: record.contributors,
+              requiredSigners: record.requiredSigners,
+              labels: record.labels,
+              createdAt: record.createdAt
+            }
+          } : {})
+        },
+        ...(base ? { precondition: { expectedStateId: base.versionEventId, expectedContentHash: base.contentHash } } : {})
       }
-    });
+    };
+  }
+
+  /** Re-emits the action carrying one revision, for a peer that says it never
+   *  received it. Same operation id, so this is that event again and not a
+   *  second one; false when this peer cannot produce it either. */
+  async emitRevisionActionFor(artifactId: string, versionEventId: string): Promise<boolean> {
+    const record = await this.deps.store.getById(artifactId);
+    const revision = record ? await this.deps.store.getRevision(artifactId, versionEventId) : undefined;
+    if (!record || !revision) return false;
+    const action = await this.buildRevisionAction(record.conversationId, artifactId, revision);
+    if (!action) return false;
+    await this.emitAction(action);
+    return true;
   }
 
   /** Never lets a delivery problem undo a change that already succeeded: the
@@ -183,20 +238,14 @@ export class ArtifactService {
     if (!this.deps.emitAction || !this.deps.hasEmittedAction) return 0;
     let recovered = 0;
     for (const record of await this.deps.store.listByConversation(conversationId)) {
-      // A recovered revision is emitted without a precondition: the change is
-      // already committed here, and re-deriving a base it might no longer hold
-      // would fabricate a conflict that never happened.
+      // Recovered through the same builder as a live change, so one revision
+      // has one action: a peer asking for this state later gets the identical
+      // event, body included, rather than a second, emptier version of it.
       const metas = await this.deps.store.listVersionMetas(record.id);
       for (const meta of metas) {
-        recovered += await this.recoverOne(conversationId, {
-          kind: "artifact.revision.created",
-          payload: {
-            operationId: `artifact-revision:${record.id}:${meta.versionEventId}`,
-            targetKey: artifactActionTarget(record.id),
-            stateId: meta.versionEventId,
-            contentHash: meta.contentHash
-          }
-        });
+        const revision = await this.deps.store.getRevision(record.id, meta.versionEventId);
+        const action = revision ? await this.buildRevisionAction(conversationId, record.id, revision) : undefined;
+        if (action) recovered += await this.recoverOne(conversationId, action);
       }
       for (const signature of await this.deps.store.listSignatures(record.id)) {
         recovered += await this.recoverOne(conversationId, {
@@ -605,6 +654,16 @@ export class ArtifactService {
           targetKey: artifactActionTarget(record.id),
           stateId: versionEventId,
           contentHash: artifactContentHash(request.content),
+          // The body travels with the event through the same preparation and
+          // fragmentation any payload uses, so a peer that lacks this revision
+          // can apply it instead of waiting for it forever.
+          revision: {
+            content: request.content,
+            author: actor,
+            ...(note ? { note } : {}),
+            createdAt: now,
+            version: nextVersion
+          },
           precondition: {
             expectedStateId: baseRevision.versionEventId,
             expectedContentHash: baseRevision.contentHash

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ChatActionApplier, type ChatActionArtifactPort } from "./chatActionApplier";
+import { createHash } from "node:crypto";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ChatActionPayload } from "../../shared/chatActionEvents";
 
@@ -207,6 +208,119 @@ test("a choice answered elsewhere is acted on by the peer running the turn", asy
   }));
   assert.equal(result.status, "applied");
   assert.deepEqual(port.performed, ["choice.answered:choice:c-1"]);
+});
+
+function replicaPort() {
+  const artifacts = new Map<string, { name: string }>();
+  const revisions = new Map<string, { version: number; contentHash: string; superseded: boolean; content: string }>();
+  return {
+    artifacts,
+    revisions,
+    port: {
+      async getRevision(_artifactId: string, versionEventId: string) { return revisions.get(versionEventId); },
+      async insertSignature() { return true; },
+      async hasArtifact(artifactId: string) { return artifacts.has(artifactId); },
+      async createArtifact(request: { artifactId: string; name: string; revision: { versionEventId: string; version: number; content: string } }) {
+        artifacts.set(request.artifactId, { name: request.name });
+        revisions.set(request.revision.versionEventId, {
+          version: request.revision.version,
+          contentHash: createHash("sha256").update(request.revision.content, "utf8").digest("hex"),
+          superseded: false,
+          content: request.revision.content
+        });
+      },
+      async retainRevision(request: { versionEventId: string; version: number; content: string }) {
+        revisions.set(request.versionEventId, {
+          version: request.version,
+          contentHash: createHash("sha256").update(request.content, "utf8").digest("hex"),
+          superseded: false,
+          content: request.content
+        });
+      }
+    }
+  };
+}
+
+const hashOf = (content: string) => createHash("sha256").update(content, "utf8").digest("hex");
+
+test("a machine that has never seen the artifact receives it, its revision and then a signature", async () => {
+  const replica = replicaPort();
+  const applier = new ChatActionApplier({ artifacts: replica.port });
+
+  // Nothing here yet: the first state carries the artifact and its body.
+  const created = await applier.apply(event("artifact.revision.created", {
+    operationId: "artifact-revision:plan:rev-1", targetKey: "artifact:plan",
+    stateId: "rev-1", contentHash: hashOf("v1"),
+    revision: {
+      content: "v1", author: "user", createdAt: "2026-09-07T09:00:00.000Z", version: 1,
+      artifact: { name: "plan", owner: "user", contributors: [], requiredSigners: ["gera"], labels: [], createdAt: "2026-09-07T09:00:00.000Z" }
+    }
+  } as ChatActionPayload));
+  assert.equal(created.status, "applied");
+  assert.match(created.detail ?? "", /artifact and its first version were created here/);
+  assert.equal(replica.revisions.get("rev-1")?.content, "v1");
+
+  // The next revision's body arrives with it too.
+  const revised = await applier.apply(event("artifact.revision.created", {
+    operationId: "artifact-revision:plan:rev-2", targetKey: "artifact:plan",
+    stateId: "rev-2", contentHash: hashOf("v2"),
+    precondition: { expectedStateId: "rev-1" },
+    revision: { content: "v2", author: "drew", createdAt: "2026-09-07T09:01:00.000Z", version: 2 }
+  } as ChatActionPayload));
+  assert.equal(revised.status, "applied");
+  assert.equal(replica.revisions.get("rev-2")?.content, "v2");
+
+  // And the signature on the first revision now has something to bind to.
+  const signed = await applier.apply(event("artifact.signature.added", {
+    operationId: "artifact-signature:plan:rev-1:gera", targetKey: "artifact:plan",
+    signer: "gera", signedStateId: "rev-1", signedContentHash: hashOf("v1")
+  } as ChatActionPayload));
+  assert.equal(signed.status, "applied");
+});
+
+test("a body that does not match the identity it was sent with is refused, not stored", async () => {
+  const replica = replicaPort();
+  const result = await new ChatActionApplier({ artifacts: replica.port }).apply(event("artifact.revision.created", {
+    operationId: "artifact-revision:plan:rev-x", targetKey: "artifact:plan",
+    stateId: "rev-x", contentHash: hashOf("what was promised"),
+    revision: {
+      content: "something else entirely", author: "user", createdAt: "2026-09-07T09:00:00.000Z", version: 1,
+      artifact: { name: "plan", owner: "user", contributors: [], requiredSigners: [], labels: [], createdAt: "2026-09-07T09:00:00.000Z" }
+    }
+  } as ChatActionPayload));
+  assert.equal(result.status, "superseded");
+  assert.match(result.detail ?? "", /does not match the identity/);
+  assert.equal(replica.revisions.size, 0);
+  assert.equal(replica.artifacts.size, 0);
+});
+
+test("two competing revisions keep their own identity and a signature does not move", async () => {
+  const replica = replicaPort();
+  const applier = new ChatActionApplier({ artifacts: replica.port });
+  await applier.apply(event("artifact.revision.created", {
+    operationId: "artifact-revision:plan:rev-1", targetKey: "artifact:plan",
+    stateId: "rev-1", contentHash: hashOf("v1"),
+    revision: {
+      content: "v1", author: "user", createdAt: "2026-09-07T09:00:00.000Z", version: 1,
+      artifact: { name: "plan", owner: "user", contributors: [], requiredSigners: ["gera"], labels: [], createdAt: "2026-09-07T09:00:00.000Z" }
+    }
+  } as ChatActionPayload));
+  await applier.apply(event("artifact.revision.created", {
+    operationId: "artifact-revision:plan:rev-2a", targetKey: "artifact:plan",
+    stateId: "rev-2a", contentHash: hashOf("v2-a"), precondition: { expectedStateId: "rev-1" },
+    revision: { content: "v2-a", author: "drew", createdAt: "2026-09-07T09:01:00.000Z", version: 2 }
+  } as ChatActionPayload));
+
+  // The loser: its base has been replaced here.
+  replica.revisions.get("rev-1")!.superseded = true;
+  const loser = await applier.apply(event("artifact.revision.created", {
+    operationId: "artifact-revision:plan:rev-2b", targetKey: "artifact:plan",
+    stateId: "rev-2b", contentHash: hashOf("v2-b"), precondition: { expectedStateId: "rev-1" },
+    revision: { content: "v2-b", author: "gera", createdAt: "2026-09-07T09:02:00.000Z", version: 2 }
+  } as ChatActionPayload));
+  assert.equal(loser.status, "superseded");
+  assert.equal(replica.revisions.has("rev-2b"), false, "a superseded revision is not written over the winner");
+  assert.equal(replica.revisions.get("rev-2a")?.content, "v2-a", "the winner keeps its own body and identity");
 });
 
 test("only action events are handled, and a malformed payload is not", () => {

@@ -569,6 +569,24 @@ export class ArtifactStore {
     }
   }
 
+  /**
+   * Retains a revision that arrived from another peer and, when it continues
+   * the chain this peer already shows, takes it as the new head.
+   *
+   * Without the second half the revision is stored but stays outside the
+   * projection, which reads as superseded — and the next revision built on it
+   * would be refused as a change to something already replaced.
+   */
+  async retainProjectedRevision(record: ArtifactRevision): Promise<void> {
+    await this.retainRevision(record);
+    const chain = (await this.listVersionMetas(record.artifactId)).map((meta) => meta.versionEventId);
+    if (chain.includes(record.versionEventId)) return;
+    // Not an extension of what is shown here: the fold already calls that
+    // superseded, and rewriting the projection would move the loser in.
+    if ((chain[chain.length - 1] ?? undefined) !== record.baseVersionEventId) return;
+    await this.projectVersions(record.artifactId, [...chain, record.versionEventId]);
+  }
+
   /** Projection only: replacing display numbers cannot rewrite contents,
    * signatures, draft sources, or execute a native action. */
   async projectVersions(artifactId: string, versionEventIds: string[]): Promise<void> {

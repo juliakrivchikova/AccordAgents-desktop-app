@@ -1,5 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { DEVICE_EVENT_CHANNEL_PROTOCOL, isDeviceEventPacket, type DeviceEventPacket } from "../../shared/deviceEventChannel";
+import {
+  DEVICE_EVENT_CHANNEL_PROTOCOL, isChatActionDependency, isDeviceEventPacket,
+  type ChatActionDependency, type DeviceEventPacket
+} from "../../shared/deviceEventChannel";
+import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import { DEVICE_EVENT_INLINE_BYTES, isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { DeviceEventApplyOutcome, DeviceEventGap, DeviceEventReceipt } from "../../shared/deviceEventDelivery";
@@ -23,8 +27,21 @@ interface DeviceEventChannelOptions {
   send(packet: DeviceEventPacket): Promise<void>;
   /** Domain owner persists before returning. Native effects must be guarded
    * by durable command receipts; a process crash may replay an unapplied event. */
-  apply(event: ChatEventEnvelope, payload: unknown): Promise<DeviceEventApplyOutcome | "deferred">;
+  apply(event: ChatEventEnvelope, payload: unknown): Promise<DeviceEventApplyOutcome | "deferred" | DeferredWithDependency>;
+  /** Serves a state a peer says it is missing, by publishing the action that
+   *  carries it to this channel again. False when this peer cannot produce it,
+   *  which is answered plainly instead of leaving the asker waiting. */
+  serveDependency?(dependency: ChatActionDependency): Promise<boolean>;
+  /** The peer cannot produce something a held action needs. Reported, because
+   *  a deferred action that can never apply is not a transient state. */
+  onDependencyUnavailable?(dependency: ChatActionDependency): void;
   onError(error: Error): void;
+}
+
+/** A deferred application that named what it is waiting for. */
+export interface DeferredWithDependency {
+  deferred: true;
+  dependency: ChatActionDependency;
 }
 
 /** A durable device channel, independent of desktop/phone/machine roles.
@@ -40,6 +57,7 @@ export class DeviceEventChannel {
   private receivePending = true;
   private readonly lastSent = new Map<string, { at: number; attempts: number }>();
   private readonly requestedGaps = new Map<string, number>();
+  private readonly requestedDependencies = new Map<string, number>();
   // Live-room and mailbox copies commonly overlap. Cache only identities and
   // receipts already committed to SQLite, never uncommitted application state.
   private readonly received = new Map<string, { hash: string; receipt?: DeviceEventReceipt; ackAt?: number }>();
@@ -59,14 +77,19 @@ export class DeviceEventChannel {
     }
   }
 
-  async publish(request: { conversationId: string; kind: string; payload: unknown; eventId?: string; scope?: string }): Promise<ChatEventEnvelope> {
+  async publish(request: {
+    conversationId: string; kind: string; payload: unknown; eventId?: string; scope?: string;
+    /** A chat action is one event for every peer, not a copy per channel: the
+     *  same decision must keep one identity however many machines hold it. */
+    sharedScope?: boolean;
+  }): Promise<ChatEventEnvelope> {
     if (this.stopped) throw new Error("Device event channel is closed.");
     const payload = await this.options.storage.deviceEventBlobs().prepare(request.payload);
     const result = await this.options.eventLog.appendLocalEvent({
       ...request,
       // Separate streams permit Stop to bypass bulk copy traffic. They still
       // use the same HLC, immutable event log and gap rules.
-      logScopeId: this.scope(request.conversationId, request.scope ?? "actions"),
+      logScopeId: request.sharedScope ? CHAT_ACTION_LOG_SCOPE : this.scope(request.conversationId, request.scope ?? "actions"),
       payload,
       recipients: [{ deviceId: this.options.peerDeviceId, channelId: this.options.channelId }]
     });
@@ -103,7 +126,7 @@ export class DeviceEventChannel {
           this.receivePending = true;
           const event = value.event;
           if (!event || Buffer.byteLength(JSON.stringify(event), "utf8") > DEVICE_EVENT_INLINE_BYTES * 2 || event.originId !== value.from ||
-              !event.logScopeId.startsWith(`device:${this.options.channelId}:`) ||
+              !this.inScope(event.logScopeId) ||
               !verifySignedChatEvent(event, this.options.peerPublicKeyDerBase64)) {
             throw new Error("Device event signature or channel scope is invalid.");
           }
@@ -140,6 +163,21 @@ export class DeviceEventChannel {
           for (const event of await this.options.storage.deviceEvents().repair(this.options.channelId, value.from, value.gap)) {
             await this.sendEvent(event, value.requestId);
           }
+          return;
+        case "need": {
+          if (!isChatActionDependency(value.dependency) || typeof value.requestId !== "string") {
+            throw new Error("Invalid device event dependency request.");
+          }
+          const served = await this.options.serveDependency?.(value.dependency);
+          if (!served) {
+            await this.sendControl(this.packet({ type: "unavailable", dependency: value.dependency, requestId: value.requestId }));
+          }
+          return;
+        }
+        case "unavailable":
+          if (!isChatActionDependency(value.dependency)) throw new Error("Invalid device event dependency answer.");
+          this.requestedDependencies.delete(JSON.stringify(value.dependency));
+          this.options.onDependencyUnavailable?.(value.dependency);
           return;
         case "probe":
           if (!Array.isArray(value.events) || value.events.length > 100) throw new Error("Invalid device event receipt probe.");
@@ -234,11 +272,22 @@ export class DeviceEventChannel {
   private async drain(): Promise<void> {
     const missingBodies = new Map<string, DeviceEventGap>();
     const held = new Set<string>();
+    const dependencies = new Map<string, ChatActionDependency>();
     let applyError: unknown;
     let deferred = false;
+    // A held event is retried as soon as something else applies: the action it
+    // was waiting for usually arrives in the same delivery, and waiting for the
+    // next timer would make an answered dependency look like a stuck one.
+    let appliedSinceHold = false;
     while (!this.stopped) {
       const ready = await this.options.storage.deviceEvents().ready(this.options.channelId, this.options.peerDeviceId, [...held]);
-      if (!ready.length) break;
+      if (!ready.length) {
+        if (!appliedSinceHold || !held.size) break;
+        appliedSinceHold = false;
+        held.clear();
+        deferred = false;
+        continue;
+      }
       for (const event of ready) {
         try {
           let payload: unknown;
@@ -255,11 +304,18 @@ export class DeviceEventChannel {
             throw error;
           }
           const outcome = await this.options.apply(event, payload);
-          if (outcome === "deferred") { deferred = true; held.add(event.eventId); continue; }
-          const receipt = await this.options.storage.deviceEvents().markApplied(event, outcome, new Date().toISOString());
+          if (outcome === "deferred" || (typeof outcome === "object" && outcome.deferred)) {
+            deferred = true;
+            held.add(event.eventId);
+            if (typeof outcome === "object") dependencies.set(JSON.stringify(outcome.dependency), outcome.dependency);
+            continue;
+          }
+          const receipt = await this.options.storage.deviceEvents()
+            .markApplied(event, outcome as DeviceEventApplyOutcome, new Date().toISOString());
           remember(this.received, event.eventId, { hash: event.eventHash, receipt });
           await this.sendControl(this.packet({ type: "ack", receipt }));
           this.received.get(event.eventId)!.ackAt = performance.now();
+          appliedSinceHold = true;
         } catch (error) {
           // A missing chat, full disk, or pending domain owner holds this
           // stream; other conversations on the same device can still apply.
@@ -279,7 +335,19 @@ export class DeviceEventChannel {
       await this.sendControl(this.packet({ type: "resend", gap, requestId: randomUUID() }));
       this.requestedGaps.set(key, performance.now());
     }
+    for (const [key, dependency] of dependencies) {
+      const previous = this.requestedDependencies.get(key);
+      if (previous !== undefined && performance.now() - previous < 5_000) continue;
+      await this.sendControl(this.packet({ type: "need", dependency, requestId: randomUUID() }));
+      this.requestedDependencies.set(key, performance.now());
+    }
     if (applyError !== undefined) throw applyError;
+  }
+
+  /** Chat actions share one log across every machine, so one decision is one
+   *  event with many recipients rather than a separate copy per channel. */
+  private inScope(logScopeId: string): boolean {
+    return logScopeId === CHAT_ACTION_LOG_SCOPE || logScopeId.startsWith(`device:${this.options.channelId}:`);
   }
 
   private scope(conversationId: string, scope: string): string {

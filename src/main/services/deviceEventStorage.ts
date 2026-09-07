@@ -1,3 +1,4 @@
+import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { decideChatEventRetention, type ChatEventRetentionDecision } from "../../shared/chatEventRetention";
 import {
@@ -268,8 +269,8 @@ export class DeviceEventStorage {
         where i.channel_id = ${quote(channelId)} and i.applied_at is null
           ${deviceId ? `and i.device_id = ${quote(deviceId)}` : ""}
           ${excludedEventIds.length ? `and e.event_id not in (${excludedEventIds.map(quote).join(",")})` : ""}
-          and e.origin_seq = coalesce(h.origin_seq, 0) + 1
-          and coalesce(e.prev_hash, '') = coalesce(h.event_hash, '')
+          and (e.log_scope_id = ${quote(CHAT_ACTION_LOG_SCOPE)} or (e.origin_seq = coalesce(h.origin_seq, 0) + 1
+            and coalesce(e.prev_hash, '') = coalesce(h.event_hash, '')))
         order by e.logical_ts, e.origin_id, e.log_scope_id, e.origin_seq, e.event_id limit ${DEVICE_EVENT_PAGE_COUNT}
       ), page as (
         select envelope,
@@ -280,6 +281,40 @@ export class DeviceEventStorage {
     return rows.map((row) => JSON.parse(row.envelope) as ChatEventEnvelope);
   }
 
+
+  /**
+   * The chat-action log is folded, not replayed: supersede and duplicate are
+   * decided from the actions themselves, so one held action must not stop the
+   * ones behind it. In particular the answer to "I am missing this revision"
+   * necessarily arrives after the action that asked for it.
+   *
+   * The head therefore records the furthest action seen rather than a
+   * contiguous position, and each action is marked applied on its own.
+   */
+  private async markActionApplied(event: ChatEventEnvelope, outcome: DeviceEventApplyOutcome, at: string): Promise<DeviceEventReceipt> {
+    const rows = await this.database.query<DeviceEventReceipt>(durable(`
+      begin immediate;
+      insert into device_event_applied_heads(origin_id, log_scope_id, origin_seq, event_hash)
+        select e.origin_id, e.log_scope_id, e.origin_seq, e.event_hash
+        from chat_events e join device_event_inbox i on i.event_id = e.event_id
+        where e.event_id = ${quote(event.eventId)} and e.event_hash = ${quote(event.eventHash)} and i.applied_at is null
+      on conflict(origin_id, log_scope_id) do update
+        set event_hash = case when excluded.origin_seq > device_event_applied_heads.origin_seq
+              then excluded.event_hash else device_event_applied_heads.event_hash end,
+            origin_seq = max(excluded.origin_seq, device_event_applied_heads.origin_seq);
+      update device_event_inbox set applied_at = ${quote(at)}, outcome = ${quote(outcome)}
+        where event_id = ${quote(event.eventId)} and applied_at is null and exists(
+          select 1 from chat_events e where e.event_id = device_event_inbox.event_id and e.event_hash = ${quote(event.eventHash)}
+        );
+      select i.event_id as eventId, e.event_hash as eventHash, i.outcome, i.applied_at as appliedAt
+        from device_event_inbox i join chat_events e on e.event_id = i.event_id
+        where i.event_id = ${quote(event.eventId)} and e.event_hash = ${quote(event.eventHash)} and i.applied_at is not null;
+      commit;
+    `));
+    if (!rows[0]) throw new Error(`Chat action ${event.eventId} could not be recorded as applied.`);
+    return rows[0];
+  }
+
   /** Called only after the domain owner has persisted its projection (or native
    * command receipt). The head and applied receipt commit together before ACK.
    * Retrying after a crash uses the same event id; domain actions must therefore
@@ -287,6 +322,7 @@ export class DeviceEventStorage {
   async markApplied(event: ChatEventEnvelope, outcome: DeviceEventApplyOutcome, at: string): Promise<DeviceEventReceipt> {
     requireOutcome(outcome);
     await this.database.init();
+    if (event.logScopeId === CHAT_ACTION_LOG_SCOPE) return this.markActionApplied(event, outcome, at);
     const rows = await this.database.query<DeviceEventReceipt>(durable(`
       begin immediate;
       insert into device_event_applied_heads(origin_id, log_scope_id, origin_seq, event_hash)
@@ -400,17 +436,25 @@ export class DeviceEventStorage {
   }
 
   /** Repair only history this peer was already a recipient of, including ACKed
-   * events after mailbox expiry. A repair request is not an access grant. */
+   * events after mailbox expiry. A repair request is not an access grant.
+   *
+   * The chat-action log is the one exception, and not a widening: it is one
+   * log for every machine in the roster, published to all of them, so a
+   * machine enrolled after a decision was made is a recipient of it. Without
+   * this it would sit behind a gap it can never close, and no action would
+   * ever apply there. The rows it is served are recorded as deliveries, so
+   * retention still waits for its acknowledgement.
+   */
   async repair(channelId: string, deviceId: string, gap: DeviceEventGap): Promise<ChatEventEnvelope[]> {
     requireCursor(gap.fromSeq);
     requireCursor(gap.toSeq);
     if (gap.fromSeq < 1 || gap.toSeq < gap.fromSeq) throw new Error("Invalid device event repair range.");
     await this.database.init();
+    const broadcast = gap.logScopeId === CHAT_ACTION_LOG_SCOPE;
     const rows = await this.database.query<{ envelope: string }>(`
       with candidates as (
-      select e.envelope_json as envelope, e.origin_seq from device_event_outbox o join chat_events e on e.event_id = o.event_id
-      where o.channel_id = ${quote(channelId)} and o.device_id = ${quote(deviceId)}
-        and e.origin_id = ${quote(gap.originId)} and e.log_scope_id = ${quote(gap.logScopeId)}
+      select e.envelope_json as envelope, e.origin_seq from ${broadcast ? "chat_events e" : `device_event_outbox o join chat_events e on e.event_id = o.event_id`}
+      where ${broadcast ? "" : `o.channel_id = ${quote(channelId)} and o.device_id = ${quote(deviceId)} and `}e.origin_id = ${quote(gap.originId)} and e.log_scope_id = ${quote(gap.logScopeId)}
         and e.origin_seq between ${gap.fromSeq} and ${Math.min(gap.toSeq, gap.fromSeq + DEVICE_EVENT_PAGE_COUNT - 1)}
       order by e.origin_seq
       ), page as (
@@ -418,7 +462,11 @@ export class DeviceEventStorage {
           row_number() over (order by origin_seq) as ordinal from candidates
       ) select envelope from page where bytes <= ${DEVICE_EVENT_PAGE_BYTES} or ordinal = 1 order by ordinal;
     `);
-    return rows.map((row) => JSON.parse(row.envelope) as ChatEventEnvelope);
+    const events = rows.map((row) => JSON.parse(row.envelope) as ChatEventEnvelope);
+    if (broadcast && events.length) {
+      await this.database.execute(deviceEventAppendSql(events, { recipients: [{ deviceId, channelId }] }));
+    }
+    return events;
   }
 }
 
