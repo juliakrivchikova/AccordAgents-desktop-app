@@ -125,7 +125,14 @@ export class MachinePeerFabric {
       if (!wanted.has(deviceId) || stableJson(wanted.get(deviceId)) !== stableJson(connection.peer)) {
         connection.channel.close();
         this.connections.delete(deviceId);
-        this.options.logger("machine-host.trust.peer-removed", { deviceId });
+        // A device taken off the roster stops being owed the room's history.
+        // Leaving its rows in place would keep re-offering them on every
+        // reconnect and serving them from the mailbox to a device the owner
+        // has revoked. Nothing the remaining devices are owed is touched.
+        const forgotten = wanted.has(deviceId) ? 0 : await this.options.storage.deviceEvents()
+          .forgetRecipient(this.channelIdFor(connection.peer), deviceId)
+          .catch(() => 0);
+        this.options.logger("machine-host.trust.peer-removed", { deviceId, forgotten });
       }
     }
     for (const [key, client] of this.rooms) {

@@ -445,6 +445,24 @@ export class DeviceEventStorage {
     `))[0]?.shared ?? 0;
   }
 
+  /**
+   * Stops holding anything for a device the owner has taken off the roster.
+   *
+   * Revoking a device ends its authority at once. What it does not end by
+   * itself is this side still carrying that device's share of the room: rows
+   * addressed to it, re-offered on every reconnect and served from the
+   * mailbox, which is retained traffic for a device that is no longer trusted.
+   * Retention for the devices that remain is untouched; only this one's claim
+   * on the room's history goes.
+   */
+  async forgetRecipient(channelId: string, deviceId: string): Promise<number> {
+    await this.database.init();
+    const rows = await this.database.query<{ eventId: string }>(durable(`
+      delete from device_event_outbox where channel_id = ${quote(channelId)} and device_id = ${quote(deviceId)}
+      returning event_id as eventId;`));
+    return rows.length;
+  }
+
   async pressure(channelId: string): Promise<{ events: number; bytes: number; recipients: number }> {
     await this.database.init();
     return (await this.database.query<{ events: number; bytes: number; recipients: number }>(`

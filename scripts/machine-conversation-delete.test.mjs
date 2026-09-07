@@ -267,3 +267,41 @@ test("a device trusted after a result was published still receives it", async (t
   assert.ok(owedAfter.recipients > owedBefore.recipients,
     `the newly trusted device is owed what the room already held (${owedBefore.recipients} -> ${owedAfter.recipients})`);
 });
+
+test("a device taken off the roster stops being owed the room's history", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-revoke-"));
+  const box = await machine(dir);
+  t.after(async () => { await box.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5 }); });
+
+  await box.deliver({ type: "machine.conversation.sync", conversation: conversation() });
+  const phoneIdentity = await phone.createIdentity();
+  const peer = {
+    deviceId: phoneIdentity.deviceId, publicKeyDerBase64: phoneIdentity.publicKeyDerBase64,
+    role: "phone", name: "Phone", relayUrl: box.pairing.relayUrl, rendezvousId: box.pairing.rendezvousId,
+    relaySealKeyBase64: box.pairing.relaySealKeyBase64, fingerprint: box.pairing.fingerprint
+  };
+  await box.trust([peer]);
+
+  box.host.noteConversationSnapshot({
+    ...conversation(),
+    metadata: {
+      participants: [PARTICIPANT],
+      pendingAppToolApprovals: [{ id: "approval-revoke", status: "pending", summary: "Write a file",
+        requesterHandle: "one", createdAt: new Date().toISOString() }]
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  const events = box.storage.deviceEvents();
+  const owedToPhone = async () => (await events.listPending(box.pairing.rendezvousId, 0, phoneIdentity.deviceId)).length;
+  assert.ok(await owedToPhone() > 0, "while trusted, the phone is owed what the room published");
+
+  // The owner removes it. Its authority ends at once, and so does its claim on
+  // what this machine is holding for it.
+  await box.trust([]);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(await owedToPhone(), 0,
+    "a revoked device is not re-offered the room's history on every reconnect");
+  // What the enrolling desktop is owed is untouched.
+  const owedToDesktop = await events.listPending(box.pairing.rendezvousId, 0, box.desktop.originId);
+  assert.ok(owedToDesktop.length > 0, "revoking one device does not discard another's retention");
+});
