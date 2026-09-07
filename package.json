@@ -1,7 +1,7 @@
 {
   "name": "accordagents",
   "productName": "AccordAgents",
-  "version": "1.10.4-beta.2",
+  "version": "1.10.4-beta.4",
   "private": true,
   "description": "Desktop app for multi-participant AI chat that debates a question or code diff and converges on a consensus answer.",
   "author": "Iuliia Svetlichnaia",
@@ -21,6 +21,7 @@
     "make": "npm run build && electron-forge make",
     "make:mac-arm64": "npm run make -- --platform=darwin --arch=arm64",
     "make:win-x64": "npm run make -- --platform=win32 --arch=x64",
+    "test:packaging-boundary": "node --test scripts/packaging-boundary.test.mjs",
     "test:packaged-contents": "npm run build:renderer-tests && npm run package -- --platform=win32 --arch=x64 && node --test scripts/packaged-app-contents.test.mjs",
     "signed:mac-arm64": "node scripts/signed-mac-arm64.mjs",
     "start": "npm run build && electron .",
@@ -93,7 +94,9 @@
     "bump:major": "node scripts/bump-version.mjs major",
     "tag-release": "node scripts/tag-release.mjs",
     "test:device-events": "npm run build:main && node --test dist/main/main/services/deviceEventStorage.test.js dist/main/main/services/deviceEventChannel.test.js dist/main/main/services/deviceEventMailbox.test.js",
-    "test:native-execution": "npm run build:main && node --test dist/main/main/services/nativeCommandStore.test.js dist/main/main/services/nativeProcess.test.js dist/main/main/services/machineApprovalExecutor.test.js scripts/machine-command.test.mjs"
+    "test:native-execution": "npm run build:main && node --test dist/main/main/services/nativeCommandStore.test.js dist/main/main/services/nativeProcess.test.js dist/main/main/services/machineApprovalExecutor.test.js scripts/machine-command.test.mjs",
+    "test:worker-relay": "npm run build:main && node --test scripts/worker-relay-chat-read.test.mjs",
+    "test:avatar-studio": "npm run build:main && node --require ./scripts/electron-stub.cjs --test dist/main/main/services/avatarStudio.test.js dist/main/main/services/settings.customAvatars.test.js && npm run build:renderer-tests && node --test --test-force-exit --import ./scripts/renderer-jsdom-setup.mjs dist/renderer-tests/renderer/components/avatar/avatar-studio-dialog.test.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-ec2": "^3.1079.0",

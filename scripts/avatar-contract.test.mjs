@@ -16,6 +16,7 @@ const avatarCssFiles = [
   "src/renderer/styles/views/visual-normalization.css",
   "src/renderer/styles/views/token-overrides.css",
   "src/renderer/styles/views/chat-setup.css",
+  "src/renderer/styles/views/avatar-studio.css",
   "src/renderer/styles/views/settings-participants.css",
   "src/renderer/styles/views/settings-roles.css",
   "src/renderer/styles/views/settings-rules.css"

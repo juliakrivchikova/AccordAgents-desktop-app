@@ -8,6 +8,7 @@ const outdir = path.join(process.cwd(), "dist", "renderer-tests");
 await mkdir(outdir, { recursive: true });
 await build({
   entryPoints: [
+    "renderer/components/avatar/avatar-studio-dialog.test.tsx",
     "renderer/components/chat/chat-composer-mention-token.test.ts",
     "renderer/components/chat/chat-composer-plugin-token.test.ts",
     "renderer/components/artifacts/artifact-drafts.test.tsx",

@@ -27,18 +27,6 @@ const hasNotarizeCredentials = Boolean(
 );
 const looseResourceSignSkipPattern = /\.(?:asar|bin|dat|icns|nib|pak)$/i;
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function ignoredRootDirectory(name: string): RegExp {
-  return new RegExp(`^/${escapeRegExp(name)}(?:/|$)`);
-}
-
-function ignoredRootFile(name: string): RegExp {
-  return new RegExp(`^/${escapeRegExp(name)}$`);
-}
-
 function shouldSkipLooseResourceSigning(filePath: string): boolean {
   return looseResourceSignSkipPattern.test(filePath);
 }
@@ -92,38 +80,9 @@ const config = {
       LSMinimumSystemVersion: "13.0"
     },
     ignore: [
-      ignoredRootDirectory(".claude"),
-      ignoredRootDirectory(".codex"),
-      ignoredRootDirectory(".github"),
-      ignoredRootDirectory(".gstack"),
-      ignoredRootDirectory(".history"),
-      ignoredRootDirectory(".idea"),
-      ignoredRootDirectory("assets"),
-      ignoredRootDirectory("brand-research"),
-      ignoredRootDirectory("docs"),
-      ignoredRootDirectory("lib"),
-      ignoredRootDirectory("out"),
-      ignoredRootDirectory("screenshots"),
-      ignoredRootDirectory("scripts"),
-      ignoredRootDirectory("signed"),
-      ignoredRootDirectory("src"),
-      ignoredRootFile(".env.local"),
-      ignoredRootFile(".env.local.example"),
-      ignoredRootFile(".gitignore"),
-      ignoredRootFile("AGENTS.md"),
-      ignoredRootFile("CLAUDE.md"),
-      ignoredRootFile("Makefile"),
-      ignoredRootFile("components.json"),
-      ignoredRootFile("entitlements.mac.inherit.plist"),
-      ignoredRootFile("entitlements.mac.plist"),
-      ignoredRootFile("forge.config.ts"),
-      ignoredRootFile("index.html"),
-      ignoredRootFile("package-lock.json"),
-      ignoredRootFile("tsconfig.json"),
-      ignoredRootFile("tsconfig.main.json"),
-      ignoredRootFile("tsconfig.renderer.json"),
-      ignoredRootFile("vite.config.mts"),
-      ...(process.platform === "win32" ? [] : [ignoredRootDirectory("node_modules/node-pty")]),
+      // Only runtime roots belong in the app; local worktrees and data must never ship.
+      /^\/(?!(?:dist|node_modules)(?:\/|$)|package\.json$).+/,
+      ...(process.platform === "win32" ? [] : [/^\/node_modules\/node-pty(?:\/|$)/]),
       // Shipped as a loose resource instead (machinePayloadPath); keeping it in
       // the asar as well would ship the same 6 MB twice and still be unusable.
       /^\/dist\/machine(?:\/|$)/,

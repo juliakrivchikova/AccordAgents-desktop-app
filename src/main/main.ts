@@ -1,6 +1,7 @@
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
 import type {
   AddChatParticipantRequest,
   AgentDetectionRequest,
@@ -156,6 +157,7 @@ import {
   sealMailboxEventPayloads
 } from "./services/mailboxAccess";
 import { AppSkillsService } from "./services/appSkills";
+import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { bootstrapAppUpdater } from "./services/appUpdater";
 import { CommandError, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
@@ -482,6 +484,20 @@ chatService.setConversationDeletedHandler(async (conversation) => {
   sendToMainWindow("conversations:deleted", conversation.id);
   await machineLinkService?.deleteConversationOnMachines(conversation);
 });
+const avatarStudioService = new AvatarStudioService({
+  cliRunner: cliAgentRunner,
+  workRoot: path.join(app.getPath("userData"), "avatar-studio"),
+  promptRoot: path.join(__dirname, "prompts"),
+  debugLogs: debugLogService
+});
+
+// Scratch pictures never outlive the app: sweep whatever an earlier session left
+// behind, and cancel live draws on quit.
+void avatarStudioService.shutdown();
+app.on("before-quit", () => {
+  void avatarStudioService.shutdown();
+});
+
 const dispatchArtifactTool = createArtifactToolDispatcher(artifactService);
 wireArtifactToolHandler(appMcpService, chatService, dispatchArtifactTool);
 // Applies chat actions that arrive from a machine. Emitting an action is half
@@ -2235,6 +2251,11 @@ function registerIpc(): void {
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
   ipcMain.handle("settings:archive-chat-role", (_event, id: string) => settingsService.archiveChatRoleConfig(id));
   ipcMain.handle("settings:save-chat-behavior-rule", (_event, update: ChatBehaviorRuleConfigUpdate) => settingsService.saveChatBehaviorRuleConfig(update));
+  ipcMain.handle("avatar-studio:run-turn", (_event, request: AvatarStudioTurnRequest) => avatarStudioService.runTurn(request));
+  ipcMain.handle("avatar-studio:cancel", (_event, studioId: string) => avatarStudioService.cancel(studioId));
+  ipcMain.handle("avatar-studio:close", (_event, studioId: string) => avatarStudioService.closeStudio(studioId));
+  ipcMain.handle("settings:save-custom-avatar", (_event, request: SaveCustomAvatarRequest) => settingsService.saveCustomAvatar(request));
+  ipcMain.handle("settings:read-custom-avatar", (_event, id: string) => settingsService.readCustomAvatar(id));
   ipcMain.handle("settings:delete-chat-behavior-rule", async (_event, id: string) => {
     const nextSettings = await settingsService.deleteChatBehaviorRuleConfig(id);
     await chatService.removeBehaviorRuleFromChatParticipants(id);

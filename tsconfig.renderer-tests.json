@@ -9,6 +9,7 @@
     "types": ["node", "vite/client"]
   },
   "include": [
+    "src/renderer/components/avatar/avatar-studio-dialog.test.tsx",
     "src/renderer/components/chat/chat-active-run-popover.test.tsx",
     "src/renderer/components/chat/chat-composer-mention-token.test.ts",
     "src/renderer/components/chat/chat-composer-plugin-token.test.ts",

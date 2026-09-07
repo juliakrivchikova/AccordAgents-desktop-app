@@ -416,6 +416,14 @@ export interface ChatPromptContextSettings {
   timeline: ChatPromptContextScopeSettings;
 }
 
+import type {
+  AvatarStudioTurnRequest,
+  AvatarStudioTurnResult,
+  CustomAvatarSummary,
+  ReadCustomAvatarResult,
+  SaveCustomAvatarRequest
+} from "./avatarStudio";
+
 export interface AppSettings {
   roundLimitDefault: number;
   betaUpdates: boolean;
@@ -431,6 +439,7 @@ export interface AppSettings {
   chatBehaviorRules: ChatBehaviorRuleConfig[];
   chatSavedPrompts: ChatSavedPromptConfig[];
   chatParticipantConfigs: ChatParticipantConfig[];
+  chatCustomAvatars: CustomAvatarSummary[];
   chatParticipantSeedState?: ChatParticipantSeedState;
   assistantProviderKind?: ChatProviderKind;
   lastSuccessfulChatProviderKind?: ChatProviderKind;
@@ -707,7 +716,7 @@ export interface AgentContextUsage {
 
 export type ChatAgentMode = "default" | "plan" | "auto";
 
-export type ChatReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ChatReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export type ChatParticipantRequestPermission = "ask" | "allow" | "deny";
 
@@ -2247,6 +2256,11 @@ export interface ChatActivityParticipantSummary {
 export interface ChatActivityTarget {
   runId?: string;
   messageId?: string;
+  /**
+   * The message is only a navigation anchor picked as a fallback, not a message this row is
+   * actually about. Such a row must not claim that message against another row that is.
+   */
+  messageIsApproximate?: boolean;
   sourceMessageId?: string;
   threadRootId?: string;
   approvalId?: string;
@@ -2267,6 +2281,8 @@ export interface ChatActivityItem {
   preview: string;
   createdAt: string;
   updatedAt: string;
+  /** Finished updates from one member in one chat share a row; how many that row stands for. */
+  groupedCount?: number;
   participant?: ChatActivityParticipantSummary;
   target: ChatActivityTarget;
 }
@@ -2277,6 +2293,10 @@ export interface ListChatActivityRequest {
   recentWindowDays?: number;
   lastViewedAtByConversationId?: Record<string, string>;
   excludedItemIds?: string[];
+  /** Per chat and member "cleared through" timestamps, so cleared updates stay cleared and uncounted. */
+  clearedRecentThroughByGroup?: Record<string, string>;
+  /** Frozen cutoff inherited from the pre-per-group clear state. */
+  clearedRecentThroughBefore?: string;
 }
 
 export interface ListChatActivityResult {
@@ -2665,6 +2685,11 @@ export interface AppBridge {
   saveChatSavedPromptConfig(update: ChatSavedPromptConfigUpdate): Promise<AppSettings>;
   deleteChatSavedPromptConfig(id: string): Promise<AppSettings>;
   saveChatParticipantConfig(update: ChatParticipantConfigUpdate): Promise<AppSettings>;
+  runAvatarStudioTurn(request: AvatarStudioTurnRequest): Promise<AvatarStudioTurnResult>;
+  cancelAvatarStudioTurn(studioId: string): Promise<void>;
+  closeAvatarStudio(studioId: string): Promise<void>;
+  saveCustomAvatar(request: SaveCustomAvatarRequest): Promise<AppSettings>;
+  readCustomAvatar(id: string): Promise<ReadCustomAvatarResult>;
   deleteChatParticipantConfig(id: string): Promise<AppSettings>;
   updateLastRepoPath(repoPath: string): Promise<AppSettings>;
   listProviderModels(kind: ProviderKind): Promise<ProviderModelCatalog>;

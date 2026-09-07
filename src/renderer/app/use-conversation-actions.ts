@@ -91,9 +91,16 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setActivityLoading(true);
     state.setActivityError(undefined);
     try {
+      const activityPreferences = state.activityItemPreferencesRef.current;
       const result = await window.consensus.listChatActivity({
         lastViewedAtByConversationId: state.lastViewedAtRef.current,
-        excludedItemIds: [...state.activityItemPreferencesRef.current.clearedItemIds]
+        excludedItemIds: [...activityPreferences.clearedItemIds],
+        ...(activityPreferences.clearedRecentThroughByGroup
+          ? { clearedRecentThroughByGroup: activityPreferences.clearedRecentThroughByGroup }
+          : {}),
+        ...(activityPreferences.clearedRecentThroughBefore
+          ? { clearedRecentThroughBefore: activityPreferences.clearedRecentThroughBefore }
+          : {})
       });
       if (requestId !== state.activityRefreshRequestRef.current) {
         return;

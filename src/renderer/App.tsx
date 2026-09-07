@@ -42,6 +42,7 @@ import { useReviewDecisionActions } from "./app/use-review-decision-actions";
 import { useReviewPlanActions } from "./app/use-review-plan-actions";
 import { useSettingsActions } from "./app/use-settings-actions";
 import { useAppViewModel } from "./app/use-app-view-model";
+import { useCustomAvatarLibrary } from "./components/avatar/custom-avatars";
 import { useChatSearch } from "./app/use-chat-search";
 import { AppNotices } from "./app/app-notices";
 import { pluginNewChatDraft, pluginNewChatMentions } from "./app/plugin-new-chat";
@@ -52,6 +53,9 @@ import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
 import "./styles/app.css";
 function App(): JSX.Element {
   const state = useAppState();
+  // Drawn avatars live as files in userData; loading them here is what makes a
+  // member's own picture appear in the timeline and the roster after a restart.
+  useCustomAvatarLibrary(state.settings.chatCustomAvatars);
   const [searchOpen, setSearchOpen] = React.useState(false);
   const conversationActions = useConversationActions(state);
   const chatSearch = useChatSearch(searchOpen);

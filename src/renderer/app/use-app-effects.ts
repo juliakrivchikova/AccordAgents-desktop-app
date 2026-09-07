@@ -188,7 +188,8 @@ export function useAppEffects(
           state,
           buildChatActivityItemsForConversationUpdate(updated, {
             lastViewedAt: state.lastViewedAtRef.current[update.id],
-            treatAsViewed: viewedLive
+            treatAsViewed: viewedLive,
+            preferences: state.activityItemPreferencesRef.current
           })
         );
         const knownMessageIds = new Set(updated.messages.map((message) => message.id));

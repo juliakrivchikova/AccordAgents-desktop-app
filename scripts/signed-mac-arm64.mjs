@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { verifyRuntimeArchive, verifyUpdaterZip } from "./packaging-boundary.mjs";
 
 const rootDir = process.cwd();
 const envPath = path.join(rootDir, ".env.local");
@@ -345,6 +346,7 @@ function createSignedZip() {
     fail(`Expected signed ZIP was not created: ${signedZipPath}`);
   }
 
+  verifyUpdaterZip(signedZipPath);
   const checksumPath = writeChecksum(signedZipPath);
   return { signedZipPath, checksumPath };
 }
@@ -366,6 +368,7 @@ log("Building macOS arm64 distributables with Electron Forge");
 run("npm", ["run", "make", "--", "--platform=darwin", "--arch=arm64"]);
 
 log("Verifying signed and notarized app bundle");
+verifyRuntimeArchive(path.join(appPath, "Contents", "Resources", "app.asar"));
 verifySignedApp();
 
 log("Creating signed ZIP for macOS auto-updates");
