@@ -1,10 +1,13 @@
 (function () {
   const DB_NAME = "accordagents-mobile-control";
-  const DB_VERSION = 3;
+  const DB_VERSION = 4;
   const META_STORE = "meta";
   const SEALED_STORE = "sealedEnvelopes";
   const MAILBOX_ACCESS_META_KEY = "mailboxAccess";
   const OUTBOX_STORE = "outbox";
+  // W: this device's own durable event log. The phone is an emitter, not a
+  // remote control, so what it did has to survive being closed mid-action.
+  const EVENT_STORE = "events";
   const TIMELINE_STORE = "timeline";
   const PAIRING_KEY = "accordagents.mobile.pairing.v1";
   const ACTIVE_CONVERSATION_KEY = "accordagents.mobile.activeConversationId.v1";
@@ -534,6 +537,11 @@
         if (!db.objectStoreNames.contains(SEALED_STORE)) {
           db.createObjectStore(SEALED_STORE, { keyPath: "eventId" });
         }
+        if (!db.objectStoreNames.contains(EVENT_STORE)) {
+          const store = db.createObjectStore(EVENT_STORE, { keyPath: "eventId" });
+          store.createIndex("origin", ["originId", "logScopeId", "originSeq"], { unique: false });
+          store.createIndex("conversationId", "conversationId", { unique: false });
+        }
       };
       request.onerror = function () {
         reject(request.error || new Error("IndexedDB open failed."));
@@ -542,6 +550,55 @@
         resolve(request.result);
       };
     });
+  }
+
+  /**
+   * One IndexedDB transaction across several stores, for the durable event log.
+   * The action and its outgoing record are written inside it, so a failed queue
+   * write leaves no event either: an action no peer will ever hear about is
+   * worse than one the User can retry.
+   */
+  function eventLogPort() {
+    return {
+      runAtomic: function (names, work) {
+        return openDb().then(function (db) {
+          return new Promise(function (resolve, reject) {
+            const tx = db.transaction(names, "readwrite");
+            const stores = {};
+            names.forEach(function (name) { stores[name] = tx.objectStore(name); });
+            let value;
+            let failed;
+            tx.onerror = function () { reject(failed || tx.error || new Error("Event log transaction failed.")); };
+            tx.onabort = function () { reject(failed || tx.error || new Error("Event log transaction aborted.")); };
+            tx.oncomplete = function () { resolve(value); db.close(); };
+            const handle = {
+              get: function (name, key) { return requestToPromise(stores[name].get(key)); },
+              getAll: function (name) { return requestToPromise(stores[name].getAll()); },
+              put: function (name, entry) { return requestToPromise(stores[name].put(entry)); },
+              remove: function (name, key) { return requestToPromise(stores[name].delete(key)); }
+            };
+            Promise.resolve()
+              .then(function () { return work(handle); })
+              .then(function (result) { value = result; })
+              .catch(function (error) { failed = error; try { tx.abort(); } catch (abortError) { reject(error); } });
+          });
+        });
+      }
+    };
+  }
+
+  let activeEventLog;
+  /** This device's durable log. Built once the pairing is known, because the
+   *  origin id has to be stable across reloads for its sequence to continue. */
+  function eventLog(originId) {
+    if (!originId || !self.AccordMobileEventLog) return undefined;
+    if (!activeEventLog || activeEventLog.originId !== originId) {
+      activeEventLog = {
+        originId: originId,
+        log: self.AccordMobileEventLog.createMobileEventLog({ port: eventLogPort(), originId: originId })
+      };
+    }
+    return activeEventLog.log;
   }
 
   function withOutbox(mode, fn) {

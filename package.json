@@ -43,7 +43,7 @@
     "qa:mobile-scroll": "npm run build:mobile && node scripts/qa-mobile-scroll.mjs",
     "qa:mobile-pairing": "npm run build:mobile && node scripts/qa-mobile-pairing.mjs",
     "qa:mobile-push-staging": "node scripts/qa-mobile-push-staging.mjs",
-    "test:mobile-shell": "node --test scripts/mobile-shell-contract.test.mjs scripts/mailbox-crypto-contract.test.mjs",
+    "test:mobile-shell": "node --test scripts/mobile-event-log.test.mjs scripts/mobile-shell-contract.test.mjs scripts/mailbox-crypto-contract.test.mjs",
     "test:mobile-timeline": "npm run build:mobile && node --test --test-timeout 180000 scripts/mobile-inprogress-row.test.mjs scripts/mobile-placeholder-corpse.test.mjs scripts/mobile-pairing-hygiene.test.mjs scripts/mobile-push-unavailable.test.mjs scripts/mobile-csp-webkit.test.mjs scripts/mobile-mention-shortcut.test.mjs",
     "test:mobile-e2e": "npm run build:main && npm run build:mobile && node --test --test-timeout 240000 scripts/mobile-e2e-live.test.mjs scripts/mobile-e2e-phone-turn.test.mjs",
     "test:mobile-control": "npm run build:main && node --test --test-timeout 120000 dist/main/main/services/mobilePairing.test.js dist/main/main/services/mailboxAccess.test.js dist/main/main/services/mobileRelayControl.test.js dist/main/main/services/mobileMailboxRunner.test.js dist/main/main/services/mobileMailboxOutbox.test.js dist/main/main/services/chatDeviceCapabilities.test.js dist/main/main/services/mobilePush.test.js dist/main/main/services/mobileProgressEnvelopeTracker.test.js && npm run test:mobile-shell",
