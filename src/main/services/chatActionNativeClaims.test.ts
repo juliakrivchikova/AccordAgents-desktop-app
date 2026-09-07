@@ -253,3 +253,29 @@ test("a receipt that cannot be written does not make the answer repeatable", asy
     assert.match(again.detail ?? "", /not repeated/);
   } finally { await held.cleanup(); }
 });
+
+test("an answer whose request names no member is kept, not called already answered", async () => {
+  const held = await box();
+  try {
+    const anonymous = {
+      ...held.conversation,
+      messages: [{ ...held.conversation.messages[0], participantId: undefined }]
+    } as unknown as Conversation;
+    const effects = createChatActionEffects({
+      chat: {
+        respondToAppToolApproval: async () => anonymous,
+        respondToChoice: async () => { held.answered.push("claimed-against-nobody"); },
+        cancelRun: () => true,
+        conversationIdForRun: () => CONVERSATION
+      },
+      emitter: { beginExecution: async () => true, recordExecution: async () => undefined },
+      storage: { getConversation: async () => anonymous },
+      nativeClaims: createNativeTargetClaims({ storage: held.storage, runtimeIdentity: async () => ({ runtimeId: "r", pid: 1, startedAt: "s" }) })
+    });
+    const result = await new ChatActionApplier({ effects }).apply(await held.answer("a"));
+    assert.equal(result.status, "deferred");
+    assert.doesNotMatch(result.detail ?? "", /already acted on/,
+      "not knowing who to claim against is not the same as it having been answered");
+    assert.deepEqual(held.answered, []);
+  } finally { await held.cleanup(); }
+});

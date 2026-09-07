@@ -105,7 +105,10 @@ export function createChatActionEffects(deps: {
       const conversation = await deps.storage.getConversation(event.conversationId);
       const message = (conversation?.messages ?? []).find((item) => item.metadata?.pendingChoice?.id === choice[1]);
       const participantId = message?.participantId ?? "";
-      if (!participantId) return false;
+      // Not knowing whose request this is means not being able to claim it.
+      // Returning false here would tell the User it had already been acted on,
+      // which is a different and untrue thing.
+      if (!participantId) throw new Error("This answer's request has no member to claim it against.");
       const outcome = await deps.nativeClaims.claimTarget(event, targetKey, participantId);
       if (outcome === "taken") return true;
       if (outcome === "uncertain") return { uncertain: true,
