@@ -120,6 +120,19 @@ export interface TrustedDeviceRecord {
   role: TrustedPeerRole;
   name: string;
   addedAt: string;
+  /**
+   * The key this device's own frames are sealed with.
+   *
+   * Every trusted device used to be handed the machine room's single seal key,
+   * so removing one from the roster ended its authority and left it able to
+   * read everything the others were sent. A key per device means a revoked
+   * device never held the others' in the first place: there is nothing to
+   * rotate, and no device that stayed has to do anything.
+   *
+   * Optional only for records written before this existed; those are given one
+   * the next time they are read.
+   */
+  channelSealKeyBase64?: string;
 }
 
 export function isTrustedDeviceRecord(value: unknown): value is TrustedDeviceRecord {

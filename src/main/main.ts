@@ -984,8 +984,12 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
         await debugLogService.write("mobile.device.identity", { deviceId: identity.deviceId });
       },
       // Where the phone can reach each machine directly.
-      machineAccess: async () => {
+      machineAccess: async (deviceId?: string) => {
         const machines = await settingsService.listMachines();
+        const trusted = deviceId
+          ? (await settingsService.listTrustedDevices()).find((device) => device.deviceId === deviceId)
+          : undefined;
+        const phoneChannelKey = trusted?.channelSealKeyBase64;
         const access = [];
         for (const machine of machines) {
           const machinePairing = await settingsService.getMachinePairing(machine.pairingKey);
@@ -998,7 +1002,10 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
             publicKeyDerBase64,
             relayUrl: machinePairing.relayUrl,
             rendezvousId: machinePairing.rendezvousId,
-            relaySealKeyBase64: machinePairing.relaySealKeyBase64,
+            // The phone's own key for this room, handed over the same way its
+            // access always was. A device the User later revokes cannot read
+            // what this one is sent, because it never had this key.
+            relaySealKeyBase64: phoneChannelKey ?? machinePairing.relaySealKeyBase64,
             fingerprint: machinePairing.fingerprint,
             ...(machinePairing.outboxUrl ? { outboxUrl: machinePairing.outboxUrl } : {})
           });
@@ -3063,7 +3070,10 @@ void app.whenReady().then(async () => {
         name: device.name,
         relayUrl: room.relayUrl,
         rendezvousId: room.rendezvousId,
-        relaySealKeyBase64: room.relaySealKeyBase64,
+        // This device's own key, not the room's. Every trusted device used to
+        // be handed the same one, so taking a device off the roster ended its
+        // authority and left it reading everything the others were sent.
+        relaySealKeyBase64: device.channelSealKeyBase64 ?? room.relaySealKeyBase64,
         fingerprint: room.fingerprint
       }))
     });

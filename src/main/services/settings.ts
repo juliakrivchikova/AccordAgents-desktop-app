@@ -1,5 +1,5 @@
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { hostPlatform, userDataPath } from "../platform";
 import type { MachineRecord, MachineSettingsSnapshot } from "../../shared/machineLink";
@@ -3186,7 +3186,17 @@ export class SettingsService {
   async listTrustedDevices(): Promise<TrustedDeviceRecord[]> {
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
-    return (stored.trustedDevices ?? []).filter(isTrustedDeviceRecord).map((record) => ({ ...record }));
+    const records = (stored.trustedDevices ?? []).filter(isTrustedDeviceRecord);
+    // A device trusted before keys were per device gets one now, once, and
+    // keeps it. Without this an old record would keep sharing the room key,
+    // which is the thing a revoked device must not still be holding.
+    const missing = records.filter((record) => !record.channelSealKeyBase64);
+    if (missing.length) {
+      for (const record of missing) record.channelSealKeyBase64 = randomBytes(32).toString("base64url");
+      stored.trustedDevices = records;
+      await this.writeStored(stored, true);
+    }
+    return records.map((record) => ({ ...record }));
   }
 
   /**
@@ -3203,8 +3213,14 @@ export class SettingsService {
     }
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
+    const previous = (stored.trustedDevices ?? []).find((entry) => entry.deviceId === record.deviceId);
     const records = (stored.trustedDevices ?? []).filter((entry) => entry.deviceId !== record.deviceId);
-    records.push({ ...record });
+    // Re-trusting the same device keeps its key, so re-announcing an identity
+    // does not lock a working device out of what it is already reading.
+    records.push({
+      ...record,
+      channelSealKeyBase64: record.channelSealKeyBase64 ?? previous?.channelSealKeyBase64 ?? randomBytes(32).toString("base64url")
+    });
     stored.trustedDevices = records;
     await this.writeStored(stored, true);
     return records.map((entry) => ({ ...entry }));

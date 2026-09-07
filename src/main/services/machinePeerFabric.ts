@@ -241,6 +241,33 @@ export class MachinePeerFabric {
   }
 
   /**
+   * Opens a frame from the machine's own room, trying each trusted device's
+   * key and then the room's.
+   *
+   * Outbound sealing is per device, so a revoked device cannot read what the
+   * others are sent. Inbound has to accept whichever key the sender holds:
+   * a device that has not yet picked up its own key is still one of the
+   * owner's, and refusing it would lock a working device out rather than
+   * revoke a removed one. Authority is decided by the roster and the
+   * signatures, not by which key opened the envelope.
+   */
+  async openHomeFrame(ciphertext: string, roomKeyBase64: string): Promise<DeviceEventPacket | undefined> {
+    const keys = [roomKeyBase64, ...[...this.connections.values()]
+      .map((connection) => connection.peer.relaySealKeyBase64)
+      .filter((key): key is string => Boolean(key))];
+    for (const key of new Set(keys)) {
+      try {
+        const payload = await openMobileRelayPayload<unknown>(ciphertext, key);
+        if (isDeviceEventPacket(payload)) return payload;
+        return undefined;
+      } catch {
+        // Sealed for someone else, or with a key this machine no longer holds.
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * The room two devices meet in, decided the same way on both sides.
    *
    * A controller (a desktop, the phone) comes to this machine, so they meet
@@ -260,7 +287,11 @@ export class MachinePeerFabric {
       ? {
         rendezvousId: this.options.home.rendezvousId,
         relayUrl: this.options.home.relayUrl ?? peer.relayUrl,
-        sealKeyBase64: this.options.home.relaySealKeyBase64,
+        // The device's own key, not the room's. The room is shared because the
+        // relay is a room; the sealing is not, so a device the owner revokes
+        // cannot read what the devices that stayed are sent. Falls back to the
+        // room key only for a peer enrolled before keys were per device.
+        sealKeyBase64: peer.relaySealKeyBase64 || this.options.home.relaySealKeyBase64,
         fingerprint: this.options.home.fingerprint,
         here: true
       }

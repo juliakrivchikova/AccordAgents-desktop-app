@@ -26,7 +26,7 @@ export interface MobileRelayControlOptions {
    *  by the desktop and named to the machines in their trust roster. */
   onPhoneIdentity?: (identity: { deviceId: string; publicKeyDerBase64: string; name: string }) => Promise<void>;
   /** The machines this phone may command, with the way into each room. */
-  machineAccess?: () => Promise<Array<{
+  machineAccess?: (deviceId?: string) => Promise<Array<{
     machineId: string;
     name: string;
     deviceId: string;
@@ -544,16 +544,17 @@ export class MobileRelayControlService {
       // The phone has a signing key of its own now. Registering it is what
       // lets a machine accept a command from the phone with this desktop
       // closed; it is stored on this desktop and named to the machines.
+      this.lastPhoneDeviceId = payload.deviceId;
       await this.options.onPhoneIdentity?.({
         deviceId: payload.deviceId,
         publicKeyDerBase64: payload.publicKeyDerBase64,
         name: payload.name?.trim() || "Phone"
       });
-      await this.sendMachineAccess(`${message.logicalMessageId}:machines`);
+      await this.sendMachineAccess(`${message.logicalMessageId}:machines`, payload.deviceId);
       return;
     }
     if (isMobileMachineAccessRequest(payload)) {
-      await this.sendMachineAccess(`${message.logicalMessageId}:machines`);
+      await this.sendMachineAccess(`${message.logicalMessageId}:machines`, this.lastPhoneDeviceId);
       return;
     }
     const accepted = await this.prepareMobileOutboxRequest(assertMobileOutboxRequest(payload));
@@ -570,9 +571,16 @@ export class MobileRelayControlService {
 
   /** The machines this phone may command, and the way into each of their
    *  rooms. Sent after the phone registers its key and on request. */
-  private async sendMachineAccess(logicalMessageId: string): Promise<void> {
+  /** The device that last announced its signing key on this pairing. Its
+   *  machine access is its own, so a later request is answered for it. */
+  private lastPhoneDeviceId?: string;
+
+  private async sendMachineAccess(logicalMessageId: string, deviceId?: string): Promise<void> {
     if (!this.isActive()) return;
-    const machines = await this.options.machineAccess?.() ?? [];
+    // Named, because each device is given its own key for a machine's room:
+    // handing the phone another device's key would put back the thing that
+    // made revocation only half a revocation.
+    const machines = await this.options.machineAccess?.(deviceId) ?? [];
     const ciphertext = await sealMobileRelayPayload({ type: "mobile.machines", machines }, this.options.relaySealKeyBase64);
     await this.client.sendCiphertext({ logicalMessageId, ciphertext });
   }

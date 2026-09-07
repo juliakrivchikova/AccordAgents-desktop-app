@@ -694,7 +694,10 @@ export class MachineHostService {
   }
 
   private async handleMessage(ciphertext: string): Promise<void> {
-    const payload = await openMobileRelayPayload<unknown>(ciphertext, this.options.pairing.relaySealKeyBase64);
+    // Each trusted device seals with its own key now, so a frame in this room
+    // may not open with the room's. Try the room key first (the enrolling
+    // desktop and anything not yet re-keyed) and then the devices' own.
+    const payload = await this.openHomeFrame(ciphertext);
     if (isDeviceEventPacket(payload)) {
       // The enrolling desktop keeps its own channel; every other device is
       // answered only if the roster says so.
@@ -725,6 +728,17 @@ export class MachineHostService {
       }
     }
     await this.handleBody(payload.body, false, undefined, from);
+  }
+
+  /** The room's key, then each trusted device's own. */
+  private async openHomeFrame(ciphertext: string): Promise<unknown> {
+    try {
+      return await openMobileRelayPayload<unknown>(ciphertext, this.options.pairing.relaySealKeyBase64);
+    } catch (error) {
+      const packet = await this.peers.openHomeFrame(ciphertext, this.options.pairing.relaySealKeyBase64);
+      if (packet) return packet;
+      throw error;
+    }
   }
 
   private async handleBody(body: MachineLinkMessage, durable = false, event?: ChatEventEnvelope, replyTo = event?.originId): Promise<void> {

@@ -32,8 +32,11 @@ const phone = require(path.join(repoRoot, "src/mobile/mobile-machine-command.js"
 const CONVERSATION = "delete-chat";
 const PARTICIPANT = { id: "p1", handle: "one", kind: "codex-cli", roleConfigId: "engineer", homeMachineId: "machine-one" };
 
-function stubClient() {
-  return { on: () => () => undefined, connect: async () => undefined, close: () => undefined, sendCiphertext: async () => [] };
+function stubClient(sent) {
+  return {
+    on: () => () => undefined, connect: async () => undefined, close: () => undefined,
+    sendCiphertext: async (request) => { sent.push(request); return []; }
+  };
 }
 
 async function machine(dir) {
@@ -55,6 +58,7 @@ async function machine(dir) {
   };
   const closed = [];
   const runs = [];
+  const sent = [];
   const host = new MachineHostService(
     {
       runMachineHostedTurn: async (request) => { runs.push(request.runId); return { messages: [], warnings: [] }; },
@@ -75,7 +79,7 @@ async function machine(dir) {
       pairing, deviceId: identity.originId, appVersion: "delete-test",
       eventStorage: storage, eventLog, publicKeyDerBase64: identity.publicKeyDerBase64,
       outboxPath: path.join(dir, "outbox.json"), trustRosterPath: path.join(dir, "trust.json"),
-      createClient: () => stubClient(), createPeerClient: () => stubClient()
+      createClient: () => stubClient(sent), createPeerClient: () => stubClient(sent)
     }
   );
   await host.start();
@@ -97,7 +101,7 @@ async function machine(dir) {
   };
 
   return {
-    host, storage, closed, runs, pairing, identity, desktop, deliver,
+    host, storage, closed, runs, sent, pairing, identity, desktop, deliver,
     trust: async (peers) => {
       const body = { type: "machine.trust.roster", conversationId: `machine-trust:${pairing.rendezvousId}`,
         roster: { version: 1, issuerDeviceId: desktop.originId, updatedAt: new Date().toISOString(), peers } };
