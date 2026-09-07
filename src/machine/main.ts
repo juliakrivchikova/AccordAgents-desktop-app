@@ -115,7 +115,7 @@ async function runMachineMaintenance(args: MachineArgs): Promise<void> {
       profilePath: userDataPath(), bootId: hostIdentity.boot, kind: "maintenance",
       uptimeMs: () => uptime() * 1000
     });
-    const admitted = presence.admit("this maintenance command");
+    const admitted = await presence.admit("this maintenance command");
     if (!admitted.admitted) {
       process.stderr.write(`${admitted.reason}\n`);
       process.exit(69);
@@ -278,6 +278,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   // it underneath, and must refuse to start work into a stop already decided.
   const nativeProcessDbPath = path.join(userDataPath(), "native-processes.sqlite3");
   let presence: MachineHostPowerRegistry | undefined;
+  let presenceWarning = "This machine cannot verify host-wide admission; native work remains queued.";
   const hostIdentity = await nativeHostIdentity().catch(() => undefined);
   if (hostIdentity) {
     try {
@@ -296,16 +297,18 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
         void debugLogService.write("machine.host-power.adopt-failed", { message: error instanceof Error ? error.message : String(error) });
         return 0;
       });
-      presence.publish(true);
+      await presence.withLock(() => presence!.publish(true));
+      presenceWarning = "";
       if (cleared) void debugLogService.write("machine.host-power.adopted", { cleared });
     } catch (error) {
       presence = undefined;
+      presenceWarning = `Host-wide admission is unavailable; native work remains queued: ${error instanceof Error ? error.message : String(error)}`;
       void debugLogService.write("machine.host-power.unavailable", { message: error instanceof Error ? error.message : String(error) });
     }
   }
   // Refused before a provider is started, not discovered when the instance
   // disappears underneath a running turn.
-  cliAgentRunner.setHostAdmission(presence ? (what) => presence!.admit(what) : undefined);
+  cliAgentRunner.setHostAdmission(presence ? (what) => presence!.admit(what) : () => ({ admitted: false, reason: presenceWarning }));
   const host = new MachineHostService(chatService, storageService, settingsService, debugLogService, {
     // A signature or a superseded change that arrives here has to become part
     // of this machine's own state, not just a stored event.
@@ -381,12 +384,12 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     // A stop another deployment has made final holds this one's queued
     // commands in the durable inbox instead of failing them as turns.
     hostStopCommitted: () => {
-      try { return presence?.stopIntent()?.phase === "committed"; }
+      try { return !presence || presence.stopIntent()?.phase === "committed"; }
       catch { return true; }
     },
     detectProviders: () => cliAgentRunner.detectAgents(),
     onNativeActivitySettled: () => idlePower?.noteActivity() ?? Promise.resolve(),
-    idleStopWarning: () => idlePower?.warning(),
+    idleStopWarning: () => presenceWarning || idlePower?.warning(),
     onSettingsImported: async () => {
       cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());
     },
@@ -420,9 +423,32 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   }
   await host.start();
   idlePower?.ready();
+  // A runtime with no AWS key is still an equal deployment on this host: it
+  // publishes both busy and idle, and may veto another runtime's stop.
+  let presenceRefresh: Promise<void> = Promise.resolve();
+  let refreshing = false;
+  let presenceClosed = false;
+  const presenceTimer = !idlePower && presence ? setInterval(() => {
+    if (refreshing || presenceClosed) return;
+    refreshing = true;
+    presenceRefresh = (async () => {
+      const busy = await host.hasWorkForIdleStop() || cliAgentRunner.hasActiveNativeWork();
+      if (!presenceClosed) presence!.publish(busy);
+    })().catch(error => {
+      presenceWarning = `Host-wide idle state cannot be saved; the machine stays awake: ${error instanceof Error ? error.message : String(error)}`;
+      void host.publishPowerStatus().catch(() => undefined);
+    }).finally(() => { refreshing = false; });
+  }, 30_000) : undefined;
+  presenceTimer?.unref();
   console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.relayUrl} (user data: ${userDataPath()})`);
 
   return async () => {
+    presenceClosed = true;
+    if (presenceTimer) clearInterval(presenceTimer);
+    await presenceRefresh;
+    try { presence?.publish(true); } catch (error) {
+      void debugLogService.write("machine.host-power.shutdown-claim-failed", { message: String(error) });
+    }
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
     idlePower?.close();
     await idlePower?.releaseAfterShutdown();

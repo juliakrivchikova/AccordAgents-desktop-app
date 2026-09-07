@@ -1,6 +1,12 @@
 import { execFile } from "node:child_process";
+import path from "node:path";
 import type { CapturedPosixProcess } from "./processTermination";
 import type { NativeHostIdentity } from "./nativeHostIdentity";
+
+const initializing = new Map<string, Promise<void>>();
+class NativeRegistryError extends Error {
+  constructor(message: string, readonly busy: boolean) { super(message); }
+}
 
 export interface NativeProcessLease {
   scope: string;
@@ -23,12 +29,33 @@ export interface NativeProcessLease {
 export class NativeProcessRegistry {
   constructor(readonly dbPath: string, readonly sqliteExecutable = "sqlite3") {}
 
-  async init(): Promise<void> {
-    await this.query(`pragma journal_mode = wal;
-      create table if not exists native_provider_processes (
-        scope text primary key, generation integer not null, token text not null,
-        phase text not null check(phase in ('launching','running','closed')), receipt text not null
-      );`);
+  init(): Promise<void> {
+    const key = JSON.stringify([path.resolve(this.dbPath), this.sqliteExecutable]);
+    const pending = initializing.get(key);
+    if (pending) return pending;
+    const work = this.initializeDatabase().finally(() => { if (initializing.get(key) === work) initializing.delete(key); });
+    initializing.set(key, work);
+    return work;
+  }
+
+  private async initializeDatabase(): Promise<void> {
+    const deadline = performance.now() + 5000;
+    for (;;) {
+      try {
+        await this.query(`pragma journal_mode = wal;
+          create table if not exists native_provider_processes (
+            scope text primary key, generation integer not null, token text not null,
+            phase text not null check(phase in ('launching','running','closed')), receipt text not null
+          );`, "initialization");
+        return;
+      } catch (error) {
+        // WAL mode changes can return BUSY immediately despite busy_timeout.
+        // Only this idempotent schema setup is retried, in a fresh connection;
+        // ownership acquisition and external execution are never replayed.
+        if (!(error instanceof NativeRegistryError) || !error.busy || performance.now() >= deadline) throw error;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    }
   }
 
   async get(scope: string): Promise<NativeProcessLease | undefined> {
@@ -63,11 +90,11 @@ export class NativeProcessRegistry {
     if (!rows.length) throw new Error("The native process lease changed before its receipt could be stored.");
   }
 
-  private query<T>(sql: string): Promise<T[]> {
+  private query<T>(sql: string, operation = "query"): Promise<T[]> {
     return new Promise((resolve, reject) => {
-      const child = execFile(this.sqliteExecutable, ["-batch", "-json", "-cmd", ".timeout 5000", this.dbPath],
-        { encoding: "utf8", maxBuffer: 2 * 1024 * 1024 }, (error, stdout) => {
-          if (error) { reject(new Error(`The native process receipt could not be stored: ${error.message}`)); return; }
+      const child = execFile(this.sqliteExecutable, ["-batch", "-bail", "-json", "-cmd", ".timeout 5000", this.dbPath],
+        { encoding: "utf8", maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+          if (error) { reject(new NativeRegistryError(`The native process receipt ${operation} failed: ${error.message}`, /(?:database is (?:locked|busy)|database table is locked).*\([56]\)/.test(stderr))); return; }
           try { resolve(stdout.trim() ? JSON.parse(stdout) as T[] : []); } catch { reject(new Error("The native process receipt query returned invalid data.")); }
         });
       child.stdin?.on("error", reject);

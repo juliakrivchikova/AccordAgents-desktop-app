@@ -10,6 +10,36 @@ import { confirmNativeProcessClosed, spawnNativeProcess } from "./nativeProcess"
 import { NativeProcessRegistry } from "./nativeProcessRegistry";
 import { hasLiveCapturedPosixProcesses, readPosixProcessTableAsync, terminateCapturedPosixProcesses } from "./processTermination";
 
+test("independent controllers initialize one process registry while admitting different sessions", { skip: process.platform === "win32" }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-native-registry-race-"));
+  const dbPath = path.join(directory, "processes.sqlite");
+  const registryModule = path.join(__dirname, "nativeProcessRegistry.js");
+  try {
+    await Promise.all(Array.from({ length: 8 }, (_, index) => new Promise<void>((resolve, reject) => {
+      const script = `const {NativeProcessRegistry}=require(${JSON.stringify(registryModule)});
+        const r=new NativeProcessRegistry(${JSON.stringify(dbPath)});
+        r.init().then(()=>r.acquire({scope:'session-${index}',token:'token-${index}',
+          supervisor:{pid:process.pid,startedAt:'fixture'},parent:{pid:process.ppid,startedAt:'fixture'}}))
+          .then(lease=>{if(!lease)throw new Error('lost admission')}).catch(e=>{console.error(e);process.exitCode=1});`;
+      execFile(process.execPath, ["-e", script], (error) => error ? reject(error) : resolve());
+    })));
+    const registry = new NativeProcessRegistry(dbPath);
+    const leases = await registry.openLeases();
+    assert.equal(leases.length, 8);
+    assert.ok(leases.every(lease => lease.generation === 1 && lease.phase === "launching"));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a registry SQL error aborts the batch before any later statement can commit", async () => {
+  const f = await fixture();
+  try {
+    const registry = f.registry as unknown as { query(sql: string): Promise<unknown[]> };
+    await assert.rejects(registry.query("begin immediate; select * from deliberately_missing_table; create table must_not_commit(value); commit;"), /deliberately_missing_table/);
+    const rows = await registry.query("select name from sqlite_master where name='must_not_commit';");
+    assert.deepEqual(rows, []);
+  } finally { await f.close(); }
+});
+
 test("resident execution owns one process generation, preserves stdio, and records verified closure", { skip: process.platform === "win32" }, async () => {
   const f = await fixture();
   try {

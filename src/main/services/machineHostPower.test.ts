@@ -3,6 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   MachineHostPowerRegistry,
   machineHostProfileId,
@@ -148,7 +151,7 @@ test("a claim survives a reader that cannot remove it", () => {
   assert.equal(claim.bootId, "boot-1");
 });
 
-test("a stop cannot commit around work admitted while it was draining", () => {
+test("a stop cannot commit around work admitted while it was draining", async () => {
   // The window a plain read leaves open: one deployment decides to stop, the
   // other starts a turn, and the stop still goes through. Admission and commit
   // take the same host lock, so the second one loses.
@@ -158,35 +161,35 @@ test("a stop cannot commit around work admitted while it was draining", () => {
   stopper.publish(false);
   neighbour.publish(false);
 
-  assert.equal(stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true, "an idle host may be stopped");
+  assert.equal(await stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true, "an idle host may be stopped");
   // The neighbour starts work before the stop is final.
-  assert.deepEqual(neighbour.admit("a turn"), { admitted: true });
-  assert.equal(stopper.commitStop(), false, "work admitted meanwhile withdraws the stop");
+  assert.deepEqual(await neighbour.admit("a turn"), { admitted: true });
+  assert.equal(await stopper.commitStop(), false, "work admitted meanwhile withdraws the stop");
   assert.equal(stopper.stopIntent(), undefined, "and the intent is gone, not left blocking the host");
 
   // With nobody working, the same sequence commits.
   neighbour.publish(false);
-  assert.equal(stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true);
-  assert.equal(stopper.commitStop(), true);
+  assert.equal(await stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true);
+  assert.equal(await stopper.commitStop(), true);
   assert.equal(stopper.stopIntent()?.phase, "committed");
 });
 
-test("a committed stop refuses new work instead of letting it start into a machine that is going away", () => {
+test("a committed stop refuses new work instead of letting it start into a machine that is going away", async () => {
   const shared = dir();
   const stopper = registry({ dir: shared, profile: "/srv/one", pid: 11 });
   const neighbour = registry({ dir: shared, profile: "/srv/two", pid: 22 });
   stopper.publish(false);
   neighbour.publish(false);
-  assert.equal(stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true);
-  assert.equal(stopper.commitStop(), true);
+  assert.equal(await stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true);
+  assert.equal(await stopper.commitStop(), true);
 
-  const refused = neighbour.admit("a turn");
+  const refused = await neighbour.admit("a turn");
   assert.equal(refused.admitted, false);
   assert.match(refused.admitted === false ? refused.reason : "", /stopping after being idle/);
   assert.match(refused.admitted === false ? refused.reason : "", /\/srv\/one/, "the deployment that decided it is named");
 });
 
-test("a neighbour's recent work is not this profile's three hours of idle", () => {
+test("a neighbour's recent work is not this profile's three hours of idle", async () => {
   const shared = dir();
   let now = 10_000;
   const mine = registry({ dir: shared, profile: "/srv/one", pid: 11, now: () => now });
@@ -200,9 +203,9 @@ test("a neighbour's recent work is not this profile's three hours of idle", () =
   assert.equal(mine.hostIdleForMs(0), 0, "the neighbour was working a moment ago");
   now += 30_000;
   assert.equal(mine.hostIdleForMs(0), 30_000, "host idle runs from the neighbour's last work, not from this profile's");
-  assert.equal(mine.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }), false);
+  assert.equal(await mine.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }), false);
   now += 40_000;
-  assert.equal(mine.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }), true);
+  assert.equal(await mine.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }), true);
 });
 
 test("a claim left by a crash keeps the host awake, and only proven closure clears it", async () => {
@@ -236,41 +239,156 @@ test("one deployment's crash does not let it clear another profile's claim", asy
   assert.ok(mine.blockingReason(), "the other profile still keeps the host awake");
 });
 
-test("a lock left by a dead holder is broken, a live holder is waited for", () => {
-  const shared = dir();
-  let now = 0;
-  const holder = registry({ dir: shared, profile: "/srv/one", pid: 11, now: () => now, alive: () => false });
-  fs.mkdirSync(path.join(shared, "lock"), { recursive: true });
-  fs.writeFileSync(path.join(shared, "lock", "owner.json"), JSON.stringify({ pid: 11, uptimeMs: 0 }));
-  now = 60_000;
-  // The holder is gone and the section is far older than it can legitimately be.
-  assert.equal(holder.withLock(() => "ran"), "ran");
 
-  const live = registry({ dir: shared, profile: "/srv/one", pid: 12, now: () => now, alive: () => true });
-  fs.mkdirSync(path.join(shared, "lock"), { recursive: true });
-  fs.writeFileSync(path.join(shared, "lock", "owner.json"), JSON.stringify({ pid: 4242, uptimeMs: now }));
-  assert.throws(() => live.withLock(() => "ran"), /holding the power lock/, "a live holder is never overrun");
-  fs.rmSync(path.join(shared, "lock"), { recursive: true, force: true });
-});
-
-test("an unreadable stop intent stops both stopping and admitting", () => {
+test("an unreadable stop intent stops both stopping and admitting", async () => {
   const shared = dir();
   const one = registry({ dir: shared, profile: "/srv/one", pid: 11 });
   one.publish(false);
   fs.writeFileSync(path.join(shared, "stop-intent.json"), "{\"version\":1,\"phase\":\"maybe\"}");
   assert.throws(() => one.stopIntent(), /cannot be read/);
-  assert.throws(() => one.admit("a turn"), /cannot be read/);
-  assert.throws(() => one.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), /cannot be read/);
+  await assert.rejects(() => one.admit("a turn"), /cannot be read/);
+  await assert.rejects(() => one.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), /cannot be read/);
 });
 
-test("maintenance is a host claim like any other and names itself", () => {
+test("maintenance is a host claim like any other and names itself", async () => {
   const shared = dir();
   const runtime = registry({ dir: shared, profile: "/srv/one", pid: 11 });
   const maintenance = registry({ dir: shared, profile: "/srv/two", pid: 22, kind: "maintenance" });
   runtime.publish(false);
-  assert.deepEqual(maintenance.admit("this maintenance command"), { admitted: true });
+  assert.deepEqual(await maintenance.admit("this maintenance command"), { admitted: true });
   assert.match(runtime.blockingReason() ?? "", /maintenance command/);
-  assert.equal(runtime.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), false);
+  assert.equal(await runtime.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), false);
   maintenance.release();
   assert.equal(runtime.blockingReason(), undefined);
+});
+
+
+test("kernel admission lock excludes concurrent owners and releases after its parent dies", async () => {
+  const shared = dir();
+  const modulePath = path.join(__dirname, "machineHostPower.js");
+  const child = spawn(process.execPath, ["-e", `
+    const { MachineHostPowerRegistry } = require(process.argv[1]);
+    const r = new MachineHostPowerRegistry({ dir: process.argv[2], profilePath: "/srv/killed", bootId: "boot-1", uptimeMs: () => 1000 });
+    r.withLock(async () => {
+      r.publish(true);
+      process.stdout.write("locked\\n");
+      await new Promise(() => {});
+    }).catch(error => { console.error(error); process.exit(1); });
+  `, modulePath, shared], { stdio: ["ignore", "pipe", "pipe"] });
+  const closed = once(child, "close");
+  let stderr = "";
+  child.stderr.on("data", data => { stderr += data; });
+  try {
+    await Promise.race([
+      once(child.stdout, "data"),
+      closed.then(() => { throw new Error(`lock owner exited: ${stderr}`); }),
+      delay(5000, undefined, { ref: false }).then(() => { throw new Error("lock owner did not acquire"); })
+    ]);
+    const contender = registry({ dir: shared, profile: "/srv/contender", pid: process.pid, alive: pid => pid === process.pid });
+    let entered = false;
+    const waiting = contender.withLock(() => { entered = true; return "acquired"; });
+    // Even a paused controller still owns its kernel lock; nobody removes it
+    // based on an unfinished owner file, pid probe, or wall-clock age.
+    child.kill("SIGSTOP");
+    await delay(150);
+    assert.equal(entered, false);
+    child.kill("SIGKILL");
+    await closed;
+    assert.equal(await waiting, "acquired");
+    assert.ok(contender.blockingReason(), "freeing the lock does not erase the dead owner's native-work claim");
+    const inode = fs.statSync(path.join(shared, "admission.lock")).ino;
+    await contender.withLock(() => undefined);
+    assert.equal(fs.statSync(path.join(shared, "admission.lock")).ino, inode, "the lock file is never unlinked or replaced");
+  } finally {
+    child.kill("SIGKILL");
+    await closed;
+    fs.rmSync(shared, { recursive: true, force: true });
+  }
+});
+
+
+test("a losing stop never commits a local fence, and local persistence is inside host admission exclusion", async () => {
+  const shared = dir();
+  const stopper = registry({ dir: shared, profile: "/srv/one", pid: 11 });
+  const neighbour = registry({ dir: shared, profile: "/srv/two", pid: 22 });
+  stopper.publish(false); neighbour.publish(false);
+  assert.equal(await stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true);
+  await neighbour.admit("a turn");
+  let writes = 0;
+  assert.equal(await stopper.commitStop(async () => { writes++; return true; }), false);
+  assert.equal(writes, 0, "no stuck local stop fence when another deployment won");
+  neighbour.publish(false);
+  assert.equal(await stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true);
+  let entered!: () => void; let release!: () => void;
+  const begun = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const committing = stopper.commitStop(async () => { entered(); await held; return true; });
+  await begun;
+  let admitted = false;
+  const competing = neighbour.admit("another turn").then(result => { admitted = true; return result; });
+  await delay(100);
+  assert.equal(admitted, false, "admission waits for local persistence and shared commit together");
+  release();
+  assert.equal(await committing, true);
+  assert.equal((await competing).admitted, false);
+});
+
+
+test("a neighbour using the old admission protocol suspends automatic stop even when idle", async () => {
+  const shared = dir();
+  const current = registry({ dir: shared, profile: "/srv/current" });
+  const old = registry({ dir: shared, profile: "/srv/old" });
+  current.publish(false); old.publish(false);
+  const entry = fs.readdirSync(shared).find(name => name.startsWith(machineHostProfileId("/srv/old")))!;
+  const record = JSON.parse(fs.readFileSync(path.join(shared, entry), "utf8"));
+  record.version = 1;
+  fs.writeFileSync(path.join(shared, entry), JSON.stringify(record));
+  assert.match(current.blockingReason() ?? "", /needs an upgrade/);
+  assert.equal(await current.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), false);
+  const own = fs.readdirSync(shared).find(name => name.startsWith(machineHostProfileId("/srv/current")))!;
+  assert.equal(JSON.parse(fs.readFileSync(path.join(shared, own), "utf8")).version, 2, "old readers refuse the new claim instead of using a different lock concurrently");
+});
+
+test("helper-only death cannot unlock a live runtime's pending SQLite commit", async () => {
+  const shared = dir();
+  const modulePath = path.join(__dirname, "machineHostPower.js");
+  const child = spawn(process.execPath, ["-e", `
+    const cp = require('node:child_process'); const spawn = cp.spawn; let helper;
+    cp.spawn = (...args) => { const result = spawn(...args); if (args[0] === 'python3') helper = result; return result; };
+    const { MachineHostPowerRegistry } = require(process.argv[1]);
+    const r = new MachineHostPowerRegistry({ dir: process.argv[2], profilePath: '/srv/stopper', bootId: 'boot-1', uptimeMs: () => 1000 });
+    (async () => {
+      r.publish(false);
+      if (!await r.beginStop({minIdleMs: 0, ownIdleSinceUptimeMs: 0})) throw new Error('no pending stop');
+      const committed = await r.commitStop(async () => {
+        process.send({ helper: helper.pid });
+        await new Promise(resolve => process.once('message', resolve));
+        return true;
+      });
+      process.send({ committed }); process.disconnect();
+    })().catch(error => { console.error(error); process.exit(1); });
+  `, modulePath, shared], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  const closed = once(child, "close");
+  let error = "";
+  child.stderr!.on("data", data => { error += data; });
+  try {
+    const [message] = await Promise.race([
+      once(child, "message"),
+      closed.then(() => { throw new Error(`owner exited: ${error}`); })
+    ]);
+    process.kill(message.helper, "SIGKILL");
+    const other = registry({ dir: shared, profile: "/srv/other", pid: process.pid });
+    let settled = false;
+    const admission = other.admit("new turn").then(value => { settled = true; return value; });
+    await delay(150);
+    assert.equal(settled, false, "Node retains the shared open-file description after its helper dies");
+    const committed = once(child, "message");
+    child.send("finish SQLite");
+    assert.equal((await committed)[0].committed, true);
+    assert.equal((await admission).admitted, false, "the committed stop is visible before any new admission");
+  } finally {
+    child.kill("SIGKILL");
+    await closed;
+    fs.rmSync(shared, { recursive: true, force: true });
+  }
 });

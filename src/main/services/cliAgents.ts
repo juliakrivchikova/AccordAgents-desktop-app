@@ -1027,7 +1027,9 @@ export class CliAgentRunner {
   /** Host-wide gate: another deployment on this machine may have committed an
    *  idle stop, and its decision has to be refused here, before a provider is
    *  started, not discovered when the instance disappears. */
-  private hostAdmission?: (what: string) => { admitted: true } | { admitted: false; reason: string };
+  private readonly warmPreparations = new Set<{ key: string; done: Promise<void> }>();
+  private nativeShutdownGeneration = 0;
+  private hostAdmission?: (what: string) => Promise<{ admitted: true } | { admitted: false; reason: string }> | { admitted: true } | { admitted: false; reason: string };
 
   constructor(
     private readonly debugLogs?: CliAgentDebugLogger,
@@ -1143,8 +1145,6 @@ export class CliAgentRunner {
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
     if (this.nativeAdmissionsFenced) return this.failed(participant, new Error("The machine is stopping after idle; this native command did not start."));
-    const refusal = this.hostRefusal("this native command");
-    if (refusal) return this.failed(participant, new Error(refusal));
     if (options.warm && this.conversationClosing(options.warm.conversationId)) {
       return this.failed(participant, new Error("This chat's native sessions are closing; this command did not start."));
     }
@@ -1165,7 +1165,13 @@ export class CliAgentRunner {
       : options;
     this.nativeOperations++;
     this.trackConversationOperation(options.warm?.conversationId, 1);
+    const shutdownGeneration = this.nativeShutdownGeneration;
     try {
+      const refusal = await this.hostRefusal("this native command");
+      if (shutdownGeneration !== this.nativeShutdownGeneration) return this.failed(participant, new Error("Native sessions shut down while this command waited; it did not start."));
+      if (signal?.aborted) return this.failed(participant, new Error("The command was cancelled before native execution started."));
+      if (options.warm && this.conversationClosing(options.warm.conversationId)) return this.failed(participant, new Error("This chat is closing; the command did not start."));
+      if (refusal || this.nativeAdmissionsFenced) return this.failed(participant, new Error(refusal ?? "Native admission is fenced."));
       if (participant.kind === "codex-cli") {
         return await this.runCodex(participant, prompt, effectiveRepoPath, diffMode, kind, signal, effectiveOptions);
       }
@@ -1192,8 +1198,6 @@ export class CliAgentRunner {
     options: CliAgentRunOptions = {}
   ): Promise<CliAgentCompactResult> {
     if (this.nativeAdmissionsFenced) return { participant, ok: false, error: "The machine is stopping after idle; compaction did not start." };
-    const compactionRefusal = this.hostRefusal("compaction");
-    if (compactionRefusal) return { participant, ok: false, error: compactionRefusal };
     if (options.warm && this.conversationClosing(options.warm.conversationId)) {
       return { participant, ok: false, error: "This chat's native sessions are closing; compaction did not start." };
     }
@@ -1203,7 +1207,13 @@ export class CliAgentRunner {
     const effectiveRepoPath = this.repoPathForRun(repoPath, diffMode, kind);
     this.nativeOperations++;
     this.trackConversationOperation(options.warm?.conversationId, 1);
+    const shutdownGeneration = this.nativeShutdownGeneration;
     try {
+      const compactionRefusal = await this.hostRefusal("compaction");
+      if (shutdownGeneration !== this.nativeShutdownGeneration) return this.failedCompact(participant, new Error("Native sessions shut down while compaction waited; it did not start."));
+      if (signal?.aborted) return this.failedCompact(participant, new Error("Compaction was cancelled before native execution started."));
+      if (options.warm && this.conversationClosing(options.warm.conversationId)) return this.failedCompact(participant, new Error("This chat is closing; compaction did not start."));
+      if (compactionRefusal || this.nativeAdmissionsFenced) return { participant, ok: false, error: compactionRefusal ?? "Native admission is fenced." };
       if (participant.kind === "codex-cli") {
         return await this.compactCodexSession(participant, effectiveRepoPath, diffMode, kind, signal, options);
       }
@@ -1218,23 +1228,23 @@ export class CliAgentRunner {
   }
 
   hasActiveNativeWork(): boolean {
-    return this.nativeOperations > 0 || this.warmOperations > 0 || this.warmAgentCreations.size > 0 || this.closingWarmAgents.size > 0 || this.failedWarmClosures.size > 0 ||
+    return this.nativeOperations > 0 || this.warmOperations > 0 || this.warmPreparations.size > 0 || this.warmAgentCreations.size > 0 || this.closingWarmAgents.size > 0 || this.failedWarmClosures.size > 0 ||
       [...this.warmAgents.values()].some(entry => !entry.closed && entry.hasLiveBackgroundWork?.());
   }
 
   /** Every deployment on this host shares one instance. Consulted before any
    * native work starts; admission also tells the other deployments that this
    * one is busy, in the same step, so a stop cannot commit around it. */
-  setHostAdmission(gate: ((what: string) => { admitted: true } | { admitted: false; reason: string }) | undefined): void {
+  setHostAdmission(gate: ((what: string) => Promise<{ admitted: true } | { admitted: false; reason: string }> | { admitted: true } | { admitted: false; reason: string }) | undefined): void {
     this.hostAdmission = gate;
   }
 
   /** The reason new native work may not start, or undefined when it may. */
-  private hostRefusal(what: string): string | undefined {
+  private async hostRefusal(what: string): Promise<string | undefined> {
     if (!this.hostAdmission) return undefined;
     let decision: { admitted: true } | { admitted: false; reason: string };
     try {
-      decision = this.hostAdmission(what);
+      decision = await this.hostAdmission(what);
     } catch (error) {
       // Coordination that cannot be read is not permission to start work on a
       // machine another deployment may be stopping.
@@ -1253,9 +1263,11 @@ export class CliAgentRunner {
 
   shutdownWarmAgents(): Promise<void> {
     if (this.warmShutdown) return this.warmShutdown;
+    this.nativeShutdownGeneration++;
     const closing = (async () => {
       // An in-flight supervisor handshake must finish before shutdown can
       // declare its process set empty. New handshakes are refused meanwhile.
+      await Promise.allSettled([...this.warmPreparations].map(value => value.done));
       await Promise.allSettled([...this.warmAgentCreations.values()]);
       const entries = [...new Set([...this.warmAgents.values(), ...this.failedWarmClosures])];
       const alreadyClosing = Array.from(this.closingWarmAgents.values());
@@ -1279,6 +1291,7 @@ export class CliAgentRunner {
     // Install the admission barrier synchronously, before waiting on startup or
     // native shutdown. A second archive shares the exact same closure proof.
     const closing = Promise.resolve().then(async () => {
+      await Promise.allSettled([...this.warmPreparations].filter(value => belongs(value.key)).map(value => value.done));
       await Promise.allSettled([...this.warmAgentCreations].filter(([key]) => belongs(key)).map(([, value]) => value));
       const entries = new Set([...this.warmAgents.values(), ...this.closingWarmAgents.keys(), ...this.failedWarmClosures]);
       await Promise.all([...entries].filter(entry => belongs(entry.key)).map(entry => this.closeWarmAgent(entry, "conversation-closed")));
@@ -2494,6 +2507,7 @@ export class CliAgentRunner {
     if (process.env[CODEX_APP_SERVER_DISABLED_ENV] === "0") {
       return this.failed(participant, new Error("Native /goal requires the Codex app-server transport; it is disabled."));
     }
+    const finishPreparation = this.beginWarmPreparation(`native-goal:${participant.id}`);
     try {
       await ensureLoginShellEnvPrimed();
       const codexExecutable = await this.codexExecutableForRun(options);
@@ -2507,6 +2521,7 @@ export class CliAgentRunner {
         this.withoutWarm(options),
         codexExecutable
       );
+      finishPreparation();
       try {
         const result = await entry.run(
           prompt,
@@ -2523,7 +2538,7 @@ export class CliAgentRunner {
       }
     } catch (error) {
       return this.failed(participant, error);
-    }
+    } finally { finishPreparation(); }
   }
 
   private async compactCodexSession(
@@ -2534,6 +2549,9 @@ export class CliAgentRunner {
     signal: AbortSignal | undefined,
     options: CliAgentRunOptions
   ): Promise<CliAgentCompactResult> {
+    if (this.nativeAdmissionsFenced || this.warmShutdown || (options.warm && this.conversationClosing(options.warm.conversationId))) {
+      return this.failedCompact(participant, new Error("Native sessions are shutting down; this command did not start."));
+    }
     const compactWithEntry = async (entry: WarmAgentEntry, warm?: CliAgentWarmOptions): Promise<CliAgentCompactResult> => {
       if (!entry.compact) {
         return { participant, ok: false, error: "Codex app-server compact is not available." };
@@ -2558,24 +2576,29 @@ export class CliAgentRunner {
     if (warm && kind === "chat" && process.env[CODEX_APP_SERVER_DISABLED_ENV] !== "0") {
       const key = this.warmAgentKey(participant, repoPath, kind, options);
       const scopeKey = this.warmAgentScopeKey(warm);
-      await this.closeStaleWarmAgents(scopeKey, key);
-      let entry = this.warmAgents.get(key);
-      if (!entry || entry.closed || entry.process.exitCode !== null) {
-        if (entry) {
-          this.warmAgents.delete(key);
-          await this.closeWarmAgent(entry, "stale");
+      let entry: WarmAgentEntry | undefined;
+      const finishPreparation = this.beginWarmPreparation(key);
+      try {
+        await this.closeStaleWarmAgents(scopeKey, key);
+        entry = this.warmAgents.get(key);
+        if (!entry || entry.closed || entry.process.exitCode !== null) {
+          if (entry) {
+            this.warmAgents.delete(key);
+            await this.closeWarmAgent(entry, "stale");
+          }
+          try {
+            await ensureLoginShellEnvPrimed();
+            const codexExecutable = await this.codexExecutableForRun(options);
+            entry = await this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable);
+          } catch (error) {
+            return this.failedCompact(participant, error);
+          }
         }
-        try {
-          await ensureLoginShellEnvPrimed();
-          const codexExecutable = await this.codexExecutableForRun(options);
-          entry = await this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable);
-        } catch (error) {
-          return this.failedCompact(participant, error);
-        }
-      }
+      } finally { finishPreparation(); }
       return compactWithEntry(entry, warm);
     }
 
+    const finishPreparation = this.beginWarmPreparation(`compact:${options.sessionId}`);
     try {
       await ensureLoginShellEnvPrimed();
       const codexExecutable = await this.codexExecutableForRun(options);
@@ -2589,6 +2612,7 @@ export class CliAgentRunner {
         this.withoutWarm(options),
         codexExecutable
       );
+      finishPreparation();
       try {
         return await compactWithEntry(entry);
       } finally {
@@ -2596,7 +2620,7 @@ export class CliAgentRunner {
       }
     } catch (error) {
       return this.failedCompact(participant, error);
-    }
+    } finally { finishPreparation(); }
   }
 
   private async runCodexAppServerWarmOrOneShot(
@@ -2608,6 +2632,9 @@ export class CliAgentRunner {
     signal: AbortSignal | undefined,
     options: CliAgentRunOptions
   ): Promise<ParticipantRunResult> {
+    if (this.nativeAdmissionsFenced || this.warmShutdown || (options.warm && this.conversationClosing(options.warm.conversationId))) {
+      return this.failed(participant, new Error("Native sessions are shutting down; this command did not start."));
+    }
     const warm = options.warm;
     if (!warm || process.env[CODEX_APP_SERVER_DISABLED_ENV] === "0") {
       if (options.nativeGoal) {
@@ -2621,34 +2648,38 @@ export class CliAgentRunner {
     }
     const key = this.warmAgentKey(participant, repoPath, kind, options);
     const scopeKey = this.warmAgentScopeKey(warm);
-    await this.closeStaleWarmAgents(scopeKey, key);
-    let entry = this.warmAgents.get(key);
-    if (!entry || entry.closed || entry.process.exitCode !== null) {
-      if (entry) {
-        this.warmAgents.delete(key);
-        await this.closeWarmAgent(entry, "stale");
+    let entry: WarmAgentEntry | undefined;
+    const finishPreparation = this.beginWarmPreparation(key);
+    try {
+      await this.closeStaleWarmAgents(scopeKey, key);
+      entry = this.warmAgents.get(key);
+      if (!entry || entry.closed || entry.process.exitCode !== null) {
+        if (entry) {
+          this.warmAgents.delete(key);
+          await this.closeWarmAgent(entry, "stale");
+        }
+        try {
+          await ensureLoginShellEnvPrimed();
+          const codexExecutable = await this.codexExecutableForRun(options);
+          entry = await this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable);
+          void this.writeDebugLog("cli-agent-warm-started", {
+            providerKind: participant.kind,
+            participantId: participant.id,
+            conversationId: warm.conversationId,
+            runtime: "codex-app-server"
+          });
+        } catch (error) {
+          void this.writeDebugLog("cli-agent-warm-start-failed", {
+            providerKind: participant.kind,
+            participantId: participant.id,
+            conversationId: warm.conversationId,
+            runtime: "codex-app-server",
+            error: this.errorText(error)
+          });
+          return this.failed(participant, error);
+        }
       }
-      try {
-        await ensureLoginShellEnvPrimed();
-        const codexExecutable = await this.codexExecutableForRun(options);
-        entry = await this.createCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable);
-        void this.writeDebugLog("cli-agent-warm-started", {
-          providerKind: participant.kind,
-          participantId: participant.id,
-          conversationId: warm.conversationId,
-          runtime: "codex-app-server"
-        });
-      } catch (error) {
-        void this.writeDebugLog("cli-agent-warm-start-failed", {
-          providerKind: participant.kind,
-          participantId: participant.id,
-          conversationId: warm.conversationId,
-          runtime: "codex-app-server",
-          error: this.errorText(error)
-        });
-        return this.failed(participant, error);
-      }
-    }
+    } finally { finishPreparation(); }
 
     return this.enqueueWarmRun(entry, async () => {
       this.clearWarmIdleTimer(entry as WarmAgentEntry);
@@ -5005,38 +5036,45 @@ export class CliAgentRunner {
     signal: AbortSignal | undefined,
     options: CliAgentRunOptions
   ): Promise<ParticipantRunResult> {
+    if (this.nativeAdmissionsFenced || this.warmShutdown || (options.warm && this.conversationClosing(options.warm.conversationId))) {
+      return this.failed(participant, new Error("Native sessions are shutting down; this command did not start."));
+    }
     const warm = options.warm;
     if (!warm) {
       return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, options);
     }
     const key = this.warmAgentKey(participant, repoPath, kind, options);
     const scopeKey = this.warmAgentScopeKey(warm);
-    await this.closeStaleWarmAgents(scopeKey, key);
-    let entry = this.warmAgents.get(key);
-    if (!entry || entry.closed || entry.unusable || entry.process.exitCode !== null) {
-      if (entry) {
-        this.warmAgents.delete(key);
-        await this.closeWarmAgent(entry, entry.unusable ? "stray-continuation" : "stale");
+    let entry: WarmAgentEntry | undefined;
+    const finishPreparation = this.beginWarmPreparation(key);
+    try {
+      await this.closeStaleWarmAgents(scopeKey, key);
+      entry = this.warmAgents.get(key);
+      if (!entry || entry.closed || entry.unusable || entry.process.exitCode !== null) {
+        if (entry) {
+          this.warmAgents.delete(key);
+          await this.closeWarmAgent(entry, entry.unusable ? "stray-continuation" : "stale");
+        }
+        try {
+          await ensureLoginShellEnvPrimed();
+          const claudeExecutable = await this.providerExecutableForRun("claude", options, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
+          entry = await this.createClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options, claudeExecutable);
+          void this.writeDebugLog("cli-agent-warm-started", {
+            providerKind: participant.kind,
+            participantId: participant.id,
+            conversationId: warm.conversationId
+          });
+        } catch (error) {
+          void this.writeDebugLog("cli-agent-warm-start-failed", {
+            providerKind: participant.kind,
+            participantId: participant.id,
+            conversationId: warm.conversationId,
+            error: this.errorText(error)
+          });
+          return this.failed(participant, error);
+        }
       }
-      try {
-        await ensureLoginShellEnvPrimed();
-        const claudeExecutable = await this.providerExecutableForRun("claude", options, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
-        entry = await this.createClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options, claudeExecutable);
-        void this.writeDebugLog("cli-agent-warm-started", {
-          providerKind: participant.kind,
-          participantId: participant.id,
-          conversationId: warm.conversationId
-        });
-      } catch (error) {
-        void this.writeDebugLog("cli-agent-warm-start-failed", {
-          providerKind: participant.kind,
-          participantId: participant.id,
-          conversationId: warm.conversationId,
-          error: this.errorText(error)
-        });
-        return this.failed(participant, error);
-      }
-    }
+    } finally { finishPreparation(); }
 
     return this.enqueueWarmRun(entry, async () => {
       this.clearWarmIdleTimer(entry as WarmAgentEntry);
@@ -5901,25 +5939,43 @@ export class CliAgentRunner {
     return this.textFromAssistantMessageItem(record);
   }
 
+  /** Track preparation from before its first await, including login-shell
+   * readiness. Shutdown cannot finish while that work could still spawn. */
+  private beginWarmPreparation(key: string): () => void {
+    if (this.nativeAdmissionsFenced || this.warmShutdown || this.conversationClosing(warmConversationId(key) ?? "")) {
+      throw new Error("Native sessions are shutting down; this command did not start.");
+    }
+    let finish!: () => void;
+    const entry = { key, done: new Promise<void>(resolve => { finish = resolve; }) };
+    this.warmPreparations.add(entry);
+    return () => { this.warmPreparations.delete(entry); finish(); };
+  }
+
   private enqueueWarmRun<T>(entry: WarmAgentEntry, task: () => Promise<T>): Promise<T> {
     if (this.nativeAdmissionsFenced) return Promise.reject(new Error("The machine is stopping after idle; this native command did not start."));
-    const refusal = this.hostRefusal("this native command");
-    if (refusal) return Promise.reject(new Error(refusal));
     this.warmOperations++;
-    const run = entry.queue.catch(() => undefined).then(task).finally(() => { this.warmOperations--; });
+    const run = entry.queue.catch(() => undefined).then(async () => {
+      const refusal = await this.hostRefusal("this native command");
+      if (refusal || this.nativeAdmissionsFenced || this.warmShutdown || entry.closed) throw new Error(refusal ?? "Native admission is fenced.");
+      return task();
+    }).finally(() => { this.warmOperations--; });
     entry.queue = run.then(() => undefined, () => undefined);
     return run;
   }
 
   private createTrackedWarmAgent(key: string, construct: () => Promise<WarmAgentEntry>): Promise<WarmAgentEntry> {
     if (this.nativeAdmissionsFenced) return Promise.reject(new Error("The machine is stopping after idle; this native session did not start."));
-    const refusal = this.hostRefusal("this native session");
-    if (refusal) return Promise.reject(new Error(refusal));
     if (this.warmShutdown) return Promise.reject(new Error("The native sessions are shutting down; this command did not start."));
     if (this.conversationClosing(warmConversationId(key) ?? "")) return Promise.reject(new Error("This chat's native sessions are closing; this command did not start."));
     const existing = this.warmAgentCreations.get(key);
     if (existing) return existing;
-    const creating = construct().then(async (entry) => {
+    const creating = (async () => {
+      const refusal = await this.hostRefusal("this native session");
+      if (refusal || this.nativeAdmissionsFenced || this.warmShutdown || this.conversationClosing(warmConversationId(key) ?? "")) {
+        throw new Error(refusal ?? "The native session is shutting down.");
+      }
+      return construct();
+    })().then(async (entry) => {
       if (this.warmShutdown || this.conversationShutdowns.has(warmConversationId(key) ?? "")) {
         await this.closeWarmAgent(entry, "shutdown-during-start");
         throw new Error("The native session shut down before this command started.");

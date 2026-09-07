@@ -36,7 +36,7 @@ function deployment(shared, profile, script, options = {}) {
       uptimeMs: () => Number(process.env.QA_UPTIME_MS ?? Date.now())
     });
     const say = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
-    ${script}
+    (async () => { ${script} })().catch(error => { console.error(error); process.exitCode = 1; });
   `], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...(options.env ?? {}) } });
   const out = [];
   const err = [];
@@ -58,18 +58,17 @@ async function scenarioTwoDeployments(shared) {
   const b = deployment(shared, "/srv/b", `
     registry.publish(false);
     say({ ready: true });
-    setTimeout(() => {
-      const decision = registry.admit("a turn");
+    setTimeout(async () => {
+      const decision = await registry.admit("a turn");
       say({ admitted: decision.admitted, reason: decision.reason ?? null });
     }, 300);
   `, { env: { QA_UPTIME_MS: "100000" } });
   await waitForLine(b, (line) => line.ready);
 
-  assert.equal(a.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true, "an idle host may be stopped");
-  await wait(600);
-  const admitted = b.lines().find((line) => line.admitted !== undefined);
+  assert.equal(await a.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true, "an idle host may be stopped");
+  const [admitted] = await waitForLine(b, line => line.admitted !== undefined);
   assert.equal(admitted?.admitted, true, "the other deployment starts its turn");
-  assert.equal(a.commitStop(), false, "and the stop cannot be made final over it");
+  assert.equal(await a.commitStop(), false, "and the stop cannot be made final over it");
   assert.equal(a.stopIntent(), undefined, "the withdrawn intent does not linger");
   b.child.kill("SIGKILL");
   await b.done;
@@ -79,13 +78,13 @@ async function scenarioTwoDeployments(shared) {
 async function scenarioStartDuringStop(shared) {
   const a = new MachineHostPowerRegistry({ dir: shared, profilePath: "/srv/a2", bootId: "qa-boot", uptimeMs: () => 200_000, pid: process.pid });
   a.publish(false);
-  assert.equal(a.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true);
-  assert.equal(a.commitStop(), true, "nothing objected, so the stop is final");
+  assert.equal(await a.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true);
+  assert.equal(await a.commitStop(), true, "nothing objected, so the stop is final");
 
   // B starts after the stop is final: it must be refused, not run into an
   // instance that is going away.
   const b = deployment(shared, "/srv/b2", `
-    const decision = registry.admit("a turn");
+    const decision = await registry.admit("a turn");
     say({ admitted: decision.admitted, reason: decision.reason ?? null });
   `, { env: { QA_UPTIME_MS: "200000" } });
   await b.done;
@@ -94,7 +93,7 @@ async function scenarioStartDuringStop(shared) {
   assert.match(decision.reason, /stopping after being idle/);
   assert.match(decision.reason, /\/srv\/a2/, "and names the deployment that decided it");
   log("start during a final stop: refused with a reason naming the decider");
-  a.abandonStop();
+  await a.abandonStop();
   // A committed intent is not withdrawn by abandon; clear it for the next case.
   await rm(path.join(shared, "stop-intent.json"), { force: true });
 }
@@ -115,10 +114,10 @@ async function scenarioShortWorkBetweenTicks(shared) {
   `, { env: { QA_UPTIME_MS: String(now) } });
   await waitForLine(b, (line) => line.worked);
   assert.equal(a.hostIdleForMs(0), 0, "the host was working a moment ago");
-  assert.equal(a.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }), false, "a short turn next door keeps the host awake");
+  assert.equal(await a.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }), false, "a short turn next door keeps the host awake");
   now += 90_000;
-  assert.equal(a.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }), true, "and stops blocking once the host is quiet");
-  a.abandonStop();
+  assert.equal(await a.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }), true, "and stops blocking once the host is quiet");
+  await a.abandonStop();
   b.child.kill("SIGKILL");
   await b.done;
   log("short work between ticks: counted as host activity, not swallowed");
@@ -140,7 +139,7 @@ async function scenarioNeighbourWithoutPowerConfig(shared, userDataRoot) {
   const reason = a.blockingReason();
   assert.ok(reason, "a deployment without power configuration still keeps the host awake");
   assert.match(reason, new RegExp(profile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.equal(a.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), false);
+  assert.equal(await a.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), false);
   b.child.kill("SIGKILL");
   await b.done;
   log("neighbour without power config: visible and blocking");
@@ -148,7 +147,7 @@ async function scenarioNeighbourWithoutPowerConfig(shared, userDataRoot) {
 
 async function scenarioMaintenance(shared) {
   const maintenance = deployment(shared, "/srv/maint", `
-    const decision = registry.admit("this maintenance command");
+    const decision = await registry.admit("this maintenance command");
     say({ admitted: decision.admitted });
     setTimeout(() => say({ holding: true }), 400);
   `, { kind: "maintenance", env: { QA_UPTIME_MS: "500000" } });
@@ -156,7 +155,7 @@ async function scenarioMaintenance(shared) {
   const a = new MachineHostPowerRegistry({ dir: shared, profilePath: "/srv/a5", bootId: "qa-boot", uptimeMs: () => 500_000, pid: process.pid });
   a.publish(false);
   assert.match(a.blockingReason() ?? "", /maintenance command/, "maintenance is host-wide work");
-  assert.equal(a.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), false);
+  assert.equal(await a.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), false);
   maintenance.child.kill("SIGKILL");
   await maintenance.done;
   assert.ok(a.blockingReason(), "a killed maintenance process does not prove its command is gone");
@@ -183,7 +182,7 @@ async function scenarioKilledRuntimeWithLiveDescendant(shared) {
   const a = new MachineHostPowerRegistry({ dir: shared, profilePath: "/srv/a6", bootId: "qa-boot", uptimeMs: () => 600_000, pid: process.pid });
   a.publish(false);
   assert.ok(a.blockingReason(), "a killed runtime keeps the host awake; its descendant is still running");
-  assert.equal(a.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), false);
+  assert.equal(await a.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), false);
   const before = await readFile(marker, "utf8").catch(() => "");
   await wait(300);
   const after = await readFile(marker, "utf8").catch(() => "");
@@ -196,8 +195,8 @@ async function scenarioPersistenceFailure(shared) {
   const a = new MachineHostPowerRegistry({ dir: shared, profilePath: "/srv/a7", bootId: "qa-boot", uptimeMs: () => 700_000, pid: process.pid });
   a.publish(false);
   await writeFile(path.join(shared, "stop-intent.json"), "{ not json");
-  assert.throws(() => a.admit("a turn"), /cannot be read/, "unreadable coordination is not permission to start work");
-  assert.throws(() => a.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), /cannot be read/, "and not permission to stop either");
+  await assert.rejects(() => a.admit("a turn"), /cannot be read/, "unreadable coordination is not permission to start work");
+  await assert.rejects(() => a.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), /cannot be read/, "and not permission to stop either");
   await rm(path.join(shared, "stop-intent.json"), { force: true });
   log("persistence failure: refuses both admission and stopping");
 }
@@ -211,8 +210,8 @@ async function scenarioRestartDuringFence(shared, userDataRoot) {
   await mkdir(profile, { recursive: true });
   const first = deployment(shared, profile, `
     registry.publish(false);
-    say({ began: registry.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }) });
-    say({ committed: registry.commitStop() });
+    say({ began: await registry.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }) });
+    say({ committed: await registry.commitStop() });
     setInterval(() => undefined, 1000);
   `, { env: { QA_UPTIME_MS: "800000" } });
   await waitForLine(first, (line) => line.committed !== undefined);
@@ -221,7 +220,7 @@ async function scenarioRestartDuringFence(shared, userDataRoot) {
   await first.done;
 
   const other = new MachineHostPowerRegistry({ dir: shared, profilePath: "/srv/a8", bootId: "qa-boot", uptimeMs: () => 800_000, pid: process.pid });
-  const refused = other.admit("a turn");
+  const refused = await other.admit("a turn");
   assert.equal(refused.admitted, false, "the committed stop still holds after its owner died");
 
   const restarted = new MachineHostPowerRegistry({ dir: shared, profilePath: profile, bootId: "qa-boot", uptimeMs: () => 800_000, pid: process.pid });
@@ -230,11 +229,13 @@ async function scenarioRestartDuringFence(shared, userDataRoot) {
     /processes are gone/,
     "an unproven restart does not clear its own fence"
   );
-  assert.equal(other.admit("a turn").admitted, false, "so work is still refused");
+  assert.equal((await other.admit("a turn")).admitted, false, "so work is still refused");
   const cleared = await restarted.adoptOwnStaleClaims(async () => undefined);
-  assert.ok(cleared >= 1, "proven closure clears the crashed deployment's claim and intent");
-  assert.equal(other.admit("a turn").admitted, true, "and the host is usable again after a normal restart");
-  log("restart during a fence: cleared only with proven closure, never left permanent");
+  assert.ok(cleared >= 1, "proven closure clears the crashed deployment's native claim");
+  assert.equal((await other.admit("a turn")).admitted, false, "a native close receipt cannot cancel a possibly submitted AWS stop");
+  const rebooted = new MachineHostPowerRegistry({ dir: shared, profilePath: "/srv/rebooted", bootId: "qa-next-boot", uptimeMs: () => 1000 });
+  assert.equal((await rebooted.admit("a turn")).admitted, true, "a verified new boot retires the old committed stop");
+  log("restart during a fence: native claims clear on proof, committed stop holds until host reboot");
 }
 
 async function scenarioSharedIdleOneStopIntent(shared) {
@@ -252,15 +253,15 @@ async function scenarioSharedIdleOneStopIntent(shared) {
   for (const registry of registries) registry.publish(false);
 
   // All three decide at once; exactly one intent may exist.
-  const began = registries.map((registry) => registry.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }));
+  const began = await Promise.all(registries.map((registry) => registry.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 })));
   assert.equal(began.filter(Boolean).length, 1, "exactly one deployment takes the stop");
   const winner = registries[began.indexOf(true)];
-  assert.equal(winner.commitStop(), true);
+  assert.equal(await winner.commitStop(), true);
   const intents = (await readdir(shared)).filter((name) => name === "stop-intent.json");
   assert.deepEqual(intents, ["stop-intent.json"], "one intent file, not one per deployment");
   for (const registry of registries) {
     if (registry === winner) continue;
-    assert.equal(registry.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }), false, "the others do not stop it a second time");
+    assert.equal(await registry.beginStop({ minIdleMs: 60_000, ownIdleSinceUptimeMs: 0 }), false, "the others do not stop it a second time");
   }
   log("shared idle: exactly one stop intent");
 }
@@ -278,7 +279,7 @@ async function scenarioAwsBoundary() {
   let now = MACHINE_IDLE_STOP_MS + 1000;
   const calls = [];
   const host = {
-    hasWorkForIdleStop: async () => false, retainIdleFence: () => undefined,
+    hasWorkForIdleStop: async () => false, retainIdleFence: () => undefined, recoverIdleFence: async () => false,
     publishPowerStatus: async () => undefined, shutdown: async () => undefined,
     prepareIdleStop: async () => async () => undefined
   };

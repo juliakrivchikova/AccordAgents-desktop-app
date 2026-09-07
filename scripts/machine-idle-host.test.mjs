@@ -6,7 +6,10 @@ import test from "node:test";
 import { StorageService } from "../dist/main/main/services/storage.js";
 import { ChatEventLogService } from "../dist/main/main/services/chatEventLog.js";
 import { MachineHostService } from "../dist/main/main/services/machineHost.js";
+import { MachineHostPowerRegistry } from "../dist/main/main/services/machineHostPower.js";
 import { MachineIdleScheduler } from "../dist/main/main/services/machineIdle.js";
+import { MachineIdlePower } from "../dist/main/main/services/machineIdlePower.js";
+import { MACHINE_IDLE_STOP_MS } from "../dist/main/shared/machinePower.js";
 import { openMobileRelayPayload } from "../dist/main/main/services/mobileRelaySealing.js";
 
 test("idle fences the actual host admission path; retained results resend and late turns wait for a new boot", async () => {
@@ -86,3 +89,96 @@ async function until(predicate) {
   const end = Date.now() + 5000;
   while (!await predicate()) { if (Date.now() >= end) throw new Error("Idle lifecycle condition was not reached"); await new Promise(resolve => setTimeout(resolve, 10)); }
 }
+
+test("unknown fence writes recover in the same runtime after SQLite becomes readable", async () => {
+  for (const { didCommit, failReads } of [{ didCommit: false, failReads: 1 }, { didCommit: false, failReads: Infinity }, { didCommit: true, failReads: Infinity }]) {
+    const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-uncertain-"));
+    const storage = new StorageService({ dbPath: path.join(dir, "state.sqlite3") });
+    const store = storage.machinePower();
+    const identity = { machine: "a".repeat(64), boot: "a".repeat(32) };
+    let nativeFenced = false, unreadable = false, stops = 0;
+    let failuresRemaining = failReads;
+    const readFence = store.stopFence.bind(store), writeFence = store.tryFence.bind(store);
+    storage.machinePower = () => store;
+    store.stopFence = async boot => { if (unreadable && failuresRemaining-- > 0) throw new Error("SQLITE_IOERR read"); return readFence(boot); };
+    store.tryFence = async (...args) => {
+      if (didCommit) await writeFence(...args);
+      unreadable = true;
+      throw new Error("SQLITE_IOERR write response");
+    };
+    const host = Object.create(MachineHostService.prototype);
+    Object.assign(host, { idleFenced: false, inbound: Promise.resolve(), eventChannel: { flush: async () => {} },
+      options: { eventStorage: storage }, debugLogs: { write: async () => {} },
+      hasWorkForIdleStop: async () => false, publishPowerStatus: async () => {}, shutdown: async () => {} });
+    const config = { version: 1, instanceId: "i-0123456789abcdef0", credentials: { accessKeyId: "synthetic", secretAccessKey: "synthetic", region: "us-east-1" } };
+    const power = new MachineIdlePower({ config, store, host, nativeProcessDbPath: path.join(dir, "native.sqlite3"), log: () => {},
+      runner: { hasActiveNativeWork: () => false, shutdownWarmAgents: async () => {},
+        fenceIdleNativeAdmissions: () => { nativeFenced = true; return () => { nativeFenced = false; }; } } }, {
+      identity: async () => identity, verifyAws: async () => {}, uptimeMs: () => MACHINE_IDLE_STOP_MS + 100,
+      createHostRegistry: options => new MachineHostPowerRegistry({ ...options, dir: path.join(dir, "host"), profilePath: dir }),
+      client: { close: () => {}, stopAfterDrain: async () => { stops++; return { instanceId: config.instanceId, state: "stopping" }; } }
+    });
+    try {
+      await store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
+      await power.start();
+      if (failReads === 1) {
+        await assert.rejects(power.scheduler.check(), /SQLITE_IOERR write/);
+        assert.equal(nativeFenced, false); assert.equal(host.idleFenced, false);
+        assert.equal(power.hostPower.stopIntent(), undefined);
+        assert.equal(stops, 0, "the outer successful absence read also releases gates retained by the first failed read");
+        continue;
+      }
+      await power.scheduler.check();
+      assert.equal(power.uncertainFence, true); assert.equal(nativeFenced, true); assert.equal(host.idleFenced, true);
+      assert.equal(power.hostPower.stopIntent().phase, "pending", "unknown persistence cannot discard the shared stop intent");
+      await assert.rejects(power.stopAws(), /SQLITE_IOERR read/);
+      assert.equal(stops, 0); assert.equal(nativeFenced, true);
+      unreadable = false;
+      await power.stopAws();
+      assert.equal(power.uncertainFence, false);
+      assert.equal(nativeFenced, didCommit); assert.equal(host.idleFenced, didCommit);
+      assert.equal(stops, didCommit ? 1 : 0, "only a stored fence continues the stop; an absent one reopens queued work");
+      if (!didCommit) assert.equal(power.hostPower.stopIntent(), undefined);
+    } finally { power.close(); await rm(dir, { recursive: true, force: true }); }
+  }
+});
+
+
+test("host stop loss leaves no local fence; failure after local commit keeps admission held", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-commit-"));
+  const storage = new StorageService({ dbPath: path.join(dir, "state.sqlite3") });
+  const store = storage.machinePower();
+  const create = profilePath => new MachineHostPowerRegistry({ dir: path.join(dir, "shared"), profilePath, bootId: "boot", uptimeMs: () => 10000 });
+  const stopper = create("/stopper"), neighbour = create("/neighbour");
+  let nativeFenced = false;
+  // Exercise the real host preparation method and SQLite fence, with no
+  // provider work or relay traffic required for this persistence interleaving.
+  const host = Object.create(MachineHostService.prototype);
+  Object.assign(host, { idleFenced: false, inbound: Promise.resolve(), eventChannel: { flush: async () => {} },
+    options: { eventStorage: storage }, debugLogs: { write: async () => {} }, hasWorkForIdleStop: async () => false });
+  const request = commitHostStop => ({ bootId: "boot", uptimeMs: 10000, idleSinceMs: 1,
+    fenceNative: () => { nativeFenced = true; return () => { nativeFenced = false; }; }, stopProviders: async () => {}, commitHostStop });
+  try {
+    await store.write({ version: 1, bootId: "boot", idleSinceMs: 1 });
+    stopper.publish(false); neighbour.publish(false);
+    assert.equal(await stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true);
+    await neighbour.admit("a turn");
+    assert.equal(await host.prepareIdleStop(request(write => stopper.commitStop(write))), undefined);
+    assert.equal(await store.stopFence("boot"), undefined);
+    assert.equal(nativeFenced, false);
+    assert.equal(host.idleFenced, false);
+    neighbour.publish(false);
+    assert.equal(await stopper.beginStop({ minIdleMs: 0, ownIdleSinceUptimeMs: 0 }), true);
+    await assert.rejects(host.prepareIdleStop(request(write => stopper.commitStop(async () => {
+      assert.equal(await write(), true);
+      throw new Error("shared commit failed after SQLite stored the fence");
+    }))), /shared commit failed/);
+    assert.ok(await store.stopFence("boot"));
+    assert.equal(nativeFenced, true);
+    assert.equal(host.idleFenced, true);
+    assert.equal(stopper.stopIntent().phase, "pending");
+    // Recovery must establish the shared fence before it may call AWS.
+    assert.equal(await stopper.commitStop(), true);
+    assert.equal((await neighbour.admit("late turn")).admitted, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

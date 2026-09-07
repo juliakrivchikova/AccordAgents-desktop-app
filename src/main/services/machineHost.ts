@@ -413,6 +413,7 @@ export class MachineHostService {
     bootId: string; uptimeMs: number; idleSinceMs: number;
     fenceNative(): (() => void) | undefined;
     stopProviders(): Promise<void>;
+    commitHostStop?(prepareLocal: () => Promise<boolean>): Promise<boolean>;
   }): Promise<(() => Promise<void>) | undefined> {
     if (this.idleFenced || await this.hasWorkForIdleStop()) return undefined;
     this.idleFenced = true;
@@ -424,9 +425,17 @@ export class MachineHostService {
       if (await this.hasWorkForIdleStop()) return undefined;
       releaseNative = request.fenceNative();
       if (!releaseNative) return undefined;
-      committed = await this.options.eventStorage.machinePower().tryFence(request.bootId, request.uptimeMs, randomUUID(), request.idleSinceMs);
+      const prepareLocal = () => this.options.eventStorage.machinePower().tryFence(request.bootId, request.uptimeMs, randomUUID(), request.idleSinceMs);
+      committed = await (request.commitHostStop ? request.commitHostStop(prepareLocal) : prepareLocal());
       if (!committed) return undefined;
       return () => this.shutdown(request.stopProviders, false);
+    } catch (error) {
+      // An uncertain file/SQLite result is not permission to reopen native
+      // work after a durable fence might have committed. Power recovery will
+      // reacquire the shared host fence before it can call AWS.
+      committed = Boolean(await this.options.eventStorage.machinePower().stopFence(request.bootId).catch(() => "unconfirmed"));
+      if (committed) this.uncertainIdleRelease = releaseNative;
+      throw error;
     } finally {
       if (!committed) {
         releaseNative?.();
@@ -434,6 +443,19 @@ export class MachineHostService {
         void this.eventChannel.flush().catch(error => { void this.debugLogs.write("machine-host.idle.resume-error", { message: errorMessage(error) }); });
       }
     }
+  }
+
+  private uncertainIdleRelease?: () => void;
+
+  /** A failed fence read is recoverable without restarting the runtime. Only
+   * a successful read proving absence permits reopening native admission. */
+  async recoverIdleFence(bootId: string): Promise<boolean> {
+    if (await this.options.eventStorage.machinePower().stopFence(bootId)) return true;
+    this.uncertainIdleRelease?.();
+    this.uncertainIdleRelease = undefined;
+    this.idleFenced = false;
+    void this.eventChannel.flush().catch(error => { void this.debugLogs.write("machine-host.idle.resume-error", { message: errorMessage(error) }); });
+    return false;
   }
 
   /** Called on every conversation mutation on this machine: approvals raised

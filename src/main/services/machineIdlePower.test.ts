@@ -19,7 +19,7 @@ test("a retained power stop survives runtime restart, never reopens admission an
   const dbPath = path.join(dir, "state.sqlite3"); const nativePath = path.join(dir, "native.sqlite3");
   const store = new StorageService({ dbPath }).machinePower();
   let stops = 0; let fenced = false; let failedAws = true;
-  const host = { hasWorkForIdleStop: async () => false,
+  const host = { hasWorkForIdleStop: async () => false, recoverIdleFence: async () => Boolean(await store.stopFence(identity.boot)),
     retainIdleFence: () => { fenced = true; }, publishPowerStatus: async () => undefined, shutdown: async () => undefined,
     prepareIdleStop: async (request: any) => {
       if (!request.fenceNative()) return undefined;
@@ -104,6 +104,7 @@ test("a deployment sharing this instance keeps it awake, and its own claim is pu
   let stops = 0;
   const host = {
     hasWorkForIdleStop: async () => false,
+    recoverIdleFence: async () => Boolean(await store.stopFence(identity.boot)),
     retainIdleFence: () => undefined,
     publishPowerStatus: async () => undefined,
     shutdown: async () => undefined,

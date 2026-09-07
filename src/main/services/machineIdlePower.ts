@@ -21,6 +21,7 @@ export class MachineIdlePower {
   private retry?: ReturnType<typeof setTimeout>;
   private closed = false;
   private stopping = false;
+  private uncertainFence = false;
   private lastWarning?: string;
   private hostIdentity?: NativeHostIdentity;
   /** Every deployment on this instance publishes what it is doing here.
@@ -31,7 +32,7 @@ export class MachineIdlePower {
   constructor(private readonly options: {
     config: AwsMachinePowerConfig;
     store: MachinePowerStore;
-    host: Pick<MachineHostService, "hasWorkForIdleStop" | "prepareIdleStop" | "retainIdleFence" | "publishPowerStatus" | "shutdown">;
+    host: Pick<MachineHostService, "hasWorkForIdleStop" | "prepareIdleStop" | "recoverIdleFence" | "retainIdleFence" | "publishPowerStatus" | "shutdown">;
     runner: Pick<CliAgentRunner, "hasActiveNativeWork" | "fenceIdleNativeAdmissions" | "shutdownWarmAgents">;
     nativeProcessDbPath: string;
     /** This deployment's user-data directory; identifies it host-wide. */
@@ -60,18 +61,6 @@ export class MachineIdlePower {
     this.hostIdentity = await this.environment.identity();
     if (!this.hostIdentity) throw new Error("The host boot identity is unavailable; power recovery cannot safely admit work.");
     const bootId = this.hostIdentity.boot;
-    const retained = await this.options.store.stopFence(bootId);
-    if (retained) {
-      this.options.host.retainIdleFence();
-      if (!this.options.runner.fenceIdleNativeAdmissions()) throw new Error("The retained idle stop raced native session admission.");
-      this.stopping = true;
-      this.setWarning("The machine is completing its retained idle stop; new turns remain queued.");
-      return;
-    }
-    const previous = await this.options.store.read();
-    if (previous?.bootId !== bootId) {
-      await this.options.store.write({ version: 1, bootId, idleSinceMs: this.environment.uptimeMs() });
-    }
     // Other deployments on this same instance measure idle independently and
     // cannot see this one's work. Without a shared claim, whichever of them
     // reaches three hours first would stop the instance underneath the others.
@@ -92,11 +81,23 @@ export class MachineIdlePower {
       this.setWarning(`Automatic idle stop is suspended: this machine's deployments cannot coordinate (${errorText(error)}).`);
       return;
     }
+    const retained = await this.options.store.stopFence(bootId);
+    if (retained) {
+      this.options.host.retainIdleFence();
+      if (!this.options.runner.fenceIdleNativeAdmissions()) throw new Error("The retained idle stop raced native session admission.");
+      this.stopping = true;
+      this.setWarning("The machine is completing its retained idle stop; new turns remain queued.");
+      return;
+    }
+    const previous = await this.options.store.read();
+    if (previous?.bootId !== bootId) {
+      await this.options.store.write({ version: 1, bootId, idleSinceMs: this.environment.uptimeMs() });
+    }
     // A machine metadata outage suspends only auto-stop; native work can still
     // run, and the visible warning must not disappear just because a poll ran.
     this.scheduler = new MachineIdleScheduler({ state: this.options.store, bootId, uptimeMs: this.environment.uptimeMs,
       isBusy: async () => {
-        const busy = await this.localBusy(bootId);
+        const busy = await this.localBusy(bootId) || this.options.runner.hasActiveNativeWork();
         // Publish before answering, so a deployment deciding to stop right now
         // reads this one's current state rather than a stale claim.
         try { this.hostPower?.publish(busy); }
@@ -108,16 +109,14 @@ export class MachineIdlePower {
         // section on this host. `beginStop` surveys every deployment's claim
         // and writes the intent inside the same lock an admission takes, so a
         // turn cannot start in the gap a plain read would leave open.
-        if (!this.beginHostStop(since)) return undefined;
+        if (!await this.beginHostStop(since)) return undefined;
         let committed = false;
         try {
           await this.environment.verifyAws(this.options.config);
           const drain = await this.options.host.prepareIdleStop({ bootId, uptimeMs: this.environment.uptimeMs(), idleSinceMs: since,
-            fenceNative: () => this.options.runner.fenceIdleNativeAdmissions(), stopProviders: () => this.options.runner.shutdownWarmAgents() });
+            fenceNative: () => this.options.runner.fenceIdleNativeAdmissions(), stopProviders: () => this.options.runner.shutdownWarmAgents(),
+            commitHostStop: prepareLocal => this.hostPower!.commitStop(prepareLocal) });
           if (!drain) return undefined;
-          // Last gate: anything admitted while this was draining has removed
-          // the intent, and this returns false rather than stopping over it.
-          if (!this.commitHostStop()) return undefined;
           committed = true;
           return async () => {
             this.stopping = true;
@@ -125,8 +124,22 @@ export class MachineIdlePower {
             try { await drain(); await this.stopAws(); }
             catch (error) { this.failedStop(error); }
           };
+        } catch (error) {
+          let fence: boolean;
+          try { fence = await this.options.host.recoverIdleFence(bootId); }
+          catch {
+            this.uncertainFence = true;
+            this.stopping = true;
+            this.failedStop(error);
+            // The scheduler stays active until we know whether preparation
+            // committed. Recovery, not another preparation, owns these gates.
+            return undefined;
+          }
+          if (!fence) throw error;
+          this.stopping = true;
+          return async () => this.failedStop(error);
         } finally {
-          if (!committed) this.abandonHostStop();
+          if (!committed && !this.stopping) await this.abandonHostStop();
         }
       },
       onError: error => this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`) });
@@ -175,13 +188,13 @@ export class MachineIdlePower {
    * survey inside `beginStop` measures from the last moment ANY deployment
    * here was working, so a neighbour's short turn keeps the instance up.
    */
-  private beginHostStop(ownIdleSinceUptimeMs: number): boolean {
+  private async beginHostStop(ownIdleSinceUptimeMs: number): Promise<boolean> {
     if (!this.hostPower) {
       this.setWarning("The machine stays awake: this machine's deployments cannot coordinate.");
       return false;
     }
     try {
-      if (this.hostPower.beginStop({ minIdleMs: MACHINE_IDLE_STOP_MS, ownIdleSinceUptimeMs })) return true;
+      if (await this.hostPower.beginStop({ minIdleMs: MACHINE_IDLE_STOP_MS, ownIdleSinceUptimeMs })) return true;
     } catch (error) {
       this.setWarning(`The machine stays awake: this machine's deployments cannot be read (${errorText(error)}).`);
       return false;
@@ -193,26 +206,42 @@ export class MachineIdlePower {
     return false;
   }
 
-  private commitHostStop(): boolean {
-    try { return this.hostPower?.commitStop() ?? false; }
-    catch (error) {
-      this.setWarning(`The machine stays awake: its stop could not be made final (${errorText(error)}).`);
-      return false;
-    }
-  }
-
-  private abandonHostStop(): void {
-    try { this.hostPower?.abandonStop(); }
+  private async abandonHostStop(): Promise<void> {
+    try { await this.hostPower?.abandonStop(); }
     catch (error) { this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`); }
   }
 
   /** The gate every native admission on this host consults. */
-  admission(): ((what: string) => { admitted: true } | { admitted: false; reason: string }) | undefined {
+  admission(): ((what: string) => Promise<{ admitted: true } | { admitted: false; reason: string }>) | undefined {
     return this.hostPower ? (what) => this.hostPower!.admit(what) : undefined;
   }
 
   private async stopAws(): Promise<void> {
     if (this.closed) return;
+    if (this.uncertainFence) {
+      const retained = await this.options.host.recoverIdleFence(this.hostIdentity!.boot);
+      if (!retained) {
+        await this.abandonHostStop();
+        this.uncertainFence = false;
+        this.stopping = false;
+        this.setWarning("The interrupted idle-stop preparation did not commit; queued work can continue.");
+        return;
+      }
+      this.uncertainFence = false;
+    }
+    if (!this.hostPower) throw new Error("The shared host stop cannot be verified; the machine stays awake.");
+    const intent = this.hostPower.stopIntent();
+    if (intent?.phase === "committed") {
+      if (intent.profileId !== this.hostPower.identity().profileId) throw new Error("Another deployment owns the host stop; this deployment remains fenced.");
+    } else {
+      // A crash can separate the local SQLite fence from the shared file.
+      // Never issue AWS Stop until admission is excluded across the host too.
+      const state = await this.options.store.read();
+      const since = state?.idleSinceMs ?? this.environment.uptimeMs();
+      if ((!intent && !await this.beginHostStop(since)) || !await this.hostPower.commitStop()) {
+        throw new Error("The shared host stop is not committed; another deployment may still be working.");
+      }
+    }
     await this.environment.verifyAws(this.options.config);
     await this.options.host.shutdown(() => this.options.runner.shutdownWarmAgents(), false);
     await assertNativeRegistryClosed(this.options.nativeProcessDbPath, this.hostIdentity!);

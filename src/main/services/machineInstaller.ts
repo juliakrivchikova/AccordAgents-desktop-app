@@ -791,6 +791,7 @@ function missingRequirements(probe: ParsedMachineProbe): string[] {
     missing.push(`Node ${MINIMUM_NODE_MAJOR}+`);
   }
   if (!probe.hasNpm) missing.push("npm");
+  if (!probe.hasPython3) missing.push("python3 (host admission locking)");
   if (!probe.hasSqlite3) missing.push("the sqlite3 CLI");
   if (!probe.hasGit) missing.push("git");
   if (!probe.hasRsync) missing.push("rsync");

@@ -178,7 +178,7 @@ export function machineProbeScript(options: {
     `printf 'user-data=%s\\n' "$UD"`,
     `printf 'service-name=%s\\n' "$SVC"`,
     `if command -v node >/dev/null 2>&1; then printf 'node=%s\\n' "$(node --version 2>/dev/null)"; else printf 'node=missing\\n'; fi`,
-    `for t in sqlite3 git rsync npm; do`,
+    `for t in sqlite3 git rsync npm python3; do`,
     `  if command -v "$t" >/dev/null 2>&1; then printf '%s=ok\\n' "$t"; else printf '%s=missing\\n' "$t"; fi`,
     `done`,
     `if command -v systemctl >/dev/null 2>&1; then printf 'systemd=ok\\n'; else printf 'systemd=missing\\n'; fi`,
@@ -219,6 +219,7 @@ export interface ParsedMachineProbe extends MachineRuntimeProbe {
   loginPath?: string;
   nodePath?: string;
   hasNpm: boolean;
+  hasPython3: boolean;
 }
 
 export function parseMachineProbe(stdout: string): ParsedMachineProbe {
@@ -259,6 +260,7 @@ export function parseMachineProbe(stdout: string): ParsedMachineProbe {
     hasGit: values.get("git") === "ok",
     hasRsync: values.get("rsync") === "ok",
     hasNpm: values.get("npm") === "ok",
+    hasPython3: values.get("python3") === "ok",
     hasSystemd: values.get("systemd") === "ok",
     hasPasswordlessSudo: values.get("sudo") === "ok",
     loginPath: values.get("login-path") || undefined,

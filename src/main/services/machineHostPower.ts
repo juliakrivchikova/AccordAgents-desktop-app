@@ -13,7 +13,7 @@
  * than a set of observations:
  *
  *   - **One lock.** Admitting work and committing a stop are the same
- *     critical section. Both take `lock/`, so a deployment can never start a
+ *     critical section. Both take the kernel file lock, so a deployment can never start a
  *     turn in the window between another deployment deciding to stop and the
  *     stop becoming final. A read before the AWS call cannot do this: the
  *     answer is stale the moment it is read.
@@ -43,20 +43,18 @@
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
+import { withHostAdmissionLock } from "./hostAdmissionLock";
 
 export const MACHINE_HOST_POWER_DIR = "/tmp/accordagents-host-power";
 /** A live claim that has not been refreshed within this counts as busy. */
 export const MACHINE_HOST_CLAIM_STALE_MS = 90_000;
-/** The critical section is a few file reads and one write; a lock older than
- *  this whose owner is gone is a crash, not a slow caller. */
-export const MACHINE_HOST_LOCK_STALE_MS = 30_000;
-const LOCK_DIR = "lock";
 const STOP_INTENT_FILE = "stop-intent.json";
 
 export type MachineHostClaimKind = "runtime" | "maintenance";
 
 export interface MachineHostClaim {
-  version: 1;
+  /** v2 uses kernel admission locking; v1 neighbours cannot safely stop this host. */
+  version: 1 | 2;
   /** Stable per user-data directory; each runtime has a distinct instance claim. */
   profileId: string;
   /** The profile's own directory, for a message the User can act on. */
@@ -143,7 +141,7 @@ export class MachineHostPowerRegistry {
     if (this.released) throw new Error("This deployment's host-power registration has been released.");
     if (busy) this.lastBusyUptimeMs = this.options.uptimeMs();
     const claim: MachineHostClaim = {
-      version: 1,
+      version: 2,
       profileId: this.profileId,
       profilePath: path.resolve(this.options.profilePath),
       bootId: this.options.bootId,
@@ -186,7 +184,7 @@ export class MachineHostPowerRegistry {
       }
       if (full === this.claimPath) continue;
       // Alive but not refreshing: treated as busy, never as idle.
-      live.push(!this.isAlive(claim.pid) || now < claim.uptimeMs || now - claim.uptimeMs > this.staleAfterMs
+      live.push(claim.version !== 2 || !this.isAlive(claim.pid) || now < claim.uptimeMs || now - claim.uptimeMs > this.staleAfterMs
         ? { ...claim, busy: true } : claim);
     }
     return live;
@@ -197,6 +195,7 @@ export class MachineHostPowerRegistry {
     const busy = this.others().filter((claim) => claim.busy);
     if (!busy.length) return undefined;
     const first = busy[0];
+    if (first.version !== 2) return `Another deployment on this machine (${first.profilePath}) needs an upgrade before automatic stop can coordinate safely.`;
     const what = first.kind === "maintenance" ? "a maintenance command" : "work";
     const more = busy.length > 1 ? ` and ${busy.length - 1} more` : "";
     return `Another deployment on this machine (${first.profilePath}${more}) is running ${what}.`;
@@ -210,38 +209,8 @@ export class MachineHostPowerRegistry {
    * finding the host idle and its stop becoming final, which is exactly the
    * work a stop must never destroy.
    */
-  withLock<T>(action: () => T): T {
-    const lockPath = path.join(this.dir, LOCK_DIR);
-    const ownerPath = path.join(lockPath, "owner.json");
-    const deadline = Date.now() + 5_000;
-    for (;;) {
-      mkdirSync(this.dir, { recursive: true, mode: 0o777 });
-      try {
-        mkdirSync(lockPath, { mode: 0o777 });
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        // A holder that is gone leaves the section closed forever otherwise.
-        // Only an owner that no longer exists and has held it far longer than
-        // the section takes may be broken; a live holder is always waited for.
-        const owner = readLockOwner(ownerPath);
-        const heldFor = owner ? this.options.uptimeMs() - owner.uptimeMs : Number.POSITIVE_INFINITY;
-        if ((!owner || (!this.isAlive(owner.pid) && heldFor > MACHINE_HOST_LOCK_STALE_MS))) {
-          rmSync(lockPath, { recursive: true, force: true });
-          continue;
-        }
-        if (Date.now() > deadline) {
-          throw new Error("Another deployment on this machine is holding the power lock; the host stays awake.");
-        }
-        sleepBriefly();
-      }
-    }
-    try {
-      writeFileSync(ownerPath, `${JSON.stringify({ pid: this.pid, uptimeMs: this.options.uptimeMs() })}\n`, { mode: 0o644 });
-      return action();
-    } finally {
-      rmSync(lockPath, { recursive: true, force: true });
-    }
+  withLock<T>(action: () => T | Promise<T>): Promise<T> {
+    return withHostAdmissionLock(this.dir, action);
   }
 
   /** The stop one deployment has decided on, if any. */
@@ -260,7 +229,7 @@ export class MachineHostPowerRegistry {
    * compaction, background work, a maintenance command — before it starts.
    * Under the lock, so a stop cannot commit while this is deciding.
    */
-  admit(what: string): MachineHostAdmission {
+  admit(what: string): Promise<MachineHostAdmission> {
     return this.withLock(() => {
       const intent = this.stopIntent();
       if (intent?.phase === "committed") {
@@ -286,7 +255,7 @@ export class MachineHostPowerRegistry {
    * pass under the lock, after the caller's own drain: an admission in between
    * removes the intent and the commit then finds it gone.
    */
-  beginStop(request: { minIdleMs: number; ownIdleSinceUptimeMs: number }): boolean {
+  beginStop(request: { minIdleMs: number; ownIdleSinceUptimeMs: number }): Promise<boolean> {
     return this.withLock(() => {
       if (this.stopIntent()) return false;
       if (this.blockingReason()) return false;
@@ -307,22 +276,25 @@ export class MachineHostPowerRegistry {
   }
 
   /** Makes this deployment's stop final, unless work was admitted meanwhile. */
-  commitStop(): boolean {
-    return this.withLock(() => {
+  commitStop(prepareLocal: () => Promise<boolean> = async () => true): Promise<boolean> {
+    return this.withLock(async () => {
       const intent = this.stopIntent();
       if (!intent || intent.instanceId !== this.instanceId || intent.phase !== "pending") return false;
       if (this.blockingReason()) {
         rmSync(path.join(this.dir, STOP_INTENT_FILE), { force: true });
         return false;
       }
+      // Keep admission excluded while the caller commits its local SQLite
+      // fence; a losing host intent must never leave that local fence behind.
+      if (!await prepareLocal()) return false;
       writeIntent(path.join(this.dir, STOP_INTENT_FILE), { ...intent, phase: "committed" });
       return true;
     });
   }
 
   /** Withdraws this deployment's own intent; a committed one stays. */
-  abandonStop(): void {
-    this.withLock(() => {
+  abandonStop(): Promise<void> {
+    return this.withLock(() => {
       const intent = this.stopIntent();
       if (intent && intent.instanceId === this.instanceId && intent.phase === "pending") {
         rmSync(path.join(this.dir, STOP_INTENT_FILE), { force: true });
@@ -364,7 +336,7 @@ export class MachineHostPowerRegistry {
    */
   async adoptOwnStaleClaims(proveClosed: () => Promise<void>): Promise<number> {
     const intent = this.stopIntent();
-    const ownDeadIntent = intent?.profileId === this.profileId && !this.isAlive(intent.pid);
+    const ownDeadIntent = intent?.phase === "pending" && intent.profileId === this.profileId && !this.isAlive(intent.pid);
     const mine = this.others().filter((claim) => claim.profileId === this.profileId);
     if (!mine.length && !ownDeadIntent) return 0;
     await proveClosed();
@@ -376,12 +348,12 @@ export class MachineHostPowerRegistry {
       cleared += 1;
     }
     if (ownDeadIntent) {
-      // This profile decided that stop and then died. Its durable fence still
-      // holds it and will be retried from there; leaving the host-wide intent
-      // behind would refuse every deployment's work until the host rebooted.
-      this.withLock(() => {
+      // An uncommitted attempt may be withdrawn after closure. A committed
+      // stop must survive: AWS may already be processing it, and admitting
+      // another profile now would start work into that unresolved stop.
+      await this.withLock(() => {
         const current = this.stopIntent();
-        if (current?.profileId === this.profileId && !this.isAlive(current.pid)) {
+        if (current?.phase === "pending" && current.profileId === this.profileId && !this.isAlive(current.pid)) {
           rmSync(path.join(this.dir, STOP_INTENT_FILE), { force: true });
         }
       });
@@ -411,7 +383,7 @@ function readClaim(file: string): MachineHostClaim | undefined {
     return undefined;
   }
   const claim = parsed as Partial<MachineHostClaim>;
-  if (!claim || claim.version !== 1 || typeof claim.profileId !== "string" || !claim.profileId
+  if (!claim || (claim.version !== 1 && claim.version !== 2) || typeof claim.profileId !== "string" || !claim.profileId
     || typeof claim.profilePath !== "string" || !path.isAbsolute(claim.profilePath)
     || typeof claim.bootId !== "string" || !claim.bootId || !Number.isSafeInteger(claim.pid) || claim.pid! <= 0
     || typeof claim.uptimeMs !== "number" || !Number.isFinite(claim.uptimeMs) || claim.uptimeMs < 0
@@ -421,7 +393,7 @@ function readClaim(file: string): MachineHostClaim | undefined {
     return undefined;
   }
   return {
-    version: 1,
+    version: claim.version,
     profileId: claim.profileId,
     profilePath: typeof claim.profilePath === "string" ? claim.profilePath : "(unknown)",
     bootId: claim.bootId,
@@ -470,26 +442,6 @@ function readStopIntent(file: string): MachineHostStopIntent | undefined {
     throw new Error("The host stop intent cannot be read; this machine stays awake.");
   }
   return intent as MachineHostStopIntent;
-}
-
-function readLockOwner(file: string): { pid: number; uptimeMs: number } | undefined {
-  try {
-    const value = JSON.parse(readFileSync(file, "utf8")) as { pid?: unknown; uptimeMs?: unknown };
-    if (!Number.isSafeInteger(value.pid) || (value.pid as number) <= 0
-      || typeof value.uptimeMs !== "number" || !Number.isFinite(value.uptimeMs)) return undefined;
-    return { pid: value.pid as number, uptimeMs: value.uptimeMs };
-  } catch {
-    return undefined;
-  }
-}
-
-/** A few milliseconds without a timer: the lock is held for file operations
- *  only, and this runs on paths that must not yield to other work. */
-function sleepBriefly(): void {
-  const until = Date.now() + 15;
-  while (Date.now() < until) {
-    // Busy wait: the section it waits for is a handful of file operations.
-  }
 }
 
 function prune(file: string): void {

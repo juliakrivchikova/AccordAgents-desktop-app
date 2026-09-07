@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { NativeProcessRegistry } from "./nativeProcessRegistry";
 import {
   claudeModelProbeEnv,
   CliAgentRunner,
@@ -15,7 +16,7 @@ import {
   runClaudeModelProbeInPty,
   runClaudeModelProbeWithExpect
 } from "./cliAgents";
-import { CommandError } from "./command";
+import { CommandError, ensureLoginShellEnvPrimed } from "./command";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 
@@ -44,6 +45,7 @@ test("idle accounts for native operations before a warm session exists and relea
   release();
   native.runCodex = () => new Promise((_resolve, reject) => { fail = reject; });
   const failed = runner.run(participant, "fails", undefined, undefined, "chat");
+  await Promise.resolve();
   fail(new Error("native setup failed")); await assert.rejects(failed, /native setup failed/);
   assert.equal(runner.hasActiveNativeWork(), false);
 });
@@ -3228,13 +3230,17 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   }
 });
 `);
-  const runner = new CliAgentRunner(undefined, undefined, { codexExecutable: codexPath, nativeProcessDbPath: path.join(fixtureDir, "native-processes.sqlite3") }) as any;
+  const diagnostics: unknown[] = [];
+  const runner = new CliAgentRunner({ write: async (event, payload) => { diagnostics.push({ event, payload }); } }, undefined, { codexExecutable: codexPath, nativeProcessDbPath: path.join(fixtureDir, "native-processes.sqlite3") }) as any;
   const participants = ["one", "two"].map((id) => ({ id: `participant-${id}`, kind: "codex-cli" as const, label: `Codex ${id}` }));
   t.after(async () => {
     await runner.shutdownWarmAgents();
     await rm(fixtureDir, { recursive: true, force: true });
   });
 
+  // Shell readiness can take up to its own eight-second timeout; it is a
+  // fixture prerequisite, not part of this four-second provider-start check.
+  await ensureLoginShellEnvPrimed();
   const runs = participants.map((participant) => runner.runCodexAppServerWarmOrOneShot(
     participant,
     "Keep responding until the app closes.",
@@ -3253,6 +3259,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     }
   ));
 
+  const earlyResults: unknown[] = [];
+  for (const run of runs) void run.then((result: unknown) => earlyResults.push(result), (error: unknown) => earlyResults.push(String(error)));
   let startedPids: number[] = [];
   for (let attempt = 0; attempt < 80; attempt += 1) {
     startedPids = await readFile(startedFile, "utf8")
@@ -3263,7 +3271,14 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  assert.equal(startedPids.length, participants.length, "both agent responses should be active before app shutdown");
+  if (startedPids.length !== participants.length) {
+    const native = new NativeProcessRegistry(path.join(fixtureDir, "native-processes.sqlite3"));
+    const diagnostic = { earlyResults, diagnostics, providers: await readFile(pidFile, "utf8").catch(() => "none"),
+      preparing: [...runner.warmPreparations].map((value: { key: string }) => value.key), creating: [...runner.warmAgentCreations.keys()], warm: [...runner.warmAgents.keys()],
+      receipts: await native.openLeases().catch(error => String(error)) };
+    console.error("native-close-startup-diagnostic", JSON.stringify(diagnostic));
+  }
+  assert.equal(startedPids.length, participants.length, `both agent responses should be active before app shutdown; early outcomes: ${JSON.stringify(earlyResults)}`);
   assert.equal(runner.hasActiveNativeWork(), true);
   assert.equal(runner.fenceIdleNativeAdmissions(), undefined, "idle stop cannot fence active provider responses");
 
@@ -4042,11 +4057,14 @@ test("shutdown waits for a session still being constructed and duplicate constru
   let create!: (entry: any) => void;
   const ready = new Promise<any>((resolve) => { create = resolve; });
   let constructions = 0;
+  let started!: () => void;
+  const constructing = new Promise<void>(resolve => { started = resolve; });
   const closed: string[] = [];
   runner.closeWarmAgent = async (entry: any) => { closed.push(entry.key); entry.closed = true; };
-  const first = runner.createTrackedWarmAgent("starting", () => { constructions += 1; return ready; });
+  const first = runner.createTrackedWarmAgent("starting", () => { constructions += 1; started(); return ready; });
   const duplicate = runner.createTrackedWarmAgent("starting", () => { constructions += 1; return ready; });
   assert.equal(first, duplicate);
+  await constructing;
   const shuttingDown = runner.shutdownWarmAgents();
   await assert.rejects(runner.createTrackedWarmAgent("new", async () => ({})), /shutting down/);
   create({ key: "starting", closed: false });
@@ -4086,7 +4104,10 @@ test("conversation shutdown fences concurrent construction and preserves another
   const runner = makeRunner() as any;
   const key = JSON.stringify({ conversationId: "closing", participantId: "member" });
   let finish!: (entry: unknown) => void;
-  const creating = runner.createTrackedWarmAgent(key, () => new Promise(resolve => { finish = resolve; }));
+  let started!: () => void;
+  const constructing = new Promise<void>(resolve => { started = resolve; });
+  const creating = runner.createTrackedWarmAgent(key, () => new Promise(resolve => { finish = resolve; started(); }));
+  await constructing;
   const closed: string[] = [];
   runner.closeWarmAgent = async (entry: { key: string }) => { closed.push(entry.key); };
   const closing = runner.closeConversationSessions("closing");
@@ -5147,4 +5168,79 @@ test("claude warm turn finishes at the result when no background task is live", 
   assert.equal(resolved.length, 1);
   assert.equal((resolved[0] as { content: string }).content, "Done.");
   assert.equal(outputs.some((event) => /Waiting for background work/.test(event.text)), false);
+});
+
+
+test("host admission waits count as busy and a Stop during the wait never starts the provider", async () => {
+  const runner = makeRunner();
+  const participant = { id: "host-admission", kind: "codex-cli" as const, label: "Codex" };
+  let admit!: (value: { admitted: true }) => void;
+  runner.setHostAdmission(() => new Promise(resolve => { admit = resolve; }));
+  let executions = 0;
+  (runner as unknown as { runCodex(): Promise<unknown> }).runCodex = async () => { executions++; throw new Error("must not execute"); };
+  const abort = new AbortController();
+  const running = runner.run(participant, "held", undefined, undefined, "chat", abort.signal);
+  assert.equal(runner.hasActiveNativeWork(), true);
+  assert.equal(runner.fenceIdleNativeAdmissions(), undefined);
+  abort.abort();
+  admit({ admitted: true });
+  const result = await running;
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /cancelled before native execution/);
+  assert.equal(executions, 0);
+  assert.equal(runner.hasActiveNativeWork(), false);
+  runner.setHostAdmission(async () => { throw new Error("coordination disk unavailable"); });
+  assert.match((await runner.run(participant, "refused", undefined, undefined, "chat")).error ?? "", /coordination disk unavailable/);
+  assert.equal(executions, 0);
+});
+
+
+test("shutdown waits for pre-spawn preparation and refuses its late provider creation", async () => {
+  for (const kind of ["codex-cli", "claude-code"] as const) {
+    const runner = makeRunner() as any;
+    let release!: () => void;
+    const preparing = new Promise<void>(resolve => { release = resolve; });
+    runner.closeStaleWarmAgents = () => preparing;
+    runner.codexExecutableForRun = async () => process.execPath;
+    runner.providerExecutableForRun = async () => process.execPath;
+    let constructed = 0;
+    runner.constructCodexAppServerWarmAgent = async () => { constructed++; throw new Error("must not spawn"); };
+    runner.constructClaudeWarmAgent = async () => { constructed++; throw new Error("must not spawn"); };
+    const method = kind === "codex-cli" ? "runCodexAppServerWarmOrOneShot" : "runClaudeWarmOrOneShot";
+    const args = [{ id: "held", label: "Held", kind }, "message", undefined,
+      ...(kind === "codex-cli" ? [undefined] : []), "chat", undefined,
+      { warm: { conversationId: "preparing", participantId: "held", contextKey: "test", idleTimeoutMs: 1000 } }];
+    const running = runner[method](...args);
+    assert.equal(runner.hasActiveNativeWork(), true);
+    let closed = false;
+    const closing = runner.shutdownWarmAgents().then(() => { closed = true; });
+    await Promise.resolve();
+    assert.equal(closed, false, "shutdown waits even though no provider creation has begun");
+    release();
+    const result = await running;
+    await closing;
+    assert.equal(result.ok, false);
+    assert.equal(constructed, 0);
+    assert.equal(runner.hasActiveNativeWork(), false);
+  }
+});
+
+test("a host admission completing after shutdown cannot start its earlier command or compaction", async () => {
+  for (const compact of [false, true]) {
+    const runner = makeRunner() as any;
+    let admit!: (value: { admitted: true }) => void;
+    runner.setHostAdmission(() => new Promise(resolve => { admit = resolve; }));
+    let executions = 0;
+    runner.runCodex = runner.compactCodexSession = async () => { executions++; throw new Error("must not execute"); };
+    const method = compact ? "compactSession" : "run";
+    const participant = { id: "late", label: "Codex", kind: "codex-cli" };
+    const pending = compact
+      ? runner[method](participant, undefined, undefined, "chat", undefined, { sessionId: "session" })
+      : runner[method](participant, "held", undefined, undefined, "chat");
+    await runner.shutdownWarmAgents();
+    admit({ admitted: true });
+    const result = await pending;
+    assert.equal(result.ok, false); assert.match(result.error, /shut down while/);
+    assert.equal(executions, 0); assert.equal(runner.hasActiveNativeWork(), false);
+  }
 });

@@ -49,6 +49,7 @@ function probeOutput(overrides: Record<string, string | undefined> = {}, release
     git: "ok",
     rsync: "ok",
     npm: "ok",
+    python3: "ok",
     systemd: "ok",
     sudo: "ok",
     "login-path": "/home/ubuntu/.npm-global/bin:/usr/bin:/bin",
@@ -707,4 +708,13 @@ test("a project the machine does not have is bootstrapped once", async () => {
   assert.equal(result.action, "created");
   assert.equal(h.syncedUp.length, 1);
   assert.match(h.syncedUp[0], /\/workspace\/mirrors\/.+\/repo$/);
+});
+
+
+test("a machine without the host lock runtime is refused before transferring a release", async () => {
+  const h = harness({ probe: probeOutput({ python3: "missing" }) });
+  const result = await h.service.install({ machineId: "m1", operationId: "no-host-lock", target: TARGET });
+  assert.equal(result.snapshot.phase, "error");
+  assert.match(result.snapshot.error ?? "", /python3/);
+  assert.equal(h.uploads.length, 0);
 });
