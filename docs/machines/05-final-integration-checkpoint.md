@@ -191,3 +191,56 @@ content. The lock helper gets static code plus one file descriptor, never a
 prompt, key or growing chat payload. The integration remains unfinished for
 canonical effects, durable deletion, confidential device revocation, PWA and
 the real acceptance/cutover gates listed above.
+
+### Canonical approval execution checkpoint — 2026-09-07
+
+Integrated Taylor's phone channel at `bde0ee4`, then traced the approval path
+through the actual IPC, canonical event, receiver, native claim, result,
+projection and receipt. A desktop answer previously also emitted a separate
+machine approval command; either path could act first. Both local and remote
+answers now use `permission.decided` and the existing `NativeCommandStore`
+approval claim before any effect. Old retained machine decisions use that same
+claim. Machine replies resolve the card only after its projection is stored;
+queued feedback is no longer mistaken for successful application.
+
+The receiver distinguishes a foreign owner from a request that has not arrived.
+The latter remains deferred. Local startup recovers recorded answers without a
+result, and repairs execution receipts lost after a stored result, using pages
+of 100 event headers. Native claims prevent another execution; uncertain prior
+delivery remains uncertain. Concurrent receipt callbacks share one write.
+These changes cover approvals; choices still need the equivalent native-effect
+boundary and must not be described as covered by a receipt lookup alone.
+
+Verification: final affected executor/action/relay cases 43/43. The broader
+affected chat/action/executor run passed 306 cases and exposed one incomplete
+new ownership fixture; using a valid approval card fixed that test, which then
+passed alone. Main and renderer typechecks, full build, and colour/unused/orphan
+guards passed (the final build contains a 9-file, 6,487,641-byte machine payload).
+Reviewed the entire checkpoint diff with the gstack review checklist and traced
+unchanged producers/consumers; fixed missing-request loss, receipt-write races
+and local startup recovery during that review. This is a scoped review, not an
+approval of the entire machines branch or its remaining acceptance gaps.
+
+Real isolated Electron 9251 and a separate runtime over the public relay:
+the machine's repository-read card was clicked and became approved, with one
+canonical decision, one native claim and one result; the participant resumed
+and answered. Its requested package-version check was not applicable because
+this no-project QA chat's working directory contains history, not package.json.
+The local equivalent resumed with `LOCAL_APPROVAL_RESUMED` (screenshot
+`screenshots/qa-canonical-local-approval.png`, a local artifact).
+For local restart recovery, a SQLite trigger rejected only the test approval's
+native claim: the clicked card left one decision and zero claims/results.
+After killing only that QA desktop, removing the trigger and restarting, the
+participant returned `LOCAL_RECOVERED_APPROVAL`; SQLite held exactly one
+decision, claim, result and execution receipt. No User app or chat was changed.
+
+Size/destination: measured approval envelopes were 1,123 bytes for a decision
+and up to 2,182 bytes for a result; each native ledger entry holds identities,
+not the conversation. A result carries its card and permission policies, so
+edited proposals/policy growth still go through the existing blob transport;
+the new approval records do not copy the 14,000-row history into SQL arguments
+or relay records. ChatService still reads its conversation to apply a decision;
+this checkpoint makes no new claim about the previously measured large-chat
+snapshot cost. Persistent copies remain in the desktop/owning machine SQLite
+stores and the sealed relay delivery path. Remaining work includes choices,
+durable archive/delete, confidential revocation and the phone/acceptance gates.

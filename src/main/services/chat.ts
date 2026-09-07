@@ -3586,6 +3586,16 @@ export class ChatService {
     return conversation;
   }
 
+  async ownsAppToolApproval(conversationId: string, approvalId: string): Promise<boolean | undefined> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") return undefined;
+    const approval = this.chatAppToolApprovals(conversation).find(item => item.id === approvalId);
+    if (!approval) return undefined;
+    if (approval.homeMachineId && approval.homeMachineId !== this.hostMachineId) return false;
+    const participant = this.chatParticipants(conversation).find(item => item.id === approval.requesterParticipantId);
+    return Boolean(participant && (!participant.homeMachineId || participant.homeMachineId === this.hostMachineId));
+  }
+
   async respondToAppToolApproval(
     request: RespondToChatAppToolApprovalRequest,
     progress?: ProgressCallback,

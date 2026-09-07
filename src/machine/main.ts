@@ -309,13 +309,14 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   // Refused before a provider is started, not discovered when the instance
   // disappears underneath a running turn.
   cliAgentRunner.setHostAdmission(presence ? (what) => presence!.admit(what) : () => ({ admitted: false, reason: presenceWarning }));
-  const host = new MachineHostService(chatService, storageService, settingsService, debugLogService, {
+  const host: MachineHostService = new MachineHostService(chatService, storageService, settingsService, debugLogService, {
     // A signature or a superseded change that arrives here has to become part
     // of this machine's own state, not just a stored event.
     chatActions: new ChatActionApplier({
       effects: createChatActionEffects({
         chat: chatService as unknown as Parameters<typeof createChatActionEffects>[0]["chat"],
         emitter: chatActionEmitter,
+        applyApproval: (event, payload) => host.applyApprovalAction(event, payload),
         storage: { getConversation: (id) => storageService.getConversation(id) }
       }),
       artifacts: {

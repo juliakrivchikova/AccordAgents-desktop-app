@@ -97,7 +97,9 @@ import { MachineLinkService } from "./services/machineLink";
 import { MachineInstallerService } from "./services/machineInstaller";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
 import { ChatActionApplier } from "./services/chatActionApplier";
-import { ChatActionEmitter } from "./services/chatActionEmitter";
+import { ChatActionEmitter, permissionDecisionAction, chatActionEventId } from "./services/chatActionEmitter";
+import { MachineApprovalExecutor, machineApprovalResultId } from "./services/machineApprovalExecutor";
+import { readPosixProcessTableAsync } from "./services/processTermination";
 import { createChatActionEffects } from "./services/chatActionEffects";
 import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
 import type {
@@ -478,14 +480,14 @@ wireArtifactToolHandler(appMcpService, chatService, dispatchArtifactTool);
 // Applies chat actions that arrive from a machine. Emitting an action is half
 // a user scenario; without this a signature made on a machine would be stored
 // and never become visible here.
+const localChatActionEffects = createChatActionEffects({
+  chat: chatService as unknown as Parameters<typeof createChatActionEffects>[0]["chat"],
+  emitter: { beginExecution: (target) => chatActionEmitter.beginExecution(target), recordExecution: (request) => chatActionEmitter.recordExecution(request) },
+  storage: { getConversation: (id) => storageService.getConversation(id) },
+  applyApproval: async (event, payload) => (await localApprovalExecutor()).applyAction(event, payload)
+});
 const chatActionApplier = new ChatActionApplier({
-  // A decision made on the phone or another machine is acted on here when this
-  // desktop is the peer holding the request, and only once.
-  effects: createChatActionEffects({
-    chat: chatService as unknown as Parameters<typeof createChatActionEffects>[0]["chat"],
-    emitter: { beginExecution: (target) => chatActionEmitter.beginExecution(target), recordExecution: (request) => chatActionEmitter.recordExecution(request) },
-    storage: { getConversation: (id) => storageService.getConversation(id) }
-  }),
+  effects: localChatActionEffects,
   artifacts: {
     getRevision: async (artifactId, versionEventId) => {
       const revision = await artifactStore.getRevision(artifactId, versionEventId);
@@ -598,6 +600,54 @@ const chatActionEmitter = new ChatActionEmitter({
     void debugLogService.write(event, payload);
   }
 });
+
+let approvalExecutor: Promise<MachineApprovalExecutor> | undefined;
+function localApprovalExecutor(): Promise<MachineApprovalExecutor> {
+  const pending = approvalExecutor ??= (async () => {
+    const device = await chatEventLogService.getOrCreateDeviceIdentity();
+    const processIdentity = (await readPosixProcessTableAsync())?.get(process.pid);
+    if (!processIdentity) throw new Error("This approval executor's process identity could not be verified.");
+    const owner = { runtimeId: randomUUID(), pid: processIdentity.pid, startedAt: processIdentity.startedAt };
+    return new MachineApprovalExecutor({
+      storage: storageService, deviceId: device.originId, chat: chatService,
+      progress: progress => emitReviewProgress(progress),
+      getConversation: id => storageService.getConversation(id), runtimeIdentity: async () => owner,
+      nativeProcessDbPath: path.join(app.getPath("userData"), "native-processes.sqlite3"),
+      publish: async body => {
+        await chatEventLogService.appendLocalEvent({ conversationId: body.conversationId,
+          logScopeId: `approval:${body.approvalId}`, kind: body.type, eventId: machineApprovalResultId(body.decisionId!), payload: body });
+      }
+    });
+  })();
+  void pending.catch(() => { if (approvalExecutor === pending) approvalExecutor = undefined; });
+  return pending;
+}
+
+async function recoverLocalApprovalActions(): Promise<void> {
+  const device = await chatEventLogService.getOrCreateDeviceIdentity();
+  let cursor = 0;
+  for (;;) {
+    const rows = await storageService.nativeCommands().pendingApprovalActions(device.originId, cursor);
+    if (!rows.length) return;
+    for (const row of rows) {
+      cursor = row.originSeq;
+      try {
+        const event = await storageService.getChatEvent(row.eventId);
+        if (!event) continue;
+        const payload = await storageService.deviceEventBlobs().hydrate(event.payload) as import("../shared/chatActionEvents").ChatActionPayload;
+        const claim = payload.targetKey?.startsWith("approval:")
+          ? await storageService.nativeCommands().approvalEffect(event.conversationId, payload.targetKey.slice(9)) : undefined;
+        if (claim?.eventId === event.eventId && localChatActionEffects.applyApproval) {
+          // A retained fact belongs to its original executor even if the
+          // participant has since moved. The claim prevents another effect.
+          await localChatActionEffects.applyApproval(event, payload);
+        } else await chatActionApplier.apply(event, payload);
+      } catch (error) {
+        await debugLogService.write("chat.approval.recovery-pending", { eventId: row.eventId, message: error instanceof Error ? error.message : String(error) });
+      }
+    }
+  }
+}
 
 const activeReviews = new Map<string, AbortController>();
 
@@ -2460,9 +2510,17 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("chat:respond-to-app-tool-approval", async (_event, request: RespondToChatAppToolApprovalRequest) => {
+    if (!await chatService.ownsAppToolApproval(request.conversationId, request.approvalId)) {
+      const conversation = await storageService.getConversation(request.conversationId);
+      const approvals = conversation?.metadata?.pendingAppToolApprovals as import("../shared/types").ChatAppToolApproval[] | undefined;
+      if (!approvals?.find(item => item.id === request.approvalId)?.homeMachineId) {
+        throw new Error("The approval's owning participant is not available here.");
+      }
+      return chatService.respondToAppToolApproval(request, progress => emitReviewProgress(progress));
+    }
     // The answer becomes a durable event before the provider is told, so a
     // crash between the two leaves the decision recorded rather than lost.
-    const target = await chatActionEmitter.permissionDecided({
+    const action = permissionDecisionAction({
       conversationId: request.conversationId,
       approvalId: request.approvalId,
       approve: request.approve,
@@ -2470,22 +2528,14 @@ function registerIpc(): void {
       decisionId: request.codexDecisionId,
       draftOverride: request.draftOverride
     });
-    // A card is answered to the provider exactly once. A second answer — the
-    // other way, from another device, or a retry after a restart — stays
-    // visible as a decision but cannot tell the provider again.
-    if (!await chatActionEmitter.beginExecution(target)) {
-      return storageService.getConversation(request.conversationId);
-    }
-    const result = await chatService.respondToAppToolApproval(
-      request,
-      (progress) => emitReviewProgress(progress)
-    );
-    await chatActionEmitter.recordExecution({
-      conversationId: request.conversationId,
-      targetKey: target,
-      effect: `${request.approve ? "allowed" : "denied"} the app tool request`
-    });
-    return result;
+    await publishChatAction(action);
+    const event = await storageService.getChatEvent(chatActionEventId(action.payload.operationId));
+    if (!event) throw new Error("The approval decision could not be stored.");
+    await chatActionApplier.apply(event, action.payload);
+    const receipt = await storageService.getChatEvent(machineApprovalResultId(event.eventId));
+    const result = receipt ? await storageService.deviceEventBlobs().hydrate(receipt.payload) as import("../shared/machineLink").MachineApprovalResultBody : undefined;
+    if (!result?.ok) throw new Error(result?.error ?? "The approval's application is not confirmed yet.");
+    return storageService.getConversation(request.conversationId);
   });
   ipcMain.handle("machines:list", async (): Promise<MachineListResult> => machineListResult());
   ipcMain.handle("machines:create", async (_event, request: CreateMachineRequest): Promise<CreateMachineResult> => {
@@ -2946,6 +2996,9 @@ void app.whenReady().then(async () => {
   bootstrapAppUpdater(debugLogService, betaUpdates);
   await appMcpService.start();
   await storageService.init();
+  void recoverLocalApprovalActions().catch(error => {
+    void debugLogService.write("chat.approval.recovery-error", { message: error instanceof Error ? error.message : String(error) });
+  });
   // A change committed here whose outgoing event did not survive would leave
   // peers permanently unaware of it. Recovery is idempotent: the operation ids
   // come from the immutable revision identity, so this is safe every start.

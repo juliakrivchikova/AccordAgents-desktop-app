@@ -181,6 +181,13 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const hostSettings = { importMachineSettingsSnapshot: async (snapshot) => { importedSnapshots.push(snapshot); } };
     const host = new MachineHostService(hostChat, hostStorage, hostSettings, debugLogs, {
       ...hostEvents,
+      chatActions: {
+        handles: event => event.kind === "permission.decided",
+        apply: async (event, payload) => {
+          await host.applyApprovalAction(event, payload ?? event.payload);
+          return { status: "applied", kind: event.kind, targetKey: (payload ?? event.payload).targetKey };
+        }
+      },
       pairing,
       deviceId: MACHINE_ID,
       machineName: "test-box",
@@ -240,7 +247,10 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     // after the desktop stored the machine's view of the card.
     const storedApprovals = [];
     link.onApproval(async (event) => { await new Promise((resolve) => setTimeout(resolve, 50)); storedApprovals.push(event.approval); });
-    await link.respondToMachineApproval({ machineId: "machine-1", conversationId: "conv-1", approvalId: "approval-1", approve: true, scope: "once", draftOverride: { kind: "edited" }, codexDecisionId: "decision-7" });
+    let queued = false;
+    await link.respondToMachineApproval({ machineId: "machine-1", conversationId: "conv-1", approvalId: "approval-1", approve: true, scope: "once", draftOverride: { kind: "edited" }, codexDecisionId: "decision-7",
+      onQueued: async () => { queued = true; } });
+    assert.equal(queued, true);
     assert.equal(approvalRequests.length, 1);
     assert.ok(storedApprovals.length >= 1, "the card call returns only after the stored approval");
     assert.ok(storedApprovals.every((approval) => approval.status === "approved"));
