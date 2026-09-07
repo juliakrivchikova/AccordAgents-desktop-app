@@ -72,6 +72,7 @@ function settingsServiceWith(
     stored = next;
   };
   service.getPublicSettings = async (): Promise<AppSettings> => ({
+    chatCustomAvatars: [],
     roundLimitDefault: stored.roundLimitDefault,
     betaUpdates: service.normalizeBetaUpdates(stored.betaUpdates),
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,

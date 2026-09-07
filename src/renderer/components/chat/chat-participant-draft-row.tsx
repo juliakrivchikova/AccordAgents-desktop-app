@@ -1,5 +1,6 @@
+import { useState } from "react";
 import type React from "react";
-import { X } from "lucide-react";
+import { Sparkles, X } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
 import {
@@ -15,6 +16,11 @@ import type {
   ChatProviderKind,
   ProviderKind
 } from "../../../shared/types";
+import { customAvatarId } from "../../../shared/avatarStudio";
+import { Avatar } from "../avatar/avatar";
+import { AvatarStudioDialog } from "../avatar/avatar-studio-dialog";
+import { useCustomAvatarLibrary } from "../avatar/custom-avatars";
+import { avatarForChatParticipant } from "./chat-avatars";
 import type { ChatAvatarOption } from "./chat-avatars";
 import {
   chatAvatarOptionsForKind,
@@ -57,6 +63,9 @@ export function ChatParticipantDraftRow(props: {
   const roleOptions = activeChatRoleConfigs(props.settings).map((role) => ({ value: role.id, label: role.label }));
   const avatarId = normalizedChatAvatarId(props.draft.kind, props.draft.avatarId, props.draft.handle);
   const avatarOptions = chatAvatarOptionsForKind(props.draft.kind);
+  const customAvatars = props.settings.chatCustomAvatars ?? [];
+  useCustomAvatarLibrary(customAvatars);
+  const [studioOpen, setStudioOpen] = useState(false);
   const isWorkflowManager = props.draft.roleConfigId === WORKFLOW_MANAGER_ROLE_ID;
   const autoWatchDisabled = isWorkflowManager || Boolean(props.autoWatchDisabledReason);
   const autoWatchChecked = props.autoWatchDisabledReason ? false : props.draft.autoWatch;
@@ -198,6 +207,37 @@ export function ChatParticipantDraftRow(props: {
       </FormRow>
       <FormRow label="Avatar" className="avatar-picker-field">
         <div className="avatar-choice-grid" role="radiogroup" aria-label="Member avatar">
+          <button
+            type="button"
+            className="avatar-choice is-create"
+            data-testid="avatar-create-tile"
+            title="Draw an avatar"
+            aria-label="Draw an avatar"
+            onClick={() => setStudioOpen(true)}
+          >
+            <Sparkles size={16} aria-hidden />
+            <span>Create</span>
+          </button>
+          {customAvatars.map((custom) => {
+            const id = customAvatarId(custom.id);
+            const selected = id === avatarId;
+            return (
+              <button
+                type="button"
+                key={id}
+                className={`avatar-choice ${selected ? "selected" : ""}`}
+                title={custom.label}
+                aria-label={custom.label}
+                aria-pressed={selected}
+                onClick={() => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { avatarId: id }))}
+              >
+                <Avatar
+                  className="avatar-choice-preview"
+                  spec={avatarForChatParticipant({ id: custom.id, handle: props.draft.handle, kind: props.draft.kind, avatarId: id }, custom.label)}
+                />
+              </button>
+            );
+          })}
           {avatarOptions.map((option) => {
             const selected = option.id === avatarId;
             return (
@@ -216,6 +256,14 @@ export function ChatParticipantDraftRow(props: {
           })}
         </div>
       </FormRow>
+      <AvatarStudioDialog
+        open={studioOpen}
+        member={{ handle: props.draft.handle, roleLabel: roleOptions.find((role) => role.value === props.draft.roleConfigId)?.label, kind: props.draft.kind }}
+        settings={props.settings}
+        agents={props.agents}
+        onOpenChange={setStudioOpen}
+        onUseAvatar={(avatarId) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { avatarId }))}
+      />
       {props.removable && (
         <IconButton
           size="xs"

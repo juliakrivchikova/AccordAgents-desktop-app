@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
 import type {
   AppBridge,
   AddChatParticipantRequest,
@@ -126,6 +127,11 @@ const bridge: AppBridge = {
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-role", update),
   archiveChatRoleConfig: (id: string) => ipcRenderer.invoke("settings:archive-chat-role", id),
   saveChatBehaviorRuleConfig: (update: ChatBehaviorRuleConfigUpdate) => ipcRenderer.invoke("settings:save-chat-behavior-rule", update),
+  runAvatarStudioTurn: (request: AvatarStudioTurnRequest) => ipcRenderer.invoke("avatar-studio:run-turn", request),
+  cancelAvatarStudioTurn: (studioId: string) => ipcRenderer.invoke("avatar-studio:cancel", studioId),
+  closeAvatarStudio: (studioId: string) => ipcRenderer.invoke("avatar-studio:close", studioId),
+  saveCustomAvatar: (request: SaveCustomAvatarRequest) => ipcRenderer.invoke("settings:save-custom-avatar", request),
+  readCustomAvatar: (id: string) => ipcRenderer.invoke("settings:read-custom-avatar", id),
   deleteChatBehaviorRuleConfig: (id: string) => ipcRenderer.invoke("settings:delete-chat-behavior-rule", id),
   saveChatSavedPromptConfig: (update: ChatSavedPromptConfigUpdate) => ipcRenderer.invoke("settings:save-chat-saved-prompt", update),
   deleteChatSavedPromptConfig: (id: string) => ipcRenderer.invoke("settings:delete-chat-saved-prompt", id),

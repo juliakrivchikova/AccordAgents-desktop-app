@@ -13,6 +13,7 @@ import {
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  chatCustomAvatars: [],
   roundLimitDefault: 2,
   betaUpdates: false,
   cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,

@@ -164,6 +164,9 @@ export function ParticipantEditorDialog(props: {
               kind={draft.kind}
               handle={editorHandle}
               avatarId={draft.avatarId}
+              roleLabel={roleLabel}
+              settings={props.settings}
+              agents={props.agents}
               onSelect={(avatarId) => patchDraft({ avatarId })}
             />
             <span className="participants-editor-title-block">
