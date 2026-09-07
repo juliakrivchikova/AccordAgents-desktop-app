@@ -62,6 +62,10 @@ export interface MachineHostOptions {
   /** Where the trust roster is kept between runs. Defaults to the machine's
    *  own user data directory. */
   trustRosterPath?: string;
+  /** True while another deployment on this host has committed an idle stop.
+   *  A command that arrives then stays in the durable inbox rather than being
+   *  started into an instance that is going away or failed as a turn. */
+  hostStopCommitted?: () => boolean;
   /** Test seam: opens a connection to another device's room. */
   createPeerClient?: (room: { relayUrl: string; rendezvousId: string; sealKeyBase64: string; fingerprint?: string; deviceId: string }) => RelayTunnelClient;
   pairing: MobilePairingPackage;
@@ -565,7 +569,9 @@ export class MachineHostService {
     channel: DeviceEventChannel | undefined,
     peer?: TrustedPeerAccess
   ): Promise<DeviceEventApplyOutcome | "deferred" | DeferredWithDependency> {
-    if (this.idleFenced) return "deferred";
+    // Held, not failed: the machine is stopping, and this command runs when it
+    // is awake again.
+    if (this.idleFenced || this.options.hostStopCommitted?.()) return "deferred";
     // A chat action from any of the owner's devices is applied here as well,
     // so a signature or a superseded change is not something only the sender
     // knows about.

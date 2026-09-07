@@ -1024,6 +1024,10 @@ export class CliAgentRunner {
   private warmOperations = 0;
   private nativeOperations = 0;
   private nativeAdmissionsFenced = false;
+  /** Host-wide gate: another deployment on this machine may have committed an
+   *  idle stop, and its decision has to be refused here, before a provider is
+   *  started, not discovered when the instance disappears. */
+  private hostAdmission?: (what: string) => { admitted: true } | { admitted: false; reason: string };
 
   constructor(
     private readonly debugLogs?: CliAgentDebugLogger,
@@ -1139,6 +1143,8 @@ export class CliAgentRunner {
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
     if (this.nativeAdmissionsFenced) return this.failed(participant, new Error("The machine is stopping after idle; this native command did not start."));
+    const refusal = this.hostRefusal("this native command");
+    if (refusal) return this.failed(participant, new Error(refusal));
     if (options.warm && this.conversationClosing(options.warm.conversationId)) {
       return this.failed(participant, new Error("This chat's native sessions are closing; this command did not start."));
     }
@@ -1186,6 +1192,8 @@ export class CliAgentRunner {
     options: CliAgentRunOptions = {}
   ): Promise<CliAgentCompactResult> {
     if (this.nativeAdmissionsFenced) return { participant, ok: false, error: "The machine is stopping after idle; compaction did not start." };
+    const compactionRefusal = this.hostRefusal("compaction");
+    if (compactionRefusal) return { participant, ok: false, error: compactionRefusal };
     if (options.warm && this.conversationClosing(options.warm.conversationId)) {
       return { participant, ok: false, error: "This chat's native sessions are closing; compaction did not start." };
     }
@@ -1212,6 +1220,27 @@ export class CliAgentRunner {
   hasActiveNativeWork(): boolean {
     return this.nativeOperations > 0 || this.warmOperations > 0 || this.warmAgentCreations.size > 0 || this.closingWarmAgents.size > 0 || this.failedWarmClosures.size > 0 ||
       [...this.warmAgents.values()].some(entry => !entry.closed && entry.hasLiveBackgroundWork?.());
+  }
+
+  /** Every deployment on this host shares one instance. Consulted before any
+   * native work starts; admission also tells the other deployments that this
+   * one is busy, in the same step, so a stop cannot commit around it. */
+  setHostAdmission(gate: ((what: string) => { admitted: true } | { admitted: false; reason: string }) | undefined): void {
+    this.hostAdmission = gate;
+  }
+
+  /** The reason new native work may not start, or undefined when it may. */
+  private hostRefusal(what: string): string | undefined {
+    if (!this.hostAdmission) return undefined;
+    let decision: { admitted: true } | { admitted: false; reason: string };
+    try {
+      decision = this.hostAdmission(what);
+    } catch (error) {
+      // Coordination that cannot be read is not permission to start work on a
+      // machine another deployment may be stopping.
+      return `This machine's deployments cannot coordinate, so ${what} did not start: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    return decision.admitted ? undefined : decision.reason;
   }
 
   /** Idle power-off must not race a queued turn/compaction. The caller can
@@ -5874,6 +5903,8 @@ export class CliAgentRunner {
 
   private enqueueWarmRun<T>(entry: WarmAgentEntry, task: () => Promise<T>): Promise<T> {
     if (this.nativeAdmissionsFenced) return Promise.reject(new Error("The machine is stopping after idle; this native command did not start."));
+    const refusal = this.hostRefusal("this native command");
+    if (refusal) return Promise.reject(new Error(refusal));
     this.warmOperations++;
     const run = entry.queue.catch(() => undefined).then(task).finally(() => { this.warmOperations--; });
     entry.queue = run.then(() => undefined, () => undefined);
@@ -5882,6 +5913,8 @@ export class CliAgentRunner {
 
   private createTrackedWarmAgent(key: string, construct: () => Promise<WarmAgentEntry>): Promise<WarmAgentEntry> {
     if (this.nativeAdmissionsFenced) return Promise.reject(new Error("The machine is stopping after idle; this native session did not start."));
+    const refusal = this.hostRefusal("this native session");
+    if (refusal) return Promise.reject(new Error(refusal));
     if (this.warmShutdown) return Promise.reject(new Error("The native sessions are shutting down; this command did not start."));
     if (this.conversationClosing(warmConversationId(key) ?? "")) return Promise.reject(new Error("This chat's native sessions are closing; this command did not start."));
     const existing = this.warmAgentCreations.get(key);

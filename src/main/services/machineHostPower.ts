@@ -8,10 +8,25 @@
  * profile is mid-turn or holding a maintenance lease, destroying work the
  * stopping profile cannot see.
  *
- * Each registered owner publishes one small claim file in the host directory.
- * These observations are not an atomic admission fence: callers must also
- * coordinate every runtime/maintenance entry with the final power-stop gate.
- * The observations are deliberately conservative:
+ * Each registered owner publishes one small claim file in the host directory,
+ * and the directory carries two more things that make this a barrier rather
+ * than a set of observations:
+ *
+ *   - **One lock.** Admitting work and committing a stop are the same
+ *     critical section. Both take `lock/`, so a deployment can never start a
+ *     turn in the window between another deployment deciding to stop and the
+ *     stop becoming final. A read before the AWS call cannot do this: the
+ *     answer is stale the moment it is read.
+ *   - **One stop intent.** Once committed under the lock it is visible to
+ *     every deployment, so admission refuses instead of starting work into a
+ *     machine that is going away; until it is committed any admission wins
+ *     and the intent is withdrawn.
+ *
+ * Idle is host-wide, not per profile: a claim carries when its owner was last
+ * busy, so three hours of quiet here plus ten minutes of work next door is
+ * ten minutes of host idle, not three hours.
+ *
+ * The observations themselves are deliberately conservative:
  *
  *   - A claim from another boot is stale: `/tmp` is cleared on boot and the
  *     boot id is checked as well, so a claim can never outlive its host.
@@ -32,6 +47,11 @@ import path from "node:path";
 export const MACHINE_HOST_POWER_DIR = "/tmp/accordagents-host-power";
 /** A live claim that has not been refreshed within this counts as busy. */
 export const MACHINE_HOST_CLAIM_STALE_MS = 90_000;
+/** The critical section is a few file reads and one write; a lock older than
+ *  this whose owner is gone is a crash, not a slow caller. */
+export const MACHINE_HOST_LOCK_STALE_MS = 30_000;
+const LOCK_DIR = "lock";
+const STOP_INTENT_FILE = "stop-intent.json";
 
 export type MachineHostClaimKind = "runtime" | "maintenance";
 
@@ -49,7 +69,28 @@ export interface MachineHostClaim {
   kind: MachineHostClaimKind;
   /** Immutable runtime identity; legacy claims without it remain readable. */
   instanceId?: string;
+  /** Host uptime when this owner was last doing work. The host is idle only
+   *  since the most recent of these, so a neighbour's short turn between two
+   *  polls is not swallowed by another profile's long quiet. */
+  lastBusyUptimeMs?: number;
 }
+
+/** A stop one deployment has decided on, as every deployment can read it. */
+export interface MachineHostStopIntent {
+  version: 1;
+  bootId: string;
+  profileId: string;
+  profilePath: string;
+  instanceId: string;
+  pid: number;
+  uptimeMs: number;
+  /** `pending` may still be withdrawn by an admission; `committed` may not. */
+  phase: "pending" | "committed";
+}
+
+export type MachineHostAdmission =
+  | { admitted: true }
+  | { admitted: false; reason: string };
 
 export interface MachineHostPowerOptions {
   profilePath: string;
@@ -76,6 +117,8 @@ export class MachineHostPowerRegistry {
   private readonly instanceId = randomUUID();
   private readonly claimPath: string;
   private released = false;
+  /** When this owner was last doing work; starting counts as work. */
+  private lastBusyUptimeMs: number;
 
   constructor(private readonly options: MachineHostPowerOptions) {
     if (!options.bootId.trim()) throw new Error("Host-wide power coordination requires the host boot identity.");
@@ -85,12 +128,20 @@ export class MachineHostPowerRegistry {
     this.claimPath = path.join(this.dir, `${this.profileId}-${this.instanceId}.json`);
     this.staleAfterMs = options.staleAfterMs ?? MACHINE_HOST_CLAIM_STALE_MS;
     this.isAlive = options.isAlive ?? defaultIsAlive;
+    this.lastBusyUptimeMs = options.uptimeMs();
+  }
+
+  /** This registration's own identity, for a stop intent and for a restart
+   *  that has to recognise the claims it left behind. */
+  identity(): { profileId: string; instanceId: string; pid: number } {
+    return { profileId: this.profileId, instanceId: this.instanceId, pid: this.pid };
   }
 
   /** Records what this profile is doing. Called on every idle poll and
    *  whenever activity is noted, so other profiles see a fresh reading. */
   publish(busy: boolean): void {
     if (this.released) throw new Error("This deployment's host-power registration has been released.");
+    if (busy) this.lastBusyUptimeMs = this.options.uptimeMs();
     const claim: MachineHostClaim = {
       version: 1,
       profileId: this.profileId,
@@ -100,7 +151,8 @@ export class MachineHostPowerRegistry {
       uptimeMs: this.options.uptimeMs(),
       busy,
       kind: this.options.kind ?? "runtime",
-      instanceId: this.instanceId
+      instanceId: this.instanceId,
+      lastBusyUptimeMs: this.lastBusyUptimeMs
     };
     // 0777/0644 on purpose: profiles may run as different OS users and must be
     // able to publish into, and read, the same directory.
@@ -119,7 +171,8 @@ export class MachineHostPowerRegistry {
     const now = this.options.uptimeMs();
     const live: MachineHostClaim[] = [];
     for (const name of names) {
-      if (!name.endsWith(".json")) continue;
+      // The stop intent lives here too, and is not a claim.
+      if (!name.endsWith(".json") || name === STOP_INTENT_FILE) continue;
       const full = path.join(this.dir, name);
       const claim = readClaim(full);
       const expectedName = claim && `${claim.profileId}${claim.instanceId ? `-${claim.instanceId}` : ""}.json`;
@@ -149,6 +202,194 @@ export class MachineHostPowerRegistry {
     return `Another deployment on this machine (${first.profilePath}${more}) is running ${what}.`;
   }
 
+  /**
+   * Runs one critical section against the whole host.
+   *
+   * Admitting work and committing a stop are the same section: without it a
+   * deployment can start a turn in the window between another deployment
+   * finding the host idle and its stop becoming final, which is exactly the
+   * work a stop must never destroy.
+   */
+  withLock<T>(action: () => T): T {
+    const lockPath = path.join(this.dir, LOCK_DIR);
+    const ownerPath = path.join(lockPath, "owner.json");
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      mkdirSync(this.dir, { recursive: true, mode: 0o777 });
+      try {
+        mkdirSync(lockPath, { mode: 0o777 });
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        // A holder that is gone leaves the section closed forever otherwise.
+        // Only an owner that no longer exists and has held it far longer than
+        // the section takes may be broken; a live holder is always waited for.
+        const owner = readLockOwner(ownerPath);
+        const heldFor = owner ? this.options.uptimeMs() - owner.uptimeMs : Number.POSITIVE_INFINITY;
+        if ((!owner || (!this.isAlive(owner.pid) && heldFor > MACHINE_HOST_LOCK_STALE_MS))) {
+          rmSync(lockPath, { recursive: true, force: true });
+          continue;
+        }
+        if (Date.now() > deadline) {
+          throw new Error("Another deployment on this machine is holding the power lock; the host stays awake.");
+        }
+        sleepBriefly();
+      }
+    }
+    try {
+      writeFileSync(ownerPath, `${JSON.stringify({ pid: this.pid, uptimeMs: this.options.uptimeMs() })}\n`, { mode: 0o644 });
+      return action();
+    } finally {
+      rmSync(lockPath, { recursive: true, force: true });
+    }
+  }
+
+  /** The stop one deployment has decided on, if any. */
+  stopIntent(): MachineHostStopIntent | undefined {
+    const intent = readStopIntent(path.join(this.dir, STOP_INTENT_FILE));
+    if (!intent) return undefined;
+    // An intent from another boot cannot be acted on: the host restarted.
+    if (intent.bootId !== this.options.bootId) return undefined;
+    return intent;
+  }
+
+  /**
+   * Says whether new work may start on this host, and records it if so.
+   *
+   * Taken by every entry point that begins native work — a turn command, a
+   * compaction, background work, a maintenance command — before it starts.
+   * Under the lock, so a stop cannot commit while this is deciding.
+   */
+  admit(what: string): MachineHostAdmission {
+    return this.withLock(() => {
+      const intent = this.stopIntent();
+      if (intent?.phase === "committed") {
+        return {
+          admitted: false,
+          reason: `This machine is stopping after being idle (decided by ${intent.profilePath}); ${what} is held until it is awake again.`
+        };
+      }
+      if (intent) {
+        // Still withdrawable: work wins over a stop that has not committed.
+        rmSync(path.join(this.dir, STOP_INTENT_FILE), { force: true });
+      }
+      this.publish(true);
+      return { admitted: true };
+    });
+  }
+
+  /**
+   * Declares the intent to stop, or refuses when the host is not idle.
+   *
+   * The claim survey happens inside the same lock the admissions take, so the
+   * answer cannot go stale between deciding and writing. Commit is a second
+   * pass under the lock, after the caller's own drain: an admission in between
+   * removes the intent and the commit then finds it gone.
+   */
+  beginStop(request: { minIdleMs: number; ownIdleSinceUptimeMs: number }): boolean {
+    return this.withLock(() => {
+      if (this.stopIntent()) return false;
+      if (this.blockingReason()) return false;
+      if (this.hostIdleForMs(request.ownIdleSinceUptimeMs) < request.minIdleMs) return false;
+      const intent: MachineHostStopIntent = {
+        version: 1,
+        bootId: this.options.bootId,
+        profileId: this.profileId,
+        profilePath: path.resolve(this.options.profilePath),
+        instanceId: this.instanceId,
+        pid: this.pid,
+        uptimeMs: this.options.uptimeMs(),
+        phase: "pending"
+      };
+      writeIntent(path.join(this.dir, STOP_INTENT_FILE), intent);
+      return true;
+    });
+  }
+
+  /** Makes this deployment's stop final, unless work was admitted meanwhile. */
+  commitStop(): boolean {
+    return this.withLock(() => {
+      const intent = this.stopIntent();
+      if (!intent || intent.instanceId !== this.instanceId || intent.phase !== "pending") return false;
+      if (this.blockingReason()) {
+        rmSync(path.join(this.dir, STOP_INTENT_FILE), { force: true });
+        return false;
+      }
+      writeIntent(path.join(this.dir, STOP_INTENT_FILE), { ...intent, phase: "committed" });
+      return true;
+    });
+  }
+
+  /** Withdraws this deployment's own intent; a committed one stays. */
+  abandonStop(): void {
+    this.withLock(() => {
+      const intent = this.stopIntent();
+      if (intent && intent.instanceId === this.instanceId && intent.phase === "pending") {
+        rmSync(path.join(this.dir, STOP_INTENT_FILE), { force: true });
+      }
+    });
+  }
+
+  /**
+   * How long every deployment on this host has been quiet.
+   *
+   * The caller passes its own idle-since, which its durable state owns; this
+   * adds what the neighbours say. Zero while any of them is busy. Otherwise
+   * it is measured from the most recent moment any deployment was working —
+   * three hours of quiet here and a turn next door ten minutes ago is ten
+   * minutes of host idle, not three hours.
+   */
+  hostIdleForMs(ownIdleSinceUptimeMs: number): number {
+    const now = this.options.uptimeMs();
+    let lastBusy = ownIdleSinceUptimeMs;
+    for (const claim of this.others()) {
+      if (claim.busy) return 0;
+      // A claim written by an older release has no busy clock of its own; the
+      // moment it was last seen is the youngest thing that can be proven.
+      const busyAt = claim.lastBusyUptimeMs ?? claim.uptimeMs;
+      if (busyAt > lastBusy) lastBusy = busyAt;
+    }
+    return Math.max(0, now - lastBusy);
+  }
+
+  /**
+   * Clears claims this same profile left behind, once its own native work is
+   * proven gone.
+   *
+   * A crash leaves a claim whose owner is dead, and a dead owner is not proof
+   * that its providers died with it — so the claim keeps the host awake. That
+   * is right until this profile starts again and can prove, from its own
+   * guardian receipts, that nothing of its is running. Without this a single
+   * crash would disable automatic stop until the host rebooted.
+   */
+  async adoptOwnStaleClaims(proveClosed: () => Promise<void>): Promise<number> {
+    const intent = this.stopIntent();
+    const ownDeadIntent = intent?.profileId === this.profileId && !this.isAlive(intent.pid);
+    const mine = this.others().filter((claim) => claim.profileId === this.profileId);
+    if (!mine.length && !ownDeadIntent) return 0;
+    await proveClosed();
+    let cleared = 0;
+    for (const claim of mine) {
+      if (claim.instanceId === this.instanceId) continue;
+      if (this.isAlive(claim.pid)) continue;
+      prune(path.join(this.dir, `${claim.profileId}-${claim.instanceId}.json`));
+      cleared += 1;
+    }
+    if (ownDeadIntent) {
+      // This profile decided that stop and then died. Its durable fence still
+      // holds it and will be retried from there; leaving the host-wide intent
+      // behind would refuse every deployment's work until the host rebooted.
+      this.withLock(() => {
+        const current = this.stopIntent();
+        if (current?.profileId === this.profileId && !this.isAlive(current.pid)) {
+          rmSync(path.join(this.dir, STOP_INTENT_FILE), { force: true });
+        }
+      });
+      cleared += 1;
+    }
+    return cleared;
+  }
+
   release(): void {
     if (this.released) return;
     const target = this.claimPath;
@@ -175,6 +416,7 @@ function readClaim(file: string): MachineHostClaim | undefined {
     || typeof claim.bootId !== "string" || !claim.bootId || !Number.isSafeInteger(claim.pid) || claim.pid! <= 0
     || typeof claim.uptimeMs !== "number" || !Number.isFinite(claim.uptimeMs) || claim.uptimeMs < 0
     || (claim.instanceId !== undefined && (typeof claim.instanceId !== "string" || !/^[a-f0-9-]{36}$/.test(claim.instanceId)))
+    || (claim.lastBusyUptimeMs !== undefined && (typeof claim.lastBusyUptimeMs !== "number" || !Number.isFinite(claim.lastBusyUptimeMs) || claim.lastBusyUptimeMs < 0))
     || typeof claim.busy !== "boolean" || (claim.kind !== "runtime" && claim.kind !== "maintenance")) {
     return undefined;
   }
@@ -187,8 +429,67 @@ function readClaim(file: string): MachineHostClaim | undefined {
     uptimeMs: claim.uptimeMs,
     busy: claim.busy,
     kind: claim.kind === "maintenance" ? "maintenance" : "runtime",
-    ...(claim.instanceId ? { instanceId: claim.instanceId } : {})
+    ...(claim.instanceId ? { instanceId: claim.instanceId } : {}),
+    ...(claim.lastBusyUptimeMs !== undefined ? { lastBusyUptimeMs: claim.lastBusyUptimeMs } : {})
   };
+}
+
+function writeIntent(file: string, intent: MachineHostStopIntent): void {
+  const temporary = `${file}.${intent.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(intent)}\n`, { mode: 0o644 });
+  renameSync(temporary, file);
+}
+
+function readStopIntent(file: string): MachineHostStopIntent | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch (error) {
+    // Only an absent file means "nobody is stopping". A file that exists and
+    // cannot be read is coordination this host cannot see through, and is
+    // neither permission to start work nor permission to stop.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new Error(`The host stop intent cannot be read; this machine stays awake: ${(error as Error).message}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("The host stop intent cannot be read; this machine stays awake.");
+  }
+  const intent = parsed as Partial<MachineHostStopIntent>;
+  if (!intent || intent.version !== 1 || typeof intent.bootId !== "string" || !intent.bootId
+    || typeof intent.profileId !== "string" || !intent.profileId
+    || typeof intent.profilePath !== "string" || !path.isAbsolute(intent.profilePath)
+    || typeof intent.instanceId !== "string" || !intent.instanceId
+    || !Number.isSafeInteger(intent.pid) || intent.pid! <= 0
+    || typeof intent.uptimeMs !== "number" || !Number.isFinite(intent.uptimeMs) || intent.uptimeMs < 0
+    || (intent.phase !== "pending" && intent.phase !== "committed")) {
+    // An unreadable intent is not permission to start work, and not permission
+    // to stop either: both callers treat it as "someone else is deciding".
+    throw new Error("The host stop intent cannot be read; this machine stays awake.");
+  }
+  return intent as MachineHostStopIntent;
+}
+
+function readLockOwner(file: string): { pid: number; uptimeMs: number } | undefined {
+  try {
+    const value = JSON.parse(readFileSync(file, "utf8")) as { pid?: unknown; uptimeMs?: unknown };
+    if (!Number.isSafeInteger(value.pid) || (value.pid as number) <= 0
+      || typeof value.uptimeMs !== "number" || !Number.isFinite(value.uptimeMs)) return undefined;
+    return { pid: value.pid as number, uptimeMs: value.uptimeMs };
+  } catch {
+    return undefined;
+  }
+}
+
+/** A few milliseconds without a timer: the lock is held for file operations
+ *  only, and this runs on paths that must not yield to other work. */
+function sleepBriefly(): void {
+  const until = Date.now() + 15;
+  while (Date.now() < until) {
+    // Busy wait: the section it waits for is a handful of file operations.
+  }
 }
 
 function prune(file: string): void {
