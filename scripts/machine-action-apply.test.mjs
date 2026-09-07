@@ -14,6 +14,8 @@ import { StorageService } from "../dist/main/main/services/storage.js";
 import { ChatEventLogService } from "../dist/main/main/services/chatEventLog.js";
 import { MachineHostService } from "../dist/main/main/services/machineHost.js";
 import { ChatActionApplier } from "../dist/main/main/services/chatActionApplier.js";
+import { ChatActionEmitter } from "../dist/main/main/services/chatActionEmitter.js";
+import { createChatActionEffects } from "../dist/main/main/services/chatActionEffects.js";
 import { DESKTOP_ID, MACHINE_ID } from "./machine-test-events.mjs";
 
 function pairing(issuer) {
@@ -119,6 +121,81 @@ test("a signature for a revision this machine lacks is kept for retry, not lost"
       "it is deferred and reported, not silently dropped"
     );
   } finally { await h.cleanup(); }
+});
+
+test("a permission answered elsewhere is told to this machine's provider exactly once", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-action-effect-"));
+  try {
+    const storage = new StorageService({ dbPath: path.join(dir, "host.sqlite3") });
+    const source = new StorageService({ dbPath: path.join(dir, "source.sqlite3") });
+    const eventLog = new ChatEventLogService(storage);
+    const sourceLog = new ChatEventLogService(source);
+    const [identity, sender] = await Promise.all([
+      eventLog.getOrCreateDeviceIdentity(), sourceLog.getOrCreateDeviceIdentity()
+    ]);
+    const answered = [];
+    const logs = [];
+    const conversation = {
+      id: "chat", kind: "chat", title: "t", createdAt: "2026-09-07T00:00:00.000Z", updatedAt: "2026-09-07T00:00:00.000Z",
+      metadata: { participants: [], pendingAppToolApprovals: [{ id: "card-1", status: "pending" }] },
+      messages: [], findings: []
+    };
+    const emitter = new ChatActionEmitter({
+      executedBy: "machine",
+      hasEvent: async (eventId) => Boolean(await storage.getChatEvent(eventId)),
+      publish: async (action) => {
+        await eventLog.appendLocalEvent({
+          conversationId: action.conversationId, logScopeId: "chat:actions",
+          kind: action.kind, payload: action.payload, eventId: "chat-action:" + action.payload.operationId
+        });
+      }
+    });
+    const effects = createChatActionEffects({
+      chat: {
+        respondToAppToolApproval: async (request) => { answered.push(request.approve); return undefined; },
+        respondToChoice: async () => undefined,
+        cancelRun: () => true,
+        conversationIdForRun: () => undefined
+      },
+      emitter,
+      storage: { getConversation: async () => conversation }
+    });
+    const client = { on: () => () => undefined, connect: async () => undefined, close: () => undefined, sendCiphertext: async () => [] };
+    const host = new MachineHostService(
+      {
+        runMachineHostedTurn: async () => ({ messages: [], warnings: [] }),
+        cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+        applyReplicatedConversation: async () => undefined
+      },
+      { getConversation: async () => conversation },
+      { importMachineSettingsSnapshot: async () => undefined },
+      { write: async (event, payload) => { logs.push({ event, payload }); } },
+      {
+        chatActions: new ChatActionApplier({ effects }),
+        pairing: pairing(sender), deviceId: identity.originId, appVersion: "test",
+        eventStorage: storage, eventLog, publicKeyDerBase64: identity.publicKeyDerBase64,
+        outboxPath: path.join(dir, "outbox.json"), createClient: () => client
+      }
+    );
+    await host.start();
+    await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, machineId: MACHINE_ID, appVersion: "test" });
+    const send = async (payload) => {
+      const { event } = await sourceLog.appendLocalEvent({
+        conversationId: "chat", kind: "permission.decided", payload,
+        logScopeId: `device:action-room:${JSON.stringify(["chat", "actions"])}`
+      });
+      await host.eventChannel.receive({
+        protocol: "accord-device-events-v1", from: sender.originId, to: identity.originId, type: "event", event
+      });
+    };
+    await send({ operationId: "permission:card-1:allow", targetKey: "approval:card-1", stateId: "approved", detail: { approve: true } });
+    assert.deepEqual(answered, [true], "the provider on this machine was told");
+
+    // The opposite answer from a third device arrives afterwards.
+    await send({ operationId: "permission:card-1:deny", targetKey: "approval:card-1", stateId: "denied", detail: { approve: false } });
+    assert.deepEqual(answered, [true], "it cannot be told again; the earlier outcome stands");
+    host.close();
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test("a change made on a revision this machine has replaced is reported as superseded", async () => {

@@ -59,8 +59,28 @@ export interface ChatActionApplyResult {
   detail?: string;
 }
 
+/** What this peer can actually do when a decision from elsewhere arrives.
+ *  Only the peer that owns the native request executes it, and only once. */
+export interface ChatActionEffectPort {
+  /** True when the pending request behind this target lives on this peer. */
+  owns(conversationId: string, targetKey: string): Promise<boolean>;
+  /** Claims the right to perform the effect. False when a receipt already
+   *  exists: the provider has been told and cannot be told again. */
+  claim(targetKey: string): Promise<boolean>;
+  /** Performs it. A rejection is reported and never recorded as done. */
+  perform(request: {
+    conversationId: string;
+    targetKey: string;
+    kind: ChatActionKind;
+    payload: ChatActionPayload;
+  }): Promise<string>;
+  /** Records that it happened, immutably. */
+  record(request: { conversationId: string; targetKey: string; effect: string; uncertain?: boolean }): Promise<void>;
+}
+
 export interface ChatActionApplierDeps {
   artifacts?: ChatActionArtifactPort;
+  effects?: ChatActionEffectPort;
   now?(): string;
   logger?(event: string, payload: Record<string, unknown>): void;
 }
@@ -88,10 +108,54 @@ export class ChatActionApplier {
     if (kind === "artifact.revision.created") {
       return this.applyRevision(payload, base);
     }
-    // Permissions, choices, participant requests and Stop are projected from
-    // the log rather than written into a second store, so recording the event
-    // is the application.
+    if (kind === "permission.decided" || kind === "choice.answered" || kind === "turn.stop.requested") {
+      return this.applyDecision(event, payload, kind, base);
+    }
+    // A participant request's lifecycle is projected from the log rather than
+    // written into a second store, so recording the event is the application.
     return { ...base, status: "applied" };
+  }
+
+  /**
+   * A decision made somewhere else that this peer has to act on.
+   *
+   * Only the peer holding the pending native request acts, and only once: the
+   * claim is durable, so a second decision — the other way, or the same one
+   * after a restart — is recorded and shown but never told to the provider
+   * again. A refusal to perform is reported, never recorded as done.
+   */
+  private async applyDecision(
+    event: ChatEventEnvelope,
+    payload: ChatActionPayload,
+    kind: ChatActionKind,
+    base: { kind: ChatActionKind; targetKey: string }
+  ): Promise<ChatActionApplyResult> {
+    const effects = this.deps.effects;
+    if (!effects) return { ...base, status: "applied" };
+    if (!await effects.owns(event.conversationId, payload.targetKey)) {
+      return { ...base, status: "applied" };
+    }
+    if (!await effects.claim(payload.targetKey)) {
+      return {
+        ...base,
+        status: "applied",
+        detail: "This was already acted on here; the earlier outcome stands and this answer is shown beside it."
+      };
+    }
+    let effect: string;
+    try {
+      effect = await effects.perform({ conversationId: event.conversationId, targetKey: payload.targetKey, kind, payload });
+    } catch (error) {
+      this.deps.logger?.("chat.action.effect-failed", {
+        targetKey: payload.targetKey,
+        kind,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      // Kept for retry: the decision is real and has not been acted on.
+      return { ...base, status: "deferred", detail: "This machine could not act on it yet." };
+    }
+    await effects.record({ conversationId: event.conversationId, targetKey: payload.targetKey, effect });
+    return { ...base, status: "applied", detail: effect };
   }
 
   private async applySignature(

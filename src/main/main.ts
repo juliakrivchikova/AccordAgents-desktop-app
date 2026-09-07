@@ -98,6 +98,7 @@ import { MachineInstallerService } from "./services/machineInstaller";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
 import { ChatActionApplier } from "./services/chatActionApplier";
 import { ChatActionEmitter } from "./services/chatActionEmitter";
+import { createChatActionEffects } from "./services/chatActionEffects";
 import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, RemoveMachineRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
@@ -474,6 +475,13 @@ wireArtifactToolHandler(appMcpService, chatService, dispatchArtifactTool);
 // a user scenario; without this a signature made on a machine would be stored
 // and never become visible here.
 const chatActionApplier = new ChatActionApplier({
+  // A decision made on the phone or another machine is acted on here when this
+  // desktop is the peer holding the request, and only once.
+  effects: createChatActionEffects({
+    chat: chatService as unknown as Parameters<typeof createChatActionEffects>[0]["chat"],
+    emitter: { beginExecution: (target) => chatActionEmitter.beginExecution(target), recordExecution: (request) => chatActionEmitter.recordExecution(request) },
+    storage: { getConversation: (id) => storageService.getConversation(id) }
+  }),
   artifacts: {
     getRevision: async (artifactId, versionEventId) => {
       const revision = await artifactStore.getRevision(artifactId, versionEventId);

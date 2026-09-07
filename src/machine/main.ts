@@ -30,7 +30,10 @@ import { CliAgentRunner } from "../main/services/cliAgents";
 import { setCommandDebugLogger } from "../main/services/command";
 import { DebugLogService } from "../main/services/debugLogs";
 import { MachineHostService } from "../main/services/machineHost";
+import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
 import { ChatActionApplier } from "../main/services/chatActionApplier";
+import { ChatActionEmitter } from "../main/services/chatActionEmitter";
+import { createChatActionEffects } from "../main/services/chatActionEffects";
 import { MachineIdlePower } from "../main/services/machineIdlePower";
 import { MachineMaintenance } from "../main/services/machineMaintenance";
 import { nativeHostIdentity } from "../main/services/nativeHostIdentity";
@@ -219,6 +222,25 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
 
   await appMcpService.start();
   await storageService.init();
+  // The machine records its own decisions and effects in the same log the
+  // desktop uses, so a permission answered from the phone is told to the
+  // provider here exactly once.
+  const chatActionEmitter = new ChatActionEmitter({
+    executedBy: args.machineName || "machine",
+    hasEvent: async (eventId) => Boolean(await storageService.getChatEvent(eventId)),
+    publish: async (action) => {
+      await chatEventLogService.appendLocalEvent({
+        conversationId: action.conversationId,
+        logScopeId: CHAT_ACTION_LOG_SCOPE,
+        kind: action.kind,
+        payload: action.payload,
+        eventId: `chat-action:${action.payload.operationId}`
+      });
+    },
+    logger: (event, payload) => {
+      void debugLogService.write(event, payload);
+    }
+  });
   const identity = await chatEventLogService.getOrCreateDeviceIdentity();
   await storageService.machineProgress().recoverLocal(identity.originId);
 
@@ -227,6 +249,11 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     // A signature or a superseded change that arrives here has to become part
     // of this machine's own state, not just a stored event.
     chatActions: new ChatActionApplier({
+      effects: createChatActionEffects({
+        chat: chatService as unknown as Parameters<typeof createChatActionEffects>[0]["chat"],
+        emitter: chatActionEmitter,
+        storage: { getConversation: (id) => storageService.getConversation(id) }
+      }),
       artifacts: {
         getRevision: async (artifactId, versionEventId) => {
           const revision = await artifactStore.getRevision(artifactId, versionEventId);
