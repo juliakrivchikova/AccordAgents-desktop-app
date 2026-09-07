@@ -3194,6 +3194,20 @@ void app.whenReady().then(async () => {
           throw error;
         });
     });
+    // A member on a machine asked other members to answer. They run here,
+    // each where that member lives; the machine waits for the answers.
+    machineLinkService.onParticipantRequest((request) => chatService.runDelegatedParticipantRequest({
+      conversationId: request.conversationId,
+      requestMessageId: request.requestMessageId,
+      depth: request.depth
+    }).catch((error) => {
+      void debugLogService.write("machine-link.participants.delegate-error", {
+        conversationId: request.conversationId,
+        requestMessageId: request.requestMessageId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }));
     machineLinkService.onApproval((event) =>
       // A failed store must fail the machine's decision outcome (and the
       // card call behind it), so the error is logged and re-thrown.

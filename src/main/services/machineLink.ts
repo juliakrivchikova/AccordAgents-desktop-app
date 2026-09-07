@@ -152,6 +152,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private readonly lateTerminalListeners: Array<(event: MachineLateTerminalEvent) => Promise<void> | void> = [];
   private readonly runStartedListeners: Array<(event: { conversationId: string; runId: string }) => Promise<void> | void> = [];
   private readonly progressListeners: Array<(progress: ReviewProgress) => void> = [];
+  private readonly participantRequestListeners: Array<(request: { machineId: string; conversationId: string; requestMessageId: string; depth: number }) => Promise<void> | void> = [];
   private readonly backDeltaListeners: Array<(delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void> = [];
   private conversationLoader?: (conversationId: string) => Promise<Conversation | undefined>;
   private readonly connections = new Map<string, MachineConnection>();
@@ -186,6 +187,16 @@ export class MachineLinkService implements MachineTurnDispatcher {
   onConversationBackDelta(listener: (delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void): () => void {
     this.backDeltaListeners.push(listener);
     return () => { const index = this.backDeltaListeners.indexOf(listener); if (index >= 0) this.backDeltaListeners.splice(index, 1); };
+  }
+
+  /** A member on a machine asked other members to answer. The listener runs
+   *  them here, where the roster and every member's home are known. */
+  onParticipantRequest(listener: (request: { machineId: string; conversationId: string; requestMessageId: string; depth: number }) => Promise<void> | void): () => void {
+    this.participantRequestListeners.push(listener);
+    return () => {
+      const index = this.participantRequestListeners.indexOf(listener);
+      if (index >= 0) this.participantRequestListeners.splice(index, 1);
+    };
   }
 
   /** An approval raised or answered by a member on a machine. A listener
@@ -934,6 +945,20 @@ export class MachineLinkService implements MachineTurnDispatcher {
         }
         return;
       }
+      case "machine.participants.delegate": {
+        // The request message itself arrived just before this, on the same
+        // ordered stream, as an ordinary back delta.
+        if (!this.participantRequestListeners.length) {
+          throw new Error("No chat owner is available to run the members this machine asked for.");
+        }
+        await Promise.all(this.participantRequestListeners.map((listener) => listener({
+          machineId: connection.record.id,
+          conversationId: body.conversationId,
+          requestMessageId: body.requestMessageId,
+          depth: body.depth
+        })));
+        return;
+      }
       case "machine.approval.requested":
       case "machine.approval.updated":
         await this.emitApproval({
@@ -972,7 +997,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
           const action = await this.applyChatAction(event, body);
           if (action) return action;
           const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
-          if (!isMachineLinkEnvelope(envelope) || !["machine.conversation.backdelta", "machine.turn.finished", "machine.turn.started",
+          if (!isMachineLinkEnvelope(envelope) || !["machine.conversation.backdelta", "machine.turn.finished", "machine.turn.started", "machine.participants.delegate",
             "machine.approval.requested", "machine.approval.updated", "machine.approval.result", "machine.turn.progress.delta"].includes(envelope.body.type) ||
               !("conversationId" in envelope.body) ||
               event.kind !== envelope.body.type || event.conversationId !== envelope.body.conversationId) {

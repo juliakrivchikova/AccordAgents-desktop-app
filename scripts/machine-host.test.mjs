@@ -297,3 +297,42 @@ test("runtime shutdown stores the final outcome before closing its device channe
   assert.ok(pending.some(row => row.event.kind === "machine.turn.finished"));
   assert.equal(host.pendingTerminals.get("shutdown-run").status, "failed", "runtime closure must not be presented as User Stop");
 });
+
+
+test("a member request from this machine reaches the desktop as one durable delegation", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const enrollment = pairing();
+  const host = new MachineHostService(
+    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true,
+      respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined },
+    { getConversation: async () => undefined },
+    { importMachineSettingsSnapshot: async () => undefined },
+    { write: async () => undefined },
+    { ...hostEvents, pairing: enrollment, deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
+  );
+  try {
+    await host.start();
+    await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test" });
+    const request = { conversationId: "delegating-chat", requestMessageId: "request-1", batchId: "batch-1", depth: 1 };
+    await host.delegateParticipantRequest(request);
+    // The member asked once; a retry of the same ask is the same event.
+    await host.delegateParticipantRequest(request);
+    await host.outbound;
+    await host.eventChannel.flush();
+
+    const pending = await hostEvents.eventStorage.deviceEvents().listPending(enrollment.rendezvousId);
+    const delegations = pending.filter((row) => row.event.kind === "machine.participants.delegate");
+    assert.equal(delegations.length, 1, "one request message is one delegation, however often it is retried");
+    const body = await hostEvents.eventStorage.deviceEventBlobs().hydrate(delegations[0].event.payload);
+    assert.equal(body.conversationId, "delegating-chat");
+    assert.equal(body.requestMessageId, "request-1");
+    assert.equal(body.batchId, "batch-1");
+    assert.equal(body.depth, 1);
+  } finally {
+    host.close();
+    await host.inbound;
+    await host.outbound;
+    await host.eventChannel.flush().catch(() => undefined);
+  }
+});

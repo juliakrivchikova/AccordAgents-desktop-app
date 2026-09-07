@@ -592,6 +592,13 @@ export interface ChatApprovalExecutionGuard {
   awaitNativeDelivery?: boolean;
 }
 
+/** How often a machine looks at its own copy while the desktop runs the
+ *  targets, and how long it keeps looking before answering with what it has. */
+const DELEGATED_PARTICIPANT_REQUEST_POLL_MS = 1_000;
+const DELEGATED_PARTICIPANT_REQUEST_LIMIT_MS = 24 * 60 * 60 * 1_000;
+/** How long the desktop waits for the request message a delegation names. */
+const DELEGATED_PARTICIPANT_REQUEST_WAIT_MS = 10_000;
+
 interface ParticipantRequestRunResult {
   batch: ChatParticipantRequestBatch;
   replies: Array<{
@@ -674,6 +681,17 @@ export interface MachineTurnDispatchResult {
   /** Called once the desktop has stored the result; the machine keeps it
    *  until then. */
   acknowledge?: () => void | Promise<void>;
+}
+
+/** Machine side. Hands one prepared member request to the desktop; the answers
+ *  come back with the conversation, like every other message. */
+export interface ChatParticipantRequestDelegate {
+  delegateParticipantRequest(request: {
+    conversationId: string;
+    requestMessageId: string;
+    batchId: string;
+    depth: number;
+  }): Promise<void>;
 }
 
 export interface MachineTurnDispatcher {
@@ -840,6 +858,7 @@ export class ChatService {
   private runOwnerHeartbeatTimer?: NodeJS.Timeout;
   private remoteRuns?: RemoteRunStarter;
   private machineLink?: MachineTurnDispatcher;
+  private participantRequestDelegate?: ChatParticipantRequestDelegate;
   private remoteRunCoordinator?: RemoteRunCoordinatorControl;
   private cloudRunAws?: CloudRunAwsResolver;
   private cloudRunDoctor?: CloudRunDoctorProbe;
@@ -880,6 +899,12 @@ export class ChatService {
    *  progress, and the final messages exactly as for a local participant. */
   setMachineLink(link: MachineTurnDispatcher | undefined): void {
     this.machineLink = link;
+  }
+
+  /** Machines transport, machine side: hands a member request to the desktop,
+   *  which owns the roster and runs each target where that member lives. */
+  setParticipantRequestDelegate(delegate: ChatParticipantRequestDelegate | undefined): void {
+    this.participantRequestDelegate = delegate;
   }
 
   setRemoteRunService(remoteRuns: RemoteRunStarter): void {
@@ -3545,13 +3570,19 @@ export class ChatService {
     }
 
     const requesterProgress = actor.runId ? this.runProgressCallbacks.get(actor.runId) : undefined;
-    const runner = this.startParticipantRequestRunner(
-      conversation.id,
-      prepared.requestMessage.id,
-      actor.runId ?? randomUUID(),
-      prepared.batch.depth,
-      requesterProgress
-    );
+    // Machines transport, machine side: a machine never runs a member that is
+    // not its own. The desktop owns the roster, so the whole batch goes there
+    // and each target runs where that member lives; the answers arrive here
+    // with the conversation. Resuming this machine's own requester stays here.
+    const runner = this.participantRequestDelegate
+      ? this.delegateParticipantRequest(conversation.id, prepared)
+      : this.startParticipantRequestRunner(
+        conversation.id,
+        prepared.requestMessage.id,
+        actor.runId ?? randomUUID(),
+        prepared.batch.depth,
+        requesterProgress
+      );
     const result = await this.awaitParticipantRequestRunner(runner, prepared.timeoutMs);
     if (result.timedOut) {
       void runner.then(() => this.autoResumeParticipantRequest(conversation.id, prepared.requestMessage.id, requesterProgress)).catch((error) => {
@@ -13775,6 +13806,89 @@ export class ChatService {
       };
     });
     return updated;
+  }
+
+
+  /**
+   * Machine side. Hands the prepared request to the desktop and waits for the
+   * answers to reach this machine's own copy of the chat.
+   *
+   * The request message is already on its way there through the ordinary
+   * back delta, and the delegation carries only its identity, so a redelivery
+   * or a restart cannot turn one request into two runs: the desktop folds it
+   * onto the same request message and only items still open are run.
+   */
+  private async delegateParticipantRequest(
+    conversationId: string,
+    prepared: PreparedParticipantRequest
+  ): Promise<ParticipantRequestRunResult> {
+    const delegate = this.participantRequestDelegate;
+    if (!delegate) throw new Error("This machine cannot reach the desktop to ask other members.");
+    await delegate.delegateParticipantRequest({
+      conversationId,
+      requestMessageId: prepared.requestMessage.id,
+      batchId: prepared.batch.id,
+      depth: prepared.batch.depth
+    });
+    const deadline = Date.now() + DELEGATED_PARTICIPANT_REQUEST_LIMIT_MS;
+    for (;;) {
+      const conversation = await this.requireChat(conversationId);
+      const message = conversation.messages.find((candidate) => candidate.id === prepared.requestMessage.id);
+      const batch = message?.metadata?.participantRequest;
+      if (!batch) throw new Error("Member request message was not found.");
+      if (!batch.items.some((item) => this.isOpenParticipantRequestStatus(item.status)) || Date.now() >= deadline) {
+        return {
+          batch,
+          replies: batch.items.map((item) => {
+            const reply = item.replyMessageId
+              ? conversation.messages.find((candidate) => candidate.id === item.replyMessageId)
+              : undefined;
+            return {
+              targetHandle: item.targetHandle,
+              messageId: reply?.id,
+              content: reply?.content,
+              error: item.error ?? (reply?.status === "error" ? reply.content : undefined)
+            };
+          })
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, DELEGATED_PARTICIPANT_REQUEST_POLL_MS));
+    }
+  }
+
+  /**
+   * Desktop side. A member on a machine asked other members to answer; this
+   * runs them here, each where that member lives.
+   *
+   * Resuming the requester is deliberately not done here: the requester is
+   * that machine's own member and its tool call is still waiting for these
+   * answers. Resuming it from here as well would give it two turns at once.
+   */
+  async runDelegatedParticipantRequest(request: {
+    conversationId: string;
+    requestMessageId: string;
+    depth: number;
+  }): Promise<void> {
+    await this.waitForQueuedSave(request.conversationId);
+    // The request message travels ahead of this on the same stream. Waiting a
+    // little rather than failing keeps a slow write from turning into a retry
+    // storm; if it truly is not here, this throws and the delegation is kept
+    // for retry instead of being acknowledged as done.
+    const deadline = Date.now() + DELEGATED_PARTICIPANT_REQUEST_WAIT_MS;
+    for (;;) {
+      const conversation = await this.requireChat(request.conversationId);
+      if (conversation.messages.some((message) => message.id === request.requestMessageId)) break;
+      if (Date.now() >= deadline) {
+        throw new Error("The member request this machine delegated has not reached this desktop yet.");
+      }
+      await new Promise((resolve) => setTimeout(resolve, DELEGATED_PARTICIPANT_REQUEST_POLL_MS));
+    }
+    await this.startParticipantRequestRunner(
+      request.conversationId,
+      request.requestMessageId,
+      randomUUID(),
+      request.depth
+    );
   }
 
   private startParticipantRequestRunner(

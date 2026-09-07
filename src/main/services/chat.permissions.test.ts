@@ -10580,6 +10580,91 @@ test("participant request permission allow runs without approval", async () => {
   assert.equal(storage.current.metadata.pendingAppToolApprovals, undefined);
 });
 
+test("a member on a machine never runs another member itself; the desktop does, and its answers come back", async () => {
+  // Requester lives on this machine; the target lives on the desktop.
+  const requester = { ...chatParticipant("codex-cli", { requestParticipants: "allow" }), id: "here", handle: "here", homeMachineId: "machine-1" };
+  const target = { ...chatParticipant("claude-code"), id: "elsewhere", handle: "elsewhere" };
+  const conversation = chatConversation([requester, target]);
+  const runs: ParticipantConfig[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (participant) => { runs.push(participant); return { participant, ok: true, content: "ran here", durationMs: 1 }; }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  service.setHostMachineId("machine-1");
+  const delegated: Array<{ conversationId: string; requestMessageId: string; batchId: string; depth: number }> = [];
+  service.setParticipantRequestDelegate({
+    delegateParticipantRequest: async (request) => {
+      delegated.push(request);
+      // The desktop ran the target where that member lives; its answer reaches
+      // this machine with the conversation, exactly like any other message.
+      const stored = storage.current;
+      const requestMessage = stored.messages.find((message: ChatMessage) => message.id === request.requestMessageId);
+      const reply: ChatMessage = {
+        id: "reply-from-desktop", role: "participant", content: "Answered on the desktop.",
+        status: "done", createdAt: new Date().toISOString(),
+        participantId: target.id, participantLabel: `@${target.handle}`,
+        metadata: { threadId: requestMessage.id, parentMessageId: requestMessage.id, sourceMessageId: requestMessage.id }
+      } as ChatMessage;
+      stored.messages.push(reply);
+      const batch = requestMessage.metadata.participantRequest;
+      batch.items = batch.items.map((item: any) => ({ ...item, status: "answered", replyMessageId: reply.id }));
+      batch.status = "answered";
+    }
+  });
+
+  const result = await service.requestParticipantsFromTool(participantRequestActor(requester), {
+    requests: [{ target: target.handle, prompt: "Please review." }],
+    timeoutMs: 5000,
+    resumeRequester: false
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(runs, [], "a machine must not run a member that is not its own");
+  assert.equal(delegated.length, 1, "the request is handed to the desktop, which owns the roster");
+  assert.equal(delegated[0].conversationId, conversation.id);
+  const requestMessage = storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest);
+  assert.equal(delegated[0].requestMessageId, requestMessage.id, "the delegation names the request message, not a new one");
+  assert.equal(delegated[0].batchId, requestMessage.metadata.participantRequest.id);
+  const items = (result as any).batch.items as Array<{ target: string; status: string; reply?: string }>;
+  assert.equal(items[0].status, "answered");
+  assert.equal(items[0].reply, "Answered on the desktop.", "the answer is returned to the member that asked");
+});
+
+test("a delegated request keeps its own thread and is not turned into a second run", async () => {
+  const requester = { ...chatParticipant("codex-cli", { requestParticipants: "allow" }), id: "here", handle: "here", homeMachineId: "machine-1" };
+  const target = { ...chatParticipant("claude-code"), id: "elsewhere", handle: "elsewhere" };
+  const conversation = chatConversation([requester, target]);
+  const { service, storage, tempRoot } = testService({ conversation });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  service.setHostMachineId("machine-1");
+  const delegated: string[] = [];
+  service.setParticipantRequestDelegate({
+    delegateParticipantRequest: async (request) => {
+      delegated.push(request.requestMessageId);
+      const stored = storage.current;
+      const requestMessage = stored.messages.find((message: ChatMessage) => message.id === request.requestMessageId);
+      const batch = requestMessage.metadata.participantRequest;
+      batch.items = batch.items.map((item: any) => ({ ...item, status: "answered" }));
+      batch.status = "answered";
+    }
+  });
+
+  const trigger = "trigger-message";
+  storage.current.messages.push({
+    id: trigger, role: "user", content: "Ask elsewhere.", status: "done", createdAt: new Date().toISOString()
+  } as ChatMessage);
+  await service.requestParticipantsFromTool(
+    { ...participantRequestActor(requester), triggerMessageId: trigger },
+    { requests: [{ target: target.handle, prompt: "Please review." }], timeoutMs: 5000, resumeRequester: false }
+  );
+
+  const requestMessage = storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest);
+  assert.equal(requestMessage.metadata.sourceMessageId ?? requestMessage.metadata.parentMessageId, trigger,
+    "the request keeps the thread it was asked in");
+  assert.deepEqual(delegated, [requestMessage.id], "one request, one delegation");
+});
+
 test("inferred accord assignment allows facilitator participant requests before nested request", async () => {
   const manager: ChatParticipant = {
     ...chatParticipant("codex-cli", { requestParticipants: "allow" }),

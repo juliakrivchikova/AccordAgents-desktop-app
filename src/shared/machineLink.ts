@@ -269,6 +269,22 @@ export interface MachineChoiceAnswerBody {
   answeredAt: string;
 }
 
+/**
+ * A member running on this machine asked other members to answer.
+ *
+ * Routing belongs to the desktop, which owns the roster: it runs each target
+ * where that member lives — locally, or on the machine that member calls home
+ * — and the answers reach this machine with the conversation like any other
+ * message. A machine never runs a member that is not its own.
+ */
+export interface MachineParticipantsDelegateBody {
+  type: "machine.participants.delegate";
+  conversationId: string;
+  requestMessageId: string;
+  batchId: string;
+  depth: number;
+}
+
 export type MachineLinkMessage =
   | MachineHelloBody
   | MachineHelloAckBody
@@ -293,6 +309,7 @@ export type MachineLinkMessage =
   | MachineHelloRequestBody
   | MachineConversationSyncDoneBody
   | MachineConversationResyncBody
+  | MachineParticipantsDelegateBody
   | MachineChoiceAnswerBody;
 
 export type MachineLinkMessageType = MachineLinkMessage["type"];
@@ -306,7 +323,7 @@ export function isMachineDurableMessage(body: MachineLinkMessage): boolean {
   return isMachineReplicationMessage(body) || body.type === "machine.turn.finished" || body.type === "machine.turn.finished.ack" ||
     body.type === "machine.turn.request" || body.type === "machine.turn.cancel" || body.type === "machine.settings.sealed" || body.type === "machine.turn.started" ||
     body.type === "machine.approval.requested" || body.type === "machine.approval.updated" || body.type === "machine.approval.decision" || body.type === "machine.approval.result" ||
-    body.type === "machine.turn.progress.delta";
+    body.type === "machine.turn.progress.delta" || body.type === "machine.participants.delegate";
 }
 
 export function machineCommandId(runId: string): string { return `machine-command:${runId}`; }
@@ -323,6 +340,7 @@ const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
   "machine.turn.cancel",
   "machine.turn.progress",
   "machine.turn.progress.delta",
+  "machine.participants.delegate",
   "machine.turn.started",
   "machine.turn.finished",
   "machine.conversation.backdelta",

@@ -309,6 +309,22 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     assert.deepEqual(echoedReplicated, [], "replicated messages must not come back as a back delta");
     stopEchoListener();
 
+    // A member on the machine asked other members to answer. The machine does
+    // not run them: the desktop does, where the roster and every member's home
+    // are known. Asking twice is one delegation, not two runs.
+    const delegations = [];
+    const stopDelegationListener = link.onParticipantRequest((request) => { delegations.push(request); });
+    await host.delegateParticipantRequest({ conversationId: "conv-1", requestMessageId: "request-1", batchId: "batch-1", depth: 2 });
+    await host.delegateParticipantRequest({ conversationId: "conv-1", requestMessageId: "request-1", batchId: "batch-1", depth: 2 });
+    await waitFor(() => delegations.length > 0, 5_000);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(delegations.length, 1, "one request message is one delegation on the desktop");
+    assert.equal(delegations[0].machineId, "machine-1");
+    assert.equal(delegations[0].conversationId, "conv-1");
+    assert.equal(delegations[0].requestMessageId, "request-1");
+    assert.equal(delegations[0].depth, 2);
+    stopDelegationListener();
+
     // A reply finished while the desktop was away is delivered on reconnect,
     // stored through the late-terminal listener, and acknowledged only then.
     const lateTerminals = [];

@@ -228,7 +228,9 @@ export class MachineHostService {
         if (!isMachineLinkEnvelope(envelope) || !isMachineDurableMessage(envelope.body) ||
             envelope.body.type === "machine.conversation.backdelta" || envelope.body.type === "machine.turn.finished" || envelope.body.type === "machine.turn.started" ||
             envelope.body.type === "machine.approval.requested" || envelope.body.type === "machine.approval.updated" || envelope.body.type === "machine.approval.result" ||
-            envelope.body.type === "machine.turn.progress.delta") {
+            envelope.body.type === "machine.turn.progress.delta" ||
+            // This machine sends delegations; it never receives them.
+            envelope.body.type === "machine.participants.delegate") {
           throw new Error("Unexpected machine replication event.");
         }
         const conversationId = envelope.body.type === "machine.conversation.sync" ? envelope.body.conversation.id : "conversationId" in envelope.body ? envelope.body.conversationId : "";
@@ -1404,6 +1406,27 @@ export class MachineHostService {
     }
   }
 
+  /** A member running here asked other members to answer. The desktop owns the
+   *  roster and runs each of them where that member lives; this machine only
+   *  waits for the answers to arrive with the conversation.
+   *
+   *  The body carries nothing that changes between attempts, so asking twice
+   *  is the same event and not a second run of the same members. */
+  delegateParticipantRequest(request: {
+    conversationId: string;
+    requestMessageId: string;
+    batchId: string;
+    depth: number;
+  }): Promise<void> {
+    return this.send({
+      type: "machine.participants.delegate",
+      conversationId: request.conversationId,
+      requestMessageId: request.requestMessageId,
+      batchId: request.batchId,
+      depth: request.depth
+    });
+  }
+
   private send(body: MachineLinkMessage): Promise<void> {
     const run = this.outbound.then(() => this.sendNow(body));
     this.outbound = run.then(() => undefined, () => undefined);
@@ -1458,6 +1481,12 @@ export class MachineHostService {
         ...(body.type === "machine.approval.requested" || body.type === "machine.approval.updated" ? { scope: `approval:${body.approval.id}` } : {}),
         ...(body.type === "machine.approval.result" && body.decisionId ? { eventId: machineApprovalResultId(body.decisionId), scope: `approval:${body.approvalId}` } : {}),
         ...(body.type === "machine.turn.started" ? { eventId: `machine-started:${body.runId}`, scope: `terminal:${body.runId}` } : {}),
+        // One request message, one delegation: a redelivery or a restart is
+        // the same event, not a second run of the same members. It stays on
+        // the conversation's own stream, behind the back delta carrying the
+        // request message it names.
+        ...(body.type === "machine.participants.delegate"
+          ? { eventId: `machine-participants:${body.requestMessageId}` } : {}),
         ...(body.type === "machine.turn.finished" ? { eventId: terminalEventId(body), scope: `terminal:${body.runId}` } : {}) });
       if (body.type === "machine.turn.finished") this.durableTerminalIds.add(published.eventId);
       if (body.type === "machine.turn.finished") await this.options.eventStorage.nativeCommands().recordOutcome(body.runId, published.eventId);

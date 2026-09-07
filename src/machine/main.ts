@@ -329,6 +329,11 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     }
   });
   hostRef = host;
+  // A member here asking other members goes through the desktop: it owns the
+  // roster and runs each target where that member lives.
+  chatService.setParticipantRequestDelegate({
+    delegateParticipantRequest: (request) => host.delegateParticipantRequest(request)
+  });
   const powerConfig = await settingsService.getMachinePower();
   if (!powerConfig) {
     const priorPower = await storageService.machinePower().read();
