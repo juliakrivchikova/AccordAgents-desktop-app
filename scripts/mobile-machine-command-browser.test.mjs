@@ -20,6 +20,7 @@ import WebSocket from "ws";
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const { verifySignedChatEvent } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
+const { verifyDevicePacket } = require(path.join(repoRoot, "dist/main/main/services/devicePacketAuthentication.js"));
 
 const SITE_PORT = 8171;
 const CDP_PORT = 9361;
@@ -118,6 +119,15 @@ test("a real browser mints this phone's identity and signs a command the desktop
     true,
     "what the browser signed must verify with the same code every machine uses"
   );
+  assert.equal(minted.capabilities?.ed25519, true, "this browser reports it can sign with Ed25519");
+  assert.equal(minted.verifiesItsOwn, true, "the browser must also verify, not only sign");
+  assert.equal(
+    verifyDevicePacket(minted.packet, minted.identity.publicKeyDerBase64),
+    true,
+    "an acknowledgement signed in the browser must be the one a machine accepts"
+  );
+  // Stated, not assumed: this is the browser that was here.
+  console.log("[machine-command-browser] verified in:", minted.userAgent);
   assert.equal(minted.event.kind, "machine.turn.request");
   assert.equal(minted.event.payload.runId, "run-browser");
 });

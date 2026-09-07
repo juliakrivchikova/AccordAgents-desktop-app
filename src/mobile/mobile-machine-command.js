@@ -148,6 +148,97 @@
     return { protocol: "accord-device-events-v1", from, to, type: "event", event };
   }
 
+  /** The signature every device puts on an event: over its event hash. */
+  async function signEventHash(identity, eventHash) {
+    return bytesToBase64(new Uint8Array(
+      await subtle().sign({ name: "Ed25519" }, await signingKey(identity), textBytes(eventHash))
+    ));
+  }
+
+  async function verifyingKey(publicKeyDerBase64) {
+    return subtle().importKey("spki", base64ToBytes(publicKeyDerBase64), { name: "Ed25519" }, false, ["verify"]);
+  }
+
+  /**
+   * The signature on a transport packet, over the packet itself.
+   *
+   * A room's seal proves the sender is in the room. It does not prove *which*
+   * device sent this, and an acknowledgement is exactly a claim about which
+   * device applied something — it releases the sender's retained history. So
+   * every packet that is not an event carries this signature, and an event
+   * carries its own immutable one instead.
+   *
+   * Byte-for-byte src/main/services/devicePacketAuthentication.ts.
+   */
+  function packetBytes(packet) {
+    const unsigned = {};
+    for (const key of Object.keys(packet)) if (key !== "signature") unsigned[key] = packet[key];
+    return textBytes("accord-device-packet-v1:" + stableJson(unsigned));
+  }
+
+  async function signPacket(identity, packet) {
+    if (packet.from !== identity.deviceId) throw new Error("Cannot sign another device's packet.");
+    const signature = bytesToBase64(new Uint8Array(
+      await subtle().sign({ name: "Ed25519" }, await signingKey(identity), packetBytes(packet))
+    ));
+    return { ...packet, signature };
+  }
+
+  async function verifyPacket(packet, publicKeyDerBase64) {
+    if (!packet || typeof packet.signature !== "string") return false;
+    try {
+      return await subtle().verify({ name: "Ed25519" }, await verifyingKey(publicKeyDerBase64),
+        base64ToBytes(packet.signature), packetBytes(packet));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * An event's own signature, checked the way every other device checks it:
+   * the payload has to hash to what the envelope claims, the envelope has to
+   * hash to its event hash, and that hash has to be signed by the origin.
+   *
+   * Byte-for-byte verifySignedChatEvent in src/main/services/chatEventLog.ts.
+   */
+  async function verifyEvent(event, publicKeyDerBase64) {
+    if (!event || typeof event.signature !== "string") return false;
+    const unsigned = {
+      eventId: event.eventId,
+      conversationId: event.conversationId,
+      logScopeId: event.logScopeId,
+      originId: event.originId,
+      originSeq: event.originSeq,
+      logicalTs: event.logicalTs,
+      kind: event.kind,
+      payloadHash: event.payloadHash,
+      prevHash: event.prevHash === undefined ? null : event.prevHash,
+      keyId: event.keyId,
+      createdAt: event.createdAt
+    };
+    try {
+      if (`sha256:${await sha256Hex(textBytes(stableJson(event.payload)))}` !== event.payloadHash) return false;
+      if (`sha256:${await sha256Hex(textBytes(stableJson(unsigned)))}` !== event.eventHash) return false;
+      return await subtle().verify({ name: "Ed25519" }, await verifyingKey(publicKeyDerBase64),
+        base64ToBytes(event.signature), textBytes(event.eventHash));
+    } catch {
+      return false;
+    }
+  }
+
+  /** Whether this browser can sign and verify what a machine requires. Said
+   *  plainly, rather than assuming every phone is the one that was tested. */
+  async function capabilities() {
+    try {
+      const pair = await subtle().generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+      const signature = await subtle().sign({ name: "Ed25519" }, pair.privateKey, textBytes("probe"));
+      const verified = await subtle().verify({ name: "Ed25519" }, pair.publicKey, signature, textBytes("probe"));
+      return { ed25519: verified === true };
+    } catch (error) {
+      return { ed25519: false, reason: String((error && error.message) || error) };
+    }
+  }
+
   /**
    * Asks a machine to run a member's turn.
    *
@@ -175,6 +266,14 @@
   return {
     stableJson,
     sha256Hex,
+    textBytes,
+    bytesToBase64,
+    base64ToBytes,
+    signEventHash,
+    signPacket,
+    verifyPacket,
+    verifyEvent,
+    capabilities,
     createIdentity,
     ensureIdentity,
     mintEvent,

@@ -760,7 +760,11 @@ export class MachineHostService {
         return;
       }
       case "machine.conversation.delta":
-        await this.applyConversationDelta(body, durable);
+        // Only the desktop's own copy tells this machine what the desktop
+        // already holds. A message the phone delivered here is new to the
+        // desktop, and recording it as known would mean the desktop never
+        // learns what the User asked while it was closed.
+        await this.applyConversationDelta(body, durable, replyTo === undefined || replyTo === this.options.pairing.issuer.originId);
         return;
       case "machine.participants.delegate":
         // Another machine's member asked for members that live here. Only the
@@ -999,8 +1003,10 @@ export class MachineHostService {
     });
   }
 
-  private async applyConversationDelta(delta: MachineConversationDeltaBody, durable = false): Promise<void> {
-    const previousStamps = this.rememberDesktopMessages(delta.conversationId, delta.messages, delta.removedMessageIds ?? []);
+  private async applyConversationDelta(delta: MachineConversationDeltaBody, durable = false, fromDesktop = true): Promise<void> {
+    const previousStamps = fromDesktop
+      ? this.rememberDesktopMessages(delta.conversationId, delta.messages, delta.removedMessageIds ?? [])
+      : new Map<string, string | undefined>();
     let missing = false;
     try {
       await this.chat.applyReplicatedConversation(delta.conversationId, (existing) => {

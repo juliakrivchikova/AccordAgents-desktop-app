@@ -26,7 +26,23 @@
               requestedAt: "2026-09-07T00:00:00.000Z"
             })
           });
-          return { identity: { deviceId: identity.deviceId, publicKeyDerBase64: identity.publicKeyDerBase64 }, event };
+          // The acknowledgement contract too: what this browser signs over a
+          // whole packet is what releases another device's retained history,
+          // so a browser that cannot do it has to fail here, not in the field.
+          const packet = await api.signPacket(identity, {
+            protocol: "accord-device-events-v1", from: identity.deviceId, to: "device-machine", type: "ack",
+            receipt: { eventId: event.eventId, eventHash: event.eventHash, outcome: "applied", appliedAt: "2026-09-07T00:00:00.000Z" }
+          });
+          return {
+            identity: { deviceId: identity.deviceId, publicKeyDerBase64: identity.publicKeyDerBase64 },
+            event,
+            packet,
+            capabilities: await api.capabilities(),
+            // What this browser actually is, so a pass is never read as a pass
+            // on a browser that was not here.
+            userAgent: navigator.userAgent,
+            verifiesItsOwn: await api.verifyEvent(event, identity.publicKeyDerBase64)
+          };
         } catch (error) {
           return { error: String(error && error.message || error) };
         }

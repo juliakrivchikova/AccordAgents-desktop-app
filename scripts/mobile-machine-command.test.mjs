@@ -19,6 +19,7 @@ const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const phone = require(path.join(repoRoot, "src/mobile/mobile-machine-command.js"));
 const { verifySignedChatEvent } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
+const { signDevicePacket, verifyDevicePacket } = require(path.join(repoRoot, "dist/main/main/services/devicePacketAuthentication.js"));
 const { MachineHostService } = require(path.join(repoRoot, "dist/main/main/services/machineHost.js"));
 const { StorageService } = require(path.join(repoRoot, "dist/main/main/services/storage.js"));
 const { ChatEventLogService } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
@@ -151,6 +152,47 @@ test("what the phone signs is what every other device verifies", async () => {
   // Another key must not pass: the signature is the whole point.
   const other = await phone.createIdentity();
   assert.equal(verifySignedChatEvent(event, other.publicKeyDerBase64), false);
+});
+
+test("the phone's transport signatures are the ones every other device makes and checks", async () => {
+  const identity = await phone.createIdentity();
+  const other = await phone.createIdentity();
+  // An acknowledgement releases the sender's retained history, so a shared
+  // room key must not be enough to make one. Both sides have to agree on the
+  // exact bytes, or a phone's ACK would be silently ignored.
+  const receipt = { eventId: "e-1", eventHash: "sha256:" + "a".repeat(64), outcome: "applied", appliedAt: "2026-09-07T00:00:00.000Z" };
+  const packet = { protocol: "accord-device-events-v1", from: identity.deviceId, to: "device-machine", type: "ack", receipt };
+  const signed = await phone.signPacket(identity, packet);
+  assert.equal(verifyDevicePacket(signed, identity.publicKeyDerBase64), true,
+    "the desktop must accept a packet the phone signed");
+  assert.equal(verifyDevicePacket(signed, other.publicKeyDerBase64), false);
+  assert.equal(verifyDevicePacket({ ...signed, to: "device-elsewhere" }, identity.publicKeyDerBase64), false,
+    "the recipient is inside the signature");
+  assert.equal(verifyDevicePacket({ ...signed, signature: undefined }, identity.publicKeyDerBase64), false);
+
+  // And the other direction: what a machine signs, the phone verifies.
+  const machineIdentity = { originId: "device-machine", privateKeyDerBase64: other.privateKeyDerBase64 };
+  const fromMachine = signDevicePacket(
+    { protocol: "accord-device-events-v1", from: "device-machine", to: identity.deviceId, type: "ack", receipt },
+    machineIdentity
+  );
+  assert.equal(await phone.verifyPacket(fromMachine, other.publicKeyDerBase64), true,
+    "the phone must accept a packet the machine signed");
+  assert.equal(await phone.verifyPacket(fromMachine, identity.publicKeyDerBase64), false);
+  assert.equal(await phone.verifyPacket({ ...fromMachine, receipt: { ...receipt, outcome: "superseded" } }, other.publicKeyDerBase64),
+    false, "the receipt itself is inside the signature");
+});
+
+test("the phone refuses an event whose payload, envelope or signature does not match", async () => {
+  const identity = await phone.createIdentity();
+  const { event } = await command(identity, "device-x", { rendezvousId: "room" }, "run-verify-phone");
+  assert.equal(await phone.verifyEvent(event, identity.publicKeyDerBase64), true);
+  assert.equal(await phone.verifyEvent({ ...event, payload: { ...event.payload, runId: "other" } }, identity.publicKeyDerBase64),
+    false, "a changed payload no longer hashes to what the envelope claims");
+  assert.equal(await phone.verifyEvent({ ...event, createdAt: "2020-01-01T00:00:00.000Z" }, identity.publicKeyDerBase64),
+    false, "a changed envelope no longer hashes to its event hash");
+  const other = await phone.createIdentity();
+  assert.equal(await phone.verifyEvent(event, other.publicKeyDerBase64), false);
 });
 
 test("a machine runs the turn the phone asked for, once, however often it arrives", async () => {
