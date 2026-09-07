@@ -21,6 +21,10 @@ test("mobile shell builds static installable PWA assets", async () => {
   const manifest = JSON.parse(await readFile(path.join(repoRoot, "dist/mobile/manifest.webmanifest"), "utf8"));
   const worker = await readFile(path.join(repoRoot, "dist/mobile/service-worker.js"), "utf8");
   const app = await readFile(path.join(repoRoot, "dist/mobile/mobile-app.js"), "utf8");
+  // The database description both the page and the worker load. They each
+  // carried their own copy of it and drifted far enough that the worker could
+  // no longer open the database at all.
+  const schema = await readFile(path.join(repoRoot, "dist/mobile/mobile-db.js"), "utf8");
   const icon = await stat(path.join(repoRoot, "dist/mobile/assets/accordagents-mark.png"));
 
   assert.equal(manifest.display, "standalone");
@@ -33,7 +37,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v65/);
+  assert.match(worker, /accordagents-mobile-shell-v66/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -49,7 +53,12 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.doesNotMatch(worker, /openEnvelope\(|deriveAccess\(|crypto\.subtle/);
   assert.doesNotMatch(worker, /localStorage/);
   assert.match(worker, /backgroundMailboxSync/);
-  assert.match(worker, /sealedEnvelopes/);
+  // The store the worker writes into, named once, in the description both
+  // contexts load. The worker imports it rather than repeating it.
+  assert.match(worker, /importScripts\("\.\/mobile-db\.js"\)/);
+  assert.match(schema, /sealedEnvelopes/);
+  assert.doesNotMatch(worker, /indexedDB\.open\(\s*DB_NAME\s*,/,
+    "the worker must not pin a version of its own; that is what broke the push path");
   assert.match(worker, /accord-test-push/);
   // W-B: every IndexedDB write in the background sync must be awaited before
   // returning. The epoch-reset branch previously fired its put and returned
@@ -330,7 +339,11 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /border-radius: 44px;/);
   assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /background: #eceef2;/);
   assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /border-radius: 18px 18px 6px 18px;/);
-  assert.match(app, /indexedDB\.open\(DB_NAME, DB_VERSION\)/);
+  // The page opens through the same shared description the worker imports,
+  // rather than a version constant of its own.
+  assert.match(app, /schema\.openControlDb\(indexedDB\)/);
+  assert.match(schema, /DB_VERSION = \d+/);
+  assert.match(schema, /machineEvents/);
   assert.match(app, /ackedEventIds\.includes\(entry\.eventId\)/);
   assert.match(app, /\/v1\/mailbox\/events/);
   assert.match(app, /return await flushOutboxViaMailbox\(entries, endpoint\)/);

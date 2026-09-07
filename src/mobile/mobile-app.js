@@ -1,6 +1,4 @@
 (function () {
-  const DB_NAME = "accordagents-mobile-control";
-  const DB_VERSION = 5;
   const META_STORE = "meta";
   const SEALED_STORE = "sealedEnvelopes";
   const MAILBOX_ACCESS_META_KEY = "mailboxAccess";
@@ -529,53 +527,13 @@
   }
 
   function openDb() {
-    return new Promise(function (resolve, reject) {
-      const request = indexedDB.open(DB_NAME, DB_VERSION);
-      request.onupgradeneeded = function () {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(OUTBOX_STORE)) {
-          const store = db.createObjectStore(OUTBOX_STORE, { keyPath: "eventId" });
-          store.createIndex("status", "status", { unique: false });
-          store.createIndex("createdAt", "createdAt", { unique: false });
-        }
-        if (!db.objectStoreNames.contains(TIMELINE_STORE)) {
-          const store = db.createObjectStore(TIMELINE_STORE, { keyPath: "id" });
-          store.createIndex("createdAt", "createdAt", { unique: false });
-        }
-        // W5: the service worker's stores. meta mirrors the non-decrypting
-        // mailbox credentials plus the shared cursor; sealedEnvelopes holds
-        // what a push-woken fetch stored, still sealed, for the page to open.
-        if (!db.objectStoreNames.contains(META_STORE)) {
-          db.createObjectStore(META_STORE, { keyPath: "key" });
-        }
-        if (!db.objectStoreNames.contains(SEALED_STORE)) {
-          db.createObjectStore(SEALED_STORE, { keyPath: "eventId" });
-        }
-        if (!db.objectStoreNames.contains(EVENT_STORE)) {
-          const store = db.createObjectStore(EVENT_STORE, { keyPath: "eventId" });
-          store.createIndex("origin", ["originId", "logScopeId", "originSeq"], { unique: false });
-          store.createIndex("conversationId", "conversationId", { unique: false });
-        }
-        // The phone's own journal towards the machines it may command, and the
-        // bodies too large to travel inside one event.
-        if (!db.objectStoreNames.contains(MACHINE_EVENT_STORE)) {
-          const store = db.createObjectStore(MACHINE_EVENT_STORE, { keyPath: "eventId" });
-          store.createIndex("origin", ["originId", "logScopeId", "originSeq"], { unique: false });
-        }
-        if (!db.objectStoreNames.contains(MACHINE_OUTBOX_STORE)) {
-          db.createObjectStore(MACHINE_OUTBOX_STORE, { keyPath: "eventId" });
-        }
-        if (!db.objectStoreNames.contains(MACHINE_BLOB_STORE)) {
-          db.createObjectStore(MACHINE_BLOB_STORE, { keyPath: "key" });
-        }
-      };
-      request.onerror = function () {
-        reject(request.error || new Error("IndexedDB open failed."));
-      };
-      request.onsuccess = function () {
-        resolve(request.result);
-      };
-    });
+    // One description of this database, shared with the service worker. They
+    // are separate programs over the same storage, and when each carried its
+    // own version the two drifted far enough that the worker could no longer
+    // open it at all.
+    const schema = globalThis.AccordMobileDb;
+    if (!schema) return Promise.reject(new Error("The phone's database description did not load."));
+    return schema.openControlDb(indexedDB);
   }
 
   /**
@@ -1126,21 +1084,42 @@
    */
   async function applyMachineEvent(event, payload, machine) {
     const body = payload && typeof payload === "object" ? payload : {};
+    // What this phone was actually handed, when the QA flag is on. Reading the
+    // screen is not proof that a result arrived: the User's own prompt can
+    // contain whatever token an answer is being looked for by.
+    recordRelayDebug({ event: "machine-event-applying", kind: event.kind, bodyType: body.type,
+      messages: Array.isArray(body.messages) ? body.messages.length : undefined, status: body.status });
     const conversationId = event.conversationId;
     if (body.type === "machine.turn.finished") {
-      await handleRelayTimelinePayload({
-        type: "mobile.timeline.events",
-        conversationId: conversationId,
-        events: (body.messages || []).map(function (message) {
-          return machineTimelineEvent(message, body.status === "failed" ? "error" : "done", body.runId);
-        }).concat((body.warnings || []).map(function (warning, index) {
-          return { id: "machine-warning:" + body.runId + ":" + index, role: "system", content: warning,
-            status: "done", createdAt: body.finishedAt };
-        })).concat(body.error
-          ? [{ id: "machine-error:" + body.runId, role: "system", content: body.error, status: "error", createdAt: body.finishedAt }]
-          : [])
-      }, conversationId);
+      const stopped = body.status === "interrupted";
+      const events = (body.messages || []).map(function (message) {
+        return machineTimelineEvent(message, body.status === "failed" ? "error" : "done", body.runId);
+      });
+      // A stopped run often produced nothing, and only a settled row for this
+      // run clears the one that says it is still working. Without this the
+      // phone showed "Stopping..." for a member that had already gone.
+      if (stopped) {
+        events.push({
+          id: "machine-stopped:" + body.runId, messageId: "machine-stopped:" + body.runId,
+          role: "participant", participantLabel: machineRunLabel(body.runId),
+          content: events.length ? "Stopped." : machineRunLabel(body.runId) + " was stopped before answering.",
+          status: "done", createdAt: body.finishedAt, runId: body.runId
+        });
+      }
+      for (const [index, warning] of (body.warnings || []).entries()) {
+        events.push({ id: "machine-warning:" + body.runId + ":" + index, role: "system", content: warning,
+          status: "done", createdAt: body.finishedAt });
+      }
+      if (body.error) {
+        events.push({ id: "machine-error:" + body.runId, role: "system", content: body.error,
+          status: "error", createdAt: body.finishedAt });
+      }
+      await handleRelayTimelinePayload({ type: "mobile.timeline.events", conversationId: conversationId, events: events },
+        conversationId);
       noteMachineRunSettled(body.runId, body.status);
+      // The terminal outlives this page: a reload must not resurrect a Stop
+      // control for a run the machine has already finished.
+      await rememberMachineTerminal(conversationId, body);
       return "applied";
     }
     if (body.type === "machine.turn.started") {
@@ -1149,8 +1128,16 @@
       // machine looks like a member working anywhere else.
       await handleRelayTimelinePayload({
         type: "mobile.timeline.events", conversationId: conversationId,
+        // Deliberately without a message id of its own. A live row that names
+        // one is ended only by a terminal naming the same id, and this row is
+        // written before the machine has said what its answer's id will be, so
+        // nothing would ever end it: the run showed as still working beside
+        // its own finished answer, and offered a Stop for a member that had
+        // already gone. Carrying only the run id is the other half of that
+        // contract, and it holds because this source posts one live row per
+        // run and no intermediate messages.
         events: [{
-          id: "machine-run:" + body.runId, messageId: "machine-run:" + body.runId, role: "participant",
+          id: "machine-run:" + body.runId, role: "participant",
           participantLabel: machineRunLabel(body.runId), content: machineRunLabel(body.runId) + " is running...",
           status: "pending", createdAt: body.startedAt, runId: body.runId
         }]
@@ -1168,7 +1155,7 @@
         await handleRelayTimelinePayload({
           type: "mobile.timeline.events", conversationId: conversationId,
           events: [{
-            id: "machine-run:" + body.runId, messageId: "machine-run:" + body.runId, role: "participant",
+            id: "machine-run:" + body.runId, role: "participant",
             participantLabel: machineRunLabel(body.runId), content: next,
             status: "pending", createdAt: new Date().toISOString(), runId: body.runId
           }]
@@ -1182,10 +1169,18 @@
         conversationId: conversationId,
         events: (body.messages || []).map(function (message) { return machineTimelineEvent(message, "done"); })
       }, conversationId);
+      // A member on a machine asks the User things as well as answering them.
+      // Without this the question existed on the machine and nowhere the User
+      // could see it, and the member waited for an answer that could not come.
+      for (const message of body.messages || []) {
+        const card = machineChoiceCard(conversationId, message);
+        if (card) mergeControlCard(conversationId, card);
+      }
+      await render("synced");
       return "applied";
     }
     if (body.type === "machine.approval.requested" || body.type === "machine.approval.updated") {
-      mergeControlCard(conversationId, machineApprovalCard(body.approval));
+      mergeControlCard(conversationId, machineApprovalCard(conversationId, body.approval, machine && machine.name));
       await render("synced");
       return "applied";
     }
@@ -1223,14 +1218,57 @@
     return storeControlCards(conversationId, cards);
   }
 
-  function machineApprovalCard(approval) {
+  /**
+   * The same card the desktop would show for this approval.
+   *
+   * Deliberately the same fields as controlCardsFromConversation in
+   * src/shared/mobileControlCards.ts, because a member must be answered the
+   * same way wherever the User happens to be looking. The phone cannot import
+   * that module, so the two are kept in step by the card contract test rather
+   * than by hope; a card missing its options is a card with no buttons.
+   */
+  function machineApprovalCard(conversationId, approval, machineName) {
     return {
       id: approval.id,
-      kind: "approval",
-      title: approval.request && approval.request.title,
-      body: approval.request && approval.request.summary,
-      status: approval.status,
-      createdAt: approval.requestedAt || nowIso()
+      kind: "permission",
+      conversationId: conversationId,
+      title: approval.summary || "Permission request",
+      summary: approval.summary || "",
+      ...(approval.requesterHandle ? { requesterLabel: "@" + approval.requesterHandle } : {}),
+      ...(machineName ? { machineName: machineName } : {}),
+      options: [{ id: "allow", label: "Allow" }, { id: "deny", label: "Deny" }],
+      allowsCustomAnswer: false,
+      allowsCancel: false,
+      status: approval.status === "pending" ? "pending" : "answered",
+      createdAt: approval.createdAt,
+      ...(typeof approval.codexDecisionId === "string" ? { codexDecisionId: approval.codexDecisionId } : {}),
+      ...(approval.request ? { draftOverride: approval.request } : {})
+    };
+  }
+
+  /** The choice a member asked, as the desktop shows it. */
+  function machineChoiceCard(conversationId, message) {
+    const choice = message.metadata && message.metadata.pendingChoice;
+    if (!choice) return undefined;
+    const options = choice.options || [];
+    const selected = options.find(function (option) { return option.id === choice.selectedOptionId; });
+    return {
+      id: choice.id,
+      kind: "choice",
+      conversationId: conversationId,
+      title: choice.title || "Choice",
+      summary: choice.question || "",
+      ...(message.participantLabel ? { requesterLabel: message.participantLabel } : {}),
+      options: options,
+      allowsCustomAnswer: true,
+      allowsCancel: true,
+      status: choice.status === "pending" ? "pending" : "answered",
+      ...(choice.status === "pending" ? {} : {
+        outcome: choice.status === "cancelled" ? "Cancelled"
+          : (selected && selected.label) || choice.customAnswer || "Answered"
+      }),
+      createdAt: message.createdAt,
+      sourceMessageId: message.id
     };
   }
 
@@ -1434,6 +1472,44 @@
     machineRunState.set(runId, { ...held, status: "running", machineId: machine && machine.machineId });
   }
 
+  const MACHINE_TERMINALS_META_KEY = "machine-run-terminals";
+
+  /**
+   * What this phone knows ended, kept across reloads.
+   *
+   * The timeline rows say what was said; this says the run itself is over. A
+   * reload rebuilds the Stop controls from the rows, and a run whose terminal
+   * only ever lived in memory would be offered for stopping again.
+   */
+  async function rememberMachineTerminal(conversationId, body) {
+    const record = (await readMetaRecord(MACHINE_TERMINALS_META_KEY)) || {};
+    const terminals = record.terminals || {};
+    terminals[body.runId] = { status: body.status, conversationId: conversationId, finishedAt: body.finishedAt };
+    // Bounded: the newest few hundred are what a live screen can refer to.
+    const ids = Object.keys(terminals);
+    if (ids.length > 300) {
+      ids.sort(function (left, right) {
+        return String(terminals[left].finishedAt || "").localeCompare(String(terminals[right].finishedAt || ""));
+      });
+      for (const id of ids.slice(0, ids.length - 300)) delete terminals[id];
+    }
+    await writeMetaRecord(MACHINE_TERMINALS_META_KEY, { terminals: terminals });
+    for (const runId of Object.keys(terminals)) machineRunState.set(runId, { status: terminals[runId].status });
+  }
+
+  function machineRunSettled(runId) {
+    const held = runId ? machineRunState.get(runId) : undefined;
+    return Boolean(held && held.status && held.status !== "running" && held.status !== "requested");
+  }
+
+  /** Reloads what ended, so Stop is not offered for a finished run. */
+  async function restoreMachineTerminals() {
+    const record = await readMetaRecord(MACHINE_TERMINALS_META_KEY).catch(function () { return undefined; });
+    const terminals = (record && record.terminals) || {};
+    for (const runId of Object.keys(terminals)) machineRunState.set(runId, { status: terminals[runId].status });
+    return Object.keys(terminals).length;
+  }
+
   function noteMachineRunSettled(runId, status) {
     const held = machineRunState.get(runId) || {};
     machineRunState.set(runId, { ...held, status: status || "completed" });
@@ -1466,7 +1542,7 @@
       return;
     }
     controlCardErrors.delete(body.approvalId);
-    if (body.approval) mergeControlCard(body.conversationId, machineApprovalCard(body.approval));
+    if (body.approval) mergeControlCard(body.conversationId, machineApprovalCard(body.conversationId, body.approval));
   }
 
   async function readMailboxAccessMeta() {
@@ -2365,11 +2441,19 @@
     return !entry.kind || entry.kind === "message.created";
   }
 
+  /** Runs the User has asked to stop, from the tap onward. The queue entry is
+   *  written asynchronously, and a render in that gap used to put the Stop
+   *  control back as if nothing had been asked -- which is both a lie and a
+   *  second Stop the User can send by accident. */
+  const stopRequestedRunIds = new Set();
+
   async function stopRunFromPhone(runId) {
     const conversationId = selectedConversationId();
     if (!conversationId || typeof runId !== "string" || !runId.trim()) {
       return;
     }
+    stopRequestedRunIds.add(runId.trim());
+    await render("waiting-to-sync");
     await enqueueRunCancel({ conversationId, runId: runId.trim() });
     await render("waiting-to-sync");
     const flushResult = await flushOutbox();
@@ -4521,7 +4605,9 @@
         // empty — it says who is working, which is exactly what the desktop
         // shows — so it keeps the member row, the clock and the shimmer.
         scaffolding: isScaffoldingEntry(entry) && !entry.participantLabel,
-        cancellable: !isScaffoldingEntry(entry),
+        // A run this phone has already seen end is not offered for stopping,
+        // even if a row for it is still on screen after a reload.
+        cancellable: !isScaffoldingEntry(entry) && !machineRunSettled(entry.runId),
         content: entry.content,
         status: entry.status === "error" ? "Error" : entry.status === "done" ? "Done" : "Running",
         createdAt: entry.createdAt,
@@ -4533,7 +4619,7 @@
         // own: the frames it streams can only be bound to this row through the
         // source event they both answer.
         runId: entry.runId,
-        stopRequested: requestedStopRunIds.has(entry.runId),
+        stopRequested: requestedStopRunIds.has(entry.runId) || stopRequestedRunIds.has(entry.runId),
         mobileEventId: entry.mobileEventId
       };
     }));
@@ -5292,6 +5378,7 @@
     // desktop a phone that could do nothing: everything the machine owes this
     // phone, and everything this phone still owes the machine, is settled on
     // this connection whether or not the desktop is anywhere.
+    await restoreMachineTerminals().catch(function () { return 0; });
     void machineChannels().then(function (channels) {
       if (channels) return channels.deliver().catch(function () { return undefined; });
       return undefined;

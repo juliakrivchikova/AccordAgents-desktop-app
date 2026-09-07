@@ -1,11 +1,21 @@
-const CACHE_NAME = "accordagents-mobile-shell-v65";
 const ASSET_VERSION = "2026-09-01-picture-rows-v1";
+// Tied to the marker the documented deploy step bumps, so a new shell really
+// replaces the cached one rather than living beside it.
+const CACHE_NAME = `accordagents-mobile-shell-v66-${ASSET_VERSION}`;
 const APP_SHELL = [
   "./",
   "./index.html",
   `./mobile-app.css?v=${ASSET_VERSION}`,
   `./mobile-app.js?v=${ASSET_VERSION}`,
   `./jsqr.js?v=${ASSET_VERSION}`,
+  // Everything the page loads before it can do anything. These were left out,
+  // so offline the phone had a shell and no journal, no signing key and no way
+  // to reach a machine. The worker imports the first of them itself.
+  "./mobile-db.js",
+  `./mobile-event-log.js?v=${ASSET_VERSION}`,
+  `./mobile-machine-wake.js?v=${ASSET_VERSION}`,
+  `./mobile-machine-command.js?v=${ASSET_VERSION}`,
+  `./mobile-machine-channel.js?v=${ASSET_VERSION}`,
   "./manifest.webmanifest",
   "./assets/accordagents-mark.png"
 ];
@@ -61,7 +71,13 @@ self.addEventListener("fetch", (event) => {
     return;
   }
   event.respondWith(
-    caches.match(request).then((cached) => cached || fetch(request).then((response) => {
+    // The page asks for each script with its own `?v=` marker, and those move
+    // independently. Matching the path as well is what makes the shell load
+    // offline after a marker changes instead of only the pieces that happened
+    // to keep theirs.
+    caches.match(request)
+      .then((exact) => exact || caches.match(request, { ignoreSearch: true }))
+      .then((cached) => cached || fetch(request).then((response) => {
       // Never cache a transient error (404/500 during a deploy): it would be
       // served cache-first until the next CACHE_NAME bump.
       if (response.ok) {
@@ -77,38 +93,22 @@ self.addEventListener("fetch", (event) => {
 // reads the push payload — routing comes only from device storage — and it
 // never decrypts: envelopes are stored sealed and the page opens them with
 // the seal key it alone holds. The notification stays opaque.
-const DB_NAME = "accordagents-mobile-control";
-const DB_VERSION = 3;
-const META_STORE = "meta";
-const SEALED_STORE = "sealedEnvelopes";
+// The page's description of this database, loaded rather than copied. The
+// worker used to carry its own version number, the page moved past it, and
+// IndexedDB refuses a version older than the one on disk -- so every
+// push-woken sync failed at the open, silently, because a push handler has
+// nobody to tell. Neither side can move alone now.
+importScripts("./mobile-db.js");
+const SCHEMA = self.AccordMobileDb;
+const META_STORE = SCHEMA.STORES.meta;
+const SEALED_STORE = SCHEMA.STORES.sealed;
 const MAILBOX_ACCESS_META_KEY = "mailboxAccess";
 
+/** Only the two stores a push-woken sync actually touches: a worker that is a
+ *  build behind must still deliver, not force a version for a store it will
+ *  never open. */
 function openControlDb() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    // Must create the exact same shapes as the page's openDb upgrade:
-    // whichever context opens v3 first runs this.
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains("outbox")) {
-        const store = db.createObjectStore("outbox", { keyPath: "eventId" });
-        store.createIndex("status", "status", { unique: false });
-        store.createIndex("createdAt", "createdAt", { unique: false });
-      }
-      if (!db.objectStoreNames.contains("timeline")) {
-        const store = db.createObjectStore("timeline", { keyPath: "id" });
-        store.createIndex("createdAt", "createdAt", { unique: false });
-      }
-      if (!db.objectStoreNames.contains(META_STORE)) {
-        db.createObjectStore(META_STORE, { keyPath: "key" });
-      }
-      if (!db.objectStoreNames.contains(SEALED_STORE)) {
-        db.createObjectStore(SEALED_STORE, { keyPath: "eventId" });
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+  return SCHEMA.openControlDb(indexedDB, [META_STORE, SEALED_STORE]);
 }
 
 function dbRequest(request) {

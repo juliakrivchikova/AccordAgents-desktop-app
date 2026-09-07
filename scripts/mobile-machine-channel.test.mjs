@@ -116,6 +116,8 @@ async function machineBox(options = {}) {
     expiresAt: new Date(Date.now() + 3_600_000).toISOString()
   };
   const runs = [];
+  const aborted = [];
+  const actions = [];
   const replicated = [];
   const outbound = [];
   const client = {
@@ -126,8 +128,15 @@ async function machineBox(options = {}) {
   };
   const host = new MachineHostService(
     {
-      runMachineHostedTurn: async (request) => {
+      runMachineHostedTurn: async (request, signal) => {
         runs.push(request.runId);
+        if (options.holdUntilAborted) {
+          await new Promise((resolve) => {
+            if (signal?.aborted) { aborted.push(request.runId); resolve(); return; }
+            signal?.addEventListener("abort", () => { aborted.push(request.runId); resolve(); }, { once: true });
+            setTimeout(resolve, 15_000);
+          });
+        }
         return {
           messages: [{ id: `reply-${request.runId}`, role: "participant", participantId: PARTICIPANT.id,
             participantLabel: "@bot", content: options.replyContent || "answered from the machine",
@@ -149,13 +158,23 @@ async function machineBox(options = {}) {
       pairing, deviceId: identity.originId, appVersion: "phone-channel-test",
       eventStorage: storage, eventLog, publicKeyDerBase64: identity.publicKeyDerBase64,
       outboxPath: path.join(dir, "outbox.json"), trustRosterPath: path.join(dir, "trust.json"),
-      createClient: () => client, createPeerClient: () => client
+      createClient: () => client, createPeerClient: () => client,
+      // The seam the owner's own applier sits behind. This test is about what
+      // the phone sends and what the machine accepts from it, so the applier
+      // records rather than executes.
+      chatActions: {
+        handles: (event) => ["permission.decided", "choice.answered"].includes(event.kind),
+        apply: async (event, payload) => {
+          actions.push({ kind: event.kind, payload, originId: event.originId });
+          return { status: "applied", kind: event.kind, targetKey: payload?.targetKey };
+        }
+      }
     }
   );
   await host.start();
   await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: desktop.originId, appVersion: "t", machineId: "machine-one" });
   return {
-    host, runs, replicated, outbound, pairing, identity, desktop, dir, hooks,
+    host, runs, aborted, actions, replicated, outbound, pairing, identity, desktop, dir, hooks,
     trust: async (peers) => {
       const body = { type: "machine.trust.roster", conversationId: `machine-trust:${pairing.rendezvousId}`,
         roster: { version: 1, issuerDeviceId: desktop.originId, updatedAt: new Date().toISOString(), peers } };
@@ -463,5 +482,132 @@ test("a reply too large for one event arrives in fragments and is put back toget
     const finished = device.applied.find((entry) => entry.kind === "machine.turn.finished");
     assert.equal(finished.payload.messages[0].content, long, "and it must be the whole reply, not a truncated one");
     assert.ok(blobs.count() > 1, `it really did travel as more than one fragment (${blobs.count()})`);
+  } finally { await box.cleanup(); }
+});
+
+test("Stop from the phone reaches the member that is running, not only the machine", async () => {
+  const identity = await phone.createIdentity();
+  const box = await machineBox({ holdUntilAborted: true });
+  try {
+    await box.trust([phonePeer(identity, box.pairing)]);
+    const device = await phoneOn(box, identity);
+    device.identityId = identity.deviceId;
+    deliverMachineTraffic(box, device);
+    const scope = phone.deviceEventScope(box.pairing.rendezvousId, CONVERSATION, "actions");
+    await device.log.append({
+      eventId: phone.machineCommandEventId("run-stop"), conversationId: CONVERSATION, logScopeId: scope,
+      kind: "machine.turn.request", recipients: [box.identity.originId],
+      payload: phone.turnRequest({ conversationId: CONVERSATION, participant: PARTICIPANT,
+        messageId: "msg-stop", runId: "run-stop", pendingMessageId: "pending-run-stop" })
+    });
+    await device.channels.deliver("machine-one");
+    assert.equal(await settle(() => box.runs.length === 1), true, "the turn is running on the machine");
+
+    // The Stop the User taps, as the phone sends it.
+    await device.log.append({
+      eventId: phone.machineCancelEventId("run-stop"), conversationId: CONVERSATION, logScopeId: scope,
+      kind: "machine.turn.cancel", recipients: [box.identity.originId],
+      payload: phone.cancelRequest({ conversationId: CONVERSATION, runId: "run-stop" })
+    });
+    await device.channels.deliver("machine-one");
+    assert.equal(await settle(() => box.aborted.includes("run-stop"), 200), true,
+      "the running member's own turn must be aborted, not merely recorded as cancelled");
+  } finally { await box.cleanup(); }
+});
+
+test("a permission a member raises on a machine reaches the phone, and the phone's answer reaches the member", async () => {
+  const identity = await phone.createIdentity();
+  const box = await machineBox();
+  try {
+    await box.trust([phonePeer(identity, box.pairing)]);
+    const device = await phoneOn(box, identity);
+    device.identityId = identity.deviceId;
+    deliverMachineTraffic(box, device);
+
+    // The machine's own conversation gains a pending approval, exactly as it
+    // does when a member asks for permission while running there.
+    box.host.noteConversationSnapshot({
+      id: CONVERSATION, kind: "chat", messages: [], updatedAt: new Date().toISOString(),
+      metadata: {
+        participants: [PARTICIPANT],
+        pendingAppToolApprovals: [{
+          id: "approval-1", status: "pending", summary: "Write phone-approval-qa.txt",
+          requesterHandle: "bot", createdAt: new Date().toISOString()
+        }]
+      }
+    });
+    assert.equal(await settle(() => device.applied.some((entry) => entry.kind === "machine.approval.requested")), true,
+      "the phone must be shown the permission its member is waiting on");
+    const raised = device.applied.find((entry) => entry.kind === "machine.approval.requested");
+    assert.equal(raised.payload.approval.id, "approval-1");
+    assert.equal(raised.payload.approval.summary, "Write phone-approval-qa.txt",
+      "with the words the desktop would show, not a simplified copy");
+
+    // The User taps Allow. The phone emits the same chat action every device
+    // emits, on the shared action log.
+    const answer = await device.log.append({
+      eventId: "phone-action:permission:approval-1:allow",
+      conversationId: CONVERSATION, logScopeId: "chat:actions", kind: "permission.decided",
+      recipients: [box.identity.originId],
+      payload: { operationId: "permission:approval-1:allow", targetKey: "approval:approval-1",
+        stateId: "approved", detail: { approve: true } }
+    });
+    await device.channels.deliver("machine-one");
+    assert.equal(await settle(() => box.actions.length === 1), true, "the machine must apply the phone's answer");
+    assert.equal(box.actions[0].kind, "permission.decided");
+    assert.equal(box.actions[0].payload.targetKey, "approval:approval-1");
+    assert.equal(box.actions[0].originId, identity.deviceId, "and know which device answered");
+
+    // Answered is not the same as sent: the phone stops owing it only once the
+    // machine has acknowledged applying it.
+    assert.equal(await settle(async () => (await device.log.pendingFor(box.identity.originId)).length === 0), true,
+      "an applied answer is acknowledged and released");
+    const receipt = await device.log.receipt(identity.deviceId, answer.eventId);
+    assert.equal(receipt, undefined, "the phone's own action is not its own receipt");
+  } finally { await box.cleanup(); }
+});
+
+test("a body whose fragments did not all arrive is not applied and not acknowledged", async () => {
+  const identity = await phone.createIdentity();
+  const long = "MACHINE_HELD_REPLY " + "y".repeat(900_000);
+  const box = await machineBox({ replyContent: long });
+  try {
+    await box.trust([phonePeer(identity, box.pairing)]);
+    // A store that refuses to keep anything: the phone's own disk failing, or
+    // a fragment lost. Either way the body cannot be read.
+    let broken = true;
+    const real = memoryBlobs();
+    const blobs = {
+      store: async (fragment) => {
+        if (broken) throw new Error("QuotaExceededError: machineBlobs");
+        return real.store(fragment);
+      },
+      take: (reference) => real.take(reference),
+      count: () => real.count()
+    };
+    const device = await phoneOn(box, identity, { blobs });
+    device.identityId = identity.deviceId;
+    deliverMachineTraffic(box, device);
+    const scope = phone.deviceEventScope(box.pairing.rendezvousId, CONVERSATION, "actions");
+    await device.log.append({
+      eventId: phone.machineCommandEventId("run-held"), conversationId: CONVERSATION, logScopeId: scope,
+      kind: "machine.turn.request", recipients: [box.identity.originId],
+      payload: phone.turnRequest({ conversationId: CONVERSATION, participant: PARTICIPANT,
+        messageId: "msg-held", runId: "run-held", pendingMessageId: "pending-run-held" })
+    });
+    await device.channels.deliver("machine-one");
+    assert.equal(await settle(() => box.runs.length === 1), true);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    assert.equal(device.applied.some((entry) => entry.kind === "machine.turn.finished"), false,
+      "a body the phone could not keep must not be applied");
+    const receipt = await device.log.receipt(box.identity.originId, "machine-terminal:machine-command:run-held");
+    assert.equal(receipt, undefined, "and must not be acknowledged, so the machine keeps holding it");
+
+    // The store works again and the machine re-offers what it still holds.
+    broken = false;
+    assert.equal(await settle(() => device.applied.some((entry) => entry.kind === "machine.turn.finished"), 300), true,
+      "once the phone can keep the body, the held result is applied");
+    const finished = device.applied.find((entry) => entry.kind === "machine.turn.finished");
+    assert.equal(finished.payload.messages[0].content, long, "and it is the whole reply");
   } finally { await box.cleanup(); }
 });

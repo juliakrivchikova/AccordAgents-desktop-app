@@ -37,6 +37,7 @@ const { loadMobileOriginHeaders, mobileOriginHeadersForPath } = require(path.joi
 const { MachineLinkService } = require(path.join(repoRoot, "dist/main/main/services/machineLink.js"));
 const { StorageService } = require(path.join(repoRoot, "dist/main/main/services/storage.js"));
 const { ChatEventLogService } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
+const { readPosixProcessTableSync } = require(path.join(repoRoot, "dist/main/main/services/processTermination.js"));
 
 const SITE_PORT = 8188;
 const CDP_PORT = 9372;
@@ -56,6 +57,25 @@ process.on("exit", stopSpawned);
 for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => { stopSpawned(); process.exit(1); });
 
 const log = (...args) => console.log("[phone-e2e]", ...args);
+
+/** A single-quoted SQL literal, for the machine's own sqlite record. */
+function sqlText(value) { return "'" + String(value).replace(/'/g, "''") + "'"; }
+
+/**
+ * Whether a process the machine recorded is still alive.
+ *
+ * Read with the machine's own process table reader, so the start time compared
+ * here is the one it wrote. A bare pid check would call a reused pid a
+ * surviving provider, and a different reader's format would call a live one
+ * gone -- both are the wrong answer, in opposite directions.
+ */
+function processStillRunning(recorded) {
+  if (!recorded || !Number.isInteger(recorded.pid)) return false;
+  const table = readPosixProcessTableSync();
+  if (!table) throw new Error("The process table could not be read; a Stop cannot be called proven.");
+  const row = table.get(recorded.pid);
+  return Boolean(row && row.startedAt === recorded.startedAt);
+}
 
 /** What the machine recorded about itself, on its own disk plus its output. */
 async function machineLog(userData, output) {
@@ -164,13 +184,17 @@ async function main() {
   await writeFile(enrollmentPath, JSON.stringify(pairing), "utf8");
   const machineUserData = path.join(dir, "machine");
   const machineOutput = [];
-  const machineChild = spawn(process.execPath, [
-    path.join(repoRoot, "dist/machine/accordagents-machine.cjs"),
-    "--enrollment", enrollmentPath, "--user-data", machineUserData, "--name", "Machine one"
-  ], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ACCORD_AGENTS_DEBUG_LOGS: "1", NODE_TLS_REJECT_UNAUTHORIZED: "0" } });
-  machineChild.stdout.on("data", (chunk) => machineOutput.push(String(chunk)));
-  machineChild.stderr.on("data", (chunk) => machineOutput.push(String(chunk)));
-  spawned.add(machineChild);
+  const startMachine = () => {
+    const child = spawn(process.execPath, [
+      path.join(repoRoot, "dist/machine/accordagents-machine.cjs"),
+      "--enrollment", enrollmentPath, "--user-data", machineUserData, "--name", "Machine one"
+    ], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ACCORD_AGENTS_DEBUG_LOGS: "1", NODE_TLS_REJECT_UNAUTHORIZED: "0" } });
+    child.stdout.on("data", (chunk) => machineOutput.push(String(chunk)));
+    child.stderr.on("data", (chunk) => machineOutput.push(String(chunk)));
+    spawned.add(child);
+    return child;
+  };
+  let machineChild = startMachine();
 
   try { execSync(`lsof -ti tcp:${CDP_PORT} -sTCP:LISTEN | xargs kill -9`, { stdio: "ignore" }); } catch { /* nothing listening */ }
   const profile = await mkdtemp(path.join(tmpdir(), "aa-phone-e2e-chrome-"));
@@ -361,12 +385,39 @@ async function main() {
   }
   log("machine received the phone's command");
 
+  /**
+   * What the member said on this phone, from the phone's own store.
+   *
+   * Reading the whole screen was wrong and hid the defect this found: the
+   * User's own prompt contains the token being looked for, so every check
+   * passed whether or not the machine's answer ever arrived.
+   */
+  const participantSaid = async (token) => evaluate(`(async () => {
+    const TOKEN_PLACEHOLDER = ${JSON.stringify(token)};
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open("accordagents-mobile-control");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const rows = await new Promise((resolve) => {
+      const tx = db.transaction("timeline", "readonly");
+      const all = tx.objectStore("timeline").getAll();
+      all.onsuccess = () => resolve(all.result);
+      all.onerror = () => resolve([]);
+    });
+    db.close();
+    return rows.some((row) => row.role === "participant" && String(row.content || "").includes(TOKEN_PLACEHOLDER));
+  })()`);
   const reply = async () => evaluate(`(() => {
     const list = document.getElementById("message-list");
     return list ? list.innerText : "";
   })()`);
-  await waitFor(async () => (await reply()).includes("PHONE_MACHINE_EXECUTED"), 180_000,
-    "the machine's real answer to appear on the phone");
+  await waitFor(() => participantSaid("PHONE_MACHINE_EXECUTED"), 180_000,
+    "the machine's real answer to be stored on the phone as the member's own message");
+  // And rendered, not only stored.
+  await waitFor(async () => evaluate(`[...document.querySelectorAll("#message-list > *")]
+    .some((item) => (item.innerText || "").includes("PHONE_MACHINE_EXECUTED") && !(item.innerText || "").includes("Reply with exactly"))`),
+    30_000, "the member's answer to be a row of its own on the phone");
   log("the answer is on the phone's screen");
 
   // Acknowledged, and only then released: what the phone still owes.
@@ -395,58 +446,180 @@ async function main() {
   await evaluate("location.reload()");
   await wait(3000);
   app = await attach({ port: CDP_PORT, title: "AccordAgents" });
-  await waitFor(async () => (await reply()).includes("PHONE_MACHINE_EXECUTED"), 30_000,
-    "the answer to survive a reload");
+  await waitFor(() => participantSaid("PHONE_MACHINE_EXECUTED"), 30_000, "the answer to survive a reload");
   await wait(4000);
   const runsAfter = await runCount();
   assert.equal(runsAfter, runsBefore, "a reload must not run the member again");
   log("reload kept the answer and ran nothing twice");
 
   // --- 3. Stop, typed on the phone, ends the run on the machine -------------
+  //
+  // Nothing here is optional. A Stop control that never appears, a machine
+  // that never confirms, a terminal the phone does not keep, an unacknowledged
+  // command or a provider process still alive is a failure, not a note.
   await evaluate(`(() => {
     const input = document.getElementById("composer-input");
     input.value = ${JSON.stringify("@one Start your response with PHONE_STOP_STARTED, then print the numbers from 1 to 500, one per line. Print them directly; no tools or explanation.")};
     document.getElementById("composer-form").dispatchEvent(new Event("submit", { cancelable: true }));
     return true;
   })()`);
-  try {
-    await waitFor(async () => (await runCount()) > runsAfter, 120_000, "the second turn to start on the machine");
-  } catch (error) {
-    console.error("[phone-e2e] phone debug:", await phoneDebug());
-    console.error("[phone-e2e] phone journal:", await phoneJournal());
-    console.error("[phone-e2e] machine tail:", (await machineLog(machineUserData, machineOutput)).split("\n").slice(-10).join("\n"));
-    throw error;
-  }
+  await waitFor(async () => (await runCount()) > runsAfter, 120_000, "the second turn to start on the machine");
   log("second turn is running on the machine");
 
-  // The row's own Stop, the one the User taps.
-  let stopped = null;
-  for (let attempt = 0; attempt < 120 && !stopped; attempt += 1) {
-    stopped = await evaluate(`(() => {
-      const button = document.querySelector("#message-list .message-stop");
-      if (!button || button.disabled) return null;
-      const runId = button.dataset.runId;
-      button.click();
-      return runId || "";
-    })()`);
-    if (!stopped) await wait(1000);
-  }
-  if (stopped) {
-    log("Stop tapped for", stopped);
-    await waitFor(async () => (await machineLog(machineUserData, machineOutput)).includes("machine.turn.cancel"), 60_000,
-      "the machine to receive the phone's Stop");
-    log("the machine received the phone's Stop");
-    // Sent is not stopped: the row keeps saying so until the machine says the
-    // run ended.
-    const stoppingText = await evaluate(`document.querySelector("#message-list .message-stop")?.innerText || ""`);
-    log("row control after tapping Stop:", JSON.stringify(stoppingText));
-  } else {
-    // The row's Stop control is only offered for a run the phone knows about.
-    // Say so rather than reporting a check that did not happen.
-    log("NOT PROVEN: no Stop control was on the row when the second turn started");
-  }
+  // The member has to be visibly working on the phone before Stop means
+  // anything: a control offered for a run that never streamed proves nothing.
+  const screen = async () => evaluate(`(() => {
+    const list = document.getElementById("message-list");
+    return list ? list.innerText : "";
+  })()`);
+  await waitFor(() => participantSaid("PHONE_STOP_STARTED"), 240_000,
+    "the member's own streamed text to reach the phone before Stop");
+  log("streamed output is on the phone's screen");
 
-  // --- 4. The desktop comes back and learns what happened without it -------
+  const stopRunId = await (async () => {
+    let found = null;
+    for (let attempt = 0; attempt < 120 && !found; attempt += 1) {
+      // Clicked and read back in one go: what the row says the instant the
+      // User taps is the claim being checked, and a re-render between two
+      // round trips would hide it.
+      found = await evaluate(`(() => {
+        const button = document.querySelector("#message-list .message-stop");
+        if (!button || button.disabled) return null;
+        const runId = button.dataset.runId || "";
+        button.click();
+        const after = document.querySelector("#message-list .message-stop");
+        return JSON.stringify({ runId: runId, text: after ? after.innerText : "", disabled: after ? after.disabled : null });
+      })()`);
+      if (!found) await wait(1000);
+    }
+    return found;
+  })();
+  assert.ok(stopRunId, "no Stop control was offered for a member that was visibly running");
+  const tapped = JSON.parse(stopRunId);
+  log("Stop tapped for", tapped.runId);
+
+  // Sent is not stopped. The row says the Stop is on its way, and does not
+  // offer to send it again while it is.
+  assert.match(tapped.text, /Stopping/, "the row must say the Stop is being delivered, not that it is done");
+  assert.equal(tapped.disabled, true, "and must not offer the same Stop again while it is being delivered");
+
+  await waitFor(async () => (await machineLog(machineUserData, machineOutput)).includes("machine.turn.cancel"), 60_000,
+    "the machine to receive the phone's Stop");
+  log("the machine received the phone's Stop");
+
+  // The machine's own record: the run finished, and its provider process and
+  // every descendant it claimed are closed.
+  const query = (db, sql) => {
+    try { return JSON.parse(execFileSync("sqlite3", ["-json", path.join(machineUserData, db), sql], { encoding: "utf8" }) || "[]"); }
+    catch { return []; }
+  };
+  await waitFor(() => query("accordagents.sqlite3", `select run_id,phase from native_commands where run_id=${sqlText(tapped.runId)};`)
+    .some((row) => row.phase === "finished"), 120_000, "the machine to finish the stopped run");
+  // The guardian closes the lease once the process is actually gone, which is
+  // shortly after the run is marked finished. Bounded, because "eventually" is
+  // not a closure: if it never closes, the Stop is not proven.
+  const leaseRows = () => query("native-processes.sqlite3", "select scope,phase,receipt from native_provider_processes;");
+  try {
+    await waitFor(() => { const rows = leaseRows(); return rows.length > 0 && rows.every((row) => row.phase === "closed"); },
+      90_000, "the machine's provider leases to close after Stop");
+  } catch (error) {
+    console.error("[phone-e2e] leases:", JSON.stringify(leaseRows().map((row) => ({ scope: row.scope, phase: row.phase }))));
+    throw error;
+  }
+  const leases = leaseRows();
+  assert.ok(leases.length > 0, "the machine recorded no provider process at all");
+  // And in the operating system, not only in the record.
+  for (const lease of leases) {
+    const receipt = JSON.parse(lease.receipt || "{}");
+    for (const process of [receipt.provider, ...(receipt.descendants || [])].filter(Boolean)) {
+      assert.equal(processStillRunning(process), false,
+        `a provider process from the stopped run is still alive: ${JSON.stringify(process)}`);
+    }
+  }
+  log("the machine's provider processes and descendants are gone");
+
+  // The phone kept the outcome, and owes the machine nothing for it.
+  await waitFor(async () => {
+    const text = await screen();
+    return /Stopped|stopped/.test(text);
+  }, 60_000, "the phone to show that the run was stopped");
+  await waitFor(async () => (await owed()) === 0, 60_000, "the phone's Stop to be acknowledged and drained");
+  log("the stop is acknowledged and nothing is owed");
+
+  // A reload must not resurrect a control for a run that has ended.
+  await evaluate("location.reload()");
+  await wait(3000);
+  app = await attach({ port: CDP_PORT, title: "AccordAgents" });
+  await waitFor(async () => (await screen()).length > 0, 30_000, "the phone to come back after the reload");
+  const revived = await evaluate(`document.querySelectorAll("#message-list .message-stop:not([disabled])").length`);
+  assert.equal(revived, 0, "a finished run must not be offered for stopping again after a reload");
+  const runsAfterStop = await runCount();
+
+  // A dropped connection and a machine restart must not re-run it either.
+  await evaluate(`(() => { window.dispatchEvent(new Event("offline")); return true; })()`);
+  machineChild.kill("SIGTERM");
+  await wait(2000);
+  machineChild = startMachine();
+  await waitFor(async () => (await machineLog(machineUserData, machineOutput)).includes("machine-host.trust.applied") ||
+    (await machineLog(machineUserData, machineOutput)).includes("machine.hello"), 60_000, "the machine to come back");
+  await evaluate(`(() => { window.dispatchEvent(new Event("online")); return true; })()`);
+  await wait(8000);
+  assert.equal(await runCount(), runsAfterStop, "a restart must not run the stopped turn again");
+  log("machine restart replayed nothing");
+
+  // --- 4. A reply too large for one event, through the phone's own store ---
+  //
+  // Anything over 32 KiB travels as a reference plus fragments. The phone has
+  // to keep those in IndexedDB, put them back together, check the whole body
+  // against the hash the event claims, and only then apply it. A body that is
+  // incomplete must not be acknowledged, or the machine would drop what the
+  // phone cannot read.
+  // A long message: over the 32 KiB an event carries inline, so the machine
+  // sends it back as a reference plus fragments and the phone has to keep
+  // those in IndexedDB, put them together and check the whole body against the
+  // hash the event claims before applying it.
+  const longBody = "LONGBODY ".repeat(4200) + "LONGBODY_END";
+  assert.ok(longBody.length > 32 * 1024, "the check needs a body larger than one event carries");
+  await evaluate(`(() => {
+    const input = document.getElementById("composer-input");
+    input.value = ${JSON.stringify(longBody)};
+    document.getElementById("composer-form").dispatchEvent(new Event("submit", { cancelable: true }));
+    return true;
+  })()`);
+  const longRowBytes = async () => evaluate(`(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open("accordagents-mobile-control");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const read = (name) => new Promise((resolve) => {
+      const tx = db.transaction(name, "readonly");
+      const all = tx.objectStore(name).getAll();
+      all.onsuccess = () => resolve(all.result);
+      all.onerror = () => resolve([]);
+    });
+    const timeline = await read("timeline");
+    const blobs = await read("machineBlobs");
+    db.close();
+    const held = timeline.filter((row) => String(row.content || "").includes("LONGBODY_END"))
+      .sort((left, right) => String(right.content || "").length - String(left.content || "").length)[0];
+    return JSON.stringify({ bytes: held ? String(held.content || "").length : 0, heldFragments: blobs.length });
+  })()`);
+  await waitFor(async () => JSON.parse(await longRowBytes()).bytes > 32 * 1024, 180_000,
+    "the whole long body to come back through the phone's fragment store");
+  const longRow = JSON.parse(await longRowBytes());
+  assert.equal(longRow.heldFragments, 0, "a body that has been put together is not kept as fragments as well");
+  await waitFor(async () => (await owed()) === 0, 90_000, "the long message to be fully acknowledged");
+  log("a", longRow.bytes, "byte body came back through the phone's fragment store and was applied");
+
+  // A second tab over the same storage, and a reload: neither re-runs held work.
+  const runsBeforeTab = await runCount();
+  await app.send("Target.createTarget", { url: `https://127.0.0.1:${SITE_PORT}/?qa=1` });
+  await wait(6000);
+  assert.equal(await runCount(), runsBeforeTab, "a second tab must not re-run anything the first one holds");
+  log("a second tab ran nothing again");
+
+  // --- 5. The desktop comes back and learns what happened without it -------
   const backDeltas = [];
   const returningLink = new MachineLinkService(desktopSettings(records, pairings), {
     write: async () => undefined
@@ -477,12 +650,12 @@ async function main() {
   await wait(500);
   await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => undefined);
   await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => undefined);
-  return { stopProven: Boolean(stopped), learned };
+  return { learned };
 }
 
 main().then((result) => {
   stopSpawned();
-  process.exit(result.stopProven ? 0 : 2);
+  process.exit(result.learned ? 0 : 2);
 }).catch((error) => {
   console.error("[phone-e2e] FAILED", error);
   stopSpawned();
