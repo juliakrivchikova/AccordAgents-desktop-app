@@ -19,6 +19,7 @@
     "make": "npm run build && electron-forge make",
     "make:mac-arm64": "npm run make -- --platform=darwin --arch=arm64",
     "make:win-x64": "npm run make -- --platform=win32 --arch=x64",
+    "test:packaging-boundary": "node --test scripts/packaging-boundary.test.mjs",
     "test:packaged-contents": "npm run build:renderer-tests && npm run package -- --platform=win32 --arch=x64 && node --test scripts/packaged-app-contents.test.mjs",
     "signed:mac-arm64": "node scripts/signed-mac-arm64.mjs",
     "start": "npm run build && electron .",
