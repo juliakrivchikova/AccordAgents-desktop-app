@@ -169,7 +169,17 @@ test("an emitted answer reaches the receiving owner with the full native decisio
   const h = harness();
   const approvals: RespondToChatAppToolApprovalRequest[] = [];
   const choices: Array<Record<string, unknown>> = [];
-  const conversation = { id: "chat", metadata: { pendingAppToolApprovals: [{ id: "card", status: "pending" }], activeRunIds: ["run"] } } as unknown as Conversation;
+  // A choice belongs to the run that raised it, so the conversation has to
+  // hold that request: "some run is active here" is not ownership.
+  const conversation = {
+    id: "chat",
+    messages: [{
+      id: "message", role: "participant", participantId: "p1", content: "Which one?",
+      createdAt: new Date().toISOString(), status: "done",
+      metadata: { runId: "run", pendingChoice: { id: "choice", status: "pending", options: [] } }
+    }],
+    metadata: { pendingAppToolApprovals: [{ id: "card", status: "pending" }], activeRunIds: ["run"] }
+  } as unknown as Conversation;
   const effects = createChatActionEffects({
     emitter: h.emitter,
     storage: { getConversation: async () => conversation },

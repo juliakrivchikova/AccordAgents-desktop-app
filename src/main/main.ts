@@ -101,6 +101,7 @@ import { ChatActionEmitter, permissionDecisionAction, chatActionEventId } from "
 import { MachineApprovalExecutor, machineApprovalResultId } from "./services/machineApprovalExecutor";
 import { readPosixProcessTableAsync } from "./services/processTermination";
 import { createChatActionEffects } from "./services/chatActionEffects";
+import { createNativeTargetClaims } from "./services/chatActionNativeClaims";
 import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
@@ -484,7 +485,13 @@ const localChatActionEffects = createChatActionEffects({
   chat: chatService as unknown as Parameters<typeof createChatActionEffects>[0]["chat"],
   emitter: { beginExecution: (target) => chatActionEmitter.beginExecution(target), recordExecution: (request) => chatActionEmitter.recordExecution(request) },
   storage: { getConversation: (id) => storageService.getConversation(id) },
-  applyApproval: async (event, payload) => (await localApprovalExecutor()).applyAction(event, payload)
+  applyApproval: async (event, payload) => (await localApprovalExecutor()).applyAction(event, payload),
+  // A choice wakes a native request that is waiting, exactly as an approval
+  // does, so it crosses the same durable row before the effect.
+  nativeClaims: createNativeTargetClaims({
+    storage: storageService,
+    runtimeIdentity: () => localRuntimeIdentity()
+  })
 });
 const chatActionApplier = new ChatActionApplier({
   effects: localChatActionEffects,
@@ -602,12 +609,24 @@ const chatActionEmitter = new ChatActionEmitter({
 });
 
 let approvalExecutor: Promise<MachineApprovalExecutor> | undefined;
+let runtimeIdentity: Promise<{ runtimeId: string; pid: number; startedAt: string }> | undefined;
+
+/** This process, named the way a durable claim names its owner: one identity
+ *  for every native admission this runtime takes. */
+function localRuntimeIdentity(): Promise<{ runtimeId: string; pid: number; startedAt: string }> {
+  const pending = runtimeIdentity ??= (async () => {
+    const processIdentity = (await readPosixProcessTableAsync())?.get(process.pid);
+    if (!processIdentity) throw new Error("This runtime's process identity could not be verified.");
+    return { runtimeId: randomUUID(), pid: processIdentity.pid, startedAt: processIdentity.startedAt };
+  })();
+  void pending.catch(() => { if (runtimeIdentity === pending) runtimeIdentity = undefined; });
+  return pending;
+}
+
 function localApprovalExecutor(): Promise<MachineApprovalExecutor> {
   const pending = approvalExecutor ??= (async () => {
     const device = await chatEventLogService.getOrCreateDeviceIdentity();
-    const processIdentity = (await readPosixProcessTableAsync())?.get(process.pid);
-    if (!processIdentity) throw new Error("This approval executor's process identity could not be verified.");
-    const owner = { runtimeId: randomUUID(), pid: processIdentity.pid, startedAt: processIdentity.startedAt };
+    const owner = await localRuntimeIdentity();
     return new MachineApprovalExecutor({
       storage: storageService, deviceId: device.originId, chat: chatService,
       progress: progress => emitReviewProgress(progress),

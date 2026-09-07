@@ -92,6 +92,26 @@ export class NativeCommandStore {
       where conversation_id = ${quote(conversationId)} and approval_id = ${quote(approvalId)};`))[0];
   }
 
+  /**
+   * The same durable boundary an approval crosses, for any answer that has a
+   * native effect.
+   *
+   * A choice used to be admitted by asking whether a receipt event existed,
+   * which is a read and not a claim: two answers arriving together both saw no
+   * receipt and both told the provider, and a crash between telling it and
+   * writing the receipt told it again on restart. The row here is the
+   * admission, taken before the effect, in one table with one key.
+   */
+  targetEffect(conversationId: string, targetKey: string): Promise<NativeApprovalEffect | undefined> {
+    return this.approvalEffect(conversationId, targetKey);
+  }
+
+  claimTarget(effect: Omit<NativeApprovalEffect, "approvalId"> & { targetKey: string }): Promise<boolean> {
+    if (!effect.targetKey.includes(":")) throw new Error("A native target claim requires a qualified target key.");
+    const { targetKey, ...rest } = effect;
+    return this.claimApproval({ ...rest, approvalId: targetKey });
+  }
+
   /** Called only after the domain validated the answer, immediately before
    * changing permissions, applying a tool or waking the native request. */
   async claimApproval(effect: NativeApprovalEffect): Promise<boolean> {
@@ -103,10 +123,11 @@ export class NativeCommandStore {
       conversation_id, approval_id, participant_id, event_id, runtime_id, pid, started_at)
       select conversation_id, ${quote(effect.approvalId)}, ${quote(effect.participantId)}, event_id,
         ${quote(effect.runtimeId)}, ${effect.pid}, ${quote(effect.startedAt)} from chat_events
-      where event_id = ${quote(effect.eventId)} and conversation_id = ${quote(effect.conversationId)} and kind in ('machine.approval.decision', 'permission.decided')
+      where event_id = ${quote(effect.eventId)} and conversation_id = ${quote(effect.conversationId)}
+        and kind in ('machine.approval.decision', 'permission.decided', 'choice.answered')
         and not exists(select 1 from machine_power_state where stop_fence is not null)
       on conflict(conversation_id, approval_id) do nothing returning event_id as eventId;`));
-    if (!rows.length && !await this.approvalEffect(effect.conversationId, effect.approvalId)) throw new Error("The signed approval decision is not stored.");
+    if (!rows.length && !await this.approvalEffect(effect.conversationId, effect.approvalId)) throw new Error("The signed decision is not stored.");
     return rows.length === 1;
   }
 

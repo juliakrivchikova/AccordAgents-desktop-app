@@ -34,6 +34,7 @@ import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
 import { ChatActionApplier } from "../main/services/chatActionApplier";
 import { ChatActionEmitter } from "../main/services/chatActionEmitter";
 import { createChatActionEffects } from "../main/services/chatActionEffects";
+import { createNativeTargetClaims } from "../main/services/chatActionNativeClaims";
 import { MachineIdlePower, assertNativeRegistryClosed } from "../main/services/machineIdlePower";
 import { MachineHostPowerRegistry } from "../main/services/machineHostPower";
 import { uptime } from "node:os";
@@ -317,6 +318,14 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
         chat: chatService as unknown as Parameters<typeof createChatActionEffects>[0]["chat"],
         emitter: chatActionEmitter,
         applyApproval: (event, payload) => host.applyApprovalAction(event, payload),
+        // The same durable row an approval crosses. A machine is where the
+        // native request is actually waiting, so a choice answered twice or
+        // replayed after a crash would wake it twice.
+        nativeClaims: createNativeTargetClaims({
+          storage: storageService,
+          runtimeIdentity: () => host.nativeRuntimeIdentity(),
+          canApply: () => host.canApplyNativeEffects()
+        }),
         storage: { getConversation: (id) => storageService.getConversation(id) }
       }),
       artifacts: {

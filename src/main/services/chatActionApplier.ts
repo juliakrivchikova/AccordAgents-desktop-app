@@ -99,7 +99,13 @@ export interface ChatActionEffectPort {
   owns(conversationId: string, targetKey: string): Promise<boolean | undefined>;
   /** Claims the right to perform the effect. False when a receipt already
    *  exists: the provider has been told and cannot be told again. */
-  claim(targetKey: string): Promise<boolean>;
+  /**
+   * Admission, not a lookup. True means this runtime may act; false means it
+   * was already acted on here and that outcome stands; `uncertain` means a
+   * claim exists with no receipt, so the effect may already have reached the
+   * provider and must not be repeated.
+   */
+  claim(targetKey: string, event: ChatEventEnvelope): Promise<boolean | { uncertain: true; detail: string }>;
   /** Performs it. A rejection is reported and never recorded as done. */
   perform(request: {
     conversationId: string;
@@ -181,7 +187,27 @@ export class ChatActionApplier {
       const detail = await effects.applyApproval(event, payload);
       return { ...base, status: "applied", detail };
     }
-    if (!await effects.claim(payload.targetKey)) {
+    let claim: boolean | { uncertain: true; detail: string };
+    try {
+      claim = await effects.claim(payload.targetKey, event);
+    } catch (error) {
+      // Admission itself failed -- a runtime on its way out, or a disk that
+      // refused the claim. The decision is real and has not been acted on, so
+      // it waits for a runtime that can carry it out.
+      this.deps.logger?.("chat.action.claim-failed", {
+        targetKey: payload.targetKey, kind,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return { ...base, status: "deferred", detail: "This machine could not take responsibility for it yet." };
+    }
+    if (claim !== true) {
+      if (claim !== false) {
+        // Recorded as what it is: an answer whose effect cannot be confirmed
+        // and cannot be repeated.
+        await effects.record({ conversationId: event.conversationId, targetKey: payload.targetKey,
+          effect: claim.detail, uncertain: true });
+        return { ...base, status: "applied", detail: claim.detail };
+      }
       return {
         ...base,
         status: "applied",

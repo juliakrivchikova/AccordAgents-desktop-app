@@ -159,6 +159,18 @@ export class MachineHostService {
     return this.approvalExecutor.applyAction(event, payload);
   }
 
+  /** This runtime, as a durable claim names its owner. Shared by every native
+   *  admission here so one process cannot appear as two. */
+  nativeRuntimeIdentity(): Promise<NativeRuntimeIdentity> {
+    return this.getRuntimeIdentity();
+  }
+
+  /** False once this machine is draining or fenced for an idle stop: an answer
+   *  stays queued rather than being half-applied by a runtime that is going. */
+  canApplyNativeEffects(): boolean {
+    return !this.draining && !this.idleFenced && !this.closed;
+  }
+
   private outboxUnreadable = false;
   /** Why the outbox is not on disk right now (write failed / unreadable);
    *  travels in hello so the desktop can show it. */
