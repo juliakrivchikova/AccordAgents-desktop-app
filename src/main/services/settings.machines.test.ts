@@ -174,9 +174,17 @@ test("a machine's install record never travels to a machine and dies with the ma
     });
     assert.equal((await instance().getMachineInstall("machine-1"))?.installedVersion, "1.10.4");
 
-    // The snapshot a machine receives must not carry this desktop's way in.
+    await instance().saveMachinePowerHandoffs([{
+      handoffId: "handoff-1", machineId: "machine-1", instanceId: "i-0943b28f7231ab93c",
+      issuedTo: "phone-1", issuedAt: "2026-09-07T06:00:00.000Z"
+    }]);
+
+    // The snapshot a machine receives must not carry this desktop's way in,
+    // nor the record of which of the User's devices can wake it.
     const snapshot = await instance().exportMachineSettingsSnapshot();
     assert.ok(!snapshot.settingsJson.includes("machineInstalls"));
+    assert.ok(!snapshot.settingsJson.includes("machinePowerHandoffs"));
+    assert.ok(!snapshot.settingsJson.includes("phone-1"));
     assert.ok(!snapshot.settingsJson.includes("198.51.100.10"));
     assert.ok(!snapshot.settingsJson.includes("accord.pem"));
 

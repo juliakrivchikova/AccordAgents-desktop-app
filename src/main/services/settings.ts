@@ -5,6 +5,7 @@ import { hostPlatform, userDataPath } from "../platform";
 import type { MachineRecord, MachineSettingsSnapshot } from "../../shared/machineLink";
 import type { MachineInstallRecord } from "../../shared/machineInstall";
 import { assertAwsMachinePowerConfig, type AwsMachinePowerConfig } from "../../shared/machinePower";
+import { normalizeMachinePowerHandoffRecords, type MachinePowerHandoffRecord } from "../../shared/machinePowerHandoff";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type {
   StoredMobilePairedDevice,
@@ -145,6 +146,9 @@ interface StoredSettings {
   encryptedMachinePairings?: string;
   /** This host's power key is never part of participant settings replication. */
   encryptedMachinePower?: string;
+  /** Who holds a copy of this machine's scoped power key. Records only, never
+   *  the secret, and never sent to a machine: they name the User's devices. */
+  machinePowerHandoffs?: MachinePowerHandoffRecord[];
   /** How each machine was installed from THIS desktop (SSH access, install
    *  root, service, installed version). Never travels to a machine: it carries
    *  this desktop's way in. */
@@ -2795,6 +2799,9 @@ export class SettingsService {
       machineInstalls: this.normalizeMachineInstalls(settings.machineInstalls),
       encryptedMachinePower: typeof settings.encryptedMachinePower === "string" && settings.encryptedMachinePower.trim()
         ? settings.encryptedMachinePower : undefined,
+      machinePowerHandoffs: normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs).length
+        ? normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs)
+        : undefined,
       encryptedMachinePairings: typeof settings.encryptedMachinePairings === "string" && settings.encryptedMachinePairings.trim()
         ? settings.encryptedMachinePairings
         : undefined
@@ -3363,6 +3370,18 @@ export class SettingsService {
     return config;
   }
 
+  /** Scoped power-key handoffs (Rule 3). Records only; the key itself stays in
+   *  `encryptedMachinePower` and travels to a device inside its sealed pairing. */
+  async listMachinePowerHandoffs(): Promise<MachinePowerHandoffRecord[]> {
+    const stored = await this.readStored();
+    return (stored.machinePowerHandoffs ?? []).map((record) => ({ ...record }));
+  }
+
+  async saveMachinePowerHandoffs(records: MachinePowerHandoffRecord[]): Promise<void> {
+    const stored = await this.readStored();
+    await this.writeStored({ ...stored, machinePowerHandoffs: records.length ? records.map((r) => ({ ...r })) : undefined }, true);
+  }
+
   async saveMachinePower(config: AwsMachinePowerConfig): Promise<void> {
     assertAwsMachinePowerConfig(config);
     const stored = await this.readStored();
@@ -3394,6 +3413,7 @@ export class SettingsService {
       machineInstalls: _machineInstalls,
       encryptedMachinePairings: _pairings,
       encryptedMachinePower: _power,
+      machinePowerHandoffs: _powerHandoffs,
       remoteSessionCleanupTombstones: _tombstones,
       lastRepoPath: _lastRepoPath,
       ...shareable
@@ -3455,6 +3475,7 @@ export class SettingsService {
       machineInstalls: stored.machineInstalls,
       encryptedMachinePairings: stored.encryptedMachinePairings,
       encryptedMachinePower: stored.encryptedMachinePower,
+      machinePowerHandoffs: stored.machinePowerHandoffs,
       remoteSessionCleanupTombstones: stored.remoteSessionCleanupTombstones,
       lastRepoPath: stored.lastRepoPath
     };
