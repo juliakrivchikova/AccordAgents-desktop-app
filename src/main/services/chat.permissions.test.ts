@@ -8445,6 +8445,66 @@ test("recoverStaleChatRun does not preserve stale heartbeat owners even if the p
   assert.equal(conversation.messages.find((message: any) => message.id === "pending-stale-owner")!.status, "error");
 });
 
+test("a member still marked for the old cloud worker refuses to run here, and says why", async () => {
+  // Its machine is the User's choice. Running it on this computer because the
+  // transport it was set up for is gone would be deciding for her.
+  const participant = { ...chatParticipant("codex-cli"), remoteExecution: "remote" as const };
+  const conversation = chatConversation([participant]);
+  const runs: ParticipantConfig[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    agents: [{ kind: "codex-cli", label: "Codex CLI", installed: true }],
+    run: async (config) => {
+      runs.push(config);
+      return { participant: config, ok: true, content: "ran locally", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "unassigned-run", content: `@${participant.handle} please look` });
+  await waitFor(() => (storage.current.messages as ChatMessage[]).some((message) => message.role === "participant" && message.status === "error"));
+  await (service as any).waitForQueuedSave(conversation.id);
+
+  assert.deepEqual(runs, [], "it must not quietly run on this computer");
+  const reply = (storage.current.messages as ChatMessage[])
+    .filter((message) => message.role === "participant")
+    .at(-1);
+  assert.equal(reply?.status, "error");
+  assert.match(reply?.content ?? "", /has no machine to run on yet/);
+  assert.match(reply?.content ?? "", /Choose its machine in the member settings/);
+  // The marker is not rewritten: the member still reads as one that needs a machine.
+  const stored = (storage.current.metadata.participants as ChatParticipant[])[0];
+  assert.equal(stored.remoteExecution, "remote");
+});
+
+test("records of runs made through the removed transport survive a save", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], {
+    remoteRunHandles: {
+      "old-run": {
+        runId: "old-run",
+        conversationId: "conversation-1",
+        participantId: participant.id,
+        participantHandle: participant.handle,
+        worker: { host: "worker.example" },
+        status: "completed",
+        startedAt: NOW,
+        updatedAt: NOW
+      }
+    },
+    remoteRunReplay: { "old-run": { cursorSeq: 12, appliedRecordIds: ["r-1"] } }
+  });
+  const { service, storage } = testService({ conversation });
+
+  await service.renameConversation({ conversationId: conversation.id, title: "Renamed" });
+  await (service as any).waitForQueuedSave(conversation.id);
+
+  const handles = storage.current.metadata.remoteRunHandles as Record<string, { status: string }>;
+  const replay = storage.current.metadata.remoteRunReplay as Record<string, { cursorSeq: number }>;
+  assert.equal(handles["old-run"].status, "completed", "an old run's record is not dropped by a later write");
+  assert.equal(replay["old-run"].cursorSeq, 12);
+});
+
 test("a run left behind by the removed cloud transport is finished, with its text kept", () => {
   // Nothing will ever report on it again, so leaving it spinning would be a
   // lie. What it managed to say before the cutover is preserved.

@@ -33,6 +33,23 @@ import {
   chatParticipantHomeUnassignedMessage
 } from "../../../shared/chatParticipantHome";
 
+// The member's machine is shown by name wherever these controls appear. The
+// roster is small and rarely changes, so it is read once per app session.
+let machineNamesPromise: Promise<Map<string, string>> | undefined;
+
+function useMachineNames(): Map<string, string> {
+  const [names, setNames] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    machineNamesPromise ??= window.consensus.listMachines()
+      .then((result) => new Map(result.machines.map((machine) => [machine.id, machine.name])))
+      .catch(() => new Map<string, string>());
+    void machineNamesPromise.then((value) => { if (!cancelled) setNames(value); });
+    return () => { cancelled = true; };
+  }, []);
+  return names;
+}
+
 const REASONING_DEFAULT_VALUE = "__default__";
 const MODEL_DEFAULT_VALUE = "__default_model__";
 const MODEL_MANUAL_VALUE = "__manual_model__";
@@ -62,6 +79,7 @@ export function ParticipantRuntimeControls(props: {
   ) => void;
 }): JSX.Element {
   const participant = props.participant;
+  const machineNames = useMachineNames();
   const mode = normalizeChatAgentMode(participant.agentMode);
   const reasoningValue = participant.reasoningEffort ?? REASONING_DEFAULT_VALUE;
   const cliSettingLabel = chatInheritedCliSettingLabel(participant.kind);
@@ -102,7 +120,7 @@ export function ParticipantRuntimeControls(props: {
   const autoWatchDisabled = props.disabled || Boolean(props.autoWatchDisabledReason);
   const home = chatParticipantHome(participant);
   const homeLabel = home.kind === "machine"
-    ? (props.machineName?.(home.machineId) ?? "Machine")
+    ? (machineNames.get(home.machineId) ?? props.machineName?.(home.machineId) ?? "Machine")
     : home.kind === "unassigned" ? CHAT_PARTICIPANT_HOME_UNASSIGNED_LABEL : "This computer";
   const homeTooltip = home.kind === "unassigned"
     ? chatParticipantHomeUnassignedMessage(participant.handle)

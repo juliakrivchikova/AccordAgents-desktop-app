@@ -9180,7 +9180,9 @@ export class ChatService {
       return;
     }
     for (const item of items) {
-      if (preservedRemoteExecution(item.remoteExecution) === "remote") {
+      // A member that does not run on this computer is not blocked by what is
+      // installed here: its CLI is on its machine, or it has none yet.
+      if (chatParticipantHome(item).kind !== "this-machine") {
         continue;
       }
       const kind = item.kind as ChatProviderKind;
@@ -9197,7 +9199,7 @@ export class ChatService {
     providers: Array<Pick<ProviderSettings, "kind" | "enabled">>
   ): void {
     for (const item of items) {
-      if (preservedRemoteExecution(item.remoteExecution) === "remote") {
+      if (chatParticipantHome(item).kind !== "this-machine") {
         continue;
       }
       const kind = item.kind as ChatProviderKind;
