@@ -685,6 +685,55 @@ async function main() {
     log("NOT PROVEN: the member never asked for permission in this run; the card path was not exercised");
   }
 
+  // --- 5b. A choice the member asks, answered on the phone -----------------
+  //
+  // A member raises a choice by writing one in its own message, so this is the
+  // real path: the machine's member asks, the machine's copy holds the pending
+  // choice, and the phone is the only place there is to answer it.
+  const choiceRuns = await runCount();
+  await evaluate(`(() => {
+    const input = document.getElementById("composer-input");
+    input.value = ${JSON.stringify([
+      "@one Reply with exactly these four lines and nothing else:",
+      "user choice: Which colour?",
+      "O1: Orchid",
+      "O2: Indigo"
+    ].join("\n"))};
+    document.getElementById("composer-form").dispatchEvent(new Event("submit", { cancelable: true }));
+    return true;
+  })()`);
+  await waitFor(async () => (await runCount()) > choiceRuns, 120_000, "the choice turn to reach the machine");
+  let choiceCard = "";
+  for (let attempt = 0; attempt < 240 && !choiceCard; attempt += 1) {
+    choiceCard = await evaluate(`(() => {
+      const held = [...document.querySelectorAll("#control-cards .control-card")]
+        .find((item) => item.dataset.cardKind === "choice");
+      if (!held) return "";
+      return JSON.stringify({ id: held.dataset.cardId,
+        text: (held.innerText || "").replace(/\\s+/g, " ").slice(0, 100),
+        options: [...held.querySelectorAll("[data-option-id]")].map((button) => button.dataset.optionId) });
+    })()`);
+    if (!choiceCard) await wait(1000);
+  }
+  let choiceProven = false;
+  if (choiceCard) {
+    const shown = JSON.parse(choiceCard);
+    log("the member asked a choice on the phone:", shown.text);
+    assert.ok(shown.options.length >= 2, "a choice with no options is a question the User cannot answer");
+    await evaluate(`(() => {
+      const held = [...document.querySelectorAll("#control-cards .control-card")]
+        .find((item) => item.dataset.cardKind === "choice");
+      held.querySelector("[data-option-id]").click();
+      return true;
+    })()`);
+    await waitFor(async () => (await machineLog(machineUserData, machineOutput)).includes("choice.answered"), 120_000,
+      "the machine to receive the phone's choice answer");
+    log("the machine applied the phone's choice answer");
+    choiceProven = true;
+  } else {
+    log("NOT PROVEN: the member did not raise a choice in this run");
+  }
+
   // --- 6. The desktop comes back and learns what happened without it -------
   const backDeltas = [];
   const returningLink = new MachineLinkService(desktopSettings(records, pairings), {
@@ -716,12 +765,13 @@ async function main() {
   await wait(500);
   await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => undefined);
   await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => undefined);
-  return { learned, approvalProven };
+  return { learned, approvalProven, choiceProven };
 }
 
 main().then((result) => {
   stopSpawned();
   if (!result.approvalProven) console.error("[phone-e2e] REMAINDER: the machine-raised permission card was not exercised");
+  if (!result.choiceProven) console.error("[phone-e2e] REMAINDER: the machine-raised choice card was not exercised");
   process.exit(result.learned ? 0 : 2);
 }).catch((error) => {
   console.error("[phone-e2e] FAILED", error);

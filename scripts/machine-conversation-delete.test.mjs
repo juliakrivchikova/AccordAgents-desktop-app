@@ -230,3 +230,40 @@ test("a machine that was off when the chat was deleted is told when it comes bac
     "a deletion is not lost because the machine was off when it was made");
   assert.deepEqual(second.closed, [CONVERSATION], "and the providers it held are closed on return");
 });
+
+test("a device trusted after a result was published still receives it", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-fanout-"));
+  const box = await machine(dir);
+  t.after(async () => { await box.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5 }); });
+
+  await box.deliver({ type: "machine.conversation.sync", conversation: conversation() });
+
+  // The machine publishes something while only the enrolling desktop is known:
+  // a member here asks for permission.
+  box.host.noteConversationSnapshot({
+    ...conversation(),
+    metadata: {
+      participants: [PARTICIPANT],
+      pendingAppToolApprovals: [{ id: "approval-fanout", status: "pending", summary: "Write a file",
+        requesterHandle: "one", createdAt: new Date().toISOString() }]
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 800));
+
+  const owedBefore = await box.storage.deviceEvents().pressure(box.pairing.rendezvousId);
+  assert.ok(owedBefore.events > 0, "the machine holds what it published until it is acknowledged");
+
+  // A phone joins the roster afterwards. What the room already owes is owed to
+  // it too: a result published before it was trusted still has to reach it.
+  const phoneIdentity = await phone.createIdentity();
+  await box.trust([{
+    deviceId: phoneIdentity.deviceId, publicKeyDerBase64: phoneIdentity.publicKeyDerBase64,
+    role: "phone", name: "Phone", relayUrl: box.pairing.relayUrl, rendezvousId: box.pairing.rendezvousId,
+    relaySealKeyBase64: box.pairing.relaySealKeyBase64, fingerprint: box.pairing.fingerprint
+  }]);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  const owedAfter = await box.storage.deviceEvents().pressure(box.pairing.rendezvousId);
+  assert.ok(owedAfter.recipients > owedBefore.recipients,
+    `the newly trusted device is owed what the room already held (${owedBefore.recipients} -> ${owedAfter.recipients})`);
+});
