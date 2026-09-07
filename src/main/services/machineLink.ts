@@ -430,6 +430,19 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }));
   }
 
+  /** Every connected machine, as delivery recipients for one chat action. An
+   *  event minted inside another transaction cannot go through `publish`, so
+   *  its recipients are taken here and written with it. */
+  chatActionRecipients(): Array<{ deviceId: string; channelId: string }> {
+    const recipients: Array<{ deviceId: string; channelId: string }> = [];
+    for (const connection of this.connections.values()) {
+      const deviceId = connection.machineDeviceId;
+      if (!deviceId) continue;
+      recipients.push({ deviceId, channelId: connection.record.pairingKey });
+    }
+    return recipients;
+  }
+
   /** Applies an incoming chat action, or undefined when the event is not one.
    *  A `deferred` outcome keeps the event for retry: this peer does not hold
    *  what the action refers to yet, and dropping it would lose the action. */

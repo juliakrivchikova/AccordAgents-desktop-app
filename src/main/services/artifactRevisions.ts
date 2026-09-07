@@ -57,6 +57,22 @@ export function artifactRevision(record: ArtifactVersionRecord, eventId?: string
     versionEventId: record.versionEventId ?? eventId ?? randomUUID(), contentHash };
 }
 
+/** The immutable identity of a body: the same hash the revision row stores. */
+export function artifactContentHash(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+/** True inside a transaction once the revision row exists, so an event can be
+ *  written only when its revision really landed. */
+export function artifactRevisionExistsSql(artifactId: string, versionEventId: string): string {
+  return `exists(select 1 from artifact_revisions where artifact_id = ${q(artifactId)} and version_event_id = ${q(versionEventId)})`;
+}
+
+/** True once the signature row exists, for the same reason. */
+export function artifactSignatureExistsSql(artifactId: string, versionEventId: string, signer: string): string {
+  return `exists(select 1 from artifact_bound_signatures where artifact_id = ${q(artifactId)} and version_event_id = ${q(versionEventId)} and signer = ${q(signer)})`;
+}
+
 export function revisionInsertSql(record: ArtifactRevision, predicate = "1"): string {
   return `insert into artifact_revisions(version_event_id, artifact_id, original_version, base_version_event_id, content_hash, content, author, note, created_at)
     select ${q(record.versionEventId)}, ${q(record.artifactId)}, ${Math.floor(record.version)}, ${q(record.baseVersionEventId)}, ${q(record.contentHash)}, ${q(record.content)},

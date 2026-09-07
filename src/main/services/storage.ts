@@ -1554,33 +1554,7 @@ export class StorageService {
         pragma synchronous = full;
         pragma fullfsync = on;
         begin immediate;
-        insert or ignore into chat_events (
-          event_id,
-          conversation_id,
-          log_scope_id,
-          origin_id,
-          origin_seq,
-          logical_ts,
-          kind,
-          payload_json,
-          payload_hash,
-          event_hash,
-          prev_hash,
-          signature,
-          key_id,
-          envelope_json,
-          received_at
-        )
-        values ${valuesSql}
-        returning event_id as eventId;
-        ${clockCandidates.length === 0 ? "" : `
-          with candidates(event_id, event_hash, logical_ts, clock_key) as (values ${clockCandidates.join(",")})
-          update schema_meta set value = max(value, coalesce((
-            select max(c.clock_key) from candidates c join chat_events e
-              on e.event_id = c.event_id and e.event_hash = c.event_hash and e.logical_ts = c.logical_ts
-          ), value)) where key = ${sqlString(CHAT_EVENT_CLOCK_META_KEY)};
-        `}
-        ${deliverySql}
+        ${chatEventInsertSql(valuesSql, clockCandidates, deliverySql, true)}
         commit;
       `
     );
@@ -1608,6 +1582,41 @@ export class StorageService {
       });
     }
     return results;
+  }
+
+  /**
+   * The same insert `appendChatEvents` runs, as text, for a caller that has to
+   * commit it together with something else.
+   *
+   * Two writes cannot be atomic across two transactions, and recovering after
+   * the fact is a weaker guarantee: an action the User already saw succeed must
+   * not be left without its outgoing event. This lets an artifact write and its
+   * event share one `begin immediate`, so a failure loses both or neither. The
+   * block carries no `begin`/`commit` of its own, and it reaches sqlite through
+   * stdin like every other statement here - never argv, whatever its size.
+   */
+  chatEventAppendSql(
+    event: ChatEventEnvelope,
+    delivery: DeviceEventAppendOptions = {},
+    /** A condition the surrounding transaction evaluates: the event is written
+     *  only when the change it describes actually happened. Without it a
+     *  refused change (a stale base, a guard that failed) would still announce
+     *  itself to every peer. */
+    onlyIfSql?: string
+  ): string {
+    this.assertValidChatEventEnvelope(event);
+    const envelopeJson = JSON.stringify(event);
+    const clock = parseHlcKey(logicalOrderKey(event));
+    const values = this.chatEventInsertValuesSql(event, envelopeJson, new Date().toISOString());
+    return chatEventInsertSql(
+      values,
+      clock
+        ? [`(${sqlString(event.eventId)}, ${sqlString(event.eventHash)}, ${sqlString(event.logicalTs)}, ${sqlString(formatHlcKey({ ...clock, originId: "clock" }))})`]
+        : [],
+      deviceEventAppendSql([event], delivery),
+      false,
+      onlyIfSql
+    );
   }
 
   /** Global across chats and origins. Only accepted events advance this floor;
@@ -2412,4 +2421,50 @@ function messagePageInfo(page: ConversationMessagePage): ConversationMessagePage
     hasMoreBefore: page.hasMoreBefore,
     totalMessages: page.totalMessages
   };
+}
+
+/** The chat-event insert, its clock advance and its delivery rows, as one block
+ *  with no transaction of its own so it can be committed alone or beside
+ *  another write. `returning` is only useful to a caller that reads the rows. */
+function chatEventInsertSql(
+  valuesSql: string,
+  clockCandidates: string[],
+  deliverySql: string,
+  withReturning: boolean,
+  onlyIfSql?: string
+): string {
+  // A conditional insert cannot use VALUES, so the same tuple becomes a SELECT
+  // with the caller's condition. The tuple is built once either way.
+  const rows = onlyIfSql
+    ? `select ${valuesSql.trim().replace(/^\(/, "").replace(/\)$/, "")} where ${onlyIfSql}`
+    : `values ${valuesSql}`;
+  return `
+        insert or ignore into chat_events (
+          event_id,
+          conversation_id,
+          log_scope_id,
+          origin_id,
+          origin_seq,
+          logical_ts,
+          kind,
+          payload_json,
+          payload_hash,
+          event_hash,
+          prev_hash,
+          signature,
+          key_id,
+          envelope_json,
+          received_at
+        )
+        ${rows}
+        ${withReturning ? "returning event_id as eventId" : ""};
+        ${clockCandidates.length === 0 ? "" : `
+          with candidates(event_id, event_hash, logical_ts, clock_key) as (values ${clockCandidates.join(",")})
+          update schema_meta set value = max(value, coalesce((
+            select max(c.clock_key) from candidates c join chat_events e
+              on e.event_id = c.event_id and e.event_hash = c.event_hash and e.logical_ts = c.logical_ts
+          ), value)) where key = ${sqlString(CHAT_EVENT_CLOCK_META_KEY)};
+        `}
+        ${deliverySql}
+  `;
 }

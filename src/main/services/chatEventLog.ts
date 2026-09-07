@@ -82,6 +82,46 @@ export class ChatEventLogService {
     return this.enqueueLocalAppend(identity.originId, () => this.appendLocalEventWithIdentity(identity, request));
   }
 
+  /**
+   * Mints this device's next event and hands its SQL to `commit`, which must
+   * write it inside its own transaction together with whatever change the
+   * event describes.
+   *
+   * Held inside the same per-origin queue an ordinary append uses, so no other
+   * append can take the sequence number between minting and committing. The
+   * caller says whether the transaction actually committed; if it did not, the
+   * event was never inserted either, which is the whole point.
+   */
+  async withPreparedLocalEvent<Payload, Result>(
+    request: CreateLocalChatEventRequest<Payload>,
+    commit: (prepared: { event: ChatEventEnvelope<Payload>; sql: string }) => Promise<Result>
+  ): Promise<{ event: ChatEventEnvelope<Payload>; committed: boolean; result: Result }> {
+    const identity = await this.getOrCreateDeviceIdentity();
+    return this.enqueueLocalAppend(identity.originId, async () => {
+      const existing = request.eventId ? await this.storage.getChatEvent(request.eventId) : undefined;
+      if (existing) {
+        // Already recorded: the change it describes may still need doing, so
+        // the caller runs with an empty statement rather than being refused.
+        const result = await commit({ event: existing as ChatEventEnvelope<Payload>, sql: "" });
+        return { event: existing as ChatEventEnvelope<Payload>, committed: true, result };
+      }
+      const clock = await this.getClock();
+      const basis = await this.storage.getChatEventSequenceBasis(identity.originId, request.logScopeId);
+      clock.restore(await this.storage.getChatEventClock());
+      const event = createSignedChatEvent(identity, {
+        ...request,
+        originSeq: basis.originSeq,
+        prevHash: basis.prevHash,
+        logicalTs: clock.tick(),
+        createdAt: this.now().toISOString()
+      });
+      const sql = this.storage.chatEventAppendSql(event, { recipients: request.recipients });
+      const result = await commit({ event, sql });
+      const stored = await this.storage.getChatEvent(event.eventId);
+      return { event, committed: Boolean(stored), result };
+    });
+  }
+
   private async appendLocalEventWithIdentity<Payload>(
     identity: ChatEventDeviceIdentityRecord,
     request: CreateLocalChatEventRequest<Payload>
@@ -123,10 +163,10 @@ export class ChatEventLogService {
     throw new Error("Chat event append failed after retrying origin sequence conflicts.");
   }
 
-  private enqueueLocalAppend<Payload>(
+  private enqueueLocalAppend<T>(
     originId: string,
-    append: () => Promise<SignedChatEventAppendResult<Payload>>
-  ): Promise<SignedChatEventAppendResult<Payload>> {
+    append: () => Promise<T>
+  ): Promise<T> {
     const queueKey = originId;
     const previous = this.localAppendQueues.get(queueKey) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(append);

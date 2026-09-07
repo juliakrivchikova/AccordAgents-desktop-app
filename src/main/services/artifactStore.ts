@@ -637,7 +637,11 @@ export class ArtifactStore {
   async appendVersion(
     record: ArtifactVersionRecord,
     expectedHeadVersion: number,
-    event?: ArtifactEventRecord
+    event?: ArtifactEventRecord,
+    /** Statements committed with this change, so the two are one transaction.
+     *  A caller uses it for the chat event that makes the change visible to
+     *  other peers: a failure here loses both, never one. */
+    alsoCommitSql?: string
   ): Promise<boolean> {
     await this.init();
     const id = sqlString(record.artifactId);
@@ -664,6 +668,7 @@ export class ArtifactStore {
         where changes() = 1;
         select changes();
       ` : "select changes();"}
+      ${alsoCommitSql ?? ""}
       commit;
     `);
     return Number.parseInt(output.trim(), 10) === 1;
@@ -707,7 +712,12 @@ export class ArtifactStore {
 
   // Idempotent: returns true when the signature was newly recorded, false when
   // this signer had already signed this version.
-  async insertSignature(record: ArtifactSignatureRecord, event?: ArtifactEventRecord): Promise<boolean> {
+  async insertSignature(
+    record: ArtifactSignatureRecord,
+    event?: ArtifactEventRecord,
+    /** Committed with the signature, for the same reason as `appendVersion`. */
+    alsoCommitSql?: string
+  ): Promise<boolean> {
     await this.init();
     const output = await this.queryText(`
       begin immediate;
@@ -737,6 +747,7 @@ export class ArtifactStore {
         );
         select count(*) from artifact_event_outbox where id = ${sqlString(event.id)};
       ` : "select changes();"}
+      ${alsoCommitSql ?? ""}
       commit;
     `);
     return Number.parseInt(output.trim(), 10) === 1;

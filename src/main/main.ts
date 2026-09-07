@@ -467,7 +467,24 @@ const artifactService = new ArtifactService({
   // a re-emission after a restart is folded once as a duplicate rather than as
   // a second revision.
   hasEmittedAction: (eventId) => chatActionEventExists(eventId),
-  emitAction: (action) => publishChatAction(action)
+  emitAction: (action) => publishChatAction(action),
+  // The atomic path: the event is minted and handed to the artifact write, so
+  // the change and the event peers learn from share one transaction.
+  commitActionWithChange: (action, write) => chatEventLogService.withPreparedLocalEvent({
+    conversationId: action.conversationId,
+    logScopeId: CHAT_ACTION_LOG_SCOPE,
+    kind: action.kind,
+    payload: action.payload,
+    eventId: `chat-action:${action.payload.operationId}`,
+    recipients: machineLinkService?.chatActionRecipients() ?? []
+  }, (prepared) => write({
+    sql: prepared.sql,
+    onlyIfSql: (condition) => prepared.sql
+      ? storageService.chatEventAppendSql(prepared.event, {
+        recipients: machineLinkService?.chatActionRecipients() ?? []
+      }, condition)
+      : ""
+  })).then((outcome) => outcome.result)
 });
 chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
 const dispatchArtifactTool = createArtifactToolDispatcher(artifactService);

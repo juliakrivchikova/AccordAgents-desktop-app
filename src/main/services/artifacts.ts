@@ -32,6 +32,7 @@ import type {
 } from "../../shared/types";
 import { ARTIFACT_USER_MEMBER } from "../../shared/types";
 import type { ChatActionPayload } from "../../shared/chatActionEvents";
+import { artifactContentHash, artifactRevisionExistsSql, artifactSignatureExistsSql } from "./artifactRevisions";
 import {
   ARTIFACT_CONTENT_MAX_BYTES,
   ARTIFACT_LABEL_MAX_LENGTH,
@@ -74,6 +75,20 @@ export interface ArtifactServiceDeps {
    *  Optional: an emitter that is not wired leaves this machine's behaviour
    *  exactly as before, it just does not converge with the others. */
   emitAction?(action: ArtifactActionEmission): Promise<void>;
+  /**
+   * Mints the event for an action and commits it INSIDE the transaction that
+   * makes the change visible. `write` receives the statement to include and
+   * returns whether its own change committed; the event is written only when
+   * it did.
+   *
+   * This is the atomic path for new actions. `emitAction` remains for the
+   * emissions that are not part of a single store write, and
+   * `recoverActionEvents` remains for states written before this existed.
+   */
+  commitActionWithChange?<T>(
+    action: ArtifactActionEmission,
+    write: (statement: { sql: string; onlyIfSql: (condition: string) => string }) => Promise<T>
+  ): Promise<T>;
   /** True when this action's event is already in the log. Used to re-emit an
    *  action whose event was lost — a disk failure between the committed change
    *  and its outgoing write — instead of leaving peers permanently unaware. */
@@ -581,19 +596,42 @@ export class ArtifactService {
         `${artifactMemberLabel(actor)} revised ${artifactReference(record.id, record.name)} · v${nextVersion}${note ? ` — ${note}` : ""}`,
         now
       );
-      const accepted = await this.deps.store.appendVersion(
-        {
-          artifactId: record.id,
-          version: nextVersion,
-          baseVersionEventId: baseRevision.versionEventId,
-          content: request.content,
-          author: actor,
-          note,
-          createdAt: now
-        },
-        record.headVersion,
-        event
-      );
+      const versionEventId = randomUUID();
+      const revisionAction: ArtifactActionEmission = {
+        conversationId: request.conversationId,
+        kind: "artifact.revision.created",
+        payload: {
+          operationId: `artifact-revision:${record.id}:${versionEventId}`,
+          targetKey: artifactActionTarget(record.id),
+          stateId: versionEventId,
+          contentHash: artifactContentHash(request.content),
+          precondition: {
+            expectedStateId: baseRevision.versionEventId,
+            expectedContentHash: baseRevision.contentHash
+          }
+        }
+      };
+      const appendVersionRecord = {
+        artifactId: record.id,
+        version: nextVersion,
+        baseVersionEventId: baseRevision.versionEventId,
+        versionEventId,
+        content: request.content,
+        author: actor,
+        note,
+        createdAt: now
+      };
+      // The revision and the event peers learn from are one commit: a failure
+      // between them would leave a change the User saw succeed that no other
+      // machine will ever hear about.
+      const accepted = this.deps.commitActionWithChange
+        ? await this.deps.commitActionWithChange(revisionAction, (statement) => this.deps.store.appendVersion(
+          appendVersionRecord,
+          record.headVersion,
+          event,
+          statement.onlyIfSql(artifactRevisionExistsSql(record.id, versionEventId))
+        ))
+        : await this.deps.store.appendVersion(appendVersionRecord, record.headVersion, event);
       if (!accepted) {
         // Another writer advanced the head between our read and the guarded
         // write (only possible across processes; in-process writes are queued).
@@ -602,25 +640,8 @@ export class ArtifactService {
       }
       this.notifyChanged(request.conversationId);
       await this.flushPendingArtifactEvents();
-      const written = await this.deps.store.getVersion(record.id, nextVersion);
-      if (written) {
-        // The precondition is the revision this author actually read. A peer
-        // whose base has since been replaced is projected as superseded rather
-        // than silently overwriting the winner.
-        await this.emitAction({
-          conversationId: request.conversationId,
-          kind: "artifact.revision.created",
-          payload: {
-            operationId: `artifact-revision:${record.id}:${written.versionEventId}`,
-            targetKey: artifactActionTarget(record.id),
-            stateId: written.versionEventId,
-            contentHash: written.contentHash,
-            precondition: {
-              expectedStateId: baseRevision.versionEventId,
-              expectedContentHash: baseRevision.contentHash
-            }
-          }
-        });
+      if (!this.deps.commitActionWithChange) {
+        await this.emitAction(revisionAction);
       }
       return this.read(actorRaw, { conversationId: request.conversationId, artifactId: record.id });
     });
@@ -738,34 +759,41 @@ export class ArtifactService {
         `${artifactMemberLabel(actor)} signed ${artifactReference(record.id, record.name)} v${version}${approvalSuffix}`,
         now
       );
-      const inserted = await this.deps.store.insertSignature(
-        {
-          artifactId: record.id,
-          version,
-          versionEventId: versionRecord.versionEventId,
-          contentHash: versionRecord.contentHash,
+      const signatureRecord = {
+        artifactId: record.id,
+        version,
+        versionEventId: versionRecord.versionEventId,
+        contentHash: versionRecord.contentHash,
+        signer: actor,
+        signedAt: now
+      };
+      const signatureAction: ArtifactActionEmission = {
+        conversationId: request.conversationId,
+        kind: "artifact.signature.added",
+        payload: {
+          operationId: `artifact-signature:${record.id}:${versionRecord.versionEventId}:${actor}`,
+          targetKey: artifactActionTarget(record.id),
           signer: actor,
-          signedAt: now
-        },
-        event
-      );
+          signedStateId: versionRecord.versionEventId,
+          signedContentHash: versionRecord.contentHash
+        } as ChatActionPayload
+      };
+      // One commit: a signature the User saw accepted is never left without the
+      // event that carries it to the other machines.
+      const inserted = this.deps.commitActionWithChange
+        ? await this.deps.commitActionWithChange(signatureAction, (statement) => this.deps.store.insertSignature(
+          signatureRecord,
+          event,
+          statement.onlyIfSql(artifactSignatureExistsSql(record.id, versionRecord.versionEventId, actor))
+        ))
+        : await this.deps.store.insertSignature(signatureRecord, event);
       if (inserted) {
         this.notifyChanged(request.conversationId);
         const summaryAfter = await this.summaryResult(record.id);
         await this.flushPendingArtifactEvents();
-        // The signature binds to the revision it read, by id and by hash, so
-        // it stays with that content if a competing revision wins the race.
-        await this.emitAction({
-          conversationId: request.conversationId,
-          kind: "artifact.signature.added",
-          payload: {
-            operationId: `artifact-signature:${record.id}:${versionRecord.versionEventId}:${actor}`,
-            targetKey: artifactActionTarget(record.id),
-            signer: actor,
-            signedStateId: versionRecord.versionEventId,
-            signedContentHash: versionRecord.contentHash
-          } as ChatActionPayload
-        });
+        if (!this.deps.commitActionWithChange) {
+          await this.emitAction(signatureAction);
+        }
         return summaryAfter;
       }
       return this.summaryResult(record.id);
