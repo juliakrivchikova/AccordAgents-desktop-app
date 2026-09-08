@@ -95,6 +95,7 @@
     "tag-release": "node scripts/tag-release.mjs",
     "test:device-events": "npm run build:main && node --test dist/main/main/services/deviceEventStorage.test.js dist/main/main/services/deviceEventChannel.test.js dist/main/main/services/deviceEventMailbox.test.js",
     "test:native-execution": "npm run build:main && node --test dist/main/main/services/nativeCommandStore.test.js dist/main/main/services/nativeProcess.test.js dist/main/main/services/machineApprovalExecutor.test.js scripts/machine-command.test.mjs",
+    "test:packaged-native": "node scripts/verify-packaged-native-process.mjs",
     "test:worker-relay": "npm run build:main && node --test scripts/worker-relay-chat-read.test.mjs",
     "test:avatar-studio": "npm run build:main && node --require ./scripts/electron-stub.cjs --test dist/main/main/services/avatarStudio.test.js dist/main/main/services/settings.customAvatars.test.js && npm run build:renderer-tests && node --test --test-force-exit --import ./scripts/renderer-jsdom-setup.mjs dist/renderer-tests/renderer/components/avatar/avatar-studio-dialog.test.mjs"
   },

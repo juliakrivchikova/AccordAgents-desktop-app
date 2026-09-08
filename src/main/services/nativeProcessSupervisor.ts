@@ -281,7 +281,7 @@ function processTable(fresh = false): ReturnType<typeof readPosixProcessTableAsy
   return reading;
 }
 
-if (require.main === module) {
+export function runNativeProcessSupervisor(): void {
   const sessions = new Map<string, SessionIO>();
   const send = (id: string, message: object): Promise<void> => new Promise((resolve, reject) => {
     if (!process.connected) { resolve(); return; }
@@ -340,3 +340,5 @@ if (require.main === module) {
     // disconnect during its disk/identity reads must remain observable there.
   });
 }
+
+if (require.main === module) runNativeProcessSupervisor();
