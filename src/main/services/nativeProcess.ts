@@ -131,8 +131,17 @@ class NativeProcessGuardian {
   constructor(private readonly key: string) {
     const script = [path.join(__dirname, "nativeProcessSupervisor.js"), path.join(__dirname, "nativeProcessSupervisor.cjs")].find(existsSync);
     if (!script) throw new NativeProcessUnavailableError("The native process supervisor is missing from this app build.");
-    this.child = spawn(process.execPath, [script], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, detached: true,
+    // Electron's RunAsNode fuse is deliberately disabled in releases. Enter
+    // the same detached supervisor through the signed launcher instead. Plain
+    // Node on machines (and in tests) keeps its standalone script entrypoint.
+    const electronMain = process.type === "browser";
+    const args = electronMain
+      ? [...(process.defaultApp ? [path.resolve(__dirname, "../launcher.js")] : []), "--accordagents-native-supervisor"]
+      : [script];
+    const env = { ...process.env };
+    if (electronMain) delete env.ELECTRON_RUN_AS_NODE;
+    this.child = spawn(process.execPath, args, {
+      env, detached: true,
       serialization: "advanced", stdio: ["ignore", "ignore", "ignore", "ipc"]
     });
     const abandoned = (): void => {

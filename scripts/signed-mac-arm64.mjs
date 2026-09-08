@@ -15,6 +15,7 @@ import {
 import path from "node:path";
 import process from "node:process";
 import { verifyRuntimeArchive, verifyUpdaterZip } from "./packaging-boundary.mjs";
+import { verifyPackagedNativeProcess } from "./verify-packaged-native-process.mjs";
 
 const rootDir = process.cwd();
 const envPath = path.join(rootDir, ".env.local");
@@ -370,6 +371,7 @@ run("npm", ["run", "make", "--", "--platform=darwin", "--arch=arm64"]);
 log("Verifying signed and notarized app bundle");
 verifyRuntimeArchive(path.join(appPath, "Contents", "Resources", "app.asar"));
 verifySignedApp();
+await verifyPackagedNativeProcess(appPath);
 
 log("Creating signed ZIP for macOS auto-updates");
 const { signedZipPath, checksumPath: zipChecksumPath } = createSignedZip();
