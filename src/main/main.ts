@@ -1,4 +1,5 @@
 import path from "node:path";
+import { CloudRunPreparationService } from "./services/cloudRunPreparation";
 import { createHash, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
@@ -389,6 +390,46 @@ function machineRuntimePayload(): MachineRuntimePayloadLocation {
   }
   return { dir: path.join(app.getAppPath(), "dist", "machine"), source: "checkout", expectVersion: app.getVersion() };
 }
+async function createMachine(request: CreateMachineRequest, awsInstanceId?: string): Promise<CreateMachineResult> {
+  const name = typeof request?.name === "string" ? request.name.trim() : "";
+  if (!name) {
+    throw new Error("A machine needs a name.");
+  }
+  const settings = await settingsService.getPublicSettings();
+  // Machines use the same live room and sealed durable buffer as the phone.
+  // The static PWA origin and the old command mailbox are not needed here.
+  const pairing = await mobilePairingService.createPairing({
+    purpose: "machine-host",
+    ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES,
+    relayUrl: settings.mobileControl.defaults.relayUrl,
+    outboxUrl: settings.mobileControl.defaults.outboxUrl
+  });
+  if (!pairing.package.relayUrl) {
+    throw new Error("Machines need a relay URL; set the mobile control relay in Settings first.");
+  }
+  if (!pairing.package.outboxUrl) {
+    throw new Error("Machines need a sealed mailbox URL; set the mobile control mailbox in Settings first.");
+  }
+  // Reserve the sealed mailbox before exposing its enrollment credentials.
+  if (!await ensureMailboxRegisteredForPairing(pairing.package)) {
+    throw new Error("The machine's relay mailbox could not be registered. Try adding the machine again.");
+  }
+  const record = {
+    id: randomUUID(),
+    name,
+    ...(awsInstanceId ? { awsInstanceId } : {}),
+    deviceId: "",
+    pairingKey: pairing.package.rendezvousId,
+    createdAt: new Date().toISOString()
+  };
+  await settingsService.saveMachine(record, pairing.package);
+  await machineLinkService?.connectMachine(record).catch((error) => {
+    void debugLogService.write("machine-link.connect.error", { machineId: record.id, message: error instanceof Error ? error.message : String(error) });
+  });
+  void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
+  return { machine: record, enrollmentJson: JSON.stringify(pairing.package, null, 2) };
+}
+
 const machineInstallerService = new MachineInstallerService({
   store: settingsService,
   doctor: cloudRunDoctorService,
@@ -399,6 +440,28 @@ const machineInstallerService = new MachineInstallerService({
   machineName: async (machineId) => (await settingsService.listMachines()).find((machine) => machine.id === machineId)?.name,
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
+  }
+});
+const cloudRunPreparation = new CloudRunPreparationService({
+  appVersion: app.getVersion(),
+  aws: cloudRunAwsService,
+  listMachines: () => settingsService.listMachines(),
+  listInstalls: () => settingsService.listMachineInstalls(),
+  createMachine: async (name, instanceId) => (await createMachine({ name }, instanceId)).machine,
+  install: (request, progress) => machineInstallerService.install(request, progress),
+  isConnected: (machineId) => Boolean(machineLinkService?.isMachineConnected(machineId)),
+  bootstrapProject: (machineId, localPath) => machineInstallerService.bootstrapProjectMirror({ machineId, localPath }),
+  saveInstall: (record) => settingsService.saveMachineInstall(record),
+  prepareProvider: async (worker, provider, record, progress) => {
+    const options = { requiredProviderKind: provider, maintenance: {
+      runtimePath: `${record.installRoot}/current/accordagents-machine.cjs`,
+      userDataDir: record.userDataDir,
+      capabilityPath: `${record.installRoot}/current/maintenance-v1`
+    } };
+    progress({ message: "Checking the provider on your cloud machine…" });
+    let report = await cloudRunDoctorService.diagnose(worker, options);
+    if (!report.ok) report = await cloudRunDoctorService.setup(worker, progress, options);
+    if (!report.ok) throw new Error(report.message);
   }
 });
 void machineInstallerService.recoverInterruptedOperation();
@@ -429,6 +492,7 @@ async function machinePowerHandoffForPairing(pairing: MobilePairingPackage): Pro
   }
 }
 chatService.setCloudRunAwsService(cloudRunAwsService);
+chatService.setMachineProjectPreparation((machineId, localPath) => cloudRunPreparation.prepareProject(machineId, localPath));
 chatService.setCloudRunDoctorService(cloudRunDoctorService);
 wireChatAppToolHandlers(appMcpService, chatService);
 // Artifacts persist in their own tables of the same SQLite database as
@@ -2629,43 +2693,11 @@ function registerIpc(): void {
     return storageService.getConversation(request.conversationId);
   });
   ipcMain.handle("machines:list", async (): Promise<MachineListResult> => machineListResult());
+  ipcMain.handle("machines:prepare-cloud-run", async (_event, request: import("../shared/cloudRunPreparation").PrepareCloudRunRequest) => {
+    return cloudRunPreparation.prepare(request, (snapshot) => sendToMainWindow("machines:cloud-run-progress", snapshot));
+  });
   ipcMain.handle("machines:create", async (_event, request: CreateMachineRequest): Promise<CreateMachineResult> => {
-    const name = typeof request?.name === "string" ? request.name.trim() : "";
-    if (!name) {
-      throw new Error("A machine needs a name.");
-    }
-    const settings = await settingsService.getPublicSettings();
-    // Machines use the same live room and sealed durable buffer as the phone.
-    // The static PWA origin and the old command mailbox are not needed here.
-    const pairing = await mobilePairingService.createPairing({
-      purpose: "machine-host",
-      ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES,
-      relayUrl: settings.mobileControl.defaults.relayUrl,
-      outboxUrl: settings.mobileControl.defaults.outboxUrl
-    });
-    if (!pairing.package.relayUrl) {
-      throw new Error("Machines need a relay URL; set the mobile control relay in Settings first.");
-    }
-    if (!pairing.package.outboxUrl) {
-      throw new Error("Machines need a sealed mailbox URL; set the mobile control mailbox in Settings first.");
-    }
-    // Reserve the sealed mailbox before exposing its enrollment credentials.
-    if (!await ensureMailboxRegisteredForPairing(pairing.package)) {
-      throw new Error("The machine's relay mailbox could not be registered. Try adding the machine again.");
-    }
-    const record = {
-      id: randomUUID(),
-      name,
-      deviceId: "",
-      pairingKey: pairing.package.rendezvousId,
-      createdAt: new Date().toISOString()
-    };
-    await settingsService.saveMachine(record, pairing.package);
-    await machineLinkService?.connectMachine(record).catch((error) => {
-      void debugLogService.write("machine-link.connect.error", { machineId: record.id, message: error instanceof Error ? error.message : String(error) });
-    });
-    void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
-    return { machine: record, enrollmentJson: JSON.stringify(pairing.package, null, 2) };
+    return createMachine(request);
   });
   ipcMain.handle("machines:remove", async (_event, request: RemoveMachineRequest): Promise<MachineListResult> => {
     const id = typeof request?.id === "string" ? request.id.trim() : "";
@@ -3126,6 +3158,7 @@ void app.whenReady().then(async () => {
     const desktopIdentity = await chatEventLogService.getOrCreateDeviceIdentity();
     machineLinkService = new MachineLinkService(settingsService, debugLogService, {
       chatActions: chatActionApplier,
+      repositoryPaths: (sourcePath) => cloudRunPreparation.repositoryPaths(sourcePath),
       // A machine that held an action back because it lacked the revision it
       // refers to asks for exactly that state, and gets the same event again.
       serveChatActionDependency: async (dependency) => dependency.targetKey.startsWith("artifact:")

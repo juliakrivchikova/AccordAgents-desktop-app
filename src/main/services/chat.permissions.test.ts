@@ -3763,6 +3763,27 @@ test("run location is editable only before a participant has durable run history
   );
 });
 
+test("cloud project setup precedes saving the machine, and the first run locks it before setup", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = { ...chatConversation([participant]), repoPath: "/Users/test/project" };
+  const { service, storage } = testService({ conversation });
+  const calls: string[] = [];
+  service.setMachineProjectPreparation(async (id: string, repo: string) => {
+    calls.push(`${id}:${repo}`);
+    throw new Error("project copy failed");
+  });
+  await assert.rejects(service.updateParticipantRuntime({ conversationId: conversation.id, participantId: participant.id, homeMachineId: "cloud" }), /project copy failed/);
+  assert.equal(storage.current.metadata.participants[0].homeMachineId, undefined);
+  service.setMachineProjectPreparation(async (id: string, repo: string) => { calls.push(`${id}:${repo}`); });
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: participant.id, homeMachineId: "cloud" });
+  assert.equal(storage.current.metadata.participants[0].homeMachineId, "cloud");
+  storage.current.metadata.participantSessions = [{ participantId: participant.id, sessionId: "native-session", updatedAt: NOW }];
+  await assert.rejects(service.updateParticipantRuntime({ conversationId: conversation.id, participantId: participant.id, homeMachineId: "other" }), /machine is locked/);
+  assert.deepEqual(calls, ["cloud:/Users/test/project", "cloud:/Users/test/project"]);
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: participant.id, model: "another-model" });
+  assert.equal(storage.current.metadata.participants[0].homeMachineId, "cloud");
+});
+
 test("participant reservation is released if turn controller setup fails", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);

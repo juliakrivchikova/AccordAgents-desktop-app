@@ -759,6 +759,7 @@ export class ChatService {
   private readonly saveOutcomes = new Map<string, Promise<boolean>>();
   /** Set inside a machine runtime: the desktop's record id for this machine. */
   private hostMachineId?: string;
+  private prepareMachineProject?: (machineId: string, localPath: string) => Promise<void>;
   private readonly participantRunSettledListeners = new Set<(run: ChatParticipantRun) => Promise<void> | void>();
   private readonly participantRunCompletionWaiters = new Map<string, Set<() => void>>();
 
@@ -874,6 +875,17 @@ export class ChatService {
   /** Machines transport: participants whose home is an enrolled machine run
    *  there through the machine link; the desktop keeps the pending bubble,
    *  progress, and the final messages exactly as for a local participant. */
+  setMachineProjectPreparation(prepare: (machineId: string, localPath: string) => Promise<void>): void {
+    this.prepareMachineProject = prepare;
+  }
+
+  private async prepareParticipantProjects(repoPath: string | undefined, participants: Array<{ homeMachineId?: string }>): Promise<void> {
+    if (!repoPath || !this.prepareMachineProject) return;
+    for (const id of new Set(participants.map(participant => participant.homeMachineId).filter((id): id is string => Boolean(id)))) {
+      await this.prepareMachineProject(id, repoPath);
+    }
+  }
+
   setMachineLink(link: MachineTurnDispatcher | undefined): void {
     this.machineLink = link;
   }
@@ -1048,6 +1060,8 @@ export class ChatService {
       this.assertParticipantProvidersReady(participantInputs, agents, settings.providers);
       const requestedParticipants = await this.validateParticipants(participantInputs, [], true);
       const participants = await this.ensureAdministratorParticipant(requestedParticipants, assistantProviderKind);
+      stage = "preparing-cloud-project";
+      await this.prepareParticipantProjects(requestedRepoPath, participants);
       conversation = {
         id: randomUUID(),
         title: normalizeAutoChatTitle(requestedTitle),
@@ -1141,6 +1155,7 @@ export class ChatService {
             }
           : participant.permissions,
         remoteExecution: participant.remoteExecution,
+        homeMachineId: participant.homeMachineId,
         skipToolchainPreflight: participant.skipToolchainPreflight
       }));
   }
@@ -1410,6 +1425,7 @@ export class ChatService {
       const settings = await this.settings.getPublicSettings();
       const agents = await this.detectAgentsForReadiness();
       this.assertParticipantProvidersReady([request.participant], agents, settings.providers ?? []);
+      await this.prepareParticipantProjects(conversation.repoPath, [nextParticipant]);
       conversation.metadata = {
         ...conversation.metadata,
         participants: [...participants, nextParticipant]
@@ -1457,6 +1473,9 @@ export class ChatService {
         : target.homeMachineId;
       if ((nextHomeMachineId ?? "") !== (target.homeMachineId ?? "") && this.chatParticipantHasRun(conversation, target.id)) {
         throw new Error("The machine is locked after the member has run. Remove and re-add the member to change it.");
+      }
+      if (nextHomeMachineId && nextHomeMachineId !== target.homeMachineId) {
+        await this.prepareParticipantProjects(conversation.repoPath, [{ homeMachineId: nextHomeMachineId }]);
       }
       const autoWatchRequested = Object.prototype.hasOwnProperty.call(request, "autoWatch");
       const autoWatchChanged = autoWatchRequested && (request.autoWatch === true) !== (target.autoWatch === true);

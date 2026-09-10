@@ -33,7 +33,7 @@ export function ChatParticipantRosterRow(props: {
   onJumpToLastMessage: (participant: ChatParticipant) => void;
   onUpdateParticipantRuntime: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">
   ) => void;
   onCompactParticipant: (participantId: string) => void;
   onRemoveParticipant: (participantId: string) => void;

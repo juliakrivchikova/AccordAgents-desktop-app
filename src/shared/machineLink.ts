@@ -480,6 +480,8 @@ export interface RemoveMachineRequest {
 export interface MachineRecord {
   id: string;
   name: string;
+  /** Stable association with the existing AWS instance; survives setup retries. */
+  awsInstanceId?: string;
   /** Relay device id of the machine (its chat-event origin id) once it has
    *  connected; empty until the first hello. */
   deviceId: string;

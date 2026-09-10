@@ -27,28 +27,8 @@ import {
   chatCliProviderLabel,
   chatInheritedCliSettingLabel
 } from "./chat-participant-drafts";
-import {
-  CHAT_PARTICIPANT_HOME_UNASSIGNED_LABEL,
-  chatParticipantHome,
-  chatParticipantHomeUnassignedMessage
-} from "../../../shared/chatParticipantHome";
-
-// The member's machine is shown by name wherever these controls appear. The
-// roster is small and rarely changes, so it is read once per app session.
-let machineNamesPromise: Promise<Map<string, string>> | undefined;
-
-function useMachineNames(): Map<string, string> {
-  const [names, setNames] = useState<Map<string, string>>(new Map());
-  useEffect(() => {
-    let cancelled = false;
-    machineNamesPromise ??= window.consensus.listMachines()
-      .then((result) => new Map(result.machines.map((machine) => [machine.id, machine.name])))
-      .catch(() => new Map<string, string>());
-    void machineNamesPromise.then((value) => { if (!cancelled) setNames(value); });
-    return () => { cancelled = true; };
-  }, []);
-  return names;
-}
+import { chatParticipantHomeIsUnassigned } from "../../../shared/chatParticipantHome";
+import { ParticipantRunLocation } from "./participant-run-location";
 
 const REASONING_DEFAULT_VALUE = "__default__";
 const MODEL_DEFAULT_VALUE = "__default_model__";
@@ -71,15 +51,12 @@ export function ParticipantRuntimeControls(props: {
   autoWatchPausedReason?: ChatParticipantWatcherPausedReason;
   roleParticipantDefaults?: ChatRoleParticipantDefaults;
   runLocationLocked: boolean;
-  /** Name of an enrolled machine, when the surface knows the roster. */
-  machineName?: (machineId: string) => string | undefined;
   onUpdate: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">
   ) => void;
 }): JSX.Element {
   const participant = props.participant;
-  const machineNames = useMachineNames();
   const mode = normalizeChatAgentMode(participant.agentMode);
   const reasoningValue = participant.reasoningEffort ?? REASONING_DEFAULT_VALUE;
   const cliSettingLabel = chatInheritedCliSettingLabel(participant.kind);
@@ -88,13 +65,14 @@ export function ParticipantRuntimeControls(props: {
 
   // Build the patch by key presence so an intentional reset (model: "") is forwarded
   // rather than collapsing back to the current value.
-  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">>): void {
+  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">>): void {
     props.onUpdate(participant.id, {
       model: "model" in patch ? patch.model : participant.model,
       reasoningEffort: "reasoningEffort" in patch ? patch.reasoningEffort : participant.reasoningEffort,
       agentMode: "agentMode" in patch ? patch.agentMode : participant.agentMode,
       permissions: "permissions" in patch ? patch.permissions : participant.permissions,
       remoteExecution: "remoteExecution" in patch ? patch.remoteExecution : participant.remoteExecution,
+      homeMachineId: "homeMachineId" in patch ? patch.homeMachineId : participant.homeMachineId,
       skipToolchainPreflight: "skipToolchainPreflight" in patch ? patch.skipToolchainPreflight : participant.skipToolchainPreflight,
       autoWatch: "autoWatch" in patch ? patch.autoWatch : participant.autoWatch
     });
@@ -118,23 +96,12 @@ export function ParticipantRuntimeControls(props: {
     ?? autoWatchPausedTooltip
     ?? (autoWatchOn ? "Auto-watch is enabled for this member." : "Let this member watch new chat messages and decide whether to act.");
   const autoWatchDisabled = props.disabled || Boolean(props.autoWatchDisabledReason);
-  const home = chatParticipantHome(participant);
-  const homeLabel = home.kind === "machine"
-    ? (machineNames.get(home.machineId) ?? props.machineName?.(home.machineId) ?? "Machine")
-    : home.kind === "unassigned" ? CHAT_PARTICIPANT_HOME_UNASSIGNED_LABEL : "This computer";
-  const homeTooltip = home.kind === "unassigned"
-    ? chatParticipantHomeUnassignedMessage(participant.handle)
-    : `@${participant.handle} runs on ${homeLabel}. Its machine is chosen in member settings.`;
 
   return (
     <div className="chat-runtime-controls" aria-label={`Runtime controls for ${chatParticipantDisplayName(participant)}`}>
-      <div className="chat-rt-toggleline">
-        <span className="chat-rt-toggle-label">Machine:</span>
-        <span
-          className={`chat-rt-toggle-value ${home.kind === "unassigned" ? "is-warning" : ""}`}
-          title={homeTooltip}
-        >{homeLabel}</span>
-      </div>
+      <ParticipantRunLocation kind={participant.kind} homeMachineId={participant.homeMachineId}
+        unassigned={chatParticipantHomeIsUnassigned(participant)} disabled={controlsDisabled}
+        locked={props.runLocationLocked} onChange={update} />
 
       <div className="chat-rt-group">
         <div className="chat-rt-group-title">Model &amp; permissions</div>

@@ -2094,6 +2094,7 @@ export interface ChatParticipantWatcherState {
 }
 
 export type ConversationMetadata = Record<string, unknown> & {
+  machineRepository?: { sourcePath: string; paths: Record<string, string> };
   activationProviderKind?: ChatProviderKind;
   activeRunParticipantIdsByRunId?: Record<string, string>;
   lastMessageByParticipant?: ChatLastMessageByParticipant;
@@ -2759,6 +2760,8 @@ export interface AppBridge {
   onArtifactsUpdated(callback: (event: ArtifactsUpdatedEvent) => void): () => void;
   // Machines transport: machines that host participants.
   listMachines(): Promise<MachineListResult>;
+  prepareCloudRun(request: import("./cloudRunPreparation").PrepareCloudRunRequest): Promise<import("./cloudRunPreparation").PrepareCloudRunResult>;
+  onCloudRunPreparationProgress(callback: (snapshot: import("./cloudRunPreparation").CloudRunPreparationProgress) => void): () => void;
   createMachine(request: CreateMachineRequest): Promise<CreateMachineResult>;
   removeMachine(request: RemoveMachineRequest): Promise<MachineListResult>;
   machineEnrollment(request: MachineEnrollmentRequest): Promise<CreateMachineResult>;

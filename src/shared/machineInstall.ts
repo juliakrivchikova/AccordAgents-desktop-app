@@ -140,6 +140,8 @@ export interface MachineInstallRecord {
   installedVersion?: string;
   installedDigest?: string;
   installedAt?: string;
+  /** Desktop project path to this machine's own checkout; never a write-back. */
+  projects?: Record<string, string>;
   lastOperation?: MachineInstallSnapshot;
 }
 
@@ -200,7 +202,7 @@ export interface MachineDrainReport {
   detail?: string;
 }
 
-export type MachineMirrorState = "absent" | "clean" | "dirty" | "unknown";
+export type MachineMirrorState = "absent" | "directory" | "clean" | "dirty" | "unknown";
 
 export interface MachineMirrorInspection {
   path: string;

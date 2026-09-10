@@ -1,11 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { machineMaintenanceCommand } from "./machineMaintenanceCommand";
+import { withMachineRsyncPath } from "./machineMaintenanceRsync";
 import { shellQuotePosix } from "./cloudRunWorkers";
+
+test("the actual rsync client transfers through the maintenance wrapper", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "maintenance-rsync-"));
+  try {
+    const source = path.join(dir, "source");
+    const destination = path.join(dir, "destination");
+    await mkdir(source); await mkdir(destination);
+    await writeFile(path.join(source, "payload.txt"), "runtime payload\n");
+    // SSH's transport is replaced with a local shell; rsync itself still builds
+    // and tokenizes --rsync-path. Passing a command straight to sh misses
+    // macOS rsync stripping the quotes before SSH joins its arguments.
+    const ssh = path.join(dir, "ssh.sh");
+    await writeFile(ssh, 'shift\nexec /bin/sh -c "$*"\n');
+    let wrapperPath = "";
+    await withMachineRsyncPath({ runtimePath: path.join(dir, "missing.cjs"), userDataDir: path.join(dir, "profile") }, run,
+      async wrapper => {
+        wrapperPath = wrapper!;
+        await new Promise<void>((resolve, reject) => execFile("rsync", ["-a", "--rsync-path", wrapper!,
+          "-e", `/bin/sh ${shellQuotePosix(ssh)}`, `${source}/`, `qa-host:${destination}/`],
+          { timeout: 10_000 }, error => error ? reject(error) : resolve()));
+      });
+    assert.equal(await readFile(path.join(destination, "payload.txt"), "utf8"), "runtime payload\n");
+    await assert.rejects(readFile(wrapperPath), /ENOENT/);
+    await assert.rejects(withMachineRsyncPath({ runtimePath: path.join(dir, "missing.cjs"), userDataDir: path.join(dir, "profile") }, run,
+      async wrapper => { wrapperPath = wrapper!; throw new Error("cancelled transfer"); }), /cancelled transfer/);
+    await assert.rejects(readFile(wrapperPath), /ENOENT/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
 
 test("guarded setup keeps payload on stdin and preserves rsync server arguments", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "maintenance-command-"));

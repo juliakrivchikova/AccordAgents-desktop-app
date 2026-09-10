@@ -98,6 +98,18 @@ class FakeSettings {
   }
 }
 
+test("Cloud selection refuses a replaced or missing instance without provisioning another", async () => {
+  const settings = new FakeSettings();
+  settings.credentials = OLD_CREDS;
+  settings.handle = OLD_HANDLE;
+  const client = new FakeEc2Client();
+  client.state = undefined;
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]));
+  await assert.rejects(service.ensureExistingWorkerForRun("i-other"), /instance changed/);
+  await assert.rejects(service.ensureExistingWorkerForRun(OLD_HANDLE.instanceId), /no longer available/);
+  assert.equal(client.runCount, 0);
+});
+
 class FakeEc2Client implements Ec2Client {
   importedKeyPairs: string[] = [];
   terminatedInstances: string[] = [];

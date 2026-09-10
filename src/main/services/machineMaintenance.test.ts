@@ -13,6 +13,22 @@ import { nativeHostIdentity } from "./nativeHostIdentity";
 import { NativeProcessRegistry } from "./nativeProcessRegistry";
 import { hasLiveCapturedPosixProcesses, readPosixProcessTableAsync } from "./processTermination";
 
+test("a completed maintenance command does not wait for its SSH peer to close stdin", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
+  const f = await fixture();
+  const stdin = new PassThrough(); const stdout = new PassThrough(); const stderr = new PassThrough();
+  const chunks: Buffer[] = []; stdout.on("data", chunk => chunks.push(chunk)); stderr.resume();
+  try {
+    const result = f.maintenance.run({ command: process.execPath,
+      args: ["-e", "process.stdin.once('data',data=>{process.stdout.write(data,()=>process.exit(0))})"],
+      env: process.env, stdin, stdout, stderr });
+    const payload = Buffer.from([0, 255, 254, 10, 128, 97]);
+    stdin.write(payload); // A duplex protocol waits for the server to finish first.
+    assert.equal(await Promise.race([result, new Promise((_, reject) => setTimeout(() => reject(new Error("maintenance waited for peer EOF")), 6000).unref())]), 0);
+    assert.deepEqual(Buffer.concat(chunks), payload);
+    assert.equal(await f.store.hasMaintenance(f.host.boot, 1000), false);
+  } finally { stdin.end(); await f.close(); }
+});
+
 test("maintenance stdin EOF lets its command finish and idle waits for the guardian receipt", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
   const f = await fixture();
   try {
@@ -139,7 +155,7 @@ async function eventually(check: () => boolean | Promise<boolean>): Promise<void
 
 async function sql(dbPath: string, statement: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = execFile("sqlite3", ["-batch", dbPath], error => error ? reject(error) : resolve());
+    const child = execFile("sqlite3", ["-batch", "-cmd", ".timeout 5000", dbPath], error => error ? reject(error) : resolve());
     child.stdin?.end(statement);
   });
 }

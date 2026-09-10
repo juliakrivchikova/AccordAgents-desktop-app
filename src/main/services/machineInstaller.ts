@@ -18,8 +18,9 @@
  * instead of forcing it, because the alternative is a duplicate executor.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
+import { withMachineRsyncPath } from "./machineMaintenanceRsync";
 import fs from "node:fs";
 import path from "node:path";
 import type { CloudRunWorkerDoctorReport, CloudRunWorkerSettings, CloudRunWorkerSetupProgress } from "../../shared/types";
@@ -53,6 +54,7 @@ import {
   machineInstallServiceScript,
   machineMirrorProbeScript,
   machinePrepareDirectoriesScript,
+  machinePublishMirrorScript,
   machineProbeScript,
   machineServiceLogScript,
   machineServiceUnit,
@@ -680,7 +682,8 @@ export class MachineInstallerService {
       serviceScope: existing?.serviceScope ?? "system",
       installedVersion: existing?.installedVersion,
       installedDigest: existing?.installedDigest,
-      installedAt: existing?.installedAt
+      installedAt: existing?.installedAt,
+      projects: existing?.projects
     };
   }
 
@@ -716,7 +719,7 @@ export class MachineInstallerService {
         message: `The machine's copy of this project has ${inspection.dirtyPaths.length} uncommitted change${inspection.dirtyPaths.length === 1 ? "" : "s"}. It was left untouched; commit or push them on the machine first.`
       };
     }
-    if (inspection.state === "clean") {
+    if (inspection.state === "clean" || inspection.state === "directory") {
       return {
         inspection,
         action: "reused",
@@ -733,16 +736,27 @@ export class MachineInstallerService {
       };
     }
     const repoPath = remoteMirrorPath(`${record.installRoot}/workspace`, request.localPath);
-    await this.mirrorSync.syncUp({
-      worker: { ...record.target, host: record.target.host },
-      localPath: request.localPath,
-      remotePath: repoPath,
-      maintenance: maintenanceFor(record)
-    });
+    const stagedPath = `${repoPath}.bootstrap-${randomUUID()}`;
+    const maintenance = maintenanceFor(record);
+    try {
+      await this.mirrorSync.syncUp({
+        worker: { ...record.target, host: record.target.host },
+        localPath: request.localPath,
+        remotePath: stagedPath,
+        maintenance
+      });
+      await this.sshExec({ target: record.target, script: machinePublishMirrorScript(stagedPath, repoPath),
+        timeoutMs: SHORT_TIMEOUT_MS, maintenance });
+    } finally {
+      // This random staging directory belongs only to this copy. A failed
+      // transfer/restart must not expose a half-copied project as runnable.
+      await this.sshExec({ target: record.target, script: `rm -rf -- ${shellQuotePosix(stagedPath)}`,
+        timeoutMs: SHORT_TIMEOUT_MS, maintenance }).catch(() => undefined);
+    }
     return {
       inspection: await this.inspectProjectMirror(request.machineId, request.localPath),
       action: "created",
-      message: "The project was copied to the machine. From now on it is the machine's own working copy: changes travel through git, never by copying again."
+      message: "The project was copied to the machine. From now on it is the machine's own working copy; it will not be overwritten by another copy."
     };
   }
 
@@ -1092,18 +1106,20 @@ async function defaultBundleUpload(request: {
     `bash -c ${shellQuotePosix(`umask 077; mkdir -p ${shellQuotePosix(request.remoteDir)}`)}`)], {
     timeoutMs: 60_000
   });
-  await runCommand("rsync", [
+  await withMachineRsyncPath(request.maintenance, (command, input) => runCommand("ssh", [
+    ...sshArgs, target, command
+  ], { input, timeoutMs: 60_000 }), (rsyncPath) => runCommand("rsync", [
     "-az",
     "--delete",
     // Dependencies are installed inside the release directory on the machine;
     // deleting them on every re-upload would reinstall them for nothing.
     "--exclude=node_modules",
-    ...(request.maintenance ? ["--rsync-path", machineMaintenanceCommand(request.maintenance, "rsync")] : []),
+    ...(rsyncPath ? ["--rsync-path", rsyncPath] : []),
     "-e",
     rsyncRshCommand(sshArgs),
     `${path.resolve(request.localDir)}/`,
     `${target}:${escapeRemoteRsyncPath(request.remoteDir)}/`
-  ], { timeoutMs: request.timeoutMs });
+  ], { timeoutMs: request.timeoutMs }));
 }
 
 /** Replaces base64/base64url/hex runs long enough to be a key. Deliberately

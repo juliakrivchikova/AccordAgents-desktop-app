@@ -2872,6 +2872,7 @@ export class SettingsService {
       return [{
         id: record.id.trim(),
         name: record.name.trim() || "Machine",
+        ...(typeof record.awsInstanceId === "string" && /^i-[a-f0-9]+$/.test(record.awsInstanceId) ? { awsInstanceId: record.awsInstanceId } : {}),
         deviceId: typeof record.deviceId === "string" ? record.deviceId : "",
         pairingKey: record.pairingKey.trim(),
         createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date(0).toISOString(),

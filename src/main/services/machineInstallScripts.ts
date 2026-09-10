@@ -60,7 +60,7 @@ export function machineInstallLayout(options: {
 /** `systemctl` needs a session bus for `--user` over SSH, and a system unit
  *  started as this user needs an explicit HOME. Both are set once here. */
 const PREAMBLE = [
-  "set -u",
+  "set -eu",
   ': "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"',
   "export XDG_RUNTIME_DIR"
 ].join("\n");
@@ -105,8 +105,8 @@ function scanProcessesFunction(rootExpression: string, userDataMatchExpression: 
     "  for p in $(own_pids 'accordagents-machine\\.cjs|nativeProcessSupervisor\\.cjs'); do",
     "    line=$(cmdline_of \"$p\")",
     "    case \"$line\" in",
-    "      *\"$ROOT_MATCH\"*accordagents-machine.cjs*) RUNTIME=\"$RUNTIME $p\" ;;",
-    "      *\"$ROOT_MATCH\"*nativeProcessSupervisor.cjs*) SUPERVISOR=\"$SUPERVISOR $p\" ;;",
+    "      *\"$ROOT_MATCH/\"*accordagents-machine.cjs*) RUNTIME=\"$RUNTIME $p\" ;;",
+    "      *\"$ROOT_MATCH/\"*nativeProcessSupervisor.cjs*) SUPERVISOR=\"$SUPERVISOR $p\" ;;",
     "    esac",
     "  done",
     "  for p in $(own_pids 'codex|claude'); do",
@@ -399,11 +399,14 @@ export function machineServiceUnit(options: MachineServiceUnitOptions): string {
 /** Installs the unit from stdin and enables it. Nothing is started here. */
 export function machineInstallServiceScript(layout: MachineInstallLayout, user: string): string {
   const unit = `${layout.serviceName}.service`;
+  // The guardian forwards stdin as a socket. `install /dev/stdin` cannot open
+  // that on Linux (ENXIO); read the stream before invoking install instead.
+  const input = [PREAMBLE, "UNIT_INPUT=$(mktemp)", 'trap \'rm -f "$UNIT_INPUT"\' EXIT', 'cat > "$UNIT_INPUT"'];
   if (layout.serviceScope === "user") {
     return [
-      PREAMBLE,
+      ...input,
       `mkdir -p "$HOME/.config/systemd/user"`,
-      `install -m 0644 /dev/stdin "$HOME/.config/systemd/user/${unit}"`,
+      `install -m 0644 "$UNIT_INPUT" "$HOME/.config/systemd/user/${unit}"`,
       "systemctl --user daemon-reload",
       `systemctl --user enable ${shellQuotePosix(unit)}`,
       // Without lingering the runtime stops when the last session closes. It is
@@ -412,8 +415,8 @@ export function machineInstallServiceScript(layout: MachineInstallLayout, user: 
     ].join("\n");
   }
   return [
-    PREAMBLE,
-    `sudo -n install -m 0644 /dev/stdin /etc/systemd/system/${unit}`,
+    ...input,
+    `sudo -n install -m 0644 "$UNIT_INPUT" /etc/systemd/system/${unit}`,
     "sudo -n systemctl daemon-reload",
     `sudo -n systemctl enable ${shellQuotePosix(unit)}`
   ].join("\n");
@@ -518,7 +521,10 @@ export function machineMirrorProbeScript(mirrorRepoPath: string): string {
   return [
     PREAMBLE,
     `printf 'path=%s\\n' ${repo}`,
-    `if [ ! -e ${repo}/.git ]; then printf 'state=absent\\n'; exit 0; fi`,
+    `if [ ! -e ${repo} ] && [ ! -L ${repo} ]; then printf 'state=absent\\n'; exit 0; fi`,
+    `if [ ! -d ${repo} ] || [ -L ${repo} ]; then printf 'state=unknown\\n'; exit 0; fi`,
+    `if [ ! -e ${repo}/.git ]; then printf 'state=directory\\n'; exit 0; fi`,
+    `if ! git -C ${repo} rev-parse --is-inside-work-tree >/dev/null 2>&1; then printf 'state=unknown\\n'; exit 0; fi`,
     `printf 'branch=%s\\n' "$(git -C ${repo} rev-parse --abbrev-ref HEAD 2>/dev/null || true)"`,
     `printf 'head=%s\\n' "$(git -C ${repo} rev-parse HEAD 2>/dev/null || true)"`,
     `git -C ${repo} status --porcelain 2>/dev/null | head -n 200 | sed 's/^/dirty=/' || true`,
@@ -552,7 +558,8 @@ export function parseMachineMirrorProbe(stdout: string): MachineMirrorInspection
   const present = values.get("state") === "present";
   const path = values.get("path") ?? "";
   if (!present) {
-    return { path, state: values.get("state") === "absent" ? "absent" : "unknown", worktrees: [], dirtyPaths: [] };
+    const state = values.get("state");
+    return { path, state: state === "absent" || state === "directory" ? state : "unknown", worktrees: [], dirtyPaths: [] };
   }
   // The mirror's own checkout is listed by `git worktree list` as well; the
   // interesting ones are the participant-created siblings.
@@ -565,4 +572,15 @@ export function parseMachineMirrorProbe(stdout: string): MachineMirrorInspection
     branch: values.get("branch") || undefined,
     head: values.get("head") || undefined
   };
+}
+
+/** Linux rename publishes a complete first copy, never over a machine's work. */
+export function machinePublishMirrorScript(stagedPath: string, repoPath: string): string {
+  const staged = shellQuotePosix(stagedPath);
+  const repo = shellQuotePosix(repoPath);
+  return [PREAMBLE,
+    `if [ -e ${repo} ] || [ -L ${repo} ]; then echo 'The machine already has this project; nothing was replaced.' >&2; exit 1; fi`,
+    `mv -Tn -- ${staged} ${repo}`,
+    `if [ -e ${staged} ]; then echo 'The project appeared during setup; nothing was replaced.' >&2; exit 1; fi`
+  ].join("\n");
 }

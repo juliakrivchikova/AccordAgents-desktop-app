@@ -117,6 +117,7 @@ function harness(options: {
   drain?: string;
   connected?: boolean;
   mirror?: string;
+  mirrorCopyError?: string;
   bundleDir?: string;
   doctor?: CloudRunWorkerDoctorReport;
 } = {}): Harness {
@@ -178,7 +179,10 @@ function harness(options: {
     },
     uploadBundle: async (request) => { uploads.push({ remoteDir: request.remoteDir }); },
     mirrorSync: {
-      async syncUp(request) { syncedUp.push(request.remotePath); },
+      async syncUp(request) {
+        syncedUp.push(request.remotePath);
+        if (options.mirrorCopyError) throw new Error(options.mirrorCopyError);
+      },
       async syncDown() { throw new Error("syncDown must never run during a machine install."); }
     }
   });
@@ -707,7 +711,42 @@ test("a project the machine does not have is bootstrapped once", async () => {
   const result = await h.service.bootstrapProjectMirror({ machineId: "m1", localPath: process.cwd() });
   assert.equal(result.action, "created");
   assert.equal(h.syncedUp.length, 1);
-  assert.match(h.syncedUp[0], /\/workspace\/mirrors\/.+\/repo$/);
+  assert.match(h.syncedUp[0], /\/workspace\/mirrors\/.+\/repo\.bootstrap-[a-f0-9-]+$/);
+  assert.ok(h.calls.some(call => call.script.includes("mv -Tn --") && call.maintenance));
+});
+
+test("ordinary folders are present projects and must never be copied over", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cloud-folder-"));
+  try {
+    const repo = path.join(root, "repo");
+    fs.mkdirSync(repo);
+    fs.writeFileSync(path.join(repo, "notes.txt"), "machine edits");
+    const output = execFileSync("sh", ["-s"], { input: machineMirrorProbeScript(repo), encoding: "utf8" });
+    assert.equal(parseMachineMirrorProbe(output).state, "directory");
+    const h = harness({ mirror: output });
+    h.records.set("m1", { machineId: "m1", target: TARGET, ...LAYOUT });
+    const result = await h.service.bootstrapProjectMirror({ machineId: "m1", localPath: root });
+    assert.equal(result.action, "reused");
+    assert.deepEqual(h.syncedUp, []);
+    assert.equal(fs.readFileSync(path.join(repo, "notes.txt"), "utf8"), "machine edits");
+    fs.writeFileSync(path.join(repo, ".git"), "gitdir: /missing/checkout\n");
+    assert.equal(parseMachineMirrorProbe(execFileSync("sh", ["-s"], {
+      input: machineMirrorProbeScript(repo), encoding: "utf8"
+    })).state, "unknown");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a failed first copy never publishes a partial project and retry stages a fresh copy", async () => {
+  const options = { mirrorCopyError: "connection lost" as string | undefined };
+  const h = harness(options);
+  h.records.set("m1", { machineId: "m1", target: TARGET, ...LAYOUT });
+  await assert.rejects(h.service.bootstrapProjectMirror({ machineId: "m1", localPath: process.cwd() }), /connection lost/);
+  assert.ok(!h.calls.some(call => call.script.includes("mv -Tn --")));
+  assert.ok(h.calls.some(call => call.script === `rm -rf -- '${h.syncedUp[0]}'`));
+  options.mirrorCopyError = undefined;
+  await h.service.bootstrapProjectMirror({ machineId: "m1", localPath: process.cwd() });
+  assert.notEqual(h.syncedUp[0], h.syncedUp[1]);
+  assert.ok(h.calls.some(call => call.script.includes("mv -Tn --")));
 });
 
 

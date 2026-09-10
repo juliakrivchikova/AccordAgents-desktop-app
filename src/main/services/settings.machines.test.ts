@@ -106,6 +106,20 @@ test("concurrent machine runtimes publish one complete secret key and corrupt ke
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test("AWS machine association and prepared project paths survive settings reload", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-cloud-selection-"));
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  try {
+    const service = new SettingsService();
+    await service.saveMachine({ id: "cloud", name: "Cloud", deviceId: "", pairingKey: "test", createdAt: "now", awsInstanceId: "i-abc123" });
+    await service.saveMachineInstall({ machineId: "cloud", target: { host: "198.51.100.8" }, installRoot: "/home/ubuntu/app",
+      userDataDir: "/home/ubuntu/data", serviceName: "test", serviceScope: "user", projects: { "/Users/test/repo": "/home/ubuntu/repo" } });
+    const restarted = new SettingsService();
+    assert.equal((await restarted.listMachines())[0].awsInstanceId, "i-abc123");
+    assert.equal((await restarted.getMachineInstall("cloud"))?.projects?.["/Users/test/repo"], "/home/ubuntu/repo");
+  } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
+});
+
 test("a machine settings snapshot applies its environment in one durable write and fails without partial changes", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-import-"));
   const file = path.join(dir, "settings.json");

@@ -1,3 +1,4 @@
+import { conversationOnMachine } from "../../shared/machineRepository";
 /**
  * Machine link, machine side (machines transport, work items 2 and 5).
  *
@@ -1136,7 +1137,7 @@ export class MachineHostService {
       // produced meanwhile: the desktop's messages win by id, ours are kept,
       // and a reply finished here is never demoted by a stale pending bubble.
       const messages = mergeReplicatedMessages(existing?.messages ?? [], incoming.messages, [], this.ownedParticipantIds(existing ?? incoming));
-      return { ...incoming, messages, metadata };
+      return conversationOnMachine({ ...incoming, messages, metadata }, this.homeMachineId);
     });
   }
 
@@ -1206,7 +1207,7 @@ export class MachineHostService {
         }
         const messages = mergeReplicatedMessages(existing.messages, delta.messages, delta.removedMessageIds ?? [], this.ownedParticipantIds(existing));
         const metadata = delta.metadata ? this.mergeMetadata(existing, delta.metadata) : existing.metadata;
-        return { ...existing, messages, metadata, updatedAt: delta.updatedAt };
+        return conversationOnMachine({ ...existing, messages, metadata, updatedAt: delta.updatedAt }, this.homeMachineId);
       });
       if (durable && !missing) await this.saveIncomingInventory(delta.conversationId, delta.messages, delta.removedMessageIds);
     } catch (error) {

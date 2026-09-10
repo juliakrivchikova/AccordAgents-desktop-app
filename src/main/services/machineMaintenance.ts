@@ -25,15 +25,23 @@ export class MachineMaintenance {
       child.once("close", code => resolve(code ?? 1));
       child.once("error", reject);
     });
-    const incoming = pipeline(options.stdin, child.stdin);
+    const inputController = new AbortController();
+    const incoming = pipeline(options.stdin, child.stdin, { signal: inputController.signal });
     const outgoing = Promise.all([
       pipeline(child.stdout, options.stdout, { end: false }),
       pipeline(child.stderr, options.stderr, { end: false })
     ]);
     try {
-      const [code] = await Promise.all([exited, incoming, outgoing]);
+      // Duplex clients such as rsync wait for the server to exit before they
+      // close SSH stdin. Native closure is the completion boundary; waiting for
+      // peer EOF as well deadlocks after the actual command has already exited.
+      const code = await Promise.race([exited, incoming.then(() => exited), outgoing.then(() => exited)]);
+      await outgoing;
+      inputController.abort();
+      await incoming.catch(() => undefined);
       return code;
     } finally {
+      inputController.abort();
       // Also handles broken SSH output/input: first close native work, then
       // allow a future idle check. Never drop the hold on an unconfirmed kill.
       await confirmNativeProcessClosed(child);

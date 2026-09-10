@@ -45,6 +45,7 @@ import type { MachineTrustRoster, TrustedPeerAccess } from "../../shared/machine
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 
 export interface MachineLinkOptions {
+  repositoryPaths?: (sourcePath: string) => Promise<Record<string, string>>;
   appVersion: string;
   desktopDeviceId: string;
   eventStorage: StorageService;
@@ -1047,6 +1048,13 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   private async replicateNow(connection: MachineConnection, conversation: Conversation): Promise<void> {
+    if (conversation.repoPath && this.options.repositoryPaths) {
+      const sourcePath = conversation.metadata.machineRepository?.sourcePath ?? conversation.repoPath;
+      const paths = await this.options.repositoryPaths(sourcePath);
+      if (Object.keys(paths).length) {
+        conversation = { ...conversation, metadata: { ...conversation.metadata, machineRepository: { sourcePath, paths } } };
+      }
+    }
     const known = connection.replicated.get(conversation.id);
     if (!known) {
       // A first copy travels as the conversation shell plus bounded message

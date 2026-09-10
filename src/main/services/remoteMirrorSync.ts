@@ -5,6 +5,7 @@ import { buildCloudRunSshTarget, cloudRunSshOptionArgs, shellQuotePosix } from "
 import { CommandError, runCommand } from "./command";
 import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
 import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
+import { withMachineRsyncPath } from "./machineMaintenanceRsync";
 
 export const REMOTE_MIRROR_DIRNAME = "mirrors";
 export const REMOTE_MIRROR_SYNC_TIMEOUT_MS = 30 * 60_000;
@@ -224,19 +225,21 @@ export const defaultRemoteMirrorSync: RemoteMirrorSyncRunner = {
         signal: request.signal
       });
       await assertRemoteMirrorHasSpace(request, localDir, target, sshArgs);
-      await runCommand("rsync", buildMirrorUpSyncRsyncArgs({
+      await withMachineRsyncPath(request.maintenance, (command, input) => runCommand("ssh", [
+        ...sshArgs, target, command
+      ], { input, timeoutMs: 30_000 }), (rsyncPath) => runCommand("rsync", buildMirrorUpSyncRsyncArgs({
         progressArgs,
         rshCommand: rsyncRshCommand(sshArgs),
         source: `${localDir}/`,
         destination: `${target}:${escapeRemoteRsyncPath(request.remotePath)}/`,
         contentMode: request.contentMode,
-        rsyncPath: request.maintenance ? machineMaintenanceCommand(request.maintenance, "rsync") : undefined
+        rsyncPath
       }), {
         timeoutMs: request.timeoutMs ?? REMOTE_MIRROR_SYNC_TIMEOUT_MS,
         signal: request.signal,
         onStdout: emitProgress,
         onStderr: emitProgress
-      });
+      }));
       await Promise.allSettled(pendingProgress);
     } catch (error) {
       await Promise.allSettled(pendingProgress);

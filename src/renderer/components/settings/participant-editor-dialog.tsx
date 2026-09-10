@@ -19,8 +19,8 @@ import {
   ChatParticipantSpecRow
 } from "../chat/chat-participant-config-panel";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
-import type { MachineRecord } from "../../../shared/machineLink";
-import { CHAT_PARTICIPANT_HOME_UNASSIGNED_LABEL, chatParticipantHomeIsUnassigned } from "../../../shared/chatParticipantHome";
+import { ParticipantRunLocation } from "../chat/participant-run-location";
+import { chatParticipantHomeIsUnassigned } from "../../../shared/chatParticipantHome";
 import { CHAT_AGENT_MODE_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatCliProviderLabel, chatProviderSupportsCloudRun, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 import {
@@ -53,22 +53,7 @@ export function ParticipantEditorDialog(props: {
     [participant?.id, props.settings.chatParticipantConfigs]
   );
   const [draft, setDraft] = useState<ChatParticipantDraft>(() => initialDraft(props.settings, participant, existingHandles));
-  // Machines transport: enrolled computers a member can live on.
-  const [machines, setMachines] = useState<MachineRecord[]>([]);
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-    let cancelled = false;
-    void window.consensus.listMachines().then((result) => {
-      if (!cancelled) {
-        setMachines(result.machines);
-      }
-    }).catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [open]);
+  const [preparingCloud, setPreparingCloud] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -87,7 +72,7 @@ export function ParticipantEditorDialog(props: {
   const changed = !participant || !sameParticipantDraft(normalized, participant);
   const validation = validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs, existingHandles, props.settings.chatBehaviorRules)
     ?? validateChatCliAgents([normalized], props.agents, props.settings.providers);
-  const canSave = changed && !validation && !saving;
+  const canSave = changed && !validation && !saving && !preparingCloud;
   const roleLabel = displayChatRoleLabel(
     props.settings.chatRoleConfigs.find((role) => role.id === draft.roleConfigId),
     draft.roleConfigId
@@ -224,13 +209,11 @@ export function ParticipantEditorDialog(props: {
               onSelect={(value) => patchDraft({ kind: value as ChatProviderKind })}
             />
             {chatProviderSupportsCloudRun(draft.kind) && (
-              <ChatParticipantInlineSelectRow
-                label="Machine"
-                value={machineSelectionLabel(draft, machines)}
-                current={machineSelectionValue(draft)}
-                options={machineSelectionOptions(machines, draft)}
-                onSelect={(value) => patchDraft(machineSelectionPatch(value))}
-              />
+              <ChatParticipantSpecRow label="Run on">
+                <ParticipantRunLocation kind={draft.kind} homeMachineId={draft.homeMachineId} hideLabel
+                  unassigned={chatParticipantHomeIsUnassigned(draft)} disabled={saving}
+                  onPreparingChange={setPreparingCloud} onChange={patchDraft} />
+              </ChatParticipantSpecRow>
             )}
             <ChatParticipantInlineModelRow
               kind={draft.kind}
@@ -344,46 +327,4 @@ export function ParticipantEditorDialog(props: {
     )}
     </>
   );
-}
-
-// The "Machine" row is where a member lives: this computer or an enrolled
-// machine. A member that was set to run on the old cloud worker has no machine
-// until the User picks one, and says so here rather than quietly running here.
-const THIS_COMPUTER_VALUE = "local";
-const UNASSIGNED_VALUE = "unassigned";
-const MACHINE_VALUE_PREFIX = "machine:";
-
-function machineSelectionValue(draft: ChatParticipantDraft): string {
-  if (draft.homeMachineId) {
-    return `${MACHINE_VALUE_PREFIX}${draft.homeMachineId}`;
-  }
-  return chatParticipantHomeIsUnassigned(draft) ? UNASSIGNED_VALUE : THIS_COMPUTER_VALUE;
-}
-
-function machineSelectionLabel(draft: ChatParticipantDraft, machines: MachineRecord[]): string {
-  if (draft.homeMachineId) {
-    return machines.find((machine) => machine.id === draft.homeMachineId)?.name ?? "Machine (removed)";
-  }
-  return chatParticipantHomeIsUnassigned(draft) ? CHAT_PARTICIPANT_HOME_UNASSIGNED_LABEL : "This computer";
-}
-
-function machineSelectionOptions(machines: MachineRecord[], draft: ChatParticipantDraft): Array<{ value: string; label: string }> {
-  return [
-    // Only shown while it is this member's actual state, so it cannot be chosen.
-    ...(chatParticipantHomeIsUnassigned(draft)
-      ? [{ value: UNASSIGNED_VALUE, label: CHAT_PARTICIPANT_HOME_UNASSIGNED_LABEL }]
-      : []),
-    { value: THIS_COMPUTER_VALUE, label: "This computer" },
-    ...machines.map((machine) => ({ value: `${MACHINE_VALUE_PREFIX}${machine.id}`, label: machine.name }))
-  ];
-}
-
-function machineSelectionPatch(value: string): Partial<ChatParticipantDraft> {
-  if (value.startsWith(MACHINE_VALUE_PREFIX)) {
-    return { homeMachineId: value.slice(MACHINE_VALUE_PREFIX.length), remoteExecution: "local" };
-  }
-  if (value === UNASSIGNED_VALUE) {
-    return {};
-  }
-  return { homeMachineId: undefined, remoteExecution: "local" };
 }

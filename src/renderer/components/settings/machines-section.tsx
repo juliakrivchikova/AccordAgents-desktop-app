@@ -174,8 +174,8 @@ export function MachinesSection(): JSX.Element {
           <div className="gen-row-text">
             <div className="gen-row-title">Computers that host members</div>
             <div className="gen-row-desc">
-              A machine runs AccordAgents without a window and hosts the members you assign to it. Install the enrollment file on the
-              computer, start the machine runtime, and it connects through the relay like your phone does.
+              Choose Cloud run in a member’s settings to use your running AWS instance. The app connects and prepares it for you.
+              Add other computers here to run members on them.
             </div>
           </div>
           <div className="gen-row-control machines-add">

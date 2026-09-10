@@ -493,15 +493,23 @@ export class CloudRunAwsService {
     return this.status();
   }
 
-  async ensureWorkerForRun(): Promise<CloudRunWorkerSettings> {
+  async ensureExistingWorkerForRun(instanceId: string): Promise<CloudRunWorkerSettings> {
+    return this.ensureWorkerForRun(instanceId);
+  }
+
+  async ensureWorkerForRun(expectedInstanceId?: string): Promise<CloudRunWorkerSettings> {
     const credentials = await this.settings.getAwsWorkerCredentials();
     const settings = await this.settings.getPublicSettings();
     if (!credentials) throw new Error("The AWS worker is not configured. Start it in Settings first.");
     let handle = settings.cloudRuns.awsHandle;
+    if (expectedInstanceId && handle?.instanceId !== expectedInstanceId) {
+      throw new Error("The selected AWS instance changed. Select Cloud run again.");
+    }
     let info = handle
       ? await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId)
       : undefined;
     if (!handle || !info || info.state === "terminated") {
+      if (expectedInstanceId) throw new Error("The selected AWS instance is no longer available. Check it in Settings.");
       const prepared = await this.resumePendingVolumeExpansion(
         await this.prepareWorker({ operationId: `run-${Date.now()}` })
       );

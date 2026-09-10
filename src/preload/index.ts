@@ -228,6 +228,12 @@ const bridge: AppBridge = {
   updateArtifactDraftRoster: (request: UpdateArtifactDraftRosterRequest) => ipcRenderer.invoke("artifacts:drafts:set-roster", request),
   publishArtifact: (request: PublishArtifactRequest) => ipcRenderer.invoke("artifacts:publish", request),
   listMachines: (): Promise<MachineListResult> => ipcRenderer.invoke("machines:list"),
+  prepareCloudRun: (request) => ipcRenderer.invoke("machines:prepare-cloud-run", request),
+  onCloudRunPreparationProgress: (callback) => {
+    const listener = (_event: unknown, snapshot: import("../shared/cloudRunPreparation").CloudRunPreparationProgress): void => callback(snapshot);
+    ipcRenderer.on("machines:cloud-run-progress", listener);
+    return () => ipcRenderer.off("machines:cloud-run-progress", listener);
+  },
   createMachine: (request: CreateMachineRequest): Promise<CreateMachineResult> => ipcRenderer.invoke("machines:create", request),
   removeMachine: (request: RemoveMachineRequest): Promise<MachineListResult> => ipcRenderer.invoke("machines:remove", request),
   machineEnrollment: (request: MachineEnrollmentRequest): Promise<CreateMachineResult> => ipcRenderer.invoke("machines:enrollment", request),

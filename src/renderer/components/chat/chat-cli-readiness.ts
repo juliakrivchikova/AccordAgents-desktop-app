@@ -6,12 +6,12 @@ import {
 } from "../../../shared/cliReadiness";
 
 export function validateChatCliAgents(
-  drafts: Array<{ kind: AgentHealth["kind"]; remoteExecution?: "local" | "remote" | "inherit" }>,
+  drafts: Array<{ kind: AgentHealth["kind"]; remoteExecution?: "local" | "remote" | "inherit"; homeMachineId?: string }>,
   agents: AgentHealth[],
   providers: Array<Pick<ProviderSettings, "kind" | "enabled">> = []
 ): string | undefined {
   for (const draft of drafts) {
-    if (draft.remoteExecution === "remote") {
+    if (draft.homeMachineId || draft.remoteExecution === "remote") {
       continue;
     }
     const readiness = readinessForProvider(draft.kind, agents, providers);

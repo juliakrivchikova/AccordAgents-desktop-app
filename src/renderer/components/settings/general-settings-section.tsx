@@ -314,8 +314,8 @@ function CloudRunsControl(props: {
         <div className="gen-row-text">
           <div className="gen-row-title">Machine instance</div>
           <div className="gen-row-desc">
-            The computer a machine runs on, created and stopped from here. Members choose the machine
-            they live on; this is where that machine&apos;s instance comes from.
+            Start your AWS instance here, then choose Cloud run in a member&apos;s settings. The app prepares
+            the cloud runtime and connects the member automatically.
           </div>
         </div>
       </div>
