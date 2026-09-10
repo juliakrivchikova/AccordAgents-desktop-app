@@ -6,7 +6,7 @@ import {
 } from "../../shared/chatParticipantRequestThreads";
 import { RelayTunnelClient, type RelayTunnelMessage } from "./relayTunnelClient";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
-import { sameControlCards, type MobileControlCard } from "../../shared/mobileControlCards";
+import { controlCardsFromConversation, sameControlCards, type MobileControlCard } from "../../shared/mobileControlCards";
 
 type ProgressCallback = (progress: ReviewProgress) => void;
 
@@ -116,7 +116,7 @@ export interface MobileRelayChatCatalog {
   listTimeline(conversationId: string): Promise<MobileTimelineEvent[]>;
   /** Cards a member is waiting on in this chat. */
   listControlCards?(conversationId: string): Promise<MobileControlCard[]>;
-  isConversationAllowed?(conversationId: string): Promise<boolean> | boolean;
+  isConversationAllowed?(conversationId: string, snapshot?: Conversation): Promise<boolean> | boolean;
 }
 
 interface MobileOutboxRequest {
@@ -751,12 +751,12 @@ export class MobileRelayControlService {
     return this.options.conversationId ? conversationId === this.options.conversationId : true;
   }
 
-  private async isConversationAllowed(conversationId: string): Promise<boolean> {
+  private async isConversationAllowed(conversationId: string, snapshot?: Conversation): Promise<boolean> {
     if (this.options.conversationId) {
       return conversationId === this.options.conversationId;
     }
     if (this.catalog?.isConversationAllowed) {
-      return this.catalog.isConversationAllowed(conversationId);
+      return this.catalog.isConversationAllowed(conversationId, snapshot);
     }
     return true;
   }
@@ -877,17 +877,15 @@ export class MobileRelayControlService {
     if (!this.isActive()) {
       return;
     }
-    if (!(await this.isConversationAllowed(conversation.id))) {
+    if (!(await this.isConversationAllowed(conversation.id, conversation))) {
       return;
     }
     const events = timelineEventsFromSnapshot(conversation);
-    if (events.length === 0) {
-      return;
-    }
     await this.sendTimelineBatch(`timeline:${conversation.id}:snapshot:${conversation.updatedAt}`, {
       type: "mobile.timeline.events",
       conversationId: conversation.id,
-      events
+      events,
+      cards: controlCardsFromConversation(conversation)
     }, { runFinished, markTerminalParticipant: seenBefore });
   }
 
@@ -1069,6 +1067,12 @@ export class MobileRelayControlService {
     if (!this.isActive()) {
       return;
     }
+    // There is no recipient for transient text while disconnected. Do not
+    // queue a database read or mark it delivered then.
+    if (options?.liveOnly === true && !this.connected) {
+      this.onLiveDiagnostic?.({ kind: "skipped-disconnected", logicalMessageId, events: timeline.events.length, bytes: 0, rendezvousId: this.options.rendezvousId });
+      return;
+    }
     const events = timeline.events.filter((event) => {
       const id = event.messageId?.trim() || event.id;
       const signature = timelineEventDeliverySignature(event);
@@ -1081,7 +1085,13 @@ export class MobileRelayControlService {
     // A card that appeared, changed or was answered is news even when every
     // message row has already been delivered: without this the phone would
     // never learn that a member is waiting on it.
-    const cards = await this.controlCardsFor(timeline.conversationId);
+    // Tokens change text, not persisted decisions. Re-reading the entire chat
+    // for every token and phone starved all other SQLite operations. Saved
+    // snapshots already carry cards; explicit reads/terminal reconciliation
+    // still consult the catalog when they have no snapshot.
+    const cards = timeline.cards ?? (options?.liveOnly === true
+      ? undefined
+      : await this.controlCardsFor(timeline.conversationId));
     const cardsChanged = cards !== undefined
       && !sameControlCards(this.lastControlCardsByConversation.get(timeline.conversationId ?? "") ?? [], cards);
     if (cardsChanged) {
@@ -1116,7 +1126,8 @@ export class MobileRelayControlService {
       const runFinished = options?.runFinished === true || newlyFinishedRunIds.length > 0;
       await this.timelineSink.publishTimeline({
         ...timeline,
-        events
+        events,
+        ...(cards ? { cards } : {})
       }, { ...options, runFinished }).catch(() => {
         // Relay delivery should not fail merely because durable timeline sync is temporarily unavailable.
       });

@@ -6,6 +6,21 @@ import { once } from "node:events";
 import test from "node:test";
 import { SqliteSession } from "./sqliteSession";
 
+test("a large history response and the next queued query keep separate exact results", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-sqlite-large-history-"));
+  const db = new SqliteSession("sqlite3", path.join(dir, "state.db"), 1000);
+  try {
+    const size = 16 * 1024 * 1024;
+    const [large, next] = await Promise.all([
+      db.run(`select hex(zeroblob(${size / 2})) as history;`, "json", 15000),
+      db.run("select 'next query' as result;", "json", 15000)
+    ]);
+    assert.equal(JSON.parse(large)[0].history, "0".repeat(size));
+    assert.deepEqual(JSON.parse(next), [{ result: "next query" }]);
+    assert.equal(await db.run("select 'line 1' || char(10) || 'line 2';", "list", 5000), "line 1\nline 2\n");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("reused SQLite process keeps independent transactions, temporary tables and UTF-8 output", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-sqlite-session-"));
   const db = new SqliteSession("sqlite3", path.join(dir, "quoted \"name' Ж.db"), 1000);

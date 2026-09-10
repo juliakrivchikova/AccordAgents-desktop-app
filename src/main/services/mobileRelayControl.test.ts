@@ -15,6 +15,87 @@ const { createReferenceRelayServer } = requireScript(path.join(process.cwd(), "s
   };
 };
 
+test("live text never queues chat-history reads, offline or after reconnect", async () => {
+  const key = Buffer.from("p".repeat(32)).toString("base64url");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  let cardReads = 0;
+  const desktop = new MobileRelayControlService({
+    relayUrl: address.url, rendezvousId: "rv-no-history-reads", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: key, conversationId: "conversation-1", streamId: "route-no-history:phone"
+  }, sender([]), {
+    async listChats() { return []; },
+    async listTimeline() { return []; },
+    async listControlCards() { cardReads += 1; return []; }
+  });
+  const phone = new RelayTunnelClient({
+    relayUrl: address.url, rendezvousId: "rv-no-history-reads", role: "phone",
+    capability: "PAIRING-FINGERPRINT", streamId: "route-no-history:phone"
+  });
+  const emit = (index: number): void => desktop.noteExternalChatProgress({
+    runId: "run-no-history", phase: "initial", message: "Streaming", createdAt: `2026-09-10T18:00:00.${String(index).padStart(3, "0")}Z`,
+    agentProgress: { state: "running", participantLabel: "@test", messageId: "live-message", partialContent: `fragment ${index}` }
+  } as Parameters<typeof desktop.noteExternalChatProgress>[0]);
+  try {
+    for (let index = 0; index < 200; index += 1) emit(index);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(cardReads, 0, "offline phones must not flood the database with history reads");
+    await Promise.all([desktop.connect(), phone.connect()]);
+    const reconnected = nextMessage(phone);
+    emit(199);
+    const payload = await openMobileRelayPayload((await reconnected).ciphertext, key) as MobileTimelineEvents;
+    assert.equal(payload.events[0].content, "fragment 199", "offline progress was not marked delivered");
+    for (let index = 200; index < 400; index += 1) emit(index);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(cardReads, 0, "connected streaming must not read history for every fragment either");
+  } finally {
+    phone.close(); desktop.close(); await relay.close();
+  }
+});
+
+test("saved snapshots deliver and clear cards without a second history read or a visible message", async () => {
+  const key = Buffer.from("q".repeat(32)).toString("base64url");
+  let cardReads = 0;
+  const published: MobileTimelineEvents[] = [];
+  const checked: Conversation[] = [];
+  const service = new MobileRelayControlService({
+    relayUrl: "ws://127.0.0.1:1/v1/relay", rendezvousId: "rv-snapshot-cards", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: key, streamId: "route-snapshot:phone"
+  }, sender([]), {
+    async listChats() { return []; },
+    async listTimeline() { return []; },
+    async listControlCards() { cardReads += 1; return []; },
+    isConversationAllowed(id, snapshot) {
+      assert.equal(snapshot?.id, id);
+      checked.push(snapshot!);
+      return snapshot?.metadata.archived !== true;
+    }
+  }, undefined, { async publishTimeline(timeline) { published.push(timeline); } });
+  const conversation: Conversation = {
+    id: "conversation-cards", kind: "chat", title: "Cards", createdAt: "2026-09-10T18:00:00Z",
+    updatedAt: "2026-09-10T18:00:00Z", messages: [], findings: [],
+    metadata: { pendingAppToolApprovals: [{
+      id: "approval-1", status: "pending", summary: "Allow file editing?", createdAt: "2026-09-10T18:00:00Z"
+    }] }
+  };
+  try {
+    service.pushConversationSnapshot(conversation);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(published.length, 1);
+    assert.equal(published[0].cards?.[0].id, "approval-1");
+    assert.equal(published[0].cards?.[0].options[0].id, "allow");
+    service.pushConversationSnapshot({ ...conversation, metadata: {}, updatedAt: "2026-09-10T18:00:01Z" });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(published.at(-1)?.cards, [], "answered cards are explicitly removed");
+    assert.equal(published.length, 2);
+    service.pushConversationSnapshot({ ...conversation, metadata: { ...conversation.metadata, archived: true } });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(published.length, 2, "archived snapshots remain excluded");
+    assert.equal(cardReads, 0);
+    assert.equal(checked.length, 3);
+  } finally { service.close(); }
+});
+
 test("MobileRelayControlService routes sealed mobile outbox events through ChatService sendMessage", async () => {
   const key = Buffer.from("a".repeat(32)).toString("base64url");
   const sent: unknown[] = [];
@@ -1298,7 +1379,8 @@ test("MobileRelayControlService pushes desktop conversation snapshots to the pho
         createdAt: "2026-08-07T00:00:04.000Z",
         runId: "remote-run-1",
         messageId: "message-cloud-result"
-      }]
+      }],
+      cards: []
     });
   } finally {
     phone.close();

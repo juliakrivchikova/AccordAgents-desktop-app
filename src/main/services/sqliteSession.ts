@@ -33,7 +33,9 @@ export class SqliteSession {
     const child = this.child;
     const marker = `accord_sqlite_${randomUUID().replaceAll("-", "")}`;
     return new Promise<string>((resolve, reject) => {
-      let stdout = "", stderr = "";
+      const output: string[] = [];
+      let outputLength = 0, tail = "", stderr = "";
+      const endMarker = new RegExp(`(^|\\r?\\n)${marker}\\r?\\n$`);
       let failure: Error | undefined;
       let timedOut = false;
       let settled = false;
@@ -52,8 +54,12 @@ export class SqliteSession {
         child.kill("SIGKILL");
       };
       const onData = (chunk: string): void => {
-        stdout += chunk;
-        const matched = stdout.match(new RegExp(`(^|\\r?\\n)${marker}\\r?\\n$`));
+        output.push(chunk);
+        outputLength += chunk.length;
+        // Only the suffix can contain the closing marker. Scanning the whole
+        // accumulated response on each chunk made large history reads quadratic.
+        tail = (tail + chunk).slice(-(marker.length + 4));
+        const matched = tail.match(endMarker);
         if (!matched) return;
         if (failure || settled) return;
         settled = true;
@@ -63,7 +69,7 @@ export class SqliteSession {
           this.child = undefined;
           child.stdin.end();
         }, 1000);
-        resolve(stdout.slice(0, matched.index! + matched[1].length));
+        resolve(output.join("").slice(0, outputLength - matched[0].length + matched[1].length));
       };
       const onErrorData = (chunk: string): void => { stderr = (stderr + chunk).slice(-8192); };
       const onError = (error: Error): void => { failure ??= error; };
@@ -73,7 +79,7 @@ export class SqliteSession {
         settled = true;
         cleanup();
         reject(new CommandError(failure?.message ?? `SQLite operation failed (${signal ?? code ?? "closed"}): ${stderr.trim() || "process closed before confirming completion"}`, {
-          command: this.executable, args: ["-batch", "-bail", ":memory:"], stdout,
+          command: this.executable, args: ["-batch", "-bail", ":memory:"], stdout: output.join(""),
           stderr: stderr || failure?.message || "", exitCode: code, timedOut
         }));
       };

@@ -2048,8 +2048,8 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
           };
         });
     },
-    async isConversationAllowed(conversationId: string) {
-      const conversation = await storageService.getConversation(conversationId);
+    async isConversationAllowed(conversationId: string, snapshot?: Conversation) {
+      const conversation = snapshot ?? await storageService.getConversation(conversationId);
       return conversation?.kind === "chat" && conversation.metadata.archived !== true;
     }
   };
