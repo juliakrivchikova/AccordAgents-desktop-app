@@ -227,6 +227,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     (progress) => hostRef?.noteNativeProgress(progress),
     chatEventMirrorService
   );
+  // Until enrollment supplies our identity, no member belongs to this runtime.
+  chatService.setHostMachineId(undefined);
   wireChatAppToolHandlers(appMcpService, chatService);
   const artifactStore = new ArtifactStore(path.join(userDataPath(), "accordagents.sqlite3"), "sqlite3");
   const artifactService = new ArtifactService({

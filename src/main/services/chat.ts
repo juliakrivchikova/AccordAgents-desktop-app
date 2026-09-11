@@ -759,6 +759,7 @@ export class ChatService {
   private readonly saveOutcomes = new Map<string, Promise<boolean>>();
   /** Set inside a machine runtime: the desktop's record id for this machine. */
   private hostMachineId?: string;
+  private machineRuntime = false;
   private prepareMachineProject?: (machineId: string, localPath: string) => Promise<void>;
   private readonly participantRunSettledListeners = new Set<(run: ChatParticipantRun) => Promise<void> | void>();
   private readonly participantRunCompletionWaiters = new Map<string, Set<() => void>>();
@@ -798,7 +799,24 @@ export class ChatService {
   /** Machines transport, machine side: members whose home is this id are
    *  this runtime's own (swept, resumed, and run here like local ones). */
   setHostMachineId(machineId: string | undefined): void {
+    this.machineRuntime = true;
     this.hostMachineId = machineId;
+  }
+
+  /** A replicated roster is context, not authority to use another host's CLI. */
+  private ownsParticipant(participant: ChatParticipant): boolean {
+    const home = chatParticipantHome(participant);
+    return this.machineRuntime
+      ? Boolean(this.hostMachineId && home.kind === "machine" && home.machineId === this.hostMachineId)
+      : home.kind === "this-machine";
+  }
+
+  private assertOwnsParticipant(participant: ChatParticipant): void {
+    if (this.ownsParticipant(participant)) return;
+    if (chatParticipantHome(participant).kind === "unassigned") {
+      throw new Error(chatParticipantHomeUnassignedMessage(participant.handle));
+    }
+    throw new Error(`@${participant.handle} belongs to another machine; no local session was started.`);
   }
   // The snapshot this process last persisted per tracked conversation, with the
   // save token that persist returned. While the database row still carries that
@@ -945,7 +963,7 @@ export class ChatService {
         continue;
       }
       const participant = participants.get(session.participantId);
-      if (!participant) {
+      if (!participant || !this.ownsParticipant(participant)) {
         continue;
       }
       let usage: AgentContextUsage | undefined;
@@ -1593,6 +1611,7 @@ export class ChatService {
         if (!participant) {
           throw new Error("Chat member was not found.");
         }
+        this.assertOwnsParticipant(participant);
         const sessionState = await this.sessionForParticipant(conversation, participant);
         if (!sessionState.session.sessionId) {
           await this.withChatMutation(conversation, async () => {
@@ -1990,6 +2009,7 @@ export class ChatService {
     if (!requester) {
       throw new Error("The requesting member is no longer in this chat.");
     }
+    this.assertOwnsParticipant(requester);
     if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
       throw new Error("The issued app-tool token does not grant permission requests.");
     }
@@ -2299,6 +2319,7 @@ export class ChatService {
     if (!requester) {
       throw new Error("The requesting member is no longer in this chat.");
     }
+    this.assertOwnsParticipant(requester);
     if (!hasChatAppToolCapability(actor.capabilities, "participants.request")) {
       return this.participantRequestFailedToolResult("This member is not allowed to request other members.");
     }
@@ -2352,19 +2373,15 @@ export class ChatService {
     }
 
     const requesterProgress = actor.runId ? this.runProgressCallbacks.get(actor.runId) : undefined;
-    // Machines transport, machine side: a machine never runs a member that is
-    // not its own. The desktop owns the roster, so the whole batch goes there
-    // and each target runs where that member lives; the answers arrive here
-    // with the conversation. Resuming this machine's own requester stays here.
-    const runner = this.participantRequestDelegate
-      ? this.delegateParticipantRequest(conversation.id, prepared)
-      : this.startParticipantRequestRunner(
-        conversation.id,
-        prepared.requestMessage.id,
-        actor.runId ?? randomUUID(),
-        prepared.batch.depth,
-        requesterProgress
-      );
+    // The shared runner handles local targets here and delegates the others
+    // to their homes, for tool requests and inferred requests alike.
+    const runner = this.startParticipantRequestRunner(
+      conversation.id,
+      prepared.requestMessage.id,
+      actor.runId ?? randomUUID(),
+      prepared.batch.depth,
+      requesterProgress
+    );
     const result = await this.awaitParticipantRequestRunner(runner, prepared.timeoutMs);
     if (result.timedOut) {
       void runner.then(() => this.autoResumeParticipantRequest(conversation.id, prepared.requestMessage.id, requesterProgress)).catch((error) => {
@@ -3644,7 +3661,7 @@ export class ChatService {
     if (!approval) return undefined;
     if (approval.homeMachineId && approval.homeMachineId !== this.hostMachineId) return false;
     const participant = this.chatParticipants(conversation).find(item => item.id === approval.requesterParticipantId);
-    return Boolean(participant && (!participant.homeMachineId || participant.homeMachineId === this.hostMachineId));
+    return Boolean(participant && this.ownsParticipant(participant));
   }
 
   async respondToAppToolApproval(
@@ -3663,7 +3680,7 @@ export class ChatService {
     // Machines transport: an approval raised by a member on a machine is
     // answered there; this desktop's copy updates when the machine reports
     // the outcome.
-    if (approval.homeMachineId) {
+    if (approval.homeMachineId && !this.machineRuntime) {
       if (approval.status !== "pending") {
         throw new Error("App tool approval request has already been answered.");
       }
@@ -3694,6 +3711,8 @@ export class ChatService {
       });
       return (await this.storage.getConversation(conversation.id)) ?? conversation;
     }
+    const approvalOwner = this.chatParticipants(conversation).find(item => item.id === approval.requesterParticipantId);
+    if (approvalOwner) this.assertOwnsParticipant(approvalOwner);
     if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
       return this.respondToToolPermissionApproval(request, execution);
     }
@@ -5090,7 +5109,7 @@ export class ChatService {
         if (!sourceMessage.participantId) throw new Error("Choice request is not attached to a chat member.");
         const requester = this.chatParticipants(conversation).find(participant => participant.id === sourceMessage.participantId);
         if (!requester) throw new Error("Choice requester is no longer in this chat.");
-        if (execution && requester.homeMachineId && requester.homeMachineId !== this.hostMachineId) {
+        if (execution && !this.ownsParticipant(requester)) {
           throw new Error("This choice is owned by another machine.");
         }
         if (!request.cancel && conversation.metadata.archived === true) throw new Error("Unarchive the chat before starting a member.");
@@ -5895,6 +5914,7 @@ export class ChatService {
     if (!existing) {
       const created = merge(undefined);
       if (created) {
+        this.reconcileReplicatedWatcher(undefined, created);
         if (created.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
         await this.saveConversation(created);
       }
@@ -5908,6 +5928,7 @@ export class ChatService {
       if (!merged) {
         return;
       }
+      this.reconcileReplicatedWatcher(existing, merged);
       if (merged.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
       existing.messages = merged.messages;
       existing.metadata = merged.metadata;
@@ -5916,6 +5937,28 @@ export class ChatService {
       existing.updatedAt = merged.updatedAt;
       await this.saveConversation(existing);
     });
+  }
+
+  /** Called by the transport only after the entire copied chat is durable. */
+  onReplicatedConversationReady(conversationId: string): void {
+    this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
+  }
+
+  private reconcileReplicatedWatcher(previous: Conversation | undefined, incoming: Conversation): void {
+    // A first copy may still be an empty shell. Its initial cursor is chosen
+    // from the complete history when the transport opens the copy barrier.
+    if (!previous) return;
+    const watcher = this.activeAutoWatchParticipant(incoming);
+    if (!watcher) return;
+    const previousWatcher = previous && this.chatParticipants(previous).find(participant => participant.id === watcher.id);
+    if (!previousWatcher?.autoWatch) {
+      incoming.metadata = this.metadataWithAutoWatchEnabled(incoming, watcher.id);
+    } else {
+      const previousUserIds = new Set(previous?.messages.filter(message => message.role === "user").map(message => message.id));
+      if (incoming.messages.some(message => message.role === "user" && !previousUserIds.has(message.id))) {
+        this.resetAutoWatchDepthForUserMessage(incoming);
+      }
+    }
   }
 
   /** Machines transport, desktop side: messages created or changed by turns
@@ -5962,6 +6005,7 @@ export class ChatService {
       if (!(await this.waitForQueuedSaveResult(request.conversationId))) {
         throw new Error("The machine's messages could not be stored in this desktop's chat.");
       }
+      this.scheduleAutoWatchEvaluation(request.conversationId, "machine-messages");
       return result;
     });
   }
@@ -6079,6 +6123,7 @@ export class ChatService {
       if (!participant) {
         throw new Error("Machine-hosted turn participant was not found in this machine's copy of the chat.");
       }
+      this.assertOwnsParticipant(participant);
       const triggerMessage = conversation.messages.find((message) => message.id === request.messageId);
       if (!triggerMessage) {
         throw new Error("Machine-hosted turn message was not found in this machine's copy of the chat.");
@@ -6093,7 +6138,11 @@ export class ChatService {
         warnings,
         {
           targetRunIds: new Map([[participant.id, request.runId]]),
-          pendingMessageIds: new Map([[participant.id, request.pendingMessageId]])
+          pendingMessageIds: new Map([[participant.id, request.pendingMessageId]]),
+          onTargetRunBegun: async () => this.withChatMutation(conversation, async () => {
+            this.advanceAutoWatchCursorForDirectTargets(conversation, [participant!], triggerMessage);
+            await this.saveConversation(conversation);
+          })
         }
       );
     } finally {
@@ -6193,6 +6242,7 @@ export class ChatService {
       existingPendingMessage?: ChatMessage;
     }
   ): Promise<ChatMessage[]> {
+    this.assertOwnsParticipant(participant);
     const sessionState = await this.sessionForParticipant(conversation, participant);
     const session = sessionState.session;
     const sourcePromptConversation = options.promptConversation ?? conversation;
@@ -8856,7 +8906,7 @@ export class ChatService {
   }
 
   private activeAutoWatchParticipant(conversation: Conversation): ChatParticipant | undefined {
-    return this.chatParticipants(conversation).find((participant) => participant.autoWatch === true);
+    return this.chatParticipants(conversation).find((participant) => participant.autoWatch === true && this.ownsParticipant(participant));
   }
 
   private autoWatchStableMessages(conversation: Conversation, participantId: string): ChatMessage[] {
@@ -8882,16 +8932,23 @@ export class ChatService {
       const index = messages.findIndex((message) => message.id === cursor);
       return index >= 0 ? messages.slice(index + 1) : messages;
     })();
-    const handledReplyIds = this.autoWatchHandledParticipantRequestReplyIds(conversation, participantId);
+    const handledReplyIds = this.autoWatchHandledParticipantRequestMessageIds(conversation, participantId);
     if (handledReplyIds.size === 0) {
       return afterCursor;
     }
     return afterCursor.filter((message) => !handledReplyIds.has(message.id));
   }
 
-  private autoWatchHandledParticipantRequestReplyIds(conversation: Conversation, participantId: string): Set<string> {
+  private autoWatchHandledParticipantRequestMessageIds(conversation: Conversation, participantId: string): Set<string> {
     const ids = new Set<string>();
-    for (const { batch } of this.participantRequestMessages(conversation)) {
+    for (const { message, batch } of this.participantRequestMessages(conversation)) {
+      // A direct or inferred request already assigns its source to this
+      // target. Auto-watch must neither duplicate it nor bypass its approval.
+      if (batch.items.some(item => item.targetParticipantId === participantId)) {
+        ids.add(message.id);
+        const sourceId = message.metadata?.sourceMessageId ?? message.metadata?.parentMessageId;
+        if (sourceId) ids.add(sourceId);
+      }
       if (
         batch.requesterParticipantId !== participantId ||
         batch.resumeRequester !== true ||
@@ -8963,7 +9020,7 @@ export class ChatService {
           return;
         }
         const conversation = await this.storage.getConversation(conversationId);
-        if (!conversation || conversation.kind !== "chat") {
+        if (!conversation || conversation.kind !== "chat" || conversation.metadata.archived === true) {
           return;
         }
         await this.withChatMutation(conversation, async () => {
@@ -8975,6 +9032,13 @@ export class ChatService {
             return;
           }
           if (this.storedMetadataHasProtectedLiveRuns(conversation.metadata)) {
+            return;
+          }
+          // A remote run is not in this process's active-run map. Its pending
+          // row still means the chat is busy; wait for that owner's terminal
+          // result instead of waking once for the request and again for its reply.
+          if (conversation.messages.some(message => message.role === "participant" && message.status === "pending"
+            && this.isMessageRunProtectedByExternalOwner(conversation, message))) {
             return;
           }
           let watchers = this.normalizeParticipantWatchers(conversation.metadata.participantWatchers);
@@ -10350,6 +10414,9 @@ export class ChatService {
     messages: ChatMessage[]
   ): Promise<Array<{ requestMessageId: string; depth: number; source: ChatParticipantRequestBatch["source"] }>> {
     const participantRequestsToRun: Array<{ requestMessageId: string; depth: number; source: ChatParticipantRequestBatch["source"] }> = [];
+    // Only the authoring host infers actions. Other copies retain its messages
+    // and the request rows it publishes, without creating a second request.
+    if (!this.ownsParticipant(participant)) return participantRequestsToRun;
     for (const sourceMessage of messages) {
       if (
         sourceMessage.role !== "participant" ||
@@ -11707,40 +11774,45 @@ export class ChatService {
 
 
   /**
-   * Machine side. Hands the prepared request to the desktop and waits for the
-   * answers to reach this machine's own copy of the chat.
+   * Machine side. Hands each group to its home and waits for the answers to
+   * reach this machine's own copy of the chat.
    *
    * The request message is already on its way there through the ordinary
-   * back delta, and the delegation carries only its identity, so a redelivery
-   * or a restart cannot turn one request into two runs: the desktop folds it
-   * onto the same request message and only items still open are run.
+   * back delta; the delegation also carries that row and its source in case
+   * it arrives first. Receivers fold it onto the same request message and
+   * only items still open and owned by that receiver are run.
    */
   private async delegateParticipantRequest(
     conversationId: string,
-    prepared: PreparedParticipantRequest
+    requestMessageId: string,
+    targetIds: ReadonlySet<string>
   ): Promise<ParticipantRequestRunResult> {
     const delegate = this.participantRequestDelegate;
     if (!delegate) throw new Error("This machine cannot reach the owner's other devices to ask other members.");
     // One delegation per home: each member is run by the device it lives on,
     // and no device is asked for a member that is not its own.
     const conversation = await this.requireChat(conversationId);
+    const requestMessage = conversation.messages.find(message => message.id === requestMessageId);
+    const batch = requestMessage?.metadata?.participantRequest;
+    if (!requestMessage || !batch) throw new Error("Member request message was not found.");
     const participants = this.chatParticipants(conversation);
     const byHome = new Map<string, string[]>();
-    for (const item of prepared.batch.items) {
-      if (item.status !== "running" && item.status !== "pending_approval") continue;
+    for (const item of batch.items) {
+      if (item.status !== "running" || !targetIds.has(item.targetParticipantId)) continue;
       const target = participants.find((participant) => participant.id === item.targetParticipantId);
+      if (!target) throw new Error("The requested member is no longer in this chat.");
+      if (this.ownsParticipant(target)) throw new Error("A local member must not be delegated back to this machine.");
       const home = target?.homeMachineId ?? "";
       byHome.set(home, [...(byHome.get(home) ?? []), item.targetParticipantId]);
     }
-    if (byHome.size === 0) byHome.set("", prepared.batch.items.map((item) => item.targetParticipantId));
     const carried = conversation.messages.filter((message) =>
-      message.id === prepared.requestMessage.id || message.id === prepared.requestMessage.metadata?.sourceMessageId);
+      message.id === requestMessage.id || message.id === requestMessage.metadata?.sourceMessageId);
     for (const [home, targetParticipantIds] of byHome) {
       await delegate.delegateParticipantRequest({
         conversationId,
-        requestMessageId: prepared.requestMessage.id,
-        batchId: prepared.batch.id,
-        depth: prepared.batch.depth,
+        requestMessageId: requestMessage.id,
+        batchId: batch.id,
+        depth: batch.depth,
         ...(home ? { homeMachineId: home } : {}),
         targetParticipantIds,
         messages: carried
@@ -11749,13 +11821,14 @@ export class ChatService {
     const deadline = Date.now() + DELEGATED_PARTICIPANT_REQUEST_LIMIT_MS;
     for (;;) {
       const conversation = await this.requireChat(conversationId);
-      const message = conversation.messages.find((candidate) => candidate.id === prepared.requestMessage.id);
+      const message = conversation.messages.find((candidate) => candidate.id === requestMessageId);
       const batch = message?.metadata?.participantRequest;
       if (!batch) throw new Error("Member request message was not found.");
-      if (!batch.items.some((item) => this.isOpenParticipantRequestStatus(item.status)) || Date.now() >= deadline) {
+      const items = batch.items.filter(item => targetIds.has(item.targetParticipantId));
+      if (!items.some((item) => this.isOpenParticipantRequestStatus(item.status)) || Date.now() >= deadline) {
         return {
           batch,
-          replies: batch.items.map((item) => {
+          replies: items.map((item) => {
             const reply = item.replyMessageId
               ? conversation.messages.find((candidate) => candidate.id === item.replyMessageId)
               : undefined;
@@ -11799,21 +11872,32 @@ export class ChatService {
     // storm; if it truly is not here, this throws and the delegation is kept
     // for retry instead of being acknowledged as done.
     const deadline = Date.now() + DELEGATED_PARTICIPANT_REQUEST_WAIT_MS;
+    let ownedIds: Set<string>;
     for (;;) {
       const conversation = await this.requireChat(request.conversationId);
-      if (conversation.messages.some((message) => message.id === request.requestMessageId)) break;
+      const message = conversation.messages.find((message) => message.id === request.requestMessageId);
+      if (message?.metadata?.participantRequest) {
+        const participants = this.chatParticipants(conversation);
+        ownedIds = new Set(participants.filter(participant => this.ownsParticipant(participant)).map(participant => participant.id));
+        if (request.targetParticipantIds?.some(id => !ownedIds.has(id))) {
+          throw new Error("The delegated request names a member that does not belong to this machine.");
+        }
+        if (request.targetParticipantIds) ownedIds = new Set(request.targetParticipantIds);
+        break;
+      }
       if (Date.now() >= deadline) {
         throw new Error("The member request this machine delegated has not reached this desktop yet.");
       }
       await new Promise((resolve) => setTimeout(resolve, DELEGATED_PARTICIPANT_REQUEST_POLL_MS));
     }
+    if (ownedIds.size === 0) return;
     await this.startParticipantRequestRunner(
       request.conversationId,
       request.requestMessageId,
       randomUUID(),
       request.depth,
       undefined,
-      request.targetParticipantIds?.length ? new Set(request.targetParticipantIds) : undefined
+      ownedIds
     );
   }
 
@@ -11895,8 +11979,21 @@ export class ChatService {
       throw new Error("Member request message was not found.");
     }
     const participants = this.chatParticipants(conversation);
-    const runnableItems = batch.items.filter((item) => item.status === "running"
+    const selectedItems = batch.items.filter((item) => item.status === "running"
       && (!onlyParticipantIds || onlyParticipantIds.has(item.targetParticipantId)));
+    const delegatedItems = this.machineRuntime && !onlyParticipantIds
+      ? selectedItems.filter(item => {
+        const target = participants.find(participant => participant.id === item.targetParticipantId);
+        return target && !this.ownsParticipant(target);
+      }) : [];
+    const delegatedIds = new Set(delegatedItems.map(item => item.targetParticipantId));
+    const runnableItems = selectedItems.filter(item => !delegatedIds.has(item.targetParticipantId));
+    // Every request source (tool, inferred mention, approval, or retry) shares
+    // this split. Handle rejection immediately while local targets run.
+    const delegation = delegatedIds.size
+      ? this.delegateParticipantRequest(conversationId, requestMessageId, delegatedIds)
+        .then(result => ({ result, error: undefined }), error => ({ result: undefined, error }))
+      : undefined;
     const replies: ParticipantRequestRunResult["replies"] = [];
     await Promise.all(runnableItems.map(async (item) => {
       const target = participants.find((participant) => participant.id === item.targetParticipantId);
@@ -11977,6 +12074,21 @@ export class ChatService {
       this.queueSnapshot(conversation);
       this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
     }));
+    if (delegation) {
+      const outcome = await delegation;
+      await this.refreshStoredChatState(conversation);
+      if (outcome.error) {
+        const error = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+        this.updateParticipantRequestBatch(conversation, requestMessageId, current => ({
+          ...current,
+          items: current.items.map(item => delegatedIds.has(item.targetParticipantId) && this.isOpenParticipantRequestStatus(item.status)
+            ? { ...item, status: "failed", error, updatedAt: new Date().toISOString() } : item)
+        }));
+        replies.push(...delegatedItems.map(item => ({ targetHandle: item.targetHandle, error })));
+      } else if (outcome.result) {
+        replies.push(...outcome.result.replies);
+      }
+    }
     const updatedBatch = this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => {
       const status = this.rollupParticipantRequestStatus(current.items);
       return {
@@ -12041,7 +12153,7 @@ export class ChatService {
         }
         const requester = this.chatParticipants(conversation).find((participant) => participant.id === approval.requesterParticipantId);
         const trigger = conversation.messages.find((message) => message.id === approval.resumeContext?.triggerMessageId);
-        if (!requester || !trigger) {
+        if (!requester || !trigger || !this.ownsParticipant(requester)) {
           return;
         }
         const participantRequestMessage = approval.resumeContext.participantRequestBatchId
@@ -12299,8 +12411,9 @@ export class ChatService {
           return;
         }
         const requester = this.chatParticipants(conversation).find((participant) => participant.id === batch.requesterParticipantId);
-        if (!requester) {
-          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "requester-missing", batch);
+        if (!requester || !this.ownsParticipant(requester)) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId,
+            requester ? "requester-owned-elsewhere" : "requester-missing", batch);
           return;
         }
         const now = new Date().toISOString();
@@ -12445,7 +12558,7 @@ export class ChatService {
       // Machines transport: every path that runs a member's turn (first turn,
       // continuations, request runners, resumes) goes through here, so a member
       // whose home is a machine is dispatched there from exactly one place.
-      if (participant.homeMachineId && this.machineLink) {
+      if (participant.homeMachineId && !this.machineRuntime) {
         return await this.runParticipantTurnOnMachine(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
           warnings: options.warnings,
           existingPendingMessage: options.existingPendingMessage,
@@ -16556,7 +16669,7 @@ export class ChatService {
     // the machine's result, or its answer to a query, finishes them. Inside
     // a machine runtime its own members are local and are swept as usual.
     if (message.participantId && this.chatParticipants(conversation).some((participant) =>
-      participant.id === message.participantId && participant.homeMachineId && participant.homeMachineId !== this.hostMachineId
+      participant.id === message.participantId && !this.ownsParticipant(participant)
     )) {
       return true;
     }
@@ -17060,6 +17173,9 @@ export class ChatService {
         });
         return true;
       }
+      // A copied pending row is not evidence that this process owns its
+      // provider. Never sweep another host's run into a false stopped state.
+      if (participant && !this.ownsParticipant(participant)) return false;
       if (!activeRunIds.includes(targetRunId) && this.chatRunId(conversation) !== targetRunId) {
         continue;
       }

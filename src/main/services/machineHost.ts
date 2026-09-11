@@ -103,7 +103,7 @@ export interface MachineHostOptions {
 /** Conversation metadata the machine owns and never takes from the desktop:
  *  its own provider sessions, run bookkeeping, and the approvals its members
  *  raised (the desktop shows those and sends decisions back). */
-const MACHINE_OWNED_METADATA_KEYS = ["participantSessions", "activeRunIds", "running", "runId", "pendingAppToolApprovals"] as const;
+const MACHINE_OWNED_METADATA_KEYS = ["participantSessions", "participantWatchers", "activeRunIds", "running", "runId", "pendingAppToolApprovals"] as const;
 /** How soon a failed outbox write is tried again. */
 const OUTBOX_RETRY_MS = 30_000;
 /** How many times an incomplete first copy is requested again. */
@@ -227,7 +227,7 @@ export class MachineHostService {
   private readonly knownMessages = new Map<string, Map<string, string>>();
 
   constructor(
-    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions">>,
+    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady">>,
     private readonly storage: Pick<StorageService, "getConversation"> & Partial<Pick<StorageService, "deleteConversation">>,
     private readonly settings: Pick<SettingsService, "importMachineSettingsSnapshot">,
     private readonly debugLogs: Pick<DebugLogService, "write">,
@@ -885,6 +885,7 @@ export class MachineHostService {
         if (stored && stored.kind === "chat") {
           this.forwardMachineMessages(stored);
         }
+        this.chat.onReplicatedConversationReady?.(body.conversationId);
         return;
       }
       case "machine.conversation.delta":
@@ -898,6 +899,9 @@ export class MachineHostService {
         // desktop, and recording it as known would mean the desktop never
         // learns what the User asked while it was closed.
         await this.applyConversationDelta(body, durable, replyTo === undefined || replyTo === this.options.pairing.issuer.originId);
+        if (!this.syncing.has(body.conversationId) && !this.failedSync.has(body.conversationId)) {
+          this.chat.onReplicatedConversationReady?.(body.conversationId);
+        }
         return;
       case "machine.participants.delegate":
         if (await this.isConversationDeleted(body.conversationId)) return;

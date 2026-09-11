@@ -194,10 +194,12 @@ test("restarting between acknowledged copy batches preserves the barrier and nev
   const enrollment = pairing();
   const store = new Map();
   const runs = [];
+  const watchReady = [];
   let host;
   const createHost = () => new MachineHostService({
     runMachineHostedTurn: async (request) => { runs.push(store.get(request.conversationId).messages.map(m => m.id)); return { messages: [], warnings: [] }; },
     cancelRun: () => true,
+    onReplicatedConversationReady: id => watchReady.push(id),
     respondToAppToolApproval: async () => undefined,
     applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) { store.set(id, next); host.noteConversationSnapshot(next); } }
   }, { getConversation: async id => store.get(id) }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
@@ -223,11 +225,22 @@ test("restarting between acknowledged copy batches preserves the barrier and nev
     await send({ type: "machine.conversation.delta", conversationId: shell.id, messages: [row("second")], updatedAt: shell.updatedAt });
     await host.handleBody({ type: "machine.turn.request", conversationId: shell.id, participantId: "p1", participant: { id: "p1", handle: "bot" }, messageId: "first", runId: "copy-resumed-run", pendingMessageId: "pending", requestedAt: shell.createdAt });
     assert.deepEqual(runs, []);
+    assert.deepEqual(watchReady, [], "auto-watch cannot bypass the incomplete copy barrier, including after restart");
     await send({ type: "machine.conversation.sync.done", conversationId: shell.id });
     await host.outbound;
     assert.deepEqual(runs, [["first", "second"]]);
+    assert.deepEqual(watchReady, [shell.id]);
     assert.equal((await hostEvents.eventStorage.deviceEvents().listPending(enrollment.rendezvousId)).filter(entry => entry.event.kind === "machine.conversation.backdelta").length, 0, "neither pre-restart nor post-restart incoming rows become backdelta events");
   } finally { host?.close(); }
+});
+
+test("the owner's watcher cursor survives a stale desktop metadata refresh", () => {
+  const { MachineHostService } = require("../dist/main/main/services/machineHost.js");
+  const host = Object.create(MachineHostService.prototype);
+  const cursor = { lastSeenMessageId: "new-reply", lastRunId: "watch-run", wakeChainDepth: 1, updatedAt: "2026-09-11T07:03:00Z" };
+  const existing = { metadata: { participantWatchers: { watcher: cursor } } };
+  const merged = host.mergeMetadata(existing, { participantWatchers: { watcher: { ...cursor, lastSeenMessageId: "old-reply" } } });
+  assert.deepEqual(merged.participantWatchers, existing.metadata.participantWatchers);
 });
 
 test("a ChatService native resume is listed, stopped and delivered through the host's result outbox", async (t) => {

@@ -53,7 +53,11 @@ export function createChatActionEffects(deps: {
       ?.participants ?? [];
     const participant = participants.find((item) => item.id === participantId);
     if (!participant) return false;
-    return (participant.homeMachineId ?? undefined) === (deps.homeMachineId?.() ?? undefined);
+    // A machine awaiting enrollment is not a desktop. Missing identity must
+    // not let it claim decisions for desktop members in its copied roster.
+    const hostMachineId = deps.homeMachineId?.();
+    if (deps.homeMachineId && !hostMachineId) return false;
+    return (participant.homeMachineId ?? undefined) === hostMachineId;
   };
   return {
     ...(deps.applyApproval ? { applyApproval: async (event: ChatEventEnvelope, payload: ChatActionPayload) => {

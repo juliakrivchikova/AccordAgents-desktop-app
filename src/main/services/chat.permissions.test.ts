@@ -10896,6 +10896,271 @@ test("run termination preserves Codex Stop and provider-exit lifecycle states", 
   assert.equal((failed.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0].status, "expired");
 });
 
+for (const route of [
+  { label: "desktop watcher on desktop", runtime: false, host: undefined, home: undefined, expected: 1 },
+  { label: "cloud watcher on desktop", runtime: false, host: undefined, home: "machine-1", expected: 0 },
+  { label: "own watcher on machine", runtime: true, host: "machine-1", home: "machine-1", expected: 1 },
+  { label: "desktop watcher on machine", runtime: true, host: "machine-1", home: undefined, expected: 0 },
+  { label: "another machine's watcher", runtime: true, host: "machine-1", home: "machine-2", expected: 0 },
+  { label: "machine awaiting identity", runtime: true, host: undefined, home: undefined, expected: 0 }
+]) {
+  test(`member ownership: auto-watch ${route.label}`, async () => {
+    const watcher = { ...chatParticipant("codex-cli"), autoWatch: true, homeMachineId: route.home };
+    const worker = chatParticipant("claude-code");
+    const conversation = chatConversation([watcher, worker], {
+      participantWatchers: { [watcher.id]: { lastSeenMessageId: "user-message", wakeChainDepth: 0, updatedAt: NOW } }
+    });
+    conversation.messages.push(participantReplyMessage(worker, "worker-reply", "Done."));
+    const runs: string[] = [];
+    const { service, storage, tempRoot } = testService({ conversation, run: async participant => {
+      runs.push(participant.id);
+      return { participant, ok: true, content: "Noted", durationMs: 1 };
+    } });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    if (route.runtime) service.setHostMachineId(route.host);
+
+    await (service as any).runAutoWatchEvaluation(conversation.id, "ownership-test");
+    if (route.expected) await waitFor(() => runs.length === 1 && !storage.current.metadata.running);
+    assert.equal(runs.length, route.expected);
+    assert.equal(storage.current.messages.filter((m: ChatMessage) => m.metadata?.autoWatchTrigger).length, route.expected);
+    if (!route.expected) assert.equal(storage.current.metadata.participantSessions, undefined);
+
+    // A new service reads the durable cursor rather than waking again for the
+    // same replicated message after a restart.
+    const restarted = testService({ conversation: storage.current, run: async () => { throw new Error("duplicate watcher run"); } });
+    if (route.runtime) restarted.service.setHostMachineId(route.host);
+    await (restarted.service as any).runAutoWatchEvaluation(conversation.id, "restart");
+    assert.equal(restarted.storage.current.messages.filter((m: ChatMessage) => m.metadata?.autoWatchTrigger).length, route.expected);
+  });
+}
+
+test("member ownership: direct machine turn advances its own watcher cursor", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1", autoWatch: true };
+  const conversation = chatConversation([participant]);
+  const runs: string[] = [];
+  const { service, storage, tempRoot } = testService({ conversation, run: async participant => {
+    runs.push(participant.id);
+    return { participant, ok: true, content: "Direct answer", durationMs: 1 };
+  } });
+  service.setHostMachineId("machine-1");
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.runMachineHostedTurn({ conversationId: conversation.id, participantId: participant.id,
+    messageId: "user-message", runId: "direct-machine-run", pendingMessageId: "direct-machine-pending" });
+  await (service as any).runAutoWatchEvaluation(conversation.id, "after-direct-turn");
+  assert.deepEqual(runs, [participant.id]);
+  assert.equal(storage.current.metadata.participantWatchers[participant.id].lastSeenMessageId, "user-message");
+  assert.equal(storage.current.messages.some((m: ChatMessage) => m.metadata?.autoWatchTrigger), false);
+});
+
+test("member ownership: replicated replies wake only the owner after the copy barrier", async () => {
+  const watcher = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1", autoWatch: true };
+  const worker = chatParticipant("claude-code");
+  const conversation = chatConversation([watcher, worker], {
+    participantWatchers: { [watcher.id]: { lastSeenMessageId: "user-message", wakeChainDepth: 0, updatedAt: NOW } }
+  });
+  const runs: string[] = [];
+  const { service, storage, tempRoot } = testService({ conversation, run: async participant => {
+    runs.push(participant.id);
+    return { participant, ok: true, content: "Observed", durationMs: 1 };
+  } });
+  service.setHostMachineId("machine-1");
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.applyReplicatedConversation(conversation.id, previous => ({ ...previous!,
+    messages: [...previous!.messages, participantReplyMessage(worker, "replicated-reply", "Done")] }));
+  assert.deepEqual(runs, [], "a partial copy must not activate a participant");
+  service.onReplicatedConversationReady(conversation.id);
+  await waitFor(() => runs.length === 1 && !storage.current.metadata.running);
+  service.onReplicatedConversationReady(conversation.id);
+  await (service as any).runAutoWatchEvaluation(conversation.id, "redelivery");
+  assert.deepEqual(runs, [watcher.id]);
+  assert.equal(storage.current.metadata.participantWatchers[watcher.id].lastSeenMessageId, "replicated-reply");
+
+  // Disabling and re-enabling is an explicit reset, not a stale cursor from
+  // a desktop refresh; the owner must still honor that control.
+  await service.applyReplicatedConversation(conversation.id, previous => ({ ...previous!,
+    metadata: { ...previous!.metadata, participants: [{ ...watcher, autoWatch: false }, worker] } }));
+  await service.applyReplicatedConversation(conversation.id, previous => ({ ...previous!,
+    metadata: { ...previous!.metadata, participants: [watcher, worker],
+      participantWatchers: { [watcher.id]: { wakeChainDepth: 50, pausedReason: "wake-limit", updatedAt: NOW } } } }));
+  assert.equal(storage.current.metadata.participantWatchers[watcher.id].pausedReason, undefined);
+  assert.equal(storage.current.metadata.participantWatchers[watcher.id].wakeChainDepth, 0);
+});
+
+test("member ownership: a machine watcher waits for the desktop's pending run to finish", async () => {
+  const watcher = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1", autoWatch: true };
+  const worker = chatParticipant("claude-code");
+  const conversation = chatConversation([watcher, worker], {
+    participantWatchers: { [watcher.id]: { wakeChainDepth: 0, updatedAt: NOW } }
+  });
+  conversation.messages.push(pendingParticipantMessage(worker, "desktop-reply", "desktop-run"));
+  const runs: string[] = [];
+  const { service, storage, tempRoot } = testService({ conversation, run: async participant => {
+    runs.push(participant.id);
+    return { participant, ok: true, content: "Observed", durationMs: 1 };
+  } });
+  service.setHostMachineId("machine-1");
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await (service as any).runAutoWatchEvaluation(conversation.id, "replicated-request");
+  assert.deepEqual(runs, [], "a remote pending row must hold the same idle gate as a local run");
+  await service.applyReplicatedConversation(conversation.id, previous => ({ ...previous!,
+    messages: previous!.messages.map(message => message.id === "desktop-reply"
+      ? participantReplyMessage(worker, message.id, "Done") : message) }));
+  service.onReplicatedConversationReady(conversation.id);
+  await waitFor(() => runs.length === 1 && !storage.current.metadata.running);
+  const triggers = storage.current.messages.filter((message: ChatMessage) => message.metadata?.autoWatchTrigger);
+  assert.equal(triggers.length, 1);
+  assert.deepEqual(triggers[0].metadata.autoWatchTrigger.messageIds, ["user-message", "desktop-reply"]);
+});
+
+test("member ownership: native entry and compact refuse a foreign member before creating a session", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation, run: async () => { throw new Error("must not run native"); } });
+  service.setHostMachineId("machine-1");
+  await assert.rejects(service.runMachineHostedTurn({ conversationId: conversation.id, participantId: participant.id,
+    messageId: "user-message", runId: "foreign-run", pendingMessageId: "foreign-pending" }), /another machine/);
+  await assert.rejects(service.compactParticipant({ conversationId: conversation.id, participantId: participant.id }), /another machine/);
+  await assert.rejects(service.requestParticipantsFromTool(participantRequestActor(participant), {
+    requests: [{ target: "someone", prompt: "Do work" }]
+  }), /another machine/);
+  assert.equal(storage.current.metadata.participantSessions, undefined);
+});
+
+test("member ownership: unavailable machine link cannot fall back to the desktop CLI", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1" };
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation, run: async () => { throw new Error("must not run native"); } });
+  await assert.rejects((service as any).runParticipantTurnSerialized(conversation, participant,
+    conversation.messages[0], "remote-run", undefined, undefined, { warnings: [] }), /machine/i);
+  assert.equal(storage.current.metadata.participantSessions, undefined);
+});
+
+for (const source of ["tool", "inferred", "approved"] as const) {
+  test(`member ownership: ${source} requests split same-host and foreign targets`, async () => {
+    const requester = { ...chatParticipant("codex-cli", { requestParticipants: source === "approved" ? "ask" : "allow" }), homeMachineId: "machine-1" };
+    const targets = [
+      { ...chatParticipant("claude-code"), id: "same", handle: "same", homeMachineId: "machine-1" },
+      { ...chatParticipant("claude-code"), id: "desktop", handle: "desktop" },
+      { ...chatParticipant("claude-code"), id: "other", handle: "other", homeMachineId: "machine-2" }
+    ];
+    const conversation = chatConversation([requester, ...targets]);
+    const native: string[] = [];
+    const delegated: Array<{ home?: string; ids: string[] }> = [];
+    const { service, storage, tempRoot } = testService({ conversation, run: async participant => {
+      native.push(participant.id);
+      return { participant, ok: true, content: "Answered here", durationMs: 1 };
+    } });
+    service.setHostMachineId("machine-1");
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    service.setParticipantRequestDelegate({ delegateParticipantRequest: async request => {
+      delegated.push({ home: request.homeMachineId, ids: request.targetParticipantIds! });
+      const message = storage.current.messages.find((m: ChatMessage) => m.id === request.requestMessageId);
+      for (const id of request.targetParticipantIds!) {
+        const target = targets.find(p => p.id === id)!;
+        const reply = participantReplyMessage(target, `reply-${id}`, `Answered on ${id}`);
+        storage.current.messages.push(reply);
+        message.metadata.participantRequest.items = message.metadata.participantRequest.items.map((item: any) =>
+          item.targetParticipantId === id ? { ...item, status: "answered", replyMessageId: reply.id } : item);
+      }
+    } });
+    if (source === "inferred") {
+      const message = participantReplyMessage(requester, "inferred-source", "@same @desktop @other Please review.");
+      conversation.messages.push(message);
+      const requests = await (service as any).createImplicitParticipantRequestApproval(conversation, requester, [message]);
+      for (const m of conversation.messages) if (m.metadata?.participantRequest) m.metadata.participantRequest.resumeRequester = false;
+      await storage.saveConversation(conversation);
+      (service as any).startDeferredParticipantRequestRunners(conversation.id, requests);
+    } else {
+      await service.requestParticipantsFromTool(participantRequestActor(requester), {
+        requests: targets.map(target => ({ target: target.handle, prompt: "Please review." })),
+        timeoutMs: 5000, resumeRequester: false
+      });
+      if (source === "approved") {
+        const approval = storage.current.metadata.pendingAppToolApprovals[0];
+        await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: approval.id, approve: true });
+      }
+    }
+    await waitFor(() => storage.current.messages.some((m: ChatMessage) =>
+      m.metadata?.participantRequest?.items.every(item => item.status === "answered")), 2000);
+    assert.deepEqual(native, ["same"]);
+    assert.deepEqual(delegated, [{ home: undefined, ids: ["desktop"] }, { home: "machine-2", ids: ["other"] }]);
+    const message = storage.current.messages.find((m: ChatMessage) => m.metadata?.participantRequest);
+    await service.runDelegatedParticipantRequest({ conversationId: conversation.id, requestMessageId: message.id,
+      depth: 1, targetParticipantIds: ["same"] });
+    assert.deepEqual(native, ["same"], "delivery of a finished request must not replay it");
+    await assert.rejects(service.runDelegatedParticipantRequest({ conversationId: conversation.id, requestMessageId: message.id,
+      depth: 1, targetParticipantIds: ["same", "other"] }), /does not belong/);
+    assert.deepEqual(native, ["same"], "reject a mixed-owner command before starting any member");
+  });
+}
+
+test("member ownership: copied replies cannot infer a second request", async () => {
+  const requester = { ...chatParticipant("codex-cli", { requestParticipants: "allow" }), homeMachineId: "machine-2" };
+  const target = { ...chatParticipant("claude-code"), homeMachineId: "machine-1" };
+  const conversation = chatConversation([requester, target]);
+  const message = participantReplyMessage(requester, "copied-reply", "@drew Please review.");
+  conversation.messages.push(message);
+  const { service } = testService({ conversation });
+  service.setHostMachineId("machine-1");
+  assert.deepEqual(await (service as any).createImplicitParticipantRequestApproval(conversation, requester, [message]), []);
+  assert.equal(conversation.messages.some(m => m.metadata?.participantRequest), false);
+});
+
+for (const source of ["tool", "inferred"] as const) {
+  test(`member ownership: ${source} request does not also auto-watch its source`, async () => {
+    const requester = chatParticipant("codex-cli", { requestParticipants: "allow" });
+    const watcher = { ...chatParticipant("claude-code"), autoWatch: true };
+    const conversation = chatConversation([requester, watcher], {
+      participantWatchers: { [watcher.id]: { lastSeenMessageId: "user-message", wakeChainDepth: 0, updatedAt: NOW } }
+    });
+    const message = participantReplyMessage(requester, "direct-request-source", "@drew Please review.");
+    conversation.messages.push(message);
+    const runs: string[] = [];
+    const { service, storage, tempRoot } = testService({ conversation, run: async participant => {
+      runs.push(participant.id);
+      return { participant, ok: true, content: "Reviewed", durationMs: 1 };
+    } });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    if (source === "tool") {
+      await service.requestParticipantsFromTool({ ...participantRequestActor(requester), triggerMessageId: message.id }, {
+        requests: [{ target: watcher.handle, prompt: "Please review." }], timeoutMs: 5000, resumeRequester: false
+      });
+    } else {
+      const requests = await (service as any).createImplicitParticipantRequestApproval(conversation, requester, [message]);
+      for (const m of conversation.messages) if (m.metadata?.participantRequest) m.metadata.participantRequest.resumeRequester = false;
+      await storage.saveConversation(conversation);
+      (service as any).startDeferredParticipantRequestRunners(conversation.id, requests);
+      await waitFor(() => runs.length === 1 && !storage.current.metadata.running);
+    }
+    await (service as any).runAutoWatchEvaluation(conversation.id, "after-direct-request");
+    assert.deepEqual(runs, [watcher.id]);
+    assert.equal(storage.current.messages.some((m: ChatMessage) => m.metadata?.autoWatchTrigger), false);
+  });
+}
+
+test("member ownership: stale-run recovery leaves a desktop member pending on a machine", () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant], { activeRunIds: ["desktop-run"], running: true });
+  conversation.messages.push(pendingParticipantMessage(participant, "desktop-pending", "desktop-run"));
+  const { service } = testService({ conversation });
+  service.setHostMachineId("machine-1");
+  (service as any).recoverStaleChatRun(conversation);
+  assert.equal(conversation.messages.find(m => m.id === "desktop-pending")!.status, "pending");
+});
+
+test("member ownership: Stop cannot sweep another host's pending run", async () => {
+  for (const machineRuntime of [false, true]) {
+    const participant = { ...chatParticipant("codex-cli"), homeMachineId: machineRuntime ? undefined : "machine-1" };
+    const conversation = chatConversation([participant], { activeRunIds: ["foreign-run"], running: true });
+    conversation.messages.push(pendingParticipantMessage(participant, "foreign-pending", "foreign-run"));
+    const { service, storage } = testService({ conversation });
+    if (machineRuntime) service.setHostMachineId("machine-1");
+    assert.equal(await (service as any).cancelStoredRun("foreign-run"), false);
+    assert.equal(storage.current.messages.find((m: ChatMessage) => m.id === "foreign-pending").status, "pending");
+    assert.equal(storage.current.metadata.running, true);
+  }
+});
+
 function testService(options: {
   conversation?: Conversation;
   run?: (...args: any[]) => Promise<any>;
