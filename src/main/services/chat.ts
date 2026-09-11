@@ -3539,7 +3539,7 @@ export class ChatService {
         supportedOperations: ["add"],
         maxOperations: CHAT_ROSTER_CHANGE_MAX_OPERATIONS,
         modelPolicy: "The model field is optional. Omit it to use the CLI/provider default. Prefer a provider's modelCatalog.models id when present; configuredModel is included as a fallback when the current settings model is not in the discovered catalog.",
-        reasoningEffortPolicy: "The reasoningEffort field is optional. Omit it to use the CLI/provider default. Codex supports none, minimal, low, medium, high, and xhigh. Claude supports low, medium, high, xhigh, and max."
+        reasoningEffortPolicy: "The reasoningEffort field is optional. Omit it to use the CLI/provider default. Codex supports none, minimal, low, medium, high, xhigh, max, and ultra; available efforts depend on the selected model's CLI catalog. Claude supports low, medium, high, xhigh, and max."
       }
     };
   }

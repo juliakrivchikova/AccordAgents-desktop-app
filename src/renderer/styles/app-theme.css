@@ -117,6 +117,8 @@
   --provider-setup-shadow-md: 0 2px 4px -1px rgba(18, 24, 40, 0.06), 0 6px 16px -4px rgba(18, 24, 40, 0.10);
   --shadow-color: rgb(18 24 40);
   --app-shadow: color-mix(in srgb, var(--shadow-color) 10%, transparent);
+  --app-search-scrim: rgba(18, 21, 27, 0.34);
+  --app-search-modal-shadow: 0 8px 20px -6px rgba(18, 24, 40, 0.12), 0 32px 64px -12px rgba(18, 24, 40, 0.22);
   --highlight-color: rgb(255 255 255);
   --app-on-dark: #ffffff;
   --plugin-brand-color: var(--app-accent);

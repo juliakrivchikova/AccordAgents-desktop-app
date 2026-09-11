@@ -1,4 +1,4 @@
-import type { AgentDetectionRequest, AgentHealth, ChatActivityItem, ChatMessage, Conversation } from "../../shared/types";
+import type { AgentDetectionRequest, AgentHealth, ChatActivityItem, ChatMessage, ChatSearchMessageMatch, Conversation } from "../../shared/types";
 import { buildChatActivityItems, reconcileChatActivityRefreshItems } from "../../shared/chatActivity";
 import { executeChatActivityFocus } from "../../shared/chatActivityFocus";
 import {
@@ -20,6 +20,7 @@ import { revokePendingImageUrls } from "../components/chat/use-chat-composer-ima
 import { conversationTimeValue, normalizeProjectPath } from "./conversation-summaries";
 import { persistLastViewedAt } from "./storage";
 import { activityItemsWithStoredPreferences } from "./activity-item-state";
+import { focusConversationMessage } from "./focus-conversation-message";
 
 export interface ConversationActions {
   refreshAll: () => Promise<void>;
@@ -27,6 +28,7 @@ export interface ConversationActions {
   refreshActivity: () => Promise<void>;
   refreshConversations: () => Promise<void>;
   openConversation: (id: string) => Promise<void>;
+  openConversationAndFocusMessage: (target: Pick<ChatSearchMessageMatch, "conversationId" | "messageId" | "threadRootId">) => Promise<void>;
   openConversationAndFocusActivityItem: (item: ChatActivityItem, options?: { timelineOnly?: boolean; markViewed?: boolean }) => Promise<void>;
   markConversationViewed: (conversation: Conversation) => void;
   clearChatMessageFocus: () => void;
@@ -252,6 +254,24 @@ export function useConversationActions(state: AppState): ConversationActions {
     });
   }
 
+  async function openConversationAndFocusMessage(
+    target: Pick<ChatSearchMessageMatch, "conversationId" | "messageId" | "threadRootId">
+  ): Promise<void> {
+    await focusConversationMessage({
+      state,
+      target,
+      openConversation: (conversationId) => openConversationForSelection(conversationId),
+      ensureTargetMessagesLoaded: (conversation, messageId, threadRootId, isCurrent) =>
+        ensureActivityTargetMessagesLoaded(
+          conversation,
+          messageId,
+          threadRootId,
+          isCurrent,
+          "The selected search result is no longer available."
+        )
+    });
+  }
+
   function activityFocusTarget(
     item: ChatActivityItem,
     options: { timelineOnly?: boolean }
@@ -333,7 +353,8 @@ export function useConversationActions(state: AppState): ConversationActions {
     conversation: Conversation,
     messageId: string,
     threadRootId: string | undefined,
-    isCurrent: () => boolean
+    isCurrent: () => boolean,
+    missingMessageError = "The selected activity message is no longer available."
   ): Promise<boolean> {
     let loadedMessages = conversation.messages;
     const targetIds = [...new Set([messageId, threadRootId].filter((id): id is string => Boolean(id)))];
@@ -353,7 +374,7 @@ export function useConversationActions(state: AppState): ConversationActions {
         return false;
       }
       if (page.messages.length === 0) {
-        throw new Error("The selected activity message is no longer available.");
+        throw new Error(missingMessageError);
       }
       loadedMessages = mergeMissingMessagesByCreatedAt(loadedMessages, page.messages);
       state.setConversation((current) => current?.id === conversation.id
@@ -592,7 +613,7 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   return {
-    refreshAll, refreshAgents, refreshActivity, refreshConversations, openConversation, openConversationAndFocusActivityItem, markConversationViewed, clearChatMessageFocus, loadOlderConversationMessages,
+    refreshAll, refreshAgents, refreshActivity, refreshConversations, openConversation, openConversationAndFocusMessage, openConversationAndFocusActivityItem, markConversationViewed, clearChatMessageFocus, loadOlderConversationMessages,
     loadConversationMessagePageForMessage, jumpToParticipantLastMessage, selectRepo,
     inspectRepo, rememberRepoPath, cancelReview, newChatSession, newProjectSession,
     updateSelectedChatParticipantConfigIds: state.setSelectedChatParticipantConfigIds

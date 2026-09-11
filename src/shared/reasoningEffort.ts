@@ -7,10 +7,11 @@ const REASONING_EFFORT_LABELS: Record<ChatReasoningEffort, string> = {
   medium: "Medium",
   high: "High",
   xhigh: "Extra High",
-  max: "Max"
+  max: "Max",
+  ultra: "Ultra"
 };
 
-const CODEX_REASONING_EFFORTS: ChatReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+const CODEX_REASONING_EFFORTS: ChatReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 const CLAUDE_REASONING_EFFORTS: ChatReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
 // Antigravity CLI (`agy`) folds effort into the model label (e.g. "Gemini 3.5 Flash (High)"),
 // so gemini-cli exposes no separate reasoning-effort dimension.
@@ -34,7 +35,8 @@ export function normalizeChatReasoningEffort(value: unknown, kind?: ChatProvider
     extrahigh: "xhigh",
     extra: "xhigh",
     max: "max",
-    maximum: "max"
+    maximum: "max",
+    ultra: "ultra"
   };
   const effort = aliases[key];
   if (!effort || (kind && !isReasoningEffortForProvider(effort, kind))) {

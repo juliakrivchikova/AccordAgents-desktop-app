@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { access, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 import {
+  claudeModelProbeEnv,
   CliAgentRunner,
   CodexAppServerRunError,
   parseClaudeModelPickerOutput,
+  resolveClaudeModelProbeCwd,
   resolveCodexCompactTimeoutMs,
-  runClaudeModelProbeInPty
+  runClaudeModelProbeInPty,
+  runClaudeModelProbeWithExpect
 } from "./cliAgents";
 import { CommandError } from "./command";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
@@ -218,6 +223,275 @@ test("parseClaudeModelPickerOutput recognizes a single picker with fragmented bo
   assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["haiku"]);
 });
 
+test("parseClaudeModelPickerOutput ignores numbered settings warning actions", () => {
+  const output = [
+    "Settings Warning",
+    "1. Continue",
+    "2. Fix with Claude",
+    "3. Exit and fix manually",
+    "Enter to confirm · Esc to cancel"
+  ].join("\n");
+
+  assert.deepEqual(parseClaudeModelPickerOutput(output), []);
+});
+
+test("macOS Claude model discovery uses a full-height, system-expect-compatible PTY", () => {
+  const script = (makeRunner() as any).claudeModelProbeExpectScript() as string;
+
+  assert.match(script, /set stty_init "rows 40 columns 120"/);
+  assert.match(script, /spawn \$env\(ACCORD_AGENTS_CLAUDE_EXECUTABLE\) --safe-mode --no-chrome/);
+  assert.doesNotMatch(script, /spawn --/);
+  assert.ok(script.indexOf("set stty_init") < script.indexOf("spawn $env"));
+  assert.match(script, /Settings\.\*Warning/);
+  assert.match(script, /Enter\.\*to\.\*confirm/);
+  assert.match(script, /Transcript\.\*saving\.\*is\.\*off/);
+  assert.match(script, /Enter\.\*to\.\*set\.\*Esc\.\*to\.\*cancel/);
+  assert.match(script, /send "\\033"\nafter 250\nsend "\/exit\\r"\nset timeout 2/);
+});
+
+test("Claude model probe environment suppresses prompt history and session persistence", () => {
+  const env = claudeModelProbeEnv({
+    PATH: "/usr/bin",
+    CLAUDE_CODE_SKIP_PROMPT_HISTORY: "0",
+    CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1"
+  });
+
+  assert.deepEqual(env, {
+    PATH: "/usr/bin",
+    CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1"
+  });
+});
+
+test("Claude model discovery falls back when the saved repository directory no longer exists", async () => {
+  const deletedDirectory = await mkdtemp(path.join(tmpdir(), "accord-claude-deleted-cwd-"));
+  await rm(deletedDirectory, { recursive: true, force: true });
+
+  assert.equal(await resolveClaudeModelProbeCwd(deletedDirectory), process.cwd());
+});
+
+test("macOS Claude model discovery passes cwd, safe env, and ignored stdin through its spawn boundary", async () => {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const child = Object.assign(new EventEmitter(), {
+    stdout,
+    stderr,
+    killed: false,
+    exitCode: null as number | null,
+    kill() {
+      this.killed = true;
+      return true;
+    }
+  });
+  let launch: { command: string; args: readonly string[]; options: Record<string, any> } | undefined;
+  const picker = "Select model 1. Default (recommended) ✔ Opus 4.8 2. Fable Fable 5 Enter to set · Esc to cancel";
+
+  const probe = runClaudeModelProbeWithExpect({
+    executable: "/tmp/claude-stub",
+    env: {
+      PATH: "/usr/bin",
+      CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1"
+    },
+    cwd: "/tmp/trusted-repo",
+    expectScript: "exit 0",
+    timeoutMs: 1_000,
+    spawnExpect: ((command: string, args: readonly string[], options: Record<string, any>) => {
+      launch = { command, args, options };
+      queueMicrotask(() => {
+        stdout.write(picker);
+        child.exitCode = 0;
+        child.emit("exit", 0, null);
+      });
+      return child;
+    }) as any
+  });
+
+  assert.deepEqual(parseClaudeModelPickerOutput(await probe).map((model) => model.id), ["fable"]);
+  assert.equal(launch?.command, "expect");
+  assert.deepEqual(launch?.args, ["-c", "exit 0"]);
+  assert.equal(launch?.options.cwd, "/tmp/trusted-repo");
+  assert.deepEqual(launch?.options.stdio, ["ignore", "pipe", "pipe"]);
+  assert.equal(launch?.options.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY, "1");
+  assert.equal("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE" in launch!.options.env, false);
+  assert.equal(launch?.options.env.ACCORD_AGENTS_CLAUDE_EXECUTABLE, "/tmp/claude-stub");
+});
+
+test("macOS Claude model discovery keeps a captured picker when process exit is late", async () => {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let killed = false;
+  const child = Object.assign(new EventEmitter(), {
+    stdout,
+    stderr,
+    killed: false,
+    exitCode: null as number | null,
+    kill() {
+      killed = true;
+      this.killed = true;
+      return true;
+    }
+  });
+  const picker = "Select model 1. Default (recommended) ✔ Opus 4.8 2. Fable Fable 5 Enter to set · Esc to cancel";
+
+  const output = await runClaudeModelProbeWithExpect({
+    executable: "/tmp/claude-stub",
+    env: {},
+    cwd: "/tmp/trusted-repo",
+    expectScript: "set timeout -1",
+    timeoutMs: 20,
+    spawnExpect: (() => {
+      queueMicrotask(() => stdout.write(picker));
+      return child;
+    }) as any
+  });
+
+  assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["fable"]);
+  assert.equal(killed, true);
+});
+
+test("macOS Claude model discovery bounds captured output", async () => {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  let killed = false;
+  const child = Object.assign(new EventEmitter(), {
+    stdout,
+    stderr,
+    killed: false,
+    exitCode: null as number | null,
+    kill() {
+      killed = true;
+      this.killed = true;
+      return true;
+    }
+  });
+
+  const probe = runClaudeModelProbeWithExpect({
+    executable: "/tmp/claude-stub",
+    env: {},
+    cwd: "/tmp/trusted-repo",
+    expectScript: "set timeout -1",
+    timeoutMs: 1_000,
+    maxOutputBytes: 16,
+    spawnExpect: (() => {
+      queueMicrotask(() => stdout.write("x".repeat(17)));
+      return child;
+    }) as any
+  });
+
+  await assert.rejects(probe, /exceeded 16 bytes/);
+  assert.equal(killed, true);
+});
+
+test("macOS Claude model discovery executes the generated program through system Expect", { timeout: 10_000 }, async (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("macOS system Expect integration");
+    return;
+  }
+  try {
+    await access("/usr/bin/expect");
+  } catch {
+    t.skip("/usr/bin/expect is unavailable");
+    return;
+  }
+
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-model-probe-"));
+  try {
+    const stubProgram = `
+printf 'STUB_CWD=%s\\r\\n' "$PWD"
+printf 'STUB_SKIP=%s\\r\\n' "\${CLAUDE_CODE_SKIP_PROMPT_HISTORY-unset}"
+printf 'STUB_FORCE=%s\\r\\n' "\${CLAUDE_CODE_FORCE_SESSION_PERSISTENCE-unset}"
+if test -t 0; then printf 'STUB_TTY=yes\\r\\n'; else printf 'STUB_TTY=no\\r\\n'; fi
+printf 'STUB_SIZE=%s\\r\\n' "$(stty size 2>/dev/null)"
+printf 'Claude ready\\r\\n'
+while IFS= read -r line; do
+  case "$line" in
+    *"/model"*) printf 'Select model\\r\\n1. Default (recommended) Opus 4.8\\r\\n2. Fable Fable 5\\r\\nEnter to set - Esc to cancel\\r\\n' ;;
+    *"/exit"*) exit 0 ;;
+  esac
+done
+`;
+
+    const output = await runClaudeModelProbeWithExpect({
+      executable: "/bin/sh",
+      env: {
+        ...process.env,
+        CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1",
+        ACCORD_AGENTS_CLAUDE_STUB_PROGRAM: stubProgram
+      },
+      cwd: fixtureDir,
+      expectCommand: "/usr/bin/expect",
+      expectScript: (makeRunner() as any).claudeModelProbeExpectScript(
+        "-c $env(ACCORD_AGENTS_CLAUDE_STUB_PROGRAM)"
+      ) as string,
+      timeoutMs: 5_000
+    });
+
+    const expectedCwd = await realpath(fixtureDir);
+    assert.match(output, new RegExp(`STUB_CWD=${expectedCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(output, /STUB_SKIP=1/);
+    assert.match(output, /STUB_FORCE=unset/);
+    assert.match(output, /STUB_TTY=yes/);
+    assert.match(output, /STUB_SIZE=40 120/);
+    assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["fable"]);
+  } finally {
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("macOS Claude model discovery continues past settings warnings before opening the picker", { timeout: 10_000 }, async (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("macOS system Expect integration");
+    return;
+  }
+  try {
+    await access("/usr/bin/expect");
+  } catch {
+    t.skip("/usr/bin/expect is unavailable");
+    return;
+  }
+
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-model-warning-"));
+  try {
+    const stubProgram = `
+printf 'Settings Warning\\r\\n'
+printf 'permissions.allow: Invalid permission rule "WebFetch*" was skipped\\r\\n'
+printf '1. Continue\\r\\n2. Fix with Claude\\r\\n3. Exit and fix manually\\r\\n'
+printf 'Enter to confirm - Esc to cancel\\r\\n'
+warning_pending=1
+while IFS= read -r line; do
+  if test "$warning_pending" = 1; then
+    warning_pending=0
+    printf 'Safe mode: all customizations are disabled\\r\\n'
+    printf 'Transcript saving is off\\r\\n'
+    continue
+  fi
+  case "$line" in
+    *"/model"*) printf 'Select model\\r\\n1. Default (recommended) Opus 5\\r\\n2. Fable Fable 5.1\\r\\nEnter to set - Esc to cancel\\r\\n' ;;
+    *"/exit"*) exit 0 ;;
+  esac
+done
+`;
+
+    const output = await runClaudeModelProbeWithExpect({
+      executable: "/bin/sh",
+      env: {
+        ...process.env,
+        ACCORD_AGENTS_CLAUDE_STUB_PROGRAM: stubProgram
+      },
+      cwd: fixtureDir,
+      expectCommand: "/usr/bin/expect",
+      expectScript: (makeRunner() as any).claudeModelProbeExpectScript(
+        "-c $env(ACCORD_AGENTS_CLAUDE_STUB_PROGRAM)"
+      ) as string,
+      timeoutMs: 5_000
+    });
+
+    assert.match(output, /Settings Warning/);
+    assert.deepEqual(parseClaudeModelPickerOutput(output).map((model) => model.id), ["fable"]);
+  } finally {
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 test("Windows Claude model discovery drives only the non-persistent interactive model picker", async () => {
   const writes: string[] = [];
   let launch: { executable: string; args: string[]; cwd: string; env: Record<string, string> } | undefined;
@@ -308,6 +582,37 @@ test("Windows Claude model discovery never accepts a folder trust prompt", async
 
   await assert.rejects(probe, /requires this folder to be trusted/);
   assert.deepEqual(writes, []);
+  assert.equal(killed, true);
+});
+
+test("Windows Claude model discovery bounds captured output", async () => {
+  let killed = false;
+  let onData: ((data: string) => void) | undefined;
+
+  const probe = runClaudeModelProbeInPty({
+    executable: "C:\\Program Files\\Claude\\claude.exe",
+    env: { PATH: "C:\\Windows\\System32" },
+    cwd: "C:\\trusted\\repo",
+    timeoutMs: 1_000,
+    initialDelayMs: 0,
+    pickerSettleDelayMs: 0,
+    exitDelayMs: 0,
+    maxOutputBytes: 16,
+    spawnPty: () => {
+      queueMicrotask(() => onData?.("x".repeat(17)));
+      return {
+        write: () => undefined,
+        kill: () => { killed = true; },
+        onData: (listener) => {
+          onData = listener;
+          return { dispose: () => undefined };
+        },
+        onExit: () => ({ dispose: () => undefined })
+      };
+    }
+  });
+
+  await assert.rejects(probe, /exceeded 16 bytes/);
   assert.equal(killed, true);
 });
 
@@ -3037,9 +3342,52 @@ test("reasoning effort mapping is provider-specific", () => {
   const runner = makeRunner() as any;
 
   assert.equal(runner.codexReasoningEffort("minimal"), "minimal");
-  assert.equal(runner.codexReasoningEffort("max"), undefined);
+  assert.equal(runner.codexReasoningEffort("max"), "max");
+  assert.equal(runner.codexReasoningEffort("ultra"), "ultra");
+  assert.equal(runner.codexReasoningEffort("invalid"), undefined);
   assert.equal(runner.claudeReasoningEffort("xhigh"), "xhigh");
+  assert.equal(runner.claudeReasoningEffort("max"), "max");
+  assert.equal(runner.claudeReasoningEffort("ultra"), undefined);
   assert.equal(runner.claudeReasoningEffort("minimal"), undefined);
+});
+
+test("Codex catalog preserves max and ultra and their default recommendation", () => {
+  const runner = makeRunner() as any;
+  const options = runner.codexModelReasoningEfforts({
+    defaultReasoningEffort: "max",
+    supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra", "invalid", "ultra"].map(
+      (reasoningEffort) => ({ reasoningEffort, description: `Use ${reasoningEffort}` })
+    )
+  });
+  assert.deepEqual(options.map((option: any) => option.id), ["low", "medium", "high", "xhigh", "max", "ultra"]);
+  assert.deepEqual(options.slice(-2), [
+    { id: "max", label: "Max", description: "Use max", recommended: true },
+    { id: "ultra", label: "Ultra", description: "Use ultra", recommended: false }
+  ]);
+  assert.deepEqual(runner.codexModelReasoningEfforts(undefined), []);
+});
+
+test("Codex max and ultra reach fresh and resumed local and remote invocations", () => {
+  const runner = makeRunner() as any;
+  for (const reasoningEffort of ["max", "ultra"] as const) {
+    const participant = { id: "participant", kind: "codex-cli" as const, label: "Codex", model: "gpt-6-astra", reasoningEffort };
+    const options = chatOptions({ agentMode: "auto", workspaceWrite: true });
+    const start = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", options);
+    const resume = runner.codexAppServerThreadResumeParams("session-1", participant, "/repo", "chat", options);
+    assert.equal(start.config.model_reasoning_effort, reasoningEffort);
+    assert.equal(resume.config.model_reasoning_effort, reasoningEffort);
+    for (const sessionId of [undefined, "session-1"]) {
+      const invocation = buildCodexExecInvocation({
+        participant,
+        prompt: "Prompt",
+        outputPath: "/tmp/output",
+        repoPath: "/repo",
+        kind: "chat",
+        options: { ...options, sessionId, remoteSandbox: { networkAccess: true, gitWritableRoot: "/repo" } }
+      });
+      assert.ok(invocation.args.includes(`model_reasoning_effort="${reasoningEffort}"`));
+    }
+  }
 });
 
 test("codex app-server resume re-asserts the auto preset so a mode switch applies without a fresh session", () => {
