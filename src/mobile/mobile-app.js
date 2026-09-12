@@ -667,7 +667,7 @@
   function sameMobileEvent(left, right) {
     return Boolean(left.mobileEventId) &&
       left.mobileEventId === right.mobileEventId &&
-      (!left.conversationId || !right.conversationId || left.conversationId === right.conversationId);
+      Boolean(left.conversationId) && left.conversationId === right.conversationId;
   }
 
   // Scaffolding ("@x is running..." / "Running...") says an answer is being
@@ -787,7 +787,7 @@
           // the other's live row.
           const matchesFailedPhoneMessage = wholeMessageFailed && entry.mobileEventId === mobileEventId;
           return (matchesMessage || matchesScaffolding || matchesAnonymousRunRow || matchesFailedPhoneMessage) &&
-            (!conversationId || entry.conversationId === conversationId || entry.conversationId === undefined);
+            entry.conversationId === conversationId;
         }).map(function (entry) {
           return requestToPromise(store.delete(entry.id));
         });
@@ -824,7 +824,7 @@
           if (!entry || entry.status !== "pending" || !isPlaceholderTimelineContent(entry.content)) {
             return false;
           }
-          if (conversationId && entry.conversationId !== conversationId && entry.conversationId !== undefined) {
+          if (entry.conversationId !== conversationId) {
             return false;
           }
           const created = Date.parse(entry.createdAt || "");
@@ -1807,7 +1807,9 @@
       return requestToPromise(store.getAll());
     }).then(function (entries) {
       return entries.filter(function (entry) {
-        return !conversationId || entry.conversationId === conversationId || entry.conversationId === undefined;
+        // Older rows without an owner stay on disk, but cannot be attributed
+        // to every chat. Only the desktop/machine can state their ownership.
+        return !conversationId || entry.conversationId === conversationId;
       }).sort(function (left, right) {
         return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
       });
@@ -4555,8 +4557,12 @@
     host.append(label, button);
   }
 
+  let renderRevision = 0;
+
   async function render(connectionStatus) {
+    const revision = ++renderRevision;
     await loadDeletedMachineConversations();
+    if (revision !== renderRevision) return;
     const state = document.getElementById("connection-state");
     const list = document.getElementById("message-list");
     const chatsScreen = document.getElementById("chats-screen");
@@ -4565,6 +4571,22 @@
     const activeId = selectedConversationId();
     if (!state || !list || !chatsScreen || !timelineScreen) {
       return;
+    }
+    if (list.dataset.conversationId !== (activeId || "")) {
+      // Navigation changes the heading before IDB finishes. Remove the old
+      // chat's rows and stream controls in the same turn, including on a failed
+      // read; they must never remain actionable under the new chat's identity.
+      if (list.dataset.conversationId !== undefined) {
+        setOpenThreadRootId(undefined);
+        setOpenStreamRunId(undefined);
+        renderStreamView([], connectionStatus);
+      }
+      list.dataset.conversationId = activeId || "";
+      list.replaceChildren();
+      renderThreadHeader(undefined);
+      state.textContent = "";
+      lastRowsFingerprint = undefined;
+      lastScrolledConversationId = undefined;
     }
     if (!loadPairing()) {
       renderUnpairedNotice();
@@ -4636,6 +4658,9 @@
     }
     const entries = await listOutboxEntries(activeId);
     const timelineEntries = await listTimelineEntries(activeId);
+    // A mailbox update, navigation or another tab may have superseded this
+    // read. Committing it would replace the current chat with the old snapshot.
+    if (revision !== renderRevision || activeId !== selectedConversationId()) return;
     const messageEntries = entries.filter(isMessageOutboxEntry);
     const requestedStopRunIds = new Set(entries.filter(function (entry) {
       return entry.kind === "run.cancel.requested";
