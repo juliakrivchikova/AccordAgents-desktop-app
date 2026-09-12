@@ -63,6 +63,22 @@ Stated repeatedly by the User; recorded 2026-08-20 after app-managed
 per-participant worktrees were proposed again. `docs/cloud-runs-workspace-parity.md`
 carries the operational detail.
 
+### Independent laptop environments may share one AWS instance
+
+The User's home and work laptops have unrelated projects and chats but share an
+AWS account and one paid EC2 instance. Each laptop must retain its own environment
+variables, global skills, native CLI profiles and sessions, machine enrollment,
+and conversation data. Sharing an instance must not merge those environments or
+overwrite the other laptop's setup. Existing projects and participant-created
+worktrees must remain intact.
+
+Both separately installed PWAs are on the same iPhone. Each installation belongs
+to its own laptop environment: pairing, queued actions, messages and notifications
+must stay with that environment. Shared availability when the EC2 instance stops
+is expected; a second paid instance is not the solution. Stated by the User on
+2026-09-11, including the same-iPhone clarification at 21:30 UTC. Verification
+status and remaining real-device checks are in `docs/qa-cloud-environments.md`.
+
 ## Exceptions
 
 An exception is a deliberate, user-visible divergence from Requirement 1 or 2.
@@ -95,6 +111,10 @@ fix or the User's approval as exceptions.
 
 | Divergence | Requirement | Evidence | Status |
 | --- | --- | --- | --- |
+| **Switching PWA chats can show the previous chat's messages under the new heading.** A render reads IndexedDB asynchronously and commits without checking whether navigation or a newer render replaced it. Old rows without a conversation also pass every chat's filter. | 1 | Reported 2026-09-11; reproduced in the built PWA with a delayed real IndexedDB read: heading `Chat B`, body `ONLY_CHAT_A`, while storage still separates A and B. The unscoped-row regression also fails on the unchanged source. | Fixed and deployed as PWA cache v68 on 2026-09-12: obsolete renders cannot commit, navigation clears old rows and stream controls before loading, and lookup/cleanup require the row's own conversation. Unscoped data is retained, never guessed or deleted. Browser and real-relay regressions pass; after deployment the User's physical-iPhone smoke check found no cross-chat messages. Automated iPhone evidence remains unavailable because iOS 27 cannot mount the available Xcode DDI and Safari control was denied. See `docs/qa-pwa-chat-isolation.md`. |
+| **Cloud run selection is disabled when the local provider is not signed in.** The new-member row disables all runtime controls, including the machine selector, from local readiness. | 2 | Real Electron QA on 2026-09-11: an empty local Codex profile made Run on disabled despite the configured, running AWS instance; restoring the QA window's existing local profile re-enabled it. `chat-participant-roster-row.tsx` passes its local `disabledReason` into `ParticipantRuntimeControls`. | Open; pre-existing restriction observed during environment-isolation QA, not silently changed here. |
+| **Machine setup's Do not check provider option still requires Codex login.** An omitted provider reaches the doctor's default required Codex/auth checks. | 2 | Real Settings installation after an interrupted sign-in on 2026-09-11 asked for Codex device authorization with Do not check selected; `requiredChecksForOptions` defaults to Codex. | Open; separate existing setup behavior, not a successful runtime-only verification path. |
+| **Saving an environment variable does not immediately update an already connected machine.** The desktop restarts its warm agents after Save, but does not call the existing machine settings sync. | 1 | Real Electron/relay QA on 2026-09-11: the machine retained the old synthetic value after Save and received the new value when it reconnected. `settings:save-agent-environment-variable` and the delete handler in `src/main/main.ts` do not call `MachineLinkService.syncSettings`. | Open; observed during environment-isolation QA, outside that change. No live settings-refresh behavior was silently added. |
 | **A payload the phone runs on carries a full conversation snapshot into a command-line argument.** `publishMobileRunnerPolicyForPairing` builds `mobileMailboxRunnerContextSnapshot` for every chat update and appends it as a chat event; chat-event writes reach SQLite through `queryJson`, which passes its SQL as an argv element. On a large chat the argument exceeds the operating system limit and the write fails, so the phone's runner policy is never published — and the failing work sits on the path that runs when the User sends a message. | 1 | Observed 2026-08-21: `spawn E2BIG` 1696 times between 08:40 and 12:00, zero on every previous day; introduced by `835d36a` (#17) and live from the 08:41 restart. Measured 4.0-4.6s between the User's send and the run starting. | Open |
 | **Stop destroys a cloud participant's session; locally it does not.** Stopping a local participant cancels the turn and the CLI session survives, so the next turn resumes with its context. Stopping a cloud participant leaves no resumable session on the worker: the next turn fails with a resume miss, the stored session id is cleared, and the participant restarts from nothing. | 1 | Observed 2026-08-19: a cloud member stopped after 16 minutes of work; the following turn returned `thread/resume failed: no rollout found`. Handling at `src/main/services/chat.ts:3020`. | Addressed on the machines transport (`feature/machines-transport`): a member on a machine is stopped by the same ChatService code a local member is, and its session survives. Verified 2026-09-06: Stop on a machine-hosted Claude member, then a new turn resumed the same session and replied. Closes when the cutover removes the worker path. |
 | **A cloud participant has no artifact tools.** The desktop exposes 38 app tools, 17 of them `app_artifact_*`; the cloud worker relay exposes 7 and none of them touch artifacts, so a cloud member cannot read, create, revise or sign a document that a local member handles normally. | 1 | `grep -c app_artifact src/main/services/remoteRuns.ts` → 0. Declared by hand at `remoteRuns.ts:3371-3387`, `:4422-4496`, `:4504+`. | Closed in the source on `taylor/machine-installer` (2026-09-07): the worker path is deleted, and a member runs only on its home machine, which serves the same `AppMcpService` and tool wiring as the desktop — artifact tools included. Reopens only if a worker path returns. |
