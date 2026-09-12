@@ -16,6 +16,7 @@
  */
 
 import { shellQuotePosix } from "./cloudRunWorkers";
+import { machineProfileVariables } from "../../shared/machineInstall";
 import type {
   MachineDrainReport,
   MachineMirrorInspection,
@@ -26,6 +27,51 @@ import type {
 export const DEFAULT_MACHINE_INSTALL_DIRNAME = "accordagents-machine";
 export const DEFAULT_MACHINE_USER_DATA_SUFFIX = ".accordagents/machine";
 export const DEFAULT_MACHINE_SERVICE_NAME = "accordagents-machine";
+
+/** Refuse another desktop's enrollment before doctor/setup can touch its
+ * provider home. The owner is published atomically; a failed write or two
+ * simultaneous installers cannot claim the same directory for different peers.
+ * The enrollment arrives on stdin and is never printed or passed in argv. */
+export function machineClaimEnvironmentScript(installRoot: string): string {
+  const script = String.raw`import json, os, sys, tempfile
+root = sys.argv[1]
+def identity(value):
+    issuer = value.get("issuer", {})
+    result = {"rendezvousId": value.get("rendezvousId"), "issuer": issuer.get("publicKeyDerBase64")}
+    if not all(isinstance(v, str) and v for v in result.values()):
+        raise RuntimeError("Machine enrollment has no owner identity; nothing was replaced.")
+    return result
+expected = identity(json.load(sys.stdin))
+enrollment = os.path.join(root, "enrollment.json")
+if os.path.lexists(enrollment):
+    with open(enrollment) as f:
+        if identity(json.load(f)) != expected:
+            raise RuntimeError("This installation belongs to another environment; nothing was replaced.")
+os.makedirs(root, mode=0o700, exist_ok=True)
+owner = os.path.join(root, "environment-owner.json")
+fd, staged = tempfile.mkstemp(prefix=".environment-owner-", dir=root)
+try:
+    with os.fdopen(fd, "w") as f:
+        json.dump(expected, f)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        os.link(staged, owner)
+        directory = os.open(root, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except FileExistsError:
+        pass
+    with open(owner) as f:
+        if json.load(f) != expected:
+            raise RuntimeError("This installation belongs to another environment; nothing was replaced.")
+finally:
+    os.unlink(staged)
+`;
+  return `set -eu\npython3 -c ${shellQuotePosix(script)} ${shellQuotePosix(installRoot)}`;
+}
 
 export interface MachineInstallLayout {
   installRoot: string;
@@ -353,6 +399,7 @@ export interface MachineServiceUnitOptions {
   user: string;
   nodePath: string;
   path?: string;
+  profileHome?: string;
 }
 
 /** The systemd unit. `KillSignal=SIGTERM` with a long stop timeout is not
@@ -370,13 +417,21 @@ export function machineServiceUnit(options: MachineServiceUnitOptions): string {
     "[Service]",
     "Type=simple",
     `WorkingDirectory=${layout.installRoot}`,
-    `Environment=HOME=${options.home}`,
+    `Environment=HOME=${options.profileHome ?? options.home}`,
     `Environment=ACCORDAGENTS_MACHINE_ENROLLMENT=${layout.enrollmentPath}`,
     `Environment=ACCORDAGENTS_USER_DATA_DIR=${layout.userDataDir}`,
     `Environment=ACCORDAGENTS_MACHINE_NAME=${options.machineName}`
   ];
   if (options.path) {
     lines.push(`Environment=PATH=${options.path}`);
+  }
+  if (options.profileHome) {
+    lines.push(
+      "Environment=SHELL=/bin/bash",
+      `Environment=ACCORD_AGENTS_MACHINE_PROFILE_HOME=${options.profileHome}`,
+      ...Object.entries(machineProfileVariables(options.profileHome))
+        .filter(([key]) => key !== "HOME").map(([key, value]) => `Environment=${key}=${value}`)
+    );
   }
   if (layout.serviceScope === "system") {
     lines.push(`User=${options.user}`);

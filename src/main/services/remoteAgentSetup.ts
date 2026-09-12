@@ -21,6 +21,7 @@ import type { CommandOptions, CommandResult } from "./command";
 import { defaultRemoteMirrorSync } from "./remoteMirrorSync";
 import type { RemoteMirrorSyncRunner } from "./remoteMirrorSync";
 import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
+import { remoteProfileCommand } from "./remoteWorkerTarget";
 
 export const PORTABLE_AGENT_SETUP_VERSION = 1;
 const PORTABLE_SETUP_DIRNAME = "agent-setup";
@@ -1342,7 +1343,8 @@ function portableSetupWorkerKey(worker: RemoteRunWorkerTarget): string {
     port: worker.port,
     identityFile: worker.identityFile,
     sshPath: worker.sshPath,
-    workerRoot: worker.workerRoot
+    workerRoot: worker.workerRoot,
+    profileHome: worker.profileHome
   });
 }
 
@@ -1352,7 +1354,8 @@ async function resolvePortableSetupRoot(
   commandRunner: PortableCommandRunner
 ): Promise<string> {
   const requested = worker.workerRoot?.trim() || "~/.accordagents/remote-runs";
-  const sharedRequested = requested.replace(/\/+$/g, "").replace(/\/devices\/[^/]+$/, "") || "/";
+  const root = requested.replace(/\/+$/g, "");
+  const sharedRequested = (worker.profileHome ? root : root.replace(/\/devices\/[^/]+$/, "")) || "/";
   if (sharedRequested.startsWith("/")) {
     return path.posix.join(sharedRequested, PORTABLE_SETUP_DIRNAME);
   }
@@ -1366,7 +1369,7 @@ async function resolvePortableSetupRoot(
     : `printf '%s' "$HOME"`;
   const result = await commandRunner(
     worker.sshPath?.trim() || "ssh",
-    [...cloudRunSshOptionArgs(worker), buildCloudRunSshTarget(worker), command],
+    [...cloudRunSshOptionArgs(worker), buildCloudRunSshTarget(worker), remoteProfileCommand(worker.profileHome, command)],
     { timeoutMs: 30_000, signal }
   );
   const resolved = result.stdout.trim();
@@ -1387,7 +1390,7 @@ async function readRemoteSetupState(
   const command = `node -e ${shellQuotePosix(script)} ${shellQuotePosix(setupRoot)}`;
   const result = await commandRunner(
     worker.sshPath?.trim() || "ssh",
-    [...cloudRunSshOptionArgs(worker), buildCloudRunSshTarget(worker), command],
+    [...cloudRunSshOptionArgs(worker), buildCloudRunSshTarget(worker), remoteProfileCommand(worker.profileHome, command)],
     { timeoutMs: 30_000, signal }
   );
   const probe = parseJsonRecord(result.stdout.trim());
@@ -1427,7 +1430,7 @@ async function activateRemotePortableSetup(
   try {
     result = await commandRunner(
       worker.sshPath?.trim() || "ssh",
-      [...cloudRunSshOptionArgs(worker), buildCloudRunSshTarget(worker), command],
+      [...cloudRunSshOptionArgs(worker), buildCloudRunSshTarget(worker), remoteProfileCommand(worker.profileHome, command)],
       { input: remotePortableSetupActivationScript(), timeoutMs: 60_000, signal }
     );
   } catch (error) {

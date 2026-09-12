@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { AwsWorkerStatus, CloudRunWorkerSettings } from "../../shared/types";
 import type { MachineRecord } from "../../shared/machineLink";
 import type { MachineInstallRecord, MachineInstallRequest, MachineInstallResult, MachineInstallSnapshot, MachineMirrorBootstrapResult } from "../../shared/machineInstall";
@@ -6,6 +6,7 @@ import type { CloudRunPreparationProgress, PrepareCloudRunRequest, PrepareCloudR
 
 interface Options {
   appVersion: string;
+  environmentId(): Promise<string>;
   aws: {
     status(): Promise<AwsWorkerStatus>;
     ensureExistingWorkerForRun(instanceId: string): Promise<CloudRunWorkerSettings>;
@@ -19,6 +20,11 @@ interface Options {
   saveInstall(record: MachineInstallRecord): Promise<void>;
   prepareProvider(worker: CloudRunWorkerSettings, provider: PrepareCloudRunRequest["provider"], record: MachineInstallRecord,
     progress: (snapshot: Omit<CloudRunPreparationProgress, "operationId">) => void): Promise<void>;
+}
+
+export function cloudEnvironmentDirectory(environmentId: string): string {
+  if (!environmentId.trim()) throw new Error("This desktop has no environment identity.");
+  return `accordagents-${createHash("sha256").update(environmentId).digest("hex").slice(0, 24)}`;
 }
 
 /** The user's Cloud run selection prepares the existing instance. This never
@@ -124,7 +130,7 @@ export class CloudRunPreparationService {
     const worker = await this.options.aws.ensureExistingWorkerForRun(instanceId);
     if (!worker.host) throw new Error("AWS did not return an address for this instance.");
     const existing = installs.find(item => item.machineId === machine?.id);
-    if (machine && existing && this.options.isConnected(machine.id) && machine.lastHello?.appVersion === this.options.appVersion) {
+    if (machine && existing?.installRoot && this.options.isConnected(machine.id) && machine.lastHello?.appVersion === this.options.appVersion) {
       // Selecting another member must never drain an already running machine.
       await this.options.prepareProvider(worker, provider, existing, snapshot => this.report(snapshot));
       this.report({ message: "Cloud run is ready." });
@@ -134,8 +140,18 @@ export class CloudRunPreparationService {
       throw new Error("The cloud runtime needs an update. Finish its current runs, then select Cloud run again.");
     }
     machine ??= await this.options.createMachine("Cloud run", instanceId);
+    // The AWS instance is shared, its enrollment, data and CLI home are not.
+    // Keep legacy paths on the desktop that already owns them so its provider
+    // sessions and participant-created worktrees are never moved or discarded.
+    const environmentId = await this.options.environmentId();
+    const directory = cloudEnvironmentDirectory(environmentId);
+    const established = existing?.installRoot ? existing : undefined;
     const result = await this.options.install({
       machineId: machine.id, operationId: randomUUID(), requiredProvider: provider,
+      installRoot: established?.installRoot || `~/${directory}`,
+      userDataDir: established?.userDataDir || undefined,
+      serviceName: established?.serviceName || undefined,
+      isolatedProfile: established ? established.isolatedProfile ?? Boolean(established.profileHome) : true,
       target: { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias }
     }, snapshot => this.report({ message: snapshot.error || snapshot.message, authUrl: snapshot.authUrl, authCode: snapshot.authCode }));
     if (result.snapshot.phase !== "ready") {

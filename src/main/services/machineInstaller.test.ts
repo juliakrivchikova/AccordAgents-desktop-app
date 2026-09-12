@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { CommandError } from "./command";
 import type { CloudRunWorkerDoctorReport } from "../../shared/types";
 import type { MachineInstallRecord, MachineInstallSnapshot, MachineSshTarget } from "../../shared/machineInstall";
 import {
@@ -106,7 +107,7 @@ interface Harness {
   progress: MachineInstallSnapshot[];
   logged: Array<Record<string, unknown>>;
   syncedUp: string[];
-  doctorCalls: Array<{ call: string; options?: { requiredProviderKind?: string } }>;
+  doctorCalls: Array<{ call: string; workerRoot?: string; options?: { requiredProviderKind?: string; profileHome?: string } }>;
   waitedVersion: () => string | undefined;
 }
 
@@ -120,6 +121,8 @@ function harness(options: {
   mirrorCopyError?: string;
   bundleDir?: string;
   doctor?: CloudRunWorkerDoctorReport;
+  ownerFailure?: string | Error;
+  probeFailure?: string;
 } = {}): Harness {
   const calls: MachineSshExecRequest[] = [];
   const uploads: Array<{ remoteDir: string }> = [];
@@ -128,7 +131,7 @@ function harness(options: {
   const logged: Array<Record<string, unknown>> = [];
   const syncedUp: string[] = [];
   let activated = false;
-  const doctorCalls: Array<{ call: string; options?: { requiredProviderKind?: string } }> = [];
+  const doctorCalls: Harness["doctorCalls"] = [];
   let waitedForVersion: string | undefined;
   const bundleDir = options.bundleDir ?? bundleFixture();
   const activeReleaseAfter = releaseName(readMachineBundle(bundleDir));
@@ -140,9 +143,9 @@ function harness(options: {
       async listMachineInstalls() { return [...records.values()]; }
     },
     doctor: {
-      async diagnose(_settings, doctorOptions) { doctorCalls.push({ call: "diagnose", options: doctorOptions }); return report; },
-      async setup(_settings, onProgress, doctorOptions) {
-        doctorCalls.push({ call: "setup", options: doctorOptions });
+      async diagnose(settings, doctorOptions) { doctorCalls.push({ call: "diagnose", workerRoot: settings.workerRoot, options: doctorOptions }); return report; },
+      async setup(settings, onProgress, doctorOptions) {
+        doctorCalls.push({ call: "setup", workerRoot: settings.workerRoot, options: doctorOptions });
         onProgress?.({ stage: "codex-auth", message: "Approve the Codex sign-in on the machine…", authUrl: "https://auth.example/device", authCode: "ABCD-1234" });
         return options.doctor ?? { ok: true, message: "Machine ready.", checks: [] };
       }
@@ -158,8 +161,12 @@ function harness(options: {
     logger: (event, payload) => logged.push({ event, ...payload }),
     sshExec: async (request) => {
       calls.push(request);
+      if (options.ownerFailure && request.script.includes("environment-owner.json")) {
+        throw typeof options.ownerFailure === "string" ? new Error(options.ownerFailure) : options.ownerFailure;
+      }
       if (request.script.includes("mv -Tf")) activated = true;
       if (request.script.includes("printf 'home=%s")) {
+        if (options.probeFailure) throw new Error(options.probeFailure);
         if (activated) {
           return options.probeAfter ?? probeOutput({
             state: JSON.stringify({ version: "1.4.0", digest: "new" }),
@@ -188,6 +195,91 @@ function harness(options: {
   });
   return { service, calls, uploads, records, progress, logged, syncedUp, doctorCalls, waitedVersion: () => waitedForVersion };
 }
+
+test("Settings resolves an unfinished installation's isolated profile before provider checks", async () => {
+  const target = { ...TARGET, hostKeyAlias: "accordagents-i-home" };
+  const h = harness({ probe: probeOutput({ "install-root": "/home/ubuntu/accordagents-home" }) });
+  h.records.set("home", { machineId: "home", target, installRoot: "~/accordagents-home",
+    userDataDir: "", serviceName: "accordagents-home", serviceScope: "system", isolatedProfile: true });
+  const resolved = await h.service.providerEnvironment(target, "~/unused");
+  assert.deepEqual(resolved, { workerRoot: "/home/ubuntu/accordagents-home", profileHome: "/home/ubuntu/accordagents-home/home" });
+  const claim = h.calls.find(call => call.script.includes("environment-owner.json"));
+  assert.ok(claim?.script.endsWith("'/home/ubuntu/accordagents-home'"));
+});
+
+test("a legacy failed attempt without resolved paths cannot reuse the default shared unit", async () => {
+  const h = harness({ probe: probeOutput({ "install-root": "/home/ubuntu/accordagents-home",
+    "service-name": "accordagents-home", "user-data": "/home/ubuntu/accordagents-home/data" }) });
+  h.records.set("home", { machineId: "home", target: TARGET, installRoot: "", userDataDir: "",
+    serviceName: "accordagents-machine", serviceScope: "system", isolatedProfile: false });
+  const result = await h.service.install({ machineId: "home", operationId: "retry", target: TARGET,
+    installRoot: "~/accordagents-home", isolatedProfile: true });
+  assert.equal(result.record.profileHome, "/home/ubuntu/accordagents-home/home");
+  assert.ok(!h.calls.find(call => call.script.includes("printf 'home=%s"))?.script.includes("SVC='accordagents-machine'"));
+});
+
+test("a foreign enrollment refuses installation before provider login, transfer or restart", async () => {
+  const h = harness({ ownerFailure: "This installation belongs to another environment." });
+  const result = await h.service.install({ machineId: "home", operationId: "one", target: TARGET, isolatedProfile: true });
+  assert.equal(result.snapshot.phase, "error");
+  assert.match(result.snapshot.error ?? "", /another environment/);
+  assert.equal(h.doctorCalls.length, 0);
+  assert.equal(h.uploads.length, 0);
+  assert.ok(!h.calls.some(call => call.script.includes("systemctl restart")));
+  assert.equal(result.record.isolatedProfile, true, "retry must keep the intended isolation");
+});
+
+test("SSH owner refusals reach setup, Settings and mirror callers without leaking command output", async () => {
+  const reason = "This installation belongs to another environment; nothing was replaced.";
+  const failure = new CommandError("ssh exited with code 1", {
+    command: "ssh", args: [ENROLLMENT], stdout: ENROLLMENT,
+    stderr: `Traceback:\n${ENROLLMENT}\nRuntimeError: ${reason}\n`, exitCode: 1, timedOut: false
+  });
+  const h = harness({ ownerFailure: failure });
+  const result = await h.service.install({ machineId: "home", operationId: "one", target: TARGET, isolatedProfile: true });
+  assert.equal(result.snapshot.error, reason);
+  assert.equal(result.snapshot.phase, "error");
+  assert.equal(h.doctorCalls.length, 0);
+  assert.equal(h.uploads.length, 0);
+  assert.ok(!JSON.stringify(h.logged).includes("SUPER-SECRET"));
+  const record = { ...result.record, installRoot: LAYOUT.installRoot,
+    target: { ...TARGET, hostKeyAlias: "same-instance" } };
+  h.records.set("home", record);
+  await assert.rejects(h.service.ensureEnvironmentOwner(record), { message: reason });
+  await assert.rejects(h.service.providerEnvironment(record.target, LAYOUT.installRoot), { message: reason });
+  await assert.rejects(h.service.bootstrapProjectMirror({ machineId: "home", localPath: "/project" }), { message: reason });
+  assert.equal(h.syncedUp.length, 0);
+});
+
+test("an owner claim's SSH transport failure is not mislabeled as another owner", async () => {
+  const failure = new CommandError("ssh exited with code 255", {
+    command: "ssh", args: [], stdout: "",
+    stderr: "Connection closed\nRuntimeError: This installation belongs to another environment; nothing was replaced.\n",
+    exitCode: 255, timedOut: false
+  });
+  const h = harness({ ownerFailure: failure });
+  await assert.rejects(h.service.ensureEnvironmentOwner({ machineId: "home", target: TARGET, installRoot: LAYOUT.installRoot }),
+    error => error === failure);
+});
+
+test("a failed first probe keeps isolation for a retry after restarting the desktop", async () => {
+  const h = harness({ probeFailure: "SSH unavailable" });
+  const result = await h.service.install({ machineId: "home", operationId: "one", target: TARGET,
+    installRoot: "~/accordagents-home", isolatedProfile: true });
+  assert.equal(result.record.isolatedProfile, true);
+  assert.equal(result.record.profileHome, undefined);
+  const restarted = harness({ probe: probeOutput({ "install-root": "/home/ubuntu/accordagents-home",
+    "user-data": "/home/ubuntu/accordagents-home/data", "service-name": "accordagents-home" }) });
+  restarted.records.set("home", JSON.parse(JSON.stringify(result.record)));
+  const retried = await restarted.service.install({ machineId: "home", operationId: "retry", target: TARGET });
+  assert.equal(retried.record.profileHome, "/home/ubuntu/accordagents-home/home");
+  assert.equal(retried.record.serviceName, "accordagents-home");
+  assert.equal(restarted.doctorCalls[0].options?.profileHome, retried.record.profileHome);
+  assert.equal(restarted.doctorCalls[0].workerRoot, retried.record.installRoot);
+  const unit = restarted.calls.find(call => call.input?.includes("[Service]"))?.input ?? "";
+  assert.ok(unit.includes("Environment=HOME=" + retried.record.profileHome));
+  assert.ok(unit.includes("Environment=ACCORD_AGENTS_MACHINE_PROFILE_HOME=" + retried.record.profileHome));
+});
 
 // ---- parsers --------------------------------------------------------------
 
@@ -502,7 +594,7 @@ test("a deployment in its own directory gets its own unit, not the default one",
   const probeCall = h.calls.find((call) => call.script.includes("printf 'home=%s"));
   assert.ok(probeCall);
   assert.ok(!probeCall.script.includes("SVC='accordagents-machine'"), "the probe must not force the default unit name");
-  assert.ok(probeCall.script.includes('SVC="$SVC_DEFAULT"'));
+  assert.ok(probeCall.script.includes("SVC='accordagents-installer-qa'"));
   assert.ok(probeCall.script.includes('ROOT="$HOME/accordagents-installer-qa"'));
 });
 
@@ -525,7 +617,7 @@ test("the chosen provider must be installed and signed in on the machine itself"
 test("the enrollment travels on stdin and never reaches a command line or a log", async () => {
   const h = harness();
   await h.service.install({ machineId: "m1", operationId: "op1", target: TARGET });
-  const enrollCall = h.calls.find((call) => call.input === ENROLLMENT);
+  const enrollCall = h.calls.find((call) => call.input === ENROLLMENT && call.script.includes("cat > "));
   assert.ok(enrollCall, "the enrollment must be written from stdin");
   assert.ok(enrollCall.script.includes("cat > "));
   assert.ok(enrollCall.script.includes("chmod 600"));
@@ -611,7 +703,8 @@ test("an upgrade keeps the enrollment that is already on the machine", async () 
     }, ["1.3.0-old"])
   });
   await h.service.upgrade({ machineId: "m1", operationId: "op4", target: TARGET });
-  assert.ok(!h.calls.some((call) => call.input === ENROLLMENT), "an upgrade must not re-pair the machine");
+  assert.ok(h.calls.some(call => call.input === ENROLLMENT && call.script.includes("environment-owner.json")), "the existing owner must be checked");
+  assert.ok(!h.calls.some(call => call.input === ENROLLMENT && call.script.includes("cat > ")), "an upgrade must not re-pair the machine");
 });
 
 test("re-installing the same bundle on a running machine changes nothing", async () => {

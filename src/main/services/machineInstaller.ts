@@ -42,12 +42,13 @@ import type {
   MachineUpgradeRequest
 } from "../../shared/machineInstall";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, shellQuotePosix } from "./cloudRunWorkers";
-import { runCommand } from "./command";
+import { CommandError, runCommand } from "./command";
 import {
   DEFAULT_MACHINE_INSTALL_DIRNAME,
   DEFAULT_MACHINE_SERVICE_NAME,
   DEFAULT_MACHINE_USER_DATA_SUFFIX,
   machineActivateReleaseScript,
+  machineClaimEnvironmentScript,
   machineDrainScript,
   machineInstallDependenciesScript,
   machineInstallLayout,
@@ -115,11 +116,11 @@ export interface MachineInstallStore {
  *  and a worker cannot drift apart, and so provider credentials are never
  *  copied from this desktop: `setup` performs a native device-auth login. */
 export interface MachineDoctor {
-  diagnose(settings: CloudRunWorkerSettings, options?: { requiredProviderKind?: "codex-cli" | "claude-code"; maintenance?: MachineMaintenanceTarget }): Promise<CloudRunWorkerDoctorReport>;
+  diagnose(settings: CloudRunWorkerSettings, options?: { requiredProviderKind?: "codex-cli" | "claude-code"; maintenance?: MachineMaintenanceTarget; profileHome?: string }): Promise<CloudRunWorkerDoctorReport>;
   setup(
     settings: CloudRunWorkerSettings,
     onProgress?: (progress: CloudRunWorkerSetupProgress) => void,
-    options?: { requiredProviderKind?: "codex-cli" | "claude-code"; maintenance?: MachineMaintenanceTarget }
+    options?: { requiredProviderKind?: "codex-cli" | "claude-code"; maintenance?: MachineMaintenanceTarget; profileHome?: string }
   ): Promise<CloudRunWorkerDoctorReport>;
 }
 
@@ -154,6 +155,7 @@ export interface MachineInstallerOptions {
    *  resources while a checkout points at `dist/machine`. */
   payload: MachineRuntimePayloadLocation | (() => MachineRuntimePayloadLocation);
   machineName?: (machineId: string) => Promise<string | undefined>;
+  prepareProfile?: (record: MachineInstallRecord) => Promise<void>;
   sshExec?: MachineSshExec;
   uploadBundle?: MachineBundleUpload;
   mirrorSync?: RemoteMirrorSyncRunner;
@@ -240,6 +242,47 @@ export class MachineInstallerService {
       timeoutMs: PROBE_TIMEOUT_MS
     });
     return parseMachineProbe(stdout);
+  }
+
+  async ensureEnvironmentOwner(record: Pick<MachineInstallRecord, "machineId" | "target" | "installRoot">): Promise<void> {
+    if (!record.installRoot.startsWith("/")) throw new Error("Finish machine setup before using its files.");
+    await this.claimEnvironmentOwner(record.target, record.installRoot, await this.options.getEnrollmentJson(record.machineId));
+  }
+
+  private async claimEnvironmentOwner(target: MachineSshTarget, installRoot: string, enrollmentJson: string): Promise<void> {
+    try {
+      await this.sshExec({ target, script: machineClaimEnvironmentScript(installRoot),
+        input: enrollmentJson, timeoutMs: SHORT_TIMEOUT_MS });
+    } catch (error) {
+      // SSH's generic exit-code message hides Python's owner refusal. Expose
+      // only our fixed diagnostic, never arbitrary stderr or enrollment data.
+      if (error instanceof CommandError && error.result.exitCode === 1) {
+        const reasons = [
+          "This installation belongs to another environment; nothing was replaced.",
+          "Machine enrollment has no owner identity; nothing was replaced."
+        ];
+        const lines = error.result.stderr.split(/\r?\n/);
+        const reason = reasons.find(message => lines.includes(`RuntimeError: ${message}`));
+        if (reason) throw new Error(reason);
+      }
+      throw error;
+    }
+  }
+
+  /** Settings Start/Check/Set up also use this desktop's native profile.
+   * A failed first probe may have persisted only a tilde path and the intent
+   * to isolate; resolve that intent instead of falling back to the SSH home. */
+  async providerEnvironment(target: MachineSshTarget, defaultInstallRoot: string): Promise<{ workerRoot: string; profileHome?: string }> {
+    const record = (await this.options.store.listMachineInstalls()).find(
+      install => target.hostKeyAlias && install.target.hostKeyAlias === target.hostKeyAlias
+    );
+    const probe = await this.probe(target, { installRoot: record?.installRoot || defaultInstallRoot,
+      userDataDir: record?.installRoot ? record.userDataDir || undefined : undefined,
+      serviceName: record?.installRoot ? record.serviceName : undefined });
+    if (record) await this.ensureEnvironmentOwner({ ...record, target, installRoot: probe.installRoot });
+    return { workerRoot: probe.installRoot,
+      profileHome: record?.installRoot ? record.profileHome ?? (record.isolatedProfile ? probe.installRoot + "/home" : undefined)
+        : probe.installRoot + "/home" };
   }
 
   install(request: MachineInstallRequest, onProgress?: (snapshot: MachineInstallSnapshot) => void): Promise<MachineInstallResult> {
@@ -338,7 +381,18 @@ export class MachineInstallerService {
       //    sandbox setting, and performs the provider sign-in ON the machine.
       await emit("preflight", "Checking the machine…");
       const initial = await this.probe(request.target, { installRoot: record.installRoot || undefined,
-        userDataDir: record.userDataDir || undefined, serviceName: request.serviceName });
+        userDataDir: record.userDataDir || undefined, serviceName: record.installRoot ? record.serviceName : request.serviceName });
+      const enrollmentJson = await this.options.getEnrollmentJson(request.machineId);
+      await this.claimEnvironmentOwner(request.target, initial.installRoot, enrollmentJson);
+      record = { ...record, installRoot: initial.installRoot, userDataDir: initial.userDataDir,
+        serviceName: initial.serviceName,
+        profileHome: record.profileHome ?? (record.isolatedProfile ? `${initial.installRoot}/home` : undefined) };
+      worker.workerRoot = record.installRoot;
+      if (record.profileHome) {
+        await this.sshExec({ target: request.target,
+          script: `umask 077; mkdir -p ${shellQuotePosix(record.profileHome)}`,
+          timeoutMs: SHORT_TIMEOUT_MS });
+      }
       // A release older than maintenance would be started, not asked to hold a
       // lease, so it is never used as the wrapper. The steps before staging
       // then run unwrapped — they only create a NEW release directory and
@@ -346,7 +400,8 @@ export class MachineInstallerService {
       // everything from the drain onward is wrapped by the release just
       // staged, which does understand it.
       maintenance = initial.maintenanceCapable ? maintenanceFor(initial) : undefined;
-      let report = await this.options.doctor.diagnose(worker, { requiredProviderKind: request.requiredProvider, maintenance });
+      const doctorOptions = { requiredProviderKind: request.requiredProvider, maintenance, profileHome: record.profileHome };
+      let report = await this.options.doctor.diagnose(worker, doctorOptions);
       if (!report.ok) {
         // Doctor progress is synchronous and each frame saves a snapshot, so
         // the writes are chained: an out-of-order save would leave the record
@@ -357,7 +412,7 @@ export class MachineInstallerService {
             authUrl: progress.authUrl,
             authCode: progress.authCode
           }));
-        }, { requiredProviderKind: request.requiredProvider, maintenance });
+        }, doctorOptions);
         await progressWrites;
       }
       if (!report.ok) {
@@ -370,14 +425,11 @@ export class MachineInstallerService {
         if (check.status === "warn") warnings.push(`${check.id}: ${check.detail ?? "warning"}`);
       }
 
-      // Only what the caller actually asked for. Passing the default service
-      // name here would override the name the machine derives from the install
-      // directory, and a second deployment would take over the first one's
-      // unit — the collision this derivation exists to prevent.
+      // Keep the first probe's resolved paths and unit name across setup.
       const probe = await this.probe(request.target, {
-        installRoot: request.installRoot,
-        userDataDir: request.userDataDir,
-        serviceName: request.serviceName
+        installRoot: record.installRoot,
+        userDataDir: record.userDataDir,
+        serviceName: record.serviceName
       });
       const missing = missingRequirements(probe);
       if (missing.length) {
@@ -405,6 +457,10 @@ export class MachineInstallerService {
         installedVersion: probe.installedVersion ?? record.installedVersion,
         installedDigest: probe.installedDigest ?? record.installedDigest
       };
+      if (this.options.prepareProfile) {
+        await emit("preflight", "Syncing your global skills to the machine…");
+        await this.options.prepareProfile(record);
+      }
 
       // 2. The bundle this desktop would install.
       await emit("bundle", "Reading the runtime bundle…");
@@ -474,7 +530,6 @@ export class MachineInstallerService {
       //    command line or a log. An upgrade keeps the pairing that is there.
       if (!probe.enrollmentPresent || kind === "install") {
         await emit("enroll", "Installing the enrollment…");
-        const enrollmentJson = await this.options.getEnrollmentJson(request.machineId);
         await exec({
           target: request.target,
           script: writeFileFromStdinScript(layout.enrollmentPath, "600"),
@@ -548,7 +603,8 @@ export class MachineInstallerService {
       const unit = machineServiceUnit({
         layout,
         machineName,
-        home: probe.home,
+        home: record.profileHome ?? probe.home,
+        profileHome: record.profileHome,
         user: request.target.user ?? "ubuntu",
         nodePath: probe.nodePath ?? "/usr/bin/node",
         path: probe.loginPath
@@ -677,13 +733,17 @@ export class MachineInstallerService {
       machineId: request.machineId,
       target: request.target,
       installRoot: request.installRoot ?? existing?.installRoot ?? "",
-      userDataDir: request.userDataDir ?? existing?.userDataDir ?? "",
-      serviceName: request.serviceName ?? existing?.serviceName ?? DEFAULT_MACHINE_SERVICE_NAME,
+      userDataDir: request.userDataDir ?? (existing?.installRoot ? existing.userDataDir : undefined) ?? "",
+      serviceName: request.serviceName ?? (existing?.installRoot ? existing.serviceName : undefined)
+        ?? request.installRoot?.replace(/\/+$/, "").split("/").pop() ?? DEFAULT_MACHINE_SERVICE_NAME,
       serviceScope: existing?.serviceScope ?? "system",
       installedVersion: existing?.installedVersion,
       installedDigest: existing?.installedDigest,
       installedAt: existing?.installedAt,
-      projects: existing?.projects
+      projects: existing?.projects,
+      profileHome: existing?.profileHome,
+      isolatedProfile: existing?.installRoot
+        ? existing.isolatedProfile ?? Boolean(existing.profileHome) : request.isolatedProfile ?? false
     };
   }
 
@@ -711,6 +771,7 @@ export class MachineInstallerService {
    */
   async bootstrapProjectMirror(request: MachineMirrorBootstrapRequest): Promise<MachineMirrorBootstrapResult> {
     const record = await this.requireRecord(request.machineId);
+    await this.ensureEnvironmentOwner(record);
     const inspection = await this.inspectProjectMirror(request.machineId, request.localPath);
     if (inspection.state === "dirty") {
       return {

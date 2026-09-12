@@ -15,6 +15,7 @@ import {
 import { runCommand } from "./command";
 import { isTransientSshError, runWithSshRetries } from "./sshRetry";
 import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
+import { remoteProfileCommand } from "./remoteWorkerTarget";
 import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
 
 const PROBE_TIMEOUT_MS = 25_000;
@@ -53,6 +54,7 @@ interface CloudRunDoctorOptions {
   requirePersistentStorage?: boolean;
   requiredProviderKind?: ChatProviderKind;
   maintenance?: MachineMaintenanceTarget;
+  profileHome?: string;
 }
 
 export interface CloudRunSshExecRequest {
@@ -70,6 +72,8 @@ export interface CloudRunDoctorServiceOptions {
   localGitIdentity?: () => Promise<{ name?: string; email?: string }>;
   openExternal?: (url: string) => void;
   logger?: (event: string, payload: Record<string, unknown>) => void;
+  /** Covers AWS Start/Check/Set up as well as the participant picker. */
+  environmentForWorker?: (worker: RemoteRunWorkerTarget) => Promise<{ profileHome?: string; workerRoot?: string }>;
 }
 
 export class CloudRunDoctorService {
@@ -77,19 +81,29 @@ export class CloudRunDoctorService {
   private readonly localGitIdentity: () => Promise<{ name?: string; email?: string }>;
   private readonly openExternal?: (url: string) => void;
   private readonly logger?: (event: string, payload: Record<string, unknown>) => void;
+  private readonly environmentForWorker?: CloudRunDoctorServiceOptions["environmentForWorker"];
 
   constructor(options: CloudRunDoctorServiceOptions = {}) {
     this.sshExec = options.sshExec ?? defaultSshExec;
     this.localGitIdentity = options.localGitIdentity ?? defaultLocalGitIdentity;
     this.openExternal = options.openExternal;
     this.logger = options.logger;
+    this.environmentForWorker = options.environmentForWorker;
+  }
+
+  private async resolveWorker(settings: CloudRunWorkerSettings, options: CloudRunDoctorOptions): Promise<(RemoteRunWorkerTarget & { maintenance?: MachineMaintenanceTarget }) | undefined> {
+    const worker = workerTarget(settings, options.maintenance, options.profileHome);
+    if (worker && !Object.hasOwn(options, "profileHome") && this.environmentForWorker) {
+      Object.assign(worker, await this.environmentForWorker(worker));
+    }
+    return worker;
   }
 
   async diagnose(
     settings: CloudRunWorkerSettings,
     options: CloudRunDoctorOptions = {}
   ): Promise<CloudRunWorkerDoctorReport> {
-    const worker = workerTarget(settings, options.maintenance);
+    const worker = await this.resolveWorker(settings, options);
     if (!worker) {
       return failedReport("connect", "Worker host is not configured.");
     }
@@ -121,7 +135,7 @@ export class CloudRunDoctorService {
     onProgress?: (progress: CloudRunWorkerSetupProgress) => void,
     options: CloudRunDoctorOptions = {}
   ): Promise<CloudRunWorkerDoctorReport> {
-    const worker = workerTarget(settings, options.maintenance);
+    const worker = await this.resolveWorker(settings, options);
     if (!worker) {
       return failedReport("connect", "Worker host is not configured.");
     }
@@ -131,7 +145,9 @@ export class CloudRunDoctorService {
     };
 
     progress("diagnose", "Checking the worker…");
-    const before = await this.diagnose(settings, options);
+    const scopedSettings = { ...settings, workerRoot: worker.workerRoot };
+    const scopedOptions = { ...options, profileHome: worker.profileHome };
+    const before = await this.diagnose(scopedSettings, scopedOptions);
     if (!before.checks.some((check) => check.status !== "pass")) {
       return before;
     }
@@ -204,7 +220,7 @@ export class CloudRunDoctorService {
     }
 
     progress("diagnose", "Re-checking the worker…");
-    return this.diagnose(settings, options);
+    return this.diagnose(scopedSettings, scopedOptions);
   }
 
   async waitForCloudInit(
@@ -277,9 +293,9 @@ function stripAnsi(value: string): string {
   return value.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
-function workerTarget(settings: CloudRunWorkerSettings, maintenance?: MachineMaintenanceTarget): (RemoteRunWorkerTarget & { maintenance?: MachineMaintenanceTarget }) | undefined {
+function workerTarget(settings: CloudRunWorkerSettings, maintenance?: MachineMaintenanceTarget, profileHome?: string): (RemoteRunWorkerTarget & { maintenance?: MachineMaintenanceTarget }) | undefined {
   const normalized = normalizeCloudRunWorkerSettings(settings);
-  return normalized.host ? { ...normalized, host: normalized.host, maintenance } : undefined;
+  return normalized.host ? { ...normalized, host: normalized.host, maintenance, profileHome } : undefined;
 }
 
 // One SSH round-trip probing everything; each line is `key=value`.
@@ -444,9 +460,9 @@ async function defaultSshExec(request: CloudRunSshExecRequest): Promise<string> 
     () => runCommand("ssh", [
       ...sshArgs,
       target,
-      request.worker.maintenance
+      remoteProfileCommand(request.worker.profileHome, request.worker.maintenance
         ? machineMaintenanceCommand(request.worker.maintenance, `bash -c ${shellQuotePosix(request.command)}`)
-        : request.command
+        : request.command)
     ], {
       timeoutMs: request.timeoutMs,
       onStdout

@@ -41,6 +41,40 @@ function doctorWith(handler: (request: CloudRunSshExecRequest) => Promise<string
   return { service, commands };
 }
 
+test("AWS check, setup, login and recheck stay in the resolved environment", async () => {
+  const calls: CloudRunSshExecRequest[] = [];
+  let resolutions = 0;
+  let signedIn = false;
+  const service = new CloudRunDoctorService({
+    environmentForWorker: async () => {
+      resolutions += 1;
+      return { profileHome: "/srv/home/profile", workerRoot: "/srv/home" };
+    },
+    sshExec: async request => {
+      calls.push(request);
+      if (request.command.includes("login --device-auth")) {
+        signedIn = true;
+        return "Successfully logged in";
+      }
+      return signedIn ? FULLY_PROVISIONED : FULLY_PROVISIONED.replace("codex-auth=ok", "codex-auth=missing");
+    }
+  });
+  assert.equal((await service.diagnose(WORKER)).ok, false);
+  assert.equal((await service.setup(WORKER)).ok, true);
+  assert.equal(resolutions, 2, "one resolution per action, including setup's probes");
+  assert.ok(calls.every(call => call.worker.profileHome === "/srv/home/profile"));
+  assert.ok(calls.some(call => call.command.includes("login --device-auth")));
+  assert.ok(calls.filter(call => call.command.includes("worker_root=")).every(call => call.command.includes("'/srv/home'")));
+});
+
+test("an explicit legacy profile does not get replaced by a new environment", async () => {
+  const { service } = doctorWith(async request => {
+    assert.equal(request.worker.profileHome, undefined);
+    return FULLY_PROVISIONED;
+  }, { environmentForWorker: async () => { throw new Error("must not reinterpret a remembered legacy profile"); } });
+  assert.equal((await service.diagnose(WORKER, { profileHome: undefined })).ok, true);
+});
+
 test("diagnose reports ready when every probe passes", async () => {
   const { service } = doctorWith(async () => FULLY_PROVISIONED);
   const report = await service.diagnose(WORKER);

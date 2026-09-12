@@ -1,5 +1,5 @@
 import path from "node:path";
-import { CloudRunPreparationService } from "./services/cloudRunPreparation";
+import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { createHash, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
@@ -161,7 +161,7 @@ import { AppSkillsService } from "./services/appSkills";
 import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { bootstrapAppUpdater } from "./services/appUpdater";
-import { CommandError, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
+import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService } from "./services/cloudRunDoctor";
 import { CloudRunAwsService } from "./services/cloudRunAws";
@@ -340,7 +340,12 @@ function emitReviewProgress(progress: ReviewProgress): void {
   }
 }
 
-const cloudRunDoctorService = new CloudRunDoctorService({
+const cloudRunDoctorService: CloudRunDoctorService = new CloudRunDoctorService({
+  environmentForWorker: async (worker) => {
+    if (!worker.hostKeyAlias?.startsWith("accordagents-i-")) return {};
+    const directory = cloudEnvironmentDirectory((await chatEventLogService.getOrCreateDeviceIdentity()).originId);
+    return machineInstallerService.providerEnvironment(worker, `~/${directory}`);
+  },
   openExternal: (url) => {
     void openExternalUrl(url);
   },
@@ -430,7 +435,14 @@ async function createMachine(request: CreateMachineRequest, awsInstanceId?: stri
   return { machine: record, enrollmentJson: JSON.stringify(pairing.package, null, 2) };
 }
 
-const machineInstallerService = new MachineInstallerService({
+const machineProfileSync = new DefaultRemoteAgentSetupSync();
+const prepareMachineProfile = async (record: MachineInstallRecord): Promise<void> => {
+  await machineProfileSync.sync({
+    worker: { ...record.target, workerRoot: record.installRoot, profileHome: record.profileHome },
+    sourceEnvironment: { ...commandEnvironment(), ...(await settingsService.getManualAgentEnvironment()).env }
+  });
+};
+const machineInstallerService: MachineInstallerService = new MachineInstallerService({
   store: settingsService,
   doctor: cloudRunDoctorService,
   getEnrollmentJson: (machineId) => requireMachineLink().enrollmentJson(machineId),
@@ -438,12 +450,14 @@ const machineInstallerService = new MachineInstallerService({
     requireMachineLink().waitForConnected(machineId, timeoutMs, expectAppVersion),
   payload: machineRuntimePayload,
   machineName: async (machineId) => (await settingsService.listMachines()).find((machine) => machine.id === machineId)?.name,
+  prepareProfile: prepareMachineProfile,
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
   }
 });
 const cloudRunPreparation = new CloudRunPreparationService({
   appVersion: app.getVersion(),
+  environmentId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
   aws: cloudRunAwsService,
   listMachines: () => settingsService.listMachines(),
   listInstalls: () => settingsService.listMachineInstalls(),
@@ -453,15 +467,20 @@ const cloudRunPreparation = new CloudRunPreparationService({
   bootstrapProject: (machineId, localPath) => machineInstallerService.bootstrapProjectMirror({ machineId, localPath }),
   saveInstall: (record) => settingsService.saveMachineInstall(record),
   prepareProvider: async (worker, provider, record, progress) => {
-    const options = { requiredProviderKind: provider, maintenance: {
+    if (!worker.host) throw new Error("AWS did not return an address for this instance.");
+    const current = { ...record, target: { ...worker, host: worker.host } };
+    const scopedWorker = { ...worker, workerRoot: record.installRoot };
+    await machineInstallerService.ensureEnvironmentOwner(current);
+    const options = { requiredProviderKind: provider, profileHome: record.profileHome, maintenance: {
       runtimePath: `${record.installRoot}/current/accordagents-machine.cjs`,
       userDataDir: record.userDataDir,
       capabilityPath: `${record.installRoot}/current/maintenance-v1`
     } };
     progress({ message: "Checking the provider on your cloud machine…" });
-    let report = await cloudRunDoctorService.diagnose(worker, options);
-    if (!report.ok) report = await cloudRunDoctorService.setup(worker, progress, options);
+    let report = await cloudRunDoctorService.diagnose(scopedWorker, options);
+    if (!report.ok) report = await cloudRunDoctorService.setup(scopedWorker, progress, options);
     if (!report.ok) throw new Error(report.message);
+    await prepareMachineProfile(current);
   }
 });
 void machineInstallerService.recoverInterruptedOperation();

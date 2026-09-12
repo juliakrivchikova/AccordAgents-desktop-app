@@ -4,7 +4,7 @@ import path from "node:path";
 import { hostPlatform, userDataPath } from "../platform";
 import type { MachineRecord, MachineSettingsSnapshot } from "../../shared/machineLink";
 import { isTrustedDeviceRecord, trustedDeviceIdMatchesKey, type TrustedDeviceRecord } from "../../shared/machineTrust";
-import type { MachineInstallRecord } from "../../shared/machineInstall";
+import { machineProfileVariables, type MachineInstallRecord } from "../../shared/machineInstall";
 import { assertAwsMachinePowerConfig, type AwsMachinePowerConfig } from "../../shared/machinePower";
 import { normalizeMachinePowerHandoffRecords, type MachinePowerHandoffRecord } from "../../shared/machinePowerHandoff";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
@@ -1774,7 +1774,7 @@ export class SettingsService {
   private storedWriteQueue: Promise<void> = Promise.resolve();
   private assistantProviderMutation: Promise<void> = Promise.resolve();
 
-  constructor() {
+  constructor(private readonly options: { profileHome?: string } = {}) {
     this.settingsPath = path.join(userDataPath(), "settings.json");
     this.mobilePairedDevicesPath = path.join(userDataPath(), "mobile-paired-devices.json");
     this.pendingMailboxRevocationsPath = path.join(userDataPath(), "pending-mailbox-revocations.json");
@@ -2647,7 +2647,10 @@ export class SettingsService {
       }
       env[variable.key] = value;
     }
-    const filtered = filterAllowedAgentEnvironment(env);
+    // Native directories belong to the machine, even if the source laptop
+    // explicitly configured CODEX_HOME / CLAUDE_CONFIG_DIR in Settings.
+    const filtered = filterAllowedAgentEnvironment({ ...env,
+      ...(this.options?.profileHome ? machineProfileVariables(this.options.profileHome) : {}) });
     return { env: filtered, version: this.agentEnvironmentVersion(filtered) };
   }
 

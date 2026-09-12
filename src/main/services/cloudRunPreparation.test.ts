@@ -4,17 +4,19 @@ import { CloudRunPreparationService } from "./cloudRunPreparation";
 import { conversationOnMachine } from "../../shared/machineRepository";
 import type { Conversation, AwsWorkerStatus } from "../../shared/types";
 import type { MachineRecord } from "../../shared/machineLink";
-import type { MachineInstallRecord } from "../../shared/machineInstall";
+import type { MachineInstallRecord, MachineInstallRequest } from "../../shared/machineInstall";
 
 function harness() {
   const machines: MachineRecord[] = [];
   const installs: MachineInstallRecord[] = [];
   const calls: string[] = [];
+  const installRequests: MachineInstallRequest[] = [];
   let phase: "ready" | "error" = "ready";
   let failSave = false;
   let state: AwsWorkerStatus["state"] = "running";
   const options: ConstructorParameters<typeof CloudRunPreparationService>[0] = {
     appVersion: "test",
+    environmentId: async () => "home-desktop",
     aws: {
       status: async () => ({ configured: true, state, handle: { instanceId: "i-abc", region: "eu-west-1" } } as AwsWorkerStatus),
       ensureExistingWorkerForRun: async id => { calls.push(`access:${id}`); return { host: "198.51.100.8", user: "ubuntu" }; }
@@ -28,12 +30,15 @@ function harness() {
       return machine;
     },
     install: async (request, progress) => {
+      installRequests.push(request);
       calls.push(`install:${request.machineId}:${request.requiredProvider}`);
       const snapshot = { machineId: request.machineId, phase, operationId: request.operationId, kind: "install" as const,
         message: phase === "ready" ? "Connected" : "Sign-in failed", updatedAt: "now", completed: [] };
       progress(snapshot);
-      const record = { machineId: request.machineId, target: request.target, installRoot: "/home/ubuntu/accordagents-machine",
-        userDataDir: "/home/ubuntu/.accordagents/machine", serviceName: "test", serviceScope: "user" as const };
+      const root = request.installRoot?.replace("~", "/home/ubuntu") || "/home/ubuntu/accordagents-machine";
+      const record = { machineId: request.machineId, target: request.target, installRoot: root,
+        userDataDir: request.userDataDir || `${root}/data`, serviceName: request.serviceName || root.split("/").pop()!,
+        profileHome: request.isolatedProfile ? `${root}/home` : undefined, serviceScope: "user" as const };
       if (!installs.length) installs.push(record);
       return { record, snapshot };
     },
@@ -48,12 +53,47 @@ function harness() {
       installs.splice(installs.findIndex(item => item.machineId === record.machineId), 1, record);
     }
   };
-  return { options, machines, installs, calls, service: new CloudRunPreparationService(options),
+  return { options, machines, installs, calls, installRequests, service: new CloudRunPreparationService(options),
     failInstall: () => { phase = "error"; }, allowInstall: () => { phase = "ready"; },
     failSave: () => { failSave = true; }, allowSave: () => { failSave = false; },
     stop: () => { state = "stopped"; } };
 }
 const request = { operationId: "one", provider: "codex-cli" as const };
+
+test("two desktops sharing one AWS instance install into separate persistent environments", async () => {
+  const home = harness();
+  const work = harness(); work.options.environmentId = async () => "work-desktop";
+  await Promise.all([home.service.prepare(request, () => {}), work.service.prepare(request, () => {})]);
+  assert.notEqual(home.installRequests[0].installRoot, work.installRequests[0].installRoot);
+  assert.equal(home.installRequests[0].target.host, work.installRequests[0].target.host);
+  assert.equal(home.installRequests[0].isolatedProfile, true);
+  await new CloudRunPreparationService(home.options).prepare(request, () => {});
+  assert.equal(home.installRequests[1].installRoot, home.installs[0].installRoot);
+  assert.equal(home.installRequests[1].isolatedProfile, true);
+});
+
+test("a legacy environment keeps its CLI sessions, data directory and worktrees", async () => {
+  const h = harness();
+  h.machines.push({ id: "legacy", name: "Cloud run", awsInstanceId: "i-abc", deviceId: "cloud", pairingKey: "legacy", createdAt: "now" });
+  h.installs.push({ machineId: "legacy", target: { host: "198.51.100.8" }, installRoot: "/home/ubuntu/accordagents-machine",
+    userDataDir: "/home/ubuntu/.accordagents/machine", serviceName: "accordagents-machine", serviceScope: "system" });
+  await h.service.prepare(request, () => {});
+  assert.equal(h.installRequests[0].installRoot, h.installs[0].installRoot);
+  assert.equal(h.installRequests[0].userDataDir, h.installs[0].userDataDir);
+  assert.equal(h.installRequests[0].isolatedProfile, false);
+  assert.equal(h.calls.includes("enroll"), false);
+});
+
+test("a failed legacy attempt with no installed paths starts in this desktop's own environment", async () => {
+  const h = harness();
+  h.machines.push({ id: "partial", name: "Cloud run", awsInstanceId: "i-abc", deviceId: "", pairingKey: "partial", createdAt: "now" });
+  h.installs.push({ machineId: "partial", target: { host: "198.51.100.8" }, installRoot: "", userDataDir: "",
+    serviceName: "accordagents-machine", serviceScope: "system" });
+  await h.service.prepare(request, () => {});
+  assert.equal(h.installRequests[0].isolatedProfile, true);
+  assert.equal(h.installRequests[0].serviceName, undefined);
+  assert.notEqual(h.installRequests[0].installRoot, "~/accordagents-machine");
+});
 
 test("two Cloud selections prepare one existing instance and both receive progress", async () => {
   const h = harness();

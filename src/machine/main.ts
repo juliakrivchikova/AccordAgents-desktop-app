@@ -182,7 +182,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   setHostPlatform(platform);
   const enrollment = readEnrollment(args.enrollmentPath);
 
-  const settingsService = new SettingsService();
+  const settingsService = new SettingsService({ profileHome: process.env.ACCORD_AGENTS_MACHINE_PROFILE_HOME });
   const storageService = new StorageService({ sqliteExecutable: "sqlite3" });
   const debugLogService = new DebugLogService();
   setCommandDebugLogger(debugLogService);

@@ -23,6 +23,19 @@ export interface MachineSshTarget {
   hostKeyAlias?: string;
 }
 
+/** Provider state stays beside its environment even when the desktop uses
+ * custom native configuration paths. These are host paths, not credentials. */
+export function machineProfileVariables(profileHome: string): Record<string, string> {
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(profileHome) || profileHome.split("/").includes("..")) {
+    throw new Error("Invalid machine profile directory.");
+  }
+  return {
+    HOME: profileHome, CODEX_HOME: `${profileHome}/.codex`, CLAUDE_CONFIG_DIR: `${profileHome}/.claude`,
+    XDG_CONFIG_HOME: `${profileHome}/.config`, XDG_DATA_HOME: `${profileHome}/.local/share`,
+    XDG_CACHE_HOME: `${profileHome}/.cache`
+  };
+}
+
 export type MachineInstallKind = "install" | "upgrade";
 
 /** Visible steps, in the order they run. `ready`, `needs-attention` and
@@ -110,6 +123,8 @@ export interface MachineInstallRequest {
   userDataDir?: string;
   /** Defaults to `accordagents-machine`. */
   serviceName?: string;
+  /** Keep provider profiles in this installation's own home directory. */
+  isolatedProfile?: boolean;
   /** Name shown by the runtime in its hello; defaults to the machine record. */
   machineName?: string;
   /** The provider the members on this machine will use. Its sign-in is
@@ -137,6 +152,10 @@ export interface MachineInstallRecord {
   userDataDir: string;
   serviceName: string;
   serviceScope: MachineServiceScope;
+  /** Absent on legacy installs, whose existing CLI sessions stay in place. */
+  profileHome?: string;
+  /** Persist the choice even when the first SSH probe fails before resolving HOME. */
+  isolatedProfile?: boolean;
   installedVersion?: string;
   installedDigest?: string;
   installedAt?: string;

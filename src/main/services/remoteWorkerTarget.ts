@@ -7,6 +7,7 @@
  * notion of a run.
  */
 import { commandEnvironment } from "./command";
+import { machineProfileVariables } from "../../shared/machineInstall";
 
 export interface RemoteRunWorkerTarget {
   host: string;
@@ -19,6 +20,8 @@ export interface RemoteRunWorkerTarget {
   claudePath?: string;
   remoteCwd?: string;
   workerRoot?: string;
+  /** Native CLI configuration belongs to this deployment, not the SSH user. */
+  profileHome?: string;
 }
 
 export interface RemoteWorkerStopLease {
@@ -67,4 +70,15 @@ export function forwardedDesktopEnvironment(base?: NodeJS.ProcessEnv): NodeJS.Pr
     result[key] = value;
   }
   return result;
+}
+
+/** The SSH login is only transport. Do not source its shell profile or carry
+ * its credentials/configuration into another desktop's provider setup. */
+export function remoteProfileCommand(profileHome: string | undefined, command: string): string {
+  if (!profileHome) return command;
+  const quote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
+  const variables = machineProfileVariables(profileHome);
+  return `umask 077; mkdir -p ${quote(profileHome)} && env -i PATH="$PATH" USER="$(id -un)" LOGNAME="$(id -un)" SHELL=/bin/bash `
+    + Object.entries(variables).map(([key, value]) => `${key}=${quote(value)}`).join(" ")
+    + ` /bin/bash --noprofile --norc -c ${quote(command)}`;
 }
