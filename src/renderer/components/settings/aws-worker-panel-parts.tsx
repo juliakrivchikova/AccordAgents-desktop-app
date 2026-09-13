@@ -1,4 +1,5 @@
 import type { AwsWorkerOperationSnapshot } from "../../../shared/types";
+import { CodexDeviceAuth } from "../codex-device-auth";
 
 /** What each confirmed action does to the shared instance, stated before the
  *  click rather than discovered after it. */
@@ -24,7 +25,7 @@ export function WorkerProgress({ operation }: { operation: AwsWorkerOperationSna
           <span>{phase.label}</span>
         </li>
       ))}
-      {operation.authUrl ? <li className="gen-aws-auth"><button type="button" className="gen-doctor-auth-link" onClick={() => void window.consensus.openExternal(operation.authUrl as string)}>Open Codex sign-in</button>{operation.authCode ? <code>{operation.authCode}</code> : null}</li> : null}
+      {operation.phase === "setting-up" && operation.authUrl ? <li className="gen-aws-auth"><CodexDeviceAuth authUrl={operation.authUrl} authCode={operation.authCode} /></li> : null}
     </ol>
   );
 }

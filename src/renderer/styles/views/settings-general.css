@@ -556,40 +556,6 @@
   border: 0;
 }
 
-.settings-view .gen-doctor-auth-code {
-  font-family: var(--font-mono, monospace);
-  font-weight: 650;
-}
-
-.settings-view .gen-doctor-auth-copy {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 24px;
-  margin-left: 7px;
-  padding: 2px 7px;
-  border: 1px solid var(--app-border);
-  border-radius: 7px;
-  background: var(--app-surface);
-  color: var(--app-text);
-  font: inherit;
-  font-size: 11.5px;
-  font-weight: 700;
-  vertical-align: middle;
-  cursor: pointer;
-}
-
-.settings-view .gen-doctor-auth-copy:hover,
-.settings-view .gen-doctor-auth-copy:focus-visible {
-  border-color: var(--app-border-strong);
-  color: var(--app-text-strong);
-}
-
-.settings-view .gen-doctor-auth-copy:focus-visible {
-  outline: 2px solid var(--app-accent);
-  outline-offset: 2px;
-}
-
 .settings-view .gen-segmented {
   display: inline-flex;
   gap: 4px;
@@ -873,11 +839,6 @@
 
 .settings-view .gen-aws-progress .gen-aws-auth {
   grid-column: 1 / -1;
-}
-
-.settings-view .gen-aws-progress .gen-aws-auth code {
-  margin-left: 6px;
-  font-family: var(--font-mono, monospace);
 }
 
 .settings-view .gen-aws-decision,

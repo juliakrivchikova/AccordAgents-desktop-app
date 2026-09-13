@@ -6,6 +6,20 @@ import { AwsWorkerSetupService } from "../../../main/services/awsWorkerSetup";
 import type { AwsWorkerOperationSnapshot, AwsWorkerStartRequest } from "../../../shared/types";
 import { OLD_ERROR, RUNNING, SETTINGS, change, click, findButton, flush, ready, renderPanel, textOf, unmount } from "./aws-worker-panel-harness.test";
 
+test("reopening AWS settings restores the live sign-in card and terminal results hide its code", async () => {
+  let publish!: (operation: AwsWorkerOperationSnapshot) => void;
+  const operation: AwsWorkerOperationSnapshot = { operationId: "sign-in", intent: "setup", phase: "setting-up", message: "Approve sign-in", updatedAt: new Date().toISOString(), authUrl: "https://auth.openai.com/codex/device", authCode: "ABCD-12345" };
+  const renderer = await renderPanel({ status: { ...RUNNING, operation }, onProgress: listener => { publish = listener; } });
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "cloud-run-device-auth-code" })), operation.authCode);
+  const copied: string[] = [];
+  (navigator.clipboard as any).writeText = async (value: string) => { copied.push(value); };
+  await click(renderer.root.findByProps({ "aria-label": "Copy sign-in code" }));
+  assert.deepEqual(copied, [operation.authCode]);
+  await act(async () => { publish({ ...operation, phase: "error", message: "Sign-in interrupted" }); });
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "cloud-run-device-auth-code" }).length, 0, "a persisted expired code is not actionable");
+  unmount(renderer);
+});
+
 test("a healthy running instance offers Stop only; a stopped one offers Start only", async () => {
   const running = await renderPanel({ status: RUNNING });
   assert.equal(running.root.findAllByProps({ "data-testid": "aws-worker-start" }).length, 0);

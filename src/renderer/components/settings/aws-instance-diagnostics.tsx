@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import type { CloudRunWorkerDoctorReport, CloudRunWorkerSetupProgress } from "../../../shared/types";
+import { CodexDeviceAuth } from "../codex-device-auth";
 
 export function AwsInstanceDiagnostics(): JSX.Element {
   const [open, setOpen] = useState(false);
@@ -43,10 +44,7 @@ export function AwsInstanceDiagnostics(): JSX.Element {
         <div className={`gen-aws-feedback${failed ? " is-error" : ""}`} data-testid="machine-instance-diagnostics-status" role={failed ? "alert" : "status"}>
           {(busy && setupProgress?.message) || status}
           {busy && setupProgress?.authUrl ? (
-            <div className="gen-row-desc">
-              <button type="button" className="gen-doctor-auth-link" onClick={() => void window.consensus.openExternal(setupProgress.authUrl as string)}>Open the sign-in page</button>
-              {setupProgress.authCode ? <> and enter code <code className="gen-doctor-auth-code" data-testid="cloud-run-device-auth-code">{setupProgress.authCode}</code></> : null}
-            </div>
+            <CodexDeviceAuth authUrl={setupProgress.authUrl} authCode={setupProgress.authCode} />
           ) : null}
         </div>
       ) : null}
