@@ -239,7 +239,9 @@ export type AwsWorkerSpecResolution = "keep" | "grow-disk" | "recreate";
 
 export interface AwsWorkerStartRequest {
   operationId: string;
-  intent?: "setup" | "resize";
+  /** "check" is read-only: it probes AWS access and classifies a refusal
+   *  into recovery steps; it never creates, starts or sets anything up. */
+  intent?: "setup" | "resize" | "check";
   clientToken?: string;
   blob?: string;
   instanceType?: string;
@@ -252,7 +254,7 @@ export interface AwsWorkerStartRequest {
 
 export interface AwsWorkerOperationSnapshot {
   operationId: string;
-  intent?: "setup" | "resize";
+  intent?: "setup" | "resize" | "check";
   clientToken?: string;
   phase: AwsWorkerStartPhase;
   message: string;

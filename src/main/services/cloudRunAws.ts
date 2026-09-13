@@ -14,6 +14,8 @@ import { awsRootVolumeSizeError, normalizeAwsInstanceType, normalizeAwsRootVolum
 import { buildBootstrapCommand, parseWorkerBlob } from "./awsWorkerProvisioning";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import { AwsWorkerLifecycle } from "./awsWorkerLifecycle";
+
+type StoredAwsWorkerOperation = Awaited<ReturnType<SettingsService["getAwsWorkerOperation"]>>;
 import type {
   AwsWorkerDeleteResult,
   AwsWorkerHandle,
@@ -426,36 +428,70 @@ export class CloudRunAwsService {
   }
 
   async status(): Promise<AwsWorkerStatus> {
+    const context = await this.workerContext();
+    if (!context.credentials || !context.handle) return { configured: false, operation: context.operation };
+    try {
+      return await this.describeWorker(context.credentials, context.handle, context.operation);
+    } catch (error) {
+      return { configured: true, handle: context.handle, operation: context.operation, message: errorMessage(error) };
+    }
+  }
+
+  /** The status read with AWS's refusal left intact: a caller that must tell a
+   *  revoked permission from a network failure needs the raw error. Reads only. */
+  async probeAccess(): Promise<AwsWorkerStatus> {
+    const context = await this.workerContext();
+    if (!context.credentials || !context.handle) return { configured: false, operation: context.operation };
+    return this.describeWorker(context.credentials, context.handle, context.operation);
+  }
+
+  /** Replace the saved credentials with pasted ones once they prove, read-only,
+   *  that they can see the existing instance. Nothing else is touched. */
+  async adoptCredentials(blob: string): Promise<void> {
+    const credentials = parseWorkerBlob(blob);
+    const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
+    if (!handle) throw new Error("Connect the AWS account before updating its credentials.");
+    await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId);
+    await this.settings.saveAwsWorkerCredentials(credentials);
+  }
+
+  private async workerContext(): Promise<{
+    credentials: AwsWorkerCredentials | undefined;
+    handle: AwsWorkerHandleInfo | undefined;
+    operation: StoredAwsWorkerOperation;
+  }> {
     const credentials = await this.settings.getAwsWorkerCredentials();
     const settings = await this.settings.getPublicSettings();
-    const handle = settings.cloudRuns.awsHandle;
-    const operation = await (this.settings as SettingsService & { getAwsWorkerOperation?: () => Promise<Awaited<ReturnType<SettingsService["getAwsWorkerOperation"]>>> }).getAwsWorkerOperation?.();
-    if (!credentials || !handle) return { configured: false, operation };
-    try {
-      // Polling status intentionally describes only the cached worker. Account
-      // fan-out is reserved for Start/recovery paths.
-      const info = await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId);
-      return {
-        configured: true,
-        handle,
-        state: info?.state ?? "absent",
-        publicIp: info?.publicIp,
-        persistentStorage: info
-          ? {
-              rootVolumeBackedByEbs: info.rootVolumeBackedByEbs === true,
-              rootDeviceName: info.rootDeviceName,
-              rootVolumeId: info.rootVolumeId
-            }
-          : undefined,
-        message: info?.rootVolumeBackedByEbs === false
-          ? "Worker root storage is not backed by EBS; remote session continuity is unsafe."
-          : undefined,
-        actualSpec: info ? actualSpecFrom(info, handle) : undefined,
-        operation
-      };
-    } catch (error) {
-      return { configured: true, handle, operation, message: errorMessage(error) };
-    }
+    const operation = await (this.settings as SettingsService & { getAwsWorkerOperation?: () => Promise<StoredAwsWorkerOperation> }).getAwsWorkerOperation?.();
+    return { credentials, handle: settings.cloudRuns.awsHandle, operation };
+  }
+
+  private async describeWorker(
+    credentials: AwsWorkerCredentials,
+    handle: AwsWorkerHandleInfo,
+    operation: StoredAwsWorkerOperation
+  ): Promise<AwsWorkerStatus> {
+    // Polling status intentionally describes only the cached worker. Account
+    // fan-out is reserved for Start/recovery paths.
+    const info = await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId);
+    return {
+      configured: true,
+      handle,
+      state: info?.state ?? "absent",
+      publicIp: info?.publicIp,
+      persistentStorage: info
+        ? {
+            rootVolumeBackedByEbs: info.rootVolumeBackedByEbs === true,
+            rootDeviceName: info.rootDeviceName,
+            rootVolumeId: info.rootVolumeId
+          }
+        : undefined,
+      message: info?.rootVolumeBackedByEbs === false
+        ? "Worker root storage is not backed by EBS; remote session continuity is unsafe."
+        : undefined,
+      actualSpec: info ? actualSpecFrom(info, handle) : undefined,
+      operation
+    };
   }
 
   async deleteWorker(): Promise<AwsWorkerStatus> {

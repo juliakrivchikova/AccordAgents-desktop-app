@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AwsWorkerStartRequest } from "../../../shared/types";
-import { OLD_ERROR, RUNNING, SETTINGS, change, click, ready, renderPanel, textOf, unmount } from "./aws-worker-panel-harness.test";
+import { OLD_ERROR, RUNNING, SETTINGS, change, click, findButton, ready, renderPanel, textOf, unmount } from "./aws-worker-panel-harness.test";
 
 test("a healthy running instance offers Stop only; a stopped one offers Start only", async () => {
   const running = await renderPanel({ status: RUNNING });
@@ -64,20 +64,40 @@ test("diagnostics appear as soon as an instance exists, without re-reading setti
   unmount(renderer);
 });
 
-test("a refresh that AWS refuses keeps a way to recover access while the last state stays visible", async () => {
+test("a refresh that AWS refuses offers a read-only access check that leads to recovery, never a start", async () => {
   let reads = 0;
+  const requests: AwsWorkerStartRequest[] = [];
   const renderer = await renderPanel({ status: RUNNING, getStatus: async () => ++reads === 1 ? RUNNING : { configured: true, message: "AccessDenied: not authorized to perform ec2:DescribeInstances" }, start: async request => {
-    const operation = { ...OLD_ERROR, operationId: request.operationId, updatedAt: new Date().toISOString() };
+    requests.push(request);
+    const operation = { ...OLD_ERROR, operationId: request.operationId, clientToken: request.clientToken, intent: request.intent, updatedAt: new Date().toISOString(), awsPrincipalUserName: "worker-user" };
     return { operation, status: { configured: true, operation, message: "AccessDenied" } };
   } });
   assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-start" }).length, 0);
   await click(renderer.root.find(node => node.type === "button" && textOf(node) === "Refresh status"));
   assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-message" })), /AccessDenied/);
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-state" })), "Running · billable");
+  assert.equal(renderer.root.findAll(node => node.type === "button" && textOf(node) === "Refresh status").length, 0, "the check is the one read action");
   const check = renderer.root.findByProps({ "data-testid": "aws-worker-start" });
   assert.equal(textOf(check), "Check AWS access");
-  assert.equal(check.props.disabled, false);
   await click(check);
+  assert.equal(requests[0].intent, "check");
   assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-authorization-toggle" }).length, 1);
+  await click(findButton(renderer, "Try again"));
+  assert.equal(requests[1].intent, "check", "retrying a check is still a check");
+  assert.equal(requests[1].operationId, requests[0].operationId);
+  unmount(renderer);
+});
+
+test("a confirmed access check brings the normal actions back", async () => {
+  let reads = 0;
+  const renderer = await renderPanel({ status: { ...RUNNING, state: "stopped" }, getStatus: async () => ++reads === 1 ? { ...RUNNING, state: "stopped" } : { configured: true, message: "getaddrinfo ENOTFOUND ec2.us-east-1.amazonaws.com" }, start: async request => {
+    assert.equal(request.intent, "check");
+    return ready(request, { ...RUNNING, state: "stopped" });
+  } });
+  await click(renderer.root.find(node => node.type === "button" && textOf(node) === "Refresh status"));
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Check AWS access");
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-start" }));
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Start instance");
+  assert.equal(renderer.root.findAll(node => node.type === "button" && textOf(node) === "Refresh status").length, 1);
   unmount(renderer);
 });

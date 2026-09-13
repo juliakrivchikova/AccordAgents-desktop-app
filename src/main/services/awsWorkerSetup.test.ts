@@ -59,6 +59,43 @@ test("keeping the current size during a resize starts nothing and restores the s
   assert.equal(runs, 0, "keeping the current size must not start the instance");
 });
 
+test("an access check is read-only: a refusal becomes permission recovery and nothing is prepared or started", async () => {
+  let prepares = 0;
+  const refusal = Object.assign(new Error("User: arn:aws:iam::123456789012:user/accordagents-worker-abc is not authorized to perform: ec2:DescribeInstances"), { name: "UnauthorizedOperation" });
+  const aws = {
+    probeAccess: async () => { throw refusal; },
+    prepareWorker: async () => { prepares++; return PREPARED; },
+    ensurePreparedRunning: async () => { throw new Error("a check must not start the instance"); },
+    status: async () => ({ configured: true, message: refusal.message })
+  };
+  const settings = { saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
+  const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
+  const result = await service.start({ operationId: "check", intent: "check" });
+  assert.equal(result.operation.phase, "error");
+  assert.equal(result.operation.intent, "check");
+  assert.equal(result.operation.remediation, "refresh-aws-authorization");
+  assert.equal(result.operation.awsPrincipalUserName, "accordagents-worker-abc");
+  assert.deepEqual(result.operation.missingAwsActions, ["ec2:DescribeInstances"]);
+  assert.equal(prepares, 0);
+});
+
+test("a confirmed access check reports the instance state and starts nothing; pasted credentials are adopted first", async () => {
+  const calls: string[] = [];
+  const aws = {
+    adoptCredentials: async (blob: string) => { calls.push(`adopt:${blob}`); },
+    probeAccess: async () => { calls.push("probe"); return { configured: true, state: "stopped" }; },
+    prepareWorker: async () => { throw new Error("a check must not prepare"); },
+    ensurePreparedRunning: async () => { throw new Error("a check must not start"); }
+  };
+  const settings = { saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
+  const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
+  const result = await service.start({ operationId: "check-ok", intent: "check", blob: "accord-aws-v1:new" });
+  assert.equal(result.operation.phase, "ready");
+  assert.match(result.operation.message, /AWS access confirmed · instance stopped/);
+  assert.deepEqual(calls, ["adopt:accord-aws-v1:new", "probe"]);
+  assert.equal(result.status.state, "stopped");
+});
+
 test("start orchestrates the exact visible phases and reaches ready", async () => {
   const saved: AwsWorkerOperationSnapshot[] = [];
   const phases: string[] = [];

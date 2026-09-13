@@ -9,7 +9,9 @@ import { isAwsTransition, useAwsWorkerStatus } from "./use-aws-worker-status";
 import { CONFIRM_TEXT, ConfirmSharedAction, WorkerProgress } from "./aws-worker-panel-parts";
 import { AwsInstanceDiagnostics } from "./aws-instance-diagnostics";
 
-type Action = "setup" | "resize" | "stop" | "delete" | "command";
+type Action = "setup" | "resize" | "check" | "stop" | "delete" | "command";
+type AttemptIntent = "setup" | "resize" | "check";
+const isAttempt = (action: Action | undefined): action is AttemptIntent => action === "setup" || action === "resize" || action === "check";
 type ConfirmAction = "stop" | "delete" | "recreate" | null;
 
 const TERMINAL_PHASES: AwsWorkerOperationSnapshot["phase"][] = ["ready", "error", "needs-decision"];
@@ -60,7 +62,7 @@ export function AwsWorkerPanel(props: {
     }
   }, [status?.operation, action]);
   useEffect(() => window.consensus.onAwsWorkerProgress(next => {
-    if (next.operationId !== activeOperationId || action !== "setup" && action !== "resize") return;
+    if (next.operationId !== activeOperationId || !isAttempt(action)) return;
     setOperation(previous => latestOperation(previous, next));
     setFeedback(undefined);
   }), [activeOperationId, action]);
@@ -89,18 +91,18 @@ export function AwsWorkerPanel(props: {
   const actual = status?.actualSpec;
   const configured = Boolean(status?.configured);
   const baseSpec = actual ?? newSpec ?? { instanceType: props.settings.awsInstanceType, rootVolumeSizeGb: props.settings.awsRootVolumeSizeGb };
-  const currentOperation = operation?.operationId === activeOperationId && (action === "setup" || action === "resize") ? operation : null;
+  const currentOperation = operation?.operationId === activeOperationId && isAttempt(action) ? operation : null;
   const mismatch = currentOperation?.phase === "needs-decision" ? currentOperation.specMismatch : undefined;
   // A size decision answers the attempt that raised it: "keep" during Start
   // continues the start, "keep" during an explicit resize changes nothing.
-  const decisionIntent: "setup" | "resize" = currentOperation?.intent ?? "setup";
+  const decisionIntent: AttemptIntent = currentOperation?.intent === "resize" ? "resize" : "setup";
   const showProgress = livePhase(currentOperation) && !feedback?.failed;
   const locked = busy || showProgress || isAwsTransition(status) || monitor.awaitingStop;
 
   const start = async (
     resolution?: AwsWorkerSpecResolution,
     spec: AwsWorkerSpec = baseSpec,
-    intent: "setup" | "resize" = "setup"
+    intent: AttemptIntent = "setup"
   ): Promise<void> => {
     if (!begin(intent)) return;
     const continuation = operation && (operation.phase === "error" || operation.phase === "needs-decision") && (operation.intent ?? "setup") === intent
@@ -207,28 +209,31 @@ export function AwsWorkerPanel(props: {
   const statusUnavailable = Boolean(status) && configured && (Boolean(monitor.error) || !status?.state);
   const canStart = Boolean(blob.trim() || props.settings.hasAwsCredentials || configured);
   const authorizationFailure = currentOperation?.phase === "error" && currentOperation.remediation === "refresh-aws-authorization";
-  const setupFailed = action === "setup" && Boolean(feedback?.failed || currentOperation?.phase === "error");
+  const setupFailed = (action === "setup" || action === "check") && Boolean(feedback?.failed || currentOperation?.phase === "error");
+  // Retrying repeats what failed: a read-only check stays a check.
+  const retryIntent: AttemptIntent = action === "check" ? "check" : "setup";
   const needsConnection = Boolean(status) && !configured && !props.settings.hasAwsCredentials;
   const stopInFlight = monitor.awaitingStop || status?.state === "stopping" || busy && action === "stop";
   const showStop = status?.state === "running" || stopInFlight;
   const stopLabel = busy && action === "stop" ? "Sending Stop…" : stopInFlight ? "Stopping…" : "Stop";
-  const workingLabel = action === "delete" ? "Deleting…" : action === "resize" ? "Applying size…" : "Starting…";
-  // One primary action, and only when there is something the user can do now.
-  const primary: { label: string; disabled: boolean } | null =
+  const workingLabel = action === "delete" ? "Deleting…" : action === "resize" ? "Applying size…" : action === "check" ? "Checking AWS access…" : "Starting…";
+  // One primary action, only when the user can act now; starting is always named as starting, a check reads only.
+  const primary: { label: string; disabled: boolean; intent: AttemptIntent } | null =
     isAwsTransition(status) || monitor.awaitingStop ? null
-      : busy ? (action === "stop" || action === "command" ? null : { label: workingLabel, disabled: true })
-        : showProgress ? { label: workingLabel, disabled: true }
-          : setupFailed ? { label: "Try again", disabled: !canStart }
-            : statusUnavailable ? { label: "Check AWS access", disabled: !canStart }
+      : busy ? (action === "stop" || action === "command" ? null : { label: workingLabel, disabled: true, intent: "setup" })
+        : showProgress ? { label: workingLabel, disabled: true, intent: "setup" }
+          : setupFailed ? { label: "Try again", disabled: !canStart, intent: retryIntent }
+            : statusUnavailable ? { label: "Check AWS access", disabled: false, intent: "check" }
               : !status || needsConnection ? null
-                : !configured || stoppedLike ? { label: "Start instance", disabled: !canStart }
+                : !configured || stoppedLike ? { label: "Start instance", disabled: !canStart, intent: "setup" }
                   : null;
-  const showRefresh = configured || Boolean(monitor.error);
+  // The check already re-reads the status; a second read button beside it would be the same action twice.
+  const showRefresh = configured && !statusUnavailable || Boolean(monitor.error) && !status;
 
   const message = monitor.error ?? (action === "resize" && editing ? undefined : feedback?.message ?? currentOperation?.message);
   const hasError = Boolean(monitor.error || feedback?.failed || currentOperation?.phase === "error");
   const messagePrefix = action && feedback && !monitor.error
-    ? action === "stop" ? "Stop" : action === "delete" ? "Delete" : "Cloud setup"
+    ? action === "stop" ? "Stop" : action === "delete" ? "Delete" : action === "check" ? "AWS access" : "Cloud setup"
     : undefined;
   const stateLabel = !status
     ? monitor.error ? "Status unavailable" : "Checking status…"
@@ -250,7 +255,7 @@ export function AwsWorkerPanel(props: {
       onBlobChange={setBlob}
       onLoadCommand={loadCommand}
       onCopyCommand={copyCommand}
-      onApply={() => start()}
+      onApply={() => start(undefined, baseSpec, retryIntent)}
     />
   );
 
@@ -261,7 +266,7 @@ export function AwsWorkerPanel(props: {
           <strong className={`gen-aws-state${isRunning ? " is-billable" : ""}`} data-testid="aws-worker-state">{stateLabel}</strong>
           <div className="gen-actions">
             {primary ? (
-              <button type="button" className="gen-pill" data-testid="aws-worker-start" disabled={primary.disabled || locked} onClick={() => void start()}>
+              <button type="button" className="gen-pill" data-testid="aws-worker-start" disabled={primary.disabled || locked} onClick={() => void start(undefined, baseSpec, primary.intent)}>
                 <span className="gen-pill-lead">{locked ? <Loader2 size={16} className="gen-aws-spinner" aria-hidden /> : <Server size={16} />}</span>
                 <span className="gen-pill-label">{primary.label}</span>
               </button>

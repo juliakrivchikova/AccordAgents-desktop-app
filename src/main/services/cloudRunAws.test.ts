@@ -978,3 +978,37 @@ test("a size edit refuses discovery of a replacement or missing instance without
     assert.equal(settings.awsRootVolumeSizeGb, 8);
   }
 });
+
+test("probeAccess leaves AWS's refusal intact while status() reports it as a message", async () => {
+  const settings = new FakeSettings();
+  settings.credentials = OLD_CREDS;
+  settings.handle = OLD_HANDLE;
+  const client = new FakeEc2Client({ instanceId: "i-old", state: "stopped" });
+  client.describeError = Object.assign(new Error("User: arn:aws:iam::123456789012:user/worker is not authorized to perform: ec2:DescribeInstances"), { name: "UnauthorizedOperation" });
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]));
+  await assert.rejects(service.probeAccess(), /not authorized/);
+  const status = await service.status();
+  assert.equal(status.configured, true);
+  assert.equal(status.state, undefined);
+  assert.match(status.message ?? "", /not authorized/);
+  client.describeError = undefined;
+  assert.equal((await service.probeAccess()).state, "stopped");
+  assert.equal(client.runCount, 0);
+});
+
+test("adoptCredentials saves pasted credentials only after they read the existing instance", async () => {
+  const settings = new FakeSettings();
+  settings.credentials = OLD_CREDS;
+  settings.handle = OLD_HANDLE;
+  const rejected = { accessKeyId: "AKIAREJECTED0000", secretAccessKey: "rejected", region: "us-east-1" };
+  const refusing = new FakeEc2Client({ instanceId: "i-old", state: "stopped" });
+  refusing.describeError = new Error("AccessDenied");
+  const accepting = new FakeEc2Client({ instanceId: "i-old", state: "stopped" });
+  const service = serviceWith(settings, new Map([[rejected.accessKeyId, refusing], [NEW_CREDS.accessKeyId, accepting]]));
+  await assert.rejects(service.adoptCredentials(encodeWorkerBlob(rejected)), /AccessDenied/);
+  assert.equal(settings.credentials, OLD_CREDS);
+  await service.adoptCredentials(encodeWorkerBlob(NEW_CREDS));
+  assert.equal(settings.credentials?.accessKeyId, NEW_CREDS.accessKeyId);
+  assert.equal(settings.handle, OLD_HANDLE);
+  assert.equal(accepting.runCount, 0);
+});

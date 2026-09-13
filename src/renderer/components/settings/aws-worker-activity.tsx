@@ -28,7 +28,7 @@ export function AwsWorkerHistory(props: { operation?: AwsWorkerOperationSnapshot
   return <details className="gen-aws-history" data-testid="aws-worker-history">
     <summary className="gen-aws-disclosure"><span>Previous attempt · {new Date(operation.updatedAt).toLocaleString()}</span><ChevronDown size={16} aria-hidden /></summary>
     <div className="gen-row gen-row-stack">
-      <strong>{operation.intent === "resize" ? "Change instance size" : "Start / set up instance"}</strong>
+      <strong>{operation.intent === "resize" ? "Change instance size" : operation.intent === "check" ? "Check AWS access" : "Start / set up instance"}</strong>
       <span>{outcome}: {message}</span>
       <span className="gen-row-desc">Saved result of that attempt, not a current AWS status check.</span>
     </div>

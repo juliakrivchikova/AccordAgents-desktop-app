@@ -74,6 +74,18 @@ export class AwsWorkerSetupService {
       return operation;
     };
     try {
+      if (request.intent === "check") {
+        // Read-only: does this app still reach AWS? A refusal lands in the
+        // catch below and becomes the permission recovery; nothing is
+        // created, started or set up. Pasted credentials are adopted only
+        // after they prove they can read the existing instance.
+        if (request.blob?.trim()) await this.aws.adoptCredentials(request.blob);
+        const current = await this.aws.probeAccess();
+        const operation = await emit("ready", current.configured
+          ? `AWS access confirmed${current.state ? ` · instance ${current.state}` : ""}.`
+          : "Connect the AWS account before checking access.");
+        return { operation, status: current };
+      }
       if (request.intent === "resize" && !request.expectedInstanceId) {
         throw new Error("Refresh and select the existing instance before changing its size.");
       }
