@@ -50,7 +50,7 @@ test("AWS worker panel exposes one-click progress, actual specs, choices, and sh
   assert.match(awsWorkerPanel, /Waiting for running/);
   assert.match(awsWorkerPanel, /Setting up/);
   assert.match(awsWorkerPanel, /data-testid="aws-worker-actual-specs"/);
-  assert.match(awsWorkerPanel, /Keep using/);
+  assert.match(awsWorkerPanel, /Keep current size/);
   assert.match(awsWorkerPanel, /Grow disk/);
   assert.match(awsWorkerPanel, /Recreate/);
   assert.match(awsWorkerPanel, /Running · billable/);

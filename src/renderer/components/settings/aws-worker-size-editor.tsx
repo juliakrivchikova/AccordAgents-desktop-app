@@ -6,6 +6,9 @@ export function AwsWorkerSizeEditor(props: {
   actual?: AwsWorkerActualSpec;
   initial: AwsWorkerSpec;
   busy: boolean;
+  /** Growing a disk resizes the filesystem on the box, so a stopped instance
+   *  is started (and billed) to apply the change. */
+  startsInstance?: boolean;
   error?: string;
   onApply: (spec: AwsWorkerSpec) => Promise<void>;
   onCancel: () => void;
@@ -31,7 +34,10 @@ export function AwsWorkerSizeEditor(props: {
       </select></label>
       <label className="gen-aws-field"><span>Disk size (GiB)</span><input className="gen-input" type="number" inputMode="numeric" step={1} min={props.actual?.rootVolumeSizeGb ?? AWS_WORKER_ROOT_VOLUME_SIZE_GB_MIN} max={AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX} aria-label="AWS worker disk size" aria-describedby="aws-disk-size-help" aria-invalid={Boolean(error)} disabled={props.busy} value={disk} onChange={event => setDisk(event.target.value)} /></label>
     </div>
-    <div className="gen-row-desc" id="aws-disk-size-help">Whole GiB, for example 40, 41 or 50. This app supports {AWS_WORKER_ROOT_VOLUME_SIZE_GB_MIN}–{AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX} GiB; the system image may require a larger minimum. Existing disks can only grow. A larger disk costs more.</div>
+    <div className="gen-row-desc" id="aws-disk-size-help">
+      Whole GiB from {AWS_WORKER_ROOT_VOLUME_SIZE_GB_MIN} to {AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX}. An existing disk can only grow, and a larger disk costs more.
+      {props.startsInstance ? " Applying a change starts the instance, which is billed until you stop it." : ""}
+    </div>
     {differs && !error ? <div data-testid="aws-worker-size-preview">
       {props.actual ? <>Disk: {base.rootVolumeSizeGb} → {numeric} GiB{instanceType !== base.instanceType ? <> · Instance: {base.instanceType} → {instanceType}</> : null}</> : <>New instance: {instanceType} · {numeric} GiB disk</>}
     </div> : null}

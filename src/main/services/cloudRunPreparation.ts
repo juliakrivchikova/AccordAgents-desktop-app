@@ -115,7 +115,7 @@ export class CloudRunPreparationService {
     this.report({ message: "Checking your AWS instance…" });
     const status = await this.options.aws.status();
     if (!status.handle || !status.configured || status.state !== "running") {
-      throw new Error(status.message || "Start your AWS instance in Settings → General → Machine instance (AWS), then select Cloud run again.");
+      throw new Error(status.message || "Start your AWS instance in Settings → General → AWS, then select Cloud run again.");
     }
     const instanceId = status.handle.instanceId;
     if (expectedInstanceId && instanceId !== expectedInstanceId) {

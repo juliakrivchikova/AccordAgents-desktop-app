@@ -1,18 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
-import type { AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStatus, CloudRunsSettings } from "../../../shared/types";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import type { AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStatus } from "../../../shared/types";
 import { AwsWorkerPanel } from "./aws-worker-panel";
 import { AWS_TRANSITION_POLL_MS } from "./use-aws-worker-status";
-
-const SETTINGS: CloudRunsSettings = { enabled: true, mode: "aws", worker: {}, hasAwsCredentials: true, awsInstanceType: "t3.small", awsRootVolumeSizeGb: 8, maxRuntimeMs: 86_400_000, pollIntervalMs: 2_500 };
-const RUNNING: AwsWorkerStatus = { configured: true, state: "running", actualSpec: { instanceId: "i-shared", region: "us-east-1", instanceType: "t3.small", rootVolumeSizeGb: 40 } };
-const OLD_ERROR: AwsWorkerOperationSnapshot = { operationId: "old", clientToken: "old-token", phase: "error", message: "Missing AWS permission", updatedAt: "2026-07-10T00:00:00Z", retryable: true, remediation: "refresh-aws-authorization" };
-
-function ready(request: AwsWorkerStartRequest, status = RUNNING) {
-  const operation: AwsWorkerOperationSnapshot = { operationId: request.operationId, intent: request.intent, phase: "ready", message: "Ready", updatedAt: new Date().toISOString() };
-  return { status: { ...status, operation }, operation };
-}
+import { OLD_ERROR, RUNNING, SETTINGS, change, click, edit, findButton, flush, ready, renderPanel, textOf, unmount } from "./aws-worker-panel-harness.test";
 
 test("opening Settings archives old errors and does not claim the saved 8 GiB is a requested change", async () => {
   let writes = 0;
@@ -85,8 +77,10 @@ test("Stop shows immediate progress, rejects duplicate clicks and polls until AW
   const renderer = await renderPanel({ status: state, getStatus: async () => state, stop: () => { stopCalls++; return new Promise(resolve => { resolveStop = resolve; }); } });
   await click(findButton(renderer, "Stop"));
   await click(findButton(renderer, "Confirm stop"));
-  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Sending Stop…");
-  assert.equal(findButton(renderer, "Stop").props.disabled, true);
+  const stopping = renderer.root.findByProps({ "data-testid": "aws-worker-stop" });
+  assert.equal(textOf(stopping), "Sending Stop…");
+  assert.equal(stopping.props.disabled, true);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-start" }).length, 0, "no second action while Stop is in flight");
   state = { ...state, state: "stopping" };
   await act(async () => { resolveStop(state); await flush(); });
   assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-message" }).length, 0);
@@ -96,6 +90,7 @@ test("Stop shows immediate progress, rejects duplicate clicks and polls until AW
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-state" })), "Stopped");
   assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-transition" }).length, 0);
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Start instance");
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-stop" }).length, 0, "a stopped instance has nothing to stop");
   assert.equal(stopCalls, 1);
   unmount(renderer);
 });
@@ -106,7 +101,7 @@ test("accepted Stop continues polling when the first AWS response still says run
   let reads = 0;
   const renderer = await renderPanel({ status: state, getStatus: async () => { reads++; return state; }, stop: async () => state });
   await click(findButton(renderer, "Stop")); await click(findButton(renderer, "Confirm stop"));
-  assert.equal(findButton(renderer, "Stop").props.disabled, true);
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-stop" }).props.disabled, true);
   state = { ...state, state: "stopped" };
   await act(async () => { t.mock.timers.tick(AWS_TRANSITION_POLL_MS); await flush(); });
   assert.equal(reads, 2);
@@ -159,7 +154,7 @@ test("status errors stay current, can be refreshed and do not invoke setup", asy
   let starts = 0;
   const renderer = await renderPanel({ status: RUNNING, getStatus: async () => { if (++reads === 1) throw new Error("AWS is unreachable"); return RUNNING; }, start: async request => { starts++; return ready(request); } });
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-state" })), "Status unavailable");
-  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-start" }).props.disabled, true);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-start" }).length, 0, "nothing to start while the status is unknown");
   await click(findButton(renderer, "Refresh status"));
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-state" })), "Running · billable");
   assert.equal(starts, 0);
@@ -169,13 +164,15 @@ test("status errors stay current, can be refreshed and do not invoke setup", asy
 test("only a current authorization failure offers recovery and preserves its retry token", async () => {
   const requests: AwsWorkerStartRequest[] = [];
   let commandOperationId: string | undefined;
-  const renderer = await renderPanel({ status: RUNNING, command: async (_region, operationId) => { commandOperationId = operationId; return "command"; }, start: async request => {
+  const renderer = await renderPanel({ status: { ...RUNNING, state: "stopped" }, command: async (_region, operationId) => { commandOperationId = operationId; return "command"; }, start: async request => {
     requests.push(request);
     if (requests.length > 1) return ready(request);
     const operation = { ...OLD_ERROR, operationId: request.operationId, clientToken: request.clientToken, updatedAt: new Date().toISOString() };
     return { operation, status: { ...RUNNING, operation } };
   } });
   await click(renderer.root.findByProps({ "data-testid": "aws-worker-start" }));
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Try again");
+  assert.equal(renderer.root.findAll(node => node.type === "button" && /retry/i.test(textOf(node))).length, 0, "one retry, named plainly");
   await click(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-toggle" }));
   await click(findButton(renderer, "Show setup command"));
   assert.equal(commandOperationId, requests[0].operationId);
@@ -187,12 +184,12 @@ test("only a current authorization failure offers recovery and preserves its ret
   assert.equal(requests[1].clientToken, requests[0].clientToken);
   assert.equal(requests[1].rootVolumeSizeGb, 40);
   assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-authorization-toggle" }).length, 0);
-  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-history" }).findAllByType("button").length, 0);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-history" }).length, 0, "a completed attempt is not history");
   unmount(renderer);
 });
 
 test("known IAM user recovery still offers its update command without generating a new credential", async () => {
-  const renderer = await renderPanel({ status: RUNNING, start: async request => {
+  const renderer = await renderPanel({ status: { ...RUNNING, state: "stopped" }, start: async request => {
     const operation = { ...OLD_ERROR, operationId: request.operationId, awsPrincipalUserName: "worker-user", missingAwsActions: ["ec2:DescribeInstanceTypes"], updatedAt: new Date().toISOString() };
     return { operation, status: { ...RUNNING, operation } };
   } });
@@ -201,14 +198,14 @@ test("known IAM user recovery still offers its update command without generating
   assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-steps" })), /worker-user/);
   await click(findButton(renderer, "Show update command"));
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-command" })), "command");
-  assert.equal(findButton(renderer, "Retry existing permissions").props.disabled, false);
+  assert.equal(findButton(renderer, "Try again").props.disabled, false);
   assert.equal(renderer.root.findAllByProps({ "aria-label": "AWS setup result" }).length, 0);
   unmount(renderer);
 });
 
 test("reopening Settings makes a completed error historical and polls never restore its recovery actions", async t => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
-  let state = RUNNING;
+  let state: AwsWorkerStatus = { ...RUNNING, state: "stopped" };
   let starts = 0;
   let renderer = await renderPanel({ status: state, getStatus: async () => state, start: async request => {
     starts++;
@@ -298,7 +295,7 @@ test("accepted Stop observation survives leaving Settings before AWS exposes sto
   await click(findButton(renderer, "Stop")); await click(findButton(renderer, "Confirm stop"));
   unmount(renderer);
   await act(async () => { renderer = create(<AwsWorkerPanel settings={SETTINGS} onDeleted={async () => undefined} />); await flush(); });
-  assert.equal(findButton(renderer, "Stop").props.disabled, true);
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-stop" }).props.disabled, true);
   assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-transition" }).length, 1);
   state = { ...state, state: "stopped" };
   await act(async () => { t.mock.timers.tick(AWS_TRANSITION_POLL_MS); await flush(); });
@@ -320,7 +317,7 @@ test("a delayed status snapshot cannot revive an adopted operation after newer t
   await act(async () => { delayed({ ...RUNNING, operation: { ...live } }); await flush(); });
   assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-progress" }).length, 0);
   assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-message" })), /Filesystem expansion failed/);
-  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-start" }).props.disabled, false);
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-panel" }).props["aria-busy"], false);
   unmount(renderer);
 });
 
@@ -343,36 +340,3 @@ test("Stop accepted after unmount reaches the reopened panel even when its first
   assert.equal(reads, 3);
   unmount(renderer);
 });
-
-async function renderPanel(options: {
-  status: AwsWorkerStatus;
-  settings?: CloudRunsSettings;
-  command?: (region: string, recoveryOperationId?: string) => Promise<string>;
-  getStatus?: () => Promise<AwsWorkerStatus>;
-  onProgress?: (listener: (operation: AwsWorkerOperationSnapshot) => void) => void;
-  start?: (request: AwsWorkerStartRequest) => Promise<any>;
-  stop?: () => Promise<AwsWorkerStatus>;
-  remove?: () => Promise<AwsWorkerStatus>;
-  onDeleted?: () => Promise<void>;
-}): Promise<ReactTestRenderer> {
-  const bridge = {
-    getAwsWorkerStatus: options.getStatus ?? (async () => options.status),
-    onAwsWorkerProgress: (listener: (operation: AwsWorkerOperationSnapshot) => void) => { options.onProgress?.(listener); return () => undefined; },
-    startAwsWorker: options.start ?? (async request => ready(request)),
-    stopAwsWorker: options.stop ?? (async () => options.status), deleteAwsWorker: options.remove ?? (async () => options.status),
-    listMachines: async () => ({ machines: [], status: [] }), onMachinesUpdated: () => () => undefined,
-    getAwsWorkerBootstrapCommand: options.command ?? (async () => "command"), openExternal: async () => undefined
-  };
-  (globalThis as any).window = { consensus: bridge, setTimeout };
-  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: async () => undefined } } });
-  let renderer!: ReactTestRenderer;
-  await act(async () => { renderer = create(<AwsWorkerPanel settings={options.settings ?? SETTINGS} onDeleted={options.onDeleted ?? (async () => undefined)} />); await flush(); });
-  return renderer;
-}
-async function edit(renderer: ReactTestRenderer): Promise<void> { await click(renderer.root.findByProps({ "data-testid": "aws-worker-config-toggle" })); await click(renderer.root.findByProps({ "data-testid": "aws-worker-size-edit" })); }
-function findButton(renderer: ReactTestRenderer, label: string): ReactTestInstance { return renderer.root.find(node => node.type === "button" && textOf(node) === label); }
-async function click(node: ReactTestInstance): Promise<void> { await act(async () => { node.props.onClick(); await flush(); }); }
-async function change(node: ReactTestInstance, value: string): Promise<void> { await act(async () => { node.props.onChange({ target: { value } }); await flush(); }); }
-function textOf(node: ReactTestInstance): string { return node.children.map(child => typeof child === "string" ? child : textOf(child as ReactTestInstance)).join(""); }
-function unmount(renderer: ReactTestRenderer): void { act(() => renderer.unmount()); }
-async function flush(): Promise<void> { await new Promise<void>(resolve => setImmediate(resolve)); }

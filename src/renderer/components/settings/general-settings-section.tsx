@@ -259,14 +259,12 @@ function CloudRunsControl(props: {
 }): JSX.Element {
   return (
     <div className="gen-card" data-testid="machine-instance-settings">
-      <div className="gen-row gen-aws-intro">
-        <div className="gen-row-desc">Start your instance here, then choose Cloud run in a member&apos;s settings.</div>
-      </div>
       <SharedAwsWorkerPanel
         settings={props.settings}
         onDeleted={() => props.onSave({ mode: "aws" })}
       />
-      <AwsInstanceDiagnostics />
+      {/* Nothing to check or set up before an instance exists. */}
+      {props.settings.awsHandle ? <AwsInstanceDiagnostics /> : null}
     </div>
   );
 }

@@ -102,6 +102,16 @@ export class AwsWorkerSetupService {
       }
       prepared = await this.aws.resumePendingVolumeExpansion(prepared);
       prepared = exactResizeMismatch(request, prepared);
+      if (request.intent === "resize" && request.resolution === "keep") {
+        // "Keep current size" answers a size change with "no change": nothing
+        // is started or set up, and the saved size goes back to what exists.
+        if (request.expectedInstanceId !== prepared.info.instanceId) {
+          throw new Error("The shared worker changed after the choice was shown. Refresh and choose again.");
+        }
+        await this.aws.keepActualSpec(prepared);
+        const operation = await emit("ready", `Kept the current instance: ${prepared.actualSpec.instanceType} · ${prepared.actualSpec.rootVolumeSizeGb} GiB disk.`);
+        return { operation, status: await this.aws.status() };
+      }
       prepared = await this.resolveMismatch(request, prepared, emit);
       prepared = exactResizeMismatch(request, prepared);
       const accepted = request.intent === "resize" ? request.resolution === "keep" : await this.aws.hasAcceptedMismatch(prepared);
@@ -132,9 +142,7 @@ export class AwsWorkerSetupService {
         });
         return { operation, status: await this.aws.status(), report };
       }
-      const operation = await emit("ready", request.resolution === "keep"
-        ? `Kept the current instance: ${prepared.actualSpec.instanceType} · ${prepared.actualSpec.rootVolumeSizeGb} GiB disk.`
-        : report.message || "Worker ready.");
+      const operation = await emit("ready", report.message || "Worker ready.");
       return { operation, status: await this.aws.status(), report };
     } catch (error) {
       const needsAuthorizationRefresh = isAwsAuthorizationError(error);

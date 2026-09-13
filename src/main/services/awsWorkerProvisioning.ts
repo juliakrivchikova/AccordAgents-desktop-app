@@ -190,7 +190,7 @@ export function buildBootstrapCommand(
       'if [ -z "$POLICY_ARN" ] || [ "$POLICY_ARN" = None ]; then POLICY_ARN=$(aws iam create-policy --policy-name "$USER" --policy-document "$POLICY" --query "Policy.Arn" --output text); else for VERSION_ID in $(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query "Versions[?IsDefaultVersion==\x60false\x60].VersionId" --output text); do aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION_ID"; done; aws iam create-policy-version --policy-arn "$POLICY_ARN" --policy-document "$POLICY" --set-as-default >/dev/null; fi',
       'aws iam attach-user-policy --user-name "$USER" --policy-arn "$POLICY_ARN"',
       'aws iam delete-user-policy --user-name "$USER" --policy-name accordagents-worker >/dev/null 2>&1 || true',
-      'printf "\\nUpdated AccordAgents worker permissions for %s. Return to AccordAgents and select Retry existing permissions.\\n" "$USER"'
+      'printf "\\nUpdated AccordAgents worker permissions for %s. Return to AccordAgents and select Try again.\\n" "$USER"'
     ].join("\n");
   }
   return [

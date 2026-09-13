@@ -35,6 +35,30 @@ test("explicit type downsizing asks for a decision even if larger capacity was p
   assert.equal(runs, 0);
 });
 
+test("keeping the current size during a resize starts nothing and restores the saved size", async () => {
+  let runs = 0;
+  let kept: PreparedAwsWorker | undefined;
+  const aws = {
+    prepareWorker: async () => ({ ...PREPARED, desiredSpec: { ...PREPARED.desiredSpec, instanceType: "t3.medium" } }),
+    resumePendingVolumeExpansion: async (prepared: PreparedAwsWorker) => prepared,
+    keepActualSpec: async (prepared: PreparedAwsWorker) => { kept = prepared; },
+    acceptMismatch: async () => { throw new Error("keeping the current size must not record a mismatch acceptance"); },
+    ensurePreparedRunning: async () => { runs++; return { host: "x" }; },
+    status: async () => ({ configured: true, state: "stopped" })
+  };
+  const settings = { saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
+  const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
+  const result = await service.start({
+    operationId: "keep", intent: "resize", resolution: "keep", expectedInstanceId: PREPARED.info.instanceId,
+    expectedDesiredSpec: { instanceType: "t3.medium", rootVolumeSizeGb: PREPARED.desiredSpec.rootVolumeSizeGb },
+    instanceType: "t3.medium", rootVolumeSizeGb: PREPARED.desiredSpec.rootVolumeSizeGb
+  });
+  assert.equal(result.operation.phase, "ready");
+  assert.match(result.operation.message, /Kept the current instance/);
+  assert.equal(kept?.actualSpec.instanceType, PREPARED.actualSpec.instanceType);
+  assert.equal(runs, 0, "keeping the current size must not start the instance");
+});
+
 test("start orchestrates the exact visible phases and reaches ready", async () => {
   const saved: AwsWorkerOperationSnapshot[] = [];
   const phases: string[] = [];

@@ -16,21 +16,28 @@ export function AwsWorkerTransition(props: { state: string; since?: number; chec
   </div>;
 }
 
+/** A previous attempt that did not complete, kept out of the way. A completed
+ *  one is not news, and an attempt shown live above is not history. */
 export function AwsWorkerHistory(props: { operation?: AwsWorkerOperationSnapshot | null }): JSX.Element | null {
-  if (!props.operation || !["ready", "error", "needs-decision"].includes(props.operation.phase)) return null;
-  const message = props.operation.phase === "error" && props.operation.remediation === "refresh-aws-authorization"
-    ? "AWS permissions were insufficient for this attempt." : props.operation.message;
+  const operation = props.operation;
+  if (!operation || operation.phase !== "error" && operation.phase !== "needs-decision") return null;
+  const message = operation.phase === "error" && operation.remediation === "refresh-aws-authorization"
+    ? "AWS permissions were insufficient for this attempt."
+    : operation.message;
+  const outcome = operation.phase === "error" ? "failed" : "not applied";
   return <details className="gen-aws-history" data-testid="aws-worker-history">
-    <summary className="gen-aws-disclosure"><span>Activity history · last setup attempt</span><ChevronDown size={16} aria-hidden /></summary>
+    <summary className="gen-aws-disclosure"><span>Previous attempt {outcome} · {new Date(operation.updatedAt).toLocaleString()}</span><ChevronDown size={16} aria-hidden /></summary>
     <div className="gen-row gen-row-stack">
-      <strong>{props.operation.intent === "resize" ? "Change instance size" : "Start / set up instance"} · {new Date(props.operation.updatedAt).toLocaleString()}</strong>
-      <span>{props.operation.phase === "error" ? "Failed" : props.operation.phase === "needs-decision" ? "Not applied" : "Completed"}: {message}</span>
-      <span className="gen-row-desc">Saved result of that operation, not a current AWS status check.</span>
+      <strong>{operation.intent === "resize" ? "Change instance size" : "Start / set up instance"}</strong>
+      <span>{message}</span>
+      <span className="gen-row-desc">Saved result of that attempt, not a current AWS status check.</span>
     </div>
   </details>;
 }
 
-export function AwsCloudRunReadiness({ status }: { status: AwsWorkerStatus | null }): JSX.Element {
+/** The one thing to do next for Cloud run, when there is one. The state line
+ *  above already says stopped, starting or stopping; this does not repeat it. */
+export function AwsCloudRunNextStep({ status }: { status: AwsWorkerStatus | null }): JSX.Element | null {
   const [machines, setMachines] = useState<MachineListResult>();
   const [unavailable, setUnavailable] = useState(false);
   useEffect(() => {
@@ -40,16 +47,16 @@ export function AwsCloudRunReadiness({ status }: { status: AwsWorkerStatus | nul
     const off = window.consensus.onMachinesUpdated(value => { version++; if (!cancelled) { setMachines(value); setUnavailable(false); } });
     return () => { cancelled = true; off(); };
   }, []);
-  const id = status?.actualSpec?.instanceId ?? status?.handle?.instanceId;
+  if (!status?.configured) return null;
+  const id = status.actualSpec?.instanceId ?? status.handle?.instanceId;
   const machine = id ? machines?.machines.find(item => item.awsInstanceId === id) : undefined;
   const link = machines?.status.find(item => item.machineId === machine?.id);
-  const text = !status?.configured ? "Connect AWS to use Cloud run."
-    : status.state === "stopping" || status.state === "stopped" ? "Cloud Run: unavailable while the instance is stopped or stopping."
-      : status.state !== "running" ? "Cloud Run: waiting for the instance."
-        : link?.connected ? "Cloud Run: connected. Provider sign-in is checked when you select Cloud run."
-          : unavailable ? "Cloud Run: connection could not be checked."
-            : !machines ? "Cloud Run: checking connection…"
-              : machine ? "Cloud Run: reconnecting to this instance…"
-                : "Cloud Run: select it in a member’s settings to finish setup automatically.";
-  return <div className="gen-row-desc" data-testid="aws-cloud-run-readiness">{text}</div>;
+  const text = status.state === "stopped" ? "Start the instance to use Cloud run."
+    : status.state !== "running" ? undefined
+      : link?.connected ? "Cloud run: connected."
+        : unavailable ? "Cloud run: connection could not be checked."
+          : !machines ? "Cloud run: checking connection…"
+            : machine ? "Cloud run: reconnecting to this instance…"
+              : "Cloud run: select it in a member’s settings to finish setup automatically.";
+  return text ? <div className="gen-row-desc" data-testid="aws-cloud-run-readiness">{text}</div> : null;
 }

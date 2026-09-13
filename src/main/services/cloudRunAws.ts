@@ -144,7 +144,7 @@ export class CloudRunAwsService {
     if (recoveryOperationId !== undefined) {
       const operation = await this.settings.getAwsWorkerOperation();
       if (operation?.operationId !== recoveryOperationId || operation.phase !== "error" || operation.remediation !== "refresh-aws-authorization") {
-        throw new Error("That AWS permission error is no longer current. Check cloud setup again before updating permissions.");
+        throw new Error("That AWS permission error is no longer current. Try again first; update permissions only from a current error.");
       }
       targetUserName = operation.awsPrincipalUserName;
     }
@@ -288,6 +288,15 @@ export class CloudRunAwsService {
     };
     const mismatch = specMismatch(actualSpec, desiredSpec);
     return { credentials, handle, info, actualSpec, desiredSpec, mismatch, created };
+  }
+
+  /** The size editor persisted its request before the decision; keeping the
+   *  instance as it is means the saved size must describe it again. */
+  async keepActualSpec(prepared: PreparedAwsWorker): Promise<void> {
+    await this.settings.saveCloudRunsSettings({
+      awsInstanceType: prepared.actualSpec.instanceType,
+      awsRootVolumeSizeGb: prepared.actualSpec.rootVolumeSizeGb
+    });
   }
 
   async acceptMismatch(prepared: PreparedAwsWorker): Promise<void> {

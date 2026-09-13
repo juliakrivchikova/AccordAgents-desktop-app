@@ -620,11 +620,6 @@
   flex-direction: column;
 }
 
-.settings-view .gen-aws-intro {
-  padding-bottom: 0;
-}
-
-.settings-view .gen-aws-intro .gen-row-desc,
 .settings-view .gen-aws .gen-row-desc,
 .settings-view .gen-aws-diagnostics .gen-row-desc {
   max-width: none;
