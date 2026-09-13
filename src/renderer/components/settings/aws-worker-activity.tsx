@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { ChevronDown, Loader2 } from "lucide-react";
 import type { AwsWorkerOperationSnapshot, AwsWorkerStatus } from "../../../shared/types";
 import type { MachineListResult } from "../../../shared/machineLink";
 
@@ -21,7 +21,7 @@ export function AwsWorkerHistory(props: { operation?: AwsWorkerOperationSnapshot
   const message = props.operation.phase === "error" && props.operation.remediation === "refresh-aws-authorization"
     ? "AWS permissions were insufficient for this attempt." : props.operation.message;
   return <details className="gen-aws-history" data-testid="aws-worker-history">
-    <summary className="gen-aws-disclosure">Activity history · last setup attempt</summary>
+    <summary className="gen-aws-disclosure"><span>Activity history · last setup attempt</span><ChevronDown size={16} aria-hidden /></summary>
     <div className="gen-row gen-row-stack">
       <strong>{props.operation.intent === "resize" ? "Change instance size" : "Start / set up instance"} · {new Date(props.operation.updatedAt).toLocaleString()}</strong>
       <span>{props.operation.phase === "error" ? "Failed" : props.operation.phase === "needs-decision" ? "Not applied" : "Completed"}: {message}</span>

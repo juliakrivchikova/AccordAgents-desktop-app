@@ -674,8 +674,7 @@
 }
 
 .settings-view .gen-aws-history summary { list-style: none; }
-.settings-view .gen-aws-history summary::after { content: "+"; }
-.settings-view .gen-aws-history[open] summary::after { content: "−"; }
+.settings-view .gen-aws-history summary::-webkit-details-marker { display: none; }
 
 .settings-view .gen-aws-state.is-billable {
   color: var(--app-warning);
@@ -743,6 +742,7 @@
 }
 
 .settings-view .gen-aws-disclosure[aria-expanded="true"] svg,
+.settings-view .gen-aws-history[open] > .gen-aws-disclosure svg,
 .settings-view .gen-aws-recovery .is-open {
   transform: rotate(180deg);
 }
