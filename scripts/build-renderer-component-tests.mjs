@@ -18,6 +18,7 @@ await build({
     "renderer/components/settings/device-pairing-revoke.test.tsx",
     "renderer/components/settings/aws-worker-panel.test.tsx",
     "renderer/components/settings/aws-worker-panel-visibility.test.tsx",
+    "renderer/components/settings/aws-worker-panel-actions.test.tsx",
     "renderer/components/settings/aws-instance-diagnostics.test.tsx",
     "renderer/components/search/chat-search-escape.test.tsx",
     "renderer/components/shell/chat-search.test.tsx"

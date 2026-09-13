@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AwsWorkerOperationSnapshot, AwsWorkerStatus } from "../../shared/types";
+import type { AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStatus } from "../../shared/types";
 import { AwsWorkerSetupService } from "./awsWorkerSetup";
 import type { PreparedAwsWorker } from "./cloudRunAws";
 
@@ -115,6 +115,44 @@ test("a check in flight is saved as running and never handed to a different requ
   const result = await check;
   assert.equal(result.operation.phase, "ready");
   assert.deepEqual(phases, ["starting", "ready"]);
+});
+
+test("what each intent may touch: a check reads only, keep changes only the saved size, a start is the only start", async () => {
+  const run = async (request: Partial<AwsWorkerStartRequest> & { operationId: string }, actual = PREPARED.actualSpec) => {
+    const touched: string[] = [];
+    const aws = new Proxy({}, { get: (_target, method: string) => async (...args: unknown[]) => {
+      touched.push(method);
+      switch (method) {
+        case "probeAccess": return { configured: true, state: "stopped" };
+        case "status": return { configured: true, state: "stopped", actualSpec: actual };
+        case "prepareWorker": return { ...PREPARED, actualSpec: actual, desiredSpec: { instanceType: request.instanceType ?? actual.instanceType, rootVolumeSizeGb: request.rootVolumeSizeGb ?? actual.rootVolumeSizeGb } };
+        case "resumePendingVolumeExpansion": return args[0];
+        case "hasAcceptedMismatch": return false;
+        case "ensurePreparedRunning": return { host: "x" };
+        case "keepActualSpec": case "adoptCredentials": case "acceptMismatch": return undefined;
+        default: throw new Error(`unexpected AWS call ${method}`);
+      }
+    } });
+    const doctor = { waitForCloudInit: async () => undefined, setup: async () => ({ ok: true, message: "Worker ready.", checks: [] }) };
+    const settings = { saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
+    const service = new AwsWorkerSetupService(aws as any, doctor as any, settings as any);
+    const result = await service.start({ ...request } as AwsWorkerStartRequest);
+    return { touched, phase: result.operation.phase, message: result.operation.message };
+  };
+  const check = await run({ operationId: "c", intent: "check" });
+  assert.deepEqual(check.touched, ["probeAccess"], "a check reads the instance and nothing else");
+  const checkWithBlob = await run({ operationId: "cb", intent: "check", blob: "accord-aws-v1:new" });
+  assert.deepEqual(checkWithBlob.touched, ["adoptCredentials", "probeAccess"]);
+  const keep = await run({ operationId: "k", intent: "resize", resolution: "keep", expectedInstanceId: PREPARED.info.instanceId, instanceType: "t3.medium", rootVolumeSizeGb: PREPARED.actualSpec.rootVolumeSizeGb, expectedDesiredSpec: { instanceType: "t3.medium", rootVolumeSizeGb: PREPARED.actualSpec.rootVolumeSizeGb } });
+  assert.deepEqual(keep.touched, ["prepareWorker", "resumePendingVolumeExpansion", "keepActualSpec", "status"]);
+  assert.equal(keep.phase, "ready");
+  const start = await run({ operationId: "s", intent: "setup" });
+  assert.deepEqual(start.touched, ["prepareWorker", "resumePendingVolumeExpansion", "hasAcceptedMismatch", "ensurePreparedRunning", "status"]);
+  assert.equal(start.phase, "ready");
+  for (const intent of ["check", "resize"] as const) {
+    const touched = intent === "check" ? check.touched : keep.touched;
+    assert.equal(touched.includes("ensurePreparedRunning"), false, `${intent} must never start the instance`);
+  }
 });
 
 test("start orchestrates the exact visible phases and reaches ready", async () => {
