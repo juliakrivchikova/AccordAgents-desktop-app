@@ -62,8 +62,8 @@ export interface MobileRelayChatSender {
    *  to the paired one. */
   conversationIdForRun?(runId: string): string | undefined;
   /** Bytes for one image, asked for by id. The timeline carries only metadata,
-   *  so this is how a picture actually reaches the phone. */
-  readChatAttachment?(request: { conversationId: string; attachmentId: string }): Promise<{
+   *  so every desktop sender must wire this or no picture reaches the phone. */
+  readChatAttachment(request: { conversationId: string; attachmentId: string }): Promise<{
     attachment: { id: string; mimeType: string; sizeBytes: number };
     dataBase64: string;
   }>;
@@ -290,6 +290,7 @@ export class MobileRelayControlService {
   private readonly abortController = new AbortController();
   private connected = false;
   private readonly lastTimelineSignatureById = new Map<string, string>();
+  private readonly lastLiveTimelineSignatureById = new Map<string, string>();
   private readonly ackedRunIds = new Set<string>();
   private readonly lastActiveRunIdsByConversation = new Map<string, Set<string>>();
   /** W-C: runs already announced as finished. The content arm below sees the
@@ -960,7 +961,8 @@ export class MobileRelayControlService {
     const keepText = extra?.liveOnly === true || MobileRelayControlService.isTerminalProgress(progress);
     const content = (keepText ? agent?.partialContent?.trim() : undefined) ||
       agent?.remoteRunStatus?.label?.trim() ||
-      agent?.activity?.trim();
+      agent?.activity?.trim() ||
+      (agent?.state === "running" ? pendingParticipantContent(agent.participantLabel) : undefined);
     if (!agent || !content) {
       if (extra?.liveOnly === true) {
         this.onLiveDiagnostic?.({ kind: "no-content", logicalMessageId: `progress:${progress.runId}`, events: 0, bytes: 0, rendezvousId: this.options.rendezvousId });
@@ -1073,15 +1075,26 @@ export class MobileRelayControlService {
       this.onLiveDiagnostic?.({ kind: "skipped-disconnected", logicalMessageId, events: timeline.events.length, bytes: 0, rendezvousId: this.options.rendezvousId });
       return;
     }
+    // Seeing a transient frame does not mean its saved waiting row reached the
+    // mailbox. Separate receipts also stop snapshots and live text repeatedly
+    // invalidating one another's deduplication while a run is active.
+    const delivered = options?.liveOnly === true
+      ? this.lastLiveTimelineSignatureById
+      : this.lastTimelineSignatureById;
     const events = timeline.events.filter((event) => {
       const id = event.messageId?.trim() || event.id;
       const signature = timelineEventDeliverySignature(event);
-      if (this.lastTimelineSignatureById.get(id) === signature) {
-        return false;
-      }
-      this.lastTimelineSignatureById.set(id, signature);
-      return true;
+      return delivered.get(id) !== signature;
     });
+    const markDelivered = (): void => {
+      for (const event of events) {
+        const id = event.messageId?.trim() || event.id;
+        delivered.set(id, timelineEventDeliverySignature(event));
+        if (options?.liveOnly !== true && event.status !== "pending") {
+          this.lastLiveTimelineSignatureById.delete(id);
+        }
+      }
+    };
     // A card that appeared, changed or was answered is news even when every
     // message row has already been delivered: without this the phone would
     // never learn that a member is waiting on it.
@@ -1128,7 +1141,7 @@ export class MobileRelayControlService {
         ...timeline,
         events,
         ...(cards ? { cards } : {})
-      }, { ...options, runFinished }).catch(() => {
+      }, { ...options, runFinished }).then(markDelivered).catch(() => {
         // Relay delivery should not fail merely because durable timeline sync is temporarily unavailable.
       });
     }
@@ -1139,6 +1152,7 @@ export class MobileRelayControlService {
       return;
     }
     await this.client.sendCiphertext({ logicalMessageId, ciphertext });
+    if (options?.liveOnly === true || !this.timelineSink) markDelivered();
     if (options?.liveOnly === true) {
       this.onLiveDiagnostic?.({ kind: "sent", logicalMessageId, events: events.length, bytes: ciphertext.length, rendezvousId: this.options.rendezvousId });
     }
@@ -1325,19 +1339,23 @@ export function timelineEventsFromConversation(conversation: Conversation): Mobi
     .map((message) => timelineEventFromMessage(message, message.id, conversation, threadRoots));
 }
 
-export function timelineEventsFromSnapshot(conversation: Conversation): MobileTimelineEvent[] {
+export function timelineEventsFromSnapshot(conversation: Conversation, limit = 40): MobileTimelineEvent[] {
   const threadRoots = chatParticipantRequestReplyRootMap(conversation);
   return conversation.messages
     .filter((message) => message.role !== "summary" && messageIsVisibleOnPhone(message))
-    .slice(-40)
+    .slice(-limit)
     .map((message) => timelineEventFromMessage(message, message.id, conversation, threadRoots));
 }
 
-/** An image with no caption is still a message. Requiring non-empty text hid it
- *  from the phone completely, so a screenshot sent from the desktop simply never
- *  arrived there. */
+/** Waiting for the first token is visible work, just like an image without a
+ *  caption is still a message. Both must survive a timeline reload. */
 function messageIsVisibleOnPhone(message: ChatMessage): boolean {
-  return Boolean(message.content.trim()) || timelineAttachmentsFromMessage(message).length > 0;
+  return Boolean(message.content.trim()) || timelineAttachmentsFromMessage(message).length > 0 ||
+    (message.role === "participant" && message.status === "pending");
+}
+
+function pendingParticipantContent(participantLabel?: string): string {
+  return participantLabel?.trim() ? `${participantLabel.trim()} is running...` : "Running...";
 }
 
 function timelineAttachmentsFromMessage(message: ChatMessage): MobileTimelineAttachment[] {
@@ -1377,7 +1395,9 @@ function timelineEventFromMessage(
     ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
     role: message.role === "participant" ? "participant" : message.role === "system" ? "system" : "you",
     ...(message.participantLabel ? { participantLabel: message.participantLabel } : {}),
-    content: message.content,
+    content: message.content.trim() || message.role !== "participant" || message.status !== "pending"
+      ? message.content
+      : pendingParticipantContent(message.participantLabel),
     ...(attachments.length > 0 ? { attachments } : {}),
     status: message.status ?? "done",
     createdAt: message.createdAt,

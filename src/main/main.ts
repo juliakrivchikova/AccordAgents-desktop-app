@@ -120,6 +120,7 @@ import type { MachineRuntimePayloadLocation } from "./services/machineInstaller"
 import { MobileProgressEnvelopeTracker } from "./services/mobileProgressEnvelopeTracker";
 import {
   MobileRelayControlService,
+  timelineEventsFromSnapshot,
   type MobileRelayChatCatalog,
   type MobileRelayChatListItem,
   type MobileTimelineEvents,
@@ -131,10 +132,6 @@ import {
   mobileMailboxEventScopeKey
 } from "./services/mobileMailboxOutbox";
 import { mobilePairingRequestWithEndpointDefaults, type MobilePairingPackage } from "../shared/mobilePairing";
-import {
-  chatMessageVisualThreadRootId,
-  chatParticipantRequestReplyRootMap
-} from "../shared/chatParticipantRequestThreads";
 import type { ChatEventEnvelope } from "../shared/chatEvents";
 import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
 import { readActiveRunIds } from "../shared/chatRunState";
@@ -1151,6 +1148,7 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
     },
     {
       sendMessage: (request, signal, progress) => chatService.sendMessage(request, signal, progress),
+      readChatAttachment: (request) => chatService.readChatAttachment(request),
       hasAcceptedMobileEvent: (conversationId, eventId) => chatService.hasAcceptedMobileEvent(conversationId, eventId),
       hasMobileMailboxResultForMobileEvent: (conversationId, eventId) =>
         hasFulfilledMobileMailboxEvent(pairing, conversationId, eventId),
@@ -2107,29 +2105,9 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
     },
     async listTimeline(conversationId: string) {
       const opened = await storageService.openConversation(conversationId, 80);
-      const messages = opened?.conversation.messages ?? [];
-      // Same helper the desktop renders threads with, so the phone groups
-      // replies exactly as the desktop does instead of showing one flat list.
-      const conversationForThreads = { messages };
-      const threadRoots = chatParticipantRequestReplyRootMap(conversationForThreads);
-      return messages
-        .filter((message) => message.content.trim())
-        .map((message) => {
-          const mobileEventId = mobileEventIdFromTimelineMessage(message);
-          const threadRootId = chatMessageVisualThreadRootId(conversationForThreads, message, threadRoots);
-          return {
-            id: message.id,
-            ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
-            role: mobileTimelineRole(message),
-            ...(message.participantLabel ? { participantLabel: message.participantLabel } : {}),
-            content: message.content,
-            status: message.status === "error" ? "error" as const : message.status === "pending" ? "pending" as const : "done" as const,
-            createdAt: message.createdAt,
-            ...(typeof message.metadata?.runId === "string" ? { runId: message.metadata.runId } : {}),
-            messageId: message.id,
-            ...(mobileEventId ? { mobileEventId } : {})
-          };
-        });
+      // Opening/reconnecting must project the same waiting rows as live saves.
+      // Keep the existing 80-message page; never load full history per token.
+      return opened ? timelineEventsFromSnapshot(opened.conversation, 80) : [];
     },
     async isConversationAllowed(conversationId: string, snapshot?: Conversation) {
       const conversation = snapshot ?? await storageService.getConversation(conversationId);
@@ -2221,34 +2199,6 @@ function mobileWhoLabel(message: ChatMessage | undefined): string | undefined {
     return `${message.participantLabel.replace(/^@/, "")}:`;
   }
   return message.role === "system" ? "system:" : undefined;
-}
-
-function mobileTimelineRole(message: ChatMessage): "you" | "participant" | "system" {
-  if (message.role === "user") {
-    return "you";
-  }
-  if (message.role === "participant") {
-    return "participant";
-  }
-  return "system";
-}
-
-function mobileEventIdFromTimelineMessage(message: ChatMessage): string | undefined {
-  const explicit = message.metadata?.mobileEventId;
-  if (typeof explicit === "string" && explicit.trim()) {
-    return explicit.trim();
-  }
-  const sourceMessageId = message.metadata?.sourceMessageId;
-  const runId = message.metadata?.runId;
-  if (
-    typeof sourceMessageId === "string" &&
-    sourceMessageId.trim() &&
-    typeof runId === "string" &&
-    runId === `mobile-${sourceMessageId.trim()}`
-  ) {
-    return sourceMessageId.trim();
-  }
-  return undefined;
 }
 
 function registerIpc(): void {

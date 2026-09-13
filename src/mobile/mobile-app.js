@@ -690,6 +690,20 @@
       return requestToPromise(meta.get("conversation-deleted:" + entry.conversationId)).then(function (deleted) {
         if (deleted) return 0;
         return requestToPromise(store.getAll()).then(function (entries) {
+        const current = entries.find(function (existing) {
+          return existing && existing.id === entry.id && existing.conversationId === entry.conversationId &&
+            existing.role === "participant" && entry.role === "participant" && existing.runId === entry.runId;
+        });
+        if (current && entry.status === "pending") {
+          // Saved snapshots carry the waiting row; only the live socket carries
+          // growing text. Either can arrive last, including after reconnect.
+          if (current.status !== "pending") return 0;
+          if (isScaffoldingEntry(entry) && !isPlaceholderTimelineContent(current.content)) {
+            entry = { ...entry, content: current.content };
+          }
+          // Live progress does not repeat the snapshot's visual thread metadata.
+          entry = { ...entry, createdAt: current.createdAt, threadRootId: entry.threadRootId || current.threadRootId };
+        }
         const others = entries.filter(function (existing) {
           return existing && existing.id !== entry.id;
         });
@@ -5495,6 +5509,11 @@
         await render(flushResult.status);
       });
     }
+    // Cached rows are visible before synchronization finishes. Their controls
+    // and elapsed time must work throughout those network waits.
+    wireStreamView();
+    startThinkingClock();
+    startSyncProgressClock();
     await render();
     // The connections to this phone's machines come up first and independently
     // of the desktop. Waiting for the desktop here is what made a closed
@@ -5529,10 +5548,7 @@
     });
     await render(flushResult.status);
     startMailboxTimelinePolling();
-    wireStreamView();
     ensureLiveRelayForOpenConversation();
-    startThinkingClock();
-    startSyncProgressClock();
     startRelayTimelineKeepAlive();
   }
 

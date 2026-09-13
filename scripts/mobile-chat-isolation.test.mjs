@@ -77,6 +77,70 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
     await select("A");
     await until('document.getElementById("message-list").textContent.includes("ONLY_CHAT_A")');
 
+    await t.test("a delayed waiting snapshot cannot erase live text or revive its finished row", async () => {
+      const waiting = { ...event("waiting-a", "Drew is running..."), status: "pending", runId: "waiting-run-a" };
+      await ingest(batch("A", [waiting]));
+      let rows = await evaluate('AccordAgentsMobile.listTimelineEntries("A")');
+      assert.equal(rows.find(row => row.messageId === "waiting-a").status, "pending");
+      await ingest(batch("A", [{ ...waiting, content: "LIVE_PROGRESS_CONTENT" }]));
+      await until('document.getElementById("message-list").textContent.includes("LIVE_PROGRESS_CONTENT")');
+      // A saved chat snapshot/mailbox refill carries the durable waiting row,
+      // while the growing text arrives separately over the live socket.
+      await ingest(batch("A", [waiting]));
+      assert.ok((await shown()).body.includes("LIVE_PROGRESS_CONTENT"));
+      await ingest(batch("B", [waiting]));
+      rows = await evaluate('AccordAgentsMobile.listTimelineEntries("B")');
+      assert.equal(rows.find(row => row.messageId === "waiting-a").content, "Drew is running...", "another chat must not lend its live content");
+      await ingest(batch("A", [{ ...waiting, status: "error", content: "Interrupted before completion." }]));
+      await ingest(batch("A", [waiting]));
+      rows = await evaluate('AccordAgentsMobile.listTimelineEntries("A")');
+      assert.equal(rows.filter(row => row.messageId === "waiting-a").length, 1);
+      assert.equal(rows.find(row => row.messageId === "waiting-a").status, "error");
+    });
+
+    await t.test("live updates retain the waiting row's thread and start time", async () => {
+      const waiting = { ...event("thread-progress", "Drew is running..."), status: "pending",
+        runId: "thread-progress-run", threadRootId: "a" };
+      await ingest(batch("A", [waiting]));
+      const { threadRootId, ...live } = waiting;
+      await ingest(batch("A", [{ ...live, content: "THREADED_PROGRESS", createdAt: "2026-09-11T22:00:20.000Z" }]));
+      const stored = (await evaluate('AccordAgentsMobile.listTimelineEntries("A")')).find(row => row.messageId === "thread-progress");
+      assert.equal(stored.threadRootId, threadRootId);
+      assert.equal(stored.createdAt, waiting.createdAt);
+      assert.equal(stored.content, "THREADED_PROGRESS");
+      await ingest(batch("A", [{ ...waiting, status: "done", content: "Thread finished" }]));
+    });
+
+    await t.test("cached live rows can be opened while initial relay synchronization is still waiting", async () => {
+      const pending = { ...event("startup-live", "CACHED_STARTUP_PROGRESS"), status: "pending", runId: "startup-live-run" };
+      await ingest(batch("A", [pending]));
+      await evaluate(`AccordAgentsMobile.savePairing({ endpoint: ${JSON.stringify(origin)}, pairedAt: new Date().toISOString(),
+        relayUrl: "wss://relay-wait.invalid/", rendezvousId: "startup", routingId: "startup",
+        fingerprint: "QA", relaySealKeyBase64: "${Buffer.alloc(32, 1).toString("base64url")}" })`);
+      // Hold the transport, not application callbacks: the page must remain
+      // interactive throughout the real initialization await chain.
+      const script = await app.send("Page.addScriptToEvaluateOnNewDocument", { source: `
+        globalThis.WebSocket = class extends EventTarget {
+          static CONNECTING = 0; static OPEN = 1; static CLOSED = 3;
+          readyState = 0; send() {} close() { this.readyState = 3; }
+        };
+      ` });
+      try {
+        await app.send("Page.reload", { ignoreCache: true });
+        await until('Boolean(globalThis.AccordAgentsMobile) && document.getElementById("message-list").textContent.includes("CACHED_STARTUP_PROGRESS")');
+        await app.click('.message-row[data-streamable="1"]');
+        await until('!document.getElementById("stream-view").hidden');
+        assert.ok(await evaluate('document.getElementById("stream-body").textContent.includes("CACHED_STARTUP_PROGRESS")'));
+        await app.click("#stream-close");
+      } finally {
+        await app.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: script.identifier });
+        await evaluate(`AccordAgentsMobile.savePairing({ endpoint: ${JSON.stringify(origin)}, pairedAt: new Date().toISOString() })`);
+        await app.send("Page.reload", { ignoreCache: true });
+        await until('Boolean(globalThis.AccordAgentsMobile) && document.getElementById("message-list").textContent.includes("CACHED_STARTUP_PROGRESS")');
+        await ingest(batch("A", [{ ...pending, status: "done" }]));
+      }
+    });
+
     // A completed IDB transaction may resolve the read's data later than
     // another render. Hold only one readonly timeline request; writes, the
     // database contents, and every later read retain their normal behavior.

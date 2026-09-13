@@ -15,6 +15,109 @@ const { createReferenceRelayServer } = requireScript(path.join(process.cwd(), "s
   };
 };
 
+test("an empty pending participant is visible before output and after reconnect", () => {
+  const conversation: Conversation = {
+    id: "waiting-chat", kind: "chat", title: "Waiting", createdAt: "2026-09-12T20:00:00Z",
+    updatedAt: "2026-09-12T20:00:00Z", findings: [], metadata: {},
+    messages: [{
+      id: "waiting-message", role: "participant", participantLabel: "@drew", content: "",
+      status: "pending", createdAt: "2026-09-12T20:00:00Z",
+      metadata: { runId: "waiting-run", chatThreadRootId: "question" }
+    }]
+  };
+  assert.deepEqual(timelineEventsFromSnapshot(conversation), [{
+    id: "waiting-message", messageId: "waiting-message", threadRootId: "question",
+    role: "participant", participantLabel: "@drew", content: "@drew is running...",
+    status: "pending", createdAt: "2026-09-12T20:00:00Z", runId: "waiting-run"
+  }]);
+  conversation.messages[0].status = "error";
+  conversation.messages[0].content = "Interrupted before completion.";
+  const terminal = timelineEventsFromSnapshot(conversation)[0];
+  assert.equal(terminal.id, "waiting-message");
+  assert.equal(terminal.status, "error");
+  assert.equal(terminal.content, "Interrupted before completion.");
+});
+
+test("desktop progress sends Thinking before its first text over the live relay", { timeout: 5000 }, async () => {
+  const key = Buffer.from("s".repeat(32)).toString("base64url");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  const durable: MobileTimelineEvents[] = [];
+  const desktop = new MobileRelayControlService({
+    relayUrl: address.url, rendezvousId: "rv-start-progress", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: key, conversationId: "conversation-1", streamId: "start-progress:phone"
+  }, sender([]), undefined, undefined, { async publishTimeline(event) { durable.push(event); } });
+  const phone = new RelayTunnelClient({
+    relayUrl: address.url, rendezvousId: "rv-start-progress", role: "phone",
+    capability: "PAIRING-FINGERPRINT", streamId: "start-progress:phone"
+  });
+  try {
+    await Promise.all([desktop.connect(), phone.connect()]);
+    for (const partialContent of [undefined, "First live text", "First live text grows"]) {
+      let timer: NodeJS.Timeout | undefined;
+      const incoming = Promise.race([
+        nextMessage(phone),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("No live progress received")), 1500); })
+      ]).finally(() => clearTimeout(timer));
+      desktop.noteExternalChatProgress({
+        runId: "waiting-run", phase: "debate", message: "Responding", createdAt: new Date().toISOString(),
+        agentProgress: { state: "running", participantLabel: "@drew", messageId: "waiting-message", partialContent }
+      });
+      const payload = await openMobileRelayPayload((await incoming).ciphertext, key) as MobileTimelineEvents;
+      assert.equal(payload.conversationId, "conversation-1");
+      assert.equal(payload.events[0].id, "waiting-message");
+      assert.equal(payload.events[0].status, "pending");
+      assert.equal(payload.events[0].content, partialContent ?? "@drew is running...");
+    }
+    assert.deepEqual(durable, [], "live text must not be appended to durable history per fragment");
+    const snapshot: Conversation = {
+      id: "conversation-1", kind: "chat", title: "Waiting", createdAt: "2026-09-12T20:00:00Z",
+      updatedAt: "2026-09-12T20:00:00Z", findings: [], metadata: {},
+      messages: [{ id: "waiting-message", role: "participant", participantLabel: "@drew", content: "",
+        status: "pending", createdAt: "2026-09-12T20:00:00Z", metadata: { runId: "waiting-run" } }]
+    };
+    desktop.noteExternalChatProgress({
+      runId: "waiting-run", phase: "debate", message: "Responding", createdAt: new Date().toISOString(),
+      agentProgress: { state: "running", participantLabel: "@drew", messageId: "waiting-message" }
+    });
+    desktop.pushConversationSnapshot(snapshot);
+    await waitFor(() => durable.length === 1);
+    assert.equal(durable.length, 1, "a live waiting frame cannot suppress its durable snapshot");
+    desktop.noteExternalChatProgress({
+      runId: "waiting-run", phase: "debate", message: "Responding", createdAt: new Date().toISOString(),
+      agentProgress: { state: "running", participantLabel: "@drew", messageId: "waiting-message", partialContent: "More live text" }
+    });
+    desktop.pushConversationSnapshot(snapshot);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(durable.length, 1, "each text fragment must not cause a repeated durable waiting row");
+  } finally { phone.close(); desktop.close(); await relay.close(); }
+});
+
+test("a failed durable waiting publication is retried on the next snapshot", async () => {
+  let attempts = 0;
+  const service = new MobileRelayControlService({
+    relayUrl: "ws://127.0.0.1:1/v1/relay", rendezvousId: "rv-save-retry", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: Buffer.from("r".repeat(32)).toString("base64url"), streamId: "save-retry:phone"
+  }, sender([]), undefined, undefined, { async publishTimeline() {
+    if (++attempts === 1) throw new Error("Storage unavailable");
+  } });
+  const snapshot: Conversation = {
+    id: "waiting-chat", kind: "chat", title: "Waiting", createdAt: "2026-09-12T20:00:00Z",
+    updatedAt: "2026-09-12T20:00:00Z", findings: [], metadata: {},
+    messages: [{ id: "waiting-message", role: "participant", content: "", status: "pending",
+      createdAt: "2026-09-12T20:00:00Z", metadata: { runId: "waiting-run" } }]
+  };
+  try {
+    for (let i = 0; i < 2; i += 1) {
+      service.pushConversationSnapshot(snapshot);
+      await waitFor(() => attempts === i + 1);
+    }
+    service.pushConversationSnapshot(snapshot);
+    await new Promise<void>(resolve => setTimeout(resolve, 20));
+    assert.equal(attempts, 2, "retry the failed write, then suppress the successfully stored duplicate");
+  } finally { service.close(); }
+});
+
 test("live text never queues chat-history reads, offline or after reconnect", async () => {
   const key = Buffer.from("p".repeat(32)).toString("base64url");
   const relay = createReferenceRelayServer();
@@ -80,12 +183,12 @@ test("saved snapshots deliver and clear cards without a second history read or a
   };
   try {
     service.pushConversationSnapshot(conversation);
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await waitFor(() => published.length === 1);
     assert.equal(published.length, 1);
     assert.equal(published[0].cards?.[0].id, "approval-1");
     assert.equal(published[0].cards?.[0].options[0].id, "allow");
     service.pushConversationSnapshot({ ...conversation, metadata: {}, updatedAt: "2026-09-10T18:00:01Z" });
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await waitFor(() => published.length === 2);
     assert.deepEqual(published.at(-1)?.cards, [], "answered cards are explicitly removed");
     assert.equal(published.length, 2);
     service.pushConversationSnapshot({ ...conversation, metadata: { ...conversation.metadata, archived: true } });
@@ -354,6 +457,7 @@ test("MobileRelayControlService deduplicates replayed mobile outbox event ids", 
       reconnectDelayMs: 50
     },
     {
+      ...sender([]),
       async hasAcceptedMobileEvent() {
         return false;
       },
@@ -448,6 +552,7 @@ test("MobileRelayControlService does not redeliver persisted mobile outbox event
       streamId: "route-persisted-dedupe:phone"
     },
     {
+      ...sender([]),
       async hasAcceptedMobileEvent(conversationId, eventId) {
         return conversationId === "conversation-1" && eventId === "event-persisted";
       },
@@ -549,6 +654,7 @@ test("MobileRelayControlService acks and shows running before the local run fini
       reconnectDelayMs: 50
     },
     {
+      ...sender([]),
       async sendMessage(request) {
         sent.push({
           conversationId: request.conversationId,
@@ -806,6 +912,7 @@ test("MobileRelayControlService forwards participant progress to the phone after
       reconnectDelayMs: 50
     },
     {
+      ...sender([]),
       async sendMessage(request, _signal, progress) {
         progress?.({
           runId: request.runId ?? "run-missing",
@@ -886,11 +993,8 @@ test("MobileRelayControlService forwards participant progress to the phone after
   }
 });
 
-// W-M(d) reshaped this path: a pending tick whose only content is the
-// growing reply publishes NOTHING durable (the partial text is live-only),
-// so the durable frames are the ack, the running placeholder, and the
-// terminal — which keeps its text and must not be eaten by the delivery
-// dedup even though the content never changed.
+// Pending text stays live-only. The durable waiting row identifies the actual
+// participant message once known, then that same row becomes the terminal.
 test("MobileRelayControlService forwards terminal status when message content is unchanged, without a durable partial pending", async () => {
   const key = Buffer.from("s".repeat(32)).toString("base64url");
   const relay = createReferenceRelayServer();
@@ -906,6 +1010,7 @@ test("MobileRelayControlService forwards terminal status when message content is
       reconnectDelayMs: 50
     },
     {
+      ...sender([]),
       async sendMessage(request, _signal, progress) {
         for (const state of ["running", "finished"] as const) {
           progress?.({
@@ -948,7 +1053,7 @@ test("MobileRelayControlService forwards terminal status when message content is
     streamId: "route-status-transition:phone"
   });
   try {
-    const messages = nextMessages(phone, 3);
+    const messages = nextMessages(phone, 4);
     let frameCount = 0;
     const unsubscribeCounter = phone.on("message", () => {
       frameCount += 1;
@@ -967,10 +1072,14 @@ test("MobileRelayControlService forwards terminal status when message content is
       }, key)
     });
 
-    const [, runningMessage, doneMessage] = await messages;
+    const [, runningMessage, waitingMessage, doneMessage] = await messages;
     const running = await openMobileRelayPayload(runningMessage.ciphertext, key);
+    const waiting = await openMobileRelayPayload(waitingMessage.ciphertext, key) as MobileTimelineEvents;
     const done = await openMobileRelayPayload(doneMessage.ciphertext, key);
     assertRunningTimeline(running, "conversation-1", "mobile-event-status-transition", "@cloud");
+    assert.equal(waiting.events[0].content, "@cloud is running...");
+    assert.equal(waiting.events[0].messageId, "message-cloud-result");
+    assert.equal(waiting.events[0].status, "pending");
     assert.deepEqual(done, {
       type: "mobile.timeline.events",
       conversationId: "conversation-1",
@@ -985,7 +1094,7 @@ test("MobileRelayControlService forwards terminal status when message content is
         messageId: "message-cloud-result"
       }]
     });
-    // The contract line: no fourth durable frame carries the partial text.
+    // No later durable frame carries partial text or reopens the finished row.
     const seen = frameCount;
     await new Promise((resolve) => setTimeout(resolve, 400));
     assert.equal(frameCount, seen, "no durable partial-pending frame may follow the terminal");
@@ -1012,6 +1121,7 @@ test("MobileRelayControlService pushes the resolved conversation timeline immedi
       reconnectDelayMs: 50
     },
     {
+      ...sender([]),
       async sendMessage(request) {
         return {
           conversation: {
@@ -1111,6 +1221,7 @@ test("MobileRelayControlService forwards remote waiting status without provider 
       reconnectDelayMs: 50
     },
     {
+      ...sender([]),
       async sendMessage(request, _signal, progress) {
         progress?.({
           runId: request.runId ?? "run-missing",
@@ -1211,6 +1322,7 @@ test("MobileRelayControlService pushes a terminal conversation snapshot for non-
       reconnectDelayMs: 50
     },
     {
+      ...sender([]),
       async sendMessage(request, _signal, progress) {
         progress?.({
           runId: request.runId ?? "run-missing",
@@ -1431,6 +1543,7 @@ test("MobileRelayControlService processes mailbox outbox events and publishes ti
       streamId: "route-mailbox:phone"
     },
     {
+      ...sender([]),
       async sendMessage(request) {
         sent.push({
           conversationId: request.conversationId,
@@ -1524,6 +1637,7 @@ test("MobileRelayControlService fences concurrent relay and mailbox delivery for
       streamId: "route-concurrent-dedupe:phone"
     },
     {
+      ...sender([]),
       async hasAcceptedMobileEvent() {
         acceptedChecks += 1;
         return releaseAcceptedCheck.promise;
@@ -1602,6 +1716,7 @@ test("MobileRelayControlService skips buffered relay delivery when mailbox alrea
       streamId: "route-mailbox-result-dedupe:phone"
     },
     {
+      ...sender([]),
       async hasAcceptedMobileEvent() {
         return false;
       },
@@ -1640,6 +1755,9 @@ test("MobileRelayControlService skips buffered relay delivery when mailbox alrea
 
 function sender(sent: unknown[]): MobileRelayChatSender {
   return {
+    async readChatAttachment() {
+      throw new Error("No attachment in this fixture");
+    },
     async sendMessage(request) {
       sent.push({
         conversationId: request.conversationId,
@@ -2556,6 +2674,7 @@ test("MobileRelayControlService strips partial text from the durable copy and ke
       }).catch(() => undefined);
     };
     const unsubscribe = phone.on("message", collector);
+    await waitFor(() => Boolean(capturedProgress));
     capturedProgress?.(tick);
     desktop.noteExternalChatProgress(tick as never);
     const deadline = Date.now() + 4000;
@@ -2715,6 +2834,14 @@ test("the phone can ask for one image by id, and an oversized one answers with a
     const answers = nextMessages(phone, 3);
     await desktop.connect();
     await phone.connect();
+    await phone.sendCiphertext({
+      logicalMessageId: "ask-other-chat-image",
+      ciphertext: await sealMobileRelayPayload({
+        type: "mobile.attachment.request",
+        conversationId: "conversation-outside-pairing",
+        attachmentId: "attachment-1"
+      }, key)
+    });
     for (const attachmentId of ["attachment-1", "attachment-huge", "attachment-missing"]) {
       await phone.sendCiphertext({
         logicalMessageId: `ask-${attachmentId}`,
@@ -2744,6 +2871,8 @@ test("the phone can ask for one image by id, and an oversized one answers with a
     assert.equal(byId.get("attachment-huge")?.dataBase64, undefined);
     // A deleted id is an ordinary answer, so the phone stops waiting.
     assert.equal(byId.get("attachment-missing")?.reason, "unavailable");
+    assert.ok(reads.every((read) => read.conversationId === "conversation-1"),
+      "a request outside the pairing must not reach attachment storage");
     assert.deepEqual(reads.map((read) => read.attachmentId).sort(), [
       "attachment-1",
       "attachment-huge",
