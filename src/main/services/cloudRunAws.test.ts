@@ -299,7 +299,7 @@ test("bootstrap command updates the active authorization-denied worker user in p
   };
   const service = serviceWith(settings, new Map());
 
-  const command = await service.bootstrapCommand("us-east-1");
+  const command = await service.bootstrapCommand("us-east-1", "op-auth");
 
   assert.match(command, /USER=accordagents-worker-pna6gbah/);
   assert.match(command, /aws iam create-policy-version --policy-arn "\$POLICY_ARN"/);
@@ -308,6 +308,29 @@ test("bootstrap command updates the active authorization-denied worker user in p
   assert.doesNotMatch(command, /UPDATE_EXISTING_USER/);
   assert.doesNotMatch(command, /aws iam create-access-key/);
   assert.doesNotMatch(command, /accord-aws-v1:/);
+});
+
+test("a fresh setup command ignores historical authorization recovery and still produces a connection result", async () => {
+  const settings = new FakeSettings();
+  settings.operation = { operationId: "old-error", phase: "error", message: "Old permission denial", updatedAt: "2026-08-10T00:00:00Z",
+    remediation: "refresh-aws-authorization", awsPrincipalUserName: "old-worker-user" };
+  const command = await serviceWith(settings, new Map()).bootstrapCommand("us-east-1");
+  assert.match(command, /USER=accordagents-worker-device-a/);
+  assert.match(command, /aws iam create-access-key/);
+  assert.match(command, /accord-aws-v1:/);
+  assert.doesNotMatch(command, /USER=old-worker-user/);
+});
+
+test("an outdated recovery request cannot silently generate a different IAM command", async () => {
+  const settings = new FakeSettings();
+  const service = serviceWith(settings, new Map());
+  settings.operation = { operationId: "new-error", phase: "error", message: "New permission denial", updatedAt: "2026-09-13T00:00:00Z",
+    remediation: "refresh-aws-authorization", awsPrincipalUserName: "new-worker-user" };
+  await assert.rejects(service.bootstrapCommand("us-east-1", "old-error"), /no longer current/);
+  settings.operation = { ...settings.operation, phase: "ready" };
+  await assert.rejects(service.bootstrapCommand("us-east-1", "new-error"), /no longer current/);
+  settings.operation = undefined;
+  await assert.rejects(service.bootstrapCommand("us-east-1", "new-error"), /no longer current/);
 });
 
 test("connectWorker refuses to overwrite an active existing worker", async () => {

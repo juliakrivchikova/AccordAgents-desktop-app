@@ -138,14 +138,16 @@ export class CloudRunAwsService {
     this.sshExec = options.sshExec ?? defaultSshExec;
   }
 
-  async bootstrapCommand(region: string): Promise<string> {
+  async bootstrapCommand(region: string, recoveryOperationId?: string): Promise<string> {
     const deviceId = await this.settings.getCloudRunsDeviceId();
-    const operation = await (this.settings as SettingsService & {
-      getAwsWorkerOperation?: () => Promise<{ remediation?: string; awsPrincipalUserName?: string } | undefined>;
-    }).getAwsWorkerOperation?.();
-    const targetUserName = operation?.remediation === "refresh-aws-authorization"
-      ? operation.awsPrincipalUserName
-      : undefined;
+    let targetUserName: string | undefined;
+    if (recoveryOperationId !== undefined) {
+      const operation = await this.settings.getAwsWorkerOperation();
+      if (operation?.operationId !== recoveryOperationId || operation.phase !== "error" || operation.remediation !== "refresh-aws-authorization") {
+        throw new Error("That AWS permission error is no longer current. Check cloud setup again before updating permissions.");
+      }
+      targetUserName = operation.awsPrincipalUserName;
+    }
     return buildBootstrapCommand(region, deviceId, { targetUserName });
   }
 

@@ -57,7 +57,9 @@ export function AwsWorkerPanel(props: {
     if (active.current || isAwsTransition(status) || monitor.awaitingStop) return false;
     active.current = kind;
     monitor.beginAction();
-    setAction(kind); setBusy(true); setFeedback(undefined); setConfirm(null); setStartedAt(Date.now());
+    // Reading recovery instructions keeps the failed attempt current.
+    if (kind !== "command" || !currentOperation) setAction(kind);
+    setBusy(true); setFeedback(undefined); setConfirm(null); setStartedAt(Date.now());
     return true;
   };
   const finish = (): void => { active.current = undefined; monitor.endAction(); if (mounted.current) setBusy(false); };
@@ -123,7 +125,8 @@ export function AwsWorkerPanel(props: {
   };
   const loadCommand = async (): Promise<void> => {
     if (!begin("command")) return;
-    try { setCommand(await window.consensus.getAwsWorkerBootstrapCommand(region.trim() || "us-east-1")); }
+    const recoveryOperationId = currentOperation?.phase === "error" && currentOperation.remediation === "refresh-aws-authorization" ? currentOperation.operationId : undefined;
+    try { setCommand(await window.consensus.getAwsWorkerBootstrapCommand(region.trim() || "us-east-1", recoveryOperationId)); }
     catch (cause) { fail(cause); }
     finally { finish(); }
   };
@@ -131,9 +134,9 @@ export function AwsWorkerPanel(props: {
     if (!command) return;
     setCopyFeedback(await writeClipboardText(command, value => navigator.clipboard.writeText(value)));
   };
-  const connectionForm = <AwsWorkerConnectionForm operation={operation} busy={locked} region={region} command={command} blob={blob} copyFeedback={copyFeedback}
+  const connectionForm = <AwsWorkerConnectionForm operation={currentOperation} busy={locked} region={region} command={command} blob={blob} copyFeedback={copyFeedback}
     onRegionChange={setRegion} onBlobChange={setBlob} onLoadCommand={loadCommand} onCopyCommand={copyCommand} onApply={() => start()} />;
-  const recovery = operation?.remediation === "refresh-aws-authorization" ? <div className="gen-aws-recovery">
+  const recovery = currentOperation?.phase === "error" && currentOperation.remediation === "refresh-aws-authorization" ? <div className="gen-aws-recovery">
     <button type="button" className="gen-pill" data-testid="aws-worker-authorization-toggle" aria-expanded={authorizationOpen} onClick={() => setAuthorizationOpen(!authorizationOpen)}><span className="gen-pill-label">Update AWS permissions</span><ChevronDown size={14} /></button>
     {authorizationOpen ? connectionForm : null}
     <button type="button" className="gen-pill" disabled={locked} onClick={() => void start()}><span className="gen-pill-label">Retry existing permissions</span></button>
@@ -166,7 +169,7 @@ export function AwsWorkerPanel(props: {
     </div>
     {isAwsTransition(status) || monitor.awaitingStop ? <AwsWorkerTransition key={monitor.awaitingStop ? "stopping" : status?.state} state={monitor.awaitingStop ? "stopping" : status?.state ?? ""} since={monitor.stopRequestedAt ?? (action === "stop" ? startedAt : undefined)} checkedAt={monitor.checkedAt} checking={monitor.checking} error={monitor.error} /> : null}
     {message ? <div className={`gen-aws-feedback${hasError ? " is-error" : ""}`} data-testid="aws-worker-message" role={hasError ? "alert" : "status"}>{action && feedback && !monitor.error ? <strong>{action === "stop" ? "Stop" : action === "delete" ? "Delete" : "Cloud setup"}: </strong> : null}{message}</div> : null}
-    {currentOperation?.phase === "error" ? recovery : null}
+    {recovery}
     {status && !status.configured && !props.settings.hasAwsCredentials ? connectionForm : null}
     {showProgress && currentOperation ? <WorkerProgress operation={currentOperation} /> : null}
     {mismatch ? <div className="gen-aws-decision" data-testid="aws-worker-spec-decision">
@@ -189,9 +192,7 @@ export function AwsWorkerPanel(props: {
         <button type="button" className="gen-pill gen-pill-danger" disabled={locked} onClick={() => void remove()}><span className="gen-pill-label">Delete</span></button>
       </div> : null}
     </div> : null}
-    <AwsWorkerHistory operation={operation}>
-      {currentOperation?.phase !== "error" ? recovery : null}
-    </AwsWorkerHistory>
+    <AwsWorkerHistory operation={operation} />
   </div>;
 }
 

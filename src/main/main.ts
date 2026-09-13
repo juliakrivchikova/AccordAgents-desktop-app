@@ -2245,8 +2245,8 @@ function registerIpc(): void {
       sendToMainWindow("cloud-runs:setup-progress", progress);
     }, { requirePersistentStorage: managedAws }));
   });
-  ipcMain.handle("cloud-runs:aws-bootstrap-command", (_event, region: string) =>
-    cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1"));
+  ipcMain.handle("cloud-runs:aws-bootstrap-command", (_event, region: string, recoveryOperationId?: string) =>
+    cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1", recoveryOperationId));
   ipcMain.handle("cloud-runs:aws-connect", (_event, request: ConnectAwsWorkerRequest) =>
     cloudRunAwsService.connectWorker(request.blob, request.instanceType, request.rootVolumeSizeGb));
   ipcMain.handle("cloud-runs:aws-start", (event, request: AwsWorkerStartRequest) =>

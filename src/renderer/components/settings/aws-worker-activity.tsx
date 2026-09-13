@@ -16,15 +16,16 @@ export function AwsWorkerTransition(props: { state: string; since?: number; chec
   </div>;
 }
 
-export function AwsWorkerHistory(props: { operation?: AwsWorkerOperationSnapshot | null; children?: React.ReactNode }): JSX.Element | null {
+export function AwsWorkerHistory(props: { operation?: AwsWorkerOperationSnapshot | null }): JSX.Element | null {
   if (!props.operation || !["ready", "error", "needs-decision"].includes(props.operation.phase)) return null;
+  const message = props.operation.phase === "error" && props.operation.remediation === "refresh-aws-authorization"
+    ? "AWS permissions were insufficient for this attempt." : props.operation.message;
   return <details className="gen-aws-history" data-testid="aws-worker-history">
     <summary className="gen-aws-disclosure">Activity history · last setup attempt</summary>
     <div className="gen-row gen-row-stack">
       <strong>{props.operation.intent === "resize" ? "Change instance size" : "Start / set up instance"} · {new Date(props.operation.updatedAt).toLocaleString()}</strong>
-      <span>{props.operation.phase === "error" ? "Failed" : props.operation.phase === "needs-decision" ? "Not applied" : "Completed"}: {props.operation.message}</span>
+      <span>{props.operation.phase === "error" ? "Failed" : props.operation.phase === "needs-decision" ? "Not applied" : "Completed"}: {message}</span>
       <span className="gen-row-desc">Saved result of that operation, not a current AWS status check.</span>
-      {props.children}
     </div>
   </details>;
 }

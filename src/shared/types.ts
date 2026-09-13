@@ -2671,7 +2671,7 @@ export interface AppBridge {
   diagnoseCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
   setupCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
   onCloudRunSetupProgress(callback: (progress: CloudRunWorkerSetupProgress) => void): () => void;
-  getAwsWorkerBootstrapCommand(region: string): Promise<string>;
+  getAwsWorkerBootstrapCommand(region: string, recoveryOperationId?: string): Promise<string>;
   connectAwsWorker(request: ConnectAwsWorkerRequest): Promise<AwsWorkerStatus>;
   startAwsWorker(request: AwsWorkerStartRequest): Promise<AwsWorkerStartResult>;
   onAwsWorkerProgress(callback: (progress: AwsWorkerOperationSnapshot) => void): () => void;

@@ -18,7 +18,10 @@ test("opening Settings archives old errors and does not claim the saved 8 GiB is
   let writes = 0;
   const renderer = await renderPanel({ status: { ...RUNNING, operation: OLD_ERROR }, start: async request => { writes++; return ready(request); } });
   assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-message" }).length, 0);
-  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-history" })), /Missing AWS permission/);
+  const history = renderer.root.findByProps({ "data-testid": "aws-worker-history" });
+  assert.match(textOf(history), /AWS permissions were insufficient for this attempt/);
+  assert.equal(history.findAllByType("button").length, 0);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-authorization-toggle" }).length, 0);
   assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-history" }).props.open, undefined);
   assert.equal(textOf(renderer.root).includes("Size change not applied"), false);
   await edit(renderer);
@@ -163,27 +166,76 @@ test("status errors stay current, can be refreshed and do not invoke setup", asy
   unmount(renderer);
 });
 
-test("authorization recovery stays reachable in history and preserves the retry token", async () => {
+test("only a current authorization failure offers recovery and preserves its retry token", async () => {
   const requests: AwsWorkerStartRequest[] = [];
-  const renderer = await renderPanel({ status: { ...RUNNING, operation: OLD_ERROR }, start: async request => { requests.push(request); return ready(request); } });
+  let commandOperationId: string | undefined;
+  const renderer = await renderPanel({ status: RUNNING, command: async (_region, operationId) => { commandOperationId = operationId; return "command"; }, start: async request => {
+    requests.push(request);
+    if (requests.length > 1) return ready(request);
+    const operation = { ...OLD_ERROR, operationId: request.operationId, clientToken: request.clientToken, updatedAt: new Date().toISOString() };
+    return { operation, status: { ...RUNNING, operation } };
+  } });
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-start" }));
   await click(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-toggle" }));
   await click(findButton(renderer, "Show setup command"));
+  assert.equal(commandOperationId, requests[0].operationId);
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-command" })), "command");
   await change(renderer.root.findByProps({ "aria-label": "AWS setup result" }), "accord-aws-v1:updated");
   await click(renderer.root.findByProps({ "data-testid": "aws-worker-apply-authorization" }));
-  assert.equal(requests[0].blob, "accord-aws-v1:updated");
-  assert.equal(requests[0].operationId, "old");
-  assert.equal(requests[0].clientToken, "old-token");
-  assert.equal(requests[0].rootVolumeSizeGb, 40);
+  assert.equal(requests[1].blob, "accord-aws-v1:updated");
+  assert.equal(requests[1].operationId, requests[0].operationId);
+  assert.equal(requests[1].clientToken, requests[0].clientToken);
+  assert.equal(requests[1].rootVolumeSizeGb, 40);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-authorization-toggle" }).length, 0);
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-history" }).findAllByType("button").length, 0);
   unmount(renderer);
 });
 
 test("known IAM user recovery still offers its update command without generating a new credential", async () => {
-  const renderer = await renderPanel({ status: { ...RUNNING, operation: { ...OLD_ERROR, awsPrincipalUserName: "worker-user", missingAwsActions: ["ec2:DescribeInstanceTypes"] } } });
+  const renderer = await renderPanel({ status: RUNNING, start: async request => {
+    const operation = { ...OLD_ERROR, operationId: request.operationId, awsPrincipalUserName: "worker-user", missingAwsActions: ["ec2:DescribeInstanceTypes"], updatedAt: new Date().toISOString() };
+    return { operation, status: { ...RUNNING, operation } };
+  } });
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-start" }));
   await click(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-toggle" }));
   assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-steps" })), /worker-user/);
   await click(findButton(renderer, "Show update command"));
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-command" })), "command");
+  assert.equal(findButton(renderer, "Retry existing permissions").props.disabled, false);
   assert.equal(renderer.root.findAllByProps({ "aria-label": "AWS setup result" }).length, 0);
+  unmount(renderer);
+});
+
+test("reopening Settings makes a completed error historical and polls never restore its recovery actions", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  let state = RUNNING;
+  let starts = 0;
+  let renderer = await renderPanel({ status: state, getStatus: async () => state, start: async request => {
+    starts++;
+    const operation = { ...OLD_ERROR, operationId: request.operationId, updatedAt: new Date().toISOString() };
+    state = { ...RUNNING, operation };
+    return { operation, status: state };
+  } });
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-start" }));
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-authorization-toggle" }).length, 1);
+  unmount(renderer);
+  await act(async () => { renderer = create(<AwsWorkerPanel settings={SETTINGS} onDeleted={async () => undefined} />); await flush(); });
+  await act(async () => { t.mock.timers.tick(30_000); await flush(); });
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-authorization-toggle" }).length, 0);
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-history" }).findAllByType("button").length, 0);
+  assert.equal(starts, 1);
+  unmount(renderer);
+});
+
+test("old permission errors cannot turn a fresh connection form into an administrator update", async () => {
+  const commandIds: (string | undefined)[] = [];
+  const renderer = await renderPanel({ status: { configured: false, operation: { ...OLD_ERROR, awsPrincipalUserName: "old-worker-user" } }, settings: { ...SETTINGS, hasAwsCredentials: false },
+    command: async (_region, operationId) => { commandIds.push(operationId); return "command"; } });
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-connect" }).length, 1);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-authorization-recovery" }).length, 0);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-authorization-toggle" }).length, 0);
+  await click(findButton(renderer, "Show setup command"));
+  assert.deepEqual(commandIds, [undefined]);
   unmount(renderer);
 });
 
@@ -294,6 +346,8 @@ test("Stop accepted after unmount reaches the reopened panel even when its first
 
 async function renderPanel(options: {
   status: AwsWorkerStatus;
+  settings?: CloudRunsSettings;
+  command?: (region: string, recoveryOperationId?: string) => Promise<string>;
   getStatus?: () => Promise<AwsWorkerStatus>;
   onProgress?: (listener: (operation: AwsWorkerOperationSnapshot) => void) => void;
   start?: (request: AwsWorkerStartRequest) => Promise<any>;
@@ -307,12 +361,12 @@ async function renderPanel(options: {
     startAwsWorker: options.start ?? (async request => ready(request)),
     stopAwsWorker: options.stop ?? (async () => options.status), deleteAwsWorker: options.remove ?? (async () => options.status),
     listMachines: async () => ({ machines: [], status: [] }), onMachinesUpdated: () => () => undefined,
-    getAwsWorkerBootstrapCommand: async () => "command", openExternal: async () => undefined
+    getAwsWorkerBootstrapCommand: options.command ?? (async () => "command"), openExternal: async () => undefined
   };
   (globalThis as any).window = { consensus: bridge, setTimeout };
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: async () => undefined } } });
   let renderer!: ReactTestRenderer;
-  await act(async () => { renderer = create(<AwsWorkerPanel settings={SETTINGS} onDeleted={options.onDeleted ?? (async () => undefined)} />); await flush(); });
+  await act(async () => { renderer = create(<AwsWorkerPanel settings={options.settings ?? SETTINGS} onDeleted={options.onDeleted ?? (async () => undefined)} />); await flush(); });
   return renderer;
 }
 async function edit(renderer: ReactTestRenderer): Promise<void> { await click(renderer.root.findByProps({ "data-testid": "aws-worker-config-toggle" })); await click(renderer.root.findByProps({ "data-testid": "aws-worker-size-edit" })); }

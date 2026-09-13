@@ -126,7 +126,7 @@ const bridge: AppBridge = {
     ipcRenderer.on("cloud-runs:setup-progress", listener);
     return () => ipcRenderer.removeListener("cloud-runs:setup-progress", listener);
   },
-  getAwsWorkerBootstrapCommand: (region: string) => ipcRenderer.invoke("cloud-runs:aws-bootstrap-command", region),
+  getAwsWorkerBootstrapCommand: (region: string, recoveryOperationId?: string) => ipcRenderer.invoke("cloud-runs:aws-bootstrap-command", region, recoveryOperationId),
   connectAwsWorker: (request: ConnectAwsWorkerRequest) => ipcRenderer.invoke("cloud-runs:aws-connect", request),
   startAwsWorker: (request: AwsWorkerStartRequest) => ipcRenderer.invoke("cloud-runs:aws-start", request),
   onAwsWorkerProgress: (callback: (progress: AwsWorkerOperationSnapshot) => void) => {
