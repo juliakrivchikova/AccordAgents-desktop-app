@@ -14,7 +14,9 @@ const awsWorkerParts = read("src/renderer/components/settings/aws-worker-panel-p
 const environmentSettings = read("src/renderer/components/settings/environment-settings-section.tsx");
 const toggleCss = read("src/renderer/styles/views/content-markdown.css");
 const approvalCss = read("src/renderer/styles/views/chat-conversation.css");
-const generalCss = read("src/renderer/styles/views/settings-general.css");
+const providerAuthCss = read("src/renderer/styles/views/provider-device-auth.css");
+const appCss = read("src/renderer/styles/app.css");
+const codexDeviceAuth = read("src/renderer/components/codex-device-auth.tsx");
 
 test("the machine instance panel offers nothing the deleted worker used to need", () => {
   // The per-turn worker is gone, and with it the toggle that switched it on,
@@ -75,9 +77,11 @@ test("approval toggles derive disabled visuals from the native input and fieldse
 });
 
 test("copy focus and manual toggle accessibility contracts remain explicit", () => {
+  assert.match(appCss, /@import "\.\/views\/provider-device-auth\.css"/);
+  assert.match(codexDeviceAuth, /className="provider-device-auth-copy" aria-label="Copy sign-in code"/);
   assert.match(
-    generalCss,
-    /\.gen-doctor-auth-copy:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--app-accent\)/s
+    providerAuthCss,
+    /\.provider-device-auth-copy:focus-visible\s*(?:,[^{}]+)?\{[^}]*outline:\s*2px solid var\(--app-accent\)/s
   );
   assert.match(environmentSettings, /aria-label=\{`Enable \$\{variable\.key\}`\}/);
 });
