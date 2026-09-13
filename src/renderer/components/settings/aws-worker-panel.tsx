@@ -7,6 +7,7 @@ import { AwsWorkerSizeEditor } from "./aws-worker-size-editor";
 import { AwsCloudRunNextStep, AwsWorkerHistory, AwsWorkerTransition } from "./aws-worker-activity";
 import { isAwsTransition, useAwsWorkerStatus } from "./use-aws-worker-status";
 import { CONFIRM_TEXT, ConfirmSharedAction, WorkerProgress } from "./aws-worker-panel-parts";
+import { AwsInstanceDiagnostics } from "./aws-instance-diagnostics";
 
 type Action = "setup" | "resize" | "stop" | "delete" | "command";
 type ConfirmAction = "stop" | "delete" | "recreate" | null;
@@ -90,6 +91,9 @@ export function AwsWorkerPanel(props: {
   const baseSpec = actual ?? newSpec ?? { instanceType: props.settings.awsInstanceType, rootVolumeSizeGb: props.settings.awsRootVolumeSizeGb };
   const currentOperation = operation?.operationId === activeOperationId && (action === "setup" || action === "resize") ? operation : null;
   const mismatch = currentOperation?.phase === "needs-decision" ? currentOperation.specMismatch : undefined;
+  // A size decision answers the attempt that raised it: "keep" during Start
+  // continues the start, "keep" during an explicit resize changes nothing.
+  const decisionIntent: "setup" | "resize" = currentOperation?.intent ?? "setup";
   const showProgress = livePhase(currentOperation) && !feedback?.failed;
   const locked = busy || showProgress || isAwsTransition(status) || monitor.awaitingStop;
 
@@ -197,9 +201,10 @@ export function AwsWorkerPanel(props: {
 
   const isRunning = status?.state === "running" || status?.state === "pending";
   const stoppedLike = configured && (status?.state === "stopped" || status?.state === "absent" || status?.state === "terminated");
-  // Configured but AWS did not answer: the last known state may be shown, but
-  // nothing here can be trusted enough to offer Start or Stop.
-  const statusUnavailable = Boolean(status) && configured && !status?.state;
+  // Configured but AWS is not answering (never, or not any more): the last
+  // known state may still be shown, but the only honest action is to check
+  // access again, which is also how a revoked permission reaches recovery.
+  const statusUnavailable = Boolean(status) && configured && (Boolean(monitor.error) || !status?.state);
   const canStart = Boolean(blob.trim() || props.settings.hasAwsCredentials || configured);
   const authorizationFailure = currentOperation?.phase === "error" && currentOperation.remediation === "refresh-aws-authorization";
   const setupFailed = action === "setup" && Boolean(feedback?.failed || currentOperation?.phase === "error");
@@ -320,11 +325,11 @@ export function AwsWorkerPanel(props: {
             <span>This app changes the instance type only by recreating the instance; growing the disk keeps it.</span>
           ) : null}
           <div className="gen-actions">
-            <button type="button" className="gen-pill" disabled={locked} onClick={() => void start("keep", mismatch.desired, "resize")}>
+            <button type="button" className="gen-pill" disabled={locked} onClick={() => void start("keep", mismatch.desired, decisionIntent)}>
               <span className="gen-pill-label">Keep current size</span>
             </button>
             {mismatch.diskTooSmall ? (
-              <button type="button" className="gen-pill" disabled={locked} onClick={() => void start("grow-disk", mismatch.desired, "resize")}>
+              <button type="button" className="gen-pill" disabled={locked} onClick={() => void start("grow-disk", mismatch.desired, decisionIntent)}>
                 <span className="gen-pill-label">Grow disk</span>
               </button>
             ) : null}
@@ -333,7 +338,7 @@ export function AwsWorkerPanel(props: {
             </button>
           </div>
           {confirm === "recreate" ? (
-            <ConfirmSharedAction label="Recreate" description={CONFIRM_TEXT.recreate} onCancel={() => setConfirm(null)} onConfirm={() => void start("recreate", mismatch.desired, "resize")} />
+            <ConfirmSharedAction label="Recreate" description={CONFIRM_TEXT.recreate} onCancel={() => setConfirm(null)} onConfirm={() => void start("recreate", mismatch.desired, decisionIntent)} />
           ) : null}
         </div>
       ) : null}
@@ -381,6 +386,9 @@ export function AwsWorkerPanel(props: {
         </div>
       ) : null}
       <AwsWorkerHistory operation={currentOperation ? null : operation} />
+      {/* Checks and setup exist once an instance does; the live status knows
+          that before the parent's settings are re-read. */}
+      {configured ? <AwsInstanceDiagnostics /> : null}
     </div>
   );
 }

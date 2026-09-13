@@ -33,7 +33,6 @@ import {
 import { AwsWorkerPanel as SharedAwsWorkerPanel } from "./aws-worker-panel";
 import { DevicePairingSection } from "./device-pairing-section";
 import { MachinesSection } from "./machines-section";
-import { AwsInstanceDiagnostics } from "./aws-instance-diagnostics";
 import { cliProviderMetadata, deriveAgentReadiness } from "../../../shared/cliReadiness";
 import { isChatProviderKind } from "../../../shared/chatProviders";
 import { AppSelect } from "../primitives";
@@ -263,8 +262,6 @@ function CloudRunsControl(props: {
         settings={props.settings}
         onDeleted={() => props.onSave({ mode: "aws" })}
       />
-      {/* Nothing to check or set up before an instance exists. */}
-      {props.settings.awsHandle ? <AwsInstanceDiagnostics /> : null}
     </div>
   );
 }

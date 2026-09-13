@@ -10,6 +10,7 @@ const generalSettings = read("src/renderer/components/settings/general-settings-
 const awsDiagnostics = read("src/renderer/components/settings/aws-instance-diagnostics.tsx");
 const awsConnection = read("src/renderer/components/settings/aws-worker-connection-form.tsx");
 const awsWorkerPanel = read("src/renderer/components/settings/aws-worker-panel.tsx");
+const awsWorkerParts = read("src/renderer/components/settings/aws-worker-panel-parts.tsx");
 const environmentSettings = read("src/renderer/components/settings/environment-settings-section.tsx");
 const toggleCss = read("src/renderer/styles/views/content-markdown.css");
 const approvalCss = read("src/renderer/styles/views/chat-conversation.css");
@@ -46,9 +47,9 @@ test("the surviving worker copy button uses a guarded exact-payload clipboard wr
 
 test("AWS worker panel exposes one-click progress, actual specs, choices, and shared cost warning", () => {
   assert.match(awsWorkerPanel, /data-testid="aws-worker-start"/);
-  assert.match(awsWorkerPanel, /Starting/);
-  assert.match(awsWorkerPanel, /Waiting for running/);
-  assert.match(awsWorkerPanel, /Setting up/);
+  assert.match(awsWorkerParts, /Starting/);
+  assert.match(awsWorkerParts, /Waiting for running/);
+  assert.match(awsWorkerParts, /Setting up/);
   assert.match(awsWorkerPanel, /data-testid="aws-worker-actual-specs"/);
   assert.match(awsWorkerPanel, /Keep current size/);
   assert.match(awsWorkerPanel, /Grow disk/);

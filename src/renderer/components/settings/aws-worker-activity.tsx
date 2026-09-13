@@ -24,12 +24,12 @@ export function AwsWorkerHistory(props: { operation?: AwsWorkerOperationSnapshot
   const message = operation.phase === "error" && operation.remediation === "refresh-aws-authorization"
     ? "AWS permissions were insufficient for this attempt."
     : operation.message;
-  const outcome = operation.phase === "error" ? "failed" : "not applied";
+  const outcome = operation.phase === "error" ? "Failed" : "Not applied";
   return <details className="gen-aws-history" data-testid="aws-worker-history">
-    <summary className="gen-aws-disclosure"><span>Previous attempt {outcome} · {new Date(operation.updatedAt).toLocaleString()}</span><ChevronDown size={16} aria-hidden /></summary>
+    <summary className="gen-aws-disclosure"><span>Previous attempt · {new Date(operation.updatedAt).toLocaleString()}</span><ChevronDown size={16} aria-hidden /></summary>
     <div className="gen-row gen-row-stack">
       <strong>{operation.intent === "resize" ? "Change instance size" : "Start / set up instance"}</strong>
-      <span>{message}</span>
+      <span>{outcome}: {message}</span>
       <span className="gen-row-desc">Saved result of that attempt, not a current AWS status check.</span>
     </div>
   </details>;

@@ -340,3 +340,29 @@ test("Stop accepted after unmount reaches the reopened panel even when its first
   assert.equal(reads, 3);
   unmount(renderer);
 });
+
+test("a size decision answers the attempt that raised it: Start keeps starting, a resize keeps nothing", async () => {
+  const requests: AwsWorkerStartRequest[] = [];
+  const decision = (request: AwsWorkerStartRequest, intent: "setup" | "resize") => {
+    const operation: AwsWorkerOperationSnapshot = { operationId: request.operationId, clientToken: request.clientToken, intent, phase: "needs-decision", message: "Choose", updatedAt: new Date().toISOString(),
+      specMismatch: { instanceId: "i-shared", actual: RUNNING.actualSpec!, desired: { instanceType: "t3.medium", rootVolumeSizeGb: 40 }, diskTooSmall: false, computeTooSmall: true } };
+    return { operation, status: { ...RUNNING, state: "stopped" as const, operation } };
+  };
+  const renderer = await renderPanel({ status: { ...RUNNING, state: "stopped" }, start: async request => { requests.push(request); return requests.length === 1 ? decision(request, "setup") : ready(request); } });
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-start" }));
+  await click(findButton(renderer, "Keep current size"));
+  assert.equal(requests[1].intent, "setup");
+  assert.equal(requests[1].resolution, "keep");
+  assert.equal(requests[1].operationId, requests[0].operationId);
+  assert.equal(requests[1].clientToken, requests[0].clientToken);
+  unmount(renderer);
+  const sizes: AwsWorkerStartRequest[] = [];
+  const resized = await renderPanel({ status: RUNNING, start: async request => { sizes.push(request); return sizes.length === 1 ? decision(request, "resize") : ready(request); } });
+  await edit(resized);
+  await change(resized.root.findByProps({ "aria-label": "AWS worker instance type" }), "t3.medium");
+  await click(resized.root.findByProps({ "data-testid": "aws-worker-size-apply" }));
+  await click(findButton(resized, "Keep current size"));
+  assert.equal(sizes[1].intent, "resize");
+  assert.equal(sizes[1].resolution, "keep");
+  unmount(resized);
+});

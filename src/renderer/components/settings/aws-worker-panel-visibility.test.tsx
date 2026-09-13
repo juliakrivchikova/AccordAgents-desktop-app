@@ -53,3 +53,31 @@ test("a first connection keeps its action beside the pasted result and offers no
   assert.equal(requests[0].intent, "setup");
   unmount(renderer);
 });
+
+test("diagnostics appear as soon as an instance exists, without re-reading settings", async () => {
+  const renderer = await renderPanel({ status: { configured: false }, settings: { ...SETTINGS, hasAwsCredentials: false } });
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "machine-instance-diagnostics-toggle" }).length, 0);
+  await change(renderer.root.findByProps({ "aria-label": "AWS setup result" }), "accord-aws-v1:new");
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-connect-start" }));
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-state" })), "Running · billable");
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "machine-instance-diagnostics-toggle" }).length, 1);
+  unmount(renderer);
+});
+
+test("a refresh that AWS refuses keeps a way to recover access while the last state stays visible", async () => {
+  let reads = 0;
+  const renderer = await renderPanel({ status: RUNNING, getStatus: async () => ++reads === 1 ? RUNNING : { configured: true, message: "AccessDenied: not authorized to perform ec2:DescribeInstances" }, start: async request => {
+    const operation = { ...OLD_ERROR, operationId: request.operationId, updatedAt: new Date().toISOString() };
+    return { operation, status: { configured: true, operation, message: "AccessDenied" } };
+  } });
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-start" }).length, 0);
+  await click(renderer.root.find(node => node.type === "button" && textOf(node) === "Refresh status"));
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-message" })), /AccessDenied/);
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-state" })), "Running · billable");
+  const check = renderer.root.findByProps({ "data-testid": "aws-worker-start" });
+  assert.equal(textOf(check), "Check AWS access");
+  assert.equal(check.props.disabled, false);
+  await click(check);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-authorization-toggle" }).length, 1);
+  unmount(renderer);
+});

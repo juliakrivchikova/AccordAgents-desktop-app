@@ -28,7 +28,10 @@ export async function renderPanel(options: {
     startAwsWorker: options.start ?? (async request => ready(request)),
     stopAwsWorker: options.stop ?? (async () => options.status), deleteAwsWorker: options.remove ?? (async () => options.status),
     listMachines: async () => ({ machines: [], status: [] }), onMachinesUpdated: () => () => undefined,
-    getAwsWorkerBootstrapCommand: options.command ?? (async () => "command"), openExternal: async () => undefined
+    getAwsWorkerBootstrapCommand: options.command ?? (async () => "command"), openExternal: async () => undefined,
+    onCloudRunSetupProgress: () => () => undefined,
+    diagnoseCloudRunWorker: async () => ({ ok: true, message: "Checked", checks: [] }),
+    setupCloudRunWorker: async () => ({ ok: true, message: "Set up", checks: [] })
   };
   (globalThis as any).window = { consensus: bridge, setTimeout };
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: async () => undefined } } });
