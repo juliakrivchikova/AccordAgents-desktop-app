@@ -73,7 +73,7 @@ export interface CloudRunDoctorServiceOptions {
   openExternal?: (url: string) => void;
   logger?: (event: string, payload: Record<string, unknown>) => void;
   /** Covers AWS Start/Check/Set up as well as the participant picker. */
-  environmentForWorker?: (worker: RemoteRunWorkerTarget) => Promise<{ profileHome?: string; workerRoot?: string }>;
+  environmentForWorker?: (worker: RemoteRunWorkerTarget, readOnly: boolean) => Promise<{ profileHome?: string; workerRoot?: string }>;
 }
 
 export class CloudRunDoctorService {
@@ -91,10 +91,10 @@ export class CloudRunDoctorService {
     this.environmentForWorker = options.environmentForWorker;
   }
 
-  private async resolveWorker(settings: CloudRunWorkerSettings, options: CloudRunDoctorOptions): Promise<(RemoteRunWorkerTarget & { maintenance?: MachineMaintenanceTarget }) | undefined> {
+  private async resolveWorker(settings: CloudRunWorkerSettings, options: CloudRunDoctorOptions, readOnly = false): Promise<(RemoteRunWorkerTarget & { maintenance?: MachineMaintenanceTarget }) | undefined> {
     const worker = workerTarget(settings, options.maintenance, options.profileHome);
     if (worker && !Object.hasOwn(options, "profileHome") && this.environmentForWorker) {
-      Object.assign(worker, await this.environmentForWorker(worker));
+      Object.assign(worker, await this.environmentForWorker(worker, readOnly));
     }
     return worker;
   }
@@ -103,7 +103,7 @@ export class CloudRunDoctorService {
     settings: CloudRunWorkerSettings,
     options: CloudRunDoctorOptions = {}
   ): Promise<CloudRunWorkerDoctorReport> {
-    const worker = await this.resolveWorker(settings, options);
+    const worker = await this.resolveWorker(settings, options, true);
     if (!worker) {
       return failedReport("connect", "Worker host is not configured.");
     }

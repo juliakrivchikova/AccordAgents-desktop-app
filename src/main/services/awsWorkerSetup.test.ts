@@ -37,11 +37,11 @@ test("explicit type downsizing asks for a decision even if larger capacity was p
 
 test("keeping the current size during a resize starts nothing and restores the saved size", async () => {
   let runs = 0;
-  let kept: PreparedAwsWorker | undefined;
+  let kept: string | undefined;
   const aws = {
     prepareWorker: async () => ({ ...PREPARED, desiredSpec: { ...PREPARED.desiredSpec, instanceType: "t3.medium" } }),
     resumePendingVolumeExpansion: async (prepared: PreparedAwsWorker) => prepared,
-    keepActualSpec: async (prepared: PreparedAwsWorker) => { kept = prepared; },
+    keepCurrentSize: async (instanceId: string) => { kept = instanceId; return PREPARED.actualSpec; },
     acceptMismatch: async () => { throw new Error("keeping the current size must not record a mismatch acceptance"); },
     ensurePreparedRunning: async () => { runs++; return { host: "x" }; },
     status: async () => ({ configured: true, state: "stopped" })
@@ -55,7 +55,7 @@ test("keeping the current size during a resize starts nothing and restores the s
   });
   assert.equal(result.operation.phase, "ready");
   assert.match(result.operation.message, /Kept the current instance/);
-  assert.equal(kept?.actualSpec.instanceType, PREPARED.actualSpec.instanceType);
+  assert.equal(kept, PREPARED.info.instanceId);
   assert.equal(runs, 0, "keeping the current size must not start the instance");
 });
 
@@ -110,6 +110,8 @@ test("a check in flight is saved as running and never handed to a different requ
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(phases, ["starting"], "the running check is persisted before AWS answers");
   await assert.rejects(service.start({ operationId: "start-now", intent: "setup" }), /still running/);
+  await assert.rejects(service.start({ operationId: "check-live", intent: "setup" }), /still running/);
+  await assert.rejects(service.start({ operationId: "check-live", intent: "check", blob: "different-credentials" }), /still running/);
   assert.equal(service.start({ operationId: "check-live", intent: "check" }), check, "a retry of the same request joins it");
   release({ configured: true, state: "stopped" });
   const result = await check;
@@ -129,7 +131,8 @@ test("what each intent may touch: a check reads only, keep changes only the save
         case "resumePendingVolumeExpansion": return args[0];
         case "hasAcceptedMismatch": return false;
         case "ensurePreparedRunning": return { host: "x" };
-        case "keepActualSpec": case "adoptCredentials": case "acceptMismatch": return undefined;
+        case "keepCurrentSize": return actual;
+        case "adoptCredentials": case "acceptMismatch": return undefined;
         default: throw new Error(`unexpected AWS call ${method}`);
       }
     } });
@@ -144,7 +147,7 @@ test("what each intent may touch: a check reads only, keep changes only the save
   const checkWithBlob = await run({ operationId: "cb", intent: "check", blob: "accord-aws-v1:new" });
   assert.deepEqual(checkWithBlob.touched, ["adoptCredentials", "probeAccess"]);
   const keep = await run({ operationId: "k", intent: "resize", resolution: "keep", expectedInstanceId: PREPARED.info.instanceId, instanceType: "t3.medium", rootVolumeSizeGb: PREPARED.actualSpec.rootVolumeSizeGb, expectedDesiredSpec: { instanceType: "t3.medium", rootVolumeSizeGb: PREPARED.actualSpec.rootVolumeSizeGb } });
-  assert.deepEqual(keep.touched, ["prepareWorker", "resumePendingVolumeExpansion", "keepActualSpec", "status"]);
+  assert.deepEqual(keep.touched, ["keepCurrentSize", "status"]);
   assert.equal(keep.phase, "ready");
   const start = await run({ operationId: "s", intent: "setup" });
   assert.deepEqual(start.touched, ["prepareWorker", "resumePendingVolumeExpansion", "hasAcceptedMismatch", "ensurePreparedRunning", "status"]);
@@ -153,6 +156,17 @@ test("what each intent may touch: a check reads only, keep changes only the save
     const touched = intent === "check" ? check.touched : keep.touched;
     assert.equal(touched.includes("ensurePreparedRunning"), false, `${intent} must never start the instance`);
   }
+});
+
+test("restarting after an interrupted check keeps its intent and never resumes a launch", async () => {
+  let saved: AwsWorkerOperationSnapshot = { operationId: "check-restart", intent: "check", phase: "starting", message: "Checking AWS access…", updatedAt: "2026-09-13T00:00:00Z" };
+  const settings = { getAwsWorkerOperation: async () => saved, saveAwsWorkerOperation: async (next: AwsWorkerOperationSnapshot) => { saved = next; } };
+  const service = new AwsWorkerSetupService({} as any, {} as any, settings as any);
+  await service.recoverInterruptedOperation();
+  assert.equal(saved.intent, "check");
+  assert.equal(saved.phase, "error");
+  assert.match(saved.message, /access check was interrupted/);
+  assert.doesNotMatch(saved.message, /Worker start/);
 });
 
 test("start orchestrates the exact visible phases and reaches ready", async () => {

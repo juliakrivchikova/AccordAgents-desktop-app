@@ -62,8 +62,19 @@ export function useAwsWorkerStatus() {
       if (!mounted.current || request !== revision.current) return;
       if (next.configured && !next.state && next.message) {
         // Losing contact must not turn an observed Stopping into Configured.
+        // Operation progress is local and can finish even when AWS refuses
+        // every status read. Keep it fresh independently of the instance state.
         setError(next.message);
-        if (!current.current) { current.current = next; setStatus(next); }
+        const previous = current.current;
+        const previousInstance = previous?.actualSpec ?? previous?.handle;
+        const sameInstance = !next.handle || !previousInstance ||
+          next.handle.instanceId === previousInstance.instanceId && next.handle.region === previousInstance.region;
+        const merged = previous && sameInstance
+          ? { ...previous, ...next, state: previous.state, actualSpec: previous.actualSpec,
+              publicIp: previous.publicIp, operation: next.operation ?? previous.operation }
+          : next;
+        current.current = merged;
+        setStatus(merged);
       } else {
         accept(next);
       }

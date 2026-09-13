@@ -2,6 +2,7 @@
 // source of truth; persisted handles are local caches, while guarded automatic
 // stop is authorized by worker-side registered activity across upgraded apps.
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type {
   AwsWorkerActualSpec,
   AwsWorkerHandleInfo,
@@ -74,6 +75,15 @@ export interface PreparedAwsWorker {
   created: boolean;
 }
 
+interface PrepareAwsWorkerRequest {
+  blob?: string;
+  instanceType?: string;
+  rootVolumeSizeGb?: number;
+  operationId: string;
+  clientToken?: string;
+  expectedInstanceId?: string;
+}
+
 export class CloudRunAwsService {
   private readonly lifecycle: AwsWorkerLifecycle;
   private readonly createEc2Client: (credentials: AwsWorkerCredentials) => Ec2Client;
@@ -86,6 +96,7 @@ export class CloudRunAwsService {
   private readonly wait: (delayMs: number) => Promise<void>;
   private readonly sshExec: (worker: CloudRunWorkerSettings, command: string, timeoutMs: number) => Promise<void>;
   private prepareActive: Promise<PreparedAwsWorker> | undefined;
+  private prepareRequest: PrepareAwsWorkerRequest | undefined;
 
   constructor(
     private readonly settings: SettingsService,
@@ -160,29 +171,20 @@ export class CloudRunAwsService {
     return this.status();
   }
 
-  async prepareWorker(request: {
-    blob?: string;
-    instanceType?: string;
-    rootVolumeSizeGb?: number;
-    operationId: string;
-    clientToken?: string;
-    expectedInstanceId?: string;
-  }): Promise<PreparedAwsWorker> {
-    if (this.prepareActive) return this.prepareActive;
-    this.prepareActive = this.prepareWorkerUnlocked(request).finally(() => {
+  async prepareWorker(request: PrepareAwsWorkerRequest): Promise<PreparedAwsWorker> {
+    if (this.prepareActive) {
+      if (isDeepStrictEqual(this.prepareRequest, request)) return this.prepareActive;
+      throw new Error("Another AWS preparation is still running. Wait for it to finish, then try again.");
+    }
+    this.prepareRequest = structuredClone(request);
+    this.prepareActive = this.prepareWorkerUnlocked(this.prepareRequest).finally(() => {
       this.prepareActive = undefined;
+      this.prepareRequest = undefined;
     });
     return this.prepareActive;
   }
 
-  private async prepareWorkerUnlocked(request: {
-    blob?: string;
-    instanceType?: string;
-    rootVolumeSizeGb?: number;
-    operationId: string;
-    clientToken?: string;
-    expectedInstanceId?: string;
-  }): Promise<PreparedAwsWorker> {
+  private async prepareWorkerUnlocked(request: PrepareAwsWorkerRequest): Promise<PreparedAwsWorker> {
     if (request.rootVolumeSizeGb !== undefined) {
       const invalidSize = awsRootVolumeSizeError(request.rootVolumeSizeGb);
       if (invalidSize) throw new Error(invalidSize);
@@ -292,13 +294,16 @@ export class CloudRunAwsService {
     return { credentials, handle, info, actualSpec, desiredSpec, mismatch, created };
   }
 
-  /** The size editor persisted its request before the decision; keeping the
-   *  instance as it is means the saved size must describe it again. */
-  async keepActualSpec(prepared: PreparedAwsWorker): Promise<void> {
+  /** Keeping a size cancels the new request, not a reason to provision, enroll
+   *  keys or resume a previously interrupted disk expansion. */
+  async keepCurrentSize(expectedInstanceId: string): Promise<AwsWorkerActualSpec> {
+    const { info, handle } = await this.existingWorker(expectedInstanceId);
+    const actual = actualSpecFrom(info, handle);
     await this.settings.saveCloudRunsSettings({
-      awsInstanceType: prepared.actualSpec.instanceType,
-      awsRootVolumeSizeGb: prepared.actualSpec.rootVolumeSizeGb
+      awsInstanceType: actual.instanceType,
+      awsRootVolumeSizeGb: actual.rootVolumeSizeGb
     });
+    return actual;
   }
 
   async acceptMismatch(prepared: PreparedAwsWorker): Promise<void> {
@@ -557,6 +562,30 @@ export class CloudRunAwsService {
 
   async ensureExistingWorkerForRun(instanceId: string): Promise<CloudRunWorkerSettings> {
     return this.ensureWorkerForRun(instanceId);
+  }
+
+  /** Diagnostics must never wake or prepare an instance to inspect it. */
+  async workerForInspection(): Promise<CloudRunWorkerSettings> {
+    const { info, handle } = await this.existingWorker();
+    if (info.state !== "running") {
+      throw new Error(`The AWS instance is ${info.state}. Start the instance and wait until it is running before checking its runtime.`);
+    }
+    if (!info.publicIp?.trim()) throw new Error("No public IP address is available for the running instance. Refresh its status before checking the runtime.");
+    const deviceId = await this.settings.getCloudRunsDeviceId();
+    return workerSettings(info.publicIp.trim(), this.privateKeyPath(handle), deviceId, info.instanceId);
+  }
+
+  private async existingWorker(expectedInstanceId?: string): Promise<{ info: AwsWorkerInstanceInfo; handle: AwsWorkerHandleInfo }> {
+    const { credentials, handle } = await this.workerContext();
+    if (!credentials || !handle) throw new Error("The AWS instance is not configured. Connect it in Settings first.");
+    if (expectedInstanceId && handle.instanceId !== expectedInstanceId) {
+      throw new Error("The instance changed. Refresh and review it before continuing.");
+    }
+    const info = await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId);
+    if (!info || info.instanceId !== handle.instanceId || info.state === "terminated" || info.state === "absent") {
+      throw new Error("The selected AWS instance is no longer available. Refresh its status in Settings.");
+    }
+    return { info, handle };
   }
 
   async ensureWorkerForRun(expectedInstanceId?: string): Promise<CloudRunWorkerSettings> {

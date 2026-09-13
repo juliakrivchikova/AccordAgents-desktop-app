@@ -19,6 +19,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
 import { withMachineRsyncPath } from "./machineMaintenanceRsync";
 import fs from "node:fs";
@@ -165,6 +166,7 @@ export interface MachineInstallerOptions {
 
 export class MachineInstallerService {
   private readonly active = new Map<string, Promise<MachineInstallResult>>();
+  private readonly activeRequests = new Map<string, { kind: MachineInstallKind; request: MachineUpgradeRequest }>();
   private readonly sshExec: MachineSshExec;
   private readonly uploadBundle: MachineBundleUpload;
   private readonly mirrorSync: RemoteMirrorSyncRunner;
@@ -244,14 +246,14 @@ export class MachineInstallerService {
     return parseMachineProbe(stdout);
   }
 
-  async ensureEnvironmentOwner(record: Pick<MachineInstallRecord, "machineId" | "target" | "installRoot">): Promise<void> {
+  async ensureEnvironmentOwner(record: Pick<MachineInstallRecord, "machineId" | "target" | "installRoot">, readOnly = false): Promise<void> {
     if (!record.installRoot.startsWith("/")) throw new Error("Finish machine setup before using its files.");
-    await this.claimEnvironmentOwner(record.target, record.installRoot, await this.options.getEnrollmentJson(record.machineId));
+    await this.claimEnvironmentOwner(record.target, record.installRoot, await this.options.getEnrollmentJson(record.machineId), readOnly);
   }
 
-  private async claimEnvironmentOwner(target: MachineSshTarget, installRoot: string, enrollmentJson: string): Promise<void> {
+  private async claimEnvironmentOwner(target: MachineSshTarget, installRoot: string, enrollmentJson: string, readOnly = false): Promise<void> {
     try {
-      await this.sshExec({ target, script: machineClaimEnvironmentScript(installRoot),
+      await this.sshExec({ target, script: machineClaimEnvironmentScript(installRoot, readOnly),
         input: enrollmentJson, timeoutMs: SHORT_TIMEOUT_MS });
     } catch (error) {
       // SSH's generic exit-code message hides Python's owner refusal. Expose
@@ -259,7 +261,8 @@ export class MachineInstallerService {
       if (error instanceof CommandError && error.result.exitCode === 1) {
         const reasons = [
           "This installation belongs to another environment; nothing was replaced.",
-          "Machine enrollment has no owner identity; nothing was replaced."
+          "Machine enrollment has no owner identity; nothing was replaced.",
+          "Finish machine setup before checking this environment."
         ];
         const lines = error.result.stderr.split(/\r?\n/);
         const reason = reasons.find(message => lines.includes(`RuntimeError: ${message}`));
@@ -272,14 +275,14 @@ export class MachineInstallerService {
   /** Settings Start/Check/Set up also use this desktop's native profile.
    * A failed first probe may have persisted only a tilde path and the intent
    * to isolate; resolve that intent instead of falling back to the SSH home. */
-  async providerEnvironment(target: MachineSshTarget, defaultInstallRoot: string): Promise<{ workerRoot: string; profileHome?: string }> {
+  async providerEnvironment(target: MachineSshTarget, defaultInstallRoot: string, readOnly = false): Promise<{ workerRoot: string; profileHome?: string }> {
     const record = (await this.options.store.listMachineInstalls()).find(
       install => target.hostKeyAlias && install.target.hostKeyAlias === target.hostKeyAlias
     );
     const probe = await this.probe(target, { installRoot: record?.installRoot || defaultInstallRoot,
       userDataDir: record?.installRoot ? record.userDataDir || undefined : undefined,
       serviceName: record?.installRoot ? record.serviceName : undefined });
-    if (record) await this.ensureEnvironmentOwner({ ...record, target, installRoot: probe.installRoot });
+    if (record) await this.ensureEnvironmentOwner({ ...record, target, installRoot: probe.installRoot }, readOnly);
     return { workerRoot: probe.installRoot,
       profileHome: record?.installRoot ? record.profileHome ?? (record.isolatedProfile ? probe.installRoot + "/home" : undefined)
         : probe.installRoot + "/home" };
@@ -299,9 +302,15 @@ export class MachineInstallerService {
     onProgress?: (snapshot: MachineInstallSnapshot) => void
   ): Promise<MachineInstallResult> {
     const running = this.active.get(request.machineId);
-    if (running) return running;
-    const started = this.run(kind, request, onProgress).finally(() => {
+    if (running) {
+      if (isDeepStrictEqual(this.activeRequests.get(request.machineId), { kind, request })) return running;
+      return Promise.reject(new Error("Another setup action for this machine is still running. Wait for it to finish, then try again."));
+    }
+    const snapshot = structuredClone(request);
+    this.activeRequests.set(request.machineId, { kind, request: snapshot });
+    const started = this.run(kind, snapshot, onProgress).finally(() => {
       this.active.delete(request.machineId);
+      this.activeRequests.delete(request.machineId);
     });
     this.active.set(request.machineId, started);
     return started;

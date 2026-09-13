@@ -32,7 +32,7 @@ export const DEFAULT_MACHINE_SERVICE_NAME = "accordagents-machine";
  * provider home. The owner is published atomically; a failed write or two
  * simultaneous installers cannot claim the same directory for different peers.
  * The enrollment arrives on stdin and is never printed or passed in argv. */
-export function machineClaimEnvironmentScript(installRoot: string): string {
+export function machineClaimEnvironmentScript(installRoot: string, readOnly = false): string {
   const script = String.raw`import json, os, sys, tempfile
 root = sys.argv[1]
 def identity(value):
@@ -47,8 +47,16 @@ if os.path.lexists(enrollment):
     with open(enrollment) as f:
         if identity(json.load(f)) != expected:
             raise RuntimeError("This installation belongs to another environment; nothing was replaced.")
-os.makedirs(root, mode=0o700, exist_ok=True)
 owner = os.path.join(root, "environment-owner.json")
+if sys.argv[2] == "check":
+    if os.path.lexists(owner):
+        with open(owner) as f:
+            if json.load(f) != expected:
+                raise RuntimeError("This installation belongs to another environment; nothing was replaced.")
+    elif not os.path.lexists(enrollment):
+        raise RuntimeError("Finish machine setup before checking this environment.")
+    sys.exit(0)
+os.makedirs(root, mode=0o700, exist_ok=True)
 fd, staged = tempfile.mkstemp(prefix=".environment-owner-", dir=root)
 try:
     with os.fdopen(fd, "w") as f:
@@ -70,7 +78,7 @@ try:
 finally:
     os.unlink(staged)
 `;
-  return `set -eu\npython3 -c ${shellQuotePosix(script)} ${shellQuotePosix(installRoot)}`;
+  return `set -eu\npython3 -c ${shellQuotePosix(script)} ${shellQuotePosix(installRoot)} ${readOnly ? "check" : "claim"}`;
 }
 
 export interface MachineInstallLayout {

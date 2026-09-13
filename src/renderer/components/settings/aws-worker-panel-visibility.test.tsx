@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act } from "react-test-renderer";
+import { CloudRunAwsService } from "../../../main/services/cloudRunAws";
+import { AwsWorkerSetupService } from "../../../main/services/awsWorkerSetup";
 import type { AwsWorkerOperationSnapshot, AwsWorkerStartRequest } from "../../../shared/types";
 import { OLD_ERROR, RUNNING, SETTINGS, change, click, findButton, flush, ready, renderPanel, textOf, unmount } from "./aws-worker-panel-harness.test";
 
@@ -103,6 +105,19 @@ test("a confirmed access check brings the normal actions back", async () => {
   unmount(renderer);
 });
 
+test("a failed read for a replacement instance cannot inherit the previous instance's Running state", async () => {
+  let reads = 0;
+  const renderer = await renderPanel({ status: RUNNING, getStatus: async () => ++reads === 1 ? RUNNING : {
+    configured: true, handle: { instanceId: "i-replacement", region: "eu-west-1", securityGroupId: "sg-2", keyName: "key-2", instanceType: "t3.small", createdAt: "2026-09-13" },
+    message: "AccessDenied"
+  } });
+  await click(findButton(renderer, "Refresh status"));
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-state" })), "Status unavailable");
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-stop" }).length, 0);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-actual-specs" }).length, 0);
+  unmount(renderer);
+});
+
 test("a check still running when Settings reopen keeps Start out of reach until it finishes", async () => {
   let progress!: (value: AwsWorkerOperationSnapshot) => void;
   const live: AwsWorkerOperationSnapshot = { operationId: "check-live", intent: "check", phase: "starting", message: "Checking AWS access…", updatedAt: "2026-09-13T12:00:00.000Z" };
@@ -115,4 +130,56 @@ test("a check still running when Settings reopen keeps Start out of reach until 
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Start instance");
   assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-start" }).props.disabled, false);
   unmount(renderer);
+});
+
+test("a missed completion after reopening Settings is recovered even when AWS keeps refusing status reads", async () => {
+  const refusal = Object.assign(new Error("Not authorized to perform: ec2:DescribeInstances"), { name: "UnauthorizedOperation" });
+  const realSetTimeout = globalThis.setTimeout;
+  let poll!: () => void;
+  globalThis.setTimeout = ((callback, delay, ...args) => {
+    if (delay === 30_000) { poll = () => callback(...args); return realSetTimeout(() => undefined, 1_000_000); }
+    return realSetTimeout(callback, delay, ...args);
+  }) as typeof setTimeout;
+  let saved: AwsWorkerOperationSnapshot | undefined;
+  let calls = 0;
+  let releaseProbe!: () => void;
+  let releaseMount!: () => void;
+  let listener: ((operation: AwsWorkerOperationSnapshot) => void) | undefined;
+  const settings = {
+    getAwsWorkerCredentials: async () => ({ accessKeyId: "synthetic", secretAccessKey: "synthetic", region: "us-east-1" }),
+    getPublicSettings: async () => ({ cloudRuns: { awsHandle: { instanceId: "i-shared", region: "us-east-1" } } }),
+    getAwsWorkerOperation: async () => saved,
+    saveAwsWorkerOperation: async (value: AwsWorkerOperationSnapshot) => { saved = value; }
+  };
+  const aws = new CloudRunAwsService(settings as any, { createEc2Client: () => ({ describeInstance: async () => {
+    const call = ++calls;
+    if (call === 2) await new Promise<void>(resolve => { releaseProbe = resolve; });
+    if (call === 3) await new Promise<void>(resolve => { releaseMount = resolve; });
+    throw refusal;
+  } }) as any });
+  const service = new AwsWorkerSetupService(aws, {} as any, settings as any);
+  let pending!: ReturnType<typeof service.start>;
+  const options = { status: RUNNING, getStatus: () => aws.status(), onProgress: (next: typeof listener) => { listener = next; },
+    start: (request: AwsWorkerStartRequest) => pending = service.start(request, operation => listener?.(operation)) };
+  let renderer: Awaited<ReturnType<typeof renderPanel>> | undefined;
+  try {
+    renderer = await renderPanel(options);
+    await click(findButton(renderer, "Check AWS access"));
+    assert.equal(saved?.phase, "starting");
+    unmount(renderer);
+    renderer = await renderPanel(options);
+    assert.equal(calls, 3);
+    await act(async () => { releaseProbe(); await pending; await flush(); });
+    assert.equal(saved?.phase, "error", "completion is persisted before the first reopened status read returns");
+    await act(async () => { releaseMount(); await flush(); });
+    assert.equal(findButton(renderer, "Checking AWS access…").props.disabled, true);
+    await act(async () => { poll(); await flush(); });
+    assert.equal(findButton(renderer, "Try again").props.disabled, false);
+    assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-authorization-toggle" }).length, 1);
+    await act(async () => { poll(); await flush(); });
+    assert.equal(findButton(renderer, "Try again").props.disabled, false, "further failures do not revive the busy state");
+  } finally {
+    if (renderer) unmount(renderer);
+    globalThis.setTimeout = realSetTimeout;
+  }
 });

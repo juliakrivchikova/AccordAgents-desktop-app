@@ -16,6 +16,7 @@ import type {
   ChatSearchRequest,
   ChatSavedPromptConfigUpdate,
   CloudRunsSettingsUpdate,
+  CloudRunWorkerDoctorReport,
   CloudRunWorkerSettings,
   ConnectAwsWorkerRequest,
   CreateMobilePairingRequest,
@@ -338,10 +339,10 @@ function emitReviewProgress(progress: ReviewProgress): void {
 }
 
 const cloudRunDoctorService: CloudRunDoctorService = new CloudRunDoctorService({
-  environmentForWorker: async (worker) => {
+  environmentForWorker: async (worker, readOnly) => {
     if (!worker.hostKeyAlias?.startsWith("accordagents-i-")) return {};
     const directory = cloudEnvironmentDirectory((await chatEventLogService.getOrCreateDeviceIdentity()).originId);
-    return machineInstallerService.providerEnvironment(worker, `~/${directory}`);
+    return machineInstallerService.providerEnvironment(worker, `~/${directory}`, readOnly);
   },
   openExternal: (url) => {
     void openExternalUrl(url);
@@ -945,7 +946,8 @@ async function testCloudRunWorker(worker: CloudRunWorkerSettings): Promise<{ ok:
 
 async function withCloudRunWorker<T>(
   request: CloudRunWorkerSettings | undefined,
-  action: (worker: CloudRunWorkerSettings) => Promise<T>
+  action: (worker: CloudRunWorkerSettings) => Promise<T>,
+  intent: "inspect" | "setup"
 ): Promise<T> {
   if (request) {
     return action(request);
@@ -953,6 +955,9 @@ async function withCloudRunWorker<T>(
   const settings = await settingsService.getPublicSettings();
   if (settings.cloudRuns.mode !== "aws") {
     return action(settings.cloudRuns.worker);
+  }
+  if (intent === "inspect") {
+    return action(await cloudRunAwsService.workerForInspection());
   }
   const operationId = randomUUID();
   return cloudRunAwsService.withRunReference(operationId, async () => {
@@ -2231,19 +2236,25 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:save-cloud-runs", (_event, update: CloudRunsSettingsUpdate) => settingsService.saveCloudRunsSettings(update));
   ipcMain.handle("cloud-runs:test-worker", async (_event, request?: CloudRunWorkerSettings) => {
-    return withCloudRunWorker(request, testCloudRunWorker);
+    try { return await withCloudRunWorker(request, testCloudRunWorker, "inspect"); }
+    catch (error) { return { ok: false, message: error instanceof Error ? error.message : String(error) }; }
   });
-  ipcMain.handle("cloud-runs:diagnose-worker", async (_event, request?: CloudRunWorkerSettings) => {
-    const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
-    return withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker, {
-      requirePersistentStorage: managedAws
-    }));
+  ipcMain.handle("cloud-runs:diagnose-worker", async (_event, request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport> => {
+    try {
+      const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
+      return await withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker, {
+        requirePersistentStorage: managedAws
+      }), "inspect");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { ok: false, message, checks: [] };
+    }
   });
   ipcMain.handle("cloud-runs:setup-worker", async (_event, request?: CloudRunWorkerSettings) => {
     const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
     return withCloudRunWorker(request, (worker) => cloudRunDoctorService.setup(worker, (progress) => {
       sendToMainWindow("cloud-runs:setup-progress", progress);
-    }, { requirePersistentStorage: managedAws }));
+    }, { requirePersistentStorage: managedAws }), "setup");
   });
   ipcMain.handle("cloud-runs:aws-bootstrap-command", (_event, region: string, recoveryOperationId?: string) =>
     cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1", recoveryOperationId));

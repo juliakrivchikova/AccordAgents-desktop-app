@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { machineProfileVariables } from "../../shared/machineInstall";
-import { runCommand } from "./command";
+import { CommandError, runCommand } from "./command";
 import { machineClaimEnvironmentScript, machineInstallLayout, machineServiceUnit } from "./machineInstallScripts";
 import { remoteProfileCommand } from "./remoteWorkerTarget";
 import { DefaultRemoteAgentSetupSync } from "./remoteAgentSetup";
@@ -15,6 +15,27 @@ const enrollment = (owner: string) => JSON.stringify({
 });
 const shell = (script: string, input?: string) => runCommand("/bin/bash", ["-c", script], {
   input, primeLoginShellEnv: false, timeoutMs: 20_000
+});
+
+test("diagnostics validate the existing environment without creating or claiming files", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "accord-owner-check-"));
+  const check = machineClaimEnvironmentScript(root, true);
+  try {
+    await assert.rejects(shell(check, enrollment("home")), error => error instanceof CommandError && error.result.stderr.includes("Finish machine setup"));
+    assert.deepEqual(await readdir(root), []);
+    await writeFile(path.join(root, "enrollment.json"), enrollment("home"));
+    await shell(check, enrollment("home"));
+    assert.deepEqual(await readdir(root), ["enrollment.json"]);
+    await assert.rejects(shell(check, enrollment("work")), error => error instanceof CommandError && error.result.stderr.includes("another environment"));
+    await shell(machineClaimEnvironmentScript(root), enrollment("home"));
+    const owner = await readFile(path.join(root, "environment-owner.json"), "utf8");
+    await shell(check, enrollment("home"));
+    assert.equal(await readFile(path.join(root, "environment-owner.json"), "utf8"), owner);
+    assert.deepEqual((await readdir(root)).sort(), ["enrollment.json", "environment-owner.json"]);
+    await writeFile(path.join(root, "environment-owner.json"), "{partial");
+    await assert.rejects(shell(check, enrollment("home")));
+    assert.equal(await readFile(path.join(root, "environment-owner.json"), "utf8"), "{partial");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("two simultaneous installers cannot enroll the same directory to different desktops", async () => {

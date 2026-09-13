@@ -797,6 +797,29 @@ test("concurrent preparation shares one creation and one client token", async ()
   assert.deepEqual(client.runTokens, ["stable-token"]);
 });
 
+test("preparation never returns another request's instance, size or credentials", async () => {
+  const settings = new FakeSettings();
+  const client = new FakeEc2Client();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const originalFind = client.findWorkerInstances.bind(client);
+  client.findWorkerInstances = async () => { await gate; return originalFind(); };
+  const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client]]));
+  const request = { operationId: "same", blob: encodeWorkerBlob(NEW_CREDS), instanceType: "t3.small", rootVolumeSizeGb: 40 };
+  const active = service.prepareWorker(request);
+  try {
+    for (const change of [{ operationId: "other" }, { instanceType: "t3.medium" }, { rootVolumeSizeGb: 80 },
+      { expectedInstanceId: "i-other" }, { blob: encodeWorkerBlob(OLD_CREDS) }, { clientToken: "another" }]) {
+      await assert.rejects(service.prepareWorker({ ...request, ...change }), /still running/);
+    }
+    assert.equal(client.runCount, 0);
+  } finally { release(); }
+  assert.equal((await active).desiredSpec.rootVolumeSizeGb, 40);
+  await assert.rejects(service.prepareWorker({ ...request, expectedInstanceId: "i-other" }), /instance changed/,
+    "after the first finishes the new request executes its own guard");
+  assert.equal(client.runCount, 1);
+});
+
 test("an ambiguous launch persists its token for a later runtime retry", async () => {
   const settings = new FakeSettings();
   const client = new FakeEc2Client();

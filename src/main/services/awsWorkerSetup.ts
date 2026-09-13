@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type {
   AwsWorkerOperationSnapshot,
   AwsWorkerStartRequest,
@@ -12,7 +13,7 @@ import type { SettingsService } from "./settings";
 
 export class AwsWorkerSetupService {
   private active: Promise<AwsWorkerStartResult> | undefined;
-  private activeRequest: { operationId: string; intent: "setup" | "resize" | "check" } | undefined;
+  private activeRequest: AwsWorkerStartRequest | undefined;
 
   constructor(
     private readonly aws: CloudRunAwsService,
@@ -26,8 +27,8 @@ export class AwsWorkerSetupService {
     await this.settings.saveAwsWorkerOperation({
       ...previous,
       phase: "error",
-      message: "Worker start was interrupted. Retry to resume safely.",
-      error: "The desktop app closed before worker setup finished.",
+      message: previous.intent === "check" ? "AWS access check was interrupted. Try again to check access." : "Worker start was interrupted. Retry to resume safely.",
+      error: previous.intent === "check" ? "The desktop app closed before the AWS access check finished." : "The desktop app closed before worker setup finished.",
       retryable: true,
       updatedAt: new Date().toISOString()
     });
@@ -41,11 +42,11 @@ export class AwsWorkerSetupService {
     // different request the running one's result would answer "start" with
     // the outcome of a read-only check, or the other way round.
     if (this.active) {
-      if (this.activeRequest?.operationId === request.operationId) return this.active;
+      if (isDeepStrictEqual(this.activeRequest, { ...request, intent: request.intent ?? "setup" })) return this.active;
       return Promise.reject(new Error(`Another AWS action (${this.activeRequest?.intent ?? "setup"}) is still running. Wait for it to finish, then try again.`));
     }
-    this.activeRequest = { operationId: request.operationId, intent: request.intent ?? "setup" };
-    this.active = this.run(request, onProgress).finally(() => {
+    this.activeRequest = structuredClone({ ...request, intent: request.intent ?? "setup" });
+    this.active = this.run(this.activeRequest, onProgress).finally(() => {
       this.active = undefined;
       this.activeRequest = undefined;
     });
@@ -100,6 +101,12 @@ export class AwsWorkerSetupService {
       if (request.intent === "resize" && !request.expectedInstanceId) {
         throw new Error("Refresh and select the existing instance before changing its size.");
       }
+      if (request.intent === "resize" && request.resolution === "keep") {
+        await emit("starting", "Checking the current instance size…");
+        const actual = await this.aws.keepCurrentSize(request.expectedInstanceId!);
+        const operation = await emit("ready", `Kept the current instance: ${actual.instanceType} · ${actual.rootVolumeSizeGb} GiB disk.`);
+        return { operation, status: await this.aws.status() };
+      }
       if (request.expectedActualSpec) {
         const current = await this.aws.status();
         if (!current.actualSpec || current.actualSpec.instanceId !== request.expectedInstanceId
@@ -125,19 +132,9 @@ export class AwsWorkerSetupService {
       }
       prepared = await this.aws.resumePendingVolumeExpansion(prepared);
       prepared = exactResizeMismatch(request, prepared);
-      if (request.intent === "resize" && request.resolution === "keep") {
-        // "Keep current size" answers a size change with "no change": nothing
-        // is started or set up, and the saved size goes back to what exists.
-        if (request.expectedInstanceId !== prepared.info.instanceId) {
-          throw new Error("The shared worker changed after the choice was shown. Refresh and choose again.");
-        }
-        await this.aws.keepActualSpec(prepared);
-        const operation = await emit("ready", `Kept the current instance: ${prepared.actualSpec.instanceType} · ${prepared.actualSpec.rootVolumeSizeGb} GiB disk.`);
-        return { operation, status: await this.aws.status() };
-      }
       prepared = await this.resolveMismatch(request, prepared, emit);
       prepared = exactResizeMismatch(request, prepared);
-      const accepted = request.intent === "resize" ? request.resolution === "keep" : await this.aws.hasAcceptedMismatch(prepared);
+      const accepted = request.intent !== "resize" && await this.aws.hasAcceptedMismatch(prepared);
       if (prepared.mismatch && !accepted) {
         const operation = await emit("needs-decision", mismatchMessage(prepared), {
           specMismatch: prepared.mismatch

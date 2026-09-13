@@ -46,7 +46,8 @@ test("AWS check, setup, login and recheck stay in the resolved environment", asy
   let resolutions = 0;
   let signedIn = false;
   const service = new CloudRunDoctorService({
-    environmentForWorker: async () => {
+    environmentForWorker: async (_worker, readOnly) => {
+      assert.equal(readOnly, resolutions === 0, "diagnosis only reads ownership; setup may establish it");
       resolutions += 1;
       return { profileHome: "/srv/home/profile", workerRoot: "/srv/home" };
     },

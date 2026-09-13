@@ -204,7 +204,7 @@ test("Settings resolves an unfinished installation's isolated profile before pro
   const resolved = await h.service.providerEnvironment(target, "~/unused");
   assert.deepEqual(resolved, { workerRoot: "/home/ubuntu/accordagents-home", profileHome: "/home/ubuntu/accordagents-home/home" });
   const claim = h.calls.find(call => call.script.includes("environment-owner.json"));
-  assert.ok(claim?.script.endsWith("'/home/ubuntu/accordagents-home'"));
+  assert.ok(claim?.script.endsWith("'/home/ubuntu/accordagents-home' claim"));
 });
 
 test("a legacy failed attempt without resolved paths cannot reuse the default shared unit", async () => {
@@ -737,6 +737,10 @@ test("two installs of one machine share a single operation", async () => {
   const h = harness();
   const first = h.service.install({ machineId: "m1", operationId: "op7", target: TARGET });
   const second = h.service.install({ machineId: "m1", operationId: "op7", target: TARGET });
+  await assert.rejects(h.service.upgrade({ machineId: "m1", operationId: "op7", target: TARGET }), /still running/);
+  await assert.rejects(h.service.install({ machineId: "m1", operationId: "op8", target: TARGET }), /still running/);
+  await assert.rejects(h.service.install({ machineId: "m1", operationId: "op7", target: { ...TARGET, host: "another-host" } }), /still running/);
+  await assert.rejects(h.service.install({ machineId: "m1", operationId: "op7", target: TARGET, requiredProvider: "claude-code" }), /still running/);
   assert.equal(await first, await second);
   assert.equal(h.uploads.length, 1);
 });
