@@ -62,6 +62,7 @@ export class AwsWorkerSetupService {
     ): Promise<AwsWorkerOperationSnapshot> => {
       const operation: AwsWorkerOperationSnapshot = {
         operationId: request.operationId,
+        intent: request.intent,
         clientToken,
         phase,
         message,
@@ -73,17 +74,38 @@ export class AwsWorkerSetupService {
       return operation;
     };
     try {
+      if (request.intent === "resize" && !request.expectedInstanceId) {
+        throw new Error("Refresh and select the existing instance before changing its size.");
+      }
+      if (request.expectedActualSpec) {
+        const current = await this.aws.status();
+        if (!current.actualSpec || current.actualSpec.instanceId !== request.expectedInstanceId
+          || current.actualSpec.instanceType !== request.expectedActualSpec.instanceType
+          || current.actualSpec.rootVolumeSizeGb !== request.expectedActualSpec.rootVolumeSizeGb) {
+          throw new Error("The instance changed after the size editor opened. Refresh and review its current size before applying.");
+        }
+        if ((request.rootVolumeSizeGb ?? current.actualSpec.rootVolumeSizeGb) < current.actualSpec.rootVolumeSizeGb) {
+          throw new Error("AWS cannot shrink an existing disk. Its current size has been kept.");
+        }
+      }
       await emit("starting", "Looking for your shared AWS worker…");
       let prepared = await this.aws.prepareWorker({
         operationId: request.operationId,
         blob: request.blob,
         instanceType: request.instanceType,
         rootVolumeSizeGb: request.rootVolumeSizeGb,
-        clientToken
+        clientToken,
+        expectedInstanceId: request.intent === "resize" ? request.expectedInstanceId : undefined
       });
+      if (request.intent === "resize" && prepared.info.instanceId !== request.expectedInstanceId) {
+        throw new Error("The shared instance changed. Refresh before applying this size change.");
+      }
       prepared = await this.aws.resumePendingVolumeExpansion(prepared);
+      prepared = exactResizeMismatch(request, prepared);
       prepared = await this.resolveMismatch(request, prepared, emit);
-      if (prepared.mismatch && !await this.aws.hasAcceptedMismatch(prepared)) {
+      prepared = exactResizeMismatch(request, prepared);
+      const accepted = request.intent === "resize" ? request.resolution === "keep" : await this.aws.hasAcceptedMismatch(prepared);
+      if (prepared.mismatch && !accepted) {
         const operation = await emit("needs-decision", mismatchMessage(prepared), {
           specMismatch: prepared.mismatch
         });
@@ -110,7 +132,9 @@ export class AwsWorkerSetupService {
         });
         return { operation, status: await this.aws.status(), report };
       }
-      const operation = await emit("ready", report.message || "Worker ready.");
+      const operation = await emit("ready", request.resolution === "keep"
+        ? `Kept the current instance: ${prepared.actualSpec.instanceType} · ${prepared.actualSpec.rootVolumeSizeGb} GiB disk.`
+        : report.message || "Worker ready.");
       return { operation, status: await this.aws.status(), report };
     } catch (error) {
       const needsAuthorizationRefresh = isAwsAuthorizationError(error);
@@ -163,9 +187,20 @@ export class AwsWorkerSetupService {
 function mismatchMessage(prepared: PreparedAwsWorker): string {
   const gaps = [
     prepared.mismatch?.diskTooSmall ? "disk" : "",
-    prepared.mismatch?.computeTooSmall ? "instance type" : ""
+    prepared.mismatch?.computeTooSmall || prepared.actualSpec.instanceType !== prepared.desiredSpec.instanceType ? "instance type" : ""
   ].filter(Boolean).join(" and ");
-  return `The existing shared worker's ${gaps} is smaller than configured. Choose what to do.`;
+  return `The existing shared worker's ${gaps || "size"} differs from the requested size. Choose what to do.`;
+}
+
+function exactResizeMismatch(request: AwsWorkerStartRequest, prepared: PreparedAwsWorker): PreparedAwsWorker {
+  // Automatic setup accepts sufficient capacity; an explicit size edit promises
+  // the requested type, including a cheaper/smaller one, unless User keeps it.
+  if (request.intent !== "resize" || prepared.actualSpec.instanceType === prepared.desiredSpec.instanceType) return prepared;
+  return { ...prepared, mismatch: {
+    instanceId: prepared.info.instanceId, actual: prepared.actualSpec, desired: prepared.desiredSpec,
+    diskTooSmall: prepared.actualSpec.rootVolumeSizeGb < prepared.desiredSpec.rootVolumeSizeGb,
+    computeTooSmall: prepared.mismatch?.computeTooSmall ?? false
+  } };
 }
 
 function actionableError(error: unknown, authorization?: ReturnType<typeof awsAuthorizationErrorDetails>): string {

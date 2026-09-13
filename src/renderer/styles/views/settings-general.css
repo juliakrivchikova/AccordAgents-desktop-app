@@ -659,6 +659,24 @@
   font-size: 14px;
 }
 
+.settings-view .gen-aws-spinner {
+  display: inline-block;
+  vertical-align: middle;
+  animation: gen-aws-spin 1s linear infinite;
+}
+
+@keyframes gen-aws-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-view .gen-aws-spinner { animation: none; }
+}
+
+.settings-view .gen-aws-history summary { list-style: none; }
+.settings-view .gen-aws-history summary::after { content: "+"; }
+.settings-view .gen-aws-history[open] summary::after { content: "−"; }
+
 .settings-view .gen-aws-state.is-billable {
   color: var(--app-warning);
 }

@@ -209,6 +209,8 @@ export interface AwsWorkerStatus {
   state?: AwsWorkerLifecycleState;
   publicIp?: string;
   message?: string;
+  /** Failure of the requested mutation, independent of the observed EC2 state. */
+  actionError?: string;
   persistentStorage?: {
     rootVolumeBackedByEbs: boolean;
     rootDeviceName?: string;
@@ -237,6 +239,7 @@ export type AwsWorkerSpecResolution = "keep" | "grow-disk" | "recreate";
 
 export interface AwsWorkerStartRequest {
   operationId: string;
+  intent?: "setup" | "resize";
   clientToken?: string;
   blob?: string;
   instanceType?: string;
@@ -244,10 +247,12 @@ export interface AwsWorkerStartRequest {
   resolution?: AwsWorkerSpecResolution;
   expectedInstanceId?: string;
   expectedDesiredSpec?: AwsWorkerSpec;
+  expectedActualSpec?: AwsWorkerSpec;
 }
 
 export interface AwsWorkerOperationSnapshot {
   operationId: string;
+  intent?: "setup" | "resize";
   clientToken?: string;
   phase: AwsWorkerStartPhase;
   message: string;

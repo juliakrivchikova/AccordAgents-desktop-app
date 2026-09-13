@@ -930,3 +930,28 @@ test("the AWS handle records the address the box came back on after a stop/start
   const storedSessionHandleWorker = { ...current, host: "13.218.239.105" };
   assert.equal(resolveCurrentWorkerAddress(storedSessionHandleWorker, current)?.host, cameBackOn);
 });
+
+test("explicit disk input is rejected before settings or AWS are touched instead of silently clamped", async () => {
+  let reads = 0;
+  const settings = { getAwsWorkerCredentials: async () => { reads++; throw new Error("Input must be checked first"); } };
+  const service = new CloudRunAwsService(settings as any);
+  for (const size of [0, 7, 8.5, 1025, NaN, Infinity]) {
+    await assert.rejects(service.prepareWorker({ operationId: "invalid-size", rootVolumeSizeGb: size }), /whole number/);
+  }
+  assert.equal(reads, 0);
+});
+
+test("a size edit refuses discovery of a replacement or missing instance without provisioning", async () => {
+  for (const discovered of [[], [{ instanceId: "i-replacement", state: "running" as const, region: "us-east-1", securityGroupId: "sg-new", instanceType: "t3.small", rootVolumeSizeGb: 40 }]]) {
+    const settings = new FakeSettings();
+    settings.credentials = NEW_CREDS;
+    settings.handle = OLD_HANDLE;
+    const client = new FakeEc2Client();
+    client.discovered = discovered;
+    const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client]]));
+    await assert.rejects(service.prepareWorker({ operationId: "resize-stale", expectedInstanceId: "i-old", rootVolumeSizeGb: 41 }), /instance changed/);
+    assert.equal(client.runCount, 0);
+    assert.equal(settings.handle, OLD_HANDLE);
+    assert.equal(settings.awsRootVolumeSizeGb, 8);
+  }
+});

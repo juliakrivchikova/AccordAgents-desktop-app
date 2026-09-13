@@ -10,7 +10,7 @@ import type {
   AwsWorkerStatus,
   CloudRunWorkerSettings
 } from "../../shared/types";
-import { normalizeAwsInstanceType, normalizeAwsRootVolumeSizeGb } from "../../shared/cloudRuns";
+import { awsRootVolumeSizeError, normalizeAwsInstanceType, normalizeAwsRootVolumeSizeGb } from "../../shared/cloudRuns";
 import { buildBootstrapCommand, parseWorkerBlob } from "./awsWorkerProvisioning";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import { AwsWorkerLifecycle } from "./awsWorkerLifecycle";
@@ -162,6 +162,7 @@ export class CloudRunAwsService {
     rootVolumeSizeGb?: number;
     operationId: string;
     clientToken?: string;
+    expectedInstanceId?: string;
   }): Promise<PreparedAwsWorker> {
     if (this.prepareActive) return this.prepareActive;
     this.prepareActive = this.prepareWorkerUnlocked(request).finally(() => {
@@ -176,7 +177,12 @@ export class CloudRunAwsService {
     rootVolumeSizeGb?: number;
     operationId: string;
     clientToken?: string;
+    expectedInstanceId?: string;
   }): Promise<PreparedAwsWorker> {
+    if (request.rootVolumeSizeGb !== undefined) {
+      const invalidSize = awsRootVolumeSizeError(request.rootVolumeSizeGb);
+      if (invalidSize) throw new Error(invalidSize);
+    }
     const credentials = request.blob?.trim()
       ? parseWorkerBlob(request.blob)
       : await this.settings.getAwsWorkerCredentials();
@@ -188,6 +194,9 @@ export class CloudRunAwsService {
     const desiredDisk = normalizeAwsRootVolumeSizeGb(request.rootVolumeSizeGb ?? publicSettings.cloudRuns.awsRootVolumeSizeGb);
     let matches = await this.discoverWorkers(credentials, false);
     if (matches.length > 1) throw multipleWorkerError(matches);
+    if (request.expectedInstanceId && matches[0]?.instanceId !== request.expectedInstanceId) {
+      throw new Error("The instance changed after the size editor opened. Refresh and review it before applying.");
+    }
     let replacedInstanceId: string | undefined;
     if (matches.length === 0 && request.blob?.trim()) {
       const previousCredentials = await this.settings.getAwsWorkerCredentials();
@@ -452,6 +461,7 @@ export class CloudRunAwsService {
         ...current,
         configured: true,
         handle,
+        actionError: errorMessage(error),
         message: retainedActionFailure("deleted", current.state, errorMessage(error))
       };
     }
@@ -461,6 +471,7 @@ export class CloudRunAwsService {
         ...current,
         configured: true,
         handle,
+        actionError: result.terminateFailed ?? "Termination was not confirmed.",
         message: retainedActionFailure("deleted", current.state, result.terminateFailed ?? "Termination was not confirmed.")
       };
     }
@@ -487,6 +498,7 @@ export class CloudRunAwsService {
         ...current,
         configured: true,
         handle,
+        actionError: errorMessage(error),
         message: retainedActionFailure("stopped", current.state, errorMessage(error))
       };
     }

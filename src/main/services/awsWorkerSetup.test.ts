@@ -16,6 +16,25 @@ const PREPARED: PreparedAwsWorker = {
   created: false
 };
 
+test("explicit type downsizing asks for a decision even if larger capacity was previously accepted", async () => {
+  let runs = 0;
+  const aws = {
+    prepareWorker: async () => ({ ...PREPARED, actualSpec: { ...PREPARED.actualSpec, instanceType: "t3.large" } }),
+    resumePendingVolumeExpansion: async (prepared: PreparedAwsWorker) => prepared,
+    hasAcceptedMismatch: async () => true,
+    ensurePreparedRunning: async () => { runs++; return { host: "x" }; },
+    status: async () => ({ configured: true })
+  };
+  const settings = { saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
+  const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
+  const result = await service.start({ operationId: "downsize", intent: "resize", expectedInstanceId: "i-shared", instanceType: "t3.small", rootVolumeSizeGb: 8 });
+  assert.equal(result.operation.phase, "needs-decision");
+  assert.equal(result.operation.specMismatch?.actual.instanceType, "t3.large");
+  assert.equal(result.operation.specMismatch?.desired.instanceType, "t3.small");
+  assert.match(result.operation.message, /instance type.*differs/);
+  assert.equal(runs, 0);
+});
+
 test("start orchestrates the exact visible phases and reaches ready", async () => {
   const saved: AwsWorkerOperationSnapshot[] = [];
   const phases: string[] = [];
@@ -252,4 +271,31 @@ test("queued doctor progress cannot overwrite the terminal ready snapshot", asyn
     "slow-progress",
     "final-progress"
   ]);
+});
+
+test("size Apply rejects a changed instance before provisioning or modifying anything", async () => {
+  let prepares = 0;
+  const aws = {
+    status: async () => ({ configured: true, state: "running", actualSpec: { ...PREPARED.actualSpec, rootVolumeSizeGb: 64 } }),
+    prepareWorker: async () => { prepares++; return PREPARED; }
+  };
+  const service = new AwsWorkerSetupService(aws as any, {} as any, { getAwsWorkerOperation: async () => undefined, saveAwsWorkerOperation: async () => undefined } as any);
+  const result = await service.start({ operationId: "stale-size", intent: "resize", rootVolumeSizeGb: 41, expectedInstanceId: "i-shared", expectedActualSpec: { instanceType: "t3.small", rootVolumeSizeGb: 40 } });
+  assert.equal(result.operation.phase, "error");
+  assert.match(result.operation.message, /instance changed/);
+  assert.equal(prepares, 0);
+});
+
+test("size Apply cannot shrink the current disk even through direct IPC", async () => {
+  let prepares = 0;
+  const actualSpec = { ...PREPARED.actualSpec, rootVolumeSizeGb: 40 };
+  const aws = {
+    status: async () => ({ configured: true, state: "running", actualSpec }),
+    prepareWorker: async () => { prepares++; return PREPARED; }
+  };
+  const service = new AwsWorkerSetupService(aws as any, {} as any, { getAwsWorkerOperation: async () => undefined, saveAwsWorkerOperation: async () => undefined } as any);
+  const result = await service.start({ operationId: "smaller-size", intent: "resize", rootVolumeSizeGb: 8, expectedInstanceId: "i-shared", expectedActualSpec: actualSpec });
+  assert.equal(result.operation.phase, "error");
+  assert.match(result.operation.message, /cannot shrink/);
+  assert.equal(prepares, 0);
 });

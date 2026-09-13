@@ -5,6 +5,14 @@ export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_OPTIONS = [8, 16, 20, 32, 64, 128, 2
 export const AWS_WORKER_INSTANCE_TYPE_DEFAULT = "t3.small";
 export const AWS_WORKER_INSTANCE_TYPE_OPTIONS = ["t3.small", "t3.medium", "t3.large", "t3.xlarge"] as const;
 
+/** Validate deliberate input; normalization is only for older stored settings. */
+export function awsRootVolumeSizeError(value: unknown): string | undefined {
+  const size = typeof value === "string" && value.trim() ? Number(value) : value;
+  return typeof size !== "number" || !Number.isInteger(size) || size < AWS_WORKER_ROOT_VOLUME_SIZE_GB_MIN || size > AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX
+    ? `Enter a whole number from ${AWS_WORKER_ROOT_VOLUME_SIZE_GB_MIN} to ${AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX} GiB.`
+    : undefined;
+}
+
 export function normalizeAwsInstanceType(value: unknown): string {
   if (typeof value !== "string") {
     return AWS_WORKER_INSTANCE_TYPE_DEFAULT;

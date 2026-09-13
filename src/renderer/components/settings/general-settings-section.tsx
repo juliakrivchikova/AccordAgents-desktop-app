@@ -257,25 +257,13 @@ function CloudRunsControl(props: {
   settings: CloudRunsSettings;
   onSave: (update: CloudRunsSettingsUpdate) => Promise<void>;
 }): JSX.Element {
-  const [draft, setDraft] = useState<CloudRunsSettings>(props.settings);
-  useEffect(() => {
-    setDraft(props.settings);
-  }, [props.settings]);
-
-  const patch = (update: CloudRunsSettingsUpdate): void => {
-    setDraft((current) => ({ ...current, ...update, worker: { ...current.worker, ...(update.worker ?? {}) } }));
-    void props.onSave(update).catch(() => { setDraft(props.settings); });
-  };
-
   return (
     <div className="gen-card" data-testid="machine-instance-settings">
       <div className="gen-row gen-aws-intro">
         <div className="gen-row-desc">Start your instance here, then choose Cloud run in a member&apos;s settings.</div>
       </div>
       <SharedAwsWorkerPanel
-        settings={draft}
-        onInstanceTypeChange={(value) => patch({ awsInstanceType: value })}
-        onDiskSizeChange={(value) => patch({ awsRootVolumeSizeGb: value })}
+        settings={props.settings}
         onDeleted={() => props.onSave({ mode: "aws" })}
       />
       <AwsInstanceDiagnostics />
