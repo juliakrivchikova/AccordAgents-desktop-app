@@ -3763,6 +3763,62 @@ test("run location is editable only before a participant has durable run history
   );
 });
 
+test("new cloud chat reports preparation before persistence and Stop prevents creation", { timeout: 10_000 }, async () => {
+  const { service, storage } = testService({ agents: installedChatAgents() });
+  const controller = new AbortController();
+  const progress: ReviewProgress[] = [];
+  let reached!: () => void;
+  const preparing = new Promise<void>(resolve => { reached = resolve; });
+  service.setMachineProjectPreparation(async (_id, _repo, signal, report) => {
+    assert.equal(signal, controller.signal);
+    report?.("Copying project · 42%");
+    reached();
+    await new Promise<void>(resolve => signal!.addEventListener("abort", () => resolve(), { once: true }));
+    // Even a dependency which resolves after cancellation cannot create a chat.
+  });
+  const creation = service.createConversation({ runId: "create-cloud", title: "hello", repoPath: "/test/project",
+    participants: [{ kind: "codex-cli", handle: "cloud", roleConfigId: ROLE.id, homeMachineId: "cloud" }]
+  }, controller.signal, event => progress.push(event));
+  const rejected = assert.rejects(creation, /cancelled/);
+  await preparing;
+  assert.equal(storage.current, undefined);
+  assert.ok(progress.some(item => item.runId === "create-cloud" && item.message.includes("42%")));
+  controller.abort(new Error("Chat creation cancelled."));
+  await rejected;
+  assert.equal(storage.current, undefined);
+  service.setMachineProjectPreparation(async () => undefined);
+  const retried = await service.createConversation({ title: "hello", repoPath: "/test/project",
+    participants: [{ kind: "codex-cli", handle: "cloud", roleConfigId: ROLE.id, homeMachineId: "cloud" }] });
+  assert.equal(storage.current.id, retried.conversation.id);
+});
+
+test("creation cleanup only archives an empty chat after queued messages have been saved", { timeout: 10_000 }, async () => {
+  const conversation = chatConversation([chatParticipant("codex-cli")]);
+  conversation.messages = [];
+  const { service, storage } = testService({ conversation });
+  (service as any).cliRunner.closeConversationSessions = async () => undefined;
+  let release!: () => void;
+  let entered!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  const mutation = (service as any).withChatMutation(conversation, async () => {
+    entered();
+    await hold;
+    conversation.messages.push({ id: "concurrent-user", role: "user", content: "Keep this message", createdAt: NOW });
+    await (service as any).saveConversation(conversation);
+  });
+  await reached;
+  const cleanup = service.setArchived({ conversationId: conversation.id, archived: true, onlyIfEmpty: true });
+  release();
+  await mutation;
+  const kept = await cleanup;
+  assert.equal(kept?.metadata.archived, undefined);
+  assert.equal(storage.current.messages[0].id, "concurrent-user");
+  storage.current.messages = [];
+  const archived = await service.setArchived({ conversationId: conversation.id, archived: true, onlyIfEmpty: true });
+  assert.equal(archived?.metadata.archived, true);
+});
+
 test("cloud project setup precedes saving the machine, and the first run locks it before setup", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = { ...chatConversation([participant]), repoPath: "/Users/test/project" };

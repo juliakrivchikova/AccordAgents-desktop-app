@@ -177,3 +177,38 @@ test("replication selects each machine's native project path without changing th
   assert.equal(one.repoPath, "/home/one/project");
   assert.equal(conversationOnMachine(one, "two").repoPath, "/home/two/project");
 });
+
+
+test("cancelling a queued project preserves the active copy and a later retry", async () => {
+  const h = harness(); await h.service.prepare(request, () => {});
+  let release!: () => void;
+  let reached!: () => void;
+  const copying = new Promise<void>(resolve => { reached = resolve; });
+  const base = h.options.bootstrapProject;
+  h.options.bootstrapProject = async (...args) => { reached(); await new Promise<void>(resolve => { release = resolve; }); return base(...args); };
+  const first = h.service.prepareProject("machine-1", "/first");
+  await copying;
+  const controller = new AbortController();
+  const second = h.service.prepareProject("machine-1", "/second", controller.signal);
+  const cancelled = assert.rejects(second, /cancelled/);
+  controller.abort(new Error("cancelled"));
+  await cancelled;
+  assert.equal(h.calls.filter(call => call === "project").length, 0);
+  h.options.bootstrapProject = base;
+  const third = h.service.prepareProject("machine-1", "/third");
+  release();
+  await Promise.all([first, third]);
+  assert.deepEqual(await h.service.repositoryPaths("/second"), {});
+  assert.ok((await h.service.repositoryPaths("/third"))["machine-1"]);
+  assert.equal(h.calls.filter(call => call === "project").length, 2);
+});
+
+test("a cancelled copy which resolves late cannot publish a prepared project mapping", async () => {
+  const h = harness(); await h.service.prepare(request, () => {});
+  const controller = new AbortController();
+  const base = h.options.bootstrapProject;
+  h.options.bootstrapProject = async (...args) => { controller.abort(new Error("cancelled")); return base(...args); };
+  await assert.rejects(h.service.prepareProject("machine-1", "/project", controller.signal), /cancelled/);
+  assert.deepEqual(await h.service.repositoryPaths("/project"), {});
+  assert.deepEqual(await new CloudRunPreparationService(h.options).repositoryPaths("/project"), {});
+});

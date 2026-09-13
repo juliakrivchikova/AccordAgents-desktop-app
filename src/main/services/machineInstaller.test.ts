@@ -119,6 +119,7 @@ function harness(options: {
   connected?: boolean;
   mirror?: string;
   mirrorCopyError?: string;
+  onMirrorCopy?: (request: import("./remoteMirrorSync").RemoteMirrorSyncRequest) => Promise<void>;
   bundleDir?: string;
   doctor?: CloudRunWorkerDoctorReport;
   ownerFailure?: string | Error;
@@ -188,6 +189,7 @@ function harness(options: {
     mirrorSync: {
       async syncUp(request) {
         syncedUp.push(request.remotePath);
+        await options.onMirrorCopy?.(request);
         if (options.mirrorCopyError) throw new Error(options.mirrorCopyError);
       },
       async syncDown() { throw new Error("syncDown must never run during a machine install."); }
@@ -853,4 +855,24 @@ test("a machine without the host lock runtime is refused before transferring a r
   assert.equal(result.snapshot.phase, "error");
   assert.match(result.snapshot.error ?? "", /python3/);
   assert.equal(h.uploads.length, 0);
+});
+
+
+test("Stop during project copy reaches the transfer and never publishes its staged files", async () => {
+  const controller = new AbortController();
+  const messages: string[] = [];
+  const h = harness({ mirror: "path=/root/repo\nstate=absent\n", onMirrorCopy: async request => {
+    assert.equal(request.signal, controller.signal);
+    await request.onProgress?.({ percent: 42 });
+    controller.abort(new Error("cancelled"));
+  } });
+  h.records.set("m1", { machineId: "m1", target: TARGET, ...LAYOUT });
+  await assert.rejects(h.service.bootstrapProjectMirror({ machineId: "m1", localPath: process.cwd() }, controller.signal,
+    message => messages.push(message)), /cancelled/);
+  assert.ok(messages.some(message => message.includes("42%")));
+  assert.ok(!h.calls.some(call => call.script.includes("mv -Tn --")));
+  const cleanup = h.calls.find(call => call.script === `rm -rf -- '${h.syncedUp[0]}'`);
+  assert.ok(cleanup);
+  assert.equal(cleanup.signal, undefined, "cleanup must run even with an aborted request");
+  assert.ok(h.calls.filter(call => call !== cleanup).every(call => call.signal === controller.signal));
 });

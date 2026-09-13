@@ -92,6 +92,7 @@ export interface MachineSshExecRequest {
    *  so it is never logged and never placed on a command line. */
   input?: string;
   onStdout?: (chunk: string) => void;
+  signal?: AbortSignal;
   maintenance?: MachineMaintenanceTarget;
 }
 
@@ -246,15 +247,17 @@ export class MachineInstallerService {
     return parseMachineProbe(stdout);
   }
 
-  async ensureEnvironmentOwner(record: Pick<MachineInstallRecord, "machineId" | "target" | "installRoot">, readOnly = false): Promise<void> {
+  async ensureEnvironmentOwner(record: Pick<MachineInstallRecord, "machineId" | "target" | "installRoot">, readOnly = false, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if (!record.installRoot.startsWith("/")) throw new Error("Finish machine setup before using its files.");
-    await this.claimEnvironmentOwner(record.target, record.installRoot, await this.options.getEnrollmentJson(record.machineId), readOnly);
+    await this.claimEnvironmentOwner(record.target, record.installRoot, await this.options.getEnrollmentJson(record.machineId), readOnly, signal);
   }
 
-  private async claimEnvironmentOwner(target: MachineSshTarget, installRoot: string, enrollmentJson: string, readOnly = false): Promise<void> {
+  private async claimEnvironmentOwner(target: MachineSshTarget, installRoot: string, enrollmentJson: string, readOnly = false, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     try {
       await this.sshExec({ target, script: machineClaimEnvironmentScript(installRoot, readOnly),
-        input: enrollmentJson, timeoutMs: SHORT_TIMEOUT_MS });
+        input: enrollmentJson, timeoutMs: SHORT_TIMEOUT_MS, signal });
     } catch (error) {
       // SSH's generic exit-code message hides Python's owner refusal. Expose
       // only our fixed diagnostic, never arbitrary stderr or enrollment data.
@@ -762,13 +765,15 @@ export class MachineInstallerService {
   // ---- project mirror -----------------------------------------------------
 
   /** Reads the mirror without changing it. */
-  async inspectProjectMirror(machineId: string, localPath: string): Promise<MachineMirrorInspection> {
+  async inspectProjectMirror(machineId: string, localPath: string, signal?: AbortSignal): Promise<MachineMirrorInspection> {
+    signal?.throwIfAborted();
     const record = await this.requireRecord(machineId);
     const repoPath = remoteMirrorPath(`${record.installRoot}/workspace`, localPath);
     const stdout = await this.sshExec({
       target: record.target,
       script: machineMirrorProbeScript(repoPath),
-      timeoutMs: PROBE_TIMEOUT_MS
+      timeoutMs: PROBE_TIMEOUT_MS,
+      signal
     });
     return parseMachineMirrorProbe(stdout);
   }
@@ -781,10 +786,13 @@ export class MachineInstallerService {
    * An existing mirror is never replaced — not a clean one, and certainly not a
    * dirty one. There is no automatic resync and no write-back to this desktop.
    */
-  async bootstrapProjectMirror(request: MachineMirrorBootstrapRequest): Promise<MachineMirrorBootstrapResult> {
+  async bootstrapProjectMirror(request: MachineMirrorBootstrapRequest, signal?: AbortSignal, progress?: (message: string) => void): Promise<MachineMirrorBootstrapResult> {
+    signal?.throwIfAborted();
     const record = await this.requireRecord(request.machineId);
-    await this.ensureEnvironmentOwner(record);
-    const inspection = await this.inspectProjectMirror(request.machineId, request.localPath);
+    progress?.("Checking the cloud copy of your project…");
+    await this.ensureEnvironmentOwner(record, false, signal);
+    const inspection = await this.inspectProjectMirror(request.machineId, request.localPath, signal);
+    signal?.throwIfAborted();
     if (inspection.state === "dirty") {
       return {
         inspection,
@@ -812,14 +820,21 @@ export class MachineInstallerService {
     const stagedPath = `${repoPath}.bootstrap-${randomUUID()}`;
     const maintenance = maintenanceFor(record);
     try {
+      progress?.("Copying your project to the cloud for the first time…");
       await this.mirrorSync.syncUp({
         worker: { ...record.target, host: record.target.host },
         localPath: request.localPath,
         remotePath: stagedPath,
-        maintenance
+        maintenance,
+        signal,
+        onProgress: ({ percent }) => {
+          if (!signal?.aborted) progress?.(`Copying your project to the cloud · ${percent}%`);
+        }
       });
+      signal?.throwIfAborted();
+      progress?.("Finishing the cloud project setup…");
       await this.sshExec({ target: record.target, script: machinePublishMirrorScript(stagedPath, repoPath),
-        timeoutMs: SHORT_TIMEOUT_MS, maintenance });
+        timeoutMs: SHORT_TIMEOUT_MS, maintenance, signal });
     } finally {
       // This random staging directory belongs only to this copy. A failed
       // transfer/restart must not expose a half-copied project as runnable.
@@ -827,7 +842,7 @@ export class MachineInstallerService {
         timeoutMs: SHORT_TIMEOUT_MS, maintenance }).catch(() => undefined);
     }
     return {
-      inspection: await this.inspectProjectMirror(request.machineId, request.localPath),
+      inspection: await this.inspectProjectMirror(request.machineId, request.localPath, signal),
       action: "created",
       message: "The project was copied to the machine. From now on it is the machine's own working copy; it will not be overwritten by another copy."
     };
@@ -1160,6 +1175,7 @@ async function defaultMachineSshExec(request: MachineSshExecRequest): Promise<st
   ], {
     input: request.input ?? request.script,
     timeoutMs: request.timeoutMs,
+    signal: request.signal,
     onStdout: request.onStdout
   });
   return result.stdout;

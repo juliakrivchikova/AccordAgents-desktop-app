@@ -137,6 +137,7 @@ export interface AppState {
   archivedConversationIdsRef: React.MutableRefObject<Set<string>>;
   lastViewedAtRef: React.MutableRefObject<Record<string, string>>;
   startingChatRef: React.MutableRefObject<boolean>;
+  chatCreationRef: React.MutableRefObject<AbortController | undefined>;
   railViewRef: React.MutableRefObject<RailView>;
 }
 
@@ -201,6 +202,7 @@ export function useAppState(): AppState {
   const archivedConversationIdsRef = useRef<Set<string>>(new Set());
   const lastViewedAtRef = useRef<Record<string, string>>(readLastViewedAtFromStorage());
   const startingChatRef = useRef(false);
+  const chatCreationRef = useRef<AbortController>();
   // Latest-value ref so long-lived IPC subscriptions (which only re-subscribe on
   // currentRunId changes) can read the current view state without stale closures.
   const railViewRef = useRef<RailView>(railView);
@@ -240,6 +242,6 @@ export function useAppState(): AppState {
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
     setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,
     activityRefreshRequestRef, summaryRefreshRequestRef, agentRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
-    lastViewedAtRef, startingChatRef, railViewRef
+    lastViewedAtRef, startingChatRef, chatCreationRef, railViewRef
   };
 }

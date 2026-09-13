@@ -464,7 +464,7 @@ const cloudRunPreparation = new CloudRunPreparationService({
   createMachine: async (name, instanceId) => (await createMachine({ name }, instanceId)).machine,
   install: (request, progress) => machineInstallerService.install(request, progress),
   isConnected: (machineId) => Boolean(machineLinkService?.isMachineConnected(machineId)),
-  bootstrapProject: (machineId, localPath) => machineInstallerService.bootstrapProjectMirror({ machineId, localPath }),
+  bootstrapProject: (machineId, localPath, signal, progress) => machineInstallerService.bootstrapProjectMirror({ machineId, localPath }, signal, progress),
   saveInstall: (record) => settingsService.saveMachineInstall(record),
   prepareProvider: async (worker, provider, record, progress) => {
     if (!worker.host) throw new Error("AWS did not return an address for this instance.");
@@ -511,7 +511,7 @@ async function machinePowerHandoffForPairing(pairing: MobilePairingPackage): Pro
   }
 }
 chatService.setCloudRunAwsService(cloudRunAwsService);
-chatService.setMachineProjectPreparation((machineId, localPath) => cloudRunPreparation.prepareProject(machineId, localPath));
+chatService.setMachineProjectPreparation((machineId, localPath, signal, progress) => cloudRunPreparation.prepareProject(machineId, localPath, signal, progress));
 chatService.setCloudRunDoctorService(cloudRunDoctorService);
 wireChatAppToolHandlers(appMcpService, chatService);
 // Artifacts persist in their own tables of the same SQLite database as
@@ -811,6 +811,10 @@ async function recoverLocalApprovalActions(): Promise<void> {
 }
 
 const activeReviews = new Map<string, AbortController>();
+const activeChatCreations = new Set<AbortController>();
+app.on("before-quit", () => {
+  for (const controller of activeChatCreations) controller.abort();
+});
 
 function appSkillsSourceRoot(): string {
   return app.isPackaged
@@ -2509,8 +2513,24 @@ function registerIpc(): void {
   ipcMain.handle("conversations:save-plan-item-review", async (_event, request: PlanItemReviewRequest) => {
     return consensusService.savePlanItemReview(request);
   });
-  ipcMain.handle("chat:create", async (_event, request: CreateChatConversationRequest) => {
-    return chatService.createConversation(request);
+  ipcMain.handle("chat:create", async (event, request: CreateChatConversationRequest) => {
+    const runId = request.runId ?? randomUUID();
+    if (activeReviews.has(runId)) throw new Error("This chat action is already running.");
+    const controller = new AbortController();
+    activeReviews.set(runId, controller);
+    activeChatCreations.add(controller);
+    const cancelCreation = (): void => controller.abort();
+    event.sender.once("destroyed", cancelCreation);
+    try {
+      return await chatService.createConversation({ ...request, runId }, controller.signal, emitReviewProgress);
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error("Chat creation cancelled.");
+      throw error;
+    } finally {
+      event.sender.removeListener("destroyed", cancelCreation);
+      activeChatCreations.delete(controller);
+      activeReviews.delete(runId);
+    }
   });
   ipcMain.handle("chat:rename", async (_event, request: RenameChatConversationRequest) => {
     return chatService.renameConversation(request);

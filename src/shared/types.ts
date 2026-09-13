@@ -1509,6 +1509,7 @@ export interface ChatParticipantInput {
 }
 
 export interface CreateChatConversationRequest {
+  runId?: string;
   title?: string;
   repoPath?: string;
   skipDefaultParticipants?: boolean;
@@ -1558,6 +1559,7 @@ export interface RenameChatConversationRequest {
 export interface SetChatArchivedRequest {
   conversationId: string;
   archived: boolean;
+  onlyIfEmpty?: boolean;
 }
 
 export interface DeleteChatConversationRequest {

@@ -760,7 +760,7 @@ export class ChatService {
   /** Set inside a machine runtime: the desktop's record id for this machine. */
   private hostMachineId?: string;
   private machineRuntime = false;
-  private prepareMachineProject?: (machineId: string, localPath: string) => Promise<void>;
+  private prepareMachineProject?: (machineId: string, localPath: string, signal?: AbortSignal, progress?: (message: string) => void) => Promise<void>;
   private readonly participantRunSettledListeners = new Set<(run: ChatParticipantRun) => Promise<void> | void>();
   private readonly participantRunCompletionWaiters = new Map<string, Set<() => void>>();
 
@@ -893,14 +893,15 @@ export class ChatService {
   /** Machines transport: participants whose home is an enrolled machine run
    *  there through the machine link; the desktop keeps the pending bubble,
    *  progress, and the final messages exactly as for a local participant. */
-  setMachineProjectPreparation(prepare: (machineId: string, localPath: string) => Promise<void>): void {
+  setMachineProjectPreparation(prepare: NonNullable<ChatService["prepareMachineProject"]>): void {
     this.prepareMachineProject = prepare;
   }
 
-  private async prepareParticipantProjects(repoPath: string | undefined, participants: Array<{ homeMachineId?: string }>): Promise<void> {
+  private async prepareParticipantProjects(repoPath: string | undefined, participants: Array<{ homeMachineId?: string }>, signal?: AbortSignal, progress?: (message: string) => void): Promise<void> {
     if (!repoPath || !this.prepareMachineProject) return;
     for (const id of new Set(participants.map(participant => participant.homeMachineId).filter((id): id is string => Boolean(id)))) {
-      await this.prepareMachineProject(id, repoPath);
+      signal?.throwIfAborted();
+      await this.prepareMachineProject(id, repoPath, signal, progress);
     }
   }
 
@@ -1027,7 +1028,12 @@ export class ChatService {
     return hydrated;
   }
 
-  async createConversation(request: CreateChatConversationRequest): Promise<StartReviewResult> {
+  async createConversation(request: CreateChatConversationRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
+    signal?.throwIfAborted();
+    const report = (message: string): void => {
+      if (request.runId && !signal?.aborted) this.emitProgress(request.runId, progress, "initial", message);
+    };
+    report("Checking participants…");
     const now = new Date().toISOString();
     const requestedTitle = request.title ?? "";
     const requestedRepoPath = request.repoPath?.trim() || undefined;
@@ -1043,6 +1049,7 @@ export class ChatService {
     let stage = "initializing";
     try {
       const agents = await this.detectAgentsForReadiness("submit");
+      signal?.throwIfAborted();
       await this.settings.ensureAssistantProviderDefault(agents);
       const settings = await this.settings.ensureGenericChatParticipantSeeds(agents);
       const readyKinds = readyProviderKinds(agents, settings.providers);
@@ -1079,7 +1086,9 @@ export class ChatService {
       const requestedParticipants = await this.validateParticipants(participantInputs, [], true);
       const participants = await this.ensureAdministratorParticipant(requestedParticipants, assistantProviderKind);
       stage = "preparing-cloud-project";
-      await this.prepareParticipantProjects(requestedRepoPath, participants);
+      signal?.throwIfAborted();
+      await this.prepareParticipantProjects(requestedRepoPath, participants, signal, report);
+      signal?.throwIfAborted();
       conversation = {
         id: randomUUID(),
         title: normalizeAutoChatTitle(requestedTitle),
@@ -1103,7 +1112,9 @@ export class ChatService {
       this.rebuildLastMessagesByParticipant(conversation);
       const logPayload = this.chatCreateLogPayload(conversation);
       stage = "saving";
+      report("Opening your chat…");
       await this.debugLogs.write("chat.create.save-started", logPayload).catch(() => undefined);
+      signal?.throwIfAborted();
       await this.saveConversation(conversation);
       stage = "saved";
       await this.debugLogs.write("chat.create.saved", logPayload).catch(() => undefined);
@@ -1221,6 +1232,10 @@ export class ChatService {
         throw new Error("Only chat conversations can be archived.");
       }
       return this.withChatMutation(conversation, async () => {
+        if (request.archived && request.onlyIfEmpty && (
+          conversation.messages.some(item => item.role !== "system")
+          || conversation.metadata.running === true || this.chatHasLiveWork(conversation.id)
+        )) return conversation;
         if (conversation.metadata.running === true || this.chatHasLiveWork(conversation.id)) {
           throw new Error("Chat cannot be archived while members are running.");
         }

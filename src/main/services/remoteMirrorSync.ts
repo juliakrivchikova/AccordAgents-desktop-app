@@ -225,9 +225,11 @@ export const defaultRemoteMirrorSync: RemoteMirrorSyncRunner = {
         signal: request.signal
       });
       await assertRemoteMirrorHasSpace(request, localDir, target, sshArgs);
+      // The setup call carries stdin; cleanup does not and must still run
+      // after cancellation to remove only this transfer's temporary script.
       await withMachineRsyncPath(request.maintenance, (command, input) => runCommand("ssh", [
         ...sshArgs, target, command
-      ], { input, timeoutMs: 30_000 }), (rsyncPath) => runCommand("rsync", buildMirrorUpSyncRsyncArgs({
+      ], { input, timeoutMs: 30_000, signal: input === undefined ? undefined : request.signal }), (rsyncPath) => runCommand("rsync", buildMirrorUpSyncRsyncArgs({
         progressArgs,
         rshCommand: rsyncRshCommand(sshArgs),
         source: `${localDir}/`,
@@ -237,6 +239,7 @@ export const defaultRemoteMirrorSync: RemoteMirrorSyncRunner = {
       }), {
         timeoutMs: request.timeoutMs ?? REMOTE_MIRROR_SYNC_TIMEOUT_MS,
         signal: request.signal,
+        killProcessGroup: true,
         onStdout: emitProgress,
         onStderr: emitProgress
       }));

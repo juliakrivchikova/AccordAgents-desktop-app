@@ -1,12 +1,12 @@
 import { BarChart3, Clock3, Loader2 } from "lucide-react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 import { Skeleton } from "@/components/ui/skeleton";
 import "./loading-states.css";
 
 export interface AppLoadingStateProps {
   title?: string;
-  description?: string;
+  description?: ReactNode;
 }
 
 export function AppLoadingState({

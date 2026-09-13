@@ -163,17 +163,22 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
     state.startingChatRef.current = true;
     const runId = crypto.randomUUID();
+    const creation = new AbortController();
+    state.chatCreationRef.current = creation;
     state.setCurrentRunId(runId);
     state.setBusy(true);
     let createdConversationId: string | undefined;
     try {
       const result = await window.consensus.createChatConversation({
+        runId,
         title: initialChatTitle(initialMessage, imageAttachments),
         repoPath: state.repoPath.trim() || undefined,
         skipDefaultParticipants: participants.length === 0,
         participants
       });
       createdConversationId = result.conversation.id;
+      creation.signal.throwIfAborted();
+      state.chatCreationRef.current = undefined;
       state.setConversation(result.conversation);
       state.setWarnings(result.warnings);
       const sendResult = await window.consensus.sendChatMessage({
@@ -196,30 +201,33 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setNewChatSkillMentions([]);
       state.setNewChatPluginMentions([]);
       state.setSelectedChatParticipantRuntimeOverrides({});
-      await conversationActions.refreshConversations();
+      await conversationActions.refreshConversations().catch(() => undefined);
       return true;
     } catch (caught) {
       const message = errorText(caught);
       if (createdConversationId) {
-        // Ingest failed before the first message was persisted, so the created
-        // conversation is empty. Soft-delete it and return to the new-chat screen
-        // with the text restored instead of stranding an empty conversation.
-        state.setConversation(undefined);
-        state.setQuestion(draftMessage);
-        try {
-          await window.consensus.setChatArchived({ conversationId: createdConversationId, archived: true });
-          await conversationActions.refreshConversations();
-        } catch {
-          // Best-effort cleanup; leave the empty conversation if archiving fails.
+        const conversationId = createdConversationId;
+        // A failed send can already have persisted. Check under the service's
+        // mutation lock so a concurrent message is never archived as empty.
+        const saved = await window.consensus.setChatArchived({
+          conversationId, archived: true, onlyIfEmpty: true
+        }).catch(() => window.consensus.getConversation(conversationId).catch(() => undefined));
+        if (saved?.metadata.archived === true) {
+          state.setConversation(undefined);
+          state.setQuestion(draftMessage);
+        } else if (saved) {
+          state.setConversation(saved);
         }
+        await conversationActions.refreshConversations().catch(() => undefined);
       }
       if (message.toLowerCase().includes("cancel")) {
-        state.setWarnings((current) => [...current, "Chat turn cancelled."]);
+        state.setWarnings((current) => [...current, creation.signal.aborted ? "Chat creation cancelled." : "Chat turn cancelled."]);
       } else {
         state.setError(message);
       }
       return false;
     } finally {
+      state.chatCreationRef.current = undefined;
       state.setBusy(false);
       state.setCurrentRunId(undefined);
       state.startingChatRef.current = false;

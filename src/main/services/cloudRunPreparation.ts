@@ -16,7 +16,7 @@ interface Options {
   createMachine(name: string, awsInstanceId: string): Promise<MachineRecord>;
   install(request: MachineInstallRequest, progress: (snapshot: MachineInstallSnapshot) => void): Promise<MachineInstallResult>;
   isConnected(machineId: string): boolean;
-  bootstrapProject(machineId: string, localPath: string): Promise<MachineMirrorBootstrapResult>;
+  bootstrapProject(machineId: string, localPath: string, signal?: AbortSignal, progress?: (message: string) => void): Promise<MachineMirrorBootstrapResult>;
   saveInstall(record: MachineInstallRecord): Promise<void>;
   prepareProvider(worker: CloudRunWorkerSettings, provider: PrepareCloudRunRequest["provider"], record: MachineInstallRecord,
     progress: (snapshot: Omit<CloudRunPreparationProgress, "operationId">) => void): Promise<void>;
@@ -55,15 +55,23 @@ export class CloudRunPreparationService {
 
   /** Called only when creating a chat or choosing/adding its machine member.
    * No SSH or copying belongs in the subsequent message/stream path. */
-  async prepareProject(machineId: string, localPath: string): Promise<void> {
+  async prepareProject(machineId: string, localPath: string, signal?: AbortSignal, progress?: (message: string) => void): Promise<void> {
+    signal?.throwIfAborted();
+    progress?.("Preparing the project on your cloud machine…");
     const previous = this.projectTasks.get(machineId) ?? Promise.resolve();
+    let started = false;
     const task = previous.catch(() => undefined).then(async () => {
+      started = true;
+      signal?.throwIfAborted();
       const index = await this.projectIndex();
+      signal?.throwIfAborted();
       if (index.get(machineId)?.[localPath]) return;
       const records = await this.options.listInstalls();
       const record = records.find(item => item.machineId === machineId);
       if (!record) return; // Manually enrolled machines keep their own path.
-      const result = await this.options.bootstrapProject(machineId, localPath);
+      signal?.throwIfAborted();
+      const result = await this.options.bootstrapProject(machineId, localPath, signal, progress);
+      signal?.throwIfAborted();
       // A dirty checkout is already the machine's working copy. Keep every
       // change and worktree, and run there; never copy over it to make it clean.
       if (!["clean", "dirty", "directory"].includes(result.inspection.state) || !result.inspection.path.startsWith("/")) {
@@ -72,12 +80,22 @@ export class CloudRunPreparationService {
       const current = (await this.options.listInstalls()).find(item => item.machineId === machineId);
       if (!current) throw new Error("The machine was removed during project setup.");
       const projects = { ...current.projects, [localPath]: result.inspection.path };
+      signal?.throwIfAborted();
       await this.options.saveInstall({ ...current, projects });
       index.set(machineId, projects);
     });
     this.projectTasks.set(machineId, task);
-    try { await task; }
-    finally { if (this.projectTasks.get(machineId) === task) this.projectTasks.delete(machineId); }
+    const forget = (): void => { if (this.projectTasks.get(machineId) === task) this.projectTasks.delete(machineId); };
+    void task.then(forget, forget);
+    // Cancelling a queued caller must not abort another chat's copy, release
+    // its queue reservation early, or make the caller wait for that copy.
+    let abortQueued: (() => void) | undefined;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      abortQueued = () => { if (!started) reject(signal?.reason); };
+      signal?.addEventListener("abort", abortQueued, { once: true });
+    });
+    try { await Promise.race([task, cancelled]); }
+    finally { if (abortQueued) signal?.removeEventListener("abort", abortQueued); }
   }
 
   async prepare(request: PrepareCloudRunRequest, progress: (snapshot: CloudRunPreparationProgress) => void): Promise<PrepareCloudRunResult> {

@@ -1,4 +1,5 @@
 import { ChatConversationView } from "../chat/chat-conversation-view";
+import { ChatCreationState } from "../chat/chat-creation-state";
 import { SlackView } from "../review/review-view";
 import { AppLoadingState } from "../loading-states";
 import { planDecisionReplies } from "../review/review-conversation-data";
@@ -48,7 +49,11 @@ export function ConversationPanel({
   }
   return (
     <section className={`conversation-panel ${view.conversationKind === "chat" ? "chat-conversation-panel" : ""}`}>
-      {view.isOpeningConversation ? (
+      {state.busy && !state.conversation && state.startingChatRef.current ? (
+        <ChatCreationState key={state.currentRunId}
+          progress={[...state.progressLog].reverse().find(item => item.runId === state.currentRunId)}
+          stopping={Boolean(state.chatCreationRef.current?.signal.aborted)} />
+      ) : view.isOpeningConversation ? (
         <AppLoadingState title="Loading chat" description={openingConversationDescription} />
       ) : view.conversationKind === "chat" && state.conversation ? (
         <ChatConversationView

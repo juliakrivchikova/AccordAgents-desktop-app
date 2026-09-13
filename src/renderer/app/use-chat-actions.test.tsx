@@ -84,6 +84,7 @@ test("stale readiness refreshes before creating without a per-chat provider over
     selectedChatParticipantConfigIds: new Set<string>(),
     selectedChatParticipantRuntimeOverrides: {},
     startingChatRef: { current: false },
+    chatCreationRef: { current: undefined },
     repoPath: "",
     setError: (value: string | undefined) => { error = value; },
     setWarnings: () => undefined,
@@ -182,6 +183,7 @@ test("New Chat runtime overrides are sent for edited Assistant and selected save
       }
     },
     startingChatRef: { current: false },
+    chatCreationRef: { current: undefined },
     repoPath: "",
     setError: (value: string | undefined) => { error = value; },
     setWarnings: () => undefined,
@@ -245,6 +247,7 @@ test("stale New Chat readiness refresh failure fails closed and preserves the co
     newChatSkillMentions: [{ frontmatterName: "office-hours" }],
     newChatPluginMentions: [{ name: "fixture-plugin", displayName: "Fixture" }],
     startingChatRef: { current: false },
+    chatCreationRef: { current: undefined },
     setError: (value: string | undefined) => { error = value; },
     setWarnings: () => undefined
   } as unknown as AppState;
