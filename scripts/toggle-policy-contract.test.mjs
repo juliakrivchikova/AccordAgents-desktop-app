@@ -7,6 +7,8 @@ function read(path) {
 }
 
 const generalSettings = read("src/renderer/components/settings/general-settings-section.tsx");
+const awsDiagnostics = read("src/renderer/components/settings/aws-instance-diagnostics.tsx");
+const awsConnection = read("src/renderer/components/settings/aws-worker-connection-form.tsx");
 const awsWorkerPanel = read("src/renderer/components/settings/aws-worker-panel.tsx");
 const environmentSettings = read("src/renderer/components/settings/environment-settings-section.tsx");
 const toggleCss = read("src/renderer/styles/views/content-markdown.css");
@@ -24,10 +26,10 @@ test("the machine instance panel offers nothing the deleted worker used to need"
   assert.doesNotMatch(generalSettings, /placeholder="Codex path"/);
   // Checking and preparing the instance are retained by the resolution and
   // must stay reachable; what they may not offer is a hand-written worker.
-  assert.match(generalSettings, /diagnoseCloudRunWorker\(undefined\)/);
-  assert.match(generalSettings, /setupCloudRunWorker\(undefined\)/);
-  assert.match(generalSettings, /data-testid="machine-instance-check"/);
-  assert.match(generalSettings, /data-testid="machine-instance-setup"/);
+  assert.match(awsDiagnostics, /diagnoseCloudRunWorker\(undefined\)/);
+  assert.match(awsDiagnostics, /setupCloudRunWorker\(undefined\)/);
+  assert.match(awsDiagnostics, /data-testid="machine-instance-check"/);
+  assert.match(awsDiagnostics, /data-testid="machine-instance-setup"/);
   assert.doesNotMatch(generalSettings, /Cloud Runs \(beta\)/);
 });
 
@@ -37,7 +39,7 @@ test("the surviving worker copy button uses a guarded exact-payload clipboard wr
   assert.equal(generalSettings.match(/writeClipboardText\(/g)?.length, undefined);
   assert.equal(awsWorkerPanel.match(/writeClipboardText\(/g)?.length, 1);
   assert.match(awsWorkerPanel, /writeClipboardText\(command,/);
-  assert.equal(awsWorkerPanel.match(/\? "Copy failed"/g)?.length, 1);
+  assert.equal(awsConnection.match(/\? "Copy failed"/g)?.length, 1);
   assert.doesNotMatch(generalSettings, /await navigator\.clipboard\.writeText/);
   assert.doesNotMatch(awsWorkerPanel, /await navigator\.clipboard\.writeText/);
 });

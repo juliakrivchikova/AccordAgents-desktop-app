@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, ChevronDown, Copy, Server } from "lucide-react";
+import { ChevronDown, Server } from "lucide-react";
 
 import type {
   AwsWorkerOperationSnapshot,
@@ -14,6 +14,8 @@ import {
   normalizeAwsRootVolumeSizeGb
 } from "../../../shared/cloudRuns";
 import { writeClipboardText, type ClipboardWriteResult } from "../../../shared/clipboard";
+
+import { AwsWorkerConnectionForm } from "./aws-worker-connection-form";
 
 type ClipboardFeedback = "idle" | ClipboardWriteResult;
 type ConfirmAction = "stop" | "delete" | "recreate" | null;
@@ -34,6 +36,13 @@ export function AwsWorkerPanel(props: {
   const [confirm, setConfirm] = useState<ConfirmAction>(null);
   const [copyFeedback, setCopyFeedback] = useState<ClipboardFeedback>("idle");
   const [actionMessage, setActionMessage] = useState<string>();
+  const [actionFailed, setActionFailed] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [authorizationOpen, setAuthorizationOpen] = useState(false);
+  const showError = (error: unknown): void => {
+    setActionMessage(error instanceof Error ? error.message : String(error));
+    setActionFailed(true);
+  };
   const diskOptions = useMemo(() => {
     const options: number[] = [...AWS_WORKER_ROOT_VOLUME_SIZE_GB_OPTIONS];
     return options.includes(props.settings.awsRootVolumeSizeGb)
@@ -45,17 +54,25 @@ export function AwsWorkerPanel(props: {
     void window.consensus.getAwsWorkerStatus().then((next) => {
       setStatus(next);
       setOperation(next.operation ?? null);
-    }).catch(() => undefined);
+      setActionMessage(next.message);
+    }).catch(showError);
   }, []);
 
   useEffect(() => window.consensus.onAwsWorkerProgress((progress) => {
-    if (!activeOperationId || progress.operationId === activeOperationId) setOperation(progress);
+    if (!activeOperationId || progress.operationId === activeOperationId) {
+      setOperation(progress);
+      setActionMessage(undefined);
+    }
   }), [activeOperationId]);
 
   const loadCommand = async (): Promise<void> => {
     setBusy(true);
+    setActionFailed(false);
+    setActionMessage(undefined);
     try {
       setCommand(await window.consensus.getAwsWorkerBootstrapCommand(region.trim() || "us-east-1"));
+    } catch (error) {
+      showError(error);
     } finally {
       setBusy(false);
     }
@@ -72,8 +89,9 @@ export function AwsWorkerPanel(props: {
     const clientToken = continuation?.clientToken ?? operationId;
     setActiveOperationId(operationId);
     setBusy(true);
-    setConfirm(null);
+    setActionFailed(false);
     setActionMessage(undefined);
+    setConfirm(null);
     try {
       const result = await window.consensus.startAwsWorker({
         operationId,
@@ -88,6 +106,8 @@ export function AwsWorkerPanel(props: {
       setOperation(result.operation);
       setStatus(result.status);
       if (result.status.configured) setBlob("");
+    } catch (error) {
+      showError(error);
     } finally {
       setBusy(false);
     }
@@ -95,11 +115,15 @@ export function AwsWorkerPanel(props: {
 
   const refresh = async (): Promise<void> => {
     setBusy(true);
+    setActionFailed(false);
+    setActionMessage(undefined);
     try {
       const next = await window.consensus.getAwsWorkerStatus();
       setStatus(next);
       setOperation(next.operation ?? operation);
-      setActionMessage(next.message ?? stateMessage(next.state));
+      setActionMessage(next.message);
+    } catch (error) {
+      showError(error);
     } finally {
       setBusy(false);
     }
@@ -111,11 +135,15 @@ export function AwsWorkerPanel(props: {
       return;
     }
     setBusy(true);
+    setActionFailed(false);
+    setActionMessage(undefined);
     try {
       const next = await window.consensus.stopAwsWorker();
       setStatus(next);
       setActionMessage(next.message ?? stateMessage(next.state));
       setConfirm(null);
+    } catch (error) {
+      showError(error);
     } finally {
       setBusy(false);
     }
@@ -127,6 +155,8 @@ export function AwsWorkerPanel(props: {
       return;
     }
     setBusy(true);
+    setActionFailed(false);
+    setActionMessage(undefined);
     try {
       const next = await window.consensus.deleteAwsWorker();
       setStatus(next);
@@ -134,6 +164,8 @@ export function AwsWorkerPanel(props: {
       setActionMessage(next.message);
       setConfirm(null);
       if (!next.configured) await props.onDeleted();
+    } catch (error) {
+      showError(error);
     } finally {
       setBusy(false);
     }
@@ -153,8 +185,7 @@ export function AwsWorkerPanel(props: {
   };
   const mismatch = operation?.specMismatch;
   const needsAuthorizationRefresh = operation?.remediation === "refresh-aws-authorization";
-  const updatesExistingWorkerUser = needsAuthorizationRefresh && Boolean(operation?.awsPrincipalUserName);
-  const showInitialConnection = !needsAuthorizationRefresh && !props.settings.hasAwsCredentials && !status?.configured;
+  const showInitialConnection = Boolean(status && !needsAuthorizationRefresh && !props.settings.hasAwsCredentials && !status.configured);
   const canStart = Boolean(blob.trim() || props.settings.hasAwsCredentials || status?.configured);
   const isRunning = status?.state === "running" || status?.state === "pending";
   const desiredInstanceDiffers = Boolean(actual?.instanceType && actual.instanceType !== desired.instanceType);
@@ -163,7 +194,7 @@ export function AwsWorkerPanel(props: {
   const desiredSizeDiffers = desiredInstanceDiffers || desiredDiskDiffers;
   const primaryActionLabel = needsAuthorizationRefresh
     ? "Retry existing permissions"
-    : operation?.phase === "error"
+    : operation?.phase === "error" || actionFailed
       ? "Retry"
       : desiredDiskCanGrow
         ? `Apply disk resize to ${desired.rootVolumeSizeGb} GB`
@@ -180,119 +211,61 @@ export function AwsWorkerPanel(props: {
     await start();
   };
   const connectionForm = (
-    <>
-      <div className="gen-row gen-row-stack" data-testid={needsAuthorizationRefresh ? "aws-worker-authorization-recovery" : "aws-worker-connect"}>
-        <div className="gen-row-text">
-          <div className="gen-row-title">{needsAuthorizationRefresh ? "AWS administrator update required" : "Connect AWS account"}</div>
-          {needsAuthorizationRefresh ? (
-            <div className="gen-row-desc" data-testid="aws-worker-authorization-steps">
-              {updatesExistingWorkerUser ? (
-                <>
-                  The active worker IAM user <code>{operation?.awsPrincipalUserName}</code> is missing required permissions{operation?.missingAwsActions?.length ? <>: <code>{operation.missingAwsActions.join(", ")}</code></> : null}.<br />
-                  1. Select Show update command, then Copy.<br />
-                  2. Run it in Terminal using an AWS administrator account. It updates that user's policy in place and does not create a new key.<br />
-                  3. Return here and select Retry existing permissions.
-                </>
-              ) : (
-                <>
-                  The restricted worker credentials cannot update their own permissions.<br />
-                  1. Select Show setup command, then Copy.<br />
-                  2. Run it in Terminal using an AWS administrator account. If you do not have one, send the copied command to your AWS administrator.<br />
-                  3. Paste its <code>accord-aws-v1:</code> result here, then select Apply update and Retry.
-                </>
-              )}
-            </div>
-          ) : (
-            <div className="gen-row-desc">Run this scoped setup command once, then paste its result before starting the worker.</div>
-          )}
-        </div>
-        <div className="gen-grid-form gen-grid-form-compact">
-          <input className="gen-input" aria-label="AWS region" value={region} onChange={(event) => setRegion(event.target.value)} />
-          <button type="button" className="gen-pill" disabled={busy} onClick={() => void loadCommand()}>
-            <span className="gen-pill-label">{updatesExistingWorkerUser ? "Show update command" : "Show setup command"}</span>
-          </button>
-        </div>
-      </div>
-      {command ? (
-        <div className="gen-aws-command-box">
-          <button type="button" className="gen-aws-copy" aria-label="Copy AWS setup command" onClick={() => void copyCommand()}>
-            {copyFeedback === "copied" ? <CheckCircle2 size={14} /> : <Copy size={14} />}
-            <span>{copyFeedback === "copied" ? "Copied" : copyFeedback === "failed" ? "Copy failed" : "Copy"}</span>
-          </button>
-          <pre className="gen-aws-command" data-testid="aws-worker-command">{command}</pre>
-        </div>
-      ) : null}
-      {!updatesExistingWorkerUser ? (
-        <>
-          <div className="gen-card-divider" />
-          <div className="gen-row gen-row-stack">
-            <div className="gen-row-text">
-              <div className="gen-row-title">{needsAuthorizationRefresh ? "Paste the updated result" : "Paste the result"}</div>
-              <div className="gen-row-desc">The command prints a line beginning with <code>accord-aws-v1:</code>.</div>
-            </div>
-            <textarea className="gen-input gen-aws-paste" aria-label="AWS setup result" value={blob} onChange={(event) => setBlob(event.target.value)} />
-            {needsAuthorizationRefresh ? (
-              <div className="gen-actions">
-                <button type="button" className="gen-pill" data-testid="aws-worker-apply-authorization" disabled={busy || !blob.trim()} onClick={() => void start()}>
-                  <span className="gen-pill-label">Apply update and Retry</span>
-                </button>
-              </div>
-            ) : null}
-          </div>
-        </>
-      ) : null}
-    </>
+    <AwsWorkerConnectionForm
+      operation={operation} busy={busy} region={region} command={command} blob={blob} copyFeedback={copyFeedback}
+      onRegionChange={setRegion} onBlobChange={setBlob} onLoadCommand={loadCommand} onCopyCommand={copyCommand}
+      onApply={() => start()}
+    />
   );
+  const message = actionMessage ?? operation?.message ?? status?.message;
+  const hasError = actionFailed || operation?.phase === "error" || Boolean(status?.configured && !status.state && status.message);
+  const showProgress = operation && !["ready", "error", "needs-decision"].includes(operation.phase);
 
   return (
-    <div className="gen-aws" data-testid="aws-worker-panel">
-      {showInitialConnection ? connectionForm : null}
-
-      <div className="gen-card-divider" />
-      <div className="gen-row gen-row-stack">
-        <div className="gen-row-text">
-          <div className="gen-row-title">Desired worker size</div>
-          <div className="gen-row-desc">New workers use this size. Existing workers keep their actual size until you apply the change.</div>
+    <div className="gen-aws" data-testid="aws-worker-panel" aria-busy={busy}>
+      <div className="gen-aws-summary" data-testid="aws-worker-actions">
+        <div className="gen-aws-summary-main">
+          <strong className={`gen-aws-state${isRunning ? " is-billable" : ""}`} data-testid="aws-worker-state">
+            {instanceStateLabel(status, actionFailed)}
+          </strong>
+          <div className="gen-actions">
+            <button type="button" className="gen-pill" data-testid="aws-worker-start" disabled={busy || !canStart || !status} onClick={() => void primaryAction()}>
+              <span className="gen-pill-lead"><Server size={16} /></span>
+              <span className="gen-pill-label">{primaryActionLabel}</span>
+            </button>
+            {status?.configured || actionFailed ? <button type="button" className="gen-pill" disabled={busy} onClick={() => void refresh()}><span className="gen-pill-label">Refresh status</span></button> : null}
+            {status?.configured ? <button type="button" className="gen-pill" disabled={busy || !isRunning} onClick={() => void stop()}><span className="gen-pill-label">Stop</span></button> : null}
+          </div>
         </div>
-        <div className="gen-grid-form gen-grid-form-compact">
-          <label className="gen-select-wrap">
-            <select className="gen-input" aria-label="AWS worker instance type" disabled={busy || operation?.phase === "needs-decision"} value={props.settings.awsInstanceType} onChange={(event) => props.onInstanceTypeChange(event.target.value)}>
-              {AWS_WORKER_INSTANCE_TYPE_OPTIONS.map((value) => <option key={value} value={value}>{value}</option>)}
-            </select>
-            <ChevronDown size={16} />
-          </label>
-          <label className="gen-select-wrap">
-            <select className="gen-input" aria-label="AWS worker disk size" disabled={busy || operation?.phase === "needs-decision"} value={props.settings.awsRootVolumeSizeGb} onChange={(event) => props.onDiskSizeChange(normalizeAwsRootVolumeSizeGb(event.target.value))}>
-              {diskOptions.map((value) => <option key={value} value={value}>{value} GB</option>)}
-            </select>
-            <ChevronDown size={16} />
-          </label>
-        </div>
+        {actual ? (
+          <div className="gen-aws-specs" data-testid="aws-worker-actual-specs">
+            <span>{actual.instanceType}</span>
+            {actual.vCpu ? <span>{actual.vCpu} vCPU</span> : null}
+            {actual.memoryMiB ? <span>{Math.round(actual.memoryMiB / 1024)} GB RAM</span> : null}
+            <span>{actual.rootVolumeSizeGb} GB disk</span>
+          </div>
+        ) : showInitialConnection ? <div className="gen-row-desc">New instance: {desired.instanceType} · {desired.rootVolumeSizeGb} GB disk</div> : null}
+        <div className="gen-row-desc">Shared by your laptops and projects. Does not stop automatically.</div>
       </div>
 
-      <div className="gen-aws-specs" data-testid="aws-worker-desired-specs">
-        <strong className="gen-aws-spec-label">Desired</strong><span>{desired.instanceType}</span><span>{desired.rootVolumeSizeGb} GB disk</span>
-      </div>
-
-      {actual ? (
-        <div className="gen-aws-specs" data-testid="aws-worker-actual-specs">
-          <strong className="gen-aws-spec-label">Actual</strong><span>{actual.instanceId}</span><span>{actual.region}</span><span>{actual.instanceType}</span>
-          {actual.vCpu ? <span>{actual.vCpu} vCPU</span> : null}
-          {actual.memoryMiB ? <span>{Math.round(actual.memoryMiB / 1024)} GB RAM</span> : null}
-          <span>{actual.rootVolumeSizeGb} GB disk</span>
-          {isRunning ? <strong className="gen-aws-running">Running · billable</strong> : <span>{status?.state ?? "unknown"}</span>}
+      {message ? <div className={`gen-aws-feedback${hasError ? " is-error" : ""}`} data-testid="aws-worker-message" role={hasError ? "alert" : "status"}>{message}</div> : null}
+      {needsAuthorizationRefresh ? (
+        <div className="gen-aws-recovery">
+          <button type="button" className="gen-pill" data-testid="aws-worker-authorization-toggle" aria-expanded={authorizationOpen} aria-controls="aws-authorization-details" onClick={() => setAuthorizationOpen(!authorizationOpen)}>
+            <span className="gen-pill-label">Update AWS permissions</span>
+            <ChevronDown size={14} aria-hidden className={authorizationOpen ? "is-open" : ""} />
+          </button>
+          {authorizationOpen ? <div id="aws-authorization-details">{connectionForm}</div> : null}
         </div>
       ) : null}
+      {showInitialConnection ? connectionForm : null}
+      {showProgress ? <WorkerProgress operation={operation} /> : null}
 
       {actual && desiredSizeDiffers && operation?.phase !== "needs-decision" ? (
-        <div className="gen-aws-decision gen-aws-size-change" data-testid="aws-worker-unapplied-size">
-          <strong>Size change not applied.</strong>
-          <span>Actual worker is {actual.instanceType}, {actual.rootVolumeSizeGb} GB disk. Desired worker is {desired.instanceType}, {desired.rootVolumeSizeGb} GB disk.</span>
+        <div className="gen-aws-size-change" data-testid="aws-worker-unapplied-size">
+          Size change not applied: {desired.instanceType} · {desired.rootVolumeSizeGb} GB disk.
         </div>
       ) : null}
-
-      {operation ? <WorkerProgress operation={operation} /> : null}
-
       {mismatch && operation?.phase === "needs-decision" ? (
         <div className="gen-aws-decision" data-testid="aws-worker-spec-decision">
           <strong>Existing worker is smaller than configured.</strong>
@@ -305,28 +278,56 @@ export function AwsWorkerPanel(props: {
           {confirm === "recreate" ? <ConfirmSharedAction label="Recreate" onCancel={() => setConfirm(null)} onConfirm={() => void start("recreate")} /> : null}
         </div>
       ) : null}
-
       {confirm === "stop" ? <ConfirmSharedAction label="Stop" onCancel={() => setConfirm(null)} onConfirm={() => void stop()} /> : null}
       {confirm === "delete" ? <ConfirmSharedAction label="Delete" onCancel={() => setConfirm(null)} onConfirm={() => void remove()} /> : null}
 
-      <div className="gen-row" data-testid="aws-worker-actions">
-        <div className="gen-row-text">
-          <div className="gen-row-title">{actionMessage ?? operation?.message ?? status?.message ?? (status?.configured ? "Shared worker configured" : "Not connected")}</div>
-          <div className="gen-row-desc">This worker is shared by every configured laptop and project. It does not stop automatically.</div>
+      <button type="button" className="gen-aws-disclosure" data-testid="aws-worker-config-toggle" aria-expanded={configOpen} aria-controls="aws-instance-configuration" onClick={() => setConfigOpen(!configOpen)}>
+        <span>Size &amp; instance details</span><ChevronDown size={16} aria-hidden />
+      </button>
+      {configOpen ? (
+        <div id="aws-instance-configuration">
+          <div className="gen-row gen-row-stack">
+            <div className="gen-row-desc">New instances use this size. Existing instances change only when you apply it.</div>
+            <div className="gen-grid-form" data-testid="aws-worker-desired-specs">
+              <label className="gen-aws-field">
+                <span>Instance type</span>
+                <span className="gen-select-wrap">
+                  <select className="gen-input" aria-label="AWS worker instance type" disabled={busy || operation?.phase === "needs-decision"} value={props.settings.awsInstanceType} onChange={(event) => props.onInstanceTypeChange(event.target.value)}>
+                    {AWS_WORKER_INSTANCE_TYPE_OPTIONS.map((value) => <option key={value} value={value}>{value}</option>)}
+                  </select>
+                  <ChevronDown size={16} />
+                </span>
+              </label>
+              <label className="gen-aws-field">
+                <span>Disk size</span>
+                <span className="gen-select-wrap">
+                  <select className="gen-input" aria-label="AWS worker disk size" disabled={busy || operation?.phase === "needs-decision"} value={props.settings.awsRootVolumeSizeGb} onChange={(event) => props.onDiskSizeChange(normalizeAwsRootVolumeSizeGb(event.target.value))}>
+                    {diskOptions.map((value) => <option key={value} value={value}>{value} GB</option>)}
+                  </select>
+                  <ChevronDown size={16} />
+                </span>
+              </label>
+            </div>
+            {actual ? <div className="gen-row-desc gen-aws-identity">{actual.instanceId} · {actual.region}</div> : null}
+            {status?.configured ? (
+              <div className="gen-actions">
+                <button type="button" className="gen-pill gen-pill-danger" disabled={busy} onClick={() => void remove()}><span className="gen-pill-label">Delete</span></button>
+              </div>
+            ) : null}
+          </div>
         </div>
-        <div className="gen-actions">
-          <button type="button" className="gen-pill" data-testid="aws-worker-start" disabled={busy || !canStart} onClick={() => void primaryAction()}>
-            <span className="gen-pill-lead"><Server size={16} /></span>
-            <span className="gen-pill-label">{primaryActionLabel}</span>
-          </button>
-          {status?.configured ? <button type="button" className="gen-pill" disabled={busy} onClick={() => void refresh()}><span className="gen-pill-label">Refresh status</span></button> : null}
-          {status?.configured ? <button type="button" className="gen-pill" disabled={busy || !isRunning} onClick={() => void stop()}><span className="gen-pill-label">Stop</span></button> : null}
-          {status?.configured ? <button type="button" className="gen-pill gen-pill-danger" disabled={busy} onClick={() => void remove()}><span className="gen-pill-label">Delete</span></button> : null}
-        </div>
-      </div>
-      {needsAuthorizationRefresh ? <><div className="gen-card-divider" />{connectionForm}</> : null}
+      ) : null}
     </div>
   );
+}
+
+function instanceStateLabel(status: AwsWorkerStatus | null, failed: boolean): string {
+  if (!status) return failed ? "Status unavailable" : "Checking status…";
+  if (!status.configured) return "Not connected";
+  if (!status.state && status.message) return "Status unavailable";
+  if (status.state === "running") return "Running · billable";
+  if (status.state === "pending") return "Starting · billable";
+  return status.state ? status.state[0].toUpperCase() + status.state.slice(1) : "Configured";
 }
 
 function stateMessage(state: AwsWorkerStatus["state"]): string | undefined {

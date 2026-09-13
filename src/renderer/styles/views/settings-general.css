@@ -620,6 +620,127 @@
   flex-direction: column;
 }
 
+.settings-view .gen-aws-intro {
+  padding-bottom: 0;
+}
+
+.settings-view .gen-aws-intro .gen-row-desc,
+.settings-view .gen-aws .gen-row-desc,
+.settings-view .gen-aws-diagnostics .gen-row-desc {
+  max-width: none;
+  overflow-wrap: anywhere;
+}
+
+.settings-view .gen-aws-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 18px;
+}
+
+.settings-view .gen-aws-summary-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-view .gen-aws-summary .gen-actions {
+  justify-content: flex-start;
+}
+
+.settings-view .gen-aws-summary .gen-pill {
+  min-width: 0;
+}
+
+.settings-view .gen-aws-state {
+  color: var(--app-text-strong);
+  font-size: 14px;
+}
+
+.settings-view .gen-aws-state.is-billable {
+  color: var(--app-warning);
+}
+
+.settings-view .gen-aws-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--app-muted);
+  font-size: 12.5px;
+}
+
+.settings-view .gen-aws .gen-grid-form {
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+  align-items: end;
+}
+
+.settings-view .gen-aws-feedback {
+  margin: 0 18px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  color: var(--app-text);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.settings-view .gen-aws-feedback.is-error {
+  border-color: var(--app-warning);
+  background: color-mix(in srgb, var(--app-warning) 8%, var(--app-surface));
+}
+
+.settings-view .gen-aws-size-change {
+  margin: 0 18px 12px;
+  color: var(--app-warning);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.settings-view .gen-aws-disclosure {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 18px;
+  border: 0;
+  border-top: 1px solid var(--app-border);
+  background: transparent;
+  color: var(--app-text);
+  font: 500 12.5px var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-view .gen-aws-disclosure:hover {
+  color: var(--app-text-strong);
+}
+
+.settings-view .gen-aws-disclosure:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: -3px;
+}
+
+.settings-view .gen-aws-disclosure[aria-expanded="true"] svg,
+.settings-view .gen-aws-recovery .is-open {
+  transform: rotate(180deg);
+}
+
+.settings-view .gen-aws-recovery > .gen-pill {
+  margin: 0 18px 12px;
+}
+
+.settings-view .gen-aws-diagnostics > .gen-aws-feedback {
+  margin-top: 12px;
+}
+
+.settings-view .gen-aws-identity {
+  font-family: var(--font-mono, monospace);
+}
+
 .settings-view .gen-aws-command-box {
   position: relative;
   margin: 0 18px 14px;
@@ -681,30 +802,24 @@
 .settings-view .gen-aws-specs {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin: 0 18px 14px;
+  gap: 8px;
+  margin: 0;
   color: var(--app-muted);
   font-size: 12px;
 }
 
 .settings-view .gen-aws-specs > * {
-  padding: 4px 7px;
-  border: 1px solid var(--app-border);
-  border-radius: 7px;
-  background: var(--app-surface);
+  white-space: nowrap;
 }
 
-.settings-view .gen-aws-specs .gen-aws-spec-label {
-  color: var(--app-text-strong);
-}
-
-.settings-view .gen-aws-specs .gen-aws-running {
-  color: var(--app-warning);
+.settings-view .gen-aws-specs > * + *::before {
+  content: "·";
+  margin-right: 8px;
 }
 
 .settings-view .gen-aws-progress {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 8px;
   margin: 0 18px 14px;
   padding: 0;

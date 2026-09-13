@@ -64,11 +64,12 @@ test("authorization recovery exposes the setup command and applies the refreshed
       };
     }
   });
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-message" })), /cannot access required AWS APIs/);
+  await click(findButton(renderer, "Refresh status"));
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-message" })), /cannot access required AWS APIs/);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-authorization-recovery" }).length, 0);
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-toggle" }));
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-recovery" })).includes("AWS administrator update required"), true);
-  const panelChildren = renderer.root.findByProps({ "data-testid": "aws-worker-panel" }).children as ReactTestInstance[];
-  const actionsIndex = panelChildren.findIndex((node) => node.props?.["data-testid"] === "aws-worker-actions");
-  const recoveryIndex = panelChildren.findIndex((node) => node.props?.["data-testid"] === "aws-worker-authorization-recovery");
-  assert.ok(actionsIndex >= 0 && recoveryIndex > actionsIndex, "recovery steps must render directly after the visible error actions");
   assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-steps" })), /cannot update their own permissions/);
   assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-steps" })), /send the copied command to your AWS administrator/);
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Retry existing permissions");
@@ -76,6 +77,10 @@ test("authorization recovery exposes the setup command and applies the refreshed
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-command" })), "command");
   assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-apply-authorization" }).props.disabled, true);
   await change(renderer.root.findByProps({ "aria-label": "AWS setup result" }), "accord-aws-v1:updated");
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-toggle" }));
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "AWS setup result" }).length, 0);
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-toggle" }));
+  assert.equal(renderer.root.findByProps({ "aria-label": "AWS setup result" }).props.value, "accord-aws-v1:updated");
   assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-apply-authorization" }).props.disabled, false);
   await click(renderer.root.findByProps({ "data-testid": "aws-worker-apply-authorization" }));
   assert.equal(requests[0].blob, "accord-aws-v1:updated");
@@ -100,6 +105,7 @@ test("authorization recovery for the active IAM user updates policy in place wit
     status: { configured: true, state: "running", operation }
   });
 
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-toggle" }));
   const steps = textOf(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-steps" }));
   assert.match(steps, /accordagents-worker-pna6gbah/);
   assert.match(steps, /ec2:DescribeInstanceTypes/);
@@ -151,8 +157,10 @@ test("larger desired disk shows an unapplied change and submits grow-disk direct
     }
   });
 
-  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-desired-specs" })), /Desiredt3\.small20 GB disk/);
-  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-actual-specs" })), /Actuali-sharedus-east-1t3\.small8 GB disk/);
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "AWS worker disk size" }).length, 0);
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-actual-specs" })), /t3\.small8 GB disk/);
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-config-toggle" }));
+  assert.equal(renderer.root.findByProps({ "aria-label": "AWS worker disk size" }).props.value, 20);
   assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-unapplied-size" })), /Size change not applied/);
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Apply disk resize to 20 GB");
   assert.equal(textOf(findButton(renderer, "Refresh status")), "Refresh status");
@@ -171,6 +179,7 @@ test("successful Delete refreshes enclosing settings while failed Delete does no
     remove: async () => ({ configured: false }),
     onDeleted: async () => { deleted += 1; }
   });
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-config-toggle" }));
   await click(findButton(renderer, "Delete"));
   await click(findButton(renderer, "Confirm delete"));
   assert.equal(deleted, 1);
@@ -181,6 +190,7 @@ test("successful Delete refreshes enclosing settings while failed Delete does no
     remove: async () => ({ configured: true, state: "stopped", message: "Termination was not confirmed" }),
     onDeleted: async () => { deleted += 1; }
   });
+  await click(failed.root.findByProps({ "data-testid": "aws-worker-config-toggle" }));
   await click(findButton(failed, "Delete"));
   await click(findButton(failed, "Confirm delete"));
   assert.equal(deleted, 1);
@@ -212,6 +222,7 @@ test("a pending mismatch freezes size controls and submits the displayed desired
       return { operation: { ...operation, phase: "ready" }, status: { configured: true, state: "running" } };
     }
   });
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-config-toggle" }));
   assert.equal(renderer.root.findByProps({ "aria-label": "AWS worker instance type" }).props.disabled, true);
   assert.equal(renderer.root.findByProps({ "aria-label": "AWS worker disk size" }).props.disabled, true);
   await click(findButton(renderer, "Keep using"));
@@ -220,17 +231,92 @@ test("a pending mismatch freezes size controls and submits the displayed desired
   renderer.unmount();
 });
 
+test("active progress survives disclosure changes and disappears after completion", async () => {
+  let progress!: (operation: AwsWorkerOperationSnapshot) => void;
+  let finish!: (value: any) => void;
+  const operation: AwsWorkerOperationSnapshot = {
+    operationId: "active", phase: "setting-up", message: "Preparing provider", updatedAt: "2026-09-12T00:00:00Z"
+  };
+  const renderer = await renderPanel({
+    status: { configured: true, state: "stopped" },
+    onProgress: (listener) => { progress = listener; },
+    start: (request) => { operation.operationId = request.operationId; return new Promise(resolve => { finish = resolve; }); }
+  });
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-config-toggle" }).props["aria-expanded"], false);
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-start" }));
+  await act(async () => { progress(operation); await flush(); });
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-message" })), /Preparing provider/);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-progress" }).length, 1);
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-config-toggle" }));
+  assert.equal(renderer.root.findByProps({ "aria-label": "AWS worker disk size" }).props.disabled, true);
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-config-toggle" }));
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-progress" }).length, 1);
+  await act(async () => {
+    finish({ status: { configured: true, state: "running" }, operation: { ...operation, phase: "ready", message: "Ready" } });
+    await flush();
+  });
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-progress" }).length, 0);
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-state" })), "Running · billable");
+  renderer.unmount();
+});
+
+test("failed status lookup stays visible and can be refreshed without starting an instance", async () => {
+  let reads = 0;
+  let starts = 0;
+  const renderer = await renderPanel({
+    status: { configured: true, state: "running" },
+    getStatus: async () => {
+      if (++reads === 1) throw new Error("AWS is unreachable");
+      return { configured: true, state: "running" };
+    },
+    start: async () => { starts++; throw new Error("Unexpected start"); }
+  });
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-state" })), "Status unavailable");
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-message" }).props.role, "alert");
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-start" }).props.disabled, true);
+  await click(findButton(renderer, "Refresh status"));
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-state" })), "Running · billable");
+  assert.equal(starts, 0);
+  renderer.unmount();
+});
+
+test("a rejected action displays its error and leaves Retry available", async () => {
+  const renderer = await renderPanel({
+    status: { configured: true, state: "stopped" },
+    start: async () => { throw new Error("Connection lost while starting"); }
+  });
+  await click(renderer.root.findByProps({ "data-testid": "aws-worker-start" }));
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-message" })), /Connection lost/);
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-message" }).props.role, "alert");
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-start" }).props.disabled, false);
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Retry");
+  renderer.unmount();
+});
+
+test("a current AWS lookup error takes precedence over an old successful operation", async () => {
+  const renderer = await renderPanel({ status: {
+    configured: true, message: "AWS credentials expired",
+    operation: { operationId: "old", phase: "ready", message: "Ready", updatedAt: "2026-09-11T00:00:00Z" }
+  } });
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-state" })), "Status unavailable");
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-message" })), "AWS credentials expired");
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-message" }).props.role, "alert");
+  renderer.unmount();
+});
+
 async function renderPanel(options: {
   settings?: CloudRunsSettings;
   status: AwsWorkerStatus;
+  getStatus?: () => Promise<AwsWorkerStatus>;
+  onProgress?: (listener: (operation: AwsWorkerOperationSnapshot) => void) => void;
   start?: (request: any) => Promise<any>;
   stop?: () => Promise<AwsWorkerStatus>;
   remove?: () => Promise<AwsWorkerStatus>;
   onDeleted?: () => Promise<void>;
 }): Promise<ReactTestRenderer> {
   const bridge = {
-    getAwsWorkerStatus: async () => options.status,
-    onAwsWorkerProgress: () => () => undefined,
+    getAwsWorkerStatus: options.getStatus ?? (async () => options.status),
+    onAwsWorkerProgress: (listener: (operation: AwsWorkerOperationSnapshot) => void) => { options.onProgress?.(listener); return () => undefined; },
     startAwsWorker: options.start ?? (async () => ({ operation: options.status.operation, status: options.status })),
     deleteAwsWorker: options.remove ?? (async () => options.status),
     stopAwsWorker: options.stop ?? (async () => options.status),

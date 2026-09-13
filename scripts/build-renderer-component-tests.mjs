@@ -17,6 +17,7 @@ await build({
     "renderer/components/chat/cli-readiness-setup-panel.test.tsx",
     "renderer/components/settings/device-pairing-revoke.test.tsx",
     "renderer/components/settings/aws-worker-panel.test.tsx",
+    "renderer/components/settings/aws-instance-diagnostics.test.tsx",
     "renderer/components/search/chat-search-escape.test.tsx",
     "renderer/components/shell/chat-search.test.tsx"
   ].map((entry) => path.join(sourceRoot, entry)),

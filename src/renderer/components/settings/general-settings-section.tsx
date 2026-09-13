@@ -3,8 +3,6 @@ import { createPortal } from "react-dom";
 import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle } from "lucide-react";
 
 import type {
-  CloudRunWorkerDoctorReport,
-  CloudRunWorkerSetupProgress,
   AgentHealth,
   ChatProviderKind,
   CloudRunsSettings,
@@ -35,6 +33,7 @@ import {
 import { AwsWorkerPanel as SharedAwsWorkerPanel } from "./aws-worker-panel";
 import { DevicePairingSection } from "./device-pairing-section";
 import { MachinesSection } from "./machines-section";
+import { AwsInstanceDiagnostics } from "./aws-instance-diagnostics";
 import { cliProviderMetadata, deriveAgentReadiness } from "../../../shared/cliReadiness";
 import { isChatProviderKind } from "../../../shared/chatProviders";
 import { AppSelect } from "../primitives";
@@ -42,6 +41,7 @@ import { AppSelect } from "../primitives";
 const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive member-to-member request nesting, not repeated rounds by the same requester.";
 const PARTICIPANT_REQUEST_PROMPT_MAX_HELP = "Maximum characters accepted for each member request prompt. Longer prompts are rejected, not truncated.";
 const AUTO_WATCH_WAKE_LIMIT_HELP = "Pauses auto-watch after this many automatic watcher runs happen without a user message.";
+const SHOW_MACHINES_SETTINGS = false;
 
 const CLI_ICON_URLS: Partial<Record<ProviderKind, string>> = {
   "codex-cli": new URL("../../assets/codex-cli.svg", import.meta.url).href,
@@ -243,10 +243,10 @@ export function GeneralSettingsSection(props: {
 
       <DevicePairingSection mobileControl={props.mobileControl} />
 
-      <MachinesSection />
+      {SHOW_MACHINES_SETTINGS && <MachinesSection />}
 
       <section className="gen-section">
-        <h2 className="gen-section-title gen-section-title-solo">Machine instance (AWS)</h2>
+        <h2 className="gen-section-title gen-section-title-solo">AWS</h2>
         <CloudRunsControl settings={props.cloudRuns} onSave={props.saveCloudRunsSettings} />
       </section>
     </>
@@ -258,50 +258,9 @@ function CloudRunsControl(props: {
   onSave: (update: CloudRunsSettingsUpdate) => Promise<void>;
 }): JSX.Element {
   const [draft, setDraft] = useState<CloudRunsSettings>(props.settings);
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string>("");
-  const [report, setReport] = useState<CloudRunWorkerDoctorReport | null>(null);
-  const [setupProgress, setSetupProgress] = useState<CloudRunWorkerSetupProgress | null>(null);
-
   useEffect(() => {
     setDraft(props.settings);
   }, [props.settings]);
-
-  useEffect(() => window.consensus.onCloudRunSetupProgress(setSetupProgress), []);
-
-  // Checking and preparing the instance are the same two acts they always
-  // were; what they no longer offer is a hand-written SSH box for a per-turn
-  // worker, so they always speak to the machine's own instance.
-  const diagnose = async (): Promise<void> => {
-    setBusy(true);
-    setStatus("Checking the instance...");
-    setReport(null);
-    try {
-      const result = await window.consensus.diagnoseCloudRunWorker(undefined);
-      setReport(result);
-      setStatus(result.message);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const setup = async (): Promise<void> => {
-    setBusy(true);
-    setStatus("Preparing the instance...");
-    setReport(null);
-    try {
-      const result = await window.consensus.setupCloudRunWorker(undefined);
-      setReport(result);
-      setStatus(result.message);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-      setSetupProgress(null);
-    }
-  };
 
   const patch = (update: CloudRunsSettingsUpdate): void => {
     setDraft((current) => ({ ...current, ...update, worker: { ...current.worker, ...(update.worker ?? {}) } }));
@@ -310,75 +269,16 @@ function CloudRunsControl(props: {
 
   return (
     <div className="gen-card" data-testid="machine-instance-settings">
-      <div className="gen-row">
-        <div className="gen-row-text">
-          <div className="gen-row-title">Machine instance</div>
-          <div className="gen-row-desc">
-            Start your AWS instance here, then choose Cloud run in a member&apos;s settings. The app prepares
-            the cloud runtime and connects the member automatically.
-          </div>
-        </div>
+      <div className="gen-row gen-aws-intro">
+        <div className="gen-row-desc">Start your instance here, then choose Cloud run in a member&apos;s settings.</div>
       </div>
-      <div className="gen-card-divider" />
-      {/* What stood beside this configured the per-turn worker that no longer
-          exists: an SSH target and its paths, its timeouts, a staging
-          directory on it, and a doctor that checked all of them. Offering
-          those described something the app can no longer do. */}
       <SharedAwsWorkerPanel
         settings={draft}
         onInstanceTypeChange={(value) => patch({ awsInstanceType: value })}
         onDiskSizeChange={(value) => patch({ awsRootVolumeSizeGb: value })}
         onDeleted={() => props.onSave({ mode: "aws" })}
       />
-      <div className="gen-card-divider" />
-      <div className="gen-row">
-        <div className="gen-row-text">
-          <div className="gen-row-title">{(busy && setupProgress?.message) || status || "Ready"}</div>
-          {busy && setupProgress?.authUrl && (
-            <div className="gen-row-desc">
-              <button
-                type="button"
-                className="gen-doctor-auth-link"
-                onClick={() => void window.consensus.openExternal(setupProgress.authUrl as string)}
-              >
-                Open the sign-in page
-              </button>
-              {setupProgress.authCode ? (
-                <>
-                  {" and enter code "}
-                  <code className="gen-doctor-auth-code" data-testid="cloud-run-device-auth-code">
-                    {setupProgress.authCode}
-                  </code>
-                </>
-              ) : null}
-            </div>
-          )}
-        </div>
-        <div className="gen-actions">
-          <button type="button" className="gen-pill" data-testid="machine-instance-check" disabled={busy} onClick={() => void diagnose()}>
-            <span className="gen-pill-label">Check</span>
-          </button>
-          <button type="button" className="gen-pill" data-testid="machine-instance-setup" disabled={busy} onClick={() => void setup()}>
-            <span className="gen-pill-label">Set up</span>
-          </button>
-        </div>
-      </div>
-      {report && (
-        <>
-          <div className="gen-card-divider" />
-          <ul className="gen-doctor-list" aria-label="Instance checks">
-            {report.checks.map((check) => (
-              <li key={check.id} className={`gen-doctor-item is-${check.status}`}>
-                <span className="gen-doctor-mark" aria-hidden="true">
-                  {check.status === "pass" ? "\u2713" : check.status === "warn" ? "!" : "\u2715"}
-                </span>
-                <span className="gen-doctor-label">{check.label}</span>
-                {check.detail && <span className="gen-doctor-detail">{check.detail}</span>}
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
+      <AwsInstanceDiagnostics />
     </div>
   );
 }
