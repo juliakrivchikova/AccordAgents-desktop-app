@@ -11,6 +11,8 @@ export interface CloudRunPreparationProgress {
   message: string;
   authUrl?: string;
   authCode?: string;
+  authProvider?: "codex-cli" | "claude-code";
+  authRequestId?: string;
 }
 
 export interface PrepareCloudRunResult {

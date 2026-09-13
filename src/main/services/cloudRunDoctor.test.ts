@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CloudRunDoctorService } from "./cloudRunDoctor";
+import { CloudRunDoctorService, enabledCloudProviders } from "./cloudRunDoctor";
 import type { CloudRunSshExecRequest } from "./cloudRunDoctor";
 import { isTransientSshError, runWithSshRetries } from "./sshRetry";
 import { CommandError } from "./command";
@@ -74,6 +74,73 @@ test("an explicit legacy profile does not get replaced by a new environment", as
     return FULLY_PROVISIONED;
   }, { environmentForWorker: async () => { throw new Error("must not reinterpret a remembered legacy profile"); } });
   assert.equal((await service.diagnose(WORKER, { profileHome: undefined })).ok, true);
+});
+
+test("Claude login stays in its resolved profile and ready requires a successful native status after the reply", async () => {
+  for (const statusPass of [false, true]) {
+    let signedIn = false;
+    let replied = false;
+    const service = new CloudRunDoctorService({
+      environmentForWorker: async () => ({ profileHome: "/srv/claude-profile", workerRoot: "/srv/claude" }),
+      sshExec: async request => {
+        assert.equal(request.worker.profileHome, "/srv/claude-profile");
+        if (request.command.includes('["auth", "login"]')) {
+          request.onStdout?.("https://claude.ai/oauth/authorize?state=native-state\n");
+          await new Promise<void>(resolve => request.inputStream!.once("data", chunk => {
+            assert.equal(String(chunk), "code#native-state\n"); replied = true; signedIn = statusPass; resolve();
+          }));
+          return "Login successful.";
+        }
+        return signedIn ? FULLY_PROVISIONED : FULLY_PROVISIONED.replace("claude-auth=ok", "claude-auth=missing");
+      }
+    });
+    const report = await service.setup(WORKER, p => {
+      if (p.authRequestId) service.submitAuthCode(p.authRequestId, "code#native-state");
+    }, { requiredProviderKind: "claude-code" });
+    assert.equal(replied, true); assert.equal(report.ok, statusPass);
+    assert.equal(report.checks.find(check => check.id === "claude-auth")?.status, statusPass ? "pass" : "fail");
+  }
+});
+
+test("provider requirements are explicit: disabled providers do not prevent readiness", async () => {
+  assert.deepEqual(enabledCloudProviders([
+    { kind: "codex-cli", enabled: false, label: "Codex" }, { kind: "claude-code", enabled: true, label: "Claude" },
+    { kind: "gemini-cli", enabled: true, label: "Gemini" }, { kind: "anthropic", enabled: true, label: "API" }
+  ]), ["claude-code"]);
+  assert.deepEqual(enabledCloudProviders([]), []);
+  const { service } = doctorWith(async () => FULLY_PROVISIONED.replace("claude-auth=ok", "claude-auth=missing"));
+  assert.equal((await service.diagnose(WORKER, { requiredProviderKinds: ["codex-cli"] })).ok, true);
+  assert.equal((await service.diagnose(WORKER, { requiredProviderKinds: ["codex-cli", "claude-code"] })).ok, false);
+});
+
+test("a failed progress save stops setup before side effects, including either native sign-in", async () => {
+  for (const provider of ["codex-cli", "claude-code"] as const) {
+    let opened = false;
+    let authAborted = false;
+    const service = new CloudRunDoctorService({
+      openExternal: () => { opened = true; },
+      sshExec: async request => {
+        if (request.command.includes("have rsync")) {
+          return FULLY_PROVISIONED.replace(`${provider === "claude-code" ? "claude" : "codex"}-auth=ok`,
+            `${provider === "claude-code" ? "claude" : "codex"}-auth=missing`);
+        }
+        if (!request.command.includes("login --device-auth") && !request.command.includes('["auth", "login"]')) return "";
+        return new Promise<string>((_resolve, reject) => {
+          request.signal?.addEventListener("abort", () => { authAborted = true; reject(new Error("aborted")); });
+          request.onStdout?.(provider === "claude-code" ? "https://claude.com/cai/oauth/authorize?state=one\n"
+            : "https://auth.openai.com/codex/device\nABCD-EFGH\n");
+        });
+      }
+    });
+    const publish = async (p: { authUrl?: string }): Promise<void> => { if (p.authUrl) throw new Error("save failed"); };
+    if (provider === "codex-cli") await assert.rejects(service.setup(WORKER, publish, { requiredProviderKind: provider }), /could not save/);
+    else assert.equal((await service.setup(WORKER, publish, { requiredProviderKind: provider })).ok, false);
+    assert.equal(authAborted, true); assert.equal(opened, false);
+  }
+  let ran = false;
+  const service = new CloudRunDoctorService({ sshExec: async () => { ran = true; return FULLY_PROVISIONED; } });
+  await assert.rejects(service.setup(WORKER, async () => { throw new Error("save failed"); }), /save failed/);
+  assert.equal(ran, false);
 });
 
 test("diagnose reports ready when every probe passes", async () => {
@@ -248,7 +315,8 @@ test("setup installs Claude Code for Claude-required workers and surfaces auth a
   assert.equal(report.checks.find((check) => check.id === "codex")?.status, "warn");
   assert.equal(report.checks.find((check) => check.id === "codex-auth")?.status, "warn");
   assert.equal(progress.some((message) => message.includes("Installing the Claude Code CLI")), true);
-  assert.equal(progress.some((message) => message.includes("Run `claude auth login` on that worker")), true);
+  assert.equal(progress.some((message) => message.includes("Starting Claude sign-in")), true);
+  assert.match(joined, /\["auth", "login"\]/);
 });
 
 test("setup drives codex device-auth and surfaces url + code to the user", async () => {

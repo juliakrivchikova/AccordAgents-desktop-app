@@ -3,6 +3,11 @@ import test from "node:test";
 import type { AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStatus } from "../../shared/types";
 import { AwsWorkerSetupService } from "./awsWorkerSetup";
 import type { PreparedAwsWorker } from "./cloudRunAws";
+import { CloudRunDoctorService } from "./cloudRunDoctor";
+
+const PROVIDER_SETTINGS = { getPublicSettings: async () => ({ providers: [
+  { kind: "codex-cli", enabled: true, label: "Codex" }
+] }) };
 
 const PREPARED: PreparedAwsWorker = {
   credentials: { accessKeyId: "AKIAEXAMPLE0001XYZ", secretAccessKey: "secret", region: "us-east-1" },
@@ -16,6 +21,38 @@ const PREPARED: PreparedAwsWorker = {
   created: false
 };
 
+test("generic AWS setup requires enabled Claude sign-in and cannot mark a cancelled login ready", async () => {
+  const aws = {
+    prepareWorker: async () => ({ ...PREPARED }), resumePendingVolumeExpansion: async (value: PreparedAwsWorker) => value,
+    hasAcceptedMismatch: async () => false, ensurePreparedRunning: async () => ({ host: "test-worker" }),
+    status: async () => ({ configured: true, state: "running" })
+  };
+  const saved: AwsWorkerOperationSnapshot[] = [];
+  const settings = { getAwsWorkerOperation: async () => undefined,
+    getPublicSettings: async () => ({ providers: [
+      { kind: "codex-cli", enabled: true, label: "Codex" }, { kind: "claude-code", enabled: true, label: "Claude" },
+      { kind: "gemini-cli", enabled: true, label: "Gemini" }
+    ] }), saveAwsWorkerOperation: async (value: AwsWorkerOperationSnapshot) => { saved.push(value); } };
+  const doctor = new CloudRunDoctorService({ sshExec: async request => {
+    if (request.command.includes('["auth", "login"]')) return new Promise((_resolve, reject) => {
+      request.signal?.addEventListener("abort", () => reject(new Error("cancelled")));
+      request.onStdout?.("https://claude.com/cai/oauth/authorize?state=aws-test\n");
+    });
+    if (!request.command.includes("have rsync")) return "";
+    return ["rsync=ok", "git=ok", "gh=ok", "java=ok", "node=ok", "codex=ok", "claude=ok", "build-essential=ok",
+      "sudo=ok", "userns=0", "git-name=Test", "git-email=test@example.com", "codex-auth=ok", "claude-auth=missing"].join("\n");
+  } });
+  const service = new AwsWorkerSetupService(aws as any, doctor, settings as any);
+  const result = await service.start({ operationId: "aws-all-providers" }, value => {
+    if (value.authRequestId) {
+      assert.equal(saved.at(-1), value, "the challenge is persisted before the UI can act on it");
+      assert.equal(value.authProvider, "claude-code"); doctor.cancelAuth(value.authRequestId);
+    }
+  });
+  assert.equal(result.operation.phase, "error");
+  assert.equal(saved.some(value => value.phase === "ready"), false);
+});
+
 test("explicit type downsizing asks for a decision even if larger capacity was previously accepted", async () => {
   let runs = 0;
   const aws = {
@@ -25,7 +62,7 @@ test("explicit type downsizing asks for a decision even if larger capacity was p
     ensurePreparedRunning: async () => { runs++; return { host: "x" }; },
     status: async () => ({ configured: true })
   };
-  const settings = { saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
+  const settings = { ...PROVIDER_SETTINGS, saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
   const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
   const result = await service.start({ operationId: "downsize", intent: "resize", expectedInstanceId: "i-shared", instanceType: "t3.small", rootVolumeSizeGb: 8 });
   assert.equal(result.operation.phase, "needs-decision");
@@ -46,7 +83,7 @@ test("keeping the current size during a resize starts nothing and restores the s
     ensurePreparedRunning: async () => { runs++; return { host: "x" }; },
     status: async () => ({ configured: true, state: "stopped" })
   };
-  const settings = { saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
+  const settings = { ...PROVIDER_SETTINGS, saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
   const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
   const result = await service.start({
     operationId: "keep", intent: "resize", resolution: "keep", expectedInstanceId: PREPARED.info.instanceId,
@@ -68,7 +105,7 @@ test("an access check is read-only: a refusal becomes permission recovery and no
     ensurePreparedRunning: async () => { throw new Error("a check must not start the instance"); },
     status: async () => ({ configured: true, message: refusal.message })
   };
-  const settings = { saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
+  const settings = { ...PROVIDER_SETTINGS, saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
   const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
   const result = await service.start({ operationId: "check", intent: "check" });
   assert.equal(result.operation.phase, "error");
@@ -87,7 +124,7 @@ test("a confirmed access check reports the instance state and starts nothing; pa
     prepareWorker: async () => { throw new Error("a check must not prepare"); },
     ensurePreparedRunning: async () => { throw new Error("a check must not start"); }
   };
-  const settings = { saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
+  const settings = { ...PROVIDER_SETTINGS, saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
   const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
   const result = await service.start({ operationId: "check-ok", intent: "check", blob: "accord-aws-v1:new" });
   assert.equal(result.operation.phase, "ready");
@@ -104,7 +141,7 @@ test("a check in flight is saved as running and never handed to a different requ
     prepareWorker: async () => { throw new Error("must not prepare"); },
     ensurePreparedRunning: async () => { throw new Error("must not start"); }
   };
-  const settings = { saveAwsWorkerOperation: async (operation: AwsWorkerOperationSnapshot | undefined) => { phases.push(operation?.phase ?? "cleared"); }, getAwsWorkerOperation: async () => undefined };
+  const settings = { ...PROVIDER_SETTINGS, saveAwsWorkerOperation: async (operation: AwsWorkerOperationSnapshot | undefined) => { phases.push(operation?.phase ?? "cleared"); }, getAwsWorkerOperation: async () => undefined };
   const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
   const check = service.start({ operationId: "check-live", intent: "check" });
   await new Promise(resolve => setImmediate(resolve));
@@ -137,7 +174,7 @@ test("what each intent may touch: a check reads only, keep changes only the save
       }
     } });
     const doctor = { waitForCloudInit: async () => undefined, setup: async () => ({ ok: true, message: "Worker ready.", checks: [] }) };
-    const settings = { saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
+    const settings = { ...PROVIDER_SETTINGS, saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
     const service = new AwsWorkerSetupService(aws as any, doctor as any, settings as any);
     const result = await service.start({ ...request } as AwsWorkerStartRequest);
     return { touched, phase: result.operation.phase, message: result.operation.message };
@@ -160,7 +197,7 @@ test("what each intent may touch: a check reads only, keep changes only the save
 
 test("restarting after an interrupted check keeps its intent and never resumes a launch", async () => {
   let saved: AwsWorkerOperationSnapshot = { operationId: "check-restart", intent: "check", phase: "starting", message: "Checking AWS access…", updatedAt: "2026-09-13T00:00:00Z" };
-  const settings = { getAwsWorkerOperation: async () => saved, saveAwsWorkerOperation: async (next: AwsWorkerOperationSnapshot) => { saved = next; } };
+  const settings = { ...PROVIDER_SETTINGS, getAwsWorkerOperation: async () => saved, saveAwsWorkerOperation: async (next: AwsWorkerOperationSnapshot) => { saved = next; } };
   const service = new AwsWorkerSetupService({} as any, {} as any, settings as any);
   await service.recoverInterruptedOperation();
   assert.equal(saved.intent, "check");
@@ -184,7 +221,7 @@ test("start orchestrates the exact visible phases and reaches ready", async () =
     waitForCloudInit: async () => undefined,
     setup: async () => ({ ok: true, message: "Worker ready.", checks: [] })
   };
-  const settings = {
+  const settings = { ...PROVIDER_SETTINGS,
     saveAwsWorkerOperation: async (operation: AwsWorkerOperationSnapshot) => { saved.push(operation); },
     getAwsWorkerOperation: async () => undefined
   };
@@ -211,7 +248,7 @@ test("undersized adopted worker stops before running until the user decides", as
     ensurePreparedRunning: async () => { ensureCalls += 1; return { host: "x" }; },
     status: async () => ({ configured: true })
   };
-  const settings = { saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
+  const settings = { ...PROVIDER_SETTINGS, saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
   const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
   const result = await service.start({ operationId: "op-2" });
   assert.equal(result.operation.phase, "needs-decision");
@@ -239,7 +276,7 @@ test("retry reuses the persisted provisioning token", async () => {
     waitForCloudInit: async () => undefined,
     setup: async () => ({ ok: true, message: "Worker ready.", checks: [] })
   };
-  const settings = {
+  const settings = { ...PROVIDER_SETTINGS,
     saveAwsWorkerOperation: async (operation: AwsWorkerOperationSnapshot) => { snapshot = operation; },
     getAwsWorkerOperation: async () => snapshot
   };
@@ -273,7 +310,7 @@ test("DescribeRegions authorization denial requests an AWS authorization refresh
     waitForCloudInit: async () => undefined,
     setup: async () => ({ ok: true, message: "Worker ready.", checks: [] })
   };
-  const settings = {
+  const settings = { ...PROVIDER_SETTINGS,
     saveAwsWorkerOperation: async (operation: AwsWorkerOperationSnapshot) => { snapshot = operation; },
     getAwsWorkerOperation: async () => snapshot
   };
@@ -295,7 +332,7 @@ test("authorization denial records the active scoped worker IAM user", async () 
     },
     status: async () => ({ configured: true, state: "running" })
   };
-  const settings = {
+  const settings = { ...PROVIDER_SETTINGS,
     saveAwsWorkerOperation: async () => undefined,
     getAwsWorkerOperation: async () => undefined
   };
@@ -314,7 +351,7 @@ test("non-authorization setup failures do not request an AWS authorization refre
     prepareWorker: async () => { throw new Error("EC2 capacity is unavailable"); },
     status: async () => ({ configured: false })
   };
-  const settings = {
+  const settings = { ...PROVIDER_SETTINGS,
     saveAwsWorkerOperation: async () => undefined,
     getAwsWorkerOperation: async () => undefined
   };
@@ -336,7 +373,7 @@ test("doctor access failures do not request an AWS authorization refresh", async
     waitForCloudInit: async () => undefined,
     setup: async () => { throw new Error("GitHub API returned 403 access denied"); }
   };
-  const settings = {
+  const settings = { ...PROVIDER_SETTINGS,
     saveAwsWorkerOperation: async () => undefined,
     getAwsWorkerOperation: async () => undefined
   };
@@ -360,7 +397,7 @@ test("mismatch resolution rejects a desired spec that differs from the displayed
     resumePendingVolumeExpansion: async (prepared: PreparedAwsWorker) => prepared,
     status: async () => ({ configured: true })
   };
-  const settings = { saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
+  const settings = { ...PROVIDER_SETTINGS, saveAwsWorkerOperation: async () => undefined, getAwsWorkerOperation: async () => undefined };
   const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
   const result = await service.start({
     operationId: "op-stale",
@@ -390,7 +427,7 @@ test("queued doctor progress cannot overwrite the terminal ready snapshot", asyn
       return { ok: true, message: "Worker ready.", checks: [] };
     }
   };
-  const settings = {
+  const settings = { ...PROVIDER_SETTINGS,
     saveAwsWorkerOperation: async (operation: AwsWorkerOperationSnapshot) => {
       if (operation.message === "slow-progress") await new Promise((resolve) => setTimeout(resolve, 5));
       saved.push(operation);

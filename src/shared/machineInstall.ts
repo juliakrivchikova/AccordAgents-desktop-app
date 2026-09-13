@@ -102,6 +102,8 @@ export interface MachineInstallSnapshot {
    *  verification URL and code the User approves. */
   authUrl?: string;
   authCode?: string;
+  authProvider?: "codex-cli" | "claude-code";
+  authRequestId?: string;
   /** Conditions that do not stop the install (for example: the runtime will
    *  not survive logout because lingering could not be enabled). */
   warnings?: string[];

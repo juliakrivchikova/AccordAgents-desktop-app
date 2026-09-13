@@ -6,7 +6,7 @@ import type {
   AwsWorkerStatus,
   CloudRunWorkerSetupProgress
 } from "../../shared/types";
-import type { CloudRunDoctorService } from "./cloudRunDoctor";
+import { enabledCloudProviders, type CloudRunDoctorService } from "./cloudRunDoctor";
 import { awsAuthorizationErrorDetails, isAwsAuthorizationError } from "./awsEc2Client";
 import type { CloudRunAwsService, PreparedAwsWorker } from "./cloudRunAws";
 import type { SettingsService } from "./settings";
@@ -144,16 +144,20 @@ export class AwsWorkerSetupService {
       await emit("waiting-running", "Waiting for the worker to be running and reachable…");
       const worker = await this.aws.ensurePreparedRunning(prepared);
       let progressWrites: Promise<unknown> = Promise.resolve();
-      const doctorProgress = (progress: CloudRunWorkerSetupProgress): void => {
+      const doctorProgress = (progress: CloudRunWorkerSetupProgress): Promise<unknown> => {
         progressWrites = progressWrites.then(() => emit("setting-up", progress.message, {
           authUrl: progress.authUrl,
-          authCode: progress.authCode
+          authCode: progress.authCode,
+          authProvider: progress.authProvider,
+          authRequestId: progress.authRequestId
         }));
+        return progressWrites;
       };
       await emit("setting-up", "Setting up the worker…");
       await this.doctor.waitForCloudInit(worker, doctorProgress);
       await progressWrites;
-      const report = await this.doctor.setup(worker, doctorProgress);
+      const requiredProviderKinds = enabledCloudProviders((await this.settings.getPublicSettings()).providers);
+      const report = await this.doctor.setup(worker, doctorProgress, { requiredProviderKinds });
       await progressWrites;
       if (!report.ok) {
         const operation = await emit("error", report.message, {

@@ -264,6 +264,8 @@ export interface AwsWorkerOperationSnapshot {
   error?: string;
   authUrl?: string;
   authCode?: string;
+  authProvider?: "codex-cli" | "claude-code";
+  authRequestId?: string;
   status?: AwsWorkerStatus;
   specMismatch?: AwsWorkerSpecMismatch;
   missingAwsActions?: string[];
@@ -363,6 +365,8 @@ export interface CloudRunWorkerSetupProgress {
   // sign-in in their browser.
   authUrl?: string;
   authCode?: string;
+  authProvider?: "codex-cli" | "claude-code";
+  authRequestId?: string;
 }
 
 export interface RemoteRunSyncInfo {
@@ -2672,6 +2676,10 @@ export interface AppBridge {
   testCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerTestResult>;
   diagnoseCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
   setupCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
+  getCloudRunSetupProgress(): Promise<CloudRunWorkerSetupProgress | null>;
+  submitCloudRunAuthCode(request: { requestId: string; code: string }): Promise<void>;
+  cancelCloudRunAuth(requestId: string): Promise<void>;
+  isCloudRunAuthActive(requestId: string): Promise<boolean>;
   onCloudRunSetupProgress(callback: (progress: CloudRunWorkerSetupProgress) => void): () => void;
   getAwsWorkerBootstrapCommand(region: string, recoveryOperationId?: string): Promise<string>;
   connectAwsWorker(request: ConnectAwsWorkerRequest): Promise<AwsWorkerStatus>;

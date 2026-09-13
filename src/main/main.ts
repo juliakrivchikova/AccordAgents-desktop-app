@@ -161,7 +161,8 @@ import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { bootstrapAppUpdater } from "./services/appUpdater";
 import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
-import { CloudRunDoctorService } from "./services/cloudRunDoctor";
+import { CloudRunDoctorService, enabledCloudProviders } from "./services/cloudRunDoctor";
+import { CloudRunSetupSession } from "./services/cloudRunSetupSession";
 import { CloudRunAwsService } from "./services/cloudRunAws";
 import { AwsWorkerSetupService } from "./services/awsWorkerSetup";
 import { DebugLogService } from "./services/debugLogs";
@@ -345,12 +346,13 @@ const cloudRunDoctorService: CloudRunDoctorService = new CloudRunDoctorService({
     return machineInstallerService.providerEnvironment(worker, `~/${directory}`, readOnly);
   },
   openExternal: (url) => {
-    void openExternalUrl(url);
+    void openExternalUrl(url).catch(() => undefined);
   },
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
   }
 });
+const cloudRunSetupSession = new CloudRunSetupSession();
 const cloudRunAwsService = new CloudRunAwsService(settingsService, {
   // The box is no longer asked over SSH whether a turn is running on it: the
   // machine on it reports its own work over the link, and an idle stop waits
@@ -2241,21 +2243,31 @@ function registerIpc(): void {
   });
   ipcMain.handle("cloud-runs:diagnose-worker", async (_event, request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport> => {
     try {
-      const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
+      const settings = await settingsService.getPublicSettings();
+      const managedAws = !request && settings.cloudRuns.mode === "aws";
       return await withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker, {
-        requirePersistentStorage: managedAws
+        requirePersistentStorage: managedAws,
+        requiredProviderKinds: enabledCloudProviders(settings.providers)
       }), "inspect");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { ok: false, message, checks: [] };
     }
   });
-  ipcMain.handle("cloud-runs:setup-worker", async (_event, request?: CloudRunWorkerSettings) => {
-    const managedAws = !request && (await settingsService.getPublicSettings()).cloudRuns.mode === "aws";
-    return withCloudRunWorker(request, (worker) => cloudRunDoctorService.setup(worker, (progress) => {
-      sendToMainWindow("cloud-runs:setup-progress", progress);
-    }, { requirePersistentStorage: managedAws }), "setup");
-  });
+  ipcMain.handle("cloud-runs:setup-worker", (_event, request?: CloudRunWorkerSettings) =>
+    cloudRunSetupSession.run(request, async publish => {
+      const settings = await settingsService.getPublicSettings();
+      const managedAws = !request && settings.cloudRuns.mode === "aws";
+      return withCloudRunWorker(request, worker => cloudRunDoctorService.setup(worker, publish, {
+        requirePersistentStorage: managedAws,
+        requiredProviderKinds: enabledCloudProviders(settings.providers)
+      }), "setup");
+    }, progress => sendToMainWindow("cloud-runs:setup-progress", progress)));
+  ipcMain.handle("cloud-runs:get-setup-progress", () => cloudRunSetupSession.getProgress());
+  ipcMain.handle("cloud-runs:submit-auth-code", (_event, request: { requestId: string; code: string }) =>
+    cloudRunDoctorService.submitAuthCode(request?.requestId, request?.code));
+  ipcMain.handle("cloud-runs:cancel-auth", (_event, requestId: string) => cloudRunDoctorService.cancelAuth(requestId));
+  ipcMain.handle("cloud-runs:is-auth-active", (_event, requestId: string) => cloudRunDoctorService.isAuthActive(requestId));
   ipcMain.handle("cloud-runs:aws-bootstrap-command", (_event, region: string, recoveryOperationId?: string) =>
     cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1", recoveryOperationId));
   ipcMain.handle("cloud-runs:aws-connect", (_event, request: ConnectAwsWorkerRequest) =>

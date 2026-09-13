@@ -50,14 +50,33 @@ test("closing diagnostics during setup preserves sign-in, busy controls and the 
   renderer.unmount();
 });
 
+test("reopening Settings restores a live Claude form and completion clears it without another setup", async () => {
+  let publish!: (value: CloudRunWorkerSetupProgress) => void;
+  const renderer = await renderDiagnostics({
+    snapshot: { stage: "claude-auth", message: "Sign in to Claude", authUrl: "https://claude.com/cai/oauth/authorize?state=one", authProvider: "claude-code", authRequestId: "active" },
+    onProgress: value => { publish = value; }
+  });
+  try {
+    assert.match(textOf(renderer.root.findByProps({ "data-testid": "cloud-run-claude-auth" })), /Complete sign-in/);
+    await click(renderer, "machine-instance-diagnostics-toggle");
+    assert.equal(renderer.root.findByProps({ "data-testid": "machine-instance-setup" }).props.disabled, true);
+    await act(async () => { publish({ stage: "complete", message: "Worker ready" }); });
+    assert.equal(renderer.root.findAllByProps({ "data-testid": "cloud-run-claude-auth" }).length, 0);
+    assert.equal(renderer.root.findByProps({ "data-testid": "machine-instance-setup" }).props.disabled, false);
+  } finally { act(() => renderer.unmount()); }
+});
+
 async function renderDiagnostics(options: {
   diagnose?: () => Promise<any>;
   setup?: () => Promise<any>;
   onProgress?: (listener: (value: CloudRunWorkerSetupProgress) => void) => void;
+  snapshot?: CloudRunWorkerSetupProgress;
 }): Promise<ReactTestRenderer> {
   (globalThis as any).window = { consensus: {
     diagnoseCloudRunWorker: options.diagnose,
     setupCloudRunWorker: options.setup,
+    getCloudRunSetupProgress: async () => options.snapshot ?? null,
+    isCloudRunAuthActive: async () => true,
     onCloudRunSetupProgress: (listener: (value: CloudRunWorkerSetupProgress) => void) => { options.onProgress?.(listener); return () => undefined; },
     openExternal: async () => undefined
   } };

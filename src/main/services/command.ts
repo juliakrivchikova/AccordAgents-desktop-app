@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import type { Readable } from "node:stream";
 import crossSpawn from "cross-spawn";
 import { terminateProcess } from "./processTermination";
 
@@ -25,6 +26,8 @@ export interface CommandResult {
 export interface CommandOptions {
   cwd?: string;
   input?: string;
+  /** Interactive input owned by the caller; never included in command arguments. */
+  inputStream?: Readable;
   timeoutMs?: number;
   allowNoTimeout?: boolean;
   env?: NodeJS.ProcessEnv;
@@ -154,6 +157,7 @@ export async function runCommand(command: string, args: string[], options: Comma
     // them indefinitely. A cancelled or timed-out run must not, so release our
     // ends once the child itself is gone.
     const releaseStdio = () => {
+      options.inputStream?.unpipe(child.stdin);
       child.stdout.destroy();
       child.stderr.destroy();
     };
@@ -228,6 +232,7 @@ export async function runCommand(command: string, args: string[], options: Comma
     });
 
     child.on("error", (error) => {
+      options.inputStream?.unpipe(child.stdin);
       if (timer) {
         clearTimeout(timer);
       }
@@ -238,6 +243,7 @@ export async function runCommand(command: string, args: string[], options: Comma
     });
 
     child.on("close", (exitCode) => {
+      options.inputStream?.unpipe(child.stdin);
       if (timer) {
         clearTimeout(timer);
       }
@@ -275,7 +281,8 @@ export async function runCommand(command: string, args: string[], options: Comma
         }
       });
     }
-    child.stdin.end();
+    if (options.inputStream) options.inputStream.pipe(child.stdin);
+    else child.stdin.end();
   });
 }
 

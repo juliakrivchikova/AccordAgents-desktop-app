@@ -412,15 +412,18 @@ export class MachineInstallerService {
       const doctorOptions = { requiredProviderKind: request.requiredProvider, maintenance, profileHome: record.profileHome };
       let report = await this.options.doctor.diagnose(worker, doctorOptions);
       if (!report.ok) {
-        // Doctor progress is synchronous and each frame saves a snapshot, so
+        // Each doctor frame saves a snapshot, so
         // the writes are chained: an out-of-order save would leave the record
         // showing an earlier step than the one the User is looking at.
         let progressWrites: Promise<unknown> = Promise.resolve();
         report = await this.options.doctor.setup(worker, (progress) => {
           progressWrites = progressWrites.then(() => emit("preflight", progress.message, {
             authUrl: progress.authUrl,
-            authCode: progress.authCode
+            authCode: progress.authCode,
+            authProvider: progress.authProvider,
+            authRequestId: progress.authRequestId
           }));
+          return progressWrites;
         }, doctorOptions);
         await progressWrites;
       }

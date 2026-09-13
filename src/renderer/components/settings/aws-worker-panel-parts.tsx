@@ -1,5 +1,5 @@
 import type { AwsWorkerOperationSnapshot } from "../../../shared/types";
-import { CodexDeviceAuth } from "../codex-device-auth";
+import { CloudProviderAuth } from "../cloud-provider-auth";
 
 /** What each confirmed action does to the shared instance, stated before the
  *  click rather than discovered after it. */
@@ -25,7 +25,7 @@ export function WorkerProgress({ operation }: { operation: AwsWorkerOperationSna
           <span>{phase.label}</span>
         </li>
       ))}
-      {operation.phase === "setting-up" && operation.authUrl ? <li className="gen-aws-auth"><CodexDeviceAuth authUrl={operation.authUrl} authCode={operation.authCode} /></li> : null}
+      {operation.phase === "setting-up" && operation.authUrl ? <li className="gen-aws-auth"><CloudProviderAuth authUrl={operation.authUrl} authCode={operation.authCode} authProvider={operation.authProvider} authRequestId={operation.authRequestId} /></li> : null}
     </ol>
   );
 }

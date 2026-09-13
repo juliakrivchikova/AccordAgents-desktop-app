@@ -9,7 +9,7 @@ import type {
   MachineSshTarget
 } from "../../../shared/machineInstall";
 import { MACHINE_INSTALL_PHASE_ORDER, machineInstallPhaseLabel } from "../../../shared/machineInstall";
-import { CodexDeviceAuth } from "../codex-device-auth";
+import { CloudProviderAuth } from "../cloud-provider-auth";
 
 /**
  * Installing and upgrading the runtime on a machine, from Settings.
@@ -211,7 +211,7 @@ function MachineSetupSteps(props: { snapshot: MachineInstallSnapshot }): JSX.Ele
       <div className="machine-setup-message" data-testid="machine-setup-message">{snapshot.message}</div>
       {!isTerminal(snapshot) && snapshot.authUrl ? (
         <div className="machine-setup-note" data-testid="machine-setup-auth">
-          <CodexDeviceAuth authUrl={snapshot.authUrl} authCode={snapshot.authCode} />
+          <CloudProviderAuth authUrl={snapshot.authUrl} authCode={snapshot.authCode} authProvider={snapshot.authProvider} authRequestId={snapshot.authRequestId} />
         </div>
       ) : null}
       {snapshot.warnings?.map((warning) => (

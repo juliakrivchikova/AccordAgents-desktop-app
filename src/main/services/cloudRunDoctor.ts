@@ -1,5 +1,6 @@
 import type {
   ChatProviderKind,
+  ProviderSettings,
   CloudRunWorkerCheck,
   CloudRunWorkerCheckId,
   CloudRunWorkerDoctorReport,
@@ -17,6 +18,8 @@ import { isTransientSshError, runWithSshRetries } from "./sshRetry";
 import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
 import { remoteProfileCommand } from "./remoteWorkerTarget";
 import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
+import { CloudRunClaudeAuth } from "./cloudRunClaudeAuth";
+import type { Readable } from "node:stream";
 
 const PROBE_TIMEOUT_MS = 25_000;
 const FIX_TIMEOUT_MS = 5 * 60_000;
@@ -53,6 +56,7 @@ const CHECK_LABELS: Record<CloudRunWorkerCheckId, string> = {
 interface CloudRunDoctorOptions {
   requirePersistentStorage?: boolean;
   requiredProviderKind?: ChatProviderKind;
+  requiredProviderKinds?: ChatProviderKind[];
   maintenance?: MachineMaintenanceTarget;
   profileHome?: string;
 }
@@ -64,6 +68,8 @@ export interface CloudRunSshExecRequest {
   onStdout?: (chunk: string) => void;
   retryAttempts?: number;
   keepAlive?: "default" | "none";
+  inputStream?: Readable;
+  signal?: AbortSignal;
 }
 
 export interface CloudRunDoctorServiceOptions {
@@ -82,6 +88,7 @@ export class CloudRunDoctorService {
   private readonly openExternal?: (url: string) => void;
   private readonly logger?: (event: string, payload: Record<string, unknown>) => void;
   private readonly environmentForWorker?: CloudRunDoctorServiceOptions["environmentForWorker"];
+  private readonly claudeAuth: CloudRunClaudeAuth;
 
   constructor(options: CloudRunDoctorServiceOptions = {}) {
     this.sshExec = options.sshExec ?? defaultSshExec;
@@ -89,7 +96,12 @@ export class CloudRunDoctorService {
     this.openExternal = options.openExternal;
     this.logger = options.logger;
     this.environmentForWorker = options.environmentForWorker;
+    this.claudeAuth = new CloudRunClaudeAuth(this.sshExec, this.openExternal);
   }
+
+  submitAuthCode(requestId: string, code: string): void { this.claudeAuth.submit(requestId, code); }
+  cancelAuth(requestId: string): void { this.claudeAuth.cancel(requestId); }
+  isAuthActive(requestId: string): boolean { return this.claudeAuth.isActive(requestId); }
 
   private async resolveWorker(settings: CloudRunWorkerSettings, options: CloudRunDoctorOptions, readOnly = false): Promise<(RemoteRunWorkerTarget & { maintenance?: MachineMaintenanceTarget }) | undefined> {
     const worker = workerTarget(settings, options.maintenance, options.profileHome);
@@ -132,19 +144,19 @@ export class CloudRunDoctorService {
 
   async setup(
     settings: CloudRunWorkerSettings,
-    onProgress?: (progress: CloudRunWorkerSetupProgress) => void,
+    onProgress?: (progress: CloudRunWorkerSetupProgress) => void | Promise<unknown>,
     options: CloudRunDoctorOptions = {}
   ): Promise<CloudRunWorkerDoctorReport> {
     const worker = await this.resolveWorker(settings, options);
     if (!worker) {
       return failedReport("connect", "Worker host is not configured.");
     }
-    const progress = (stage: string, message: string, extra: Partial<CloudRunWorkerSetupProgress> = {}): void => {
+    const progress = (stage: string, message: string, extra: Partial<CloudRunWorkerSetupProgress> = {}): void | Promise<unknown> => {
       this.logger?.("cloud-runs.setup.progress", { stage, message });
-      onProgress?.({ stage, message, ...extra });
+      return onProgress?.({ stage, message, ...extra });
     };
 
-    progress("diagnose", "Checking the worker…");
+    await progress("diagnose", "Checking the worker…");
     const scopedSettings = { ...settings, workerRoot: worker.workerRoot };
     const scopedOptions = { ...options, profileHome: worker.profileHome };
     const before = await this.diagnose(scopedSettings, scopedOptions);
@@ -169,43 +181,43 @@ export class CloudRunDoctorService {
     if (failing("sqlite3")) aptPackages.push("sqlite3");
 
     if ((aptPackages.length > 0 || failing("node") || blocking("codex") || blocking("claude") || failing("userns")) && !hasSudo) {
-      progress("sudo", "Missing tools need passwordless sudo to install; ask whoever owns the box to install the failing items.");
+      await progress("sudo", "Missing tools need passwordless sudo to install; ask whoever owns the box to install the failing items.");
     }
 
     if (hasSudo) {
       if (aptPackages.length > 0) {
-        progress("apt", `Installing ${aptPackages.join(", ")}…`);
+        await progress("apt", `Installing ${aptPackages.join(", ")}…`);
         await this.fix(worker, `sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ${aptPackages.join(" ")}`);
       }
       if (failing("node")) {
         // Distro nodejs is too old for the codex npm wrapper; use NodeSource 22
         // to match the proven worker provisioning.
-        progress("node", "Installing Node.js 22 (NodeSource)…");
+        await progress("node", "Installing Node.js 22 (NodeSource)…");
         await this.fix(worker, "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -nE bash - && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs");
       }
       if (failing("browser")) {
         // Ubuntu's `chromium` is snap-backed and unreliable on a headless EC2
         // box, so install Google's .deb. It also pulls the GTK/NSS/ALSA stack
         // Electron needs, which is why this runs before any Electron QA.
-        progress("browser", "Installing Google Chrome (headless browser QA)…");
+        await progress("browser", "Installing Google Chrome (headless browser QA)…");
         await this.fix(worker, "tmp=\"$(mktemp -d)\" && curl -fsSL -o \"$tmp/chrome.deb\" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \"$tmp/chrome.deb\" && rm -rf \"$tmp\"");
       }
       if (blocking("codex")) {
-        progress("codex", "Installing the Codex CLI…");
+        await progress("codex", "Installing the Codex CLI…");
         await this.fix(worker, "sudo -n npm install -g @openai/codex");
       }
       if (blocking("claude")) {
-        progress("claude", "Installing the Claude Code CLI…");
+        await progress("claude", "Installing the Claude Code CLI…");
         await this.fix(worker, "sudo -n npm install -g @anthropic-ai/claude-code");
       }
       if (failing("userns")) {
-        progress("userns", "Allowing unprivileged user namespaces (required by the Codex sandbox)…");
+        await progress("userns", "Allowing unprivileged user namespaces (required by the Codex sandbox)…");
         await this.fix(worker, "sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 && printf 'kernel.apparmor_restrict_unprivileged_userns=0\\n' | sudo -n tee /etc/sysctl.d/99-accordagents-userns.conf > /dev/null");
       }
     }
 
     if (failing("git-identity")) {
-      progress("git-identity", "Copying your git identity to the worker…");
+      await progress("git-identity", "Copying your git identity to the worker…");
       const identity = await this.localGitIdentity();
       const name = identity.name?.trim() || "AccordAgents Remote Agent";
       const email = identity.email?.trim() || "accordagents-remote@users.noreply.github.com";
@@ -216,20 +228,26 @@ export class CloudRunDoctorService {
       await this.runDeviceAuth(worker, progress);
     }
     if (blocking("claude-auth") && (!failing("claude") || hasSudo)) {
-      progress("claude-auth", "Claude Code sign-in is required on the worker. Run `claude auth login` on that worker and retry.");
+      try {
+        await this.claudeAuth.run(worker, value => progress(value.stage, value.message, value));
+      } catch (error) {
+        const detail = errorMessage(error);
+        await progress("claude-auth", detail);
+        return failedReport("claude-auth", detail);
+      }
     }
 
-    progress("diagnose", "Re-checking the worker…");
+    await progress("diagnose", "Re-checking the worker…");
     return this.diagnose(scopedSettings, scopedOptions);
   }
 
   async waitForCloudInit(
     settings: CloudRunWorkerSettings,
-    onProgress?: (progress: CloudRunWorkerSetupProgress) => void
+    onProgress?: (progress: CloudRunWorkerSetupProgress) => void | Promise<unknown>
   ): Promise<void> {
     const worker = workerTarget(settings);
     if (!worker) throw new Error("Worker host is not configured.");
-    onProgress?.({ stage: "cloud-init", message: "Waiting for the worker base image…" });
+    await onProgress?.({ stage: "cloud-init", message: "Waiting for the worker base image…" });
     await this.sshExec({
       worker,
       command: "command -v cloud-init >/dev/null 2>&1 && sudo -n cloud-init status --wait >/dev/null || true",
@@ -246,14 +264,17 @@ export class CloudRunDoctorService {
   // blocks until codex reports the login finished or the timeout hits.
   private async runDeviceAuth(
     worker: RemoteRunWorkerTarget,
-    progress: (stage: string, message: string, extra?: Partial<CloudRunWorkerSetupProgress>) => void
+    progress: (stage: string, message: string, extra?: Partial<CloudRunWorkerSetupProgress>) => void | Promise<unknown>
   ): Promise<void> {
-    progress("codex-auth", "Starting Codex sign-in on the worker…");
+    await progress("codex-auth", "Starting Codex sign-in on the worker…");
     let buffered = "";
     let authUrl: string | undefined;
     let authCode: string | undefined;
     let opened = false;
     let lastProgressKey = "";
+    let published: Promise<unknown> = Promise.resolve();
+    let publishError: unknown;
+    const abort = new AbortController();
     const codexPath = worker.codexPath?.trim() || "codex";
     try {
       await this.sshExec({
@@ -261,6 +282,7 @@ export class CloudRunDoctorService {
         command: `${shellQuotePosix(codexPath)} login --device-auth < /dev/null 2>&1`,
         timeoutMs: DEVICE_AUTH_TIMEOUT_MS,
         keepAlive: "none",
+        signal: abort.signal,
         onStdout: (chunk) => {
           buffered += chunk;
           const visible = stripAnsi(buffered);
@@ -272,19 +294,27 @@ export class CloudRunDoctorService {
           const progressKey = `${authUrl}:${authCode ?? ""}`;
           if (progressKey !== lastProgressKey) {
             lastProgressKey = progressKey;
-            progress("codex-auth", authCode
-              ? "Approve the Codex sign-in with the device code."
-              : "Approve the Codex sign-in; waiting for the device code…", { authUrl, authCode });
-          }
-          if (!opened) {
-            opened = true;
-            this.openExternal?.(authUrl);
+            const challenge = { authUrl, authCode, authProvider: "codex-cli" as const };
+            published = published.then(async () => {
+              if (publishError) return;
+              await progress("codex-auth", challenge.authCode
+                ? "Approve the Codex sign-in with the device code."
+                : "Approve the Codex sign-in; waiting for the device code…", challenge);
+              if (!opened && !abort.signal.aborted) {
+                opened = true;
+                this.openExternal?.(challenge.authUrl);
+              }
+            }).catch(error => { publishError = error; abort.abort(); });
           }
         }
       });
-      progress("codex-auth", "Codex sign-in completed.");
+      await published;
+      if (publishError) throw publishError;
+      await progress("codex-auth", "Codex sign-in completed.");
     } catch (error) {
-      progress("codex-auth", `Codex sign-in did not complete: ${errorMessage(error)}`);
+      await published;
+      if (publishError) throw new Error("The app could not save the Codex sign-in step. Start setup again.");
+      await progress("codex-auth", `Codex sign-in did not complete: ${errorMessage(error)}`);
     }
   }
 }
@@ -411,20 +441,23 @@ function parseProbeOutput(output: string, options: CloudRunDoctorOptions): Cloud
     status: values.get("claude-auth") === "ok" ? "pass" : requiredChecks.has("claude-auth") ? "fail" : "warn",
     detail: values.get("claude-auth") === "ok"
       ? undefined
-      : "Claude Code is not signed in on the worker. Run `claude auth login` on the worker and retry.",
-    fixable: false
+      : "Claude Code is not signed in. Set up the worker to sign in through your browser.",
+    fixable: true
   });
   return checks;
 }
 
+export function enabledCloudProviders(providers: ProviderSettings[]): ChatProviderKind[] {
+  return providers.flatMap(provider => provider.enabled && (provider.kind === "codex-cli" || provider.kind === "claude-code")
+    ? [provider.kind] : []);
+}
+
 function requiredChecksForOptions(options: CloudRunDoctorOptions): ReadonlySet<CloudRunWorkerCheckId> {
   const required = new Set(BASE_REQUIRED_CHECKS);
-  if (options.requiredProviderKind === "claude-code") {
-    required.add("claude");
-    required.add("claude-auth");
-  } else {
-    required.add("codex");
-    required.add("codex-auth");
+  for (const provider of options.requiredProviderKinds ?? [options.requiredProviderKind ?? "codex-cli"]) {
+    const check = provider === "claude-code" ? "claude" : "codex";
+    required.add(check);
+    required.add(`${check}-auth`);
   }
   return required;
 }
@@ -465,10 +498,13 @@ async function defaultSshExec(request: CloudRunSshExecRequest): Promise<string> 
         : request.command)
     ], {
       timeoutMs: request.timeoutMs,
-      onStdout
+      onStdout,
+      inputStream: request.inputStream,
+      signal: request.signal
     }),
     {
       attempts: request.worker.maintenance ? 1 : request.retryAttempts,
+      signal: request.signal,
       isTransient: (error) => !producedOutput && isTransientSshError(error)
     }
   );

@@ -3,7 +3,7 @@ import { ChevronDown } from "lucide-react";
 import type { ChatProviderKind } from "../../../shared/types";
 import type { MachineRecord } from "../../../shared/machineLink";
 import type { CloudRunPreparationProgress } from "../../../shared/cloudRunPreparation";
-import { CodexDeviceAuth } from "../codex-device-auth";
+import { CloudProviderAuth } from "../cloud-provider-auth";
 
 export function ParticipantRunLocation(props: {
   kind: ChatProviderKind;
@@ -89,7 +89,7 @@ export function ParticipantRunLocation(props: {
       </div>
       {props.locked && <p className="text-muted-foreground text-xs">{lockedReason}</p>}
       {preparing && <p className="text-muted-foreground text-xs" role="status">{progress?.message}</p>}
-      {preparing && progress?.authUrl && <CodexDeviceAuth authUrl={progress.authUrl} authCode={progress.authCode} />}
+      {preparing && progress?.authUrl && <CloudProviderAuth authUrl={progress.authUrl} authCode={progress.authCode} authProvider={progress.authProvider} authRequestId={progress.authRequestId} />}
       {error && <div className="text-xs"><p className="text-destructive" role="alert">{error}</p>
         <button type="button" className="gen-doctor-auth-link" disabled={preparing || props.locked || props.disabled} onClick={() => void select("cloud")}>Retry Cloud run</button></div>}
     </div>

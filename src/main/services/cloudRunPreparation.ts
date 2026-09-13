@@ -153,7 +153,8 @@ export class CloudRunPreparationService {
       serviceName: established?.serviceName || undefined,
       isolatedProfile: established ? established.isolatedProfile ?? Boolean(established.profileHome) : true,
       target: { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias }
-    }, snapshot => this.report({ message: snapshot.error || snapshot.message, authUrl: snapshot.authUrl, authCode: snapshot.authCode }));
+    }, snapshot => this.report({ message: snapshot.error || snapshot.message, authUrl: snapshot.authUrl, authCode: snapshot.authCode,
+      authProvider: snapshot.authProvider, authRequestId: snapshot.authRequestId }));
     if (result.snapshot.phase !== "ready") {
       throw new Error(result.snapshot.error || result.snapshot.message || "Cloud setup did not finish. Select Cloud run to retry.");
     }

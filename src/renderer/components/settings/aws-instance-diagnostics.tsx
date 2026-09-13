@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import type { CloudRunWorkerDoctorReport, CloudRunWorkerSetupProgress } from "../../../shared/types";
-import { CodexDeviceAuth } from "../codex-device-auth";
+import { CloudProviderAuth } from "../cloud-provider-auth";
 
 export function AwsInstanceDiagnostics(): JSX.Element {
   const [open, setOpen] = useState(false);
@@ -11,7 +11,18 @@ export function AwsInstanceDiagnostics(): JSX.Element {
   const [report, setReport] = useState<CloudRunWorkerDoctorReport | null>(null);
   const [setupProgress, setSetupProgress] = useState<CloudRunWorkerSetupProgress | null>(null);
 
-  useEffect(() => window.consensus.onCloudRunSetupProgress(setSetupProgress), []);
+  useEffect(() => {
+    let current = true;
+    let received = false;
+    const apply = (progress: CloudRunWorkerSetupProgress): void => {
+      const finished = progress.stage === "complete" || progress.stage === "error";
+      setBusy(!finished); setStatus(progress.message); setFailed(progress.stage === "error");
+      setSetupProgress(finished ? null : progress);
+    };
+    const off = window.consensus.onCloudRunSetupProgress(progress => { received = true; if (current) apply(progress); });
+    void window.consensus.getCloudRunSetupProgress?.().then(progress => { if (current && !received && progress) apply(progress); }).catch(() => undefined);
+    return () => { current = false; off(); };
+  }, []);
 
   const run = async (prepare: boolean): Promise<void> => {
     setBusy(true);
@@ -44,7 +55,7 @@ export function AwsInstanceDiagnostics(): JSX.Element {
         <div className={`gen-aws-feedback${failed ? " is-error" : ""}`} data-testid="machine-instance-diagnostics-status" role={failed ? "alert" : "status"}>
           {(busy && setupProgress?.message) || status}
           {busy && setupProgress?.authUrl ? (
-            <CodexDeviceAuth authUrl={setupProgress.authUrl} authCode={setupProgress.authCode} />
+            <CloudProviderAuth authUrl={setupProgress.authUrl} authCode={setupProgress.authCode} authProvider={setupProgress.authProvider} authRequestId={setupProgress.authRequestId} />
           ) : null}
         </div>
       ) : null}
