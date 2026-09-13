@@ -1007,7 +1007,17 @@ test("adoptCredentials saves pasted credentials only after they read the existin
   const service = serviceWith(settings, new Map([[rejected.accessKeyId, refusing], [NEW_CREDS.accessKeyId, accepting]]));
   await assert.rejects(service.adoptCredentials(encodeWorkerBlob(rejected)), /AccessDenied/);
   assert.equal(settings.credentials, OLD_CREDS);
-  await service.adoptCredentials(encodeWorkerBlob(NEW_CREDS));
+  const blind = { accessKeyId: "AKIABLIND0000000", secretAccessKey: "blind", region: "us-east-1" };
+  const elsewhere = { accessKeyId: "AKIAELSEWHERE000", secretAccessKey: "elsewhere", region: "us-east-1" };
+  const service2 = serviceWith(settings, new Map([
+    [rejected.accessKeyId, refusing], [NEW_CREDS.accessKeyId, accepting],
+    [blind.accessKeyId, new FakeEc2Client(undefined)],
+    [elsewhere.accessKeyId, new FakeEc2Client({ instanceId: "i-other", state: "running" })]
+  ]));
+  await assert.rejects(service2.adoptCredentials(encodeWorkerBlob(blind)), /cannot see the existing instance i-old/);
+  await assert.rejects(service2.adoptCredentials(encodeWorkerBlob(elsewhere)), /cannot see the existing instance i-old/);
+  assert.equal(settings.credentials, OLD_CREDS, "credentials that do not see the instance are never saved");
+  await service2.adoptCredentials(encodeWorkerBlob(NEW_CREDS));
   assert.equal(settings.credentials?.accessKeyId, NEW_CREDS.accessKeyId);
   assert.equal(settings.handle, OLD_HANDLE);
   assert.equal(accepting.runCount, 0);

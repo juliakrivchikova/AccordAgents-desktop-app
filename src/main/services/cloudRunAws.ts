@@ -451,7 +451,10 @@ export class CloudRunAwsService {
     const credentials = parseWorkerBlob(blob);
     const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
     if (!handle) throw new Error("Connect the AWS account before updating its credentials.");
-    await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId);
+    const info = await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId);
+    if (!info || info.instanceId !== handle.instanceId) {
+      throw new Error(`These credentials cannot see the existing instance ${handle.instanceId} in ${handle.region}. The saved credentials were kept.`);
+    }
     await this.settings.saveAwsWorkerCredentials(credentials);
   }
 

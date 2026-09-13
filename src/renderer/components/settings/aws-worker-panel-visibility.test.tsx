@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AwsWorkerStartRequest } from "../../../shared/types";
-import { OLD_ERROR, RUNNING, SETTINGS, change, click, findButton, ready, renderPanel, textOf, unmount } from "./aws-worker-panel-harness.test";
+import { act } from "react-test-renderer";
+import type { AwsWorkerOperationSnapshot, AwsWorkerStartRequest } from "../../../shared/types";
+import { OLD_ERROR, RUNNING, SETTINGS, change, click, findButton, flush, ready, renderPanel, textOf, unmount } from "./aws-worker-panel-harness.test";
 
 test("a healthy running instance offers Stop only; a stopped one offers Start only", async () => {
   const running = await renderPanel({ status: RUNNING });
@@ -99,5 +100,19 @@ test("a confirmed access check brings the normal actions back", async () => {
   await click(renderer.root.findByProps({ "data-testid": "aws-worker-start" }));
   assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Start instance");
   assert.equal(renderer.root.findAll(node => node.type === "button" && textOf(node) === "Refresh status").length, 1);
+  unmount(renderer);
+});
+
+test("a check still running when Settings reopen keeps Start out of reach until it finishes", async () => {
+  let progress!: (value: AwsWorkerOperationSnapshot) => void;
+  const live: AwsWorkerOperationSnapshot = { operationId: "check-live", intent: "check", phase: "starting", message: "Checking AWS access…", updatedAt: "2026-09-13T12:00:00.000Z" };
+  const renderer = await renderPanel({ status: { ...RUNNING, state: "stopped", operation: live }, onProgress: listener => { progress = listener; }, start: async () => { throw new Error("nothing may start while a check runs"); } });
+  const busyButton = renderer.root.findByProps({ "data-testid": "aws-worker-start" });
+  assert.equal(textOf(busyButton), "Checking AWS access…");
+  assert.equal(busyButton.props.disabled, true);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-progress" }).length, 0, "a check has no start phases to show");
+  await act(async () => { progress({ ...live, phase: "ready", message: "AWS access confirmed · instance stopped.", updatedAt: "2026-09-13T12:00:05.000Z" }); await flush(); });
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-start" })), "Start instance");
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-start" }).props.disabled, false);
   unmount(renderer);
 });

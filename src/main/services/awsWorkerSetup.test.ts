@@ -96,6 +96,27 @@ test("a confirmed access check reports the instance state and starts nothing; pa
   assert.equal(result.status.state, "stopped");
 });
 
+test("a check in flight is saved as running and never handed to a different request", async () => {
+  const phases: string[] = [];
+  let release!: (value: { configured: boolean; state: string }) => void;
+  const aws = {
+    probeAccess: () => new Promise<{ configured: boolean; state: string }>(resolve => { release = resolve; }),
+    prepareWorker: async () => { throw new Error("must not prepare"); },
+    ensurePreparedRunning: async () => { throw new Error("must not start"); }
+  };
+  const settings = { saveAwsWorkerOperation: async (operation: AwsWorkerOperationSnapshot | undefined) => { phases.push(operation?.phase ?? "cleared"); }, getAwsWorkerOperation: async () => undefined };
+  const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any);
+  const check = service.start({ operationId: "check-live", intent: "check" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(phases, ["starting"], "the running check is persisted before AWS answers");
+  await assert.rejects(service.start({ operationId: "start-now", intent: "setup" }), /still running/);
+  assert.equal(service.start({ operationId: "check-live", intent: "check" }), check, "a retry of the same request joins it");
+  release({ configured: true, state: "stopped" });
+  const result = await check;
+  assert.equal(result.operation.phase, "ready");
+  assert.deepEqual(phases, ["starting", "ready"]);
+});
+
 test("start orchestrates the exact visible phases and reaches ready", async () => {
   const saved: AwsWorkerOperationSnapshot[] = [];
   const phases: string[] = [];

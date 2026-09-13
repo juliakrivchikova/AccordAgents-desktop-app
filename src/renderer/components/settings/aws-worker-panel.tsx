@@ -321,7 +321,7 @@ export function AwsWorkerPanel(props: {
         </div>
       ) : null}
       {needsConnection ? connectionForm : null}
-      {showProgress && currentOperation ? <WorkerProgress operation={currentOperation} /> : null}
+      {showProgress && currentOperation && currentOperation.intent !== "check" ? <WorkerProgress operation={currentOperation} /> : null}
       {mismatch ? (
         <div className="gen-aws-decision" data-testid="aws-worker-spec-decision">
           <strong>Review the requested size change</strong>

@@ -12,6 +12,7 @@ import type { SettingsService } from "./settings";
 
 export class AwsWorkerSetupService {
   private active: Promise<AwsWorkerStartResult> | undefined;
+  private activeRequest: { operationId: string; intent: "setup" | "resize" | "check" } | undefined;
 
   constructor(
     private readonly aws: CloudRunAwsService,
@@ -36,9 +37,17 @@ export class AwsWorkerSetupService {
     request: AwsWorkerStartRequest,
     onProgress?: (progress: AwsWorkerOperationSnapshot) => void
   ): Promise<AwsWorkerStartResult> {
-    if (this.active) return this.active;
+    // Only a retry of the same request may join the one in flight. Handing a
+    // different request the running one's result would answer "start" with
+    // the outcome of a read-only check, or the other way round.
+    if (this.active) {
+      if (this.activeRequest?.operationId === request.operationId) return this.active;
+      return Promise.reject(new Error(`Another AWS action (${this.activeRequest?.intent ?? "setup"}) is still running. Wait for it to finish, then try again.`));
+    }
+    this.activeRequest = { operationId: request.operationId, intent: request.intent ?? "setup" };
     this.active = this.run(request, onProgress).finally(() => {
       this.active = undefined;
+      this.activeRequest = undefined;
     });
     return this.active;
   }
@@ -78,7 +87,9 @@ export class AwsWorkerSetupService {
         // Read-only: does this app still reach AWS? A refusal lands in the
         // catch below and becomes the permission recovery; nothing is
         // created, started or set up. Pasted credentials are adopted only
-        // after they prove they can read the existing instance.
+        // after they prove they can read the existing instance. The live
+        // phase is saved so a reopened Settings panel sees the check running.
+        await emit("starting", "Checking AWS access…");
         if (request.blob?.trim()) await this.aws.adoptCredentials(request.blob);
         const current = await this.aws.probeAccess();
         const operation = await emit("ready", current.configured
