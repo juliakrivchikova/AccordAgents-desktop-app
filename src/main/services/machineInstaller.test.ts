@@ -124,6 +124,10 @@ function harness(options: {
   doctor?: CloudRunWorkerDoctorReport;
   ownerFailure?: string | Error;
   probeFailure?: string;
+  getEnrollmentJson?: () => Promise<string>;
+  restoreEnrollment?: (machineId: string, requested: string, installed: string, installedMachineId?: string) => Promise<string | void>;
+  recoveryOutput?: string;
+  readRecovery?: () => Promise<string>;
 } = {}): Harness {
   const calls: MachineSshExecRequest[] = [];
   const uploads: Array<{ remoteDir: string }> = [];
@@ -151,7 +155,8 @@ function harness(options: {
         return options.doctor ?? { ok: true, message: "Machine ready.", checks: [] };
       }
     },
-    getEnrollmentJson: async () => ENROLLMENT,
+    getEnrollmentJson: options.getEnrollmentJson ?? (async () => ENROLLMENT),
+    restoreEnrollment: options.restoreEnrollment,
     waitForConnected: async (_machineId, _timeoutMs, expectAppVersion) => {
       waitedForVersion = expectAppVersion;
       return options.connected !== false;
@@ -162,6 +167,7 @@ function harness(options: {
     logger: (event, payload) => logged.push({ event, ...payload }),
     sshExec: async (request) => {
       calls.push(request);
+      if (request.script.endsWith(" recover")) return options.readRecovery ? options.readRecovery() : options.recoveryOutput ?? "";
       if (options.ownerFailure && request.script.includes("environment-owner.json")) {
         throw typeof options.ownerFailure === "string" ? new Error(options.ownerFailure) : options.ownerFailure;
       }
@@ -251,6 +257,61 @@ test("SSH owner refusals reach setup, Settings and mirror callers without leakin
   await assert.rejects(h.service.providerEnvironment(record.target, LAYOUT.installRoot), { message: reason });
   await assert.rejects(h.service.bootstrapProjectMirror({ machineId: "home", localPath: "/project" }), { message: reason });
   assert.equal(h.syncedUp.length, 0);
+});
+
+test("setup restores and persists the installed channel before owner checks or provider work; failed save and cancellation stop there", async () => {
+  const installed = JSON.stringify({ version: 1, purpose: "machine-host", issuer: { originId: "desktop", keyId: "key", publicKeyDerBase64: "same-key" },
+    rendezvousId: "installed-room", stableRoutingId: "route", relaySealKeyBase64: "c2VjcmV0", relayUrl: "wss://relay.example",
+    fingerprint: "fingerprint", createdAt: "2026-01-01T00:00:00.000Z", expiresAt: "2036-01-01T00:00:00.000Z",
+    capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }] });
+  const requested = JSON.stringify({ ...JSON.parse(installed), rendezvousId: "replacement-room" });
+  let saved = requested;
+  let saves = 0;
+  const h = harness({ recoveryOutput: JSON.stringify({ enrollment: JSON.parse(installed), machineId: "original" }), getEnrollmentJson: async () => saved,
+    restoreEnrollment: async (_id, expected, recovered, originalId) => { assert.equal(expected, requested); assert.equal(recovered, installed); assert.equal(originalId, "original"); saved = recovered; saves++; return originalId; } });
+  const result = await h.service.install({ machineId: "one", operationId: "restore", target: TARGET, isolatedProfile: true });
+  assert.equal(result.snapshot.phase, "ready");
+  assert.equal(saves, 1);
+  assert.equal(result.record.machineId, "original");
+  assert.equal(result.snapshot.machineId, "original");
+  assert.equal(h.calls.find(call => call.script.endsWith(" claim"))?.input, installed);
+  assert.equal(h.calls.find(call => call.script.includes("enrollment.json.new"))?.input, installed);
+  assert.ok(!JSON.stringify(h.logged).includes("c2VjcmV0"));
+  let commit!: () => void;
+  let saving!: () => void;
+  const writing = new Promise<void>(resolve => { saving = resolve; });
+  const held = harness({ recoveryOutput: JSON.stringify({ enrollment: JSON.parse(installed), machineId: "original" }), getEnrollmentJson: async () => installed,
+    restoreEnrollment: async () => { saving(); await new Promise<void>(resolve => { commit = resolve; }); return "original"; } });
+  const first = held.service.install({ machineId: "one", operationId: "recover-home", target: TARGET });
+  await writing;
+  await assert.rejects(held.service.install({ machineId: "original", operationId: "competing", target: TARGET }), /still running/);
+  commit();
+  assert.equal((await first).record.machineId, "original");
+  const failed = harness({ recoveryOutput: JSON.stringify({ enrollment: JSON.parse(installed), machineId: "original" }), getEnrollmentJson: async () => requested,
+    restoreEnrollment: async () => { throw new Error("ENOSPC: cannot save connection"); } });
+  const failure = await failed.service.install({ machineId: "one", operationId: "failed", target: TARGET });
+  assert.equal(failure.snapshot.phase, "error");
+  assert.equal(failed.doctorCalls.length, 0);
+  assert.equal(failed.uploads.length, 0);
+  assert.ok(!failed.calls.some(call => call.script.endsWith(" claim")));
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(failed.service.ensureEnvironmentOwner({ machineId: "one", target: TARGET, installRoot: LAYOUT.installRoot }, false, controller.signal));
+  const reads = failed.calls.length;
+  await failed.service.ensureEnvironmentOwner({ machineId: "one", target: TARGET, installRoot: LAYOUT.installRoot }, true);
+  assert.equal(failed.calls.length, reads + 1);
+  assert.ok(failed.calls.at(-1)?.script.endsWith(" check"), "Check must not restore settings");
+  const during = new AbortController();
+  let release!: (value: string) => void;
+  let began!: () => void;
+  const started = new Promise<void>(resolve => { began = resolve; });
+  let restored = false;
+  const cancelled = harness({ getEnrollmentJson: async () => requested,
+    readRecovery: () => { began(); return new Promise(resolve => { release = resolve; }); },
+    restoreEnrollment: async () => { restored = true; } });
+  const operation = cancelled.service.ensureEnvironmentOwner({ machineId: "one", target: TARGET, installRoot: LAYOUT.installRoot }, false, during.signal);
+  await started; during.abort(); release(JSON.stringify({ enrollment: JSON.parse(installed) }));
+  await assert.rejects(operation);
+  assert.equal(restored, false, "a late SSH result cannot restore a cancelled request");
 });
 
 test("an owner claim's SSH transport failure is not mislabeled as another owner", async () => {

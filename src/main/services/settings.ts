@@ -8,6 +8,8 @@ import { machineProfileVariables, type MachineInstallRecord } from "../../shared
 import { assertAwsMachinePowerConfig, type AwsMachinePowerConfig } from "../../shared/machinePower";
 import { normalizeMachinePowerHandoffRecords, type MachinePowerHandoffRecord } from "../../shared/machinePowerHandoff";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
+import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
+import { isDeepStrictEqual } from "node:util";
 import type {
   StoredMobilePairedDevice,
   StoredPendingMailboxRevocation,
@@ -3258,6 +3260,53 @@ export class SettingsService {
     }
     await this.writeStored(stored);
     return machines.map((machine) => ({ ...machine }));
+  }
+
+  private enrollmentRecovery: Promise<unknown> = Promise.resolve();
+
+  restoreMachineEnrollment(id: string, requested: MobilePairingPackage, installed: MobilePairingPackage, installedMachineId = id): Promise<MachineRecord> {
+    const expected = structuredClone(requested), existing = structuredClone(installed);
+    const task = this.enrollmentRecovery.then(() => this.commitMachineEnrollment(id, expected, existing, installedMachineId));
+    this.enrollmentRecovery = task.catch(() => undefined);
+    return task;
+  }
+
+  private async commitMachineEnrollment(id: string, requested: MobilePairingPackage, installed: MobilePairingPackage, installedMachineId: string): Promise<MachineRecord> {
+    assertRecoverableMachineEnrollment(requested, installed);
+    if (!installedMachineId.trim() || installedMachineId.length > 256) throw new Error("The saved machine identity is invalid.");
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read; the saved connection was left untouched.");
+    const record = stored.machines?.find(machine => machine.id === id);
+    const pairings = this.readMachinePairings(stored);
+    if (!record) {
+      const restored = stored.machines?.find(machine => machine.id === installedMachineId);
+      if (restored?.pairingKey === installed.rendezvousId && isDeepStrictEqual(pairings[restored.pairingKey], installed)) return { ...restored };
+      throw new Error("Machine not found.");
+    }
+    if (record.id === installedMachineId && record.pairingKey === installed.rendezvousId && isDeepStrictEqual(pairings[record.pairingKey], installed)) return { ...record };
+    if (record.pendingRuns?.length || record.pendingCancels?.length || record.lastHello?.activeRunIds?.length) {
+      throw new Error("The machine has pending actions. Finish them before restoring its connection.");
+    }
+    if (record.pairingKey !== requested.rendezvousId || !isDeepStrictEqual(pairings[record.pairingKey], requested)) {
+      throw new Error("The machine connection changed during setup. Try again.");
+    }
+    if (installedMachineId !== id && (record.deviceId || stored.machines?.some(machine => machine.id === installedMachineId))) {
+      throw new Error("A connected machine identity cannot be replaced. The saved connection was kept.");
+    }
+    if (stored.machines?.some(machine => machine.id !== id && machine.pairingKey === installed.rendezvousId)) {
+      throw new Error("This installation is already connected as another machine on this desktop.");
+    }
+    const restored = { ...record, id: installedMachineId, pairingKey: installed.rendezvousId };
+    pairings[installed.rendezvousId] = installed;
+    // Commit the route and its sealed capability together, before reconnecting.
+    // Do not mutate readStored's object: a failed write must retain the old route.
+    await this.writeStored({ ...stored,
+      machines: stored.machines!.map(machine => machine.id === id ? restored : machine),
+      machineInstalls: stored.machineInstalls?.map(install => install.machineId === id ? { ...install, machineId: installedMachineId,
+        lastOperation: install.lastOperation ? { ...install.lastOperation, machineId: installedMachineId } : undefined } : install),
+      encryptedMachinePairings: this.sealJson(JSON.stringify(pairings))
+    }, true);
+    return restored;
   }
 
   async removeMachine(id: string): Promise<MachineRecord[]> {

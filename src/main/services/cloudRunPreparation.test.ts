@@ -60,6 +60,18 @@ function harness() {
 }
 const request = { operationId: "one", provider: "codex-cli" as const };
 
+test("Cloud run returns the restored home identity so a new participant targets the existing runtime", async () => {
+  const h = harness();
+  const install = h.options.install;
+  h.options.install = async (request, progress) => {
+    const result = await install(request, progress);
+    h.machines[0] = { ...h.machines[0], id: "original-home" };
+    return { ...result, record: { ...result.record, machineId: "original-home" } };
+  };
+  const result = await h.service.prepare(request, () => {});
+  assert.equal(result.machine.id, "original-home");
+});
+
 test("two desktops sharing one AWS instance install into separate persistent environments", async () => {
   const home = harness();
   const work = harness(); work.options.environmentId = async () => "work-desktop";

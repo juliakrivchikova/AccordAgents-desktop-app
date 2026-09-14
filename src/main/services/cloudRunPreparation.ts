@@ -177,6 +177,8 @@ export class CloudRunPreparationService {
       throw new Error(result.snapshot.error || result.snapshot.message || "Cloud setup did not finish. Select Cloud run to retry.");
     }
     this.report({ message: "Cloud run is ready." });
-    return { machine: (await this.options.listMachines()).find(item => item.id === machine!.id) ?? machine };
+    const restored = (await this.options.listMachines()).find(item => item.id === result.record.machineId);
+    if (!restored) throw new Error("The cloud machine was removed during setup. Select Cloud run again.");
+    return { machine: restored };
   }
 }

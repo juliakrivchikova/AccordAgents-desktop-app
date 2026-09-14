@@ -10,11 +10,43 @@ import { remoteProfileCommand } from "./remoteWorkerTarget";
 import { DefaultRemoteAgentSetupSync } from "./remoteAgentSetup";
 
 const enrollment = (owner: string) => JSON.stringify({
-  rendezvousId: "room-" + owner, issuer: { publicKeyDerBase64: owner },
+  rendezvousId: "room-" + owner, issuer: { originId: "device-" + owner, publicKeyDerBase64: owner },
   relaySealKeyBase64: "synthetic-secret-never-in-argv"
 });
 const shell = (script: string, input?: string) => runCommand("/bin/bash", ["-c", script], {
   input, primeLoginShellEnv: false, timeoutMs: 20_000
+});
+
+test("a recreated connection recovers the same owner's installed channel without changing any remote files", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "accord-owner-recover-"));
+  try {
+    const installed = enrollment("home");
+    const replacement = JSON.stringify({ ...JSON.parse(installed), rendezvousId: "new-room", relaySealKeyBase64: "new-secret" });
+    const recover = machineClaimEnvironmentScript(root, "recover", root);
+    assert.equal((await shell(recover, replacement)).stdout, "");
+    assert.deepEqual(await readdir(root), []);
+    await writeFile(path.join(root, "enrollment.json"), installed);
+    await writeFile(path.join(root, "saved-session"), "keep-session-and-worktree");
+    await shell(machineClaimEnvironmentScript(root), installed);
+    await runCommand("sqlite3", [path.join(root, "accordagents.sqlite3"), "create table schema_meta(key text primary key, value text not null); insert into schema_meta values ('device-channel-home:room-home', 'original-machine');"], { primeLoginShellEnv: false });
+    const before = await Promise.all((await readdir(root)).map(async name => [name, await readFile(path.join(root, name))]));
+    await assert.rejects(shell(machineClaimEnvironmentScript(root), replacement), /exited/);
+    const recovered = (await shell(recover, replacement)).stdout;
+    assert.deepEqual(JSON.parse(recovered), { enrollment: JSON.parse(installed), machineId: "original-machine" });
+    await shell(machineClaimEnvironmentScript(root), installed);
+    assert.equal((await shell(recover, installed)).stdout, "", "retry and restart use the restored channel");
+    assert.deepEqual(await Promise.all((await readdir(root)).map(async name => [name, await readFile(path.join(root, name))])), before);
+    for (const request of [enrollment("work"), JSON.stringify({ ...JSON.parse(replacement), issuer: { originId: "another-device", publicKeyDerBase64: "home" } })]) {
+      await assert.rejects(shell(recover, request), error => error instanceof CommandError && error.result.stderr.includes("another environment"));
+    }
+    // Two same-owner attempts read the same channel, instead of racing to rotate it.
+    const attempts = await Promise.all([replacement, JSON.stringify({ ...JSON.parse(replacement), rendezvousId: "third-room" })].map(input => shell(recover, input)));
+    assert.ok(attempts.every(result => result.stdout === recovered));
+    await writeFile(path.join(root, "environment-owner.json"), JSON.stringify({ rendezvousId: "room-work", issuer: "work" }));
+    await assert.rejects(shell(recover, replacement), error => error instanceof CommandError && error.result.stderr.includes("another environment"));
+    await rm(path.join(root, "environment-owner.json"));
+    assert.deepEqual(JSON.parse((await shell(recover, replacement)).stdout).enrollment, JSON.parse(installed), "legacy install without owner marker");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("diagnostics validate the existing environment without creating or claiming files", async () => {

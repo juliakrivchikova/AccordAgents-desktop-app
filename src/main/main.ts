@@ -446,6 +446,7 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
   store: settingsService,
   doctor: cloudRunDoctorService,
   getEnrollmentJson: (machineId) => requireMachineLink().enrollmentJson(machineId),
+  restoreEnrollment: (machineId, requested, installed, installedMachineId) => requireMachineLink().restoreEnrollment(machineId, requested, installed, installedMachineId),
   waitForConnected: (machineId, timeoutMs, expectAppVersion) =>
     requireMachineLink().waitForConnected(machineId, timeoutMs, expectAppVersion),
   payload: machineRuntimePayload,

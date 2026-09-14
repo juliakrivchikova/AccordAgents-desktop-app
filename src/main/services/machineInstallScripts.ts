@@ -31,9 +31,10 @@ export const DEFAULT_MACHINE_SERVICE_NAME = "accordagents-machine";
 /** Refuse another desktop's enrollment before doctor/setup can touch its
  * provider home. The owner is published atomically; a failed write or two
  * simultaneous installers cannot claim the same directory for different peers.
- * The enrollment arrives on stdin and is never printed or passed in argv. */
-export function machineClaimEnvironmentScript(installRoot: string, readOnly = false): string {
-  const script = String.raw`import json, os, sys, tempfile
+ * The enrollment arrives on stdin, never in argv. Recovery returns the
+ * existing package through the private SSH response, never through progress. */
+export function machineClaimEnvironmentScript(installRoot: string, readOnly: boolean | "recover" = false, userDataDir = ""): string {
+  const script = String.raw`import json, os, sys, tempfile, sqlite3, pathlib
 root = sys.argv[1]
 def identity(value):
     issuer = value.get("issuer", {})
@@ -41,14 +42,51 @@ def identity(value):
     if not all(isinstance(v, str) and v for v in result.values()):
         raise RuntimeError("Machine enrollment has no owner identity; nothing was replaced.")
     return result
-expected = identity(json.load(sys.stdin))
+requested = json.load(sys.stdin)
+expected = identity(requested)
 enrollment = os.path.join(root, "enrollment.json")
+owner = os.path.join(root, "environment-owner.json")
+if sys.argv[-1] == "recover":
+    # Recovery reads the existing connection, never rotates it. Keeping its
+    # room also keeps the durable delivery cursors and pending results.
+    if not os.path.lexists(enrollment):
+        sys.exit(0)
+    with open(enrollment) as f:
+        payload = f.read(65537)
+    if len(payload.encode("utf-8")) > 65536:
+        raise RuntimeError("The saved machine connection is too large to restore.")
+    installed = json.loads(payload)
+    actual = identity(installed)
+    if actual == expected:
+        sys.exit(0)
+    origin = requested.get("issuer", {}).get("originId")
+    if actual["issuer"] != expected["issuer"] or not isinstance(origin, str) or not origin or installed.get("issuer", {}).get("originId") != origin:
+        raise RuntimeError("This installation belongs to another environment; nothing was replaced.")
+    if os.path.lexists(owner):
+        with open(owner) as f:
+            if json.load(f) != actual:
+                raise RuntimeError("This installation belongs to another environment; nothing was replaced.")
+    # A channel's participant-home id is immutable. Restore it on the desktop
+    # along with the channel; inventing a new id would reject every turn.
+    data = sys.argv[2] or os.path.expanduser("~/.accordagents/" + os.path.basename(root))
+    database = pathlib.Path(data) / "accordagents.sqlite3"
+    machine_id = None
+    if database.exists():
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
+            row = db.execute("select value from schema_meta where key = ?", ("device-channel-home:" + actual["rendezvousId"],)).fetchone()
+            machine_id = row[0] if row else None
+        if machine_id is not None and (not isinstance(machine_id, str) or not machine_id.strip() or len(machine_id) > 256):
+            raise RuntimeError("The saved machine identity is invalid; nothing was replaced.")
+    payload = json.dumps({"enrollment": installed, "machineId": machine_id})
+    if len(payload.encode("utf-8")) > 65536:
+        raise RuntimeError("The saved machine connection is too large to restore.")
+    print(payload)
+    sys.exit(0)
 if os.path.lexists(enrollment):
     with open(enrollment) as f:
         if identity(json.load(f)) != expected:
             raise RuntimeError("This installation belongs to another environment; nothing was replaced.")
-owner = os.path.join(root, "environment-owner.json")
-if sys.argv[2] == "check":
+if sys.argv[-1] == "check":
     if os.path.lexists(owner):
         with open(owner) as f:
             if json.load(f) != expected:
@@ -78,7 +116,7 @@ try:
 finally:
     os.unlink(staged)
 `;
-  return `set -eu\npython3 -c ${shellQuotePosix(script)} ${shellQuotePosix(installRoot)} ${readOnly ? "check" : "claim"}`;
+  return `set -eu\npython3 -c ${shellQuotePosix(script)} ${shellQuotePosix(installRoot)}${readOnly === "recover" ? ` ${shellQuotePosix(userDataDir)}` : ""} ${readOnly === "recover" ? "recover" : readOnly ? "check" : "claim"}`;
 }
 
 export interface MachineInstallLayout {

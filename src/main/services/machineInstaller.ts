@@ -20,6 +20,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
 import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
 import { withMachineRsyncPath } from "./machineMaintenanceRsync";
 import fs from "node:fs";
@@ -147,6 +148,7 @@ export interface MachineInstallerOptions {
   doctor: MachineDoctor;
   /** Enrollment package for a machine, as Settings > Machines mints it. */
   getEnrollmentJson: (machineId: string) => Promise<string>;
+  restoreEnrollment?: (machineId: string, requestedJson: string, installedJson: string, installedMachineId?: string) => Promise<string | void>;
   /** Resolves on the next hello from the machine that arrives AFTER the call
    *  started, reporting `expectAppVersion` when one is given. A link that is
    *  merely open does not count: after a restart it can still be the old
@@ -250,7 +252,46 @@ export class MachineInstallerService {
   async ensureEnvironmentOwner(record: Pick<MachineInstallRecord, "machineId" | "target" | "installRoot">, readOnly = false, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     if (!record.installRoot.startsWith("/")) throw new Error("Finish machine setup before using its files.");
-    await this.claimEnvironmentOwner(record.target, record.installRoot, await this.options.getEnrollmentJson(record.machineId), readOnly, signal);
+    const { enrollment } = await this.enrollmentForEnvironment(record, readOnly, signal);
+    await this.claimEnvironmentOwner(record.target, record.installRoot, enrollment, readOnly, signal);
+  }
+
+  private async enrollmentForEnvironment(record: Pick<MachineInstallRecord, "machineId" | "target" | "installRoot"> & { userDataDir?: string }, readOnly = false, signal?: AbortSignal, restoreIdentity = false): Promise<{ enrollment: string; machineId: string }> {
+    const requested = await this.options.getEnrollmentJson(record.machineId);
+    if (readOnly || !this.options.restoreEnrollment) return { enrollment: requested, machineId: record.machineId };
+    signal?.throwIfAborted();
+    let installed: string;
+    try {
+      installed = await this.sshExec({ target: record.target, script: machineClaimEnvironmentScript(record.installRoot, "recover", record.userDataDir),
+        input: requested, timeoutMs: SHORT_TIMEOUT_MS, signal });
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (error instanceof CommandError && error.result.exitCode === 1 && error.result.stderr.split(/\r?\n/).includes(
+        "RuntimeError: This installation belongs to another environment; nothing was replaced.")) {
+        throw new Error("This installation belongs to another environment; nothing was replaced.");
+      }
+      throw new Error("Could not read the saved machine connection. Check the connection and try again.");
+    }
+    if (!installed.trim()) return { enrollment: requested, machineId: record.machineId };
+    let recovered: { enrollment: unknown; machineId?: string | null };
+    // Never include this response (a relay secret) in errors or progress.
+    try {
+      if (Buffer.byteLength(installed) > 65_536) throw new Error();
+      recovered = JSON.parse(installed);
+      assertRecoverableMachineEnrollment(JSON.parse(requested), recovered.enrollment);
+      if (recovered.machineId != null && (typeof recovered.machineId !== "string" || !recovered.machineId.trim() || recovered.machineId.length > 256)) throw new Error();
+    } catch { throw new Error("The saved machine connection is invalid; nothing was replaced."); }
+    if (recovered.machineId && recovered.machineId !== record.machineId && !restoreIdentity) {
+      throw new Error("Finish Cloud run setup before using this machine's files.");
+    }
+    signal?.throwIfAborted();
+    if (recovered.machineId && recovered.machineId !== record.machineId) {
+      const task = this.active.get(record.machineId);
+      if (this.active.has(recovered.machineId)) throw new Error("Another setup is already running for the saved machine.");
+      if (task) this.active.set(recovered.machineId, task);
+    }
+    const machineId = await this.options.restoreEnrollment(record.machineId, requested, JSON.stringify(recovered.enrollment), recovered.machineId ?? undefined) || record.machineId;
+    return { enrollment: await this.options.getEnrollmentJson(machineId), machineId };
   }
 
   private async claimEnvironmentOwner(target: MachineSshTarget, installRoot: string, enrollmentJson: string, readOnly = false, signal?: AbortSignal): Promise<void> {
@@ -312,7 +353,7 @@ export class MachineInstallerService {
     const snapshot = structuredClone(request);
     this.activeRequests.set(request.machineId, { kind, request: snapshot });
     const started = this.run(kind, snapshot, onProgress).finally(() => {
-      this.active.delete(request.machineId);
+      for (const [id, task] of this.active) if (task === started) this.active.delete(id);
       this.activeRequests.delete(request.machineId);
     });
     this.active.set(request.machineId, started);
@@ -357,7 +398,7 @@ export class MachineInstallerService {
         completed.push(snapshot.phase);
       }
       snapshot = {
-        machineId: request.machineId,
+        machineId: record.machineId,
         operationId: request.operationId,
         kind,
         phase,
@@ -394,7 +435,9 @@ export class MachineInstallerService {
       await emit("preflight", "Checking the machine…");
       const initial = await this.probe(request.target, { installRoot: record.installRoot || undefined,
         userDataDir: record.userDataDir || undefined, serviceName: record.installRoot ? record.serviceName : request.serviceName });
-      const enrollmentJson = await this.options.getEnrollmentJson(request.machineId);
+      const recovered = await this.enrollmentForEnvironment({ machineId: request.machineId, target: request.target, installRoot: initial.installRoot, userDataDir: initial.userDataDir }, false, undefined, true);
+      record = { ...record, machineId: recovered.machineId };
+      const enrollmentJson = recovered.enrollment;
       await this.claimEnvironmentOwner(request.target, initial.installRoot, enrollmentJson);
       record = { ...record, installRoot: initial.installRoot, userDataDir: initial.userDataDir,
         serviceName: initial.serviceName,
@@ -614,7 +657,7 @@ export class MachineInstallerService {
       activated = true;
 
       await emit("service", "Installing the machine service…");
-      const machineName = (await this.options.machineName?.(request.machineId)) ?? request.machineName ?? request.machineId;
+      const machineName = (await this.options.machineName?.(record.machineId)) ?? request.machineName ?? record.machineId;
       const unit = machineServiceUnit({
         layout,
         machineName,
@@ -644,7 +687,7 @@ export class MachineInstallerService {
       // 7. The machine is installed when it says hello over the relay, not
       //    when systemd says the unit started.
       await emit("verify", "Waiting for the machine to connect…");
-      const connected = await this.options.waitForConnected(request.machineId, CONNECT_TIMEOUT_MS, bundle.version);
+      const connected = await this.options.waitForConnected(record.machineId, CONNECT_TIMEOUT_MS, bundle.version);
       // A connection alone is not proof: a unit that failed to restart can
       // leave an older process connected. Read back which release the machine
       // actually runs before calling this done.

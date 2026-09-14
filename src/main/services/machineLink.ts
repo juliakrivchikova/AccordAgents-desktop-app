@@ -24,6 +24,7 @@ import {
   type MachineTurnFinishedBody
 } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
+import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
 import type { ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatAppToolApprovalRequest, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
 import type { MachineTurnDispatchRequest, MachineTurnDispatchResult, MachineTurnDispatcher } from "./chat";
 import type { DebugLogService } from "./debugLogs";
@@ -182,7 +183,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private readonly now: () => Date;
 
   constructor(
-    private readonly settings: Pick<SettingsService, "listMachines" | "saveMachine" | "removeMachine" | "getMachinePairing" | "exportMachineSettingsSnapshot">,
+    private readonly settings: Pick<SettingsService, "listMachines" | "saveMachine" | "removeMachine" | "getMachinePairing" | "exportMachineSettingsSnapshot"> & Partial<Pick<SettingsService, "restoreMachineEnrollment">>,
     private readonly debugLogs: Pick<DebugLogService, "write">,
     private readonly options: MachineLinkOptions
   ) {
@@ -441,6 +442,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       await this.sendTrustRoster(connection);
     }
     client.on("peer", (event) => {
+      if (this.connections.get(record.id) !== connection) return;
       void this.debugLogs.write("machine-link.peer", {
         machineId: record.id,
         type: event.type,
@@ -457,6 +459,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       }
     });
     client.on("message", (message) => {
+      if (this.connections.get(record.id) !== connection) return;
       // Strictly in order from decryption on: a large progress frame must
       // not be overtaken by the small finished result behind it.
       connection.inbound = connection.inbound
@@ -466,6 +469,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         });
     });
     client.on("state", (state) => {
+      if (this.connections.get(record.id) !== connection) return;
       void this.debugLogs.write("machine-link.tunnel.state", { machineId: record.id, state });
       if (state !== "connected") {
         this.setMachinePeer(connection, undefined);
@@ -703,6 +707,52 @@ export class MachineLinkService implements MachineTurnDispatcher {
       throw new Error("The machine's enrollment is missing; remove and add the machine again.");
     }
     return JSON.stringify(pairing, null, 2);
+  }
+
+  /** Restore this owner's existing remote channel, preserving its delivery
+   * history. Never disconnect a working channel or discard queued actions. */
+  private enrollmentRecovery = new Map<string, { requested: string; installed: string; installedMachineId: string; task: Promise<string> }>();
+
+  restoreEnrollment(machineId: string, requestedJson: string, installedJson: string, installedMachineId = machineId): Promise<string> {
+    const active = this.enrollmentRecovery.get(machineId);
+    if (active) {
+      if (active.requested === requestedJson && active.installed === installedJson && active.installedMachineId === installedMachineId) return active.task;
+      return Promise.reject(new Error("Another connection recovery is running. Wait for it to finish, then try again."));
+    }
+    const task = this.restoreEnrollmentNow(machineId, requestedJson, installedJson, installedMachineId).finally(() => this.enrollmentRecovery.delete(machineId));
+    this.enrollmentRecovery.set(machineId, { requested: requestedJson, installed: installedJson, installedMachineId, task });
+    return task;
+  }
+
+  private async restoreEnrollmentNow(machineId: string, requestedJson: string, installedJson: string, installedMachineId: string): Promise<string> {
+    const requested = JSON.parse(requestedJson) as MobilePairingPackage;
+    const installed = JSON.parse(installedJson) as MobilePairingPackage;
+    assertRecoverableMachineEnrollment(requested, installed);
+    if (!this.settings.restoreMachineEnrollment) throw new Error("Machine connection recovery is unavailable.");
+    const connection = this.connections.get(machineId);
+    if (machineId === installedMachineId && connection?.pairing.rendezvousId === installed.rendezvousId) return machineId;
+    if (connection && (connection.machineDeviceId || connection.pendingRuns.size || connection.pendingTurns.size
+      || connection.pendingCancels.size || connection.pendingApprovals.size || connection.pendingChoices.size)) {
+      throw new Error("The machine still has an active connection or pending actions. Finish them before restoring its connection.");
+    }
+    if (connection?.helloRequestTimer) clearTimeout(connection.helloRequestTimer);
+    await this.disconnectMachine(machineId);
+    try {
+      if (connection) {
+        await connection.inbound;
+        await connection.outbound;
+        await connection.persist;
+      }
+      const restored = await this.settings.restoreMachineEnrollment(machineId, requested, installed, installedMachineId);
+      await this.connectMachine(restored);
+      return restored.id;
+    } catch (error) {
+      // On disk failure restore the old route; after a committed save or a
+      // process restart, this reads the new route and reconnects to it instead.
+      const saved = (await this.settings.listMachines()).find(machine => machine.id === machineId || machine.id === installedMachineId);
+      if (saved) await this.connectMachine(saved).catch(() => undefined);
+      throw error;
+    }
   }
 
   /** Resolves on the next hello from this machine that arrives after the call
