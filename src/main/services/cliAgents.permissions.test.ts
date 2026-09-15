@@ -16,7 +16,9 @@ import {
   runClaudeModelProbeWithExpect
 } from "./cliAgents";
 import { CommandError } from "./command";
+import type { CodexServerRequestDelivery } from "./codexApprovals";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
+import type { ParticipantRunResult } from "./providers";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 
 function makeRunner(): CliAgentRunner {
@@ -2726,9 +2728,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   let deliveryAcknowledged = false;
   let guardianSignal: AbortSignal | undefined;
   let resolveDecision!: () => void;
-  let resolveDelivery!: () => void;
+  let resolveDelivery!: (receipt: CodexServerRequestDelivery) => void;
   let rejectDelivery!: (error: unknown) => void;
-  const delivery = new Promise<void>((resolve, reject) => {
+  const delivery = new Promise<CodexServerRequestDelivery>((resolve, reject) => {
     resolveDelivery = resolve;
     rejectDelivery = reject;
   });
@@ -2749,12 +2751,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
           contextKey: "context-guardian",
           idleTimeoutMs: 60_000
         },
-        onCodexServerRequest: (request: { method: string; signal: AbortSignal; responseDelivered: Promise<void> }) => {
+        onCodexServerRequest: (request: { method: string; signal: AbortSignal; responseDelivered: Promise<CodexServerRequestDelivery> }) => {
           assert.equal(request.method, "item/autoApprovalReview/denied");
           guardianSignal = request.signal;
-          void request.responseDelivered.then(() => {
+          void request.responseDelivered.then((receipt) => {
             deliveryAcknowledged = true;
-            resolveDelivery();
+            resolveDelivery(receipt);
           }, rejectDelivery);
           return new Promise((resolve, reject) => {
             resolveDecision = () => resolve({ decision: "approveRetry" });
@@ -2768,11 +2770,212 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     assert.equal(guardianSignal?.aborted, false);
     assert.equal(deliveryAcknowledged, false);
     resolveDecision();
-    await Promise.race([
+    const receipt = await Promise.race([
       delivery,
       new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Guardian override was not acknowledged")), 1_500))
     ]);
     assert.equal(deliveryAcknowledged, true);
+    // The turn had completed before the decision: Codex only records it, so
+    // the chat must continue the participant with it.
+    assert.deepEqual(receipt, { turnActive: false });
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("codex app-server reports a Guardian override delivered into the still-running turn", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-guardian-live-"));
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-guardian-live" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-guardian-live" } } });
+    send({ method: "turn/started", params: { threadId: "thread-guardian-live", turn: { id: "turn-guardian-live" } } });
+    send({ method: "item/autoApprovalReview/completed", params: {
+      threadId: "thread-guardian-live", turnId: "turn-guardian-live", startedAtMs: 10, completedAtMs: 20,
+      reviewId: "review-guardian-live", targetItemId: "item-guardian-live", decisionSource: "agent",
+      review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Protected action" },
+      action: { type: "command", source: "unifiedExec", command: "git push origin scratch", cwd: process.cwd() }
+    } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian-live", turnId: "turn-guardian-live", item: {
+      id: "item-guardian-live", type: "commandExecution", status: "failed", command: "git push origin scratch"
+    } } });
+    // The turn keeps working: it ends only after the User's decision arrives.
+  } else if (message.method === "thread/approveGuardianDeniedAction") {
+    if (message.params?.threadId !== "thread-guardian-live" || message.params?.event?.id !== "review-guardian-live") process.exit(52);
+    send({ id: message.id, result: {} });
+    send({ method: "item/agentMessage/delta", params: {
+      threadId: "thread-guardian-live", turnId: "turn-guardian-live", itemId: "agent-guardian-live", delta: "Retried inside the running turn."
+    } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian-live", turnId: "turn-guardian-live", item: {
+      id: "agent-guardian-live", type: "agentMessage", text: "Retried inside the running turn."
+    } } });
+    send({ method: "turn/completed", params: {
+      threadId: "thread-guardian-live", turn: { id: "turn-guardian-live", status: "completed" }
+    } });
+  }
+});
+`);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  let resolveDecision!: () => void;
+  let resolveRequested!: () => void;
+  const requested = new Promise<void>((resolve) => { resolveRequested = resolve; });
+  let resolveDelivery!: (receipt: CodexServerRequestDelivery) => void;
+  let rejectDelivery!: (error: unknown) => void;
+  const delivery = new Promise<CodexServerRequestDelivery>((resolve, reject) => {
+    resolveDelivery = resolve;
+    rejectDelivery = reject;
+  });
+  void delivery.catch(() => undefined);
+  try {
+    const resultPromise: Promise<ParticipantRunResult> = runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-guardian-live", kind: "codex-cli", label: "Codex" },
+      "Push the scratch branch.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm: {
+          conversationId: "conversation-guardian-live",
+          participantId: "participant-guardian-live",
+          contextKey: "context-guardian-live",
+          idleTimeoutMs: 60_000
+        },
+        onCodexServerRequest: (request: { method: string; signal: AbortSignal; responseDelivered: Promise<CodexServerRequestDelivery> }) => {
+          assert.equal(request.method, "item/autoApprovalReview/denied");
+          void request.responseDelivered.then(resolveDelivery, rejectDelivery);
+          resolveRequested();
+          return new Promise((resolve, reject) => {
+            resolveDecision = () => resolve({ decision: "approveRetry" });
+            request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+          });
+        }
+      }
+    );
+    await Promise.race([
+      requested,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Guardian denial was not offered")), 1_500))
+    ]);
+    resolveDecision();
+    const receipt = await Promise.race([
+      delivery,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Guardian override was not acknowledged")), 1_500))
+    ]);
+    // Codex applies the decision inside the running turn: no continuation.
+    assert.deepEqual(receipt, { turnActive: true });
+    const result = await resultPromise;
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(result.content, /Retried inside the running turn/);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("codex app-server reports turnActive when the approval ack and turn/completed arrive in one stdout chunk", async () => {
+  // Regression: sampling turnActive AFTER `await sendRequest` let a coalesced
+  // ack+turn/completed clear pendingTurn first, yielding turnActive:false for a
+  // retry Codex already ran in-turn — which restarted it a second time. The fake
+  // writes the ack and the turn/completed in a single write to force coalescing.
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-guardian-coalesced-"));
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "thread/start") {
+    send({ id: message.id, result: { thread: { id: "thread-guardian-coalesced" }, model: "gpt-5" } });
+  } else if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-guardian-coalesced" } } });
+    send({ method: "turn/started", params: { threadId: "thread-guardian-coalesced", turn: { id: "turn-guardian-coalesced" } } });
+    send({ method: "item/autoApprovalReview/completed", params: {
+      threadId: "thread-guardian-coalesced", turnId: "turn-guardian-coalesced", startedAtMs: 10, completedAtMs: 20,
+      reviewId: "review-guardian-coalesced", targetItemId: "item-guardian-coalesced", decisionSource: "agent",
+      review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "Protected action" },
+      action: { type: "command", source: "unifiedExec", command: "git push origin scratch", cwd: process.cwd() }
+    } });
+    send({ method: "item/completed", params: { threadId: "thread-guardian-coalesced", turnId: "turn-guardian-coalesced", item: {
+      id: "item-guardian-coalesced", type: "commandExecution", status: "failed", command: "git push origin scratch"
+    } } });
+  } else if (message.method === "thread/approveGuardianDeniedAction") {
+    if (message.params?.threadId !== "thread-guardian-coalesced" || message.params?.event?.id !== "review-guardian-coalesced") process.exit(53);
+    // One write: the approve ack AND the item/agentMessage + turn/completed for
+    // the in-turn retry, so the runner parses them in a single data event.
+    const lines = [
+      { id: message.id, result: {} },
+      { method: "item/agentMessage/delta", params: { threadId: "thread-guardian-coalesced", turnId: "turn-guardian-coalesced", itemId: "agent-guardian-coalesced", delta: "Retried inside the running turn." } },
+      { method: "item/completed", params: { threadId: "thread-guardian-coalesced", turnId: "turn-guardian-coalesced", item: { id: "agent-guardian-coalesced", type: "agentMessage", text: "Retried inside the running turn." } } },
+      { method: "turn/completed", params: { threadId: "thread-guardian-coalesced", turn: { id: "turn-guardian-coalesced", status: "completed" } } }
+    ];
+    process.stdout.write(lines.map((value) => JSON.stringify(value)).join("\\n") + "\\n");
+  }
+});
+`);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  let resolveDecision!: () => void;
+  let resolveRequested!: () => void;
+  const requested = new Promise<void>((resolve) => { resolveRequested = resolve; });
+  let resolveDelivery!: (receipt: CodexServerRequestDelivery) => void;
+  let rejectDelivery!: (error: unknown) => void;
+  const delivery = new Promise<CodexServerRequestDelivery>((resolve, reject) => {
+    resolveDelivery = resolve;
+    rejectDelivery = reject;
+  });
+  void delivery.catch(() => undefined);
+  try {
+    const resultPromise: Promise<ParticipantRunResult> = runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-guardian-coalesced", kind: "codex-cli", label: "Codex" },
+      "Push the scratch branch.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "auto",
+        warm: {
+          conversationId: "conversation-guardian-coalesced",
+          participantId: "participant-guardian-coalesced",
+          contextKey: "context-guardian-coalesced",
+          idleTimeoutMs: 60_000
+        },
+        onCodexServerRequest: (request: { method: string; signal: AbortSignal; responseDelivered: Promise<CodexServerRequestDelivery> }) => {
+          assert.equal(request.method, "item/autoApprovalReview/denied");
+          void request.responseDelivered.then(resolveDelivery, rejectDelivery);
+          resolveRequested();
+          return new Promise((resolve, reject) => {
+            resolveDecision = () => resolve({ decision: "approveRetry" });
+            request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+          });
+        }
+      }
+    );
+    await Promise.race([
+      requested,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Guardian denial was not offered")), 1_500))
+    ]);
+    resolveDecision();
+    const receipt = await Promise.race([
+      delivery,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Guardian override was not acknowledged")), 1_500))
+    ]);
+    // The retry ran inside the turn; the receipt must say so even though
+    // turn/completed was coalesced with the ack. Otherwise chat starts a
+    // second continuation and the approved command runs twice.
+    assert.deepEqual(receipt, { turnActive: true });
+    const result = await resultPromise;
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(result.content, /Retried inside the running turn/);
   } finally {
     await runner.shutdownWarmAgents();
     await rm(fixtureDir, { recursive: true, force: true });

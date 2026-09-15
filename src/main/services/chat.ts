@@ -119,7 +119,7 @@ import {
   limitChatBehaviorRulePromptText
 } from "../../shared/chatBehaviorRules";
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../shared/reasoningEffort";
-import { CODEX_APPROVAL_TOOL_NAME, codexApprovalCancellationResult, prepareCodexApproval } from "./codexApprovals";
+import { CODEX_APPROVAL_TOOL_NAME, codexApprovalCancellationResult, prepareCodexApproval, type CodexServerRequestDelivery } from "./codexApprovals";
 import {
   CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID,
   isCodexGuardianDeniedApprovalMethod,
@@ -542,7 +542,7 @@ interface CodexApprovalResolver {
   conversationId: string;
   runId: string;
   responseByOptionId: ReadonlyMap<string, unknown>;
-  responseDelivered: Promise<void>;
+  responseDelivered: Promise<CodexServerRequestDelivery>;
   submitted: boolean;
   timer?: NodeJS.Timeout;
   resolve: (result: unknown) => void;
@@ -5094,7 +5094,7 @@ export class ChatService {
       const decisionId = request.codexDecisionId?.trim();
       const cancelGuardian = decisionId === CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID &&
         !request.approve &&
-        this.isEndedTurnGuardianApproval(approval);
+        this.isGuardianDeniedApproval(approval);
       const option: ChatCodexApprovalOption | undefined = cancelGuardian
         ? { id: "cancel", label: "Cancel", outcome: "cancel" }
         : approval.request.options.find((item) => item.id === decisionId);
@@ -5159,12 +5159,13 @@ export class ChatService {
     resolver: CodexApprovalResolver,
     progress?: ProgressCallback
   ): Promise<void> {
+    let delivery: CodexServerRequestDelivery;
     try {
-      await resolver.responseDelivered;
+      delivery = await resolver.responseDelivered;
     } catch (error) {
       resolver.cleanup();
       const message = `Codex could not receive this decision: ${error instanceof Error ? error.message : String(error)}`;
-      if (this.isEndedTurnGuardianApproval(approval)) {
+      if (this.isGuardianDeniedApproval(approval)) {
         await this.appendCodexContinuationStartFailure(conversationId, approval, message);
       } else {
         this.emitProgress(resolver.runId, progress, "error", message);
@@ -5178,7 +5179,21 @@ export class ChatService {
       return;
     }
     resolver.cleanup();
-    if (!this.isEndedTurnGuardianApproval(approval) || (outcome !== "approve" && outcome !== "deny")) {
+    if (!this.isGuardianDeniedApproval(approval) || (outcome !== "approve" && outcome !== "deny")) {
+      return;
+    }
+    // A decision that reached Codex while the original response was still
+    // running is applied inside that response (an approved retry runs there);
+    // a continuation would start a second turn and could run the retry twice.
+    // Only a response that had already ended needs to be continued with it.
+    if (delivery.turnActive) {
+      void this.debugLogs.write("chat.codex-approval.continuation-skipped", {
+        conversationId,
+        runId: resolver.runId,
+        approvalId: approval.id,
+        outcome,
+        reason: "original-run-active"
+      });
       return;
     }
     try {
@@ -5195,7 +5210,7 @@ export class ChatService {
     }
   }
 
-  private isEndedTurnGuardianApproval(approval: ChatAppToolApproval): boolean {
+  private isGuardianDeniedApproval(approval: ChatAppToolApproval): boolean {
     return this.isCodexApprovalRequest(approval.request) &&
       isCodexGuardianDeniedApprovalMethod(approval.request.method);
   }
@@ -5218,7 +5233,7 @@ export class ChatService {
         if (
           !approval ||
           (approval.status !== "approved" && approval.status !== "denied") ||
-          !this.isEndedTurnGuardianApproval(approval) ||
+          !this.isGuardianDeniedApproval(approval) ||
           !approval.resumeContext
         ) {
           return;

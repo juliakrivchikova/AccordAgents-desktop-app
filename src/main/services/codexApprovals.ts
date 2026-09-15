@@ -24,12 +24,22 @@ const MAX_DISPLAY_TEXT = 2_000;
 const MAX_DISPLAY_PATH = 600;
 const MAX_DISPLAY_ITEMS = 24;
 
+/**
+ * What the runner knew when Codex acknowledged a decision. A Guardian denial
+ * does not block the provider turn: Codex injects a decision into the turn
+ * that raised it when that turn is still running (`inject_no_new_turn`), and
+ * only records it in the thread history when the turn has already ended.
+ */
+export interface CodexServerRequestDelivery {
+  turnActive: boolean;
+}
+
 export interface CodexInboundServerRequest {
   id: string | number;
   method: string;
   params: unknown;
   signal: AbortSignal;
-  responseDelivered: Promise<void>;
+  responseDelivered: Promise<CodexServerRequestDelivery>;
 }
 
 export interface CodexApprovalCorrelation {

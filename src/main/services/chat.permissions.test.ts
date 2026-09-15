@@ -25,6 +25,7 @@ import {
   AppMcpService
 } from "./appMcp";
 import { ChatService } from "./chat";
+import type { CodexServerRequestDelivery } from "./codexApprovals";
 import {
   chatAgentPermissionsEqual,
   defaultChatAgentPermissions,
@@ -10909,7 +10910,7 @@ test("Codex session approval resolves the blocked callback without creating a ch
         availableDecisions: ["accept", "acceptForSession", "decline", "cancel"]
       },
       signal: controller.signal,
-      responseDelivered: Promise.resolve()
+      responseDelivered: Promise.resolve({ turnActive: false })
     }
   );
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -10949,8 +10950,8 @@ test("Codex approval compacts immediately while the provider receives the select
     participantPermissions: participant.permissions,
     updatedAt: NOW
   };
-  let acknowledge!: () => void;
-  const responseDelivered = new Promise<void>((resolve) => { acknowledge = resolve; });
+  let acknowledge!: (delivery: CodexServerRequestDelivery) => void;
+  const responseDelivered = new Promise<CodexServerRequestDelivery>((resolve) => { acknowledge = resolve; });
   const decision = (service as any).requestCodexApprovalFromCli(
     conversation,
     participant,
@@ -10984,7 +10985,7 @@ test("Codex approval compacts immediately while the provider receives the select
   assert.deepEqual(await decision, { decision: "accept" });
   await response;
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
-  acknowledge();
+  acknowledge({ turnActive: true });
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
 });
@@ -11007,7 +11008,7 @@ test("Codex approval keeps the compact decision and reports provider delivery fa
     updatedAt: NOW
   };
   let rejectDelivery!: (error: Error) => void;
-  const responseDelivered = new Promise<void>((_resolve, reject) => { rejectDelivery = reject; });
+  const responseDelivered = new Promise<CodexServerRequestDelivery>((_resolve, reject) => { rejectDelivery = reject; });
   void responseDelivered.catch(() => undefined);
   const decision = (service as any).requestCodexApprovalFromCli(
     conversation,
@@ -11080,7 +11081,7 @@ test("Codex approval rejects a tampered approve flag", async () => {
       availableDecisions: ["decline"]
     },
     signal: controller.signal,
-    responseDelivered: Promise.resolve()
+    responseDelivered: Promise.resolve({ turnActive: false })
   });
   void decision.catch(() => undefined);
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -11133,7 +11134,7 @@ test("Codex approval requires an explicit decision id and keeps deny distinct fr
         availableDecisions: ["decline", "cancel"]
       },
       signal: new AbortController().signal,
-      responseDelivered: Promise.resolve()
+      responseDelivered: Promise.resolve({ turnActive: false })
     }
   );
 
@@ -11197,8 +11198,8 @@ test("Codex human-decision timeout sends the method refusal and expires the card
     participantPermissions: participant.permissions,
     updatedAt: NOW
   } satisfies ChatParticipantSession;
-  let acknowledge!: () => void;
-  const responseDelivered = new Promise<void>((resolve) => { acknowledge = resolve; });
+  let acknowledge!: (delivery: CodexServerRequestDelivery) => void;
+  const responseDelivered = new Promise<CodexServerRequestDelivery>((resolve) => { acknowledge = resolve; });
   const decision = (service as any).requestCodexApprovalFromCli(conversation, participant, session, "run-timeout", "user-message", {
     id: 81,
     method: "item/permissions/requestApproval",
@@ -11220,7 +11221,7 @@ test("Codex human-decision timeout sends the method refusal and expires the card
     new Promise<void>((resolve) => setTimeout(resolve, 10))
   ]);
   assert.deepEqual(refusal, { permissions: {}, scope: "turn" });
-  acknowledge();
+  acknowledge({ turnActive: true });
   await new Promise<void>((resolve) => setTimeout(resolve, 10));
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "expired");
   assert.match(storage.current.metadata.pendingAppToolApprovals[0].error ?? "", /method-supported refusal/);
@@ -11258,7 +11259,7 @@ test("Guardian timeout creates a durable terminal card without a resolver", asyn
       action: { type: "command", source: "unifiedExec", command: "git push origin scratch", cwd: "/tmp" }
     },
     signal: new AbortController().signal,
-    responseDelivered: Promise.resolve()
+    responseDelivered: Promise.resolve({ turnActive: false })
   });
   assert.deepEqual(result, { decision: "keepDenied" });
   const approval = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
@@ -11294,8 +11295,8 @@ test("Guardian approval compacts immediately and starts one hidden same-session 
   });
   (service as any).ensureHistoryFiles = async () => tempRoot;
   const controller = new AbortController();
-  let acknowledge!: () => void;
-  const responseDelivered = new Promise<void>((resolve) => { acknowledge = resolve; });
+  let acknowledge!: (delivery: CodexServerRequestDelivery) => void;
+  const responseDelivered = new Promise<CodexServerRequestDelivery>((resolve) => { acknowledge = resolve; });
   const decision = (service as any).requestCodexApprovalFromCli(
     conversation,
     participant,
@@ -11346,7 +11347,7 @@ test("Guardian approval compacts immediately and starts one hidden same-session 
     approve: true,
     codexDecisionId: "approveRetry"
   }), /already been answered/);
-  acknowledge();
+  acknowledge({ turnActive: false });
   await waitFor(() => runs.length === 1);
   await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
     message.role === "participant" && message.content === "Continuation complete." && message.status === "done"
@@ -11394,7 +11395,7 @@ test("Guardian Keep denied compacts and starts the decision-specific continuatio
     session,
     "run-guardian-deny",
     "user-message",
-    guardianDeniedRequest("codex-thread-deny", Promise.resolve())
+    guardianDeniedRequest("codex-thread-deny", Promise.resolve({ turnActive: false }))
   );
   await new Promise<void>((resolve) => setImmediate(resolve));
   const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
@@ -11452,7 +11453,7 @@ test("Guardian Cancel compacts the card without starting a continuation", async 
     session,
     "run-guardian-cancel",
     "user-message",
-    guardianDeniedRequest("codex-thread-cancel", Promise.resolve())
+    guardianDeniedRequest("codex-thread-cancel", Promise.resolve({ turnActive: false }))
   );
   await new Promise<void>((resolve) => setImmediate(resolve));
   const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
@@ -11471,7 +11472,66 @@ test("Guardian Cancel compacts the card without starting a continuation", async 
   assert.equal(storage.current.messages.filter((message: ChatMessage) => message.metadata?.approvedContinuation).length, 0);
 });
 
-test("Guardian decision queues one continuation while the original run finishes", async () => {
+test("Guardian decision delivered into the running response starts no continuation", async () => {
+  for (const decisionId of ["approveRetry", "keepDenied"] as const) {
+    const participant = chatParticipant("codex-cli");
+    participant.agentMode = "auto";
+    const session: ChatParticipantSession = {
+      participantId: participant.id,
+      sessionId: `codex-thread-live-${decisionId}`,
+      roleConfigId: ROLE.id,
+      roleConfigVersion: ROLE.version,
+      roleLabel: ROLE.label,
+      roleInstructions: ROLE.instructions,
+      roleAppToolCapabilities: ROLE.appToolCapabilities,
+      participantKind: "codex-cli",
+      participantAgentMode: "auto",
+      participantPermissions: participant.permissions,
+      updatedAt: NOW
+    };
+    const conversation = chatConversation([participant], { participantSessions: [session] });
+    let runCount = 0;
+    const { service, storage, tempRoot } = testService({
+      conversation,
+      run: async (runParticipant) => {
+        runCount += 1;
+        return { participant: runParticipant, ok: true, content: "Unexpected continuation.", durationMs: 1 };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    (service as any).rememberActiveChatRun(conversation.id, "run-guardian-live");
+    // Codex applies a decision inside the turn that raised the denial while
+    // that turn is still running, so the receipt reports the turn as active.
+    const decision = (service as any).requestCodexApprovalFromCli(
+      conversation,
+      participant,
+      session,
+      "run-guardian-live",
+      "user-message",
+      guardianDeniedRequest(session.sessionId, Promise.resolve({ turnActive: true }))
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+
+    await service.respondToAppToolApproval({
+      conversationId: conversation.id,
+      approvalId: pending.id,
+      approve: decisionId === "approveRetry",
+      codexDecisionId: decisionId
+    });
+    assert.deepEqual(await decision, { decision: decisionId });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(runCount, 0, `${decisionId} must not start a continuation while the response is running`);
+    assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, decisionId === "approveRetry" ? "approved" : "denied");
+    assert.equal(storage.current.messages.filter((message: ChatMessage) => message.metadata?.approvedContinuation).length, 0);
+    assert.equal(storage.current.messages.filter((message: ChatMessage) => message.metadata?.hiddenFromTimeline).length, 0);
+    (service as any).forgetActiveChatRun(conversation.id, "run-guardian-live");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(runCount, 0, `${decisionId} must not start a continuation once the run bookkeeping ends either`);
+  }
+});
+
+test("Guardian decision delivered after the response ended queues one continuation behind the finishing run", async () => {
   const participant = chatParticipant("codex-cli");
   participant.agentMode = "auto";
   const session: ChatParticipantSession = {
@@ -11497,6 +11557,8 @@ test("Guardian decision queues one continuation while the original run finishes"
     }
   });
   (service as any).ensureHistoryFiles = async () => tempRoot;
+  // The provider turn has ended (the receipt says so) while the chat is still
+  // closing the run's bookkeeping: the continuation is queued, exactly once.
   (service as any).rememberActiveChatRun(conversation.id, "run-guardian-active");
   const decision = (service as any).requestCodexApprovalFromCli(
     conversation,
@@ -11504,7 +11566,7 @@ test("Guardian decision queues one continuation while the original run finishes"
     session,
     "run-guardian-active",
     "user-message",
-    guardianDeniedRequest("codex-thread-active", Promise.resolve())
+    guardianDeniedRequest("codex-thread-active", Promise.resolve({ turnActive: false }))
   );
   await new Promise<void>((resolve) => setImmediate(resolve));
   const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
@@ -11549,7 +11611,7 @@ test("Guardian delivery failure keeps the compact decision and creates an explic
     updatedAt: NOW
   };
   let rejectDelivery!: (error: Error) => void;
-  const delivery = new Promise<void>((_resolve, reject) => { rejectDelivery = reject; });
+  const delivery = new Promise<CodexServerRequestDelivery>((_resolve, reject) => { rejectDelivery = reject; });
   void delivery.catch(() => undefined);
   const decision = (service as any).requestCodexApprovalFromCli(
     conversation,
@@ -11613,7 +11675,7 @@ test("Codex approval becomes non-actionable when its app-server request is cance
         grantRoot: "/tmp/scratch"
       },
       signal: controller.signal,
-      responseDelivered: Promise.resolve()
+      responseDelivered: Promise.resolve({ turnActive: false })
     }
   );
   controller.abort(new Error("Stopped by user."));
@@ -11961,12 +12023,12 @@ function testService(options: {
   };
 }
 
-function guardianDeniedRequest(threadId: string, responseDelivered: Promise<void>): {
+function guardianDeniedRequest(threadId: string, responseDelivered: Promise<CodexServerRequestDelivery>): {
   id: string;
   method: "item/autoApprovalReview/denied";
   params: Record<string, unknown>;
   signal: AbortSignal;
-  responseDelivered: Promise<void>;
+  responseDelivered: Promise<CodexServerRequestDelivery>;
 } {
   return {
     id: `guardian:${threadId}`,

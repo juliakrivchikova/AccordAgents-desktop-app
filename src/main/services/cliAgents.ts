@@ -57,7 +57,8 @@ import {
   isCodexApprovalMethod,
   validateCodexApprovalCorrelation,
   type CodexApprovalCorrelation,
-  type CodexInboundServerRequest
+  type CodexInboundServerRequest,
+  type CodexServerRequestDelivery
 } from "./codexApprovals";
 import {
   buildGeminiExecInvocation,
@@ -2898,9 +2899,9 @@ export class CliAgentRunner {
       pendingInboundRequests.set(key, request);
       turn.outstandingServerRequestIds.add(key);
       pausePendingTurnTimer(turn);
-      let resolveDelivery!: () => void;
+      let resolveDelivery!: (delivery: CodexServerRequestDelivery) => void;
       let rejectDelivery!: (error: Error) => void;
-      const responseDelivered = new Promise<void>((resolve, reject) => {
+      const responseDelivered = new Promise<CodexServerRequestDelivery>((resolve, reject) => {
         resolveDelivery = resolve;
         rejectDelivery = reject;
       });
@@ -2918,7 +2919,9 @@ export class CliAgentRunner {
             if (!delivered) {
               throw new Error("The Codex approval request was resolved before this decision could be delivered.");
             }
-            resolveDelivery();
+            // The turn blocks on this request, so an answered request always
+            // lands inside the running turn.
+            resolveDelivery({ turnActive: true });
           } catch (error) {
             const deliveryError = error instanceof Error ? error : new Error(String(error));
             rejectDelivery(deliveryError);
@@ -3041,7 +3044,7 @@ export class CliAgentRunner {
           method: CODEX_GUARDIAN_TIMED_OUT_APPROVAL_METHOD,
           params,
           signal: new AbortController().signal,
-          responseDelivered: Promise.resolve()
+          responseDelivered: Promise.resolve({ turnActive: true })
         }).catch((error) => {
           void this.debugLogs?.write("cli.codex-app-server.guardian-timeout-projection-failed", {
             threadId: notificationThreadId,
@@ -3080,13 +3083,17 @@ export class CliAgentRunner {
         targetItemId: targetItemId ?? null
       };
       pendingGuardianApprovals.set(key, approval);
-      let resolveDelivery!: () => void;
+      let resolveDelivery!: (delivery: CodexServerRequestDelivery) => void;
       let rejectDelivery!: (error: Error) => void;
-      const responseDelivered = new Promise<void>((resolve, reject) => {
+      const responseDelivered = new Promise<CodexServerRequestDelivery>((resolve, reject) => {
         resolveDelivery = resolve;
         rejectDelivery = reject;
       });
       void responseDelivered.catch(() => undefined);
+      // A Guardian denial never blocks the turn that raised it. Codex applies
+      // the User's decision inside that turn while it is still running and only
+      // records it in the thread history once the turn has ended, so the
+      // receipt tells the chat whether a continuation is needed at all.
       void turn.onCodexServerRequest({
         id: `guardian:${reviewId}`,
         method: CODEX_GUARDIAN_DENIED_APPROVAL_METHOD,
@@ -3097,9 +3104,16 @@ export class CliAgentRunner {
         if (pendingGuardianApprovals.get(key) !== approval || controller.signal.aborted) {
           throw new Error("The Guardian approval is no longer active.");
         }
+        // Sample the turn state synchronously, as the decision is handed over,
+        // before any `await`. Reading it after `await sendRequest` is unsafe:
+        // Codex's acknowledgement and the turn's `turn/completed` can arrive in
+        // one stdout chunk, so the completion handler clears `pendingTurn`
+        // before the post-await read runs — reporting `turnActive:false` for a
+        // retry Codex already applied in-turn, which would run it a second time.
+        const turnActive = pendingTurn === turn;
         const decision = this.stringField(this.asRecord(result) ?? {}, "decision");
         if (decision !== "approveRetry") {
-          resolveDelivery();
+          resolveDelivery({ turnActive });
           return;
         }
         if (closed || child.exitCode !== null || child.killed || threadId !== notificationThreadId) {
@@ -3112,14 +3126,17 @@ export class CliAgentRunner {
         void this.debugLogs?.write("cli.codex-app-server.guardian-approval-sent", {
           threadId: notificationThreadId,
           turnId: notificationTurnId,
-          reviewId
+          reviewId,
+          turnActive
         });
         this.emitLiveOutput(turn.onOutput, "tool", "Recorded User approval for the Auto Review denial\n", undefined, {
           activityKind: "approval",
           activityStatus: "completed",
-          activityDetail: "The User approved one retry. AccordAgents will continue the participant if the original response has ended."
+          activityDetail: turnActive
+            ? "The User approved one retry. Codex received it inside the running response."
+            : "The User approved one retry. AccordAgents will continue the participant with it."
         });
-        resolveDelivery();
+        resolveDelivery({ turnActive });
       }).catch((error) => {
         const deliveryError = error instanceof Error ? error : new Error(String(error));
         rejectDelivery(deliveryError);
