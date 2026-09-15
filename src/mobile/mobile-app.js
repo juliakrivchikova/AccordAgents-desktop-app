@@ -27,6 +27,15 @@
   // Cards a member is waiting on, per chat, as the desktop last stated them.
   // Kept so closing the app does not lose a question that is still open.
   const CONTROL_CARDS_KEY = "accordagents.mobile.controlCards.v1";
+  // Chats with activity this phone has not looked at yet. The dot in the list
+  // and the number on the app icon both read from here; the service worker
+  // adds to its IndexedDB mirror when a push lands while the app is closed.
+  const UNREAD_KEY = "accordagents.mobile.unreadConversationIds.v1";
+  const UNREAD_META_KEY = "unreadConversations";
+  const CHAT_TITLES_META_KEY = "chatTitles";
+  // Where the history of each chat stops on this phone: whether the desktop
+  // has messages before the oldest one shown, and which message to ask before.
+  const TIMELINE_PAGES_KEY = "accordagents.mobile.timelinePages.v1";
   const TERMINAL_RUNS_MAX = 600;
   const DEFAULT_MANAGED_RELAY_URL = "wss://relay.accordagents.com/v1/relay";
   const RELAY_PROTOCOL = "accord-relay-v1";
@@ -664,6 +673,21 @@
       isPlaceholderTimelineContent(entry.content);
   }
 
+  function sameTimelineEntryContent(left, right) {
+    const attachmentIds = function (entry) {
+      return Array.isArray(entry.attachments)
+        ? entry.attachments.map(function (attachment) { return attachment.id; }).join(",")
+        : "";
+    };
+    return left.content === right.content &&
+      left.status === right.status &&
+      left.createdAt === right.createdAt &&
+      (left.participantLabel || "") === (right.participantLabel || "") &&
+      (left.threadRootId || "") === (right.threadRootId || "") &&
+      (left.runId || "") === (right.runId || "") &&
+      attachmentIds(left) === attachmentIds(right);
+  }
+
   function sameMobileEvent(left, right) {
     return Boolean(left.mobileEventId) &&
       left.mobileEventId === right.mobileEventId &&
@@ -714,6 +738,14 @@
         })) {
           return 0;
         }
+        // Resolves true only when the store ends up different from before: a
+        // replayed copy of a row already held is not news for anyone.
+        const stored = entries.find(function (existing) {
+          return existing && existing.id === entry.id && existing.conversationId === entry.conversationId;
+        });
+        if (stored && sameTimelineEntryContent(stored, entry)) {
+          return false;
+        }
         const deletes = others.filter(function (existing) {
           if (key && timelineEntryDedupeKey(existing) === key) {
             return true;
@@ -727,6 +759,8 @@
         });
         return Promise.all(deletes).then(function () {
           return requestToPromise(store.put(entry));
+        }).then(function () {
+          return true;
         });
         });
       });
@@ -1966,6 +2000,9 @@
     if (Array.isArray(chats) && chats.length > 0) {
       sessionStorage.removeItem(SYNC_WAIT_KEY);
     }
+    const previousById = new Map(loadChats().map(function (chat) {
+      return [chat.id, chat];
+    }));
     const normalized = Array.isArray(chats) ? chats.filter(function (chat) {
       return chat && typeof chat.id === "string" && chat.id.trim();
     }).map(function (chat) {
@@ -1984,7 +2021,125 @@
       };
     }) : [];
     localStorage.setItem(CHAT_LIST_KEY, JSON.stringify(normalized));
+    // Same rule as the desktop sidebar: a chat that moved while it was not the
+    // one on screen is unread. The list this phone held before is the "seen"
+    // baseline, so the first list after an update marks nothing.
+    const activeId = selectedConversationId();
+    const viewingActive = Boolean(activeId) && !document.hidden;
+    const newlyActive = normalized.filter(function (chat) {
+      const previous = previousById.get(chat.id);
+      return Boolean(previous) &&
+        chat.updatedAt > previous.updatedAt &&
+        !(viewingActive && chat.id === activeId);
+    }).map(function (chat) {
+      return chat.id;
+    });
+    if (newlyActive.length > 0) {
+      markConversationsUnread(newlyActive);
+    }
+    void mirrorChatTitlesForWorker(normalized);
     return normalized;
+  }
+
+  function loadUnreadConversationIds() {
+    return loadStoredStringArray(UNREAD_KEY);
+  }
+
+  function markConversationsUnread(conversationIds) {
+    const current = loadUnreadConversationIds();
+    const next = current.slice();
+    for (const conversationId of conversationIds) {
+      if (conversationId && next.indexOf(conversationId) < 0) {
+        next.push(conversationId);
+      }
+    }
+    if (next.length === current.length) {
+      return;
+    }
+    saveStoredStringArray(UNREAD_KEY, next);
+    void syncUnreadWithWorker(next);
+  }
+
+  function markConversationRead(conversationId) {
+    const current = loadUnreadConversationIds();
+    if (current.indexOf(conversationId) < 0) {
+      return;
+    }
+    const next = current.filter(function (item) {
+      return item !== conversationId;
+    });
+    saveStoredStringArray(UNREAD_KEY, next);
+    void syncUnreadWithWorker(next);
+  }
+
+  // The number on the icon is the number of chats with something new, the
+  // same thing the dots in the list add up to. The IndexedDB copy is what a
+  // push-woken service worker adds to and shows while the page is closed.
+  async function syncUnreadWithWorker(ids) {
+    await writeMetaRecord(UNREAD_META_KEY, { ids: ids }).catch(function () { return undefined; });
+    applyAppBadge(ids.length);
+  }
+
+  function applyAppBadge(count) {
+    if (!("setAppBadge" in navigator)) {
+      return;
+    }
+    const apply = count > 0 ? navigator.setAppBadge(count) : navigator.clearAppBadge();
+    Promise.resolve(apply).catch(function () { return undefined; });
+  }
+
+  // The worker cannot read localStorage, and the chat list lives there; the
+  // titles it needs for a notification are mirrored, nothing else.
+  async function mirrorChatTitlesForWorker(chats) {
+    const titles = {};
+    for (const chat of chats) {
+      titles[chat.id] = chat.title;
+    }
+    await writeMetaRecord(CHAT_TITLES_META_KEY, { titles: titles }).catch(function () { return undefined; });
+  }
+
+  // Reconciles the unread set with what a push-woken worker added while the
+  // page was closed, then puts the icon number back in step.
+  async function adoptWorkerUnread() {
+    const record = await readMetaRecord(UNREAD_META_KEY).catch(function () { return undefined; });
+    const workerIds = record && Array.isArray(record.ids) ? record.ids.filter(function (id) {
+      return typeof id === "string" && id.trim();
+    }) : [];
+    const activeId = selectedConversationId();
+    const merged = loadUnreadConversationIds();
+    for (const id of workerIds) {
+      if (merged.indexOf(id) < 0 && id !== activeId) {
+        merged.push(id);
+      }
+    }
+    saveStoredStringArray(UNREAD_KEY, merged);
+    await syncUnreadWithWorker(merged);
+  }
+
+  function loadTimelinePages() {
+    try {
+      const raw = localStorage.getItem(TIMELINE_PAGES_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function timelinePageFor(conversationId) {
+    const page = loadTimelinePages()[conversationId];
+    return page && typeof page === "object" ? page : undefined;
+  }
+
+  function saveTimelinePage(conversationId, page) {
+    const pages = loadTimelinePages();
+    pages[conversationId] = {
+      hasMoreBefore: page.hasMoreBefore === true,
+      beforeMessageId: typeof page.beforeMessageId === "string" && page.beforeMessageId.trim()
+        ? page.beforeMessageId
+        : undefined
+    };
+    localStorage.setItem(TIMELINE_PAGES_KEY, JSON.stringify(pages));
   }
 
   function normalizeMobileMember(value) {
@@ -2010,6 +2165,9 @@
       // Where this member actually runs, and what that machine needs to run
       // it. Present only for members that live on a machine.
       homeMachineId: typeof value.homeMachineId === "string" ? value.homeMachineId : undefined,
+      homeMachineName: typeof value.homeMachineName === "string" && value.homeMachineName.trim()
+        ? value.homeMachineName.trim()
+        : undefined,
       participant: value.participant && typeof value.participant === "object" ? value.participant : undefined
     };
   }
@@ -3047,12 +3205,19 @@
     return undefined;
   }
 
-  async function requestTimelineViaRelay(pairing, conversationId) {
+  async function requestTimelineViaRelay(pairing, conversationId, options) {
+    const beforeMessageId = options && typeof options.beforeMessageId === "string" && options.beforeMessageId.trim()
+      ? options.beforeMessageId
+      : undefined;
     const payload = await sendRelayPayload(pairing, "timeline-" + conversationId + "-" + createEventId(), {
       type: "mobile.timeline.request",
-      conversationId
+      conversationId,
+      ...(beforeMessageId ? { beforeMessageId } : {})
     });
-    return handleRelayTimelinePayload(payload, conversationId);
+    return handleRelayTimelinePayload(payload, conversationId, {
+      deferRender: Boolean(options && options.deferRender),
+      historyPage: Boolean(beforeMessageId)
+    });
   }
 
   async function pollMailboxTimeline(options) {
@@ -3324,9 +3489,60 @@
       const note = document.createElement("div");
       note.className = "message-image-note";
       note.hidden = true;
+      // A loaded picture opens at full size; one that has no bytes yet, or
+      // never will, stays a note in the row.
+      image.addEventListener("click", function () {
+        if (image.dataset.state === "ready" && image.src) {
+          openImageViewer(image.src, attachment.filename);
+        }
+      });
       container.append(image, note);
       loadAttachmentInto(image, entry.conversationId, attachment);
     }
+  }
+
+  function openImageViewer(src, alt) {
+    const viewer = document.getElementById("image-viewer");
+    const picture = document.getElementById("image-viewer-image");
+    if (!viewer || !picture) {
+      return;
+    }
+    picture.src = src;
+    picture.alt = alt || "Picture";
+    viewer.hidden = false;
+  }
+
+  function closeImageViewer() {
+    const viewer = document.getElementById("image-viewer");
+    const picture = document.getElementById("image-viewer-image");
+    if (!viewer || viewer.hidden) {
+      return;
+    }
+    viewer.hidden = true;
+    if (picture) {
+      picture.removeAttribute("src");
+    }
+  }
+
+  function wireImageViewer() {
+    const viewer = document.getElementById("image-viewer");
+    const close = document.getElementById("image-viewer-close");
+    if (!viewer) {
+      return;
+    }
+    close?.addEventListener("click", closeImageViewer);
+    // Anywhere outside the picture itself is "back": the dark backdrop and the
+    // picture's own margins. Scrolling inside a tall picture must not close it.
+    viewer.addEventListener("click", function (event) {
+      if (event.target === viewer || (event.target instanceof Element && event.target.classList.contains("image-viewer-body"))) {
+        closeImageViewer();
+      }
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        closeImageViewer();
+      }
+    });
   }
 
   function attachmentsNodeFor(parent) {
@@ -3397,9 +3613,19 @@
     if (!conversationId || await isMachineConversationDeleted(conversationId)) {
       return 0;
     }
+    // Only the answer to a direct request says where this chat's history
+    // stops; batches that arrive on their own carry no page and leave the
+    // stored cursor alone. Handled here rather than by the requester because
+    // a slow answer can outlive the request's own wait and still land through
+    // the socket collector — the rows must not arrive without their cursor.
+    if (payload.page && typeof payload.page === "object") {
+      saveTimelinePage(conversationId, payload.page);
+    }
     let stored = 0;
+    let changed = 0;
     if (Array.isArray(payload.cards) && storeControlCards(conversationId, payload.cards)) {
       stored += 1;
+      changed += 1;
     }
     for (const event of payload.events) {
       if (!event || typeof event !== "object") {
@@ -3424,15 +3650,19 @@
       // non-pending event as terminal deleted the in-progress row about a
       // second after it appeared, and blacklisted the run so it never returned.
       const messageId = typeof event.messageId === "string" && event.messageId.trim() ? event.messageId.trim() : id;
-      if (status !== "pending" && role === "participant" && (runId || mobileEventId || messageId)) {
+      // A page of earlier history is a record, not a run ending: it must not
+      // clear anything pending now, nor crowd the recent runs out of the
+      // terminal bookkeeping, which is bounded.
+      const historyPage = Boolean(options && options.historyPage) || Boolean(payload.page && payload.page.earlier === true);
+      if (!historyPage && status !== "pending" && role === "participant" && (runId || mobileEventId || messageId)) {
         await deletePendingTimelineEntriesForRun(conversationId, runId, mobileEventId, messageId, status);
         rememberTerminalRun(runId, mobileEventId, createdAt);
         await deleteStalePlaceholderTimelineEntries(conversationId, createdAt);
       }
-      if (status === "pending" && isSupersededPendingEvent(runId, mobileEventId, createdAt)) {
+      if (!historyPage && status === "pending" && isSupersededPendingEvent(runId, mobileEventId, createdAt)) {
         continue;
       }
-      await putTimelineEntryDeduped({
+      const written = await putTimelineEntryDeduped({
         id: conversationId ? conversationId + ":" + id : id,
         sourceId: id,
         conversationId,
@@ -3449,7 +3679,17 @@
           : undefined,
         mobileEventId
       });
+      if (written) {
+        changed += 1;
+      }
       stored += 1;
+    }
+    // News for a chat that is not on screen — or is, behind a locked screen —
+    // is unread, the way the desktop marks a chat it is not showing. The
+    // phone's own message echoed back is news too; the desktop treats it so.
+    const historyBatch = Boolean(options && options.historyPage) || Boolean(payload.page && payload.page.earlier === true);
+    if (changed > 0 && !historyBatch && (conversationId !== selectedConversationId() || document.hidden)) {
+      markConversationsUnread([conversationId]);
     }
     if (stored > 0 && !(options && options.deferRender)) {
       await render("synced");
@@ -3905,6 +4145,26 @@
     return groups;
   }
 
+  // The search filters what the phone already holds: title, who wrote last
+  // and what they wrote. It never asks the desktop.
+  let chatSearchQuery = "";
+
+  function chatMatchesQuery(chat, query) {
+    const needle = String(query || "").trim().toLowerCase();
+    if (!needle) {
+      return true;
+    }
+    return [chat.title, chat.who, chat.snippet, chat.group].some(function (field) {
+      return typeof field === "string" && field.toLowerCase().includes(needle);
+    });
+  }
+
+  function filterChatsByQuery(chats, query) {
+    return chats.filter(function (chat) {
+      return chatMatchesQuery(chat, query);
+    });
+  }
+
   function renderChatList() {
     const listContainer = document.getElementById("chat-list");
     if (listContainer) {
@@ -3914,10 +4174,14 @@
     if (!container) {
       return;
     }
-    const chats = loadChats();
+    const allChats = loadChats();
+    const chats = filterChatsByQuery(allChats, chatSearchQuery);
     const activeId = selectedConversationId();
+    const unreadIds = loadUnreadConversationIds();
     const renderSignature = JSON.stringify({
       activeId,
+      query: chatSearchQuery,
+      unreadIds,
       chats: chats.map(function (chat) {
         return {
           id: chat.id,
@@ -3936,6 +4200,13 @@
     }
     lastChatListRenderSignature = renderSignature;
     container.textContent = "";
+    if (allChats.length > 0 && chats.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "mobile-empty";
+      empty.textContent = "No chats match “" + chatSearchQuery.trim() + "”.";
+      container.append(empty);
+      return;
+    }
     if (chats.length === 0) {
       const empty = document.createElement("div");
       empty.className = "mobile-empty";
@@ -3960,8 +4231,13 @@
       list.className = "mobile-chat-group";
       for (const chat of group.items) {
         const row = document.createElement("button");
-        row.className = "mobile-chat-row" + (chat.id === activeId ? " is-active" : "");
+        const unread = unreadIds.indexOf(chat.id) >= 0;
+        row.className = "mobile-chat-row" + (chat.id === activeId ? " is-active" : "") + (unread ? " is-unread" : "");
         row.type = "button";
+        row.dataset.conversationId = chat.id;
+        if (unread) {
+          row.dataset.unread = "1";
+        }
         row.addEventListener("click", function () {
           localStorage.setItem(ACTIVE_CONVERSATION_KEY, chat.id);
           void render("synced").then(function () {
@@ -4009,6 +4285,12 @@
           const live = document.createElement("span");
           live.className = "mobile-live-dot";
           titleLine.append(live);
+        }
+        if (unread) {
+          const dot = document.createElement("span");
+          dot.className = "mobile-unread-dot";
+          dot.setAttribute("aria-label", "New activity");
+          titleLine.append(dot);
         }
         const snippet = document.createElement("div");
         snippet.className = "mobile-chat-snippet";
@@ -4670,6 +4952,12 @@
     if (title) {
       title.textContent = activeChat?.title || "AccordAgents";
     }
+    // Looking at the chat is what reads it. A chat opened behind a locked
+    // screen is not being looked at.
+    if (!document.hidden) {
+      markConversationRead(activeId);
+    }
+    renderMembersSheetIfOpen(activeChat);
     const entries = await listOutboxEntries(activeId);
     const timelineEntries = await listTimelineEntries(activeId);
     // A mailbox update, navigation or another tab may have superseded this
@@ -4768,6 +5056,7 @@
     const grouped = groupRowsIntoThreads(rows, openThread);
     rows = grouped.rows;
     renderThreadHeader(openThread);
+    renderLoadEarlier(activeId, openThread);
     const openedConversation = lastScrolledConversationId !== activeId || openThread !== lastRenderedThreadRootId;
     lastRenderedThreadRootId = openThread;
     const rowsFingerprint = rows.map(function (row) {
@@ -4970,6 +5259,7 @@
         ? entry.attachments.map(function (attachment) { return attachment.id; })
         : undefined,
       status: entry.status,
+      when: formatClockTime(entry.createdAt),
       runId: entry.runId,
       stopRequested: entry.stopRequested
     });
@@ -5038,6 +5328,23 @@
 
   // The slot is held either way so the row does not jump sideways when the
   // participant becomes known; it simply carries no identity until then.
+  // Same clock the desktop prints under a message. A finished message says
+  // when it was written; only a message still in flight says what it is doing.
+  function formatClockTime(iso) {
+    const time = Date.parse(iso || "");
+    if (!Number.isFinite(time)) {
+      return "";
+    }
+    return new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+
+  function messageStatusLabel(entry) {
+    if (entry.status === "Done" || entry.status === "Sent") {
+      return formatClockTime(entry.createdAt) || entry.status;
+    }
+    return entry.status;
+  }
+
   function rowHandleText(entry) {
     return entry.identified === false ? "" : (entry.participantLabel || "Agent");
   }
@@ -5136,7 +5443,7 @@
       handle.textContent = rowHandleText(entry);
       const status = document.createElement("span");
       status.className = "message-status";
-      status.textContent = entry.status;
+      status.textContent = messageStatusLabel(entry);
       const content = document.createElement("div");
       content.className = "message-content";
       if (isThinkingEntry(entry)) {
@@ -5157,7 +5464,7 @@
       renderMessageContentIfChanged(content, entry.content);
       const meta = document.createElement("div");
       meta.className = "message-status";
-      meta.textContent = entry.status;
+      meta.textContent = messageStatusLabel(entry);
       bubble.append(content, meta);
       renderAttachmentsInto(attachmentsNodeFor(bubble), entry);
       item.append(bubble);
@@ -5211,7 +5518,7 @@
       }
       applyRowIdentity(avatar, entry);
       handle.textContent = rowHandleText(entry);
-      status.textContent = entry.status;
+      status.textContent = messageStatusLabel(entry);
       const meta = status.parentElement;
       if (!meta) {
         return false;
@@ -5226,7 +5533,7 @@
     if (!status || !content) {
       return false;
     }
-    status.textContent = entry.status;
+    status.textContent = messageStatusLabel(entry);
     renderMessageContentIfChanged(content, entry.content);
     renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
     return true;
@@ -5282,8 +5589,505 @@
     }
   }
 
+  // --- members of the open chat ---------------------------------------------
+  // Everything shown here is already on the phone: the chat list carries each
+  // member's role and home machine. Nothing is asked of the desktop.
+
+  let membersSheetOpen = false;
+
+  function memberKindLabel(kind) {
+    if (kind === "claude-code") {
+      return "Claude Code";
+    }
+    if (kind === "codex-cli") {
+      return "Codex CLI";
+    }
+    if (kind === "gemini-cli") {
+      return "Gemini CLI";
+    }
+    return "";
+  }
+
+  // Same wording as the desktop's run-location control, from the phone's
+  // point of view: the desktop is "local".
+  function memberLocationLabel(member) {
+    if (member.homeMachineId) {
+      return member.homeMachineName || "Machine";
+    }
+    return "Local · desktop";
+  }
+
+  function renderMembersSheet(chat) {
+    const sheet = document.getElementById("members-sheet");
+    const list = document.getElementById("members-sheet-list");
+    const title = document.getElementById("members-sheet-title");
+    const toggle = document.getElementById("chat-members-toggle");
+    if (!sheet || !list) {
+      return;
+    }
+    sheet.hidden = !membersSheetOpen;
+    if (toggle) {
+      toggle.setAttribute("aria-expanded", membersSheetOpen ? "true" : "false");
+    }
+    if (!membersSheetOpen) {
+      return;
+    }
+    const members = chat ? selectedConversationMembers() : [];
+    if (title) {
+      title.textContent = members.length === 1 ? "1 member" : members.length + " members";
+    }
+    list.replaceChildren();
+    if (members.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "members-sheet-empty";
+      empty.textContent = "No members in this chat yet.";
+      list.append(empty);
+      return;
+    }
+    members.forEach(function (member, index) {
+      const row = document.createElement("div");
+      row.className = "members-sheet-row";
+      row.dataset.handle = member.handle;
+      const avatar = document.createElement("span");
+      avatar.className = "mobile-mention-avatar";
+      fillAvatar(avatar, member.displayName, index);
+      const copy = document.createElement("span");
+      copy.className = "members-sheet-copy";
+      const name = document.createElement("strong");
+      name.textContent = member.displayName;
+      const role = document.createElement("span");
+      role.className = "members-sheet-role";
+      role.textContent = [member.roleLabel, memberKindLabel(member.kind)].filter(Boolean).join(" · ");
+      const location = document.createElement("span");
+      location.className = "members-sheet-location";
+      location.textContent = memberLocationLabel(member);
+      copy.append(name, role, location);
+      row.append(avatar, copy);
+      list.append(row);
+    });
+  }
+
+  function renderMembersSheetIfOpen(chat) {
+    if (membersSheetOpen) {
+      renderMembersSheet(chat);
+    }
+  }
+
+  function activeChatRecord() {
+    const conversationId = selectedConversationId();
+    return loadChats().find(function (chat) {
+      return chat.id === conversationId;
+    });
+  }
+
+  function openMembersSheet() {
+    membersSheetOpen = true;
+    renderMembersSheet(activeChatRecord());
+  }
+
+  function closeMembersSheet() {
+    membersSheetOpen = false;
+    renderMembersSheet(undefined);
+  }
+
+  function wireMembersSheet() {
+    const toggle = document.getElementById("chat-members-toggle");
+    const sheet = document.getElementById("members-sheet");
+    const close = document.getElementById("members-sheet-close");
+    if (!toggle || !sheet) {
+      return;
+    }
+    toggle.addEventListener("click", function () {
+      if (!selectedConversationId()) {
+        return;
+      }
+      if (membersSheetOpen) {
+        closeMembersSheet();
+      } else {
+        openMembersSheet();
+      }
+    });
+    close?.addEventListener("click", closeMembersSheet);
+    sheet.addEventListener("click", function (event) {
+      if (event.target instanceof Element && event.target.dataset.membersClose === "1") {
+        closeMembersSheet();
+      }
+    });
+  }
+
+  // --- earlier messages -----------------------------------------------------
+  // The desktop answers a timeline request with its last page and says whether
+  // there is more before it. Each tap asks for the page before the oldest
+  // message the phone was given, and the view stays where the reader was.
+
+  let loadEarlierBusy = false;
+
+  function renderLoadEarlier(conversationId, openThread) {
+    const button = document.getElementById("load-earlier");
+    if (!button) {
+      return;
+    }
+    const page = conversationId ? timelinePageFor(conversationId) : undefined;
+    const pairing = loadPairing();
+    const show = Boolean(page && page.hasMoreBefore && page.beforeMessageId) &&
+      !openThread &&
+      Boolean(pairing && relayCanSync(pairing));
+    button.hidden = !show;
+    button.disabled = loadEarlierBusy;
+    button.textContent = loadEarlierBusy ? "Loading…" : "Show earlier messages";
+  }
+
+  async function loadEarlierMessages() {
+    const conversationId = selectedConversationId();
+    const pairing = loadPairing();
+    const page = conversationId ? timelinePageFor(conversationId) : undefined;
+    if (!conversationId || !pairing || !relayCanSync(pairing) || !page || !page.beforeMessageId || loadEarlierBusy) {
+      return;
+    }
+    loadEarlierBusy = true;
+    renderLoadEarlier(conversationId, openThreadRootId());
+    const surface = threadSurface();
+    const heightBefore = surface ? surface.scrollHeight : 0;
+    const topBefore = surface ? surface.scrollTop : 0;
+    let failed = false;
+    try {
+      await requestTimelineViaRelay(pairing, conversationId, {
+        beforeMessageId: page.beforeMessageId,
+        deferRender: true
+      });
+    } catch {
+      failed = true;
+    } finally {
+      loadEarlierBusy = false;
+    }
+    if (selectedConversationId() !== conversationId) {
+      return;
+    }
+    await render(failed ? "tunnel-reconnecting" : "synced");
+    if (surface && !failed) {
+      // Rows were added above the reader. Keep the message they were looking at
+      // exactly where it was instead of letting the list jump under them.
+      surface.scrollTop = topBefore + (surface.scrollHeight - heightBefore);
+      setJumpToLatestVisible(!isNearBottom(surface));
+    }
+  }
+
+  // --- pull to refresh ------------------------------------------------------
+  // A downward drag from the very top of a list asks the desktop again. This
+  // is the only manual refresh the phone has; before it, "Waiting to sync"
+  // could only be waited out.
+
+  const PULL_REFRESH_ARM_PX = 56;
+  const PULL_REFRESH_MAX_PX = 84;
+
+  function attachPullToRefresh(scroller, indicator, refresh) {
+    if (!scroller || !indicator) {
+      return;
+    }
+    let startY;
+    let pulling = false;
+    let distance = 0;
+    let busy = false;
+    function settle() {
+      indicator.style.height = "0px";
+      indicator.classList.remove("is-armed");
+      distance = 0;
+    }
+    scroller.addEventListener("touchstart", function (event) {
+      if (busy || scroller.scrollTop > 0 || event.touches.length !== 1) {
+        pulling = false;
+        return;
+      }
+      startY = event.touches[0].clientY;
+      pulling = true;
+      distance = 0;
+    }, { passive: true });
+    scroller.addEventListener("touchmove", function (event) {
+      if (!pulling || busy) {
+        return;
+      }
+      const dy = event.touches[0].clientY - startY;
+      if (dy <= 0 || scroller.scrollTop > 0) {
+        settle();
+        return;
+      }
+      distance = Math.min(PULL_REFRESH_MAX_PX, dy * 0.55);
+      indicator.style.height = distance + "px";
+      indicator.classList.toggle("is-armed", distance >= PULL_REFRESH_ARM_PX);
+    }, { passive: true });
+    async function finish() {
+      if (!pulling) {
+        return;
+      }
+      pulling = false;
+      if (distance < PULL_REFRESH_ARM_PX || busy) {
+        settle();
+        return;
+      }
+      busy = true;
+      indicator.classList.add("is-refreshing");
+      indicator.style.height = PULL_REFRESH_ARM_PX + "px";
+      try {
+        await refresh();
+      } finally {
+        busy = false;
+        indicator.classList.remove("is-refreshing");
+        settle();
+      }
+    }
+    scroller.addEventListener("touchend", function () {
+      void finish();
+    });
+    scroller.addEventListener("touchcancel", function () {
+      pulling = false;
+      settle();
+    });
+  }
+
+  async function refreshChatList() {
+    const pairing = loadPairing();
+    if (!pairing || !relayCanSync(pairing)) {
+      await render();
+      return;
+    }
+    try {
+      await requestChatListViaRelay(pairing);
+      await render("synced");
+    } catch {
+      await render("tunnel-reconnecting");
+    }
+  }
+
+  async function refreshOpenTimeline() {
+    const pairing = loadPairing();
+    const conversationId = selectedConversationId();
+    if (!pairing || !relayCanSync(pairing) || !conversationId) {
+      await pollMailboxTimeline().catch(function () { return 0; });
+      await render();
+      return;
+    }
+    try {
+      await requestTimelineViaRelay(pairing, conversationId);
+      await pollMailboxTimeline().catch(function () { return 0; });
+      await render("synced");
+    } catch {
+      await render("tunnel-reconnecting");
+    }
+    ensureLiveRelayForOpenConversation();
+  }
+
+  // --- coming back to the app -----------------------------------------------
+  // iOS freezes the page in the background. The socket that looks open when
+  // the app returns is usually dead, and nothing would notice until the next
+  // request timed out or the keep-alive ticked — up to a minute of a reply
+  // that had stopped moving. Coming back asks the desktop straight away.
+
+  const FOREGROUND_RECONNECT_AFTER_MS = 5_000;
+  let hiddenSince;
+  let foregroundResyncPromise;
+
+  function dropRelaySocket(reason) {
+    const socket = activeRelaySocket;
+    activeRelaySocket = undefined;
+    activeRelaySocketPromise = undefined;
+    activeRelayTimelineCollectorSocket = undefined;
+    if (socket && socket.readyState < 2) {
+      socket.close(1000, reason);
+    }
+  }
+
+  function resyncAfterForeground() {
+    if (foregroundResyncPromise) {
+      return foregroundResyncPromise;
+    }
+    foregroundResyncPromise = (async function () {
+      const awayMs = hiddenSince ? Date.now() - hiddenSince : 0;
+      hiddenSince = undefined;
+      recordRelayDebug({ event: "foreground-resync", awayMs });
+      await adoptWorkerUnread();
+      const pairing = loadPairing();
+      if (!pairing || !relayCanSync(pairing)) {
+        await render();
+        return;
+      }
+      if (awayMs > FOREGROUND_RECONNECT_AFTER_MS) {
+        dropRelaySocket("mobile foreground resync");
+      }
+      try {
+        await requestChatListViaRelay(pairing);
+        const conversationId = selectedConversationId();
+        if (conversationId) {
+          await requestTimelineViaRelay(pairing, conversationId);
+        }
+        await render("synced");
+      } catch {
+        await render("tunnel-reconnecting");
+      }
+      await pollMailboxTimeline().catch(function () { return 0; });
+      await render();
+      ensureLiveRelayForOpenConversation();
+    })().finally(function () {
+      foregroundResyncPromise = undefined;
+    });
+    return foregroundResyncPromise;
+  }
+
+  function wireForegroundResync() {
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) {
+        hiddenSince = Date.now();
+        return;
+      }
+      void resyncAfterForeground();
+    });
+    window.addEventListener("pageshow", function (event) {
+      if (event.persisted) {
+        void resyncAfterForeground();
+      }
+    });
+    window.addEventListener("online", function () {
+      void resyncAfterForeground();
+    });
+  }
+
+  // A notification names the chat it is about; tapping it lands there.
+  function openConversationFromNotification(conversationId) {
+    if (typeof conversationId !== "string" || !conversationId.trim()) {
+      return;
+    }
+    setOpenThreadRootId(undefined);
+    localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
+    void render("synced").then(function () {
+      return refreshOpenTimeline();
+    });
+  }
+
+  function wireWorkerMessages() {
+    if (!("serviceWorker" in navigator)) {
+      return;
+    }
+    navigator.serviceWorker.addEventListener("message", function (event) {
+      if (event.data && event.data.type === "accord-open-conversation") {
+        openConversationFromNotification(event.data.conversationId);
+      }
+    });
+  }
+
+  // --- the "/" menu ---------------------------------------------------------
+  // What the desktop composer lists after "/": /compact and /goal for one clear
+  // member, saved prompts, and the skills the target member can run. The
+  // desktop decides the list; the phone only asks with the draft so far.
+
+  function activeSlashQuery(value) {
+    const match = String(value || "").match(/(?:^|\s)\/([A-Za-z0-9_-]*)$/);
+    return match ? match[1] : undefined;
+  }
+
+  function replaceActiveSlashQuery(value, insertion) {
+    const source = String(value || "");
+    const match = source.match(/(?:^|\s)\/([A-Za-z0-9_-]*)$/);
+    if (!match || match.index === undefined) {
+      return source + (source.endsWith(" ") || !source ? "" : " ") + insertion;
+    }
+    const prefix = source.slice(0, match.index);
+    const leadingSpace = match[0].startsWith(" ") ? " " : "";
+    return prefix + leadingSpace + insertion;
+  }
+
+  function replaceSlashAtCaret(value, insertion, caret) {
+    const source = String(value || "");
+    const position = Number.isFinite(caret)
+      ? Math.max(0, Math.min(source.length, caret))
+      : source.length;
+    const replacedBefore = replaceActiveSlashQuery(source.slice(0, position), insertion);
+    const after = source.slice(position);
+    const suffix = replacedBefore.endsWith(" ") && after.startsWith(" ") ? after.slice(1) : after;
+    return { value: replacedBefore + suffix, caret: replacedBefore.length };
+  }
+
+  function skillTokenPresent(value, frontmatterName) {
+    const escaped = String(frontmatterName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp("(^|\\s)/" + escaped + "(?=\\s|$)").test(String(value || ""));
+  }
+
+  async function requestComposerOptionsViaRelay(pairing, conversationId, query, content) {
+    const payload = await sendRelayPayload(pairing, "composer-" + createEventId(), {
+      type: "mobile.composer.request",
+      conversationId,
+      query,
+      content
+    });
+    if (!payload || payload.type !== "mobile.composer") {
+      return { commands: [], prompts: [], skills: [] };
+    }
+    return {
+      commands: Array.isArray(payload.commands) ? payload.commands : [],
+      prompts: Array.isArray(payload.prompts) ? payload.prompts : [],
+      skills: Array.isArray(payload.skills) ? payload.skills : []
+    };
+  }
+
+  // A notification tapped while the app was closed opens it with the chat
+  // named in the URL. The parameter is consumed once and removed, so a reload
+  // does not keep re-opening that chat.
+  function adoptOpenConversationFromLocation() {
+    try {
+      const url = new URL(globalThis.location.href);
+      const open = url.searchParams.get("open");
+      if (!open || !open.trim()) {
+        return;
+      }
+      setOpenThreadRootId(undefined);
+      localStorage.setItem(ACTIVE_CONVERSATION_KEY, open.trim());
+      url.searchParams.delete("open");
+      history.replaceState(null, "", url.pathname + (url.search || "") + (url.hash || ""));
+    } catch {
+      return;
+    }
+  }
+
+  function wireChatSearch() {
+    const toggle = document.getElementById("chat-search-toggle");
+    const box = document.getElementById("chat-search");
+    const input = document.getElementById("chat-search-input");
+    const close = document.getElementById("chat-search-close");
+    if (!toggle || !box || !input) {
+      return;
+    }
+    function setOpen(open) {
+      box.hidden = !open;
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) {
+        input.focus();
+      } else {
+        input.value = "";
+        chatSearchQuery = "";
+        renderChatList();
+      }
+    }
+    toggle.addEventListener("click", function () {
+      setOpen(box.hidden);
+    });
+    close?.addEventListener("click", function () {
+      setOpen(false);
+    });
+    input.addEventListener("input", function () {
+      chatSearchQuery = input.value;
+      renderChatList();
+    });
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+      if (event.key === "Enter") {
+        input.blur();
+      }
+    });
+  }
+
   async function init() {
     readBootstrapFromLocation(globalThis.location);
+    adoptOpenConversationFromLocation();
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("service-worker.js").catch(function () {
         return undefined;
@@ -5303,6 +6107,16 @@
         setJumpToLatestVisible(!isNearBottom(surface));
       }, { passive: true });
     }
+    wireChatSearch();
+    wireMembersSheet();
+    wireImageViewer();
+    wireWorkerMessages();
+    wireForegroundResync();
+    document.getElementById("load-earlier")?.addEventListener("click", function () {
+      void loadEarlierMessages();
+    });
+    attachPullToRefresh(document.getElementById("chat-list"), document.getElementById("chat-list-refresh"), refreshChatList);
+    attachPullToRefresh(surface, document.getElementById("timeline-refresh"), refreshOpenTimeline);
     const backToTimeline = document.getElementById("back-to-timeline");
     if (backToTimeline) {
       backToTimeline.addEventListener("click", function () {
@@ -5395,13 +6209,210 @@
         return options;
       }
 
+      // The "/" menu. The list is the desktop's — it knows the member the
+      // draft addresses, the saved prompts and the skills that member can run —
+      // so each keystroke after "/" asks it, debounced, and a stale answer is
+      // dropped. Picking a skill is remembered so the message carries it the
+      // way the desktop composer does, as long as its token is still in the
+      // text when the message goes.
+      const slashMenu = document.getElementById("slash-menu");
+      let slashIndex = 0;
+      let slashOptions = [];
+      let slashRequestSeq = 0;
+      let slashDebounceTimer;
+      let slashRequestKey = "";
+      let selectedSkillMentions = [];
+
+      function slashMenuOpen() {
+        return Boolean(slashMenu) && !slashMenu.hidden && slashOptions.length > 0;
+      }
+
+      function closeSlashMenu() {
+        clearTimeout(slashDebounceTimer);
+        slashRequestSeq += 1;
+        slashRequestKey = "";
+        slashOptions = [];
+        if (slashMenu) {
+          slashMenu.hidden = true;
+          slashMenu.textContent = "";
+        }
+        if (!mentionMenu || mentionMenu.hidden) {
+          input.setAttribute("aria-expanded", "false");
+          input.removeAttribute("aria-activedescendant");
+        }
+      }
+
+      function slashOptionLabel(option) {
+        if (option.kind === "command") {
+          return { title: option.item.label || "/" + option.item.id, detail: option.item.description || "" };
+        }
+        if (option.kind === "prompt") {
+          return { title: "/" + option.item.trigger, detail: option.item.label || "" };
+        }
+        return { title: "/" + option.item.frontmatterName, detail: option.item.description || option.item.displayName || "" };
+      }
+
+      function renderSlashMenu(state) {
+        if (!slashMenu) {
+          return;
+        }
+        slashMenu.textContent = "";
+        if (slashOptions.length === 0 && state === "ready") {
+          closeSlashMenu();
+          return;
+        }
+        slashIndex = Math.min(slashIndex, Math.max(0, slashOptions.length - 1));
+        if (slashOptions.length === 0) {
+          const note = document.createElement("div");
+          note.className = "mobile-mention-title";
+          note.dataset.slashState = state;
+          note.textContent = state === "offline" ? "Commands need the desktop" : "Asking the desktop…";
+          slashMenu.append(note);
+        }
+        const groups = [
+          { kind: "command", title: "Commands" },
+          { kind: "prompt", title: "Saved prompts" },
+          { kind: "skill", title: "Skills" }
+        ];
+        let position = 0;
+        for (const group of groups) {
+          const members = slashOptions.filter(function (option) { return option.kind === group.kind; });
+          if (members.length === 0) {
+            continue;
+          }
+          const title = document.createElement("div");
+          title.className = "mobile-mention-title";
+          title.textContent = group.title;
+          slashMenu.append(title);
+          for (const option of members) {
+            const index = slashOptions.indexOf(option);
+            const button = document.createElement("button");
+            button.type = "button";
+            button.id = "slash-option-" + index;
+            button.className = "mobile-mention-option mobile-slash-option" + (index === slashIndex ? " is-selected" : "");
+            button.dataset.slashKind = option.kind;
+            button.setAttribute("role", "option");
+            button.setAttribute("aria-selected", index === slashIndex ? "true" : "false");
+            button.addEventListener("pointerdown", function (event) {
+              event.preventDefault();
+            });
+            button.addEventListener("click", function () {
+              insertSlashOption(option);
+            });
+            const copy = document.createElement("span");
+            copy.className = "mobile-mention-copy";
+            const label = slashOptionLabel(option);
+            const name = document.createElement("strong");
+            name.textContent = label.title;
+            const detail = document.createElement("span");
+            detail.textContent = label.detail;
+            copy.append(name, detail);
+            button.append(copy);
+            slashMenu.append(button);
+            position += 1;
+          }
+        }
+        slashMenu.hidden = false;
+        input.setAttribute("aria-expanded", "true");
+        if (position > 0) {
+          input.setAttribute("aria-activedescendant", "slash-option-" + slashIndex);
+          slashMenu.querySelector(".is-selected")?.scrollIntoView({ block: "nearest" });
+        }
+      }
+
+      function insertSlashOption(option) {
+        const caret = typeof input.selectionStart === "number" ? input.selectionStart : input.value.length;
+        let insertion;
+        if (option.kind === "command") {
+          insertion = "/" + option.item.id + " ";
+        } else if (option.kind === "prompt") {
+          insertion = String(option.item.body || "").trim();
+        } else {
+          insertion = "/" + option.item.frontmatterName + " ";
+          if (!selectedSkillMentions.some(function (mention) { return mention.skillId === option.item.skillId; })) {
+            selectedSkillMentions.push(option.item);
+          }
+        }
+        const edit = replaceSlashAtCaret(input.value, insertion, caret);
+        input.value = edit.value;
+        slashIndex = 0;
+        closeSlashMenu();
+        input.focus();
+        input.setSelectionRange(edit.caret, edit.caret);
+      }
+
+      function updateSlashMenu() {
+        const before = mentionValueBeforeCaret();
+        const query = activeSlashQuery(before);
+        if (query === undefined) {
+          clearTimeout(slashDebounceTimer);
+          slashRequestKey = "";
+          if (slashMenu && !slashMenu.hidden) {
+            closeSlashMenu();
+          }
+          return;
+        }
+        // A caret moving inside the same draft is not a new question.
+        const requestKey = selectedConversationId() + "\0" + before;
+        if (requestKey === slashRequestKey) {
+          return;
+        }
+        slashRequestKey = requestKey;
+        clearTimeout(slashDebounceTimer);
+        const pairing = loadPairing();
+        const conversationId = selectedConversationId();
+        if (!pairing || !relayCanSync(pairing) || !conversationId) {
+          slashOptions = [];
+          renderSlashMenu("offline");
+          return;
+        }
+        renderSlashMenu("loading");
+        const seq = ++slashRequestSeq;
+        const content = input.value;
+        slashDebounceTimer = setTimeout(function () {
+          requestComposerOptionsViaRelay(pairing, conversationId, query, content).then(function (result) {
+            if (seq !== slashRequestSeq || activeSlashQuery(mentionValueBeforeCaret()) !== query) {
+              return;
+            }
+            slashOptions = [].concat(
+              result.commands.map(function (item) { return { kind: "command", item }; }),
+              result.prompts.map(function (item) { return { kind: "prompt", item }; }),
+              result.skills.filter(function (item) {
+                return item && item.capabilityState === "invocable" && !item.ambiguous;
+              }).map(function (item) { return { kind: "skill", item }; })
+            );
+            renderSlashMenu("ready");
+          }).catch(function () {
+            if (seq === slashRequestSeq) {
+              slashOptions = [];
+              renderSlashMenu("offline");
+            }
+          });
+        }, 120);
+      }
+
+      // The skills a message carries are the ones still named in it: deleting
+      // the "/name" token drops the skill, as it does on the desktop.
+      function takeSkillMentions(content) {
+        const carried = selectedSkillMentions.filter(function (mention) {
+          return skillTokenPresent(content, mention.frontmatterName);
+        });
+        selectedSkillMentions = [];
+        return carried;
+      }
+
       input.addEventListener("input", function () {
         mentionIndex = 0;
         renderMentionMenu();
+        slashIndex = 0;
+        updateSlashMenu();
       });
       document.addEventListener("selectionchange", function () {
         if (document.activeElement === input && mentionMenu && !mentionMenu.hidden) {
           renderMentionMenu();
+        }
+        if (document.activeElement === input && slashMenu && !slashMenu.hidden) {
+          updateSlashMenu();
         }
       });
       // Every control in the composer row needs this, not just the mention one.
@@ -5452,6 +6463,29 @@
         });
       }
       input.addEventListener("keydown", function (event) {
+        if (slashMenuOpen()) {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            slashIndex = (slashIndex + 1) % slashOptions.length;
+            renderSlashMenu("ready");
+            return;
+          }
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            slashIndex = (slashIndex - 1 + slashOptions.length) % slashOptions.length;
+            renderSlashMenu("ready");
+            return;
+          }
+          if (event.key === "Enter" || event.key === "Tab") {
+            event.preventDefault();
+            insertSlashOption(slashOptions[slashIndex] || slashOptions[0]);
+            return;
+          }
+        }
+        if (event.key === "Escape" && slashMenu && !slashMenu.hidden) {
+          closeSlashMenu();
+          return;
+        }
         const options = mentionOptions(mentionValueBeforeCaret(), selectedConversationMembers());
         if (options.length > 0 && event.key === "ArrowDown") {
           event.preventDefault();
@@ -5476,6 +6510,7 @@
       });
       input.addEventListener("blur", function () {
         setTimeout(closeMentionMenu, 0);
+        setTimeout(closeSlashMenu, 0);
       });
       form.addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -5486,11 +6521,22 @@
           return;
         }
         input.value = "";
+        closeSlashMenu();
         const attachments = takePendingAttachments();
+        const skillMentions = takeSkillMentions(content);
+        const carriesExtras = attachments.length > 0 || skillMentions.length > 0;
         await enqueueMessage({
           content,
           conversationId,
-          ...(attachments.length > 0 ? { payload: { content, attachments } } : {})
+          ...(carriesExtras
+            ? {
+              payload: {
+                content,
+                ...(attachments.length > 0 ? { attachments } : {}),
+                ...(skillMentions.length > 0 ? { skillMentions } : {})
+              }
+            }
+            : {})
         });
         await render();
         // Sending is a deliberate action, so following it is expected.
@@ -5515,6 +6561,9 @@
     startThinkingClock();
     startSyncProgressClock();
     await render();
+    // What a push-woken worker counted while the app was closed, folded in
+    // before the lists paint again; the icon number follows.
+    await adoptWorkerUnread().catch(function () { return undefined; });
     // The connections to this phone's machines come up first and independently
     // of the desktop. Waiting for the desktop here is what made a closed
     // desktop a phone that could do nothing: everything the machine owes this
@@ -5604,7 +6653,32 @@
     addPendingAttachments,
     takePendingAttachments,
     preparePickedImage,
-    savePairing
+    savePairing,
+    chatMatchesQuery,
+    filterChatsByQuery,
+    formatClockTime,
+    messageStatusLabel,
+    activeSlashQuery,
+    replaceActiveSlashQuery,
+    replaceSlashAtCaret,
+    skillTokenPresent,
+    requestComposerOptionsViaRelay,
+    loadUnreadConversationIds,
+    markConversationsUnread,
+    markConversationRead,
+    adoptWorkerUnread,
+    resyncAfterForeground,
+    dropRelaySocket,
+    loadEarlierMessages,
+    timelinePageFor,
+    saveTimelinePage,
+    refreshChatList,
+    refreshOpenTimeline,
+    openImageViewer,
+    closeImageViewer,
+    openMembersSheet,
+    closeMembersSheet,
+    openConversationFromNotification
   };
 
   // iOS reports a height at first paint that is taller than what you can

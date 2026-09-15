@@ -23,3 +23,11 @@ The functional PWA uses the "Chat timeline" screen from the handoff as the paire
 - composer height `46px`, pill radius `23px`, input background `#f6f7f8`, border `#e7e9ee`, and circular `46px` send button
 
 Desktop/browser QA may show the phone frame centered. Narrow real-mobile viewports fill the viewport without the outer preview border/shadow, but the interior component geometry and typography stay the same.
+
+## Dark appearance
+
+Decided by the User on 2026-09-15 (PWA polish round): the PWA follows the phone's
+own appearance setting. Under `prefers-color-scheme: dark` the stylesheet restates
+its surface variables with the desktop's dark palette (`src/renderer/styles/app-theme.css`,
+`.dark`), so a chat looks the same on both. The light values stay the handoff's;
+component geometry and typography do not change between the two.

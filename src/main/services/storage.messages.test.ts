@@ -284,6 +284,45 @@ test("listConversationMessages returns an empty page when target message id is m
   assert.equal(page.totalMessages, 4);
 });
 
+test("listConversationMessages pages strictly before a message id, and answers nothing for an unknown one", async () => {
+  const queries: string[] = [];
+  const storage = fakeStorage(async (sql) => {
+    queries.push(sql);
+    if (sql.includes("select sequence") && sql.includes("message_id")) {
+      return sql.includes("'known'") ? [{ sequence: 3 }] : [];
+    }
+    if (sql.includes("hex(payload_json) as payloadHex")) {
+      return [
+        { sequence: 2, payloadHex: hexJson({ id: "before", role: "user", content: "before", createdAt: "2026-01-01T00:00:02.000Z" }) },
+        { sequence: 1, payloadHex: hexJson({ id: "older", role: "user", content: "older", createdAt: "2026-01-01T00:00:01.000Z" }) }
+      ];
+    }
+    if (sql.includes("count(*) as totalMessages")) {
+      return [{ totalMessages: 3 }];
+    }
+    return [];
+  });
+
+  const page = await storage.listConversationMessages({ conversationId: "conversation", beforeMessageId: "known", limit: 2 });
+  assert.match(queries[1], /sequence < 3/, "the cursor message itself is excluded");
+  assert.deepEqual(page.messages.map((message) => message.id), ["older", "before"]);
+  assert.equal(page.hasMoreBefore, false, "two rows for a limit of two means the history is exhausted");
+
+  // The cursor wins over the other cursors: a reader that names a message
+  // wants what is before it, not the page around it.
+  queries.length = 0;
+  await storage.listConversationMessages({ conversationId: "conversation", beforeMessageId: "known", aroundMessageId: "known", beforeSequence: 99, limit: 2 });
+  assert.match(queries[1], /sequence < 3/);
+  assert.doesNotMatch(queries[1], /sequence <= 3|sequence < 99/);
+
+  // An unknown cursor is an empty answer, not the latest page: the reader
+  // asked for older history and the latest page is not that.
+  const missing = await storage.listConversationMessages({ conversationId: "conversation", beforeMessageId: "gone", limit: 2 });
+  assert.deepEqual(missing.messages, []);
+  assert.equal(missing.hasMoreBefore, false);
+  assert.equal(missing.totalMessages, 3);
+});
+
 test("normalizeInferredParticipantRequestThreads runs once and avoids blob queryJson", async () => {
   const legacy = legacyInferredConversation();
   const { storage, queryJsonSql, queryTextSql, runSqlStatements, saved } = maintenanceStorage({

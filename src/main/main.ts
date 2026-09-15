@@ -63,8 +63,10 @@ import type {
   UserSkillDiagnosticsRequest,
   UserSkillListRequest,
   UserSkillSearchRequest,
-  UserSkillSummary
+  UserSkillSummary,
+  UserSkillTargetSummary
 } from "../shared/types";
+import { matchingChatSavedPrompts } from "../shared/chatSavedPrompts";
 import type {
   CreateArtifactRequest,
   DiffArtifactRequest,
@@ -122,9 +124,12 @@ import { MobileProgressEnvelopeTracker } from "./services/mobileProgressEnvelope
 import {
   MobileRelayControlService,
   timelineEventsFromSnapshot,
+  type MobileComposerOptions,
+  type MobileNoticeKind,
   type MobileRelayChatCatalog,
   type MobileRelayChatListItem,
   type MobileTimelineEvents,
+  type MobileTimelinePage,
   type MobileTimelineSink
 } from "./services/mobileRelayControl";
 import {
@@ -1676,7 +1681,7 @@ function mobileTimelineSinkForPairing(pairing: MobilePairingPackage): MobileTime
   }
   const pairingKey = mobilePairingKey(pairing);
   return {
-    async publishTimeline(timeline: MobileTimelineEvents, publishOptions?: { runFinished?: boolean }) {
+    async publishTimeline(timeline: MobileTimelineEvents, publishOptions?: { runFinished?: boolean; notices?: MobileNoticeKind[] }) {
       const conversationId = timeline.conversationId?.trim();
       if (!conversationId || timeline.events.length === 0 || !pairing.outboxUrl) {
         return;
@@ -1687,6 +1692,21 @@ function mobileTimelineSinkForPairing(pairing: MobilePairingPackage): MobileTime
         kind: "mobile.timeline.events",
         payload: timeline
       });
+      // What the ring is about, as its own tiny envelope beside the batch. Its
+      // plaintext kind is all a push-woken phone reads: it names the chat and
+      // says "reply" or "approval" without opening anything sealed. The phone's
+      // page ignores the kind; the batch itself carries the content.
+      const notices = (publishOptions?.notices ?? []).filter((notice) => notice === "reply" || notice === "approval");
+      const noticeEvents = [];
+      for (const notice of notices) {
+        const noticeAppend = await chatEventLogService.appendLocalEvent({
+          conversationId,
+          logScopeId: conversationId,
+          kind: `mobile.notice.${notice}`,
+          payload: { type: "mobile.notice", notice }
+        });
+        noticeEvents.push(noticeAppend.event);
+      }
       const runFinished = publishOptions?.runFinished === true;
       // W-C diagnostics: the marker has now been wrong in both directions, so
       // record what was actually decided for each publication rather than
@@ -1698,7 +1718,7 @@ function mobileTimelineSinkForPairing(pairing: MobilePairingPackage): MobileTime
         eventCount: timeline.events.length,
         statuses: timeline.events.map((event) => `${event.role ?? "?"}:${event.status ?? "?"}`).slice(0, 10)
       });
-      await postMailboxEvents(pairing, [append.event], { runFinished });
+      await postMailboxEvents(pairing, [append.event, ...noticeEvents], { runFinished });
       // W3/W-A: remember which envelopes carried nothing but pending progress,
       // and once every run they were waiting on has a durable terminal
       // snapshot, delete them so no reader can replay superseded progress. An
@@ -2062,6 +2082,16 @@ function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: 
   });
 }
 
+/** How many newest messages the chat list reads per chat to find the last
+ *  line with text: a pending or empty row at the end must not blank the
+ *  snippet, and the whole history must never be read for it. */
+const MOBILE_CHAT_LIST_SNIPPET_WINDOW = 10;
+/** The window the "/" menu resolves a draft's target in. The desktop composer
+ *  resolves against the whole chat; the newest participant message is what
+ *  the no-mention rule looks for, and it is in this window unless the last
+ *  two hundred messages are all the User's own. */
+const MOBILE_COMPOSER_TARGET_WINDOW = 200;
+
 function mobileRelayChatCatalog(): MobileRelayChatCatalog {
   return {
     async listChats() {
@@ -2074,9 +2104,16 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
           ? "Generic Member"
           : role.label
       ]));
+      const machineNames = new Map((await settingsService.listMachines()).map((machine) => [machine.id, machine.name]));
       const items: MobileRelayChatListItem[] = [];
       for (const summary of visible.slice(0, 100)) {
-        const conversation = await storageService.getConversation(summary.id);
+        // The list needs each chat's members and its last line, not its
+        // history. Reading whole conversations here pulled the newest hundred
+        // chats' messages — tens of megabytes on the User's data — through the
+        // sqlite CLI on every list request, and the phone now asks for the
+        // list on every return to the foreground and every pull to refresh.
+        const opened = await storageService.openConversation(summary.id, MOBILE_CHAT_LIST_SNIPPET_WINDOW);
+        const conversation = opened?.conversation;
         const lastMessage = conversation?.messages.slice().reverse().find((message) => message.content.trim());
         const members = mobileRelayChatMembers(conversation);
         items.push({
@@ -2102,7 +2139,13 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
             // needs to run it, so the phone can ask the machine itself when
             // this desktop is closed. Local members carry nothing extra.
             ...(participant.homeMachineId
-              ? { homeMachineId: participant.homeMachineId, participant }
+              ? {
+                homeMachineId: participant.homeMachineId,
+                ...(machineNames.get(participant.homeMachineId)
+                  ? { homeMachineName: machineNames.get(participant.homeMachineId) }
+                  : {}),
+                participant
+              }
               : {})
           }))
         });
@@ -2120,6 +2163,48 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
       // Opening/reconnecting must project the same waiting rows as live saves.
       // Keep the existing 80-message page; never load full history per token.
       return opened ? timelineEventsFromSnapshot(opened.conversation, 80) : [];
+    },
+    async listTimelinePage(conversationId: string, options: { beforeMessageId?: string }): Promise<MobileTimelinePage> {
+      // The same 80-message page the phone always got, or the 80 before a
+      // message it already holds. The cursor is the oldest stored message of
+      // the page, not the oldest visible row: a page of rows the phone does
+      // not show would otherwise be asked for again and again.
+      const opened = await storageService.openConversation(conversationId, 80, options.beforeMessageId
+        ? { beforeMessageId: options.beforeMessageId }
+        : undefined);
+      if (!opened) {
+        return { events: [], hasMoreBefore: false };
+      }
+      const oldest = opened.conversation.messages[0];
+      return {
+        events: timelineEventsFromSnapshot(opened.conversation, 80),
+        hasMoreBefore: opened.messagePage.hasMoreBefore,
+        ...(oldest ? { beforeMessageId: oldest.id } : {})
+      };
+    },
+    async composerOptions(request: { conversationId: string; query: string; content: string }): Promise<MobileComposerOptions> {
+      const opened = await storageService.openConversation(request.conversationId, MOBILE_COMPOSER_TARGET_WINDOW);
+      const conversation = opened?.conversation;
+      if (!conversation || conversation.kind !== "chat") {
+        return { commands: [], prompts: [], skills: [] };
+      }
+      // Exactly what the desktop composer asks for the same draft: the skill
+      // search with the draft's resolved target, the saved prompts, and the
+      // two commands offered for one clear member.
+      const search = await userSkillsService.search(
+        { conversationId: conversation.id, query: request.query, content: request.content, limit: 8 },
+        chatService.userSkillRunContext(conversation, request.content)
+      );
+      const settings = await settingsService.getPublicSettings();
+      return {
+        commands: mobileComposerCommandOptions(request.query, search.target),
+        prompts: matchingChatSavedPrompts(settings.chatSavedPrompts ?? [], request.query, { includeBody: false })
+          .slice(0, 8)
+          .map((prompt) => ({ id: prompt.id, label: prompt.label, trigger: prompt.trigger, body: prompt.body })),
+        skills: search.skills
+          .filter((skill) => skill.capabilityState === "invocable" && !skill.ambiguous)
+          .map(({ providerKinds: _providerKinds, scopeKinds: _scopeKinds, statusMessage: _statusMessage, ambiguous: _ambiguous, ...mention }) => mention)
+      };
     },
     async isConversationAllowed(conversationId: string, snapshot?: Conversation) {
       const conversation = snapshot ?? await storageService.getConversation(conversationId);
@@ -2198,6 +2283,27 @@ function mobileSnippet(content: string | undefined): string {
     return "No messages yet";
   }
   return normalized.length > 84 ? `${normalized.slice(0, 81)}...` : normalized;
+}
+
+/** The same rule as the desktop composer's `compactCommandOption` and
+ *  `goalCommandOption`: both commands exist only for one clearly addressed
+ *  member, and are offered while the typed word is still a prefix of them. */
+function mobileComposerCommandOptions(
+  query: string,
+  target: UserSkillTargetSummary
+): MobileComposerOptions["commands"] {
+  if (!target.hasClearTargets || target.participantIds.length !== 1) {
+    return [];
+  }
+  const needle = query.trim().toLowerCase();
+  const options: MobileComposerOptions["commands"] = [];
+  if ("compact".startsWith(needle)) {
+    options.push({ id: "compact", label: "/compact", description: "Compact the mentioned member context" });
+  }
+  if ("goal".startsWith(needle)) {
+    options.push({ id: "goal", label: "/goal", description: "Run the mentioned member until the goal is finished" });
+  }
+  return options;
 }
 
 function mobileWhoLabel(message: ChatMessage | undefined): string | undefined {

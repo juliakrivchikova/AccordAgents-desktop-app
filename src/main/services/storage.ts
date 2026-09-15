@@ -679,7 +679,11 @@ export class StorageService {
     );
   }
 
-  async openConversation(id: string, limit?: number): Promise<ConversationOpenResult | undefined> {
+  async openConversation(
+    id: string,
+    limit?: number,
+    page?: { beforeMessageId?: string }
+  ): Promise<ConversationOpenResult | undefined> {
     await this.init();
     const bodyJson = await this.queryText(
       `select coalesce(nullif(body_json, ''), payload_json) from conversations where id = ${sqlString(id)} limit 1;`
@@ -692,7 +696,8 @@ export class StorageService {
     sanitizeConversationWarnings(conversation);
     const messagePage = await this.listConversationMessages({
       conversationId: id,
-      limit
+      limit,
+      ...(page?.beforeMessageId ? { beforeMessageId: page.beforeMessageId } : {})
     });
     return {
       conversation: {
@@ -707,8 +712,34 @@ export class StorageService {
     await this.init();
     const limit = normalizeMessagePageLimit(request.limit);
     const aroundMessageId = typeof request.aroundMessageId === "string" ? request.aroundMessageId.trim() : "";
+    const beforeMessageId = typeof request.beforeMessageId === "string" ? request.beforeMessageId.trim() : "";
     let sequenceClause = "";
-    if (aroundMessageId) {
+    if (beforeMessageId) {
+      // Strictly before a message the reader already holds. An unknown id
+      // answers with nothing rather than the latest page: the reader asked
+      // for older history, and the latest page is not that.
+      const targetRows = await this.queryJson<{ sequence: number }>(
+        `
+          select sequence
+          from conversation_messages
+          where conversation_id = ${sqlString(request.conversationId)}
+            and message_id = ${sqlString(beforeMessageId)}
+          limit 1;
+        `
+      );
+      const targetSequence = targetRows[0]?.sequence;
+      if (targetSequence === undefined) {
+        const countRows = await this.queryJson<{ totalMessages: number }>(
+          `select count(*) as totalMessages from conversation_messages where conversation_id = ${sqlString(request.conversationId)};`
+        );
+        return {
+          messages: [],
+          hasMoreBefore: false,
+          totalMessages: countRows[0]?.totalMessages ?? 0
+        };
+      }
+      sequenceClause = ` and sequence < ${Math.max(0, Math.floor(targetSequence))}`;
+    } else if (aroundMessageId) {
       const targetRows = await this.queryJson<{ sequence: number }>(
         `
           select sequence

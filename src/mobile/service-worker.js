@@ -1,7 +1,7 @@
-const ASSET_VERSION = "2026-09-12-live-progress-v1";
+const ASSET_VERSION = "2026-09-15-pwa-polish-v1";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
-const CACHE_NAME = `accordagents-mobile-shell-v69-${ASSET_VERSION}`;
+const CACHE_NAME = `accordagents-mobile-shell-v70-${ASSET_VERSION}`;
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -21,13 +21,8 @@ const APP_SHELL = [
   "./assets/accordagents-mark.png"
 ];
 const NOTIFICATION_TITLE = "AccordAgents";
-const NOTIFICATION_OPTIONS = {
-  body: "Open AccordAgents to sync updates.",
-  icon: "./assets/accordagents-mark.png",
-  badge: "./assets/accordagents-mark.png",
-  tag: "accordagents-sync",
-  data: { action: "sync" }
-};
+const NOTIFICATION_FALLBACK_BODY = "Open AccordAgents to sync updates.";
+const NOTIFICATION_ICON = "./assets/accordagents-mark.png";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -104,6 +99,16 @@ const SCHEMA = self.AccordMobileDb;
 const META_STORE = SCHEMA.STORES.meta;
 const SEALED_STORE = SCHEMA.STORES.sealed;
 const MAILBOX_ACCESS_META_KEY = "mailboxAccess";
+// Mirrors the page keeps for this worker: chat titles, so a notification can
+// name the chat, and the chats the phone has not looked at, for the icon.
+const CHAT_TITLES_META_KEY = "chatTitles";
+const UNREAD_META_KEY = "unreadConversations";
+// The desktop appends one of these beside the batch it rings for: a reply
+// that finished, or a member that started waiting on a permission or a
+// choice. The kind is plaintext and is the only thing read here; a batch
+// without a notice says nothing about what happened in it.
+const REPLY_NOTICE_KIND = "mobile.notice.reply";
+const APPROVAL_NOTICE_KIND = "mobile.notice.approval";
 
 /** Only the two stores a push-woken sync actually touches: a worker that is a
  *  build behind must still deliver, not force a version for a store it will
@@ -163,12 +168,19 @@ async function backgroundMailboxSync() {
     const tx = db.transaction([SEALED_STORE, META_STORE], "readwrite");
     const sealedStore = tx.objectStore(SEALED_STORE);
     let storedCount = 0;
+    // What arrived, by chat, in plaintext metadata only: the sealed payload is
+    // never opened here. Enough to say "which chat" and "reply or approval".
+    const arrivals = [];
     for (const envelope of events) {
       if (!envelope || typeof envelope.eventId !== "string") {
         continue;
       }
       sealedStore.put(envelope);
       storedCount += 1;
+      arrivals.push({
+        conversationId: typeof envelope.conversationId === "string" ? envelope.conversationId : "",
+        kind: typeof envelope.kind === "string" ? envelope.kind : ""
+      });
       if (Number.isFinite(envelope.arrivalSeq) && envelope.arrivalSeq > cursor) {
         cursor = envelope.arrivalSeq;
       }
@@ -178,7 +190,7 @@ async function backgroundMailboxSync() {
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
-    return { synced: true, stored: storedCount, cursor };
+    return { synced: true, stored: storedCount, cursor, arrivals };
   } catch (error) {
     return { synced: false, reason: String(error && error.message || error) };
   } finally {
@@ -188,15 +200,124 @@ async function backgroundMailboxSync() {
   }
 }
 
+/** Names the chats that just moved and what happened in each, from the
+ *  titles the page mirrored. Message text never reaches a notification: the
+ *  payloads are sealed and stay sealed. Also grows the unread mirror so the
+ *  icon number is right before the page next opens. Returns one notification
+ *  per chat, or nothing when the arrivals name no known chat. */
+async function describeArrivals(arrivals) {
+  const byConversation = new Map();
+  const touched = new Set();
+  for (const arrival of arrivals) {
+    if (!arrival.conversationId) {
+      continue;
+    }
+    touched.add(arrival.conversationId);
+    if (arrival.kind !== REPLY_NOTICE_KIND && arrival.kind !== APPROVAL_NOTICE_KIND) {
+      continue;
+    }
+    const entry = byConversation.get(arrival.conversationId) || { approval: false, reply: false };
+    if (arrival.kind === APPROVAL_NOTICE_KIND) {
+      entry.approval = true;
+    } else {
+      entry.reply = true;
+    }
+    byConversation.set(arrival.conversationId, entry);
+  }
+  if (touched.size === 0) {
+    return [];
+  }
+  let db;
+  let titles = {};
+  let unread = [];
+  try {
+    db = await openControlDb();
+    const titlesRecord = await dbRequest(db.transaction(META_STORE).objectStore(META_STORE).get(CHAT_TITLES_META_KEY));
+    titles = titlesRecord && titlesRecord.titles && typeof titlesRecord.titles === "object" ? titlesRecord.titles : {};
+    const unreadRecord = await dbRequest(db.transaction(META_STORE).objectStore(META_STORE).get(UNREAD_META_KEY));
+    unread = unreadRecord && Array.isArray(unreadRecord.ids) ? unreadRecord.ids.filter((id) => typeof id === "string") : [];
+    for (const conversationId of touched) {
+      if (!unread.includes(conversationId)) {
+        unread.push(conversationId);
+      }
+    }
+    const tx = db.transaction(META_STORE, "readwrite");
+    tx.objectStore(META_STORE).put({ key: UNREAD_META_KEY, ids: unread });
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // Without the mirrors the notification falls back to the generic line.
+  } finally {
+    if (db) {
+      db.close();
+    }
+  }
+  await applyBadge(unread.length);
+  const notifications = [];
+  for (const [conversationId, entry] of byConversation) {
+    const title = typeof titles[conversationId] === "string" ? titles[conversationId].trim() : "";
+    if (!title) {
+      continue;
+    }
+    const what = entry.approval ? (entry.reply ? "approval needed, reply ready" : "approval needed") : "reply ready";
+    notifications.push({ conversationId, body: `${title}: ${what}` });
+  }
+  return notifications;
+}
+
+async function applyBadge(count) {
+  if (!("setAppBadge" in self.navigator)) {
+    return;
+  }
+  try {
+    if (count > 0) {
+      await self.navigator.setAppBadge(count);
+    } else {
+      await self.navigator.clearAppBadge();
+    }
+  } catch {
+    // The icon number is a courtesy; the notification is what matters here.
+  }
+}
+
+async function showArrivalNotifications(result) {
+  const arrivals = result && result.synced && Array.isArray(result.arrivals) ? result.arrivals : [];
+  const notifications = await describeArrivals(arrivals).catch(() => []);
+  if (notifications.length === 0) {
+    await self.registration.showNotification(NOTIFICATION_TITLE, {
+      body: NOTIFICATION_FALLBACK_BODY,
+      icon: NOTIFICATION_ICON,
+      badge: NOTIFICATION_ICON,
+      tag: "accordagents-sync",
+      data: { action: "sync" }
+    });
+    return;
+  }
+  // One per chat, tagged by chat: a second reply in the same chat replaces
+  // the first notification instead of stacking, and another chat's does not.
+  for (const notification of notifications) {
+    await self.registration.showNotification(NOTIFICATION_TITLE, {
+      body: notification.body,
+      icon: NOTIFICATION_ICON,
+      badge: NOTIFICATION_ICON,
+      tag: "accordagents-chat-" + notification.conversationId,
+      data: { action: "open", conversationId: notification.conversationId }
+    });
+  }
+}
+
 self.addEventListener("push", (event) => {
   event.waitUntil((async () => {
-    // Always show the notification, even if the background sync fails: a push
+    // Always show a notification, even if the background sync fails: a push
     // that does not surface a notification counts against the subscription on
     // iOS. The page catches up on open regardless.
+    let result;
     try {
-      await backgroundMailboxSync();
+      result = await backgroundMailboxSync();
     } finally {
-      await self.registration.showNotification(NOTIFICATION_TITLE, NOTIFICATION_OPTIONS);
+      await showArrivalNotifications(result);
     }
   })());
 });
@@ -205,10 +326,19 @@ self.addEventListener("push", (event) => {
 // anything the message carries (including an endpoint) is ignored by
 // construction, which is exactly what the payload-isolation test proves.
 self.addEventListener("message", (event) => {
-  if (!event.data || event.data.type !== "accord-test-push") {
+  if (!event.data || (event.data.type !== "accord-test-push" && event.data.type !== "accord-test-describe")) {
     return;
   }
   event.waitUntil((async () => {
+    if (event.data.type === "accord-test-describe") {
+      // Harness hook for the wording: the same description a real push would
+      // build from these plaintext arrivals and the mirrors on this device.
+      const notifications = await describeArrivals(Array.isArray(event.data.arrivals) ? event.data.arrivals : []);
+      if (event.source) {
+        event.source.postMessage({ type: "accord-test-describe-done", notifications });
+      }
+      return;
+    }
     const result = await backgroundMailboxSync();
     if (event.source) {
       event.source.postMessage({ type: "accord-test-push-done", result });
@@ -218,14 +348,23 @@ self.addEventListener("message", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
+  const data = event.notification.data || {};
+  const conversationId = typeof data.conversationId === "string" && data.conversationId.trim()
+    ? data.conversationId.trim()
+    : "";
   event.waitUntil(
-    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (clients) => {
       for (const client of clients) {
         if ("focus" in client) {
-          return client.focus();
+          const focused = await client.focus();
+          if (conversationId) {
+            // The page owns navigation; it is told which chat, nothing more.
+            (focused || client).postMessage({ type: "accord-open-conversation", conversationId });
+          }
+          return focused;
         }
       }
-      return self.clients.openWindow("./");
+      return self.clients.openWindow(conversationId ? "./?open=" + encodeURIComponent(conversationId) : "./");
     })
   );
 });

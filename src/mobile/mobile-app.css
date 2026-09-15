@@ -8,11 +8,25 @@
   --bd: #e7e9ee;
   --bdf: #f0f1f4;
   --s2: #f6f7f8;
+  /* Surfaces the handoff states as literal colors. Named here so the dark
+     palette below can restate them; the light values are the handoff's. */
+  --stage: #eceef2;
+  --surface: #ffffff;
+  --surface-fg: #ffffff;
+  --user-bub: #eceff3;
+  --code-bg: rgba(15, 23, 42, 0.08);
+  --pre-bg: #111827;
+  --pre-fg: #f9fafb;
+  --link: #2563eb;
+  --danger: #b4443a;
+  --press: rgba(22, 25, 31, 0.08);
+  --menu-shadow: 0 12px 30px rgba(22, 25, 31, 0.16);
+  --pill-shadow: 0 6px 18px rgba(22, 25, 31, 0.12);
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", system-ui, sans-serif;
   --disp: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
   font-family: var(--sans);
-  background: #eceef2;
+  background: var(--stage);
   color: var(--fg);
 }
 
@@ -23,7 +37,7 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: #eceef2;
+  background: var(--stage);
 }
 
 button,
@@ -38,7 +52,7 @@ textarea {
   justify-content: center;
   align-items: flex-start;
   padding: 56px 44px 72px;
-  background: #eceef2;
+  background: var(--stage);
   font-family: var(--sans);
   color: var(--fg);
 }
@@ -47,12 +61,12 @@ textarea {
   width: 390px;
   height: 844px;
   border-radius: 44px;
-  background: #ffffff;
+  background: var(--surface);
   overflow: hidden;
   display: flex;
   flex-direction: column;
   box-shadow: 0 2px 6px rgba(18, 24, 40, 0.08), 0 26px 60px -18px rgba(18, 24, 40, 0.28);
-  border: 1px solid #dcdee5;
+  border: 1px solid var(--frame-bd, #dcdee5);
 }
 
 /* Narrow window, or the installed app in any orientation. The width test alone
@@ -123,7 +137,7 @@ textarea {
   width: 96px;
   height: 4px;
   border-radius: 999px;
-  background: #cfd3dc;
+  background: var(--home-bar, #cfd3dc);
 }
 
 .mobile-status-bar {
@@ -205,7 +219,7 @@ textarea {
 }
 
 .mobile-round-button.is-primary {
-  color: #ffffff;
+  color: var(--surface-fg);
   background: var(--fg1);
 }
 
@@ -257,7 +271,7 @@ textarea {
   width: 38px;
   height: 38px;
   border-radius: 11px;
-  border: 2px solid #ffffff;
+  border: 2px solid var(--surface);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -276,7 +290,7 @@ textarea {
 
 .mobile-chat-avatar + .mobile-chat-avatar {
   margin-left: -13px;
-  box-shadow: 0 0 0 2.5px #ffffff;
+  box-shadow: 0 0 0 2.5px var(--surface);
 }
 
 .mobile-chat-copy {
@@ -386,9 +400,21 @@ textarea {
 .mobile-title {
   flex: 1;
   min-width: 0;
+  /* It is a button now: the way to the members sheet. It must keep looking
+     like the title it always was. */
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.mobile-title h1 {
+.mobile-title-name {
+  display: block;
   margin: 0;
   font: 600 16.5px var(--disp);
   letter-spacing: -0.018em;
@@ -398,7 +424,8 @@ textarea {
   text-overflow: ellipsis;
 }
 
-.mobile-title p {
+.mobile-title-state {
+  display: block;
   margin: 1px 0 0;
   min-height: 1.2em;
   font: 400 13px var(--sans);
@@ -418,8 +445,8 @@ textarea {
   padding: 6px;
   border: 1px solid var(--bd);
   border-radius: 14px;
-  background: #fff;
-  box-shadow: 0 12px 30px rgba(22, 25, 31, 0.16);
+  background: var(--surface);
+  box-shadow: var(--menu-shadow);
 }
 
 .composer-attachments[hidden] {
@@ -447,7 +474,7 @@ textarea {
   height: 22px;
   border: 1px solid var(--bd);
   border-radius: 50%;
-  background: #fff;
+  background: var(--surface);
   color: var(--fg1);
   font: 600 14px var(--sans);
   line-height: 1;
@@ -536,7 +563,7 @@ textarea {
   padding: 5px 11px;
   border: 1px solid var(--bd);
   border-radius: 999px;
-  background: #fff;
+  background: var(--surface);
   color: var(--fg);
   font-family: var(--sans);
   font-size: 12.5px;
@@ -568,12 +595,12 @@ textarea {
   padding: 7px 13px 7px 11px;
   border: 1px solid var(--bd);
   border-radius: 999px;
-  background: #fff;
+  background: var(--surface);
   color: var(--fg1);
   font-family: var(--sans);
   font-size: 13px;
   font-weight: 500;
-  box-shadow: 0 6px 18px rgba(22, 25, 31, 0.12);
+  box-shadow: var(--pill-shadow);
   opacity: 0;
   pointer-events: none;
   transition: opacity 140ms ease;
@@ -613,7 +640,7 @@ textarea {
 
 .message-bubble {
   max-width: 82%;
-  background: #eceff3;
+  background: var(--user-bub);
   border-radius: 18px 18px 6px 18px;
   padding: 11px 14px;
   font: 400 15.5px var(--sans);
@@ -683,7 +710,7 @@ textarea {
   padding: 3px 8px;
   border: 1px solid var(--bd);
   border-radius: 999px;
-  background: #fff;
+  background: var(--surface);
   color: var(--fg1);
   font: 600 11px var(--sans);
 }
@@ -730,7 +757,7 @@ textarea {
 .message-content.markdown-text code {
   border-radius: 5px;
   padding: 1px 4px;
-  background: rgba(15, 23, 42, 0.08);
+  background: var(--code-bg);
   font: 500 13px var(--mono);
 }
 
@@ -739,8 +766,8 @@ textarea {
   overflow-x: auto;
   border-radius: 9px;
   padding: 9px 10px;
-  background: #111827;
-  color: #f9fafb;
+  background: var(--pre-bg);
+  color: var(--pre-fg);
 }
 
 .message-content.markdown-text pre code {
@@ -752,7 +779,7 @@ textarea {
 }
 
 .message-content.markdown-text a {
-  color: #2563eb;
+  color: var(--link);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -778,8 +805,8 @@ textarea {
   padding: 6px;
   border: 1px solid var(--bd);
   border-radius: 14px;
-  background: #fff;
-  box-shadow: 0 12px 30px rgba(22, 25, 31, 0.16);
+  background: var(--surface);
+  box-shadow: var(--menu-shadow);
 }
 
 .mobile-mention-menu[hidden] {
@@ -798,13 +825,21 @@ textarea {
   width: 100%;
   height: auto;
   min-height: 48px;
+  /* A plain button: the browser's outset border and inline layout were
+     showing through, boxing every option and stacking the avatar on top of
+     the name. */
+  border: 0;
+  display: flex;
+  align-items: center;
   border-radius: 10px;
   padding: 6px 9px;
   background: transparent;
   color: var(--fg1);
+  font: inherit;
   justify-content: flex-start;
   gap: 9px;
   text-align: left;
+  cursor: pointer;
 }
 
 .composer .mobile-mention-option.is-selected {
@@ -918,7 +953,7 @@ textarea {
 }
 
 .composer .composer-tool:active {
-  background: rgba(22, 25, 31, 0.08);
+  background: var(--press);
 }
 
 .composer .composer-tool:focus-visible {
@@ -935,7 +970,7 @@ textarea {
   border: 0;
   border-radius: 50%;
   background: var(--fg1);
-  color: #ffffff;
+  color: var(--surface-fg);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1067,7 +1102,7 @@ textarea {
   padding: 13px 14px;
   border: 1px solid var(--bd);
   border-radius: 14px;
-  background: #fff;
+  background: var(--surface);
   color: var(--fg1);
   font: 400 15px var(--sans);
 }
@@ -1077,13 +1112,13 @@ textarea {
   border: 0;
   border-radius: 14px;
   background: var(--fg1);
-  color: #fff;
+  color: var(--surface-fg);
   font: 600 15px var(--sans);
 }
 
 .pairing-error {
   margin: 10px 20px 0;
-  color: #b4443a;
+  color: var(--danger);
   font: 400 13.5px var(--sans);
 }
 
@@ -1092,7 +1127,7 @@ textarea {
   padding: 13px 16px;
   border: 1px solid var(--bd);
   border-radius: 14px;
-  background: #fff;
+  background: var(--surface);
   color: var(--fg1);
   font: 600 15px var(--sans);
 }
@@ -1124,10 +1159,10 @@ textarea {
 .mobile-alerts-banner {
   margin: 8px 16px 0;
   padding: 10px 14px;
-  border: 1px solid #d7dae1;
+  border: 1px solid var(--bd);
   border-radius: 12px;
-  background: #ffffff;
-  color: #23262d;
+  background: var(--surface);
+  color: var(--fg1);
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
@@ -1142,7 +1177,7 @@ textarea {
   z-index: 4;
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--surface);
   padding-left: env(safe-area-inset-left);
   padding-right: env(safe-area-inset-right);
 }
@@ -1171,7 +1206,7 @@ textarea {
   padding: 6px 11px;
   border: 1px solid var(--bd);
   border-radius: 999px;
-  background: #fff;
+  background: var(--surface);
   color: var(--fg1);
   font: 600 12px var(--sans);
 }
@@ -1216,11 +1251,15 @@ textarea {
   padding: 8px 12px 0;
 }
 
+.control-cards[hidden] {
+  display: none;
+}
+
 .control-card {
   border: 1px solid var(--mobile-border, rgba(0, 0, 0, 0.12));
   border-radius: 12px;
   padding: 12px;
-  background: var(--mobile-surface, #fff);
+  background: var(--mobile-surface, var(--surface));
 }
 
 .control-card-head {
@@ -1302,6 +1341,12 @@ textarea {
   gap: 10px;
 }
 
+/* display: flex above outranks the hidden attribute, so the empty box stayed
+   on screen — a bordered bar above the composer with nothing in it. */
+.machine-wake[hidden] {
+  display: none;
+}
+
 .machine-wake button {
   border: 1px solid var(--mobile-border, rgba(0, 0, 0, 0.12));
   border-radius: 999px;
@@ -1309,4 +1354,350 @@ textarea {
   font: inherit;
   background: transparent;
   color: inherit;
+}
+
+/* --- Search in the chat list ---------------------------------------------- */
+
+.mobile-chat-search {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px 10px;
+}
+
+.mobile-chat-search[hidden] {
+  display: none;
+}
+
+.mobile-chat-search input {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  padding: 0 12px;
+  background: var(--s2);
+  color: var(--fg1);
+  font: 400 15px var(--sans);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.mobile-chat-search input:focus {
+  outline: none;
+  border-color: var(--acc);
+}
+
+.mobile-chat-search-close {
+  flex-shrink: 0;
+  border: 0;
+  padding: 0 2px;
+  background: transparent;
+  color: var(--acc);
+  font: 500 15px var(--sans);
+  cursor: pointer;
+}
+
+/* --- Unread ---------------------------------------------------------------- */
+
+.mobile-unread-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--acc);
+}
+
+.mobile-chat-row.is-unread .mobile-chat-title-line strong {
+  font-weight: 700;
+}
+
+.mobile-chat-row.is-unread .mobile-chat-snippet {
+  color: var(--fg);
+}
+
+/* --- Pull to refresh ------------------------------------------------------- */
+
+.pull-refresh {
+  flex-shrink: 0;
+  height: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: height 160ms ease-out;
+}
+
+.pull-refresh-spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2.5px solid var(--bd);
+  border-top-color: var(--mut);
+  opacity: 0.55;
+  transform: rotate(0deg);
+}
+
+.pull-refresh.is-armed .pull-refresh-spinner {
+  opacity: 1;
+  border-top-color: var(--fg1);
+}
+
+.pull-refresh.is-refreshing .pull-refresh-spinner {
+  opacity: 1;
+  border-top-color: var(--fg1);
+  animation: pull-refresh-spin 0.8s linear infinite;
+}
+
+@keyframes pull-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- Earlier messages ------------------------------------------------------ */
+
+.load-earlier {
+  display: block;
+  margin: 12px auto 0;
+  min-height: 36px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  padding: 0 16px;
+  background: var(--surface);
+  color: var(--fg);
+  font: 500 13.5px var(--sans);
+  cursor: pointer;
+}
+
+.load-earlier[hidden] {
+  display: none;
+}
+
+.load-earlier:disabled {
+  color: var(--mut);
+}
+
+/* --- Members sheet --------------------------------------------------------- */
+
+.members-sheet {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.members-sheet[hidden] {
+  display: none;
+}
+
+.members-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(22, 25, 31, 0.32);
+}
+
+.members-sheet-panel {
+  position: relative;
+  max-height: 70%;
+  display: flex;
+  flex-direction: column;
+  border-radius: 22px 22px 0 0;
+  background: var(--surface);
+  box-shadow: 0 -8px 30px rgba(22, 25, 31, 0.18);
+  padding-bottom: calc(10px + env(safe-area-inset-bottom));
+}
+
+.members-sheet-grip {
+  width: 36px;
+  height: 5px;
+  margin: 8px auto 0;
+  border-radius: 999px;
+  background: var(--bd);
+}
+
+.members-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 18px 6px;
+}
+
+.members-sheet-head strong {
+  font: 600 16.5px var(--disp);
+  letter-spacing: -0.018em;
+  color: var(--fg1);
+}
+
+.members-sheet-close {
+  border: 0;
+  padding: 6px 2px;
+  background: transparent;
+  color: var(--acc);
+  font: 500 15px var(--sans);
+  cursor: pointer;
+}
+
+.members-sheet-list {
+  overflow-y: auto;
+  padding: 0 10px 6px;
+}
+
+.members-sheet-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 60px;
+  padding: 8px 8px;
+  border-radius: 12px;
+}
+
+.members-sheet-row .mobile-mention-avatar {
+  width: 38px;
+  height: 38px;
+  flex-basis: 38px;
+  border-radius: 11px;
+  font: 700 14px var(--disp);
+}
+
+.members-sheet-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.members-sheet-copy strong {
+  font: 600 15.5px var(--disp);
+  letter-spacing: -0.012em;
+  color: var(--fg1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.members-sheet-role {
+  font: 400 13px var(--sans);
+  color: var(--fg);
+}
+
+.members-sheet-location {
+  font: 400 12.5px var(--sans);
+  color: var(--mut);
+}
+
+.members-sheet-empty {
+  padding: 18px;
+  color: var(--mut);
+  font: 400 14px var(--sans);
+}
+
+/* --- Picture at full size -------------------------------------------------- */
+
+.image-viewer {
+  position: absolute;
+  inset: 0;
+  z-index: 14;
+  background: rgba(0, 0, 0, 0.94);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.image-viewer[hidden] {
+  display: none;
+}
+
+.image-viewer-body {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+
+.image-viewer-body img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.image-viewer-close {
+  position: absolute;
+  top: calc(8px + env(safe-area-inset-top));
+  right: 8px;
+  z-index: 1;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.message-image[data-state="ready"] {
+  cursor: zoom-in;
+}
+
+/* --- The "/" menu ---------------------------------------------------------- */
+
+.composer .mobile-slash-option {
+  min-height: 44px;
+}
+
+.mobile-slash-option .mobile-mention-copy span {
+  color: var(--mut);
+  font: 400 12.5px var(--sans);
+}
+
+.mobile-mention-title[data-slash-state] {
+  text-transform: none;
+  letter-spacing: 0;
+  font: 400 13px var(--sans);
+}
+
+/* --- Dark ------------------------------------------------------------------ */
+/* Follows the phone's own setting. The values are the desktop's dark palette,
+   so a chat looks the same on both. */
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --acc: #b39ef0;
+    --accs: rgba(179, 158, 240, 0.16);
+    --fg1: #f1f3f7;
+    --fg: #c1c7d2;
+    --mut: #7f8794;
+    --bd: #282d36;
+    --bdf: #232831;
+    --s2: #1d2128;
+    --stage: #0d0f13;
+    --surface: #181b21;
+    --surface-fg: #0d0f13;
+    --user-bub: #232a35;
+    --code-bg: rgba(255, 255, 255, 0.08);
+    --pre-bg: #0d0f13;
+    --pre-fg: #e5e9f0;
+    --link: #8ab4ff;
+    --danger: #ff8a80;
+    --press: rgba(255, 255, 255, 0.08);
+    --menu-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+    --pill-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+    --frame-bd: #282d36;
+    --home-bar: #353c47;
+  }
+
+  .members-sheet-backdrop {
+    background: rgba(0, 0, 0, 0.55);
+  }
 }

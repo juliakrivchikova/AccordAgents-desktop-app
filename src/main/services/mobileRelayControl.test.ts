@@ -3030,3 +3030,248 @@ test("a picture with no caption is accepted from the phone, and a changed pictur
   );
   service.close();
 });
+
+test("MobileRelayControlService answers a timeline request with the page cursor and pages before a message", async () => {
+  const key = Buffer.from("p".repeat(32)).toString("base64url");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  const pageRequests: Array<{ beforeMessageId?: string }> = [];
+  const desktop = new MobileRelayControlService(
+    {
+      relayUrl: address.url,
+      rendezvousId: "rv-timeline-page",
+      relayCapability: "PAIRING-FINGERPRINT",
+      relaySealKeyBase64: key,
+      streamId: "route-timeline-page:phone",
+      reconnectDelayMs: 50
+    },
+    sender([]),
+    {
+      async listChats() { return []; },
+      async listTimeline() { throw new Error("the paged reader must be used when it exists"); },
+      async listTimelinePage(_conversationId, options) {
+        pageRequests.push(options);
+        if (options.beforeMessageId === "m-oldest-of-first-page") {
+          return {
+            events: [{ id: "m-earlier", role: "you", content: "Earlier.", status: "done", createdAt: "2026-09-01T00:00:00.000Z" }],
+            hasMoreBefore: false,
+            beforeMessageId: "m-earlier"
+          };
+        }
+        return {
+          events: [{ id: "m-latest", role: "you", content: "Latest.", status: "done", createdAt: "2026-09-02T00:00:00.000Z" }],
+          hasMoreBefore: true,
+          beforeMessageId: "m-oldest-of-first-page"
+        };
+      },
+      isConversationAllowed() { return true; }
+    }
+  );
+  const phone = new RelayTunnelClient({
+    relayUrl: address.url,
+    rendezvousId: "rv-timeline-page",
+    role: "phone",
+    capability: "PAIRING-FINGERPRINT",
+    streamId: "route-timeline-page:phone"
+  });
+  try {
+    await desktop.connect();
+    await phone.connect();
+    const first = nextMessage(phone);
+    await phone.sendCiphertext({
+      logicalMessageId: "timeline-1",
+      ciphertext: await sealMobileRelayPayload({ type: "mobile.timeline.request", conversationId: "conversation-1" }, key)
+    });
+    const firstPage = await openMobileRelayPayload<MobileTimelineEvents>(await first.then((message) => message.ciphertext), key);
+    assert.deepEqual(firstPage.page, { hasMoreBefore: true, beforeMessageId: "m-oldest-of-first-page" });
+    assert.equal(firstPage.events[0].id, "m-latest");
+
+    const second = nextMessage(phone);
+    await phone.sendCiphertext({
+      logicalMessageId: "timeline-2",
+      ciphertext: await sealMobileRelayPayload({
+        type: "mobile.timeline.request", conversationId: "conversation-1", beforeMessageId: "m-oldest-of-first-page"
+      }, key)
+    });
+    const earlierPage = await openMobileRelayPayload<MobileTimelineEvents>(await second.then((message) => message.ciphertext), key);
+    assert.deepEqual(earlierPage.page, { hasMoreBefore: false, beforeMessageId: "m-earlier", earlier: true });
+    assert.equal(earlierPage.events[0].id, "m-earlier");
+    assert.deepEqual(pageRequests, [{ beforeMessageId: undefined }, { beforeMessageId: "m-oldest-of-first-page" }]);
+  } finally {
+    phone.close();
+    desktop.close();
+    await relay.close();
+  }
+});
+
+test("MobileRelayControlService answers the composer request from the catalog and carries picked skills into sendMessage", async () => {
+  const key = Buffer.from("s".repeat(32)).toString("base64url");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  const composerRequests: Array<{ conversationId: string; query: string; content: string }> = [];
+  const sent: SendChatMessageRequest[] = [];
+  const desktop = new MobileRelayControlService(
+    {
+      relayUrl: address.url,
+      rendezvousId: "rv-composer",
+      relayCapability: "PAIRING-FINGERPRINT",
+      relaySealKeyBase64: key,
+      streamId: "route-composer:phone",
+      reconnectDelayMs: 50
+    },
+    {
+      async sendMessage(request: SendChatMessageRequest) {
+        sent.push(request);
+        return {
+          conversation: {
+            id: request.conversationId, kind: "chat", title: "t", createdAt: "2026-09-01T00:00:00.000Z",
+            updatedAt: "2026-09-01T00:00:00.000Z", messages: [], findings: [], metadata: {}
+          } as unknown as Conversation
+        } as unknown as StartReviewResult;
+      }
+    } as unknown as MobileRelayChatSender,
+    {
+      async listChats() { return []; },
+      async listTimeline() { return []; },
+      async composerOptions(request) {
+        composerRequests.push(request);
+        return {
+          commands: [{ id: "compact", label: "/compact", description: "Compact the mentioned member context" }],
+          prompts: [{ id: "p1", label: "Daily standup", trigger: "standup", body: "Give me a standup summary." }],
+          skills: [{
+            skillId: "skill-1", displayName: "review", frontmatterName: "review", description: "Review the diff",
+            contentHash: "hash", capabilityState: "invocable", variants: []
+          }]
+        };
+      },
+      isConversationAllowed() { return true; }
+    }
+  );
+  const phone = new RelayTunnelClient({
+    relayUrl: address.url,
+    rendezvousId: "rv-composer",
+    role: "phone",
+    capability: "PAIRING-FINGERPRINT",
+    streamId: "route-composer:phone"
+  });
+  try {
+    await desktop.connect();
+    await phone.connect();
+    const reply = nextMessage(phone);
+    await phone.sendCiphertext({
+      logicalMessageId: "composer-1",
+      ciphertext: await sealMobileRelayPayload({
+        type: "mobile.composer.request", conversationId: "conversation-1", query: "re", content: "@drew /re"
+      }, key)
+    });
+    const options = await openMobileRelayPayload<Record<string, unknown>>(await reply.then((message) => message.ciphertext), key);
+    assert.equal(options.type, "mobile.composer");
+    assert.equal(options.query, "re");
+    assert.deepEqual(composerRequests, [{ conversationId: "conversation-1", query: "re", content: "@drew /re" }]);
+    assert.equal((options.skills as Array<{ frontmatterName: string }>)[0].frontmatterName, "review");
+    assert.equal((options.commands as Array<{ id: string }>)[0].id, "compact");
+    assert.equal((options.prompts as Array<{ trigger: string }>)[0].trigger, "standup");
+
+    const ack = nextMessage(phone);
+    await phone.sendCiphertext({
+      logicalMessageId: "send-1",
+      ciphertext: await sealMobileRelayPayload({
+        type: "mobile.outbox.events",
+        events: [{
+          eventId: "evt-skill-1",
+          conversationId: "conversation-1",
+          payload: {
+            content: "@drew /review this",
+            skillMentions: [{
+              skillId: "skill-1", displayName: "review", frontmatterName: "review",
+              contentHash: "hash", capabilityState: "invocable", variants: []
+            }]
+          }
+        }]
+      }, key)
+    });
+    await ack;
+    for (let i = 0; i < 50 && sent.length === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].skillMentions?.[0].skillId, "skill-1", "the picked skill reaches the chat service like the desktop composer's");
+  } finally {
+    phone.close();
+    desktop.close();
+    await relay.close();
+  }
+});
+
+test("MobileRelayControlService states what a ring is about: a finished reply, a member newly waiting", async () => {
+  const key = Buffer.from("n".repeat(32)).toString("base64url");
+  const published: Array<{ runFinished: boolean; notices?: string[] }> = [];
+  const service = new MobileRelayControlService(
+    {
+      relayUrl: "ws://127.0.0.1:1/v1/relay",
+      rendezvousId: "rv-notices",
+      relayCapability: "cap",
+      relaySealKeyBase64: key,
+      conversationId: "conversation-1",
+      streamId: "route:phone"
+    },
+    { async sendMessage() { throw new Error("not used"); } } as unknown as MobileRelayChatSender,
+    undefined,
+    undefined,
+    {
+      async publishTimeline(_timeline: MobileTimelineEvents, options?: { runFinished?: boolean; notices?: string[] }) {
+        published.push({ runFinished: options?.runFinished === true, ...(options?.notices ? { notices: options.notices } : {}) });
+      }
+    }
+  );
+  let messageSeq = 0;
+  const snapshot = (activeRunIds: string[], updatedAt: string, options: { status?: string; card?: boolean } = {}): Conversation => {
+    messageSeq += 1;
+    return {
+      id: "conversation-1",
+      kind: "chat",
+      title: "Test chat",
+      createdAt: "2026-08-17T00:00:00.000Z",
+      updatedAt,
+      messages: [{
+        id: `m${messageSeq}`,
+        role: "participant",
+        participantLabel: "@drew",
+        content: `An answer ${messageSeq}.`,
+        status: options.status ?? "done",
+        createdAt: `2026-08-17T00:00:0${messageSeq}.000Z`
+      }],
+      findings: [],
+      metadata: {
+        activeRunIds,
+        ...(options.card
+          ? { pendingAppToolApprovals: [{ id: "approval-1", status: "pending", summary: "Allow file editing?", createdAt: updatedAt }] }
+          : {})
+      }
+    } as unknown as Conversation;
+  };
+  const waitForPublished = async (count: number) => {
+    for (let i = 0; i < 50 && published.length < count; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  try {
+    service.pushConversationSnapshot(snapshot([], "2026-08-17T00:00:02.000Z"));
+    await waitForPublished(1);
+    assert.deepEqual(published[0], { runFinished: false }, "history delivered after start carries no notice");
+
+    service.pushConversationSnapshot(snapshot(["run-a"], "2026-08-17T00:00:03.000Z", { status: "pending" }));
+    await waitForPublished(2);
+    assert.deepEqual(published[1], { runFinished: false }, "a run starting is not news for the phone");
+
+    service.pushConversationSnapshot(snapshot(["run-a"], "2026-08-17T00:00:04.000Z", { status: "pending", card: true }));
+    await waitForPublished(3);
+    assert.deepEqual(published[2], { runFinished: true, notices: ["approval"] }, "a member newly waiting rings and says approval");
+
+    service.pushConversationSnapshot(snapshot(["run-a"], "2026-08-17T00:00:05.000Z", { card: true }));
+    await waitForPublished(4);
+    assert.deepEqual(published[3], { runFinished: true, notices: ["reply"] }, "the finished answer rings and says reply; the unchanged card does not repeat");
+  } finally {
+    service.close();
+  }
+});

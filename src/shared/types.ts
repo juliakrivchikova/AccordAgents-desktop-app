@@ -2127,6 +2127,9 @@ export interface Conversation extends ConversationSummary {
 export interface ConversationMessagePageRequest {
   conversationId: string;
   beforeSequence?: number;
+  /** The page strictly before this message; takes precedence over the other
+   *  cursors. Used by readers that know message ids but not sequences. */
+  beforeMessageId?: string;
   aroundMessageId?: string;
   limit?: number;
 }
