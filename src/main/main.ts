@@ -91,6 +91,7 @@ import { normalizeExternalUrlForOpen } from "../shared/externalLinks";
 import { stableJson } from "../shared/stableJson";
 import { ArtifactService } from "./services/artifacts";
 import { ArtifactStore } from "./services/artifactStore";
+import { artifactEventWriter, artifactProjectionPort } from "./services/artifactReplication";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "./appToolWiring";
 import { ChatEventLogService } from "./services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "./services/chatEventMirror";
@@ -142,7 +143,6 @@ import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
 import { acquireMobileMailboxExecutionClaim } from "./services/mobileMailboxClaims";
 import { controlCardsFromConversation } from "../shared/mobileControlCards";
-import { artifactNameKey } from "../shared/artifacts";
 import {
   deleteMailboxEvents,
   mailboxAccessForSealKey,
@@ -534,32 +534,7 @@ const artifactService = new ArtifactService({
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
   },
-  // Canonical action events for artifact work. The local change is already
-  // committed when this runs; the event is what lets other peers fold the same
-  // decision. `operationId` is derived from the immutable revision identity, so
-  // a re-emission after a restart is folded once as a duplicate rather than as
-  // a second revision.
-  hasEmittedAction: (eventId) => chatActionEventExists(eventId),
-  emitAction: (action) => publishChatAction(action),
-  // The atomic path: the event is minted and handed to the artifact write, so
-  // the change and the event peers learn from share one transaction.
-  commitActionWithChange: async (action, write) => chatEventLogService.withPreparedLocalEvent({
-    conversationId: action.conversationId,
-    logScopeId: CHAT_ACTION_LOG_SCOPE,
-    kind: action.kind,
-    // Immutable bytes are written ahead of the change: a body large enough
-    // becomes fragments here, and only the reference travels in the event.
-    payload: await storageService.deviceEventBlobs().prepare(action.payload),
-    eventId: `chat-action:${action.payload.operationId}`,
-    recipients: machineLinkService?.chatActionRecipients() ?? []
-  }, (prepared) => write({
-    sql: prepared.sql,
-    onlyIfSql: (condition) => prepared.sql
-      ? storageService.chatEventAppendSql(prepared.event, {
-        recipients: machineLinkService?.chatActionRecipients() ?? []
-      }, condition)
-      : ""
-  })).then((outcome) => outcome.result)
+  ...artifactEventWriter(storageService, chatEventLogService, () => machineLinkService?.chatActionRecipients() ?? [], artifactStore)
 });
 chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
 // A deleted chat is deleted on the machines that host its members too, durably
@@ -596,54 +571,7 @@ const localChatActionEffects = createChatActionEffects({
 });
 const chatActionApplier = new ChatActionApplier({
   effects: localChatActionEffects,
-  artifacts: {
-    getRevision: async (artifactId, versionEventId) => {
-      const revision = await artifactStore.getRevision(artifactId, versionEventId);
-      return revision
-        ? { version: revision.version, contentHash: revision.contentHash, superseded: revision.superseded }
-        : undefined;
-    },
-    insertSignature: (record) => artifactStore.insertSignature(record),
-    hasArtifact: async (artifactId) => Boolean(await artifactStore.getById(artifactId)),
-    createArtifact: async (request) => {
-      await artifactStore.insertArtifact({
-        id: request.artifactId,
-        conversationId: request.conversationId,
-        name: request.name,
-        owner: request.owner,
-        contributors: request.contributors,
-        requiredSigners: request.requiredSigners,
-        labels: request.labels,
-        lifecycle: "published",
-        allowedDraftAuthors: [],
-        requiredDraftAuthors: [],
-        audiencePolicyByAuthor: {},
-        draftRosterRevision: 0,
-        headVersion: request.revision.version,
-        createdAt: request.createdAt,
-        updatedAt: request.revision.createdAt
-      }, artifactNameKey(request.name), {
-        artifactId: request.artifactId,
-        version: request.revision.version,
-        versionEventId: request.revision.versionEventId,
-        content: request.revision.content,
-        author: request.revision.author,
-        note: request.revision.note,
-        createdAt: request.revision.createdAt
-      });
-    },
-    retainRevision: (request) => artifactStore.retainProjectedRevision({
-      artifactId: request.artifactId,
-      versionEventId: request.versionEventId,
-      baseVersionEventId: request.baseVersionEventId,
-      version: request.version,
-      content: request.content,
-      contentHash: "",
-      author: request.author,
-      note: request.note,
-      createdAt: request.createdAt
-    })
-  },
+  artifacts: artifactProjectionPort(artifactStore, (conversationId) => sendToMainWindow("artifacts:updated", { conversationId })),
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
   }

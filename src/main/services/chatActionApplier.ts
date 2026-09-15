@@ -1,3 +1,4 @@
+import { ARTIFACT_STATE_KINDS } from "./artifactStateEvents";
 /**
  * Applying a chat action that arrived from another machine.
  *
@@ -34,10 +35,12 @@ import {
   type ChatSignaturePayload
 } from "../../shared/chatActionEvents";
 import { createHash } from "node:crypto";
+import { ARTIFACT_CONTENT_MAX_BYTES } from "../../shared/artifacts";
 import type { ChatActionDependency } from "../../shared/deviceEventChannel";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 
 export interface ChatActionArtifactPort {
+  applyState?(event: ChatEventEnvelope, payload: ChatActionPayload): Promise<ChatActionApplyStatus>;
   getRevision(artifactId: string, versionEventId: string): Promise<
     { version: number; contentHash: string; superseded: boolean } | undefined
   >;
@@ -53,10 +56,12 @@ export interface ChatActionArtifactPort {
     contributors: string[];
     requiredSigners: string[];
     labels: string[];
+    publication?: NonNullable<ChatActionPayload["revision"]>;
     createdAt: string;
     revision: { versionEventId: string; version: number; content: string; author: string; note?: string; createdAt: string };
   }): Promise<void>;
   /** Stores an immutable revision received from another peer. */
+  publishArtifact?(request: { artifactId: string; conversationId: string; body: NonNullable<ChatActionPayload["revision"]>; versionEventId: string }): Promise<void>;
   retainRevision?(request: {
     artifactId: string;
     versionEventId: string;
@@ -142,6 +147,9 @@ export class ChatActionApplier {
     const payload = (isActionPayload(hydrated) ? hydrated : event.payload) as ChatActionPayload;
     const kind = event.kind as ChatActionKind;
     const base = { kind, targetKey: payload.targetKey };
+    if ((ARTIFACT_STATE_KINDS as readonly string[]).includes(kind)) {
+      return { ...base, status: await this.deps.artifacts?.applyState?.(event, payload) ?? "deferred" };
+    }
     if (kind === "execution.receipt") {
       // A fact about something that already happened elsewhere. Recording it is
       // the whole application; there is nothing local to repeat.
@@ -243,7 +251,8 @@ export class ChatActionApplier {
     const signature = payload as ChatSignaturePayload;
     const artifactId = artifactIdFromTarget(payload.targetKey);
     if (!artifacts || !artifactId || typeof signature.signer !== "string"
-      || typeof signature.signedStateId !== "string" || typeof signature.signedContentHash !== "string") {
+      || typeof signature.signedStateId !== "string" || typeof signature.signedContentHash !== "string"
+      || (signature.signedAt !== undefined && typeof signature.signedAt !== "string")) {
       return { ...base, status: "applied" };
     }
     const revision = await artifacts.getRevision(artifactId, signature.signedStateId);
@@ -271,7 +280,7 @@ export class ChatActionApplier {
       versionEventId: signature.signedStateId,
       contentHash: signature.signedContentHash,
       signer: signature.signer,
-      signedAt: signatureTime(event, this.deps.now)
+      signedAt: signature.signedAt ?? signatureTime(event, this.deps.now)
     });
     if (!inserted) return { ...base, status: "duplicate" };
     return revision.superseded
@@ -302,6 +311,10 @@ export class ChatActionApplier {
     // revision can apply it instead of waiting for it forever. Its identity is
     // checked before anything is written.
     if (body) {
+      if (typeof body.content !== "string" || Buffer.byteLength(body.content, "utf8") > ARTIFACT_CONTENT_MAX_BYTES
+          || !Number.isSafeInteger(body.version) || body.version < 1 || typeof body.author !== "string"
+          || typeof body.createdAt !== "string" || (body.note !== undefined && typeof body.note !== "string")
+          || (body.sources !== undefined && !Array.isArray(body.sources))) throw new Error("Invalid artifact revision event.");
       const hash = createHash("sha256").update(body.content, "utf8").digest("hex");
       if (payload.contentHash && hash !== payload.contentHash) {
         return {
@@ -327,6 +340,7 @@ export class ChatActionApplier {
           requiredSigners: body.artifact.requiredSigners,
           labels: body.artifact.labels,
           createdAt: body.artifact.createdAt,
+          publication: body,
           revision: {
             versionEventId: payload.stateId,
             version: body.version,
@@ -337,6 +351,9 @@ export class ChatActionApplier {
           }
         });
         return { ...base, status: "applied", detail: "The artifact and its first version were created here." };
+      }
+      if (body?.artifact && artifacts.publishArtifact) {
+        await artifacts.publishArtifact({ artifactId, conversationId: event.conversationId, body, versionEventId: payload.stateId });
       }
       return { ...base, status: "applied" };
     }

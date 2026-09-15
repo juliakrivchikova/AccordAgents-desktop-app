@@ -136,12 +136,12 @@ export function ArtifactsPanel(props: {
   }, [props.selectedId, clearTransient, loadDetail]);
   // Keep the open detail in sync when the list refreshes after a change.
   useEffect(() => {
-    if (props.selectedId && selectedSummary && detail && detail.summary.id === props.selectedId) {
-      if (selectedSummary.updatedAt !== detail.summary.updatedAt || selectedSummary.name !== detail.summary.name) {
-        void loadDetail(props.selectedId, viewVersion);
-      }
+    if (props.selectedId && selectedSummary) {
+      // A late signature or draft can change the detail without changing its
+      // timestamp. Each event-driven list refresh invalidates the open detail.
+      void loadDetail(props.selectedId, viewVersion);
     }
-  }, [selectedSummary, detail, props.selectedId, viewVersion, loadDetail]);
+  }, [selectedSummary, props.selectedId, viewVersion, loadDetail]);
   useEffect(() => {
     if (!detail?.summary.archivedAt) {
       return;

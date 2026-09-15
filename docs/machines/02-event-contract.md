@@ -141,12 +141,21 @@ and overlays pending messages on reads, so a desktop restart does not erase
 already stored partial output. A machine recovers its published local frames
 before native-run recovery; received frames still follow channel gap rules.
 
+Artifact mutations now use the same writer and receiving adapter in desktop and
+headless runtimes. Collection, metadata, draft save/submit/withdraw, publication,
+revision and signature changes commit with their outgoing event. Draft events
+carry the complete resulting draft, its identity and reader ACL; version events
+carry the complete version, with initial publication metadata and source
+references. Signatures carry only signer, signed time and immutable version id
+plus content hash. Large bodies use the same durable fragments; a short chat
+note or a content hash alone is not a substitute for the body. Receiving an
+artifact event refreshes the open desktop panel, including late signatures.
+
 This is not the complete event-contract cutover: PWA IndexedDB outbox,
-canonical chat-wide roster fan-out, pure conflict projections, artifact event
-delivery and superseded-revision navigation, pressure UI and history/blob garbage
-collection remain. Artifact storage now binds signatures to immutable revision
-identities and content hashes; this does not yet connect artifact mutations to
-the multi-peer event projector.
+canonical chat-wide roster fan-out, general conflict projections and
+superseded-revision navigation, pressure UI and history/blob garbage collection
+remain. Draft-state events are refolded in total order; revision storage binds
+signatures to immutable revision identities and content hashes.
 The retained history and blob fragments currently stay in local SQLite after
 ACK for origin repair. Replication inventory and partial-copy barriers also
 survive machine restart. No relay deployment is needed for these changes.

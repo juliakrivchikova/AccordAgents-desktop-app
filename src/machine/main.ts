@@ -23,6 +23,7 @@ import { AppMcpService } from "../main/services/appMcp";
 import { AppSkillsService } from "../main/services/appSkills";
 import { ArtifactService } from "../main/services/artifacts";
 import { ArtifactStore } from "../main/services/artifactStore";
+import { artifactEventWriter, artifactProjectionPort } from "../main/services/artifactReplication";
 import { ChatEventLogService } from "../main/services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "../main/services/chatEventMirror";
 import { ChatService } from "../main/services/chat";
@@ -45,7 +46,6 @@ import { PluginService } from "../main/services/plugins";
 import { SettingsService } from "../main/services/settings";
 import { StorageService } from "../main/services/storage";
 import { UserSkillsService } from "../main/services/userSkills";
-import { artifactNameKey } from "../shared/artifacts";
 
 interface MachineArgs {
   enrollmentPath: string;
@@ -242,6 +242,9 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     },
     postNote: (conversationId, eventId, content) => chatService.postArtifactChatNote(conversationId, eventId, content),
     onChanged: () => undefined,
+    ...artifactEventWriter(storageService, chatEventLogService, () => hostRef?.chatActionRecipients() ?? [{
+      deviceId: enrollment.issuer.originId, channelId: enrollment.rendezvousId
+    }], artifactStore),
     logger: (event, payload) => {
       void debugLogService.write(event, payload);
     }
@@ -323,54 +326,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
         homeMachineId: () => host.enrolledMachineId(),
         storage: { getConversation: (id) => storageService.getConversation(id) }
       }),
-      artifacts: {
-        getRevision: async (artifactId, versionEventId) => {
-          const revision = await artifactStore.getRevision(artifactId, versionEventId);
-          return revision
-            ? { version: revision.version, contentHash: revision.contentHash, superseded: revision.superseded }
-            : undefined;
-        },
-        insertSignature: (record) => artifactStore.insertSignature(record),
-        hasArtifact: async (artifactId) => Boolean(await artifactStore.getById(artifactId)),
-        createArtifact: async (request) => {
-          await artifactStore.insertArtifact({
-            id: request.artifactId,
-            conversationId: request.conversationId,
-            name: request.name,
-            owner: request.owner,
-            contributors: request.contributors,
-            requiredSigners: request.requiredSigners,
-            labels: request.labels,
-            lifecycle: "published",
-            allowedDraftAuthors: [],
-            requiredDraftAuthors: [],
-            audiencePolicyByAuthor: {},
-            draftRosterRevision: 0,
-            headVersion: request.revision.version,
-            createdAt: request.createdAt,
-            updatedAt: request.revision.createdAt
-          }, artifactNameKey(request.name), {
-            artifactId: request.artifactId,
-            version: request.revision.version,
-            versionEventId: request.revision.versionEventId,
-            content: request.revision.content,
-            author: request.revision.author,
-            note: request.revision.note,
-            createdAt: request.revision.createdAt
-          });
-        },
-        retainRevision: (request) => artifactStore.retainProjectedRevision({
-          artifactId: request.artifactId,
-          versionEventId: request.versionEventId,
-          baseVersionEventId: request.baseVersionEventId,
-          version: request.version,
-          content: request.content,
-          contentHash: "",
-          author: request.author,
-          note: request.note,
-          createdAt: request.createdAt
-        })
-      },
+      artifacts: artifactProjectionPort(artifactStore, () => undefined),
       logger: (event, payload) => {
         void debugLogService.write(event, payload);
       }
@@ -427,6 +383,14 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await idlePower.start();
   }
   await host.start();
+  // Repair artifact actions written by runtimes whose event writer was absent.
+  // The ids are immutable, so a restart cannot create another version or signature.
+  void (async () => {
+    for (const conversation of await storageService.listConversations()) {
+      if (conversation.kind === "chat") await artifactService.recoverActionEvents(conversation.id);
+    }
+    await artifactService.flushPendingArtifactEvents();
+  })().catch(error => debugLogService.write("artifact.action.recover-failed", { message: String(error) }));
   idlePower?.ready();
   // A runtime with no AWS key is still an equal deployment on this host: it
   // publishes both busy and idle, and may veto another runtime's stop.

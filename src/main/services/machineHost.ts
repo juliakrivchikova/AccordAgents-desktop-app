@@ -1876,6 +1876,11 @@ export class MachineHostService {
     return [issuer, ...peers];
   }
 
+  /** Recipients for artifact actions committed directly with their store write. */
+  chatActionRecipients(): Array<{ deviceId: string; channelId: string }> {
+    return this.resultRecipients();
+  }
+
   private enqueueOutbound(task: () => Promise<void>): Promise<void> {
     const run = this.outbound.then(task);
     this.outbound = run.then(() => undefined, () => undefined);

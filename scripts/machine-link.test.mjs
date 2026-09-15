@@ -45,6 +45,8 @@ test("a command queued with the machine offline survives a desktop restart and e
   let link = createLink(), host;
   try {
     await link.start();
+    assert.deepEqual(link.chatActionRecipients(), [{ deviceId: MACHINE_ID, channelId: pairing.rendezvousId }],
+      "artifact actions retain their offline recipient before a live hello");
     const participant = { id: "offline-member", homeMachineId: record.id, handle: "bot", kind: "codex-cli" };
     const triggerMessage = { id: "offline-message", role: "user", content: "retained", createdAt: new Date().toISOString() };
     const conversation = { id: "offline-chat", kind: "chat", title: "offline", messages: [triggerMessage], metadata: { participants: [participant] }, findings: [], createdAt: triggerMessage.createdAt, updatedAt: triggerMessage.createdAt };

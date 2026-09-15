@@ -1,7 +1,11 @@
+import { ARTIFACT_STATE_SCHEMA, artifactStateChange, artifactStateEventSql, foldArtifactState } from "./artifactStateEvents";
+import type { ChatActionPayload } from "../../shared/chatActionEvents";
+import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { runCommand } from "./command";
 import { artifactRevision, migrateArtifactRevisions, revisionInsertSql, revisionProjectionInsertSql, type ArtifactRevision } from "./artifactRevisions";
+import { artifactNameKey } from "../../shared/artifacts";
 
 // SQLite persistence for artifacts. Deliberately independent from conversation
 // payload storage: artifacts must survive chat compaction, agent session loss,
@@ -215,6 +219,20 @@ const ARTIFACT_SELECT = `
 `;
 
 export class ArtifactStore {
+  private readonly mutationQueues = new Map<string, Promise<unknown>>();
+
+  /** Local edits and incoming events in this runtime share one queue.
+   * Independent runtimes remain guarded by SQLite preconditions. */
+  withMutation<T>(conversationId: string, fn: () => Promise<T>): Promise<T> {
+    const key = conversationId;
+    const previous = this.mutationQueues.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(fn);
+    const tail = next.then(() => undefined, () => undefined);
+    this.mutationQueues.set(key, tail);
+    return next.finally(() => {
+      if (this.mutationQueues.get(key) === tail) this.mutationQueues.delete(key);
+    });
+  }
   private static readonly initByPath = new Map<string, Promise<void>>();
   private initialized = false;
 
@@ -291,6 +309,7 @@ export class ArtifactStore {
     }
     await this.runSql(`
       begin immediate;
+      ${ARTIFACT_STATE_SCHEMA}
       create table if not exists artifact_drafts (
         id text primary key,
         artifact_id text not null,
@@ -373,7 +392,8 @@ export class ArtifactStore {
     record: ArtifactRecord,
     nameKey: string,
     firstVersion: ArtifactVersionRecord,
-    event?: ArtifactEventRecord
+    event?: ArtifactEventRecord,
+    alsoCommitSql?: string
   ): Promise<boolean> {
     await this.init();
     const revision = artifactRevision(firstVersion, event?.id);
@@ -419,6 +439,7 @@ export class ArtifactStore {
         where exists (select 1 from artifacts where id = ${sqlString(record.id)});
       ` : ""}
       select count(*) from artifacts where id = ${sqlString(record.id)};
+      ${alsoCommitSql ?? ""}
       commit;
     `);
     return Number.parseInt(output.trim(), 10) === 1;
@@ -428,7 +449,8 @@ export class ArtifactStore {
     record: ArtifactRecord,
     nameKey: string,
     operation: ArtifactOperationRecord,
-    event: ArtifactEventRecord
+    event: ArtifactEventRecord,
+    alsoCommitSql?: string
   ): Promise<boolean> {
     await this.init();
     await this.runSql(`
@@ -477,6 +499,7 @@ export class ArtifactStore {
         ${sqlString(event.createdAt)}, NULL
       where ${this.operationAppliedSql(operation)};
       ${this.deletePendingOperationSql(operation)}
+      ${alsoCommitSql ?? ""}
       commit;
     `);
     return (await this.getOperation(
@@ -491,6 +514,97 @@ export class ArtifactStore {
     await this.init();
     const rows = await this.queryJson<ArtifactRow>(`${ARTIFACT_SELECT} where id = ${sqlString(id)} limit 1;`);
     return rows[0] ? this.recordFromRow(rows[0]) : undefined;
+  }
+
+  async applyStateEvent(event: ChatEventEnvelope, payload: ChatActionPayload): Promise<"applied" | "superseded"> {
+    await this.init();
+    const change = artifactStateChange(payload);
+    if (!change || event.conversationId !== change.record.conversationId) throw new Error("Invalid artifact state event.");
+    await this.runSql(artifactStateEventSql({ ...event, payload }, change));
+    const rows = await this.queryJson<{ eventJson: string }>(`select event_json as eventJson from artifact_state_events where artifact_id = ${sqlString(change.record.id)};`);
+    const projection = foldArtifactState(rows.map(row => JSON.parse(row.eventJson)));
+    const record = projection.record!;
+    if (!record) return "superseded";
+    const id = sqlString(record.id);
+    const columns: Record<string, string> = {
+      name: "name", owner: "owner", contributors: "contributors_json", requiredSigners: "required_signers_json", labels: "labels_json",
+      archivedAt: "archived_at", allowedDraftAuthors: "allowed_draft_authors_json", requiredDraftAuthors: "required_draft_authors_json",
+      audiencePolicyByAuthor: "audience_policy_json", draftRosterRevision: "draft_roster_revision"
+    };
+    const assignments = Object.entries(projection.metadata).map(([key, value]) => {
+      const column = columns[key];
+      if (!column) throw new Error("Unknown artifact metadata field.");
+      return `${column} = ${typeof value === "number" ? value : sqlString(value && typeof value === "object" ? JSON.stringify(value) : value as string || null)}`;
+    });
+    if (projection.metadata.name) assignments.push(`name_key = ${sqlString(projection.metadata.name.toLowerCase())}`);
+    const drafts = projection.drafts;
+    await this.runSql(`begin immediate;
+      create temp table artifact_fold_guard(valid integer check(valid = 1));
+      insert into artifact_fold_guard select case when (select count(*) from artifact_state_events where artifact_id = ${id}) = ${rows.length}
+        and not exists(select 1 from artifact_conversation_tombstones where conversation_id = ${sqlString(record.conversationId)}) then 1 else 0 end;
+      insert or ignore into artifacts(id, conversation_id, name, name_key, owner, contributors_json, required_signers_json, labels_json,
+        lifecycle, allowed_draft_authors_json, required_draft_authors_json, audience_policy_json, draft_roster_revision, head_version, created_at, updated_at, archived_at)
+      values(${id}, ${sqlString(record.conversationId)}, ${sqlString(record.name)}, ${sqlString(record.name.toLowerCase())}, ${sqlString(record.owner)},
+        ${sqlString(JSON.stringify(record.contributors))}, ${sqlString(JSON.stringify(record.requiredSigners))}, ${sqlString(JSON.stringify(record.labels))},
+        ${sqlString(record.lifecycle)}, ${sqlString(JSON.stringify(record.allowedDraftAuthors))}, ${sqlString(JSON.stringify(record.requiredDraftAuthors))},
+        ${sqlString(JSON.stringify(record.audiencePolicyByAuthor))}, ${record.draftRosterRevision}, ${record.headVersion}, ${sqlString(record.createdAt)}, ${sqlString(record.updatedAt)}, ${sqlString(record.archivedAt)});
+      insert into artifact_fold_guard select case when exists(select 1 from artifacts where id = ${id} and conversation_id = ${sqlString(record.conversationId)}) then 1 else 0 end;
+      ${assignments.length ? `update artifacts set ${assignments.join(", ")} where id = ${id};` : ""}
+      update artifacts set updated_at = max(updated_at, ${sqlString(event.createdAt)}) where id = ${id};
+      ${drafts.length ? `update artifact_drafts set state = 'superseded' where artifact_id = ${id} and id in (${drafts.map(row => sqlString(row.id)).join(",")});` : ""}
+      ${drafts.map(draft => `insert into artifact_drafts(id, artifact_id, author, state, content, readers_json, edit_revision, supersedes_draft_id, created_at, updated_at, submitted_at)
+        values(${sqlString(draft.id)}, ${id}, ${sqlString(draft.author)}, ${sqlString(draft.state)}, ${sqlString(draft.content)}, ${sqlString(JSON.stringify(draft.readers))},
+          ${draft.editRevision}, ${sqlString(draft.supersedesDraftId)}, ${sqlString(draft.createdAt)}, ${sqlString(draft.updatedAt)}, ${sqlString(draft.submittedAt)})
+        on conflict(id) do update set state=excluded.state, content=excluded.content, readers_json=excluded.readers_json,
+          edit_revision=excluded.edit_revision, updated_at=excluded.updated_at, submitted_at=excluded.submitted_at
+        where artifact_drafts.artifact_id=excluded.artifact_id and artifact_drafts.author=excluded.author;`).join("\n")}
+      commit;`);
+    return projection.applied.has(event.eventId) ? "applied" : "superseded";
+  }
+
+  operationCommittedSql(operation: ArtifactOperationRecord): string {
+    return this.operationAppliedSql(operation);
+  }
+
+  async applyPublication(artifactId: string, body: NonNullable<ChatActionPayload["revision"]>, versionEventId: string, conversationId: string): Promise<void> {
+    await this.init();
+    if (body.version !== 1 || !body.artifact) throw new Error("An initial publication must carry its artifact and version 1.");
+    const id = sqlString(artifactId);
+    const revision = artifactRevision({ artifactId, ...body, versionEventId });
+    const header = body.artifact;
+    artifactStateChange({ operationId: versionEventId, targetKey: `artifact:${artifactId}`, artifactChange: {
+      type: "collection", record: { ...header, id: artifactId, conversationId, lifecycle: "published", headVersion: 1,
+        updatedAt: body.createdAt, allowedDraftAuthors: header.allowedDraftAuthors ?? [], requiredDraftAuthors: header.requiredDraftAuthors ?? [],
+        audiencePolicyByAuthor: header.audiencePolicyByAuthor ?? {}, draftRosterRevision: header.draftRosterRevision ?? 0 }
+    } });
+    const sources = body.sources ?? [];
+    for (const source of sources) {
+      if (source.artifactId !== artifactId || source.version !== 1 || !source.draftId || !source.author
+          || typeof source.submittedAt !== "string" || typeof source.contentHash !== "string"
+          || !["considered", "excluded"].includes(source.disposition)) throw new Error("Invalid publication source.");
+    }
+    await this.runSql(`begin immediate;
+      create temp table publication_guard(valid integer check(valid = 1));
+      insert into publication_guard select case when not exists(select 1 from artifact_conversation_tombstones where conversation_id = ${sqlString(conversationId)}) then 1 else 0 end;
+      insert or ignore into artifacts(id, conversation_id, name, name_key, owner, contributors_json, required_signers_json, labels_json,
+        lifecycle, allowed_draft_authors_json, required_draft_authors_json, audience_policy_json, draft_roster_revision, head_version, created_at, updated_at)
+      values(${id}, ${sqlString(conversationId)}, ${sqlString(header.name)}, ${sqlString(artifactNameKey(header.name))}, ${sqlString(header.owner)},
+        ${sqlString(JSON.stringify(header.contributors))}, ${sqlString(JSON.stringify(header.requiredSigners))}, ${sqlString(JSON.stringify(header.labels))},
+        'collecting_drafts', ${sqlString(JSON.stringify(header.allowedDraftAuthors ?? []))}, ${sqlString(JSON.stringify(header.requiredDraftAuthors ?? []))},
+        ${sqlString(JSON.stringify(header.audiencePolicyByAuthor ?? {}))}, ${header.draftRosterRevision ?? 0}, 0, ${sqlString(header.createdAt)}, ${sqlString(body.createdAt)});
+      insert into publication_guard select case when exists(select 1 from artifacts where id = ${id} and conversation_id = ${sqlString(conversationId)}) then 1 else 0 end;
+      ${revisionInsertSql(revision, `exists(select 1 from artifacts where id = ${id}) and not exists(select 1 from artifact_revisions where version_event_id = ${sqlString(versionEventId)})`)}
+      insert into publication_guard select case when exists(select 1 from artifact_revisions where artifact_id = ${id}
+        and version_event_id = ${sqlString(versionEventId)} and content_hash = ${sqlString(revision.contentHash)}
+        and author = ${sqlString(revision.author)} and created_at = ${sqlString(revision.createdAt)} and original_version = 1 and base_version_event_id is null) then 1 else 0 end;
+      insert or ignore into artifact_version_projection(artifact_id, version, version_event_id)
+        select ${id}, 1, ${sqlString(versionEventId)} where exists(select 1 from artifact_revisions where artifact_id = ${id} and version_event_id = ${sqlString(versionEventId)});
+      update artifacts set lifecycle = 'published', head_version = 1,
+        required_signers_json = ${sqlString(JSON.stringify(body.artifact.requiredSigners))}, updated_at = ${sqlString(body.createdAt)}
+        where id = ${id} and lifecycle = 'collecting_drafts' and head_version = 0;
+      ${sources.map(source => `insert or ignore into artifact_bound_sources(artifact_id, version_event_id, draft_id, author, submitted_at, content_hash, disposition, exclusion_rationale)
+        values(${id}, ${sqlString(versionEventId)}, ${sqlString(source.draftId)}, ${sqlString(source.author)}, ${sqlString(source.submittedAt)}, ${sqlString(source.contentHash)}, ${sqlString(source.disposition)}, ${sqlString(source.exclusionRationale)});`).join("\n")}
+      commit;`);
   }
 
   async getByName(conversationId: string, nameKey: string): Promise<ArtifactRecord | undefined> {
@@ -697,7 +811,8 @@ export class ArtifactStore {
     name: string,
     nameKey: string,
     updatedAt: string,
-    event?: ArtifactEventRecord
+    event?: ArtifactEventRecord,
+    alsoCommitSql?: string
   ): Promise<void> {
     await this.init();
     await this.runSql(`
@@ -706,6 +821,7 @@ export class ArtifactStore {
       set name = ${sqlString(name)}, name_key = ${sqlString(nameKey)}, updated_at = ${sqlString(updatedAt)}
       where id = ${sqlString(id)};
       ${event ? this.insertEventSql(event) : ""}
+      ${alsoCommitSql ?? ""}
       commit;
     `);
   }
@@ -713,10 +829,12 @@ export class ArtifactStore {
   async updateAccess(
     id: string,
     access: { owner: string; contributors: string[]; requiredSigners: string[]; labels: string[] },
-    updatedAt: string
+    updatedAt: string,
+    alsoCommitSql?: string
   ): Promise<void> {
     await this.init();
     await this.runSql(`
+      begin immediate;
       update artifacts
       set
         owner = ${sqlString(access.owner)},
@@ -725,6 +843,8 @@ export class ArtifactStore {
         labels_json = ${sqlString(JSON.stringify(access.labels))},
         updated_at = ${sqlString(updatedAt)}
       where id = ${sqlString(id)};
+      ${alsoCommitSql ?? ""}
+      commit;
     `);
   }
 
@@ -734,7 +854,10 @@ export class ArtifactStore {
     record: ArtifactSignatureRecord,
     event?: ArtifactEventRecord,
     /** Committed with the signature, for the same reason as `appendVersion`. */
-    alsoCommitSql?: string
+    alsoCommitSql?: string,
+    /** A signed event records a past action, whose authorization was checked
+     * at its origin. Later archive/access changes cannot erase that fact. */
+    historical = false
   ): Promise<boolean> {
     await this.init();
     const output = await this.queryText(`
@@ -743,8 +866,9 @@ export class ArtifactStore {
       insert into signature_guard select case when exists(
         select 1 from artifact_revisions r join artifacts a on a.id = r.artifact_id
         where r.artifact_id = ${sqlString(record.artifactId)} and r.version_event_id = ${sqlString(record.versionEventId)}
-          and r.content_hash = ${sqlString(record.contentHash)} and a.archived_at is null
-          and exists(select 1 from json_each(a.required_signers_json) where value = ${sqlString(record.signer)})
+          and r.content_hash = ${sqlString(record.contentHash)}
+          ${historical ? "" : `and a.archived_at is null
+          and exists(select 1 from json_each(a.required_signers_json) where value = ${sqlString(record.signer)})`}
       ) then 1 else 0 end;
       insert or ignore into artifact_bound_signatures (artifact_id, version_event_id, content_hash, signer, signed_at)
       select artifact_id, version_event_id, content_hash, ${sqlString(record.signer)}, ${sqlString(record.signedAt)}
@@ -780,7 +904,8 @@ export class ArtifactStore {
     id: string,
     archivedAt: string | undefined,
     updatedAt: string,
-    event?: ArtifactEventRecord
+    event?: ArtifactEventRecord,
+    alsoCommitSql?: string
   ): Promise<void> {
     await this.init();
     await this.runSql(`
@@ -789,6 +914,7 @@ export class ArtifactStore {
       set archived_at = ${sqlString(archivedAt)}, updated_at = ${sqlString(updatedAt)}
       where id = ${sqlString(id)};
       ${event ? this.insertEventSql(event) : ""}
+      ${alsoCommitSql ?? ""}
       commit;
     `);
   }
@@ -870,7 +996,8 @@ export class ArtifactStore {
     record: ArtifactDraftRecord,
     expectedEditRevision: number,
     expectedRosterRevision: number,
-    operation: ArtifactOperationRecord
+    operation: ArtifactOperationRecord,
+    alsoCommitSql?: string
   ): Promise<boolean> {
     await this.init();
     const isNew = expectedEditRevision === 0;
@@ -940,6 +1067,7 @@ export class ArtifactStore {
       set updated_at = ${sqlString(record.updatedAt)}
       where id = ${sqlString(record.artifactId)} and ${this.operationAppliedSql(operation)};
       ${this.deletePendingOperationSql(operation)}
+      ${alsoCommitSql ?? ""}
       commit;
     `);
     return (await this.getOperation(
@@ -955,7 +1083,8 @@ export class ArtifactStore {
     expectedEditRevision: number,
     expectedRosterRevision: number,
     operation: ArtifactOperationRecord,
-    event: ArtifactEventRecord
+    event: ArtifactEventRecord,
+    alsoCommitSql?: string
   ): Promise<boolean> {
     await this.init();
     await this.runSql(`
@@ -1013,6 +1142,7 @@ export class ArtifactStore {
         ${sqlString(event.createdAt)}, NULL
       where ${this.operationAppliedSql(operation)};
       ${this.deletePendingOperationSql(operation)}
+      ${alsoCommitSql ?? ""}
       commit;
     `);
     return (await this.getOperation(
@@ -1027,7 +1157,8 @@ export class ArtifactStore {
     draft: ArtifactDraftRecord,
     expectedRosterRevision: number,
     operation: ArtifactOperationRecord,
-    event: ArtifactEventRecord
+    event: ArtifactEventRecord,
+    alsoCommitSql?: string
   ): Promise<boolean> {
     await this.init();
     await this.runSql(`
@@ -1064,6 +1195,7 @@ export class ArtifactStore {
         ${sqlString(event.createdAt)}, NULL
       where ${this.operationAppliedSql(operation)};
       ${this.deletePendingOperationSql(operation)}
+      ${alsoCommitSql ?? ""}
       commit;
     `);
     return (await this.getOperation(
@@ -1079,7 +1211,8 @@ export class ArtifactStore {
     expectedRevision: number,
     roster: Pick<ArtifactRecord, "allowedDraftAuthors" | "requiredDraftAuthors" | "audiencePolicyByAuthor">,
     updatedAt: string,
-    operation: ArtifactOperationRecord
+    operation: ArtifactOperationRecord,
+    alsoCommitSql?: string
   ): Promise<boolean> {
     await this.init();
     await this.runSql(`
@@ -1099,6 +1232,7 @@ export class ArtifactStore {
       update artifact_operations set applied = 1
       where ${this.operationIdentitySql(operation)} and applied = 0 and changes() = 1;
       ${this.deletePendingOperationSql(operation)}
+      ${alsoCommitSql ?? ""}
       commit;
     `);
     return (await this.getOperation(
@@ -1115,7 +1249,8 @@ export class ArtifactStore {
     sources: ArtifactVersionSourceRecord[],
     requiredSigners: string[],
     operation: ArtifactOperationRecord,
-    event: ArtifactEventRecord
+    event: ArtifactEventRecord,
+    alsoCommitSql?: string
   ): Promise<boolean> {
     await this.init();
     const revision = artifactRevision(version, event.id);
@@ -1204,6 +1339,7 @@ export class ArtifactStore {
       update artifact_operations set applied = 1
       where ${this.operationIdentitySql(operation)} and applied = 0 and changes() = 1;
       ${this.deletePendingOperationSql(operation)}
+      ${alsoCommitSql ?? ""}
       commit;
     `);
     return (await this.getOperation(
@@ -1280,6 +1416,7 @@ export class ArtifactStore {
       delete from artifact_signatures where artifact_id in ${artifacts};
       delete from artifact_versions where artifact_id in ${artifacts};
       delete from artifact_drafts where artifact_id in ${artifacts};
+      delete from artifact_state_events where artifact_id in ${artifacts};
       delete from artifact_event_outbox where conversation_id = ${sqlString(conversationId)};
       delete from artifact_operations where conversation_id = ${sqlString(conversationId)};
       delete from artifacts where conversation_id = ${sqlString(conversationId)};

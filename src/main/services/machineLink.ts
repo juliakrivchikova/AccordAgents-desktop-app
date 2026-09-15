@@ -524,13 +524,13 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }));
   }
 
-  /** Every connected machine, as delivery recipients for one chat action. An
+  /** Enrolled machines, including offline recipients, for one chat action. An
    *  event minted inside another transaction cannot go through `publish`, so
    *  its recipients are taken here and written with it. */
   chatActionRecipients(): Array<{ deviceId: string; channelId: string }> {
     const recipients: Array<{ deviceId: string; channelId: string }> = [];
     for (const connection of this.connections.values()) {
-      const deviceId = connection.machineDeviceId;
+      const deviceId = connection.machineDeviceId ?? connection.record.deviceId;
       if (!deviceId) continue;
       recipients.push({ deviceId, channelId: connection.record.pairingKey });
     }

@@ -46,6 +46,11 @@ export const CHAT_ACTION_LOG_SCOPE = "chat:actions";
 export type ChatActionKind =
   | "artifact.revision.created"
   | "artifact.signature.added"
+  | "artifact.collection.created"
+  | "artifact.metadata.changed"
+  | "artifact.draft.saved"
+  | "artifact.draft.submitted"
+  | "artifact.draft.withdrawn"
   | "permission.decided"
   | "choice.answered"
   | "participant.request.opened"
@@ -56,6 +61,11 @@ export type ChatActionKind =
 export const CHAT_ACTION_KINDS: readonly ChatActionKind[] = [
   "artifact.revision.created",
   "artifact.signature.added",
+  "artifact.collection.created",
+  "artifact.metadata.changed",
+  "artifact.draft.saved",
+  "artifact.draft.submitted",
+  "artifact.draft.withdrawn",
   "permission.decided",
   "choice.answered",
   "participant.request.opened",
@@ -86,6 +96,8 @@ export interface ChatActionPayload {
   contentHash?: string;
   /** The body this state is, when the action carries it. */
   revision?: ChatRevisionContent;
+  /** Domain state carried in full by artifact draft/metadata events. */
+  artifactChange?: unknown;
   /** Free-form action detail; the projection never interprets it beyond the
    *  fields above, so a new action kind does not need a new projection. */
   detail?: Record<string, unknown>;
@@ -107,6 +119,7 @@ export interface ChatRevisionContent {
   note?: string;
   createdAt: string;
   version: number;
+  sources?: Array<{ artifactId: string; version: number; draftId: string; author: string; submittedAt: string; contentHash: string; disposition: "considered" | "excluded"; exclusionRationale?: string }>;
   /** Enough to create the artifact on a peer that has never seen it. */
   artifact?: {
     name: string;
@@ -115,6 +128,10 @@ export interface ChatRevisionContent {
     requiredSigners: string[];
     labels: string[];
     createdAt: string;
+    allowedDraftAuthors?: string[];
+    requiredDraftAuthors?: string[];
+    audiencePolicyByAuthor?: Record<string, { allowedReaders: string[]; requiredReaders: string[] }>;
+    draftRosterRevision?: number;
   };
 }
 
@@ -123,6 +140,7 @@ export interface ChatSignaturePayload extends ChatActionPayload {
   signer: string;
   signedStateId: string;
   signedContentHash: string;
+  signedAt?: string;
 }
 
 /** Something that happened outside this process. Never superseded. */
