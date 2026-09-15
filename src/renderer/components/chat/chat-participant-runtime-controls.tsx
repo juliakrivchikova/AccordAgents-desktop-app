@@ -53,7 +53,7 @@ export function ParticipantRuntimeControls(props: {
   runLocationLocked: boolean;
   onUpdate: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">
   ) => void;
 }): JSX.Element {
   const participant = props.participant;
@@ -65,14 +65,15 @@ export function ParticipantRuntimeControls(props: {
 
   // Build the patch by key presence so an intentional reset (model: "") is forwarded
   // rather than collapsing back to the current value.
-  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">>): void {
-    props.onUpdate(participant.id, {
+  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">>): void {
+    return props.onUpdate(participant.id, {
       model: "model" in patch ? patch.model : participant.model,
       reasoningEffort: "reasoningEffort" in patch ? patch.reasoningEffort : participant.reasoningEffort,
       agentMode: "agentMode" in patch ? patch.agentMode : participant.agentMode,
       permissions: "permissions" in patch ? patch.permissions : participant.permissions,
       remoteExecution: "remoteExecution" in patch ? patch.remoteExecution : participant.remoteExecution,
       homeMachineId: "homeMachineId" in patch ? patch.homeMachineId : participant.homeMachineId,
+      cloudRun: "cloudRun" in patch ? patch.cloudRun : participant.cloudRun,
       skipToolchainPreflight: "skipToolchainPreflight" in patch ? patch.skipToolchainPreflight : participant.skipToolchainPreflight,
       autoWatch: "autoWatch" in patch ? patch.autoWatch : participant.autoWatch
     });
@@ -99,7 +100,7 @@ export function ParticipantRuntimeControls(props: {
 
   return (
     <div className="chat-runtime-controls" aria-label={`Runtime controls for ${chatParticipantDisplayName(participant)}`}>
-      <ParticipantRunLocation kind={participant.kind} homeMachineId={participant.homeMachineId}
+      <ParticipantRunLocation kind={participant.kind} homeMachineId={participant.homeMachineId} cloudRun={participant.cloudRun}
         unassigned={chatParticipantHomeIsUnassigned(participant)} disabled={controlsDisabled}
         locked={props.runLocationLocked} onChange={update} />
 

@@ -1,3 +1,4 @@
+import { CloudProviderAuth } from "../cloud-provider-auth";
 import { memo, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Copy, FileText, ListChecks, RefreshCw, Reply, Smile, X } from "lucide-react";
 
@@ -386,6 +387,12 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           {queuedBehind && (
             <div className="chat-queued-badge">
               <span>Queued — waiting for @{queuedBehind.handle} to finish</span>
+            </div>
+          )}
+          {isStreaming && message.metadata?.cloudRunPreparation && !stopPending && (
+            <div className="chat-cloud-preparation" role="status">
+              <p>{message.metadata.cloudRunPreparation.message}</p>
+              {message.metadata.cloudRunPreparation.authUrl && <CloudProviderAuth {...message.metadata.cloudRunPreparation} authUrl={message.metadata.cloudRunPreparation.authUrl} />}
             </div>
           )}
           {stopPending && (

@@ -233,8 +233,9 @@ const bridge: AppBridge = {
   publishArtifact: (request: PublishArtifactRequest) => ipcRenderer.invoke("artifacts:publish", request),
   listMachines: (): Promise<MachineListResult> => ipcRenderer.invoke("machines:list"),
   prepareCloudRun: (request) => ipcRenderer.invoke("machines:prepare-cloud-run", request),
+  getCloudRunPreparation: (request) => ipcRenderer.invoke("machines:get-cloud-run-preparation", request),
   onCloudRunPreparationProgress: (callback) => {
-    const listener = (_event: unknown, snapshot: import("../shared/cloudRunPreparation").CloudRunPreparationProgress): void => callback(snapshot);
+    const listener = (_event: unknown, snapshot: import("../shared/cloudRunPreparation").CloudRunPreparationState): void => callback(snapshot);
     ipcRenderer.on("machines:cloud-run-progress", listener);
     return () => ipcRenderer.off("machines:cloud-run-progress", listener);
   },

@@ -2,9 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AwsWorkerStatus, CloudRunWorkerSettings } from "../../shared/types";
 import type { MachineRecord } from "../../shared/machineLink";
 import type { MachineInstallRecord, MachineInstallRequest, MachineInstallResult, MachineInstallSnapshot, MachineMirrorBootstrapResult } from "../../shared/machineInstall";
-import type { CloudRunPreparationProgress, PrepareCloudRunRequest, PrepareCloudRunResult } from "../../shared/cloudRunPreparation";
+import type { CloudRunPreparationProgress, CloudRunPreparationState, PrepareCloudRunRequest, PrepareCloudRunResult } from "../../shared/cloudRunPreparation";
 
 interface Options {
+  onProgress?(snapshot: CloudRunPreparationState): void;
+  configuredInstanceId?(): Promise<string | undefined>;
   appVersion: string;
   environmentId(): Promise<string>;
   aws: {
@@ -37,8 +39,25 @@ export class CloudRunPreparationService {
   private latest?: Omit<CloudRunPreparationProgress, "operationId">;
   private projects?: Promise<Map<string, Record<string, string>>>;
   private projectTasks = new Map<string, Promise<void>>();
+  private states = new Map<string, CloudRunPreparationState>();
 
   constructor(private readonly options: Options) {}
+
+  private key(request: Pick<PrepareCloudRunRequest, "provider" | "instanceId">): string {
+    return `${request.provider}:${request.instanceId ?? "configured"}`;
+  }
+
+  snapshot(request: Pick<PrepareCloudRunRequest, "provider" | "instanceId">): CloudRunPreparationState | undefined {
+    return this.states.get(this.key(request));
+  }
+
+  private publish(request: PrepareCloudRunRequest, phase: CloudRunPreparationState["phase"],
+    snapshot: Omit<CloudRunPreparationProgress, "operationId">, machine?: MachineRecord): void {
+    const state: CloudRunPreparationState = { ...snapshot, operationId: request.operationId,
+      provider: request.provider, instanceId: request.instanceId, phase, ...(machine ? { machine } : {}) };
+    this.states.set(this.key(request), state);
+    this.options.onProgress?.(state);
+  }
 
   private projectIndex(): Promise<Map<string, Record<string, string>>> {
     if (!this.projects) {
@@ -53,8 +72,8 @@ export class CloudRunPreparationService {
       typeof paths[sourcePath] === "string" ? [[id, paths[sourcePath]]] : []));
   }
 
-  /** Called only when creating a chat or choosing/adding its machine member.
-   * No SSH or copying belongs in the subsequent message/stream path. */
+  /** Bootstrap once, outside the chat mutation lock. Existing projects and
+   * participant-created worktrees are reused without another copy. */
   async prepareProject(machineId: string, localPath: string, signal?: AbortSignal, progress?: (message: string) => void): Promise<void> {
     signal?.throwIfAborted();
     progress?.("Preparing the project on your cloud machine…");
@@ -102,12 +121,33 @@ export class CloudRunPreparationService {
     if (typeof request?.operationId !== "string" || !request.operationId.trim() || (request.provider !== "codex-cli" && request.provider !== "claude-code")) {
       throw new Error("Choose a supported provider before preparing Cloud run.");
     }
+    const previous = this.snapshot(request);
+    let currentInstance: string | undefined;
+    try { currentInstance = request.instanceId ?? await this.options.configuredInstanceId?.(); }
+    catch (error) {
+      this.publish(request, "error", { message: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
+    if (previous?.phase === "ready" && previous.machine && this.options.isConnected(previous.machine.id)
+      && (!this.options.configuredInstanceId || currentInstance === previous.machine.awsInstanceId)) {
+      const machine = (await this.options.listMachines()).find(item => item.id === previous.machine!.id);
+      if (machine?.lastHello?.appVersion === this.options.appVersion) {
+        progress({ operationId: request.operationId, message: "Cloud run is ready." });
+        return { machine };
+      }
+    }
     // A second provider waits for the same machine, then checks its own login.
     if (this.active && (this.activeProvider !== request.provider || this.activeInstance !== request.instanceId)) {
+      const waiting = { message: "Waiting for the other cloud setup to finish…" };
+      this.publish(request, "preparing", waiting);
+      progress({ ...waiting, operationId: request.operationId });
       await this.active.catch(() => undefined);
       return this.prepare(request, progress);
     }
-    const listener = (snapshot: Omit<CloudRunPreparationProgress, "operationId">): void => progress({ ...snapshot, operationId: request.operationId });
+    const listener = (snapshot: Omit<CloudRunPreparationProgress, "operationId">): void => {
+      this.publish(request, "preparing", snapshot);
+      progress({ ...snapshot, operationId: request.operationId });
+    };
     this.listeners.add(listener);
     if (this.latest) listener(this.latest);
     if (!this.active) {
@@ -120,7 +160,14 @@ export class CloudRunPreparationService {
         this.latest = undefined;
       });
     }
-    try { return await this.active; }
+    try {
+      const result = await this.active;
+      this.publish(request, "ready", { message: "Cloud run is ready." }, result.machine);
+      return result;
+    } catch (error) {
+      this.publish(request, "error", { message: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
     finally { this.listeners.delete(listener); }
   }
 

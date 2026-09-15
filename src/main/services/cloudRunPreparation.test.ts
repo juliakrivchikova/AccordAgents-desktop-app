@@ -224,3 +224,37 @@ test("a cancelled copy which resolves late cannot publish a prepared project map
   assert.deepEqual(await h.service.repositoryPaths("/project"), {});
   assert.deepEqual(await new CloudRunPreparationService(h.options).repositoryPaths("/project"), {});
 });
+
+
+test("background preparation keeps a queryable result and reuses a connected prepared provider", async () => {
+  const h = harness();
+  const snapshots: any[] = [];
+  h.options.onProgress = snapshot => snapshots.push(snapshot);
+  await h.service.prepare(request, () => {});
+  assert.equal(h.service.snapshot(request)?.phase, "ready");
+  assert.equal(h.service.snapshot(request)?.machine?.id, "machine-1");
+  h.options.isConnected = () => true;
+  h.machines[0].lastHello = { deviceId: "cloud", machineName: "cloud", platform: "linux", appVersion: "test", providers: [] };
+  const before = h.calls.length;
+  await h.service.prepare({ ...request, operationId: "reopen" }, () => {});
+  assert.equal(h.calls.length, before);
+  assert.ok(snapshots.some(snapshot => snapshot.phase === "preparing"));
+  h.options.isConnected = () => false;
+  h.failInstall();
+  await assert.rejects(h.service.prepare({ ...request, operationId: "retry" }, () => {}), /Sign-in failed/);
+  assert.equal(h.service.snapshot(request)?.phase, "error");
+  assert.match(h.service.snapshot(request)?.message ?? "", /Sign-in failed/);
+});
+
+
+test("a cached Cloud result is not reused after the configured AWS instance changes", async () => {
+  const h = harness();
+  h.options.configuredInstanceId = async () => "i-abc";
+  await h.service.prepare(request, () => {});
+  h.options.isConnected = () => true;
+  h.machines[0].lastHello = { deviceId: "cloud", machineName: "cloud", platform: "linux", appVersion: "test", providers: [] };
+  h.options.configuredInstanceId = async () => "i-new";
+  h.options.aws.status = async () => { throw new Error("new AWS instance unavailable"); };
+  await assert.rejects(h.service.prepare(request, () => {}), /new AWS instance unavailable/);
+  assert.equal(h.service.snapshot(request)?.phase, "error");
+});

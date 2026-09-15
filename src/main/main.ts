@@ -457,6 +457,8 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
   }
 });
 const cloudRunPreparation = new CloudRunPreparationService({
+  onProgress: snapshot => sendToMainWindow("machines:cloud-run-progress", snapshot),
+  configuredInstanceId: async () => (await settingsService.getPublicSettings()).cloudRuns.awsHandle?.instanceId,
   appVersion: app.getVersion(),
   environmentId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
   aws: cloudRunAwsService,
@@ -511,6 +513,11 @@ async function machinePowerHandoffForPairing(pairing: MobilePairingPackage): Pro
     return pairing;
   }
 }
+chatService.setCloudRunPreparation(async (selection, provider, progress) => {
+  if (provider !== "codex-cli" && provider !== "claude-code") throw new Error("This provider does not support Cloud run.");
+  const result = await cloudRunPreparation.prepare({ operationId: randomUUID(), provider, instanceId: selection.instanceId }, progress);
+  return result.machine.id;
+});
 chatService.setCloudRunAwsService(cloudRunAwsService);
 chatService.setMachineProjectPreparation((machineId, localPath, signal, progress) => cloudRunPreparation.prepareProject(machineId, localPath, signal, progress));
 chatService.setCloudRunDoctorService(cloudRunDoctorService);
@@ -2635,8 +2642,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("machines:list", async (): Promise<MachineListResult> => machineListResult());
   ipcMain.handle("machines:prepare-cloud-run", async (_event, request: import("../shared/cloudRunPreparation").PrepareCloudRunRequest) => {
-    return cloudRunPreparation.prepare(request, (snapshot) => sendToMainWindow("machines:cloud-run-progress", snapshot));
+    return cloudRunPreparation.prepare(request, () => {});
   });
+  ipcMain.handle("machines:get-cloud-run-preparation", (_event, request: import("../shared/cloudRunPreparation").PrepareCloudRunRequest) => cloudRunPreparation.snapshot(request));
   ipcMain.handle("machines:create", async (_event, request: CreateMachineRequest): Promise<CreateMachineResult> => {
     return createMachine(request);
   });

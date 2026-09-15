@@ -53,7 +53,6 @@ export function ParticipantEditorDialog(props: {
     [participant?.id, props.settings.chatParticipantConfigs]
   );
   const [draft, setDraft] = useState<ChatParticipantDraft>(() => initialDraft(props.settings, participant, existingHandles));
-  const [preparingCloud, setPreparingCloud] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -72,7 +71,7 @@ export function ParticipantEditorDialog(props: {
   const changed = !participant || !sameParticipantDraft(normalized, participant);
   const validation = validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs, existingHandles, props.settings.chatBehaviorRules)
     ?? validateChatCliAgents([normalized], props.agents, props.settings.providers);
-  const canSave = changed && !validation && !saving && !preparingCloud;
+  const canSave = changed && !validation && !saving;
   const roleLabel = displayChatRoleLabel(
     props.settings.chatRoleConfigs.find((role) => role.id === draft.roleConfigId),
     draft.roleConfigId
@@ -210,9 +209,9 @@ export function ParticipantEditorDialog(props: {
             />
             {chatProviderSupportsCloudRun(draft.kind) && (
               <ChatParticipantSpecRow label="Run on">
-                <ParticipantRunLocation kind={draft.kind} homeMachineId={draft.homeMachineId} hideLabel
+                <ParticipantRunLocation kind={draft.kind} homeMachineId={draft.homeMachineId} cloudRun={draft.cloudRun} hideLabel
                   unassigned={chatParticipantHomeIsUnassigned(draft)} disabled={saving}
-                  onPreparingChange={setPreparingCloud} onChange={patchDraft} />
+                  onChange={patchDraft} />
               </ChatParticipantSpecRow>
             )}
             <ChatParticipantInlineModelRow

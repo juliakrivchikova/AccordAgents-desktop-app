@@ -56,7 +56,7 @@ export interface ChatActions {
   respondToChatChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => Promise<void>;
   addChatParticipant: () => Promise<void>;
   addSavedChatParticipant: (config: ChatParticipantConfig) => Promise<void>;
-  updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">) => Promise<void>;
+  updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">) => Promise<boolean>;
   removeChatParticipant: (participantId: string) => Promise<void>;
   compactChatParticipant: (participantId: string, options?: ChatRunScopeOptions) => Promise<boolean>;
   startChatAccord: (options: StartChatAccordOptions) => Promise<boolean>;
@@ -422,8 +422,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     await commitChatParticipant(participant);
   }
 
-  async function updateChatParticipantRuntime(participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">): Promise<void> {
-    if (!state.conversation || state.conversation.kind !== "chat") return;
+  async function updateChatParticipantRuntime(participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">): Promise<boolean> {
+    if (!state.conversation || state.conversation.kind !== "chat") return false;
     state.setError(undefined);
     try {
       const saved = await window.consensus.updateChatParticipantRuntime({
@@ -435,13 +435,16 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         permissions: patch.permissions,
         remoteExecution: patch.remoteExecution,
         homeMachineId: patch.homeMachineId,
+        cloudRun: patch.cloudRun,
         skipToolchainPreflight: patch.skipToolchainPreflight,
         autoWatch: patch.autoWatch
       });
       if (saved) state.setConversation(saved);
       await conversationActions.refreshConversations();
+      return true;
     } catch (caught) {
       state.setError(errorText(caught));
+      return false;
     }
   }
 

@@ -774,8 +774,10 @@ export interface ChatParticipant {
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
   /** Machine that hosts this participant's sessions (machines transport).
-   *  Absent = this desktop. */
+   *  Absent = this desktop unless a Cloud choice is awaiting preparation. */
   homeMachineId?: string;
+  /** Cloud choice is saved before the machine is ready. */
+  cloudRun?: import("./cloudRunPreparation").CloudRunSelection;
   skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
@@ -1090,6 +1092,8 @@ export interface ChatRosterCurrentParticipant {
   manageRolesParticipants?: ChatManageRolesParticipantsResolution;
   remoteExecution?: CloudRunRemoteExecutionMode;
   homeMachineId?: string;
+  /** Cloud choice is saved before the machine is ready. */
+  cloudRun?: import("./cloudRunPreparation").CloudRunSelection;
   skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
@@ -1272,6 +1276,7 @@ export interface ChatMessageMetadata {
    *  kept apart from the content so delivered text is never overwritten. */
   stopPending?: { machineName: string; at: string };
   machinePending?: { machineName: string; at: string };
+  cloudRunPreparation?: import("./cloudRunPreparation").CloudRunPreparationProgress;
   /** Machines transport: the result already folded into this bubble
    *  (identified by the machine's finishedAt), so a redelivery of the same
    *  result is applied once while a real result still replaces a provisional
@@ -1467,8 +1472,10 @@ export interface ChatParticipantConfig {
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
   /** Machine that hosts this participant's sessions (machines transport).
-   *  Absent = this desktop. */
+   *  Absent = this desktop unless a Cloud choice is awaiting preparation. */
   homeMachineId?: string;
+  /** Cloud choice is saved before the machine is ready. */
+  cloudRun?: import("./cloudRunPreparation").CloudRunSelection;
   skipToolchainPreflight?: boolean;
   autoWatchEnabled?: boolean;
   updatedAt: string;
@@ -1487,6 +1494,8 @@ export interface ChatParticipantConfigUpdate {
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
   homeMachineId?: string;
+  /** Cloud choice is saved before the machine is ready. */
+  cloudRun?: import("./cloudRunPreparation").CloudRunSelection;
   skipToolchainPreflight?: boolean;
   autoWatchEnabled?: boolean;
 }
@@ -1504,6 +1513,8 @@ export interface ChatParticipantInput {
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
   homeMachineId?: string;
+  /** Cloud choice is saved before the machine is ready. */
+  cloudRun?: import("./cloudRunPreparation").CloudRunSelection;
   skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
@@ -1530,6 +1541,8 @@ export interface UpdateChatParticipantRuntimeRequest {
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
   homeMachineId?: string;
+  /** Cloud choice is saved before the machine is ready. */
+  cloudRun?: import("./cloudRunPreparation").CloudRunSelection;
   skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
@@ -2777,8 +2790,9 @@ export interface AppBridge {
   onArtifactsUpdated(callback: (event: ArtifactsUpdatedEvent) => void): () => void;
   // Machines transport: machines that host participants.
   listMachines(): Promise<MachineListResult>;
+  getCloudRunPreparation(request: Pick<import("./cloudRunPreparation").PrepareCloudRunRequest, "provider" | "instanceId">): Promise<import("./cloudRunPreparation").CloudRunPreparationState | undefined>;
   prepareCloudRun(request: import("./cloudRunPreparation").PrepareCloudRunRequest): Promise<import("./cloudRunPreparation").PrepareCloudRunResult>;
-  onCloudRunPreparationProgress(callback: (snapshot: import("./cloudRunPreparation").CloudRunPreparationProgress) => void): () => void;
+  onCloudRunPreparationProgress(callback: (snapshot: import("./cloudRunPreparation").CloudRunPreparationState) => void): () => void;
   createMachine(request: CreateMachineRequest): Promise<CreateMachineResult>;
   removeMachine(request: RemoveMachineRequest): Promise<MachineListResult>;
   machineEnrollment(request: MachineEnrollmentRequest): Promise<CreateMachineResult>;

@@ -14,11 +14,13 @@ import type { ChatParticipant, ChatParticipantConfig, CloudRunRemoteExecutionMod
 export type ChatParticipantHome =
   | { kind: "this-machine" }
   | { kind: "machine"; machineId: string }
+  | { kind: "cloud-pending" }
   /** Was set to run in the cloud through the transport that is gone. */
   | { kind: "unassigned" };
 
 interface ParticipantHomeFields {
   homeMachineId?: string;
+  cloudRun?: import("./cloudRunPreparation").CloudRunSelection;
   remoteExecution?: CloudRunRemoteExecutionMode;
 }
 
@@ -27,6 +29,7 @@ export function chatParticipantHome(participant: ParticipantHomeFields | ChatPar
   if (machineId) {
     return { kind: "machine", machineId };
   }
+  if (participant.cloudRun) return { kind: "cloud-pending" };
   return participant.remoteExecution === "remote" ? { kind: "unassigned" } : { kind: "this-machine" };
 }
 
