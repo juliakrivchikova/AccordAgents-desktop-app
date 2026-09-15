@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ChatMessage, ChatParticipant, Conversation, ReviewProgress, SendChatMessageRequest, StartReviewResult } from "../../shared/types";
+import type { ChatMessage, ChatParticipant, ChatSkillMention, Conversation, ReviewProgress, SendChatMessageRequest, StartReviewResult } from "../../shared/types";
 import {
   chatMessageVisualThreadRootId,
   chatParticipantRequestReplyRootMap
@@ -106,6 +106,8 @@ export interface MobileRelayChatMember {
   /** The machine this member runs on, when it is not this desktop. Carried so
    *  the phone can reach that machine itself with the desktop closed. */
   homeMachineId?: string;
+  /** That machine's name, as Settings shows it, for the phone's member list. */
+  homeMachineName?: string;
   /** The member record a machine needs to run a turn. Sent only for members
    *  with a home machine, so the list does not grow for every local member. */
   participant?: ChatParticipant;
@@ -114,9 +116,44 @@ export interface MobileRelayChatMember {
 export interface MobileRelayChatCatalog {
   listChats(): Promise<MobileRelayChatListItem[]>;
   listTimeline(conversationId: string): Promise<MobileTimelineEvent[]>;
+  /** One page of the timeline, answered to a direct request: the last page,
+   *  or the page before a message the phone already holds, with where the
+   *  history stops. Without it, a request is answered by `listTimeline`. */
+  listTimelinePage?(conversationId: string, options: { beforeMessageId?: string }): Promise<MobileTimelinePage>;
   /** Cards a member is waiting on in this chat. */
   listControlCards?(conversationId: string): Promise<MobileControlCard[]>;
+  /** What the desktop composer would list after "/" for this draft. */
+  composerOptions?(request: { conversationId: string; query: string; content: string }): Promise<MobileComposerOptions>;
   isConversationAllowed?(conversationId: string, snapshot?: Conversation): Promise<boolean> | boolean;
+}
+
+export interface MobileTimelinePage {
+  events: MobileTimelineEvent[];
+  /** Whether the desktop holds messages before this page. */
+  hasMoreBefore: boolean;
+  /** The oldest message of this page, visible on the phone or not. The next
+   *  page is asked before it; asking before the oldest *visible* row could
+   *  return the same page forever when the page had nothing to show. */
+  beforeMessageId?: string;
+}
+
+export interface MobileComposerCommandOption {
+  id: "compact" | "goal";
+  label: string;
+  description: string;
+}
+
+export interface MobileComposerPromptOption {
+  id: string;
+  label: string;
+  trigger: string;
+  body: string;
+}
+
+export interface MobileComposerOptions {
+  commands: MobileComposerCommandOption[];
+  prompts: MobileComposerPromptOption[];
+  skills: ChatSkillMention[];
 }
 
 interface MobileOutboxRequest {
@@ -137,6 +174,9 @@ export interface MobileMessageOutboxEvent extends MobileOutboxEventBase {
     /** Pictures taken or picked on the phone. The relay is the only path they
      *  have, so they arrive inline here rather than by reference. */
     attachments?: Array<{ filename?: string; mimeType: string; dataBase64: string }>;
+    /** Skills picked from the phone's "/" menu, the same records the desktop
+     *  composer attaches. Sanitized again on the chat side. */
+    skillMentions?: ChatSkillMention[];
   };
 }
 
@@ -207,6 +247,11 @@ export interface MobileTimelineEvents {
    *  the phone shows the same cards the desktop does, and sent even when the
    *  message rows deduplicate to nothing: a card appearing is news by itself. */
   cards?: MobileControlCard[];
+  /** Only on the answer to a direct timeline request: where this chat's
+   *  history stops on the desktop, so the phone can offer what is earlier.
+   *  `earlier` marks an answer to a request for the page before a message:
+   *  history being filled in, not a run's outcome. */
+  page?: { hasMoreBefore: boolean; beforeMessageId?: string; earlier?: boolean };
 }
 
 export interface MobileTimelineSink {
@@ -232,7 +277,14 @@ export interface MobileTimelinePublishOptions {
    *  sink. Partial reply text is for someone watching right now; persisting it
    *  would re-append the whole growing answer to the mailbox on every flush. */
   liveOnly?: boolean;
+  /** What the ring is about, stated beside the batch in plaintext kind only
+   *  (`mobile.notice.reply` / `mobile.notice.approval`), so a push-woken phone
+   *  can say "reply ready" or "approval needed" for a named chat without ever
+   *  opening a sealed payload. Set by the publisher from the batch it marked. */
+  notices?: MobileNoticeKind[];
 }
+
+export type MobileNoticeKind = "reply" | "approval";
 
 interface MobileChatListRequest {
   type: "mobile.chat-list.request";
@@ -241,6 +293,21 @@ interface MobileChatListRequest {
 interface MobileTimelineRequest {
   type: "mobile.timeline.request";
   conversationId: string;
+  /** Ask for the page before this message instead of the latest page. */
+  beforeMessageId?: string;
+}
+
+interface MobileComposerRequest {
+  type: "mobile.composer.request";
+  conversationId: string;
+  query: string;
+  content: string;
+}
+
+interface MobileComposerResponse extends MobileComposerOptions {
+  type: "mobile.composer";
+  conversationId: string;
+  query: string;
 }
 
 interface MobileAttachmentRequest {
@@ -534,7 +601,11 @@ export class MobileRelayControlService {
       return;
     }
     if (isMobileTimelineRequest(payload)) {
-      await this.sendConversationTimeline(payload.conversationId, `${message.logicalMessageId}:timeline`);
+      await this.sendConversationTimeline(payload.conversationId, `${message.logicalMessageId}:timeline`, payload.beforeMessageId);
+      return;
+    }
+    if (isMobileComposerRequest(payload)) {
+      await this.sendComposerOptions(payload, `${message.logicalMessageId}:composer`);
       return;
     }
     if (isMobileAttachmentRequest(payload)) {
@@ -707,11 +778,13 @@ export class MobileRelayControlService {
           continue;
         }
         const imageAttachments = mobileUploadImages(item.event.payload.attachments);
+        const skillMentions = mobileSkillMentions(item.event.payload.skillMentions);
         const result = await this.chat.sendMessage(
           {
             conversationId: item.event.conversationId,
             content: typeof item.event.payload.content === "string" ? item.event.payload.content : "",
             ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
+            ...(skillMentions.length > 0 ? { skillMentions } : {}),
             runId: item.runId,
             mobileEventId: item.event.eventId
           },
@@ -790,19 +863,61 @@ export class MobileRelayControlService {
     await this.client.sendCiphertext({ logicalMessageId, ciphertext });
   }
 
-  private async sendConversationTimeline(conversationId: string, logicalMessageId: string): Promise<void> {
+  private async sendConversationTimeline(conversationId: string, logicalMessageId: string, beforeMessageId?: string): Promise<void> {
     if (!this.isActive()) {
       return;
     }
     if (!(await this.isConversationAllowed(conversationId))) {
       throw new Error("Mobile relay timeline request is outside the paired scope.");
     }
-    const timeline: MobileTimelineEvents = {
-      type: "mobile.timeline.events",
-      conversationId,
-      events: this.catalog ? await this.catalog.listTimeline(conversationId) : []
-    };
+    const before = typeof beforeMessageId === "string" && beforeMessageId.trim() ? beforeMessageId.trim() : undefined;
+    let timeline: MobileTimelineEvents;
+    if (this.catalog?.listTimelinePage) {
+      const page = await this.catalog.listTimelinePage(conversationId, { beforeMessageId: before });
+      timeline = {
+        type: "mobile.timeline.events",
+        conversationId,
+        events: page.events,
+        page: {
+          hasMoreBefore: page.hasMoreBefore,
+          ...(page.beforeMessageId ? { beforeMessageId: page.beforeMessageId } : {}),
+          ...(before ? { earlier: true } : {})
+        }
+      };
+    } else {
+      timeline = {
+        type: "mobile.timeline.events",
+        conversationId,
+        events: this.catalog ? await this.catalog.listTimeline(conversationId) : []
+      };
+    }
     const ciphertext = await sealMobileRelayPayload(timeline, this.options.relaySealKeyBase64);
+    await this.client.sendCiphertext({ logicalMessageId, ciphertext });
+  }
+
+  /** The "/" menu for a draft on the phone: the desktop decides, from the
+   *  same services its own composer asks, and answers with the list. */
+  private async sendComposerOptions(request: MobileComposerRequest, logicalMessageId: string): Promise<void> {
+    if (!this.isActive()) {
+      return;
+    }
+    if (!(await this.isConversationAllowed(request.conversationId))) {
+      throw new Error("Mobile relay composer request is outside the paired scope.");
+    }
+    const options: MobileComposerOptions = this.catalog?.composerOptions
+      ? await this.catalog.composerOptions({
+        conversationId: request.conversationId,
+        query: request.query,
+        content: request.content
+      })
+      : { commands: [], prompts: [], skills: [] };
+    const response: MobileComposerResponse = {
+      type: "mobile.composer",
+      conversationId: request.conversationId,
+      query: request.query,
+      ...options
+    };
+    const ciphertext = await sealMobileRelayPayload(response, this.options.relaySealKeyBase64);
     await this.client.sendCiphertext({ logicalMessageId, ciphertext });
   }
 
@@ -1105,10 +1220,19 @@ export class MobileRelayControlService {
     const cards = timeline.cards ?? (options?.liveOnly === true
       ? undefined
       : await this.controlCardsFor(timeline.conversationId));
-    const cardsChanged = cards !== undefined
-      && !sameControlCards(this.lastControlCardsByConversation.get(timeline.conversationId ?? "") ?? [], cards);
-    if (cardsChanged) {
-      this.lastControlCardsByConversation.set(timeline.conversationId ?? "", cards);
+    const cardsKey = timeline.conversationId ?? "";
+    const seenCardsBefore = this.lastControlCardsByConversation.has(cardsKey);
+    const previousCards = this.lastControlCardsByConversation.get(cardsKey) ?? [];
+    const cardsChanged = cards !== undefined && !sameControlCards(previousCards, cards);
+    // A card that was not pending before is a member starting to wait on the
+    // User. That rings the phone the way a finished reply does, and says so.
+    // Never on the first cards seen for a chat since the process started: like
+    // the first snapshot, that is history being delivered, not a change.
+    const previouslyPending = new Set(previousCards.filter((card) => card.status === "pending").map((card) => card.id));
+    const approvalStarted = seenCardsBefore && cardsChanged &&
+      (cards ?? []).some((card) => card.status === "pending" && !previouslyPending.has(card.id));
+    if (cardsChanged || (cards !== undefined && !seenCardsBefore)) {
+      this.lastControlCardsByConversation.set(cardsKey, cards ?? []);
     }
     if (events.length === 0 && !cardsChanged) {
       if (options?.liveOnly === true) {
@@ -1136,12 +1260,17 @@ export class MobileRelayControlService {
       for (const runId of newlyFinishedRunIds) {
         this.announcedFinishedRunIds.add(runId);
       }
-      const runFinished = options?.runFinished === true || newlyFinishedRunIds.length > 0;
+      const replyFinished = options?.runFinished === true || newlyFinishedRunIds.length > 0;
+      const runFinished = replyFinished || approvalStarted;
+      const notices: MobileNoticeKind[] = [
+        ...(replyFinished ? ["reply" as const] : []),
+        ...(approvalStarted ? ["approval" as const] : [])
+      ];
       await this.timelineSink.publishTimeline({
         ...timeline,
         events,
         ...(cards ? { cards } : {})
-      }, { ...options, runFinished }).then(markDelivered).catch(() => {
+      }, { ...options, runFinished, ...(notices.length > 0 ? { notices } : {}) }).then(markDelivered).catch(() => {
         // Relay delivery should not fail merely because durable timeline sync is temporarily unavailable.
       });
     }
@@ -1201,6 +1330,20 @@ function isMobileChatListRequest(value: unknown): value is MobileChatListRequest
  *  become a message: known image types only, a bounded count, and a bounded
  *  size each. An oversized or unknown one is dropped rather than failing the
  *  whole send, so the text still arrives. */
+/** Skill records the phone attached. Shape-checked here; the chat service
+ *  sanitizes and validates them against the target member the same way it
+ *  does for the desktop composer. */
+function mobileSkillMentions(value: unknown): ChatSkillMention[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is ChatSkillMention =>
+    Boolean(item) && typeof item === "object" && !Array.isArray(item) &&
+    typeof (item as Partial<ChatSkillMention>).skillId === "string" &&
+    typeof (item as Partial<ChatSkillMention>).frontmatterName === "string"
+  ).slice(0, 8);
+}
+
 function mobileUploadImages(
   attachments: MobileMessageOutboxEvent["payload"]["attachments"]
 ): Array<{ filename?: string; mimeType: string; dataBase64: string }> {
@@ -1251,6 +1394,18 @@ function isMobileTimelineRequest(value: unknown): value is MobileTimelineRequest
     (value as Partial<MobileTimelineRequest>).type === "mobile.timeline.request" &&
     typeof (value as Partial<MobileTimelineRequest>).conversationId === "string" &&
     (value as Partial<MobileTimelineRequest>).conversationId?.trim());
+}
+
+function isMobileComposerRequest(value: unknown): value is MobileComposerRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const request = value as Partial<MobileComposerRequest>;
+  return request.type === "mobile.composer.request" &&
+    typeof request.conversationId === "string" &&
+    request.conversationId.trim().length > 0 &&
+    typeof request.query === "string" &&
+    typeof request.content === "string";
 }
 
 function isMobileDecisionEvent(event: MobileOutboxEvent): event is MobileDecisionOutboxEvent {

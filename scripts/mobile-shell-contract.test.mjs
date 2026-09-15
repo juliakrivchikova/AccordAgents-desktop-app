@@ -37,7 +37,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v69/);
+  assert.match(worker, /accordagents-mobile-shell-v70/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -293,7 +293,10 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.doesNotMatch(cssBlock(".composer textarea"), /position: absolute/);
   assert.match(cssBlock(".composer .composer-tool"), /width: 44px/);
   assert.match(cssBlock(".composer .composer-send"), /width: 44px/);
-  assert.match(cssBlock(".composer .composer-tool:active"), /background: rgba\(22, 25, 31, 0\.08\)/);
+  // The press tint is a named surface now so the dark palette can restate it;
+  // its light value is still the handoff's.
+  assert.match(cssBlock(".composer .composer-tool:active"), /background: var\(--press\)/);
+  assert.match(cssBlock(":root"), /--press: rgba\(22, 25, 31, 0\.08\)/);
   assert.match(cssBlock(".composer .composer-send"), /margin-left: auto/);
   assert.match(cssBlock(".mobile-chat-header"), /padding: calc\(2px \+ env\(safe-area-inset-top\)\)/);
   assert.match(cssBlock(".mobile-chats-header"), /padding: calc\(6px \+ env\(safe-area-inset-top\)\)/);
@@ -337,7 +340,10 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /width: 390px;/);
   assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /height: 844px;/);
   assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /border-radius: 44px;/);
-  assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /background: #eceef2;/);
+  // The stage color is a named surface now (the dark palette restates it);
+  // its light value is still the handoff's.
+  assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /--stage: #eceef2;/);
+  assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /background: var\(--stage\);/);
   assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /border-radius: 18px 18px 6px 18px;/);
   // The page opens through the same shared description the worker imports,
   // rather than a version constant of its own.
