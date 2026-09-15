@@ -6,7 +6,7 @@ import type { CloudRunPreparationProgress, CloudRunPreparationState, PrepareClou
 
 interface Options {
   onProgress?(snapshot: CloudRunPreparationState): void;
-  configuredInstanceId?(): Promise<string | undefined>;
+  configuredInstanceId(): Promise<string | undefined>;
   appVersion: string;
   environmentId(): Promise<string>;
   aws: {
@@ -20,8 +20,26 @@ interface Options {
   isConnected(machineId: string): boolean;
   bootstrapProject(machineId: string, localPath: string, signal?: AbortSignal, progress?: (message: string) => void): Promise<MachineMirrorBootstrapResult>;
   saveInstall(record: MachineInstallRecord): Promise<void>;
+  prepareMachine(worker: CloudRunWorkerSettings, record: MachineInstallRecord): Promise<void>;
   prepareProvider(worker: CloudRunWorkerSettings, provider: PrepareCloudRunRequest["provider"], record: MachineInstallRecord,
     progress: (snapshot: Omit<CloudRunPreparationProgress, "operationId">) => void): Promise<void>;
+}
+
+interface PreparedMachine {
+  identity: string;
+  instanceId: string;
+  machine: MachineRecord;
+  worker: CloudRunWorkerSettings;
+  record: MachineInstallRecord;
+  providers: Set<PrepareCloudRunRequest["provider"]>;
+  retryProviders: Set<PrepareCloudRunRequest["provider"]>;
+}
+
+function preparationIdentity(machine: MachineRecord, record: MachineInstallRecord): string {
+  return JSON.stringify([machine.id, machine.awsInstanceId, machine.deviceId, machine.lastHello?.instanceId,
+    machine.lastHello?.instanceStartedAt, machine.lastHello?.instanceSequence, machine.lastHello?.appVersion,
+    record.installRoot, record.userDataDir, record.profileHome, record.serviceName, record.serviceScope,
+    record.target.host, record.target.port, record.target.user, record.target.identityFile, record.target.hostKeyAlias]);
 }
 
 export function cloudEnvironmentDirectory(environmentId: string): string {
@@ -40,6 +58,7 @@ export class CloudRunPreparationService {
   private projects?: Promise<Map<string, Record<string, string>>>;
   private projectTasks = new Map<string, Promise<void>>();
   private states = new Map<string, CloudRunPreparationState>();
+  private prepared?: PreparedMachine;
 
   constructor(private readonly options: Options) {}
 
@@ -121,23 +140,27 @@ export class CloudRunPreparationService {
     if (typeof request?.operationId !== "string" || !request.operationId.trim() || (request.provider !== "codex-cli" && request.provider !== "claude-code")) {
       throw new Error("Choose a supported provider before preparing Cloud run.");
     }
-    const previous = this.snapshot(request);
+    request = { ...request };
     let currentInstance: string | undefined;
-    try { currentInstance = request.instanceId ?? await this.options.configuredInstanceId?.(); }
+    let prepared: PreparedMachine | undefined;
+    try {
+      currentInstance = await this.options.configuredInstanceId();
+      if (request.instanceId && request.instanceId !== currentInstance) {
+        throw new Error("This machine belongs to a different AWS instance. Select Cloud run to use the instance currently shown in Settings.");
+      }
+      prepared = await this.reusableMachine(currentInstance);
+    }
     catch (error) {
       this.publish(request, "error", { message: error instanceof Error ? error.message : String(error) });
       throw error;
     }
-    if (previous?.phase === "ready" && previous.machine && this.options.isConnected(previous.machine.id)
-      && (!this.options.configuredInstanceId || currentInstance === previous.machine.awsInstanceId)) {
-      const machine = (await this.options.listMachines()).find(item => item.id === previous.machine!.id);
-      if (machine?.lastHello?.appVersion === this.options.appVersion) {
-        progress({ operationId: request.operationId, message: "Cloud run is ready." });
-        return { machine };
-      }
+    if (prepared?.providers.has(request.provider)) {
+      this.publish(request, "ready", { message: "Cloud run is ready." }, prepared.machine);
+      progress({ operationId: request.operationId, message: "Cloud run is ready." });
+      return { machine: prepared.machine };
     }
     // A second provider waits for the same machine, then checks its own login.
-    if (this.active && (this.activeProvider !== request.provider || this.activeInstance !== request.instanceId)) {
+    if (this.active && (this.activeProvider !== request.provider || this.activeInstance !== currentInstance)) {
       const waiting = { message: "Waiting for the other cloud setup to finish…" };
       this.publish(request, "preparing", waiting);
       progress({ ...waiting, operationId: request.operationId });
@@ -152,8 +175,13 @@ export class CloudRunPreparationService {
     if (this.latest) listener(this.latest);
     if (!this.active) {
       this.activeProvider = request.provider;
-      this.activeInstance = request.instanceId;
-      this.active = this.run(request.provider, request.instanceId).finally(() => {
+      this.activeInstance = currentInstance;
+      this.active = this.run(request.provider, currentInstance).catch(error => {
+        // Refresh access when retrying the failed provider, without making
+        // another member repeat a preparation that already succeeded.
+        if (this.prepared && this.prepared.instanceId === currentInstance) this.prepared.retryProviders.add(request.provider);
+        throw error;
+      }).finally(() => {
         this.active = undefined;
         this.activeProvider = undefined;
         this.activeInstance = undefined;
@@ -176,7 +204,33 @@ export class CloudRunPreparationService {
     for (const listener of this.listeners) listener(snapshot);
   }
 
+  private async reusableMachine(instanceId?: string): Promise<PreparedMachine | undefined> {
+    const prepared = this.prepared;
+    if (!prepared || prepared.instanceId !== instanceId || !this.options.isConnected(prepared.machine.id)) return;
+    const [machines, installs] = await Promise.all([this.options.listMachines(), this.options.listInstalls()]);
+    const machine = machines.find(item => item.id === prepared.machine.id);
+    const record = installs.find(item => item.machineId === prepared.machine.id);
+    if (!machine || !record || !this.options.isConnected(machine.id) || machine.lastHello?.appVersion !== this.options.appVersion
+      || preparationIdentity(machine, record) !== prepared.identity) return;
+    return { ...prepared, machine, record };
+  }
+
+  private remember(instanceId: string, machine: MachineRecord, record: MachineInstallRecord,
+    worker: CloudRunWorkerSettings): PreparedMachine {
+    const identity = preparationIdentity(machine, record);
+    const providers = new Set(this.prepared?.identity === identity ? this.prepared.providers : undefined);
+    return this.prepared = { instanceId, machine, record, worker, identity, providers, retryProviders: new Set() };
+  }
+
   private async run(provider: PrepareCloudRunRequest["provider"], expectedInstanceId?: string): Promise<PrepareCloudRunResult> {
+    const prepared = await this.reusableMachine(expectedInstanceId);
+    if (prepared && !prepared.retryProviders.has(provider)) {
+      if (!prepared.providers.has(provider)) {
+        await this.options.prepareProvider(prepared.worker, provider, prepared.record, snapshot => this.report(snapshot));
+        prepared.providers.add(provider);
+      }
+      return { machine: prepared.machine };
+    }
     this.report({ message: "Checking your AWS instance…" });
     const status = await this.options.aws.status();
     if (!status.handle || !status.configured || status.state !== "running") {
@@ -197,7 +251,9 @@ export class CloudRunPreparationService {
     const existing = installs.find(item => item.machineId === machine?.id);
     if (machine && existing?.installRoot && this.options.isConnected(machine.id) && machine.lastHello?.appVersion === this.options.appVersion) {
       // Selecting another member must never drain an already running machine.
+      await this.options.prepareMachine(worker, existing);
       await this.options.prepareProvider(worker, provider, existing, snapshot => this.report(snapshot));
+      this.remember(instanceId, machine, existing, worker).providers.add(provider);
       this.report({ message: "Cloud run is ready." });
       return { machine };
     }
@@ -226,6 +282,7 @@ export class CloudRunPreparationService {
     this.report({ message: "Cloud run is ready." });
     const restored = (await this.options.listMachines()).find(item => item.id === result.record.machineId);
     if (!restored) throw new Error("The cloud machine was removed during setup. Select Cloud run again.");
+    this.remember(instanceId, restored, result.record, worker).providers.add(provider);
     return { machine: restored };
   }
 }

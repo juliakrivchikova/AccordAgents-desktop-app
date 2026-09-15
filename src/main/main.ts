@@ -469,11 +469,15 @@ const cloudRunPreparation = new CloudRunPreparationService({
   isConnected: (machineId) => Boolean(machineLinkService?.isMachineConnected(machineId)),
   bootstrapProject: (machineId, localPath, signal, progress) => machineInstallerService.bootstrapProjectMirror({ machineId, localPath }, signal, progress),
   saveInstall: (record) => settingsService.saveMachineInstall(record),
-  prepareProvider: async (worker, provider, record, progress) => {
+  prepareMachine: async (worker, record) => {
     if (!worker.host) throw new Error("AWS did not return an address for this instance.");
     const current = { ...record, target: { ...worker, host: worker.host } };
-    const scopedWorker = { ...worker, workerRoot: record.installRoot };
     await machineInstallerService.ensureEnvironmentOwner(current);
+    await prepareMachineProfile(current);
+  },
+  prepareProvider: async (worker, provider, record, progress) => {
+    if (!worker.host) throw new Error("AWS did not return an address for this instance.");
+    const scopedWorker = { ...worker, workerRoot: record.installRoot };
     const options = { requiredProviderKind: provider, profileHome: record.profileHome, maintenance: {
       runtimePath: `${record.installRoot}/current/accordagents-machine.cjs`,
       userDataDir: record.userDataDir,
@@ -483,7 +487,6 @@ const cloudRunPreparation = new CloudRunPreparationService({
     let report = await cloudRunDoctorService.diagnose(scopedWorker, options);
     if (!report.ok) report = await cloudRunDoctorService.setup(scopedWorker, progress, options);
     if (!report.ok) throw new Error(report.message);
-    await prepareMachineProfile(current);
   }
 });
 void machineInstallerService.recoverInterruptedOperation();
