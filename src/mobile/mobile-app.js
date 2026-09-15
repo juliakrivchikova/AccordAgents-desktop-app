@@ -2105,10 +2105,13 @@
     const workerIds = record && Array.isArray(record.ids) ? record.ids.filter(function (id) {
       return typeof id === "string" && id.trim();
     }) : [];
+    // The chat on screen is being read only while the page is visible; a
+    // push counted for it behind a locked screen is still news.
     const activeId = selectedConversationId();
+    const viewingActive = Boolean(activeId) && !document.hidden;
     const merged = loadUnreadConversationIds();
     for (const id of workerIds) {
-      if (merged.indexOf(id) < 0 && id !== activeId) {
+      if (merged.indexOf(id) < 0 && !(viewingActive && id === activeId)) {
         merged.push(id);
       }
     }
@@ -2129,6 +2132,38 @@
   function timelinePageFor(conversationId) {
     const page = loadTimelinePages()[conversationId];
     return page && typeof page === "object" ? page : undefined;
+  }
+
+  // Where "earlier" continues from. An answer to a request for the page before
+  // a message always moves it back. The latest page — asked on every open,
+  // every pull and every return to the foreground — must not move it forward
+  // past history this phone already holds: each of those reset it to the page
+  // below the latest one, so the next taps re-fetched rows already on screen
+  // and showed nothing.
+  async function adoptTimelinePage(conversationId, payload) {
+    const page = payload.page;
+    const existing = timelinePageFor(conversationId);
+    if (page.earlier !== true && existing && existing.beforeMessageId &&
+      existing.beforeMessageId !== page.beforeMessageId &&
+      await holdsHistoryBefore(conversationId, payload.events)) {
+      return;
+    }
+    saveTimelinePage(conversationId, page);
+  }
+
+  async function holdsHistoryBefore(conversationId, events) {
+    const pageTimes = (Array.isArray(events) ? events : []).map(function (event) {
+      return Date.parse((event && event.createdAt) || "");
+    }).filter(Number.isFinite);
+    if (pageTimes.length === 0) {
+      return false;
+    }
+    const pageOldest = Math.min.apply(null, pageTimes);
+    const entries = await listTimelineEntries(conversationId).catch(function () { return []; });
+    return entries.some(function (entry) {
+      const time = Date.parse((entry && entry.createdAt) || "");
+      return Number.isFinite(time) && time < pageOldest;
+    });
   }
 
   function saveTimelinePage(conversationId, page) {
@@ -2898,7 +2933,21 @@
       activeRelaySocket.close(1000, "mobile relay socket replaced");
     }
     activeRelaySocketKey = key;
-    activeRelaySocketPromise = openRelaySocket(relayUrl, pairing).then(function (socket) {
+    const opening = openRelaySocket(relayUrl, pairing).then(function (socket) {
+      // Dropped or replaced while this open was in flight — the foreground
+      // resync closing a frozen socket and dialling again, a re-pairing — so
+      // this socket must not become the live one beside the replacement: the
+      // relay seats one phone, and the collector would be left on the loser.
+      // Close it and answer with whatever is current instead.
+      if (activeRelaySocketPromise !== opening) {
+        if (socket.readyState < 2) {
+          socket.close(1000, "mobile relay socket superseded");
+        }
+        if (activeRelaySocketKey !== key) {
+          throw new Error("Relay socket replaced by another pairing.");
+        }
+        return getRelaySocket(relayUrl, pairing);
+      }
       activeRelaySocket = socket;
       socket.addEventListener("close", function () {
         if (activeRelaySocket === socket) {
@@ -2909,12 +2958,23 @@
       }, { once: true });
       return socket;
     }).catch(function (error) {
+      if (activeRelaySocketPromise !== opening) {
+        // Superseded while opening — typically the relay dismissed it the
+        // moment the replacement was seated. Its failure is not the
+        // replacement's: whoever waited on this open continues on the
+        // current socket instead of failing a request the User will see.
+        if (activeRelaySocketKey !== key) {
+          throw error;
+        }
+        return getRelaySocket(relayUrl, pairing);
+      }
       activeRelaySocket = undefined;
       activeRelaySocketPromise = undefined;
       activeRelayTimelineCollectorSocket = undefined;
       throw error;
     });
-    return activeRelaySocketPromise;
+    activeRelaySocketPromise = opening;
+    return opening;
   }
 
   function relaySocketKey(relayUrl, pairing) {
@@ -3619,7 +3679,7 @@
     // a slow answer can outlive the request's own wait and still land through
     // the socket collector — the rows must not arrive without their cursor.
     if (payload.page && typeof payload.page === "object") {
-      saveTimelinePage(conversationId, payload.page);
+      await adoptTimelinePage(conversationId, payload);
     }
     let stored = 0;
     let changed = 0;
@@ -5969,6 +6029,11 @@
     navigator.serviceWorker.addEventListener("message", function (event) {
       if (event.data && event.data.type === "accord-open-conversation") {
         openConversationFromNotification(event.data.conversationId);
+      }
+      // A push counted while this page was open: fold it in now, so the chat
+      // on screen is not left on the icon as unread until the next return.
+      if (event.data && event.data.type === "accord-unread-changed") {
+        void adoptWorkerUnread().then(renderChatList).catch(function () { return undefined; });
       }
     });
   }

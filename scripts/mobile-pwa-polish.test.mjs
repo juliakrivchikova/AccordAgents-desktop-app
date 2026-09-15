@@ -325,6 +325,16 @@ test("PWA polish: search, times, unread, members, earlier history, slash menu, r
     assert.deepEqual(calls.timeline.filter((call) => call.conversationId === CHAT_A).map((call) => call.beforeMessageId), [undefined, "a-010"], "the desktop was asked for the page before the oldest message it had given");
     assert.equal(await evaluate(`(() => document.getElementById("load-earlier").hidden)()`), true, "nothing earlier remains, so the offer goes away");
 
+    // The latest page asked again — a pull, a reopen, a return to the
+    // foreground — names a-010 as the page below it and says there is more.
+    // The phone already holds a-008: "earlier" must not move forward to a
+    // page it has, or the next taps would re-fetch rows on screen and show
+    // nothing.
+    await evaluate(`window.AccordAgentsMobile.refreshOpenTimeline().then(() => true)`);
+    assert.deepEqual(calls.timeline.at(-1), { conversationId: CHAT_A, beforeMessageId: undefined }, "the refresh asked for the latest page");
+    assert.deepEqual(await evaluate(`window.AccordAgentsMobile.timelinePageFor("${CHAT_A}")`), { hasMoreBefore: false, beforeMessageId: "a-008" }, "the cursor stays where the earlier pages left it");
+    assert.equal(await evaluate(`(() => document.getElementById("load-earlier").hidden)()`), true, "and the offer stays away: this phone holds everything the desktop has");
+
     // --- a picture, opened at full size ----------------------------------
     await waitFor(() => evaluate(`(() => document.querySelector('#message-list .message-image')?.dataset.state)()`), (state) => state === "ready", "the picture's bytes arrive by id");
     await evaluate(`(() => { document.querySelector('#message-list .message-image').click(); return true; })()`);
@@ -378,6 +388,63 @@ test("PWA polish: search, times, unread, members, earlier history, slash menu, r
     assert.ok(resync.awayMs >= 5000, "after a real absence, which is when the socket is replaced");
     await waitFor(() => evaluate(`(() => document.getElementById("connection-state").textContent)()`), (text) => text === "Synced", "and the chat is synced again");
 
+    // --- an open still in flight when the resync drops the socket ----------
+    // The keep-alive or a request can be dialling at the moment the foreground
+    // resync closes the frozen socket and dials again. The relay seats the
+    // newer connection and dismisses the older; the superseded open must
+    // neither seat itself beside the replacement nor, failing, discard the
+    // replacement's state — either left the live collector on a dead socket
+    // and a third dial evicting the good one. The first socket's frames are
+    // delivered late so its open is still pending when the resync happens.
+    await evaluate(`(() => {
+      const Native = globalThis.WebSocket;
+      window.__native = Native;
+      window.__made = [];
+      const Wrapped = function (url) {
+        const socket = new Native(url);
+        const index = window.__made.length;
+        window.__made.push(socket);
+        if (index === 0) {
+          const add = socket.addEventListener.bind(socket);
+          socket.addEventListener = function (type, listener, options) {
+            const late = type === "message"
+              ? function (event) { setTimeout(function () { listener.call(socket, event); }, 1500); }
+              : listener;
+            return add(type, late, options);
+          };
+        }
+        return socket;
+      };
+      Wrapped.prototype = Native.prototype;
+      globalThis.WebSocket = Wrapped;
+      window.AccordAgentsMobile.dropRelaySocket("race: start from no socket");
+      window.__first = window.AccordAgentsMobile.refreshOpenTimeline();
+      return true;
+    })()`);
+    await waitFor(() => evaluate(`window.__made.length`), (n) => n === 1, "the first open is in flight");
+    await evaluate(`(() => {
+      window.AccordAgentsMobile.dropRelaySocket("race: foreground resync");
+      window.__second = window.AccordAgentsMobile.refreshChatList();
+      return true;
+    })()`);
+    await waitFor(() => evaluate(`window.__made.length`), (n) => n >= 2, "the resync dialled again while the first open was still in flight");
+    await evaluate(`Promise.all([window.__first, window.__second]).then(() => true)`);
+    await new Promise((r) => setTimeout(r, 750));
+    assert.equal(await evaluate(`window.__made.length`), 2, "no third dial: the superseded open did not discard the replacement");
+    await waitFor(
+      () => evaluate(`window.__made.map((socket) => socket.readyState)`),
+      (states) => states[0] !== 1 && states.filter((state) => state === 1).length === 1,
+      "the superseded first socket is closed and exactly one socket stays open"
+    );
+    await waitFor(() => evaluate(`(() => document.getElementById("connection-state").textContent)()`), (text) => text === "Synced", "the request that was waiting on the superseded open finished on the replacement");
+    control.pushConversationSnapshot({
+      id: CHAT_A, kind: "chat", title: "Alpha planning", createdAt: at(0), updatedAt: at(21),
+      messages: [{ id: "a-021", role: "participant", participantLabel: "@drew", content: "After the race.", status: "done", createdAt: at(21) }],
+      findings: [], metadata: { activeRunIds: [] }
+    });
+    await waitFor(rows, (list) => list.some((row) => row.text === "After the race."), "a live batch after the race arrives: the collector sits on the socket that stayed");
+    await evaluate(`(() => { globalThis.WebSocket = window.__native; return true; })()`);
+
     // --- an earlier page that arrives late, through the socket collector ------
     // The request's own wait can end before a slow answer lands. The answer
     // still carries its cursor and says it is history: the cursor is saved
@@ -410,14 +477,27 @@ test("PWA polish: search, times, unread, members, earlier history, slash menu, r
           { conversationId: "${CHAT_B}", kind: "mobile.timeline.events" },
           { conversationId: "${CHAT_B}", kind: "mobile.notice.reply" },
           { conversationId: "${CHAT_C}", kind: "mobile.notice.approval" },
-          { conversationId: "conv-unknown", kind: "mobile.notice.reply" }
+          { conversationId: "conv-unknown", kind: "mobile.notice.reply" },
+          { conversationId: "${CHAT_A}", kind: "mobile.notice.reply" }
         ]
       }));
     })`);
     assert.deepEqual(described, [
       { conversationId: CHAT_B, body: "Beta bugs: reply ready" },
-      { conversationId: CHAT_C, body: "Gamma notes: approval needed" }
+      { conversationId: CHAT_C, body: "Gamma notes: approval needed" },
+      { conversationId: CHAT_A, body: "Alpha planning: reply ready" }
     ], "each named chat gets its own line from the phone's own memory; an unknown chat gets nothing and message text never appears");
+    // The page is showing Alpha right now. The worker counted it too — it
+    // cannot know — so the page folds the count back at once: the icon says
+    // three for the chats not on screen, not four, and the mirror the next
+    // push builds on no longer names Alpha. Before, Alpha stayed on the icon
+    // until the app was next brought back to the foreground.
+    await waitFor(
+      () => evaluate(`JSON.parse(localStorage.getItem("accordagents.mobile.unreadConversationIds.v1") || "[]")`),
+      (ids) => ids.length === 3 && !ids.includes(CHAT_A),
+      "the page adopts the worker's count for the chats it is not showing"
+    );
+    await waitFor(() => evaluate(`(() => window.__badge.at(-1))()`), (n) => n === 3, "the icon number is the three chats not on screen");
     const mirrored = await evaluate(`new Promise((resolve, reject) => {
       const open = self.AccordMobileDb.openControlDb(indexedDB);
       open.then((db) => {
@@ -426,7 +506,7 @@ test("PWA polish: search, times, unread, members, earlier history, slash menu, r
         request.onerror = () => { db.close(); reject(request.error); };
       }).catch(reject);
     })`);
-    assert.deepEqual([...mirrored].sort(), [CHAT_B, CHAT_C, "conv-unknown"].sort(), "the worker counted every chat that moved for the icon, known or not");
+    assert.deepEqual([...mirrored].sort(), [CHAT_B, CHAT_C, "conv-unknown"].sort(), "the worker counted every chat that moved, known or not, and the page took the one on screen back out");
   } finally {
     app?.close();
     control.close();

@@ -255,6 +255,7 @@ async function describeArrivals(arrivals) {
     }
   }
   await applyBadge(unread.length);
+  await tellPagesUnreadChanged();
   const notifications = [];
   for (const [conversationId, entry] of byConversation) {
     const title = typeof titles[conversationId] === "string" ? titles[conversationId].trim() : "";
@@ -265,6 +266,20 @@ async function describeArrivals(arrivals) {
     notifications.push({ conversationId, body: `${title}: ${what}` });
   }
   return notifications;
+}
+
+/** A page open right now folds this count in at once. Without it, a push for
+ *  the very chat the page was showing left that chat on the icon as unread
+ *  until the app was next brought back to the foreground. */
+async function tellPagesUnreadChanged() {
+  try {
+    const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const client of clients) {
+      client.postMessage({ type: "accord-unread-changed" });
+    }
+  } catch {
+    // The page reconciles on its next return to the foreground regardless.
+  }
 }
 
 async function applyBadge(count) {

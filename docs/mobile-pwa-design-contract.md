@@ -24,6 +24,15 @@ The functional PWA uses the "Chat timeline" screen from the handoff as the paire
 
 Desktop/browser QA may show the phone frame centered. Narrow real-mobile viewports fill the viewport without the outer preview border/shadow, but the interior component geometry and typography stay the same.
 
+## Chats header
+
+Decided by the User on 2026-09-15 (PWA polish round): the handoff's "New chat"
+button is not rendered. The phone cannot create a chat — that needs the desktop's
+member roster and a protocol the phone does not have — and a control that does
+nothing is worse than none. The "Search chats" button stays and filters the list
+the phone already holds (title, last sender, last message) without asking the
+desktop. The header geometry is otherwise the handoff's.
+
 ## Dark appearance
 
 Decided by the User on 2026-09-15 (PWA polish round): the PWA follows the phone's
