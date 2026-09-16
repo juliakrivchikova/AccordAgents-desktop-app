@@ -706,6 +706,10 @@ export interface ChatParticipantRequestDelegate {
 export interface MachineTurnDispatcher {
   runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult>;
   cancelMachineRun?(request: { machineId: string; conversationId: string; runId: string; onStopPending?: (machineName: string) => Promise<void> }): Promise<void>;
+  /** The bytes of a picture this copy does not hold on disk. Only a machine
+   *  supplies this: replication brings an attachment's metadata here without
+   *  its file, and the desktop that owns the chat still has it. */
+  fetchAttachment?(conversationId: string, attachmentId: string): Promise<{ dataBase64: string }>;
   /** Forwards the desktop's decision on an approval raised on a machine. */
   respondToMachineApproval?(request: {
     machineId: string;
@@ -15408,6 +15412,20 @@ export class ChatService {
     try {
       bytes = await readFile(filePath);
     } catch (error) {
+      // A machine holds the chat's text but not its pictures: replication
+      // carries attachment metadata without the file. Ask the desktop that
+      // owns the chat, and keep what it sends, so the next read is local.
+      const fetched = await this.fetchAttachmentFromOwner(conversationId, attachment).catch((fetchError) => {
+        void this.debugLogs.write("chat.attachments.fetch-failed", {
+          conversationId,
+          attachmentId: attachment.id,
+          message: fetchError instanceof Error ? fetchError.message : String(fetchError)
+        });
+        return undefined;
+      });
+      if (fetched) {
+        return fetched;
+      }
       void this.debugLogs.write("chat.attachments.missing", {
         conversationId,
         attachmentId: attachment.id,
@@ -15418,6 +15436,33 @@ export class ChatService {
       );
     }
     return bytes.toString("base64");
+  }
+
+  /** The picture's bytes from the desktop that owns the chat, written to this
+   *  machine's own store so one fetch serves every later read. A copy that is
+   *  not a machine has no owner to ask and simply reports it missing. */
+  private async fetchAttachmentFromOwner(conversationId: string, attachment: ChatImageAttachment): Promise<string | undefined> {
+    const fetch = this.machineLink?.fetchAttachment;
+    if (!fetch) {
+      return undefined;
+    }
+    const result = await fetch.call(this.machineLink, conversationId, attachment.id);
+    const dataBase64 = typeof result?.dataBase64 === "string" ? result.dataBase64 : "";
+    if (!dataBase64) {
+      return undefined;
+    }
+    const filePath = this.attachmentPath(conversationId, attachment.storageKey);
+    await mkdir(path.dirname(filePath), { recursive: true }).catch(() => undefined);
+    await writeFile(filePath, Buffer.from(dataBase64, "base64"), { mode: 0o600 }).catch((error) => {
+      // Not fatal: the member gets its picture even when this machine cannot
+      // keep a copy, it just pays for the fetch again next time.
+      void this.debugLogs.write("chat.attachments.cache-failed", {
+        conversationId,
+        attachmentId: attachment.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    });
+    return dataBase64;
   }
 
   private async prepareImageAttachments(conversationId: string, inputs: ChatImageInput[] | undefined): Promise<PreparedImageAttachments> {

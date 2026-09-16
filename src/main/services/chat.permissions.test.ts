@@ -12014,3 +12014,59 @@ test("Stop still reaches the machine when this desktop has no pending row for th
   assert.deepEqual(cancels, [{ machineId: "machine", runId: "run-on-machine" }],
     "a Stop for a machine-hosted run must be published to that machine");
 });
+
+test("a picture a machine does not hold is fetched from the desktop that owns the chat", async () => {
+  // The defect: conversation replication carries an attachment's metadata but
+  // never its file, and the machine link had no notion of attachments at all
+  // (zero references). A member running in the cloud could therefore see that
+  // the User attached a picture and could never read it: every read failed
+  // with AttachmentMissing, telling the User to resend an image that was not
+  // lost. The bytes now come from the desktop on demand.
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const attachment = {
+    id: "attachment-1", filename: "shot.png", mimeType: "image/png",
+    sizeBytes: 3, width: 1, height: 1,
+    storageKey: "attachments/11111111-1111-1111-1111-111111111111.png", createdAt: NOW
+  };
+  conversation.messages.push({
+    id: "user-picture", role: "user", content: "Look at this.", status: "done", createdAt: NOW,
+    metadata: { imageAttachments: [attachment] }
+  } as any);
+  const { service } = testService({ conversation });
+  const asked: Array<{ conversationId: string; attachmentId: string }> = [];
+  const bytes = Buffer.from("PNG").toString("base64");
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    fetchAttachment: async (conversationId: string, attachmentId: string) => {
+      asked.push({ conversationId, attachmentId });
+      return { dataBase64: bytes };
+    }
+  } as any);
+  const read = await service.readChatAttachment({ conversationId: conversation.id, attachmentId: attachment.id });
+  assert.equal(read.dataBase64, bytes, "the member must receive the picture the desktop holds");
+  assert.deepEqual(asked, [{ conversationId: conversation.id, attachmentId: attachment.id }]);
+});
+
+test("a picture no owner can supply is still reported as missing, not as empty bytes", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const attachment = {
+    id: "attachment-2", filename: "shot.png", mimeType: "image/png",
+    sizeBytes: 3, width: 1, height: 1,
+    storageKey: "attachments/22222222-2222-2222-2222-222222222222.png", createdAt: NOW
+  };
+  conversation.messages.push({
+    id: "user-picture-2", role: "user", content: "Look at this.", status: "done", createdAt: NOW,
+    metadata: { imageAttachments: [attachment] }
+  } as any);
+  const { service } = testService({ conversation });
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    fetchAttachment: async () => { throw new Error("The desktop did not answer with this picture in time."); }
+  } as any);
+  await assert.rejects(
+    service.readChatAttachment({ conversationId: conversation.id, attachmentId: attachment.id }),
+    /AttachmentMissing/
+  );
+});

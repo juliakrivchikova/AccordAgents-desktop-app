@@ -3225,6 +3225,9 @@ void app.whenReady().then(async () => {
       desktopDeviceId: desktopIdentity.originId,
       eventStorage: storageService,
       eventLog: chatEventLogService,
+      // A member on a machine reads the User's pictures from here: a chat's
+      // text is replicated to that machine, its attachment files are not.
+      readChatAttachment: (request) => chatService.readChatAttachment(request),
       // Every device the User has trusted is named to each machine, in the
       // room that machine is met in. That is what lets a machine keep working
       // when this desktop is closed.

@@ -163,6 +163,45 @@ export class MachineHostService {
     return this.choiceExecutor.applyAction(event, payload);
   }
 
+  /** requestId -> whoever is waiting for those picture bytes. */
+  private readonly pendingAttachments = new Map<string, {
+    resolve: (value: { dataBase64: string; mediaType?: string; fileName?: string }) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+
+  /**
+   * The bytes of a picture this chat carries, from the desktop that holds it.
+   *
+   * Replication brings the attachment's metadata here but not its file, so
+   * without this a member on a machine sees that the User attached a picture
+   * and can never read it. Bounded: a desktop that never answers fails the
+   * read rather than leaving the member waiting for the rest of its turn.
+   */
+  async requestAttachment(conversationId: string, attachmentId: string, timeoutMs = 30_000):
+  Promise<{ dataBase64: string; mediaType?: string; fileName?: string }> {
+    const requestId = randomUUID();
+    const pending = new Promise<{ dataBase64: string; mediaType?: string; fileName?: string }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingAttachments.delete(requestId);
+        reject(new Error("The desktop did not answer with this picture in time."));
+      }, timeoutMs);
+      timer.unref?.();
+      this.pendingAttachments.set(requestId, { resolve, reject, timer });
+    });
+    try {
+      await this.send({ type: "machine.attachment.request", requestId, conversationId, attachmentId });
+    } catch (error) {
+      const waiter = this.pendingAttachments.get(requestId);
+      if (waiter) {
+        this.pendingAttachments.delete(requestId);
+        clearTimeout(waiter.timer);
+      }
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+    return pending;
+  }
+
   applyApprovalAction(event: ChatEventEnvelope, payload: import("../../shared/chatActionEvents").ChatActionPayload): Promise<import("../../shared/machineLink").MachineApprovalResultBody> {
     return this.approvalExecutor.applyAction(event, payload);
   }
@@ -941,6 +980,22 @@ export class MachineHostService {
         }
         void this.runTurn(body);
         return;
+      case "machine.attachment.result": {
+        const waiter = this.pendingAttachments.get(body.requestId);
+        if (!waiter) return;
+        this.pendingAttachments.delete(body.requestId);
+        clearTimeout(waiter.timer);
+        if (body.ok && typeof body.dataBase64 === "string") {
+          waiter.resolve({
+            dataBase64: body.dataBase64,
+            ...(body.mediaType ? { mediaType: body.mediaType } : {}),
+            ...(body.fileName ? { fileName: body.fileName } : {})
+          });
+        } else {
+          waiter.reject(new Error(body.error ?? "The desktop could not read this picture."));
+        }
+        return;
+      }
       case "machine.turn.query":
         if (await this.options.eventStorage.nativeCommands().forRun(body.runId)) {
           await this.repeatCommandResult(body.runId);

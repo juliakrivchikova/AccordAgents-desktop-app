@@ -364,6 +364,12 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   chatService.setParticipantRequestDelegate({
     delegateParticipantRequest: (request) => host.delegateParticipantRequest(request)
   });
+  // And a picture the User attached is read from the desktop too: the chat's
+  // text is replicated here, its attachment files are not.
+  chatService.setMachineLink({
+    runTurn: async () => { throw new Error("A machine does not dispatch turns to another machine."); },
+    fetchAttachment: (conversationId, attachmentId) => host.requestAttachment(conversationId, attachmentId)
+  });
   const powerConfig = await settingsService.getMachinePower();
   if (!powerConfig) {
     const priorPower = await storageService.machinePower().read();

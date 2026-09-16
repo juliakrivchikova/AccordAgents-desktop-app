@@ -69,6 +69,11 @@ export interface MachineLinkOptions {
   /** Produces the state a peer says a held action of its own is waiting for,
    *  by re-emitting the action that carries it. */
   serveChatActionDependency?: (dependency: ChatActionDependency) => Promise<boolean>;
+  /** The bytes of a picture a machine asks for. Replication carries an
+   *  attachment's metadata but not its file, so this desktop is where a
+   *  member running on a machine reads one from. */
+  readChatAttachment?: (request: { conversationId: string; attachmentId: string })
+    => Promise<{ attachment: { mimeType?: string; filename?: string }; dataBase64: string }>;
   now?: () => Date;
 }
 
@@ -1223,6 +1228,25 @@ export class MachineLinkService implements MachineTurnDispatcher {
       case "machine.conversation.resync":
         await this.handleResync(connection, body.conversationId);
         return;
+      case "machine.attachment.request": {
+        // Answered either way: a refusal tells the member the picture is
+        // unavailable, where silence would leave it waiting out its turn.
+        // ChatService checks the attachment belongs to the chat that asked.
+        const reply = { type: "machine.attachment.result" as const, requestId: body.requestId,
+          conversationId: body.conversationId, attachmentId: body.attachmentId };
+        try {
+          if (!this.options.readChatAttachment) throw new Error("This desktop cannot read chat pictures.");
+          const read = await this.options.readChatAttachment({
+            conversationId: body.conversationId, attachmentId: body.attachmentId
+          });
+          await this.send(connection, { ...reply, ok: true, dataBase64: read.dataBase64,
+            ...(read.attachment?.mimeType ? { mediaType: read.attachment.mimeType } : {}),
+            ...(read.attachment?.filename ? { fileName: read.attachment.filename } : {}) });
+        } catch (error) {
+          await this.send(connection, { ...reply, ok: false, error: errorMessage(error) }).catch(() => undefined);
+        }
+        return;
+      }
       case "machine.choice.result": {
         const pending = connection.pendingChoices.get(body.decisionId);
         try {

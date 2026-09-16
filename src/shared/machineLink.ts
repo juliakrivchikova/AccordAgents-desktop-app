@@ -244,6 +244,37 @@ export interface MachineConversationResyncBody {
   conversationId: string;
 }
 
+/** Machine -> desktop: the bytes of a picture this chat carries.
+ *
+ *  Conversation replication carries an attachment's metadata but not its file,
+ *  so a member running on a machine could see that a picture exists and never
+ *  read it. Fetched on demand rather than replicated with the chat: a chat's
+ *  pictures are far larger than its text and a member usually needs none of
+ *  them. The phone asks the desktop for the same bytes the same way
+ *  (`mobile.attachment.request`). */
+export interface MachineAttachmentRequestBody {
+  type: "machine.attachment.request";
+  requestId: string;
+  conversationId: string;
+  attachmentId: string;
+}
+
+/** Desktop -> machine: the answer to one machine.attachment.request. `ok`
+ *  false carries why, so the member is told the picture is unavailable rather
+ *  than waiting for bytes that will never come. */
+export interface MachineAttachmentResultBody {
+  type: "machine.attachment.result";
+  requestId: string;
+  conversationId: string;
+  attachmentId: string;
+  ok: boolean;
+  /** Base64 of the file, present only when ok. */
+  dataBase64?: string;
+  mediaType?: string;
+  fileName?: string;
+  error?: string;
+}
+
 /** Desktop -> machine: the first copy of a chat (shell plus every batch) has
  *  been sent in full; the machine may now compare its own rows against what
  *  the desktop holds. */
@@ -359,7 +390,9 @@ export type MachineLinkMessage =
   | MachineTrustRosterBody
   | MachineParticipantsDelegateBody
   | MachineChoiceAnswerBody
-  | MachineChoiceResultBody;
+  | MachineChoiceResultBody
+  | MachineAttachmentRequestBody
+  | MachineAttachmentResultBody;
 
 export type MachineLinkMessageType = MachineLinkMessage["type"];
 
