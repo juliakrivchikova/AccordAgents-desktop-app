@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { CloudRunDoctorService, enabledCloudProviders } from "./cloudRunDoctor";
+import { spawnSync } from "node:child_process";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { performance } from "node:perf_hooks";
+import test, { type TestContext } from "node:test";
+import { CloudRunDoctorService, codexAuthProbeShell, enabledCloudProviders } from "./cloudRunDoctor";
+import { shellQuotePosix } from "./cloudRunWorkers";
 import type { CloudRunSshExecRequest } from "./cloudRunDoctor";
 import { isTransientSshError, runWithSshRetries } from "./sshRetry";
 import { CommandError } from "./command";
@@ -150,6 +156,46 @@ test("diagnose reports ready when every probe passes", async () => {
   assert.equal(report.checks.find((check) => check.id === "codex-auth")?.status, "pass");
   assert.equal(report.checks.find((check) => check.id === "userns")?.status, "pass");
   assert.match(report.checks.find((check) => check.id === "persistent-storage")?.detail ?? "", /ext4/);
+});
+
+test("the worker probe asks codex login status first and falls back to app-server account/read", async () => {
+  const { service, commands } = doctorWith(async () => FULLY_PROVISIONED);
+  await service.diagnose({ ...WORKER, codexPath: "/opt/codex/bin/codex" });
+  const probe = commands.find((command) => command.includes("codex-auth="));
+  assert.ok(probe, "the probe script must report codex-auth");
+  assert.match(probe, /'\/opt\/codex\/bin\/codex' login status >\/dev\/null 2>&1 \|\| codex_account_ready/);
+  assert.match(probe, /'\/opt\/codex\/bin\/codex' app-server --listen stdio:\/\//);
+  assert.match(probe, /"method":"account\/read","id":2,"params":\{"refreshToken":false\}/);
+});
+
+test("the codex-auth probe shell mirrors local readiness against a fake codex", { timeout: 30_000 }, async (t) => {
+  if (process.platform === "win32" || spawnSync("sh", ["-c", "command -v timeout"], { encoding: "utf8" }).status !== 0) {
+    t.skip("needs a POSIX shell with coreutils timeout, like the Ubuntu worker");
+    return;
+  }
+  const cases: Array<{ mode: FakeCodexMode; expected: string; appServerStarts: boolean }> = [
+    { mode: "logged-in", expected: "codex-auth=ok", appServerStarts: false },
+    { mode: "no-openai-auth", expected: "codex-auth=ok", appServerStarts: true },
+    { mode: "account", expected: "codex-auth=ok", appServerStarts: true },
+    { mode: "signed-out", expected: "codex-auth=missing", appServerStarts: true },
+    { mode: "error", expected: "codex-auth=missing", appServerStarts: true },
+    { mode: "silent", expected: "codex-auth=missing", appServerStarts: true }
+  ];
+  for (const { mode, expected, appServerStarts } of cases) {
+    const fake = await fakeCodex(t, mode);
+    const startedAt = performance.now();
+    const result = spawnSync("sh", ["-c", codexAuthProbeShell(fake.executablePath)], { encoding: "utf8", timeout: 20_000 });
+    const elapsedMs = performance.now() - startedAt;
+
+    assert.equal(result.stdout.trim(), expected, `${mode}: ${result.stderr}`);
+    assert.equal(await fake.appServerStarted(), appServerStarts, `${mode} must ${appServerStarts ? "" : "not "}start app-server`);
+    if (mode === "silent") {
+      assert.ok(elapsedMs >= 8_000 && elapsedMs < 12_000, `silent app-server must give up after 8s, took ${elapsedMs}ms`);
+    } else {
+      assert.ok(elapsedMs < 5_000, `${mode} must settle without waiting, took ${elapsedMs}ms`);
+    }
+    assert.equal(await fake.appServerRunning(), false, `${mode} must leave no app-server behind`);
+  }
 });
 
 test("diagnose fails closed when worker or Codex sessions use volatile storage", async () => {
@@ -436,3 +482,78 @@ test("runWithSshRetries can stop retrying once output is produced (device-auth s
   }, { sleep: async () => {}, isTransient: (e) => !produced && isTransientSshError(e) }));
   assert.equal(calls, 2); // retried the pre-output failure once, did not retry after output
 });
+
+type FakeCodexMode = "logged-in" | "no-openai-auth" | "account" | "signed-out" | "error" | "silent";
+
+interface FakeCodex {
+  executablePath: string;
+  appServerStarted: () => Promise<boolean>;
+  appServerRunning: () => Promise<boolean>;
+}
+
+/**
+ * A `codex` stand-in for the probe shell: `login status` succeeds only in
+ * `logged-in` mode, and `app-server --listen stdio://` answers `account/read`
+ * according to the mode (never, for `silent`), records its pid, and like the
+ * real server exits once stdin closes.
+ */
+const fakeCodexAppServerScript = [
+  "const fs = require('node:fs');",
+  "const mode = process.env.FAKE_CODEX_MODE;",
+  "fs.writeFileSync(process.env.FAKE_CODEX_PID_FILE, String(process.pid));",
+  "process.stdout.on('error', () => {});",
+  "const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');",
+  "let buffer = '';",
+  "process.stdin.setEncoding('utf8');",
+  "process.stdin.on('data', (chunk) => {",
+  "  buffer += chunk;",
+  "  let lineBreak = buffer.indexOf('\\n');",
+  "  while (lineBreak >= 0) {",
+  "    const line = buffer.slice(0, lineBreak);",
+  "    buffer = buffer.slice(lineBreak + 1);",
+  "    lineBreak = buffer.indexOf('\\n');",
+  "    if (!line) continue;",
+  "    const request = JSON.parse(line);",
+  "    send({ method: 'currentTime/read', id: request.id, params: {} });",
+  "    if (request.method === 'initialize') send({ id: request.id, result: { userAgent: 'fake-codex' } });",
+  "    else if (mode === 'no-openai-auth') send({ id: request.id, result: { account: null, requiresOpenaiAuth: false } });",
+  "    else if (mode === 'account') send({ id: request.id, result: { account: { type: 'chatgpt', email: 'private@example.com' }, requiresOpenaiAuth: true } });",
+  "    else if (mode === 'signed-out') send({ id: request.id, result: { account: null, requiresOpenaiAuth: true } });",
+  "    else if (mode === 'error') send({ id: request.id, error: { code: -32000, message: 'fake account failure' } });",
+  "  }",
+  "});",
+  "process.stdin.on('end', () => process.exit(0));"
+].join("\n");
+
+async function fakeCodex(t: TestContext, mode: FakeCodexMode): Promise<FakeCodex> {
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-fake-cloud-codex-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const scriptPath = path.join(root, "app-server.js");
+  const pidPath = path.join(root, "app-server.pid");
+  const executablePath = path.join(root, "codex");
+  await writeFile(scriptPath, fakeCodexAppServerScript);
+  await writeFile(executablePath, [
+    "#!/bin/sh",
+    `if [ "$1 $2" = "login status" ]; then [ ${JSON.stringify(mode)} = logged-in ] && echo 'Logged in using ChatGPT' && exit 0; echo 'Not logged in' >&2; exit 1; fi`,
+    `[ "$*" = 'app-server --listen stdio://' ] || exit 2`,
+    `FAKE_CODEX_MODE=${JSON.stringify(mode)} FAKE_CODEX_PID_FILE=${shellQuotePosix(pidPath)} exec ${shellQuotePosix(process.execPath)} ${shellQuotePosix(scriptPath)}`,
+    ""
+  ].join("\n"));
+  await chmod(executablePath, 0o755);
+  const pid = async (): Promise<number | undefined> => {
+    const value = Number.parseInt(await readFile(pidPath, "utf8").catch(() => ""), 10);
+    return Number.isInteger(value) && value > 0 ? value : undefined;
+  };
+  return {
+    executablePath,
+    appServerStarted: async () => (await pid()) !== undefined,
+    appServerRunning: async () => {
+      const value = await pid();
+      if (value === undefined) {
+        return false;
+      }
+      const result = spawnSync("ps", ["-o", "stat=", "-p", String(value)], { encoding: "utf8" });
+      return result.status === 0 && result.stdout.trim() !== "" && !result.stdout.trim().startsWith("Z");
+    }
+  };
+}
