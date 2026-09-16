@@ -15,6 +15,7 @@ import {
   classifyClaudeAuth,
   classifyCodexAuth,
   CliReadinessService,
+  isCodexAccountReady,
   type CliReadinessDependencies
 } from "./cliReadiness";
 
@@ -100,6 +101,13 @@ test("provider auth fixtures classify ready, signed-out, malformed, offline, and
   assert.deepEqual(Object.keys(classifyClaudeAuth(captured(true, JSON.stringify({ loggedIn: true, email: "private@example.com" })))).sort(), ["authentication", "exitCode"]);
 });
 
+test("Codex account readiness follows the active provider contract", () => {
+  assert.equal(isCodexAccountReady({ account: null, requiresOpenaiAuth: false }), true);
+  assert.equal(isCodexAccountReady({ account: { email: "private@example.com" }, requiresOpenaiAuth: true }), true);
+  assert.equal(isCodexAccountReady({ account: null, requiresOpenaiAuth: true }), false);
+  assert.equal(isCodexAccountReady({ account: null }), false);
+});
+
 test("provider setup commands and official guides have one shared source", () => {
   assert.equal(CLI_PROVIDER_SETUP["claude-code"].loginCommand, "claude auth login");
   assert.match(CLI_PROVIDER_SETUP["codex-cli"].guideUrl, /^https:\/\//);
@@ -175,6 +183,41 @@ test("readiness runs version and authentication probes through each resolved exe
     { command: resolvedPaths.claude, args: ["auth", "status"] },
     { command: resolvedPaths.codex, args: ["login", "status"] }
   ]);
+});
+
+test("Codex readiness falls back to app-server when login status reports not logged in", async () => {
+  const accountProbes: Array<{ command: string; env: NodeJS.ProcessEnv }> = [];
+  const service = new CliReadinessService(undefined, fakeDependencies({
+    refreshEnvironment: async () => ({ ok: true, env: { PATH: "/login/bin" } }),
+    manualEnvironment: async () => ({ CODEX_HOME: "/private/codex-home" }),
+    lookup: async (command) => ({ status: "found", path: `/private/bin/${command}` }),
+    run: async (command, args) => {
+      if (command === "/private/bin/codex" && args.join(" ") === "login status") {
+        throw new CommandError("Not logged in", {
+          command,
+          args,
+          stdout: "",
+          stderr: "Not logged in",
+          exitCode: 1,
+          timedOut: false
+        });
+      }
+      return successfulCommand(command, args);
+    },
+    codexAccountReady: async (command, env) => {
+      accountProbes.push({ command, env: { ...env } });
+      return isCodexAccountReady({ account: null, requiresOpenaiAuth: false });
+    }
+  }));
+
+  const snapshot = await service.refresh({ force: true, trigger: "manual" });
+  const codex = snapshot.find((health) => health.kind === "codex-cli");
+
+  assert.equal(codex?.authentication, "ready");
+  assert.equal(accountProbes.length, 1);
+  assert.equal(accountProbes[0]?.command, "/private/bin/codex");
+  assert.equal(accountProbes[0]?.env.PATH, "/login/bin");
+  assert.equal(accountProbes[0]?.env.CODEX_HOME, "/private/codex-home");
 });
 
 test("a shared environment failure preserves the last complete readiness snapshot", async () => {
