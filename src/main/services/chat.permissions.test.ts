@@ -1,4 +1,5 @@
 import { NativeProcessUnavailableError } from "./nativeProcess";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12027,7 +12028,7 @@ test("a picture a machine does not hold is fetched from the desktop that owns th
   const attachment = {
     id: "attachment-1", filename: "shot.png", mimeType: "image/png",
     sizeBytes: 3, width: 1, height: 1,
-    storageKey: "attachments/11111111-1111-1111-1111-111111111111.png", createdAt: NOW
+    storageKey: `attachments/${randomUUID()}.png`, createdAt: NOW
   };
   conversation.messages.push({
     id: "user-picture", role: "user", content: "Look at this.", status: "done", createdAt: NOW,
@@ -12054,7 +12055,7 @@ test("a picture no owner can supply is still reported as missing, not as empty b
   const attachment = {
     id: "attachment-2", filename: "shot.png", mimeType: "image/png",
     sizeBytes: 3, width: 1, height: 1,
-    storageKey: "attachments/22222222-2222-2222-2222-222222222222.png", createdAt: NOW
+    storageKey: `attachments/${randomUUID()}.png`, createdAt: NOW
   };
   conversation.messages.push({
     id: "user-picture-2", role: "user", content: "Look at this.", status: "done", createdAt: NOW,
