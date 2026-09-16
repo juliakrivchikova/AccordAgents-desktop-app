@@ -361,8 +361,62 @@ function probeScript(worker: RemoteRunWorkerTarget): string {
     "printf 'git-name=%s\\n' \"$(git config --global user.name 2>/dev/null | head -c 80)\"",
     "printf 'git-email=%s\\n' \"$(git config --global user.email 2>/dev/null | head -c 80)\"",
     `is_ebs_path() { source="$(findmnt -n -o SOURCE -T "$1" 2>/dev/null)"; [ -n "$source" ] || return 1; device="$(readlink -f "$source" 2>/dev/null || printf '%s' "$source")"; lsblk -s -n -o SERIAL "$device" 2>/dev/null | tr -d '-' | grep -Eq '^vol[0-9a-fA-F]+'; }; worker_root=${workerRootExpression}; codex_home="\${CODEX_HOME:-$HOME/.codex}"; mkdir -p "$worker_root" "$codex_home"; worker_mount="$(findmnt -n -o SOURCE,FSTYPE -T "$worker_root" 2>/dev/null | head -c 200)"; codex_mount="$(findmnt -n -o SOURCE,FSTYPE -T "$codex_home" 2>/dev/null | head -c 200)"; if is_ebs_path "$worker_root" && is_ebs_path "$codex_home"; then printf 'persistent-storage=ok\\n'; else printf 'persistent-storage=missing\\n'; fi; printf 'storage-detail=%s | %s\\n' "$worker_mount" "$codex_mount"`,
-    `${shellQuotePosix(codexPath)} login status >/dev/null 2>&1 && printf 'codex-auth=ok\\n' || printf 'codex-auth=missing\\n'`,
+    codexAuthProbeShell(codexPath),
     `${shellQuotePosix(claudePath)} auth status 2>/dev/null | grep -Eq '"loggedIn"[[:space:]]*:[[:space:]]*true' && printf 'claude-auth=ok\\n' || printf 'claude-auth=missing\\n'`
+  ].join("; ");
+}
+
+/** Same budget as the local readiness probe (READINESS_PROBE_TIMEOUT_MS on main); the request writer polls every 100 ms. */
+const CODEX_ACCOUNT_PROBE_TIMEOUT_MS = 8_000;
+const CODEX_PROBE_INITIALIZE = {
+  method: "initialize",
+  id: 1,
+  params: {
+    clientInfo: { name: "accordagents", title: "AccordAgents", version: "0.1.0" },
+    capabilities: { experimentalApi: true, requestAttestation: false, optOutNotificationMethods: [] }
+  }
+};
+const CODEX_PROBE_ACCOUNT_READ = { method: "account/read", id: 2, params: { refreshToken: false } };
+
+/**
+ * Prints `codex-auth=ok` when Codex on the worker can run without a sign-in
+ * prompt, by the same rule as the local readiness probe (`classifyCodexAuth`
+ * and `isCodexAccountReady` on main): `codex login status` exits 0 and prints
+ * "Logged in", or it exits 1 saying exactly "Not logged in" and the app-server
+ * `account/read` result reports an account or `requiresOpenaiAuth: false` (a
+ * third-party provider with its own API key). Any other login-status outcome
+ * stays `missing`, as it stays "could not verify" locally.
+ *
+ * The exchange follows the local probe: `initialize`, wait for its reply,
+ * then `account/read`, with one shared budget. The app-server exits as soon as
+ * stdin closes, so the writer keeps the pipe open until the reader has settled;
+ * `timeout` ends a server that never answers, SIGKILL after SIGTERM like the
+ * local probe. The reader relies on Codex's compact JSON with results id-first
+ * (`{"id":2,"result":…}`) and errors error-first (`{"error":…,"id":2}`); server
+ * requests carry a `"method"` key and never match. Only a `result` line can
+ * report ok, so an error payload cannot forge readiness. The snippet also
+ * behaves the same under `set -e -u -o pipefail`.
+ */
+export function codexAuthProbeShell(codexPath: string): string {
+  const codex = shellQuotePosix(codexPath);
+  const ticks = CODEX_ACCOUNT_PROBE_TIMEOUT_MS / 100;
+  const serverTimeout = `timeout -k 2 ${Math.ceil(CODEX_ACCOUNT_PROBE_TIMEOUT_MS / 1000) + 2}`;
+  const initialize = shellQuotePosix(JSON.stringify(CODEX_PROBE_INITIALIZE));
+  const accountRead = shellQuotePosix(JSON.stringify(CODEX_PROBE_ACCOUNT_READ));
+  const wait = (until: string) => `while [ ! -e "$d/done" ]${until} && [ "$n" -lt ${ticks} ]; do sleep 0.1; n=$((n+1)); done`;
+  const writer = `{ printf '%s\\n' ${initialize}; n=0; ${wait(' && [ ! -e "$d/init" ]')}; if [ -e "$d/init" ]; then printf '%s\\n' ${accountRead}; ${wait("")}; fi; }`;
+  const server = `${serverTimeout} ${codex} app-server --listen stdio:// 2>/dev/null`;
+  const reader = "{ while IFS= read -r line; do case \"$line\" in"
+    + " '{\"id\":1,\"result\":'*) touch \"$d/init\";;"
+    + " '{\"id\":2,\"result\":'*'\"requiresOpenaiAuth\":false'*|'{\"id\":2,\"result\":'*'\"account\":{'*) touch \"$d/ready\"; break;;"
+    + " '{\"id\":1,\"error\":'*|'{\"error\":'*',\"id\":1}'|'{\"id\":2,\"result\":'*|'{\"id\":2,\"error\":'*|'{\"error\":'*',\"id\":2}') break;;"
+    + " esac; done; touch \"$d/done\"; }";
+  return [
+    `codex_account_ready() { d="$(mktemp -d)" || return 1; trap 'rm -rf "$d"' EXIT HUP TERM`,
+    `${writer} | ${server} | ${reader}`,
+    `[ -e "$d/ready" ]; r=$?; rm -rf "$d"; return "$r"; }`,
+    `if codex_login="$(${serverTimeout} ${codex} login status 2>&1)"; then codex_login_rc=0; else codex_login_rc=$?; fi`,
+    `if { [ "$codex_login_rc" -eq 0 ] && printf '%s\\n' "$codex_login" | grep -q '^Logged in'; } || { [ "$codex_login_rc" -eq 1 ] && [ "$codex_login" = "Not logged in" ] && codex_account_ready; }; then printf 'codex-auth=ok\\n'; else printf 'codex-auth=missing\\n'; fi`
   ].join("; ");
 }
 

@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { CloudRunDoctorService, enabledCloudProviders } from "./cloudRunDoctor";
+import { spawnSync } from "node:child_process";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { performance } from "node:perf_hooks";
+import test, { type TestContext } from "node:test";
+import { CloudRunDoctorService, codexAuthProbeShell, enabledCloudProviders } from "./cloudRunDoctor";
+import { shellQuotePosix } from "./cloudRunWorkers";
 import type { CloudRunSshExecRequest } from "./cloudRunDoctor";
 import { isTransientSshError, runWithSshRetries } from "./sshRetry";
 import { CommandError } from "./command";
@@ -150,6 +156,79 @@ test("diagnose reports ready when every probe passes", async () => {
   assert.equal(report.checks.find((check) => check.id === "codex-auth")?.status, "pass");
   assert.equal(report.checks.find((check) => check.id === "userns")?.status, "pass");
   assert.match(report.checks.find((check) => check.id === "persistent-storage")?.detail ?? "", /ext4/);
+});
+
+test("the worker probe asks codex login status first and falls back to app-server account/read", async () => {
+  const { service, commands } = doctorWith(async () => FULLY_PROVISIONED);
+  await service.diagnose({ ...WORKER, codexPath: "/opt/codex/bin/codex" });
+  const probe = commands.find((command) => command.includes("codex-auth="));
+  assert.ok(probe, "the probe script must report codex-auth");
+  assert.match(probe, /if codex_login="\$\(timeout -k 2 10 '\/opt\/codex\/bin\/codex' login status 2>&1\)"; then/);
+  assert.match(probe, /\[ "\$codex_login" = "Not logged in" \] && codex_account_ready/);
+  assert.match(probe, /'\/opt\/codex\/bin\/codex' app-server --listen stdio:\/\//);
+  assert.match(probe, /"method":"account\/read","id":2,"params":\{"refreshToken":false\}/);
+});
+
+test("the codex-auth probe shell mirrors local readiness against a fake codex", { timeout: 60_000 }, async (t) => {
+  if (process.platform === "win32" || spawnSync("sh", ["-c", "command -v timeout"], { encoding: "utf8" }).status !== 0) {
+    t.skip("needs a POSIX shell with coreutils timeout, like the Ubuntu worker");
+    return;
+  }
+  const cases: Array<{ mode: FakeCodexMode; expected: string; appServer: "not-started" | "eof" | "crashed" | "stuck" }> = [
+    { mode: "logged-in", expected: "codex-auth=ok", appServer: "not-started" },
+    { mode: "login-odd", expected: "codex-auth=missing", appServer: "not-started" },
+    { mode: "login-broken", expected: "codex-auth=missing", appServer: "not-started" },
+    { mode: "no-openai-auth", expected: "codex-auth=ok", appServer: "eof" },
+    { mode: "account", expected: "codex-auth=ok", appServer: "eof" },
+    { mode: "signed-out", expected: "codex-auth=missing", appServer: "eof" },
+    { mode: "initialize-error", expected: "codex-auth=missing", appServer: "eof" },
+    { mode: "error", expected: "codex-auth=missing", appServer: "eof" },
+    { mode: "error-with-account", expected: "codex-auth=missing", appServer: "eof" },
+    { mode: "crash", expected: "codex-auth=missing", appServer: "crashed" },
+    { mode: "silent", expected: "codex-auth=missing", appServer: "eof" },
+    { mode: "stuck", expected: "codex-auth=missing", appServer: "stuck" }
+  ];
+  for (const { mode, expected, appServer } of cases) {
+    const fake = await fakeCodex(t, mode);
+    const startedAt = performance.now();
+    const result = await fake.runProbeShell();
+    const elapsedMs = performance.now() - startedAt;
+
+    assert.equal(result.stdout.trim(), expected, `${mode}: ${result.stderr}`);
+    assert.equal(await fake.appServerOutcome(), appServer, `${mode}: app-server outcome`);
+    if (appServer !== "not-started" && appServer !== "crashed") {
+      // account/read is sent only after a successful initialize reply, as locally.
+      assert.deepEqual(await fake.requests(), mode === "initialize-error" ? ["initialize"] : ["initialize", "account/read"], `${mode}: request order`);
+    }
+    if (mode === "silent") {
+      // The writer gives up after the 8s budget and the server exits on EOF, well before timeout's 10s SIGTERM.
+      assert.ok(elapsedMs >= 8_000 && elapsedMs < 12_000, `silent app-server must give up after 8s, took ${elapsedMs}ms`);
+    } else if (mode === "stuck") {
+      // A server that ignores both EOF and SIGTERM is only ended by timeout's SIGKILL escalation two seconds later.
+      assert.ok(elapsedMs >= 12_000 && elapsedMs < 16_000, `stuck app-server must be killed after 10s + 2s, took ${elapsedMs}ms`);
+    } else {
+      assert.ok(elapsedMs < 5_000, `${mode} must settle without waiting, took ${elapsedMs}ms`);
+    }
+    assert.equal(await fake.appServerRunning(), false, `${mode} must leave no app-server behind`);
+  }
+
+  // A worker where mktemp cannot create the flag directory reports missing instead of hanging or lying.
+  const fake = await fakeCodex(t, "no-openai-auth");
+  const stubs = await mkdtemp(path.join(tmpdir(), "accordagents-fake-mktemp-"));
+  t.after(() => rm(stubs, { recursive: true, force: true }));
+  await writeFile(path.join(stubs, "mktemp"), "#!/bin/sh\necho 'mktemp: failed to create directory' >&2\nexit 1\n");
+  await chmod(path.join(stubs, "mktemp"), 0o755);
+  const noTemp = await fake.runProbeShell({ PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ""}` });
+  assert.equal(noTemp.stdout.trim(), "codex-auth=missing");
+  assert.equal(await fake.appServerOutcome(), "not-started");
+
+  // Without coreutils timeout the probe fails closed instead of running an unbounded server.
+  await writeFile(path.join(stubs, "timeout"), "#!/bin/sh\necho 'timeout: not found' >&2\nexit 127\n");
+  await chmod(path.join(stubs, "timeout"), 0o755);
+  await rm(path.join(stubs, "mktemp"));
+  const noTimeout = await fake.runProbeShell({ PATH: `${stubs}${path.delimiter}${process.env.PATH ?? ""}` });
+  assert.equal(noTimeout.stdout.trim(), "codex-auth=missing");
+  assert.equal(await fake.appServerOutcome(), "not-started");
 });
 
 test("diagnose fails closed when worker or Codex sessions use volatile storage", async () => {
@@ -436,3 +515,136 @@ test("runWithSshRetries can stop retrying once output is produced (device-auth s
   }, { sleep: async () => {}, isTransient: (e) => !produced && isTransientSshError(e) }));
   assert.equal(calls, 2); // retried the pre-output failure once, did not retry after output
 });
+
+type FakeCodexMode = "logged-in" | "login-odd" | "login-broken" | "no-openai-auth" | "account" | "signed-out" | "initialize-error" | "error" | "error-with-account" | "crash" | "silent" | "stuck";
+
+interface FakeCodex {
+  executablePath: string;
+  /** Runs the generated probe shell; a leaked server cannot hold the harness's pipes because output goes to files. */
+  runProbeShell: (env?: NodeJS.ProcessEnv) => Promise<{ stdout: string; stderr: string }>;
+  appServerOutcome: () => Promise<"not-started" | "eof" | "crashed" | "killed" | "stuck">;
+  /** Methods of the requests the app-server received, in order. */
+  requests: () => Promise<string[]>;
+  appServerRunning: () => Promise<boolean>;
+}
+
+/**
+ * A `codex` stand-in for the probe shell. `login status` succeeds only in
+ * `logged-in` mode, exits 0 without "Logged in" in `login-odd` mode, and fails
+ * with something other than "Not logged in" in `login-broken` mode.
+ * `app-server --listen stdio://` records its pid and every request, uses
+ * Codex's real wire framing (results id-first, errors error-first, server
+ * requests id-first with a `method` key and the client's own id), answers
+ * `account/read` according to the mode (never, for `silent`), exits with an
+ * error before answering in `crash` mode, ignores EOF and SIGTERM in `stuck`
+ * mode, and otherwise exits once stdin closes like the real server, recording
+ * how it ended.
+ */
+const fakeCodexAppServerScript = [
+  "const fs = require('node:fs');",
+  "const mode = process.env.FAKE_CODEX_MODE;",
+  "const outcome = (value) => fs.writeFileSync(process.env.FAKE_CODEX_OUTCOME_FILE, value);",
+  "fs.writeFileSync(process.env.FAKE_CODEX_PID_FILE, String(process.pid));",
+  "if (mode === 'crash') { outcome('crashed'); process.exit(3); }",
+  "if (mode === 'stuck') { outcome('stuck'); setInterval(() => {}, 1000); }",
+  "process.stdout.on('error', () => {});",
+  "const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');",
+  "let buffer = '';",
+  "process.stdin.setEncoding('utf8');",
+  "process.stdin.on('data', (chunk) => {",
+  "  buffer += chunk;",
+  "  let lineBreak = buffer.indexOf('\\n');",
+  "  while (lineBreak >= 0) {",
+  "    const line = buffer.slice(0, lineBreak);",
+  "    buffer = buffer.slice(lineBreak + 1);",
+  "    lineBreak = buffer.indexOf('\\n');",
+  "    if (!line) continue;",
+  "    const request = JSON.parse(line);",
+  "    fs.appendFileSync(process.env.FAKE_CODEX_REQUEST_LOG, request.method + '\\n');",
+  "    send({ id: request.id, method: 'currentTime/read', params: {} });",
+  "    if (request.method === 'initialize' && mode === 'initialize-error') send({ error: { code: -32600, message: 'fake initialize failure' }, id: request.id });",
+  "    else if (request.method === 'initialize') send({ id: request.id, result: { userAgent: 'fake-codex' } });",
+  "    else if (mode === 'no-openai-auth') send({ id: request.id, result: { account: null, requiresOpenaiAuth: false } });",
+  "    else if (mode === 'account') send({ id: request.id, result: { account: { type: 'chatgpt', email: 'private@example.com' }, requiresOpenaiAuth: true } });",
+  "    else if (mode === 'signed-out') send({ id: request.id, result: { account: null, requiresOpenaiAuth: true } });",
+  "    else if (mode === 'error') send({ error: { code: -32000, message: 'fake account failure' }, id: request.id });",
+  "    else if (mode === 'error-with-account') send({ error: { code: -32000, message: 'fake failure', data: { account: { type: 'chatgpt' }, requiresOpenaiAuth: false } }, id: request.id });",
+  "  }",
+  "});",
+  "process.stdin.on('end', () => { if (mode === 'stuck') return; outcome('eof'); process.exit(0); });",
+  "process.on('SIGTERM', () => { if (mode === 'stuck') return; outcome('killed'); process.exit(143); });"
+].join("\n");
+
+async function fakeCodex(t: TestContext, mode: FakeCodexMode): Promise<FakeCodex> {
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-fake-cloud-codex-"));
+  const scriptPath = path.join(root, "app-server.js");
+  const pidPath = path.join(root, "app-server.pid");
+  const outcomePath = path.join(root, "app-server.outcome");
+  const requestLogPath = path.join(root, "app-server.requests");
+  const executablePath = path.join(root, "codex");
+  const pid = async (): Promise<number | undefined> => {
+    const value = Number.parseInt(await readFile(pidPath, "utf8").catch(() => ""), 10);
+    return Number.isInteger(value) && value > 0 ? value : undefined;
+  };
+  t.after(async () => {
+    // A probe regression that leaks the server must fail the assertion, not outlive the test run.
+    const leaked = await pid();
+    if (leaked !== undefined && spawnSync("ps", ["-o", "command=", "-p", String(leaked)], { encoding: "utf8" }).stdout.includes(root)) {
+      try {
+        process.kill(leaked, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+  await writeFile(scriptPath, fakeCodexAppServerScript);
+  await writeFile(executablePath, [
+    "#!/bin/sh",
+    "if [ \"$1 $2\" = \"login status\" ]; then",
+    `  case ${shellQuotePosix(mode)} in logged-in) echo 'Logged in using ChatGPT'; exit 0;; login-odd) echo 'Not logged in'; exit 0;; login-broken) echo 'error: config.toml is unreadable' >&2; exit 1;; *) echo 'Not logged in' >&2; exit 1;; esac`,
+    "fi",
+    "[ \"$*\" = 'app-server --listen stdio://' ] || exit 2",
+    `FAKE_CODEX_MODE=${shellQuotePosix(mode)} FAKE_CODEX_PID_FILE=${shellQuotePosix(pidPath)} FAKE_CODEX_OUTCOME_FILE=${shellQuotePosix(outcomePath)} FAKE_CODEX_REQUEST_LOG=${shellQuotePosix(requestLogPath)} exec ${shellQuotePosix(process.execPath)} ${shellQuotePosix(scriptPath)}`,
+    ""
+  ].join("\n"));
+  await chmod(executablePath, 0o755);
+  return {
+    executablePath,
+    runProbeShell: async (env) => {
+      const stdoutPath = path.join(root, "probe.stdout");
+      const stderrPath = path.join(root, "probe.stderr");
+      // Strict flags: a remote profile may enable them, and they must not change the verdict.
+      spawnSync("sh", ["-e", "-u", "-c", `{ ${codexAuthProbeShell(executablePath)}; } >${shellQuotePosix(stdoutPath)} 2>${shellQuotePosix(stderrPath)}`], {
+        stdio: "ignore",
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+        env: { ...process.env, ...env }
+      });
+      return {
+        stdout: await readFile(stdoutPath, "utf8").catch(() => ""),
+        stderr: await readFile(stderrPath, "utf8").catch(() => "")
+      };
+    },
+    appServerOutcome: async () => {
+      if ((await pid()) === undefined) {
+        return "not-started";
+      }
+      const outcome = (await readFile(outcomePath, "utf8").catch(() => "")).trim();
+      assert.ok(outcome === "eof" || outcome === "crashed" || outcome === "killed" || outcome === "stuck", `unexpected app-server outcome "${outcome}"`);
+      return outcome as "eof" | "crashed" | "killed" | "stuck";
+    },
+    requests: async () => (await readFile(requestLogPath, "utf8").catch(() => "")).split("\n").filter(Boolean),
+    appServerRunning: async () => {
+      const value = await pid();
+      if (value === undefined) {
+        return false;
+      }
+      const result = spawnSync("ps", ["-o", "stat=", "-p", String(value)], { encoding: "utf8" });
+      if (result.error || (result.status !== 0 && result.stderr.trim())) {
+        throw new Error(`cannot inspect process ${value}: ${result.error?.message ?? result.stderr.trim()}`);
+      }
+      return result.status === 0 && result.stdout.trim() !== "" && !result.stdout.trim().startsWith("Z");
+    }
+  };
+}
