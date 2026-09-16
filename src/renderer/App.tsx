@@ -254,7 +254,7 @@ function App(): JSX.Element {
             onAddParticipantDraftChange={state.setChatAddParticipantDraft}
             onAddParticipant={() => void chatActions.addChatParticipant()}
             onAddSavedParticipant={(participant) => void chatActions.addSavedChatParticipant(participant)}
-            onUpdateParticipantRuntime={(participantId, patch) => void chatActions.updateChatParticipantRuntime(participantId, patch)}
+            onUpdateParticipantRuntime={(participantId, patch) => chatActions.updateChatParticipantRuntime(participantId, patch)}
             onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
             onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
             onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}

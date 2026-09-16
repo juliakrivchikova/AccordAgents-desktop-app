@@ -462,6 +462,8 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
   }
 });
 const cloudRunPreparation = new CloudRunPreparationService({
+  onProgress: snapshot => sendToMainWindow("machines:cloud-run-progress", snapshot),
+  configuredInstanceId: async () => (await settingsService.getPublicSettings()).cloudRuns.awsHandle?.instanceId,
   appVersion: app.getVersion(),
   environmentId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
   aws: cloudRunAwsService,
@@ -472,11 +474,15 @@ const cloudRunPreparation = new CloudRunPreparationService({
   isConnected: (machineId) => Boolean(machineLinkService?.isMachineConnected(machineId)),
   bootstrapProject: (machineId, localPath, signal, progress) => machineInstallerService.bootstrapProjectMirror({ machineId, localPath }, signal, progress),
   saveInstall: (record) => settingsService.saveMachineInstall(record),
-  prepareProvider: async (worker, provider, record, progress) => {
+  prepareMachine: async (worker, record) => {
     if (!worker.host) throw new Error("AWS did not return an address for this instance.");
     const current = { ...record, target: { ...worker, host: worker.host } };
-    const scopedWorker = { ...worker, workerRoot: record.installRoot };
     await machineInstallerService.ensureEnvironmentOwner(current);
+    await prepareMachineProfile(current);
+  },
+  prepareProvider: async (worker, provider, record, progress) => {
+    if (!worker.host) throw new Error("AWS did not return an address for this instance.");
+    const scopedWorker = { ...worker, workerRoot: record.installRoot };
     const options = { requiredProviderKind: provider, profileHome: record.profileHome, maintenance: {
       runtimePath: `${record.installRoot}/current/accordagents-machine.cjs`,
       userDataDir: record.userDataDir,
@@ -486,7 +492,6 @@ const cloudRunPreparation = new CloudRunPreparationService({
     let report = await cloudRunDoctorService.diagnose(scopedWorker, options);
     if (!report.ok) report = await cloudRunDoctorService.setup(scopedWorker, progress, options);
     if (!report.ok) throw new Error(report.message);
-    await prepareMachineProfile(current);
   }
 });
 void machineInstallerService.recoverInterruptedOperation();
@@ -516,6 +521,11 @@ async function machinePowerHandoffForPairing(pairing: MobilePairingPackage): Pro
     return pairing;
   }
 }
+chatService.setCloudRunPreparation(async (selection, provider, progress) => {
+  if (provider !== "codex-cli" && provider !== "claude-code") throw new Error("This provider does not support Cloud run.");
+  const result = await cloudRunPreparation.prepare({ operationId: randomUUID(), provider, instanceId: selection.instanceId }, progress);
+  return result.machine.id;
+});
 chatService.setCloudRunAwsService(cloudRunAwsService);
 chatService.setMachineProjectPreparation((machineId, localPath, signal, progress) => cloudRunPreparation.prepareProject(machineId, localPath, signal, progress));
 chatService.setCloudRunDoctorService(cloudRunDoctorService);
@@ -2741,8 +2751,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("machines:list", async (): Promise<MachineListResult> => machineListResult());
   ipcMain.handle("machines:prepare-cloud-run", async (_event, request: import("../shared/cloudRunPreparation").PrepareCloudRunRequest) => {
-    return cloudRunPreparation.prepare(request, (snapshot) => sendToMainWindow("machines:cloud-run-progress", snapshot));
+    return cloudRunPreparation.prepare(request, () => {});
   });
+  ipcMain.handle("machines:get-cloud-run-preparation", (_event, request: import("../shared/cloudRunPreparation").PrepareCloudRunRequest) => cloudRunPreparation.snapshot(request));
   ipcMain.handle("machines:create", async (_event, request: CreateMachineRequest): Promise<CreateMachineResult> => {
     return createMachine(request);
   });

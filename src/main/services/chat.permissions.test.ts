@@ -3763,33 +3763,19 @@ test("run location is editable only before a participant has durable run history
   );
 });
 
-test("new cloud chat reports preparation before persistence and Stop prevents creation", { timeout: 10_000 }, async () => {
+test("new cloud chat saves every Cloud choice without waiting for project preparation", { timeout: 10_000 }, async () => {
   const { service, storage } = testService({ agents: installedChatAgents() });
-  const controller = new AbortController();
-  const progress: ReviewProgress[] = [];
-  let reached!: () => void;
-  const preparing = new Promise<void>(resolve => { reached = resolve; });
-  service.setMachineProjectPreparation(async (_id, _repo, signal, report) => {
-    assert.equal(signal, controller.signal);
-    report?.("Copying project · 42%");
-    reached();
-    await new Promise<void>(resolve => signal!.addEventListener("abort", () => resolve(), { once: true }));
-    // Even a dependency which resolves after cancellation cannot create a chat.
-  });
-  const creation = service.createConversation({ runId: "create-cloud", title: "hello", repoPath: "/test/project",
-    participants: [{ kind: "codex-cli", handle: "cloud", roleConfigId: ROLE.id, homeMachineId: "cloud" }]
-  }, controller.signal, event => progress.push(event));
-  const rejected = assert.rejects(creation, /cancelled/);
-  await preparing;
-  assert.equal(storage.current, undefined);
-  assert.ok(progress.some(item => item.runId === "create-cloud" && item.message.includes("42%")));
-  controller.abort(new Error("Chat creation cancelled."));
-  await rejected;
-  assert.equal(storage.current, undefined);
-  service.setMachineProjectPreparation(async () => undefined);
-  const retried = await service.createConversation({ title: "hello", repoPath: "/test/project",
-    participants: [{ kind: "codex-cli", handle: "cloud", roleConfigId: ROLE.id, homeMachineId: "cloud" }] });
-  assert.equal(storage.current.id, retried.conversation.id);
+  service.setMachineProjectPreparation(async () => { assert.fail("chat creation must not wait for a project copy"); });
+  service.setCloudRunPreparation(async () => { assert.fail("chat creation must not wait for AWS"); });
+  const result = await service.createConversation({ title: "hello", repoPath: "/test/project",
+    participants: [
+      { kind: "codex-cli", handle: "cloud-one", roleConfigId: ROLE.id, cloudRun: {} },
+      { kind: "claude-code", handle: "cloud-two", roleConfigId: ROLE.id, cloudRun: { instanceId: "i-test" } }
+    ] });
+  assert.equal(storage.current.id, result.conversation.id);
+  const members = storage.current.metadata.participants.filter((item: ChatParticipant) => item.handle.startsWith("cloud-"));
+  assert.deepEqual(members.map((item: ChatParticipant) => item.cloudRun), [{}, { instanceId: "i-test" }]);
+  assert.ok(members.every((item: ChatParticipant) => !item.homeMachineId));
 });
 
 test("creation cleanup only archives an empty chat after queued messages have been saved", { timeout: 10_000 }, async () => {
@@ -3819,25 +3805,99 @@ test("creation cleanup only archives an empty chat after queued messages have be
   assert.equal(archived?.metadata.archived, true);
 });
 
-test("cloud project setup precedes saving the machine, and the first run locks it before setup", async () => {
+test("Cloud selection persists independently of setup and existing session location stays locked", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = { ...chatConversation([participant]), repoPath: "/Users/test/project" };
   const { service, storage } = testService({ conversation });
-  const calls: string[] = [];
-  service.setMachineProjectPreparation(async (id: string, repo: string) => {
-    calls.push(`${id}:${repo}`);
-    throw new Error("project copy failed");
-  });
-  await assert.rejects(service.updateParticipantRuntime({ conversationId: conversation.id, participantId: participant.id, homeMachineId: "cloud" }), /project copy failed/);
+  service.setMachineProjectPreparation(async () => { assert.fail("selection must not copy a project"); });
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: participant.id, cloudRun: {} });
+  assert.deepEqual(storage.current.metadata.participants[0].cloudRun, {});
   assert.equal(storage.current.metadata.participants[0].homeMachineId, undefined);
-  service.setMachineProjectPreparation(async (id: string, repo: string) => { calls.push(`${id}:${repo}`); });
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: participant.id, cloudRun: undefined });
+  assert.equal(storage.current.metadata.participants[0].cloudRun, undefined);
   await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: participant.id, homeMachineId: "cloud" });
   assert.equal(storage.current.metadata.participants[0].homeMachineId, "cloud");
   storage.current.metadata.participantSessions = [{ participantId: participant.id, sessionId: "native-session", updatedAt: NOW }];
   await assert.rejects(service.updateParticipantRuntime({ conversationId: conversation.id, participantId: participant.id, homeMachineId: "other" }), /machine is locked/);
-  assert.deepEqual(calls, ["cloud:/Users/test/project", "cloud:/Users/test/project"]);
   await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: participant.id, model: "another-model" });
   assert.equal(storage.current.metadata.participants[0].homeMachineId, "cloud");
+});
+
+test("several Cloud choices do not block a local member, and Stop prevents a delayed cloud start", { timeout: 15_000 }, async () => {
+  const one = { ...chatParticipant("codex-cli"), id: "cloud-one", handle: "cloud-one" };
+  const two = { ...chatParticipant("claude-code"), id: "cloud-two", handle: "cloud-two" };
+  const local = { ...chatParticipant("codex-cli"), id: "local", handle: "local" };
+  const conversation = chatConversation([one, two, local]);
+  const localCalls: string[] = [];
+  const h = testService({ conversation, run: async participant => {
+    localCalls.push(participant.id);
+    return { participant, ok: true, content: "LOCAL_REPLY", durationMs: 1 };
+  } });
+  (h.service as any).ensureHistoryFiles = async () => h.tempRoot;
+  await Promise.all([one, two].map(member => h.service.updateParticipantRuntime({
+    conversationId: conversation.id, participantId: member.id, cloudRun: {}
+  })));
+  assert.deepEqual(h.storage.current.metadata.participants.slice(0, 2).map((item: ChatParticipant) => item.cloudRun), [{}, {}]);
+  let finish!: (id: string) => void;
+  const setup = new Promise<string>(resolve => { finish = resolve; });
+  const prepared: string[] = [];
+  h.service.setCloudRunPreparation(async (_selection, provider, progress) => {
+    prepared.push(provider);
+    progress({ operationId: "prep", message: "Waiting for cloud login" });
+    return setup;
+  });
+  const dispatched: string[] = [];
+  h.service.setMachineLink({ runTurn: async request => {
+    dispatched.push(request.participant.id);
+    return { status: "completed", messages: [], warnings: [] };
+  } });
+  await h.service.sendMessage({ conversationId: conversation.id, content: "@local hello" });
+  await waitFor(() => localCalls.length === 1);
+  assert.deepEqual(prepared, []);
+  await h.service.sendMessage({ conversationId: conversation.id, content: "@cloud-one hello" });
+  await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.metadata?.cloudRunPreparation?.message === "Waiting for cloud login"));
+  await h.service.sendMessage({ conversationId: conversation.id, content: "@local still available" });
+  await waitFor(() => localCalls.length === 2);
+  const pending = h.storage.current.messages.find((item: ChatMessage) => item.participantId === one.id && item.status === "pending");
+  assert.equal(h.service.cancelRun(pending.metadata.runId), true);
+  await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.id === pending.id && item.metadata?.terminalReason === "user-stopped"));
+  finish("cloud-machine");
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepEqual(dispatched, []);
+  assert.deepEqual(prepared, ["codex-cli"]);
+  assert.deepEqual(h.storage.current.metadata.participants[0].cloudRun, {});
+});
+
+test("a saved Cloud choice survives setup failure and restart, and only the addressed member runs", { timeout: 15_000 }, async () => {
+  const one = { ...chatParticipant("codex-cli"), id: "cloud-one", handle: "cloud-one", cloudRun: {} };
+  const two = { ...chatParticipant("claude-code"), id: "cloud-two", handle: "cloud-two", cloudRun: {} };
+  const first = testService({ conversation: chatConversation([one, two]) });
+  first.service.setCloudRunPreparation(async () => { throw new Error("AWS unavailable"); });
+  first.service.setMachineLink({ runTurn: async () => { assert.fail("must not dispatch before preparation"); } });
+  await first.service.sendMessage({ conversationId: first.storage.current.id, content: "@cloud-one hello" });
+  await waitFor(() => first.storage.current.messages.some((item: ChatMessage) => item.content.includes("AWS unavailable")));
+  assert.deepEqual(first.storage.current.metadata.participants[0].cloudRun, {});
+  const next = testService({ conversation: first.storage.current });
+  const prepared: string[] = [];
+  next.service.setCloudRunPreparation(async (_selection, provider) => { prepared.push(provider); return "cloud-machine"; });
+  const dispatched: string[] = [];
+  next.service.setMachineLink({ runTurn: async request => {
+    dispatched.push(request.participant.id);
+    assert.equal(request.participant.homeMachineId, "cloud-machine");
+    return { status: "completed", warnings: [], messages: [{
+      ...pendingParticipantMessage(request.participant, request.pendingMessageId, request.runId), status: "done", content: "CLOUD_REPLY"
+    }] };
+  } });
+  await next.service.sendMessage({ conversationId: next.storage.current.id, content: "@cloud-two hello" });
+  await waitFor(() => next.storage.current.messages.some((item: ChatMessage) => item.content === "CLOUD_REPLY"));
+  assert.deepEqual(prepared, ["claude-code"]);
+  assert.deepEqual(dispatched, [two.id]);
+  assert.equal(next.storage.current.metadata.participants[0].homeMachineId, undefined);
+  assert.equal(next.storage.current.metadata.participants[1].homeMachineId, "cloud-machine");
+  next.service.setCloudRunPreparation(async () => { assert.fail("a started member keeps its assigned machine without preparing the current AWS selection again"); });
+  await next.service.sendMessage({ conversationId: next.storage.current.id, content: "@cloud-two continue" });
+  await waitFor(() => dispatched.length === 2);
+  assert.deepEqual(dispatched, [two.id, two.id]);
 });
 
 test("participant reservation is released if turn controller setup fails", async () => {
@@ -8336,6 +8396,20 @@ test("recoverStaleChatRun leaves a pending bubble of a machine-hosted member alo
   const pending = conversation.messages.find((message: any) => message.id === "pending-machine")!;
   assert.equal(pending.status, "pending");
   assert.equal(pending.metadata?.staleRunRecovery, undefined);
+});
+
+test("Cloud preparation interrupted by a restart is recovered even after its machine was assigned", () => {
+  for (const homeMachineId of [undefined, "machine-1"]) {
+    const participant = { ...chatParticipant("codex-cli"), cloudRun: {}, homeMachineId };
+    const conversation = chatConversation([participant]);
+    const pending = pendingParticipantMessage(participant, "preparing", "cloud-preparation");
+    pending.metadata = { ...pending.metadata, cloudRunPreparation: { operationId: "setup", message: "Preparing project" } };
+    conversation.messages.push(pending);
+    const { service } = testService({ conversation });
+    assert.equal((service as any).recoverStaleChatRun(conversation), true);
+    assert.equal(pending.status, "error");
+    assert.match(pending.content, /Interrupted/);
+  }
 });
 
 test("inside a machine runtime its own members' bubbles are swept like local ones, other machines' are not", () => {

@@ -1,3 +1,4 @@
+import { cloudRunSelection } from "../../shared/cloudRunPreparation";
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -2391,6 +2392,7 @@ export class SettingsService {
       permissions: normalizeChatAgentPermissions(update.permissions),
       remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
       homeMachineId: typeof update.homeMachineId === "string" && update.homeMachineId.trim() ? update.homeMachineId.trim() : undefined,
+      cloudRun: cloudRunSelection(update.cloudRun),
       skipToolchainPreflight: update.skipToolchainPreflight === true,
       autoWatchEnabled: this.autoWatchEnabledForRole(role, update.autoWatchEnabled),
       updatedAt: now
@@ -3897,6 +3899,7 @@ export class SettingsService {
             ? { ...permissions, manageRolesParticipants: "allow" as const }
             : permissions,
           remoteExecution: this.normalizeRemoteExecutionMode((participant as { remoteExecution?: unknown }).remoteExecution),
+          cloudRun: cloudRunSelection((participant as { cloudRun?: unknown }).cloudRun),
           homeMachineId: typeof (participant as { homeMachineId?: unknown }).homeMachineId === "string" &&
             ((participant as { homeMachineId?: string }).homeMachineId ?? "").trim()
             ? ((participant as { homeMachineId?: string }).homeMachineId ?? "").trim()

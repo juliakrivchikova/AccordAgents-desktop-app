@@ -15,7 +15,7 @@ import { ParticipantRuntimeControls } from "./chat-participant-runtime-controls"
 import { chatCliProviderLabel, type ChatParticipantRuntimeOverride } from "./chat-participant-drafts";
 import { RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-roster-status";
 
-type ParticipantRuntimePatch = Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">;
+type ParticipantRuntimePatch = Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">;
 
 export function ChatParticipantRosterRow(props: {
   participant: ChatParticipant;
@@ -33,7 +33,7 @@ export function ChatParticipantRosterRow(props: {
   onJumpToLastMessage: (participant: ChatParticipant) => void;
   onUpdateParticipantRuntime: (
     participantId: string,
-    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">
+    patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">
   ) => void;
   onCompactParticipant: (participantId: string) => void;
   onRemoveParticipant: (participantId: string) => void;
@@ -150,6 +150,7 @@ export function ChatParticipantSelectableRosterRow(props: {
     permissions: runtimeOverride.permissions ?? props.participant.permissions,
     remoteExecution: runtimeOverride.remoteExecution ?? props.remoteExecution ?? props.participant.remoteExecution,
     homeMachineId: "homeMachineId" in runtimeOverride ? runtimeOverride.homeMachineId : props.participant.homeMachineId,
+    cloudRun: "cloudRun" in runtimeOverride ? runtimeOverride.cloudRun : props.participant.cloudRun,
     skipToolchainPreflight: runtimeOverride.skipToolchainPreflight ?? props.participant.skipToolchainPreflight,
     autoWatch: runtimeOverride.autoWatch ?? props.participant.autoWatchEnabled
   };

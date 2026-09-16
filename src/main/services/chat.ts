@@ -1,3 +1,4 @@
+import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -760,6 +761,7 @@ export class ChatService {
   /** Set inside a machine runtime: the desktop's record id for this machine. */
   private hostMachineId?: string;
   private machineRuntime = false;
+  private prepareCloudSelection?: (selection: CloudRunSelection, provider: ChatProviderKind, progress: (snapshot: CloudRunPreparationProgress) => void) => Promise<string>;
   private prepareMachineProject?: (machineId: string, localPath: string, signal?: AbortSignal, progress?: (message: string) => void) => Promise<void>;
   private readonly participantRunSettledListeners = new Set<(run: ChatParticipantRun) => Promise<void> | void>();
   private readonly participantRunCompletionWaiters = new Map<string, Set<() => void>>();
@@ -893,6 +895,10 @@ export class ChatService {
   /** Machines transport: participants whose home is an enrolled machine run
    *  there through the machine link; the desktop keeps the pending bubble,
    *  progress, and the final messages exactly as for a local participant. */
+  setCloudRunPreparation(prepare: NonNullable<ChatService["prepareCloudSelection"]>): void {
+    this.prepareCloudSelection = prepare;
+  }
+
   setMachineProjectPreparation(prepare: NonNullable<ChatService["prepareMachineProject"]>): void {
     this.prepareMachineProject = prepare;
   }
@@ -1085,9 +1091,6 @@ export class ChatService {
       this.assertParticipantProvidersReady(participantInputs, agents, settings.providers);
       const requestedParticipants = await this.validateParticipants(participantInputs, [], true);
       const participants = await this.ensureAdministratorParticipant(requestedParticipants, assistantProviderKind);
-      stage = "preparing-cloud-project";
-      signal?.throwIfAborted();
-      await this.prepareParticipantProjects(requestedRepoPath, participants, signal, report);
       signal?.throwIfAborted();
       conversation = {
         id: randomUUID(),
@@ -1185,6 +1188,7 @@ export class ChatService {
           : participant.permissions,
         remoteExecution: participant.remoteExecution,
         homeMachineId: participant.homeMachineId,
+        cloudRun: participant.cloudRun,
         skipToolchainPreflight: participant.skipToolchainPreflight
       }));
   }
@@ -1458,7 +1462,6 @@ export class ChatService {
       const settings = await this.settings.getPublicSettings();
       const agents = await this.detectAgentsForReadiness();
       this.assertParticipantProvidersReady([request.participant], agents, settings.providers ?? []);
-      await this.prepareParticipantProjects(conversation.repoPath, [nextParticipant]);
       conversation.metadata = {
         ...conversation.metadata,
         participants: [...participants, nextParticipant]
@@ -1507,8 +1510,13 @@ export class ChatService {
       if ((nextHomeMachineId ?? "") !== (target.homeMachineId ?? "") && this.chatParticipantHasRun(conversation, target.id)) {
         throw new Error("The machine is locked after the member has run. Remove and re-add the member to change it.");
       }
-      if (nextHomeMachineId && nextHomeMachineId !== target.homeMachineId) {
-        await this.prepareParticipantProjects(conversation.repoPath, [{ homeMachineId: nextHomeMachineId }]);
+      const nextCloudRun = Object.prototype.hasOwnProperty.call(request, "cloudRun")
+        ? cloudRunSelection(request.cloudRun) : target.cloudRun;
+      if (nextCloudRun && target.kind !== "codex-cli" && target.kind !== "claude-code") {
+        throw new Error("This provider does not support Cloud run.");
+      }
+      if (JSON.stringify(nextCloudRun) !== JSON.stringify(target.cloudRun) && this.chatParticipantHasRun(conversation, target.id)) {
+        throw new Error("Run location is locked after the member has run. Remove and re-add the member to change it.");
       }
       const autoWatchRequested = Object.prototype.hasOwnProperty.call(request, "autoWatch");
       const autoWatchChanged = autoWatchRequested && (request.autoWatch === true) !== (target.autoWatch === true);
@@ -1531,6 +1539,7 @@ export class ChatService {
           : target.permissions,
         remoteExecution: nextRemoteExecution,
         homeMachineId: nextHomeMachineId,
+        cloudRun: nextCloudRun,
         skipToolchainPreflight: Object.prototype.hasOwnProperty.call(request, "skipToolchainPreflight")
           ? request.skipToolchainPreflight === true
           : target.skipToolchainPreflight,
@@ -5740,7 +5749,62 @@ export class ChatService {
     // a failure raised after that (the run failed on its machine) leaves the
     // bubble as folded and is never stored or acknowledged a second time.
     let terminalHandled = false;
+    let dispatched = false;
+    let progressWrites = Promise.resolve();
+    const reportPreparation = (snapshot: CloudRunPreparationProgress): void => {
+      if (signal?.aborted) return;
+      this.emitProgress(runId, progress, "initial", snapshot.message, { participantLabel: `@${participant.handle}` });
+      progressWrites = progressWrites.then(() => this.withChatMutation(conversation, async () => {
+        if (signal?.aborted) return;
+        for (const bubble of bubbleObjects()) bubble.metadata = { ...bubble.metadata, cloudRunPreparation: snapshot };
+        this.queueSnapshot(conversation);
+      }));
+      void progressWrites.catch(() => {});
+    };
     try {
+      signal?.throwIfAborted();
+      if (participant.cloudRun && !participant.homeMachineId) {
+        if (!this.prepareCloudSelection) throw new Error("Cloud setup is not available on this device.");
+        reportPreparation({ operationId: runId, message: "Preparing Cloud run…" });
+        const preparing = this.prepareCloudSelection(participant.cloudRun, participant.kind, reportPreparation);
+        let abort: (() => void) | undefined;
+        const cancelled = new Promise<never>((_resolve, reject) => {
+          abort = () => reject(signal?.reason ?? new Error("Chat run cancelled."));
+          signal?.addEventListener("abort", abort, { once: true });
+          if (signal?.aborted) abort();
+        });
+        let machineId: string;
+        try { machineId = await Promise.race([preparing, cancelled]); }
+        finally { if (abort) signal?.removeEventListener("abort", abort); }
+        signal?.throwIfAborted();
+        await this.withChatMutation(conversation, async () => {
+          signal?.throwIfAborted();
+          const members = this.chatParticipants(conversation);
+          const current = members.find(item => item.id === participant.id);
+          if (!current || JSON.stringify(current.cloudRun) !== JSON.stringify(participant.cloudRun)) {
+            throw new Error("The member's run location changed while Cloud was preparing.");
+          }
+          if (current.homeMachineId && current.homeMachineId !== machineId) {
+            throw new Error("The cloud machine identity changed. Re-add this member before running it there.");
+          }
+          const ready = { ...current, homeMachineId: machineId };
+          conversation.metadata = { ...conversation.metadata, participants: members.map(item => item.id === ready.id ? ready : item) };
+          await this.saveConversation(conversation);
+          participant = ready;
+        });
+      }
+      signal?.throwIfAborted();
+      await this.prepareParticipantProjects(conversation.repoPath, [participant], signal,
+        message => reportPreparation({ operationId: runId, message }));
+      await progressWrites;
+      signal?.throwIfAborted();
+      await this.withChatMutation(conversation, async () => {
+        for (const bubble of bubbleObjects()) if (bubble.metadata) delete bubble.metadata.cloudRunPreparation;
+        this.queueSnapshot(conversation);
+      });
+      if (!await this.waitForQueuedSaveResult(conversation.id)) throw new Error("The cloud run could not be saved before dispatch.");
+      signal?.throwIfAborted();
+      dispatched = true;
       const result = await link.runTurn({
         conversation,
         participant,
@@ -5816,8 +5880,10 @@ export class ChatService {
       if (!signal?.aborted) {
         pendingMessage.status = "error";
         pendingMessage.content = this.failedPrecreatedPendingMessageContent(participant, error);
+      } else if (!dispatched) {
+        this.markParticipantMessageStoppedByUser(pendingMessage, participant);
       } else {
-        // Stopped, but the failure means the machine never confirmed it.
+        // Once dispatched, only the machine can confirm cancellation.
         this.markParticipantMessageStopUnconfirmed(pendingMessage, participant, error instanceof Error ? error.message : String(error));
       }
       if (dispatchResult) {
@@ -5825,7 +5891,9 @@ export class ChatService {
       }
       throw error;
     } finally {
-      if (ownsPendingMessage && !signal?.aborted) {
+      await progressWrites.catch(() => {});
+      for (const bubble of bubbleObjects()) if (bubble.metadata) delete bubble.metadata.cloudRunPreparation;
+      if (ownsPendingMessage && (!signal?.aborted || !dispatched)) {
         await this.finalizePendingParticipantMessage(conversation, participant, pendingMessage);
       }
     }
@@ -9246,6 +9314,7 @@ export class ChatService {
         }
         throw new Error(`Unknown role for @${handle}.`);
       }
+      if (item.cloudRun && item.kind !== "codex-cli" && item.kind !== "claude-code") throw new Error("This provider does not support Cloud run.");
       const requestedRuleIds = new Set(this.normalizeBehaviorRuleIds(item.behaviorRuleIds));
       const behaviorRuleIds = (settings.chatBehaviorRules ?? []).map((rule) => rule.id).filter((id) => requestedRuleIds.has(id));
       const wantsAutoWatch = item.autoWatch === true || (item.autoWatch === undefined && role.participantDefaults?.autoWatch === true);
@@ -9267,6 +9336,7 @@ export class ChatService {
         permissions: this.normalizeParticipantPermissionsForRole(role, item.permissions, item.permissions === undefined),
         remoteExecution: preservedRemoteExecution(item.remoteExecution),
         homeMachineId: item.homeMachineId || undefined,
+        cloudRun: cloudRunSelection(item.cloudRun),
         skipToolchainPreflight: item.skipToolchainPreflight === true,
         autoWatch
       };
@@ -9582,6 +9652,7 @@ export class ChatService {
       agentMode: normalizeChatAgentMode(participant.agentMode),
       remoteExecution: preservedRemoteExecution(participant.remoteExecution),
       homeMachineId: participant.homeMachineId || undefined,
+      cloudRun: participant.cloudRun,
       skipToolchainPreflight: participant.skipToolchainPreflight === true,
       autoWatch: participant.autoWatch === true
     };
@@ -10201,6 +10272,7 @@ export class ChatService {
           homeMachineId: overrides && "homeMachineId" in overrides
             ? (typeof overrides.homeMachineId === "string" && overrides.homeMachineId.trim() ? overrides.homeMachineId.trim() : undefined)
             : preset.homeMachineId,
+          cloudRun: overrides && "cloudRun" in overrides ? cloudRunSelection(overrides.cloudRun) : preset.cloudRun,
           skipToolchainPreflight: overrides && "skipToolchainPreflight" in overrides ? overrides.skipToolchainPreflight : preset.skipToolchainPreflight,
           autoWatch: overrides && "autoWatch" in overrides ? overrides.autoWatch : preset.autoWatchEnabled
         };
@@ -12573,7 +12645,7 @@ export class ChatService {
       // Machines transport: every path that runs a member's turn (first turn,
       // continuations, request runners, resumes) goes through here, so a member
       // whose home is a machine is dispatched there from exactly one place.
-      if (participant.homeMachineId && !this.machineRuntime) {
+      if ((participant.cloudRun || participant.homeMachineId) && !this.machineRuntime) {
         return await this.runParticipantTurnOnMachine(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
           warnings: options.warnings,
           existingPendingMessage: options.existingPendingMessage,
@@ -16683,8 +16755,8 @@ export class ChatService {
     // this instance never registered). Such bubbles are never swept here;
     // the machine's result, or its answer to a query, finishes them. Inside
     // a machine runtime its own members are local and are swept as usual.
-    if (message.participantId && this.chatParticipants(conversation).some((participant) =>
-      participant.id === message.participantId && !this.ownsParticipant(participant)
+    if (!message.metadata?.cloudRunPreparation && message.participantId && this.chatParticipants(conversation).some((participant) =>
+      participant.id === message.participantId && !this.ownsParticipant(participant) && !(participant.cloudRun && !participant.homeMachineId)
     )) {
       return true;
     }
@@ -17173,7 +17245,7 @@ export class ChatService {
       const activeRunIds = readActiveRunIds(conversation.metadata);
       const pending = conversation.messages.find((message) => message.role === "participant" && message.status === "pending" && message.metadata?.runId === targetRunId);
       const participant = pending && this.chatParticipants(conversation).find((member) => member.id === pending.participantId);
-      if (pending && participant?.homeMachineId && participant.homeMachineId !== this.hostMachineId && this.machineLink?.cancelMachineRun) {
+      if (pending && !pending.metadata?.cloudRunPreparation && participant?.homeMachineId && participant.homeMachineId !== this.hostMachineId && this.machineLink?.cancelMachineRun) {
         await this.machineLink.cancelMachineRun({
           machineId: participant.homeMachineId, conversationId: conversation.id, runId: targetRunId,
           onStopPending: async (machineName) => {
@@ -17190,7 +17262,8 @@ export class ChatService {
       }
       // A copied pending row is not evidence that this process owns its
       // provider. Never sweep another host's run into a false stopped state.
-      if (participant && !this.ownsParticipant(participant)) return false;
+      if (participant && !this.ownsParticipant(participant) && !pending?.metadata?.cloudRunPreparation
+        && !(participant.cloudRun && !participant.homeMachineId)) return false;
       if (!activeRunIds.includes(targetRunId) && this.chatRunId(conversation) !== targetRunId) {
         continue;
       }

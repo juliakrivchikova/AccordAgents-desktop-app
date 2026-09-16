@@ -16,6 +16,7 @@ function harness() {
   let state: AwsWorkerStatus["state"] = "running";
   const options: ConstructorParameters<typeof CloudRunPreparationService>[0] = {
     appVersion: "test",
+    configuredInstanceId: async () => "i-abc",
     environmentId: async () => "home-desktop",
     aws: {
       status: async () => ({ configured: true, state, handle: { instanceId: "i-abc", region: "eu-west-1" } } as AwsWorkerStatus),
@@ -43,6 +44,7 @@ function harness() {
       return { record, snapshot };
     },
     isConnected: () => false,
+    prepareMachine: async () => { calls.push("profile"); },
     prepareProvider: async (_worker, provider) => { calls.push(`provider:${provider}`); },
     bootstrapProject: async () => {
       calls.push("project");
@@ -139,8 +141,15 @@ test("choosing an existing AWS machine never silently switches to a different in
 
 test("different providers each get their own setup check on the same machine", async () => {
   const h = harness();
+  const install = h.options.install;
+  h.options.install = async (request, progress) => {
+    const result = await install(request, progress);
+    h.options.isConnected = () => true;
+    h.machines[0].lastHello = { deviceId: "cloud", machineName: "cloud", platform: "linux", appVersion: "test", providers: [] };
+    return result;
+  };
   await Promise.all([h.service.prepare(request, () => {}), h.service.prepare({ ...request, provider: "claude-code" }, () => {})]);
-  assert.deepEqual(h.calls.filter(call => call.startsWith("install:")), ["install:machine-1:codex-cli", "install:machine-1:claude-code"]);
+  assert.deepEqual(h.calls, ["access:i-abc", "enroll", "install:machine-1:codex-cli", "provider:claude-code"]);
   assert.equal(h.machines.length, 1);
 });
 
@@ -223,4 +232,152 @@ test("a cancelled copy which resolves late cannot publish a prepared project map
   await assert.rejects(h.service.prepareProject("machine-1", "/project", controller.signal), /cancelled/);
   assert.deepEqual(await h.service.repositoryPaths("/project"), {});
   assert.deepEqual(await new CloudRunPreparationService(h.options).repositoryPaths("/project"), {});
+});
+
+
+test("background preparation keeps a queryable result and reuses a connected prepared provider", async () => {
+  const h = harness();
+  const install = h.options.install;
+  h.options.install = async (request, progress) => {
+    const result = await install(request, progress);
+    h.options.isConnected = () => true;
+    h.machines[0].lastHello = { deviceId: "cloud", machineName: "cloud", platform: "linux", appVersion: "test", providers: [] };
+    return result;
+  };
+  const snapshots: any[] = [];
+  h.options.onProgress = snapshot => snapshots.push(snapshot);
+  await h.service.prepare(request, () => {});
+  assert.equal(h.service.snapshot(request)?.phase, "ready");
+  assert.equal(h.service.snapshot(request)?.machine?.id, "machine-1");
+  h.options.isConnected = () => true;
+  h.machines[0].lastHello = { deviceId: "cloud", machineName: "cloud", platform: "linux", appVersion: "test", providers: [] };
+  const before = h.calls.length;
+  await h.service.prepare({ ...request, operationId: "reopen" }, () => {});
+  assert.equal(h.calls.length, before);
+  assert.ok(snapshots.some(snapshot => snapshot.phase === "preparing"));
+  h.options.isConnected = () => false;
+  h.failInstall();
+  await assert.rejects(h.service.prepare({ ...request, operationId: "retry" }, () => {}), /Sign-in failed/);
+  assert.equal(h.service.snapshot(request)?.phase, "error");
+  assert.match(h.service.snapshot(request)?.message ?? "", /Sign-in failed/);
+});
+
+
+test("a cached Cloud result is not reused after the configured AWS instance changes", async () => {
+  const h = harness();
+  h.options.configuredInstanceId = async () => "i-abc";
+  await h.service.prepare(request, () => {});
+  h.options.isConnected = () => true;
+  h.machines[0].lastHello = { deviceId: "cloud", machineName: "cloud", platform: "linux", appVersion: "test", providers: [] };
+  h.options.configuredInstanceId = async () => "i-new";
+  h.options.aws.status = async () => { throw new Error("new AWS instance unavailable"); };
+  await assert.rejects(h.service.prepare(request, () => {}), /new AWS instance unavailable/);
+  assert.equal(h.service.snapshot(request)?.phase, "error");
+});
+
+async function connectedHarness() {
+  const h = harness();
+  await h.service.prepare(request, () => {});
+  h.options.isConnected = () => true;
+  h.machines[0].lastHello = { deviceId: "cloud", machineName: "cloud", platform: "linux", appVersion: "test",
+    instanceId: "process-1", providers: [] };
+  h.calls.length = 0;
+  return { ...h, service: new CloudRunPreparationService(h.options) };
+}
+
+test("many members and configured/explicit aliases share AWS and profile work, with one check per provider", async () => {
+  const h = await connectedHarness();
+  const progress = new Set<string>();
+  let statusChecks = 0;
+  const status = h.options.aws.status;
+  h.options.aws.status = async () => { statusChecks++; return status(); };
+  const requests = Array.from({ length: 12 }, (_, i) => ({ operationId: `member-${i}`,
+    provider: i % 2 ? "claude-code" as const : "codex-cli" as const, instanceId: i % 3 ? "i-abc" : undefined }));
+  const results = await Promise.all(requests.map(item => h.service.prepare(item, p => progress.add(p.operationId))));
+  assert.equal(new Set(results.map(item => item.machine.id)).size, 1);
+  assert.equal(progress.size, requests.length);
+  assert.equal(statusChecks, 1);
+  assert.deepEqual(h.calls, ["access:i-abc", "profile", "provider:codex-cli", "provider:claude-code"]);
+  for (const item of requests) assert.equal(h.service.snapshot(item)?.phase, "ready");
+  await Promise.all(requests.map(item => h.service.prepare(item, () => {})));
+  assert.equal(statusChecks, 1);
+  assert.equal(h.calls.length, 4);
+});
+
+test("provider failure reaches every same-provider waiter and a retry refreshes shared access once", async () => {
+  const h = await connectedHarness();
+  let fail = true;
+  h.options.prepareProvider = async (_worker, provider) => {
+    h.calls.push(`provider:${provider}`);
+    if (fail) throw new Error("sign-in expired");
+  };
+  const failures = await Promise.allSettled([h.service.prepare(request, () => {}),
+    h.service.prepare({ ...request, operationId: "alias", instanceId: "i-abc" }, () => {})]);
+  assert.ok(failures.every(result => result.status === "rejected" && /sign-in expired/.test(result.reason.message)));
+  assert.deepEqual(h.calls, ["access:i-abc", "profile", "provider:codex-cli"]);
+  assert.equal(h.service.snapshot(request)?.phase, "error");
+  fail = false;
+  await Promise.all([h.service.prepare(request, () => {}), h.service.prepare({ ...request, operationId: "retry" }, () => {})]);
+  assert.deepEqual(h.calls.slice(3), ["access:i-abc", "profile", "provider:codex-cli"]);
+});
+
+test("a cancelled provider login preserves other ready members, including after its retry", async () => {
+  const h = await connectedHarness();
+  await h.service.prepare(request, () => {});
+  const prepare = h.options.prepareProvider;
+  h.options.prepareProvider = async () => { throw new Error("sign-in cancelled"); };
+  const claude = { ...request, provider: "claude-code" as const };
+  await assert.rejects(h.service.prepare(claude, () => {}), /sign-in cancelled/);
+  await h.service.prepare({ ...request, instanceId: "i-abc" }, () => {});
+  assert.deepEqual(h.calls, ["access:i-abc", "profile", "provider:codex-cli"]);
+  h.options.prepareProvider = prepare;
+  await h.service.prepare(claude, () => {});
+  const before = h.calls.length;
+  await h.service.prepare(request, () => {});
+  assert.equal(h.calls.length, before);
+  assert.deepEqual(h.calls.slice(3), ["access:i-abc", "profile", "provider:claude-code"]);
+});
+
+test("a failed profile save is not marked prepared and provider checks wait for the retry", async () => {
+  const h = await connectedHarness();
+  const prepare = h.options.prepareMachine;
+  h.options.prepareMachine = async () => { throw new Error("profile not saved"); };
+  await assert.rejects(h.service.prepare(request, () => {}), /profile not saved/);
+  assert.deepEqual(h.calls, ["access:i-abc"]);
+  h.options.prepareMachine = prepare;
+  await h.service.prepare(request, () => {});
+  assert.deepEqual(h.calls.slice(1), ["access:i-abc", "profile", "provider:codex-cli"]);
+});
+
+test("runtime restart, changed installation, disconnect and desktop restart invalidate prepared work", async () => {
+  for (const change of ["runtime", "installation", "disconnect", "desktop"]) {
+    const h = await connectedHarness();
+    await h.service.prepare(request, () => {});
+    h.calls.length = 0;
+    if (change === "runtime") h.machines[0].lastHello!.instanceId = "process-2";
+    if (change === "installation") h.installs[0].profileHome = "/home/ubuntu/changed/home";
+    if (change === "disconnect") h.options.isConnected = () => false;
+    const service = change === "desktop" ? new CloudRunPreparationService(h.options) : h.service;
+    await service.prepare(request, () => {});
+    assert.equal(h.calls.filter(call => call === "access:i-abc").length, 1, change);
+    assert.ok(h.calls.some(call => call.startsWith(change === "disconnect" ? "install:" : "provider:")), change);
+  }
+});
+
+test("queued configured selections resolve a changed instance again instead of reusing the old one", async () => {
+  const h = await connectedHarness();
+  let release!: () => void;
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  h.options.prepareProvider = async () => { entered(); await new Promise<void>(resolve => { release = resolve; }); };
+  const first = h.service.prepare(request, () => {});
+  await started;
+  const queued = h.service.prepare({ ...request, provider: "claude-code" }, () => {});
+  h.options.configuredInstanceId = async () => "i-new";
+  const rejected = assert.rejects(queued, /different AWS instance/);
+  release();
+  await first;
+  await rejected;
+  await assert.rejects(h.service.prepare({ ...request, instanceId: "i-abc" }, () => {}), /different AWS instance/);
+  assert.equal(h.calls.filter(call => call === "access:i-abc").length, 1);
 });

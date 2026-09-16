@@ -61,13 +61,14 @@ export interface ChatParticipantDraft {
   remoteExecution?: ChatParticipantConfig["remoteExecution"];
   /** Machine that hosts this member (machines transport); undefined = this computer. */
   homeMachineId?: string;
+  cloudRun?: ChatParticipantConfig["cloudRun"];
   skipToolchainPreflight: boolean;
   autoWatch: boolean;
 }
 
 export type ChatParticipantRuntimeOverride = Partial<Pick<
   ChatParticipantDraft,
-  "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch"
+  "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch"
 >>;
 
 export const NEW_CHAT_ASSISTANT_PARTICIPANT_ID = "__new-chat-assistant__";
@@ -209,6 +210,7 @@ export function chatParticipantConfigToDraft(
     permissions: normalizeChatAgentPermissions(participant.permissions),
     remoteExecution: participant.remoteExecution,
     homeMachineId: participant.homeMachineId || undefined,
+    cloudRun: participant.cloudRun,
     skipToolchainPreflight: participant.skipToolchainPreflight === true,
     autoWatch: participant.roleConfigId === WORKFLOW_MANAGER_ROLE_ID || participant.autoWatchEnabled === true
   };
@@ -275,6 +277,7 @@ export function sameParticipantDraft(draft: ChatParticipantDraft, participant: C
     normalizeChatAgentMode(draft.agentMode) === normalizeChatAgentMode(participant.agentMode) &&
     chatAgentPermissionsEqual(draft.permissions, participant.permissions) &&
     (draft.homeMachineId || undefined) === (participant.homeMachineId || undefined) &&
+    JSON.stringify(draft.cloudRun) === JSON.stringify(participant.cloudRun) &&
     (draft.remoteExecution ?? "local") === (participant.remoteExecution ?? "local") &&
     draft.skipToolchainPreflight === (participant.skipToolchainPreflight === true) &&
     draft.autoWatch === (participant.autoWatchEnabled === true)
@@ -332,6 +335,7 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
     permissions: normalizeChatAgentPermissions(draft.permissions),
     remoteExecution: draft.remoteExecution,
     homeMachineId: draft.homeMachineId?.trim() || undefined,
+    cloudRun: draft.cloudRun,
     skipToolchainPreflight: draft.skipToolchainPreflight === true,
     autoWatch: isAutoWatchLockedRole(roleConfigId) || draft.autoWatch === true
   };
@@ -340,7 +344,7 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
 export function updateChatParticipantDraft(
   draft: ChatParticipantDraft,
   settings: AppSettings,
-  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "model" | "reasoningEffort" | "avatarId" | "agentMode" | "permissions" | "remoteExecution" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">>
+  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "model" | "reasoningEffort" | "avatarId" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">>
 ): ChatParticipantDraft {
   let next = { ...draft, ...patch };
   const kindChanged = patch.kind !== undefined && patch.kind !== draft.kind;
@@ -359,7 +363,8 @@ export function updateChatParticipantDraft(
   if (kindChanged && !chatProviderSupportsCloudRun(next.kind)) {
     next = {
       ...next,
-      remoteExecution: "local"
+      remoteExecution: "local",
+      cloudRun: undefined
     };
   }
   if (!isChatAvatarIdForKind(next.avatarId, next.kind)) {
@@ -456,6 +461,7 @@ export function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatPartic
     permissions: normalizeChatAgentPermissions(draft.permissions),
     remoteExecution: draft.remoteExecution,
     homeMachineId: draft.homeMachineId?.trim() || undefined,
+    cloudRun: draft.cloudRun,
     skipToolchainPreflight: draft.skipToolchainPreflight === true,
     autoWatch: draft.autoWatch === true
   }));
