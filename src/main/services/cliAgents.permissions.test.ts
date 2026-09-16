@@ -89,6 +89,7 @@ function makeClaudeWarmPendingTurn(overrides: Partial<Record<string, unknown>> =
     backgroundTaskLabels: new Map<string, string>(),
     finishedTaskIds: new Set<string>(),
     notificationsSinceInit: 0,
+    modelStepActive: false,
     heldSegments: [],
     heldResultEvents: [],
     holds: 0,
@@ -5489,4 +5490,78 @@ test("a host admission completing after shutdown cannot start its earlier comman
     assert.equal(result.ok, false); assert.match(result.error, /shut down while/);
     assert.equal(executions, 0); assert.equal(runner.hasActiveNativeWork(), false);
   }
+});
+
+test("claude warm hold: a notification during a running model step does not end the turn", async () => {
+  // The defect: once a reply was held, every system/task_notification armed the
+  // 10 s resume timer, and only system/init cleared it. The CLI also emits a
+  // notification for a long *foreground* command, which lands inside a step
+  // that is already running, so no init ever follows -- the app finalized the
+  // turn while the member was still working, dropped everything it produced
+  // afterwards, and ten minutes later killed the process mid-command.
+  const runner = makeRunner() as any;
+  runner.claudeBackgroundResumeGraceMs = 20;
+  const resolved: unknown[] = [];
+  let current: any = makeClaudeWarmPendingTurn({ resolve: (result: unknown) => resolved.push(result) });
+  const pending = current;
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const cleanup = (): unknown => { const value = current; current = undefined; return value; };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event), participant, {}, undefined, pending, cleanup, fail
+  );
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "system", subtype: "task_started", task_id: "t1", description: "suite", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "ACK" }] } });
+  send({ type: "result", result: "ACK" });
+  send({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed" });
+  send({ type: "system", subtype: "init" });
+
+  // The resumed step runs a long foreground command; the CLI reports it as a
+  // task notification too, and no further init follows because this step is
+  // already running.
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "u1", name: "Bash", input: {} }] } });
+  send({ type: "system", subtype: "task_notification", task_id: "t2", status: "completed" });
+  assert.equal(pending.holdGraceTimer, undefined, "a notification inside a running step must not arm the resume timer");
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(resolved.length, 0, "the turn must still be open while the model is working");
+  assert.ok(current, "the turn must not have been finalized");
+
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "DONE" }] } });
+  send({ type: "result", result: "DONE" });
+  assert.equal(resolved.length, 1, "the turn ends on the model's own result");
+  assert.equal((resolved[0] as { content: string }).content, "ACK\n\nDONE");
+});
+
+test("claude warm hold: model output while the resume timer is armed keeps the turn open", async () => {
+  const runner = makeRunner() as any;
+  runner.claudeBackgroundResumeGraceMs = 40;
+  const resolved: unknown[] = [];
+  let current: any = makeClaudeWarmPendingTurn({ resolve: (result: unknown) => resolved.push(result) });
+  const pending = current;
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const cleanup = (): unknown => { const value = current; current = undefined; return value; };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event), participant, {}, undefined, pending, cleanup, fail
+  );
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "system", subtype: "task_started", task_id: "t1", description: "suite", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "ACK" }] } });
+  send({ type: "result", result: "ACK" });
+  send({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed" });
+  assert.ok(pending.holdGraceTimer, "with no step running the timer waits for the CLI to resume");
+
+  // The CLI resumed without an init this copy could see: its output is the
+  // evidence, and it must be enough to stand the timer down.
+  send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "still here" } } });
+  assert.equal(pending.holdGraceTimer, undefined, "the model's own output stands the timer down");
+
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.equal(resolved.length, 0, "the turn must still be open");
+  send({ type: "result", result: "DONE" });
+  assert.equal(resolved.length, 1);
 });
