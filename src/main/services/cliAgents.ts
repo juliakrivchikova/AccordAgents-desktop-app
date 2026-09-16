@@ -389,6 +389,13 @@ interface ClaudeWarmPendingTurn {
   /** Armed when the hold is waiting only for the CLI to resume (no task still
    *  running); if no model turn starts in time, the held reply is delivered. */
   holdGraceTimer?: NodeJS.Timeout;
+  /** True while the model is inside a step: from `system/init` (or any output
+   *  of that step) until its `result`. A notification that lands mid-step is
+   *  delivered to the running step as a tool result and is never followed by a
+   *  fresh `init`, so waiting for one finished the turn while the member was
+   *  still working, dropped everything it produced afterwards, and let the
+   *  idle timer kill the process mid-command. */
+  modelStepActive: boolean;
   /** The visible "waiting" activity row of the current hold, completed when the
    *  CLI resumes so it does not stay "started" forever. */
   holdActivity?: { itemId: string; label: string };
@@ -5332,6 +5339,7 @@ export class CliAgentRunner {
             backgroundTaskLabels: new Map(),
             finishedTaskIds: new Set(),
             notificationsSinceInit: 0,
+            modelStepActive: false,
             heldSegments: [],
             heldResultEvents: [],
             holds: 0,
@@ -5464,6 +5472,21 @@ export class CliAgentRunner {
       rejectPending(new Error(streamError));
       return;
     }
+    // Anything the model itself produces is proof that a step is running now.
+    // Recorded before the notification bookkeeping below, because a
+    // notification that lands inside a running step must not arm the timer
+    // that waits for a step to start.
+    if (this.claudeWarmEventShowsModelStep(event)) {
+      if (!pending.modelStepActive) {
+        // A step this copy did not see start. Its own output is the proof it is
+        // running, and a running step is where any outstanding notification was
+        // delivered -- the same thing `system/init` states explicitly.
+        pending.notificationsSinceInit = 0;
+        pending.modelStepActive = true;
+        this.finishClaudeHoldActivity(pending, "completed");
+      }
+      this.clearClaudeHoldGraceTimer(pending);
+    }
     this.trackClaudeBackgroundTasks(event, pending, participant, options, fallbackSessionId, cleanupPending);
     const toolSummary = this.claudeWarmToolSummary(event);
     if (toolSummary) {
@@ -5496,6 +5519,9 @@ export class CliAgentRunner {
     if (!this.isClaudeWarmResult(event)) {
       return;
     }
+    // The step is over. From here a continuation has to start a new one, which
+    // is exactly what the grace timer below waits for.
+    pending.modelStepActive = false;
     const segment = this.claudeWarmSegmentText(pending, event);
     if (pending.backgroundTasks.size > 0 || pending.notificationsSinceInit > 0) {
       // Parity with the dedicated CLI: the model's reply is not the end of the
@@ -5714,6 +5740,7 @@ export class CliAgentRunner {
       // A model turn started: every notification seen so far has been delivered
       // to the model, and a held reply is now being continued.
       pending.notificationsSinceInit = 0;
+      pending.modelStepActive = true;
       this.clearClaudeHoldGraceTimer(pending);
       this.finishClaudeHoldActivity(pending, "completed");
       return;
@@ -5755,7 +5782,14 @@ export class CliAgentRunner {
         pending.backgroundTasks.delete(taskId);
         pending.finishedTaskIds.add(taskId);
       }
-      pending.notificationsSinceInit += 1;
+      // Only a notification with no step to receive it is something the CLI
+      // still has to resume for. One that arrives mid-step -- which is how the
+      // CLI reports a long foreground command -- was delivered into that step
+      // as a tool result, and counting it held a turn that had nothing left to
+      // wait for.
+      if (!pending.modelStepActive) {
+        pending.notificationsSinceInit += 1;
+      }
       const completed = status === "completed";
       this.emitLiveOutput(pending.onOutput, "tool", `Background task ${completed ? "finished" : status}: ${description}\n`, undefined, {
         activityKind: "status",
@@ -5812,7 +5846,8 @@ export class CliAgentRunner {
     fallbackSessionId: string | undefined,
     cleanupPending: () => ClaudeWarmPendingTurn | undefined
   ): void {
-    if (pending.holds === 0 || pending.backgroundTasks.size > 0) {
+    // A step already running is the resume this timer exists to wait for.
+    if (pending.holds === 0 || pending.backgroundTasks.size > 0 || pending.modelStepActive) {
       return;
     }
     this.clearClaudeHoldGraceTimer(pending);
@@ -5830,6 +5865,15 @@ export class CliAgentRunner {
       this.finishClaudeWarmTurn(current, "", undefined, participant, options, fallbackSessionId);
     }, this.claudeBackgroundResumeGraceMs);
     pending.holdGraceTimer.unref();
+  }
+
+  /** Output only a running model step produces: its own text, its stream
+   *  frames, and the tool results fed back into it. `system` events are not
+   *  included — `init` states the step itself, and the rest (notifications,
+   *  task bookkeeping) say nothing about whether one is running. */
+  private claudeWarmEventShowsModelStep(event: unknown): boolean {
+    const type = this.stringField(this.asRecord(event) ?? {}, "type");
+    return type === "assistant" || type === "stream_event" || type === "user";
   }
 
   private clearClaudeHoldGraceTimer(pending: ClaudeWarmPendingTurn): void {
