@@ -26,7 +26,7 @@ AccordAgents lets multiple agents work from the same project, compare perspectiv
 - Node.js 20+
 - npm
 - macOS (primary development target; the signed release pipeline is macOS arm64)
-- At least one supported CLI (`agy`, `claude`, or `codex`) installed and authenticated; first-run setup guides you when none is ready
+- At least one supported CLI (`agy`, `claude`, or `codex`) installed and signed in (Codex may instead use a provider configured with `requires_openai_auth = false`); first-run setup guides you when none is ready
 
 ## Install
 

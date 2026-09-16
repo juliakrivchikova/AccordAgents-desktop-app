@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test, { type TestContext } from "node:test";
 
 import type { AgentHealth, ChatProviderKind, ProviderSettings } from "../../shared/types";
 import {
@@ -220,6 +223,75 @@ test("Codex readiness falls back to app-server when login status reports not log
   assert.equal(accountProbes[0]?.env.CODEX_HOME, "/private/codex-home");
 });
 
+test("the real Codex account probe accepts a provider that does not require OpenAI sign-in", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("the fake app-server launcher is a POSIX shell script");
+    return;
+  }
+  const fake = await fakeCodexAppServer(t, "ready");
+  const snapshot = await codexSignedOutService(fake).refresh({ force: true, trigger: "manual" });
+  const codex = snapshot.find((health) => health.kind === "codex-cli");
+
+  assert.equal(codex?.authentication, "ready");
+  assert.equal(codex?.diagnosticCode, undefined);
+  const requests = await fake.requests();
+  assert.deepEqual(requests.map((request) => [request.method, request.id]), [["initialize", 1], ["account/read", 2]]);
+  const initialize = requests[0]?.params as { clientInfo?: { name?: string }; capabilities?: { experimentalApi?: boolean } };
+  assert.equal(initialize.clientInfo?.name, "accordagents");
+  assert.equal(initialize.capabilities?.experimentalApi, true);
+  assert.deepEqual(requests[1]?.params, { refreshToken: false });
+  await fake.assertTerminated();
+});
+
+test("the real Codex account probe keeps sign-in required when the provider needs OpenAI auth", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("the fake app-server launcher is a POSIX shell script");
+    return;
+  }
+  const fake = await fakeCodexAppServer(t, "signed-out");
+  const snapshot = await codexSignedOutService(fake).refresh({ force: true, trigger: "manual" });
+  const codex = snapshot.find((health) => health.kind === "codex-cli");
+
+  assert.equal(codex?.authentication, "required");
+  assert.equal(codex?.diagnosticCode, "auth-required");
+  assert.equal((await fake.requests()).length, 2);
+  await fake.assertTerminated();
+});
+
+test("the real Codex account probe keeps sign-in required when app-server exits before answering", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("the fake app-server launcher is a POSIX shell script");
+    return;
+  }
+  const fake = await fakeCodexAppServer(t, "exit");
+  const startedAt = Date.now();
+  const snapshot = await codexSignedOutService(fake).refresh({ force: true, trigger: "manual" });
+  const codex = snapshot.find((health) => health.kind === "codex-cli");
+
+  assert.equal(codex?.authentication, "required");
+  assert.equal(codex?.diagnosticCode, "auth-required");
+  assert.ok(Date.now() - startedAt < 5_000, "an exited app-server must settle the probe without waiting for the timeout");
+  await fake.assertTerminated();
+});
+
+test("the real Codex account probe times out, keeps sign-in required, and kills the app-server process tree", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("the fake app-server launcher is a POSIX shell script");
+    return;
+  }
+  const fake = await fakeCodexAppServer(t, "timeout");
+  const startedAt = Date.now();
+  const snapshot = await codexSignedOutService(fake).refresh({ force: true, trigger: "manual" });
+  const codex = snapshot.find((health) => health.kind === "codex-cli");
+
+  assert.equal(codex?.authentication, "required");
+  assert.equal(codex?.diagnosticCode, "auth-required");
+  const elapsedMs = Date.now() - startedAt;
+  assert.ok(elapsedMs >= 7_500 && elapsedMs < 12_000, `expected the 8s probe timeout, took ${elapsedMs}ms`);
+  assert.equal((await fake.pids()).length, 2, "the fake app-server must have started its helper child");
+  await fake.assertTerminated();
+});
+
 test("a shared environment failure preserves the last complete readiness snapshot", async () => {
   let refreshCalls = 0;
   const checkedAt = [
@@ -416,4 +488,140 @@ function deferred<T>() {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+type FakeCodexAppServerMode = "ready" | "signed-out" | "exit" | "timeout";
+
+interface FakeCodexAppServer {
+  executablePath: string;
+  environment: NodeJS.ProcessEnv;
+  requests: () => Promise<Array<{ method?: string; id?: number; params?: unknown }>>;
+  pids: () => Promise<number[]>;
+  assertTerminated: () => Promise<void>;
+}
+
+/**
+ * Speaks just enough of the Codex app-server stdio protocol to drive the real
+ * account probe: it answers `initialize` (after a notification and a server
+ * request that reuse id 1) and then `account/read` according to the mode. Like
+ * the real server it stays alive after stdin closes, so a finished probe must
+ * terminate it; the `timeout` mode also starts a helper child to prove the whole
+ * process tree goes away.
+ */
+const fakeCodexAppServerScript = [
+  "const fs = require('node:fs');",
+  "const { spawn } = require('node:child_process');",
+  "const mode = process.env.FAKE_CODEX_APP_SERVER_MODE;",
+  "const pids = [process.pid];",
+  "if (mode === 'timeout') {",
+  "  pids.push(spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }).pid);",
+  "}",
+  "fs.writeFileSync(process.env.FAKE_CODEX_APP_SERVER_PIDS, pids.join('\\n'));",
+  "process.stdout.on('error', () => {});",
+  "const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');",
+  "let buffer = '';",
+  "process.stdin.setEncoding('utf8');",
+  "process.stdin.on('data', (chunk) => {",
+  "  buffer += chunk;",
+  "  let lineBreak = buffer.indexOf('\\n');",
+  "  while (lineBreak >= 0) {",
+  "    const line = buffer.slice(0, lineBreak);",
+  "    buffer = buffer.slice(lineBreak + 1);",
+  "    lineBreak = buffer.indexOf('\\n');",
+  "    if (!line) continue;",
+  "    fs.appendFileSync(process.env.FAKE_CODEX_APP_SERVER_LOG, line + '\\n');",
+  "    const request = JSON.parse(line);",
+  "    if (request.method === 'initialize') {",
+  "      send({ method: 'remoteControl/status/changed', params: { status: 'disabled' } });",
+  "      send({ method: 'currentTime/read', id: 1, params: {} });",
+  "      send({ id: request.id, result: { userAgent: 'fake-codex' } });",
+  "    } else if (request.method === 'account/read') {",
+  "      if (mode === 'ready') send({ id: request.id, result: { account: null, requiresOpenaiAuth: false } });",
+  "      else if (mode === 'signed-out') send({ id: request.id, result: { account: null, requiresOpenaiAuth: true } });",
+  "      else if (mode === 'exit') process.exit(0);",
+  "    }",
+  "  }",
+  "});",
+  "process.stdin.on('end', () => {});",
+  "setInterval(() => {}, 1000);"
+].join("\n");
+
+async function fakeCodexAppServer(t: TestContext, mode: FakeCodexAppServerMode): Promise<FakeCodexAppServer> {
+  const root = await mkdtemp(path.join(tmpdir(), "accordagents-fake-codex-"));
+  const scriptPath = path.join(root, "app-server.js");
+  const executablePath = path.join(root, "codex");
+  const logPath = path.join(root, "requests.jsonl");
+  const pidsPath = path.join(root, "pids.txt");
+  await writeFile(scriptPath, fakeCodexAppServerScript);
+  await writeFile(executablePath, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)} "$@"\n`);
+  await chmod(executablePath, 0o755);
+  const pids = async (): Promise<number[]> => (await readFile(pidsPath, "utf8").catch(() => ""))
+    .split("\n")
+    .map((line) => Number.parseInt(line, 10))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+  t.after(async () => {
+    // A probe regression that leaks the server would otherwise keep the test
+    // process alive forever instead of reporting the failed assertion.
+    for (const pid of (await pids()).filter(processExists)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+  return {
+    executablePath,
+    environment: {
+      FAKE_CODEX_APP_SERVER_MODE: mode,
+      FAKE_CODEX_APP_SERVER_LOG: logPath,
+      FAKE_CODEX_APP_SERVER_PIDS: pidsPath
+    },
+    requests: async () => (await readFile(logPath, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { method?: string; id?: number; params?: unknown }),
+    pids,
+    assertTerminated: async () => {
+      const started = await pids();
+      assert.ok(started.length > 0, "the fake app-server must have recorded its pid");
+      for (let attempt = 0; attempt < 60 && started.some(processExists); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.deepEqual(started.filter(processExists), [], "the finished probe must leave no app-server process behind");
+    }
+  };
+}
+
+/** Readiness service whose `codex login status` reports "Not logged in", so the real app-server probe runs. */
+function codexSignedOutService(fake: FakeCodexAppServer): CliReadinessService {
+  return new CliReadinessService(undefined, fakeDependencies({
+    manualEnvironment: async () => fake.environment,
+    lookup: async (command) => command === "codex"
+      ? { status: "found", path: fake.executablePath }
+      : { status: "not-found" },
+    run: async (command, args) => {
+      if (command === fake.executablePath && args.join(" ") === "login status") {
+        throw new CommandError("Not logged in", {
+          command,
+          args,
+          stdout: "",
+          stderr: "Not logged in",
+          exitCode: 1,
+          timedOut: false
+        });
+      }
+      return successfulCommand(command, args);
+    }
+  }));
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
