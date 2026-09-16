@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { create } from "react-test-renderer";
+import { act, create } from "react-test-renderer";
 
 import type { ChatActivityItem, ChatAppToolApproval, ChatCodexApprovalRequest, ChatMessage } from "../../../shared/types";
 import {
@@ -85,6 +85,56 @@ test("cancelled Guardian denial renders a compact result without the blocked com
   assert.match(text, /Cancelled/);
   assert.match(text, /Closed without retrying/);
   assert.doesNotMatch(text, /very-long-command/);
+  renderer.unmount();
+});
+
+test("decided Codex card clamps a long summary and reveals it on Show more", () => {
+  const approval = codexApproval("guardian-approved-long", "participant", "run");
+  approval.status = "approved";
+  approval.summary = `Codex Auto Review denied: ${"very-long-command ".repeat(80)}`;
+  approval.request = {
+    ...(approval.request as ChatCodexApprovalRequest),
+    method: "item/autoApprovalReview/denied",
+    options: [
+      { id: "approveRetry", label: "Approve one retry", outcome: "approve" },
+      { id: "keepDenied", label: "Keep denied", outcome: "deny" }
+    ]
+  };
+  // Three clamped lines hide most of the command: the measured box overflows.
+  let renderer!: ReturnType<typeof create>;
+  act(() => {
+    renderer = create(<ChatCodexApprovalResult approval={approval} />, {
+      createNodeMock: () => ({ scrollHeight: 300, clientHeight: 57 })
+    });
+  });
+  const detail = (): { props: { className: string } } => renderer.root.find((instance) =>
+    instance.type === "span" && /(?:^| )chat-app-tool-result-detail(?: |$)/.test(String(instance.props.className ?? ""))
+  ) as never;
+  const toggle = (): { props: { onClick: () => void; children: string } } | undefined =>
+    renderer.root.findAllByType("button")[0] as never;
+  assert.match(detail().props.className, /is-collapsed/);
+  assert.equal(toggle()?.props.children, "Show more");
+  act(() => toggle()?.props.onClick());
+  assert.doesNotMatch(detail().props.className, /is-collapsed/);
+  assert.equal(toggle()?.props.children, "Show less");
+  assert.match(textContent(renderer.toJSON()), /very-long-command/);
+  act(() => toggle()?.props.onClick());
+  assert.match(detail().props.className, /is-collapsed/);
+  assert.equal(toggle()?.props.children, "Show more");
+  renderer.unmount();
+});
+
+test("decided Codex card with a short summary offers no Show more", () => {
+  const approval = codexApproval("approved-short", "participant", "run");
+  approval.status = "approved";
+  let renderer!: ReturnType<typeof create>;
+  act(() => {
+    renderer = create(<ChatCodexApprovalResult approval={approval} />, {
+      createNodeMock: () => ({ scrollHeight: 19, clientHeight: 19 })
+    });
+  });
+  assert.equal(renderer.root.findAllByType("button").length, 0);
+  assert.match(textContent(renderer.toJSON()), /Codex approval/);
   renderer.unmount();
 });
 

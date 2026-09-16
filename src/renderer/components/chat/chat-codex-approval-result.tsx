@@ -1,6 +1,7 @@
 import { AlertTriangle, Check } from "lucide-react";
 
 import type { ChatAppToolApproval } from "../../../shared/types";
+import { ChatAppToolResultDetail } from "./chat-app-tool-result-detail";
 import { chatCodexApprovalRequest, chatCodexApprovalShowsCancel } from "./chat-codex-approval-presentation";
 
 export function ChatCodexApprovalResult({ approval }: { approval: ChatAppToolApproval }): JSX.Element {
@@ -23,11 +24,11 @@ export function ChatCodexApprovalResult({ approval }: { approval: ChatAppToolApp
       </div>
       <div className="chat-app-tool-result-copy">
         <strong>{title}</strong>
-        <span>{guardianCancelled
+        <ChatAppToolResultDetail text={guardianCancelled
           ? "Closed without retrying the denied action."
           : approval.error
             ? `${approval.summary}: ${approval.error}`
-            : approval.summary}</span>
+            : approval.summary} />
       </div>
     </div>
   );

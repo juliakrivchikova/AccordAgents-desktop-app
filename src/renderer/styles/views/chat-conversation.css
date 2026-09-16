@@ -1567,6 +1567,39 @@
   overflow-wrap: anywhere;
 }
 
+.chat-app-tool-result-detail {
+  white-space: pre-wrap;
+}
+
+.chat-app-tool-result-detail.is-collapsed {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.chat-app-tool-result-detail-toggle {
+  justify-self: start;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--app-muted-subtle);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.chat-app-tool-result-detail-toggle:hover {
+  color: var(--app-muted);
+}
+
+.chat-app-tool-result-detail-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 .chat-app-tool-review-participant-head {
   display: flex;
   align-items: center;
