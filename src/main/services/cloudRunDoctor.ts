@@ -366,25 +366,47 @@ function probeScript(worker: RemoteRunWorkerTarget): string {
   ].join("; ");
 }
 
+/** Same budget as the local readiness probe (READINESS_PROBE_TIMEOUT_MS on main); the request writer polls every 100 ms. */
+const CODEX_ACCOUNT_PROBE_TIMEOUT_MS = 8_000;
+const CODEX_PROBE_INITIALIZE = {
+  method: "initialize",
+  id: 1,
+  params: {
+    clientInfo: { name: "accordagents", title: "AccordAgents", version: "0.1.0" },
+    capabilities: { experimentalApi: true, requestAttestation: false, optOutNotificationMethods: [] }
+  }
+};
+const CODEX_PROBE_ACCOUNT_READ = { method: "account/read", id: 2, params: { refreshToken: false } };
+
 /**
  * Prints `codex-auth=ok` when Codex on the worker can run without a sign-in
- * prompt, mirroring the local readiness probe in cliReadiness.ts: `codex login
- * status` succeeds, or the app-server `account/read` reports an account or
- * `requiresOpenaiAuth: false` (a third-party provider with its own API key).
- * The app-server exits as soon as stdin closes, so the request writer keeps the
- * pipe open until the `id: 2` reply has been read, at most 8 seconds.
+ * prompt, by the same rule as the local readiness probe (`isCodexAccountReady`
+ * on main): `codex login status` succeeds, or it says exactly "Not logged in"
+ * and the app-server `account/read` reports an account or `requiresOpenaiAuth:
+ * false` (a third-party provider with its own API key). Any other login-status
+ * failure stays `missing`, as it stays "could not verify" locally.
+ *
+ * The app-server exits as soon as stdin closes, so the writer keeps the pipe
+ * open until the reader has seen the `id: 2` reply, for at most the probe
+ * budget; `timeout` then ends a server that never answers, with SIGKILL after
+ * SIGTERM like the local probe. Codex writes compact JSON, results id-first
+ * (`{"id":2,"result":…}`), errors error-first (`{"error":…,"id":2}`), and
+ * server-initiated requests with a `"method"` key, which the reader skips.
  */
 export function codexAuthProbeShell(codexPath: string): string {
   const codex = shellQuotePosix(codexPath);
-  const initialize = "{\"method\":\"initialize\",\"id\":1,\"params\":{\"clientInfo\":{\"name\":\"accordagents\",\"title\":\"AccordAgents\",\"version\":\"0.1.0\"},\"capabilities\":{\"experimentalApi\":true,\"requestAttestation\":false,\"optOutNotificationMethods\":[]}}}";
-  const accountRead = "{\"method\":\"account/read\",\"id\":2,\"params\":{\"refreshToken\":false}}";
+  const ticks = CODEX_ACCOUNT_PROBE_TIMEOUT_MS / 100;
+  const serverTimeoutSeconds = Math.ceil(CODEX_ACCOUNT_PROBE_TIMEOUT_MS / 1000) + 2;
+  const requests = `${shellQuotePosix(JSON.stringify(CODEX_PROBE_INITIALIZE))} ${shellQuotePosix(JSON.stringify(CODEX_PROBE_ACCOUNT_READ))}`;
+  const writer = `{ printf '%s\\n%s\\n' ${requests}; n=0; while [ ! -e "$d/done" ] && [ "$n" -lt ${ticks} ]; do sleep 0.1; n=$((n+1)); done; }`;
+  const server = `timeout -k 2 ${serverTimeoutSeconds} ${codex} app-server --listen stdio:// 2>/dev/null`;
+  const reader = `{ line="$(grep -m1 -E '^\\{"(id":2,"(result|error)"|error":.*,"id":2\\})')"; touch "$d/done"; case "$line" in *'"requiresOpenaiAuth":false'*|*'"account":{'*) touch "$d/ready";; esac; }`;
   return [
-    "codex_account_ready() { d=\"$(mktemp -d)\" || return 1",
-    `{ printf '%s\\n%s\\n' '${initialize}' '${accountRead}'; n=0; while [ ! -e "$d/done" ] && [ "$n" -lt 80 ]; do sleep 0.1; n=$((n+1)); done; }`
-      + ` | timeout 10 ${codex} app-server --listen stdio:// 2>/dev/null`
-      + " | { line=\"$(grep -m1 '^{\"id\":2,')\"; touch \"$d/done\"; case \"$line\" in *'\"requiresOpenaiAuth\":false'*|*'\"account\":{'*) touch \"$d/ready\";; esac; }",
-    "[ -e \"$d/ready\" ]; r=$?; rm -rf \"$d\"; return \"$r\"; }",
-    `if ${codex} login status >/dev/null 2>&1 || codex_account_ready; then printf 'codex-auth=ok\\n'; else printf 'codex-auth=missing\\n'; fi`
+    `codex_account_ready() { d="$(mktemp -d)" || return 1; trap 'rm -rf "$d"' EXIT HUP TERM`,
+    `${writer} | ${server} | ${reader}`,
+    `[ -e "$d/ready" ]; r=$?; rm -rf "$d"; return "$r"; }`,
+    `codex_login="$(${codex} login status 2>&1)"; codex_login_rc=$?`,
+    `if [ "$codex_login_rc" -eq 0 ] || { [ "$codex_login_rc" -eq 1 ] && [ "$codex_login" = "Not logged in" ] && codex_account_ready; }; then printf 'codex-auth=ok\\n'; else printf 'codex-auth=missing\\n'; fi`
   ].join("; ");
 }
 
