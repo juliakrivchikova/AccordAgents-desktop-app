@@ -630,6 +630,14 @@ export class MobileRelayControlService {
       return;
     }
     const accepted = await this.prepareMobileOutboxRequest(assertMobileOutboxRequest(payload));
+    // A card answered on the phone travels this path whenever the desktop is
+    // up, because the phone prefers its live tunnel over the mailbox. Without
+    // this the answer was accepted, acked, and then dropped: no durable
+    // decision event was ever written, the peer holding the request never
+    // acted on it, and the card stayed pending above the composer for ever.
+    // Delivered before the ack, like a cancellation, so an answer this desktop
+    // could not take is not reported to the phone as delivered.
+    await this.deliverAcceptedDecisionEvents(accepted);
     await this.deliverAcceptedCancellationEvents(accepted);
     await this.sendAck(message.logicalMessageId, accepted);
     this.markRunIdsAcked(accepted.runIds);

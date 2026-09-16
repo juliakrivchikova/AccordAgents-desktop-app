@@ -3275,3 +3275,53 @@ test("MobileRelayControlService states what a ring is about: a finished reply, a
     service.close();
   }
 });
+
+test("a card answered on the phone over the live tunnel is delivered, not only acked", { timeout: 10000 }, async () => {
+  // The defect: a decision arriving on the connected tunnel -- the path the
+  // phone uses whenever the desktop is up -- was accepted and acked, and then
+  // dropped. Only cancellations and messages were delivered here, so Stop kept
+  // working while an answered choice never became a durable decision at all:
+  // the member holding the question was never told, and the card stayed
+  // pending above the phone's composer for ever.
+  const key = Buffer.from("d".repeat(32)).toString("base64url");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  const decisions: Array<{ kind: string; targetKey: string; conversationId: string }> = [];
+  const desktop = new MobileRelayControlService({
+    relayUrl: address.url, rendezvousId: "rv-decision", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: key, conversationId: "conversation-1", streamId: "decision:phone"
+  }, {
+    ...sender([]),
+    async applyMobileDecision(request) {
+      decisions.push({ kind: request.kind, targetKey: request.payload.targetKey, conversationId: request.conversationId });
+    }
+  });
+  const phone = new RelayTunnelClient({
+    relayUrl: address.url, rendezvousId: "rv-decision", role: "phone",
+    capability: "PAIRING-FINGERPRINT", streamId: "decision:phone"
+  });
+  try {
+    await Promise.all([desktop.connect(), phone.connect()]);
+    await phone.sendCiphertext({
+      logicalMessageId: "phone-answer-1",
+      ciphertext: await sealMobileRelayPayload({
+        type: "mobile.outbox.events",
+        events: [{
+          eventId: "event-choice-1",
+          conversationId: "conversation-1",
+          kind: "choice.answered",
+          payload: {
+            operationId: "choice:choice-1:o1",
+            targetKey: "choice:choice-1",
+            stateId: "o1",
+            detail: { sourceMessageId: "message-1", selectedOptionId: "o1" }
+          }
+        }]
+      }, key)
+    });
+    await waitFor(() => decisions.length === 1, 5000);
+    assert.deepEqual(decisions, [{
+      kind: "choice.answered", targetKey: "choice:choice-1", conversationId: "conversation-1"
+    }], "the answer must reach the desktop's decision path, not stop at the ack");
+  } finally { phone.close(); desktop.close(); await relay.close(); }
+});
