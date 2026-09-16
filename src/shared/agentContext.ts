@@ -1,4 +1,5 @@
 import type { AgentContextUsage, AgentContextUsageSource, ProviderKind } from "./types";
+import { ZAI_MODEL_CONTEXT_WINDOWS } from "./chatParticipantEndpoint";
 
 const OPENAI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "gpt-5.2": 400_000,
@@ -68,7 +69,10 @@ export function contextWindowForModel(kind: ProviderKind, model: string | undefi
     return contextWindowFromMap(OPENAI_MODEL_CONTEXT_WINDOWS, normalized) ?? openAiFamilyContextWindow(normalized);
   }
   if (kind === "claude-code" || kind === "anthropic") {
-    return contextWindowFromMap(CLAUDE_MODEL_CONTEXT_WINDOWS, normalized) ?? claudeFamilyContextWindow(normalized);
+    return contextWindowFromMap(CLAUDE_MODEL_CONTEXT_WINDOWS, normalized)
+      ?? contextWindowFromMap(ZAI_MODEL_CONTEXT_WINDOWS, normalized)
+      ?? claudeFamilyContextWindow(normalized)
+      ?? glmFamilyContextWindow(normalized);
   }
   if (kind === "gemini-cli" || kind === "gemini") {
     return contextWindowFromMap(GEMINI_CLI_MODEL_CONTEXT_WINDOWS, normalized) ?? geminiFamilyContextWindow(normalized);
@@ -110,6 +114,12 @@ function claudeFamilyContextWindow(normalizedModel: string): number | undefined 
     return 200_000;
   }
   return undefined;
+}
+
+// GLM-5.x served through Claude Code (Z.ai endpoint): Claude Code treats the ids
+// as unrecognized and assumes 200k, which is what its context display shows.
+function glmFamilyContextWindow(normalizedModel: string): number | undefined {
+  return /^glm-5(\.\d+)?(-flash)?$/.test(normalizedModel) ? 200_000 : undefined;
 }
 
 function openAiFamilyContextWindow(normalizedModel: string): number | undefined {

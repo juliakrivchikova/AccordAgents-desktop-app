@@ -59,7 +59,7 @@ export function ParticipantPresetCard(props: {
       <dl className="participant-preset-facts">
         <ParticipantFact
           label="Provider"
-          value={participantProviderLabel(props.participant.kind)}
+          value={participantProviderLabel(props.participant.kind, props.participant.endpoint)}
           providerKind={props.participant.kind}
         />
         <ParticipantFact label="Model" value={props.participant.model?.trim() || "CLI default"} />

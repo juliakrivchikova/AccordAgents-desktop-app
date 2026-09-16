@@ -44,7 +44,7 @@ export function participantMatchesQuery(
   roleLabel: string,
   query: string
 ): boolean {
-  return [participant.handle, roleLabel, participantProviderLabel(participant.kind), participant.model ?? ""]
+  return [participant.handle, roleLabel, participantProviderLabel(participant.kind, participant.endpoint), participant.model ?? ""]
     .join(" ")
     .toLowerCase()
     .includes(query);
@@ -53,7 +53,7 @@ export function participantMatchesQuery(
 export function providerSummary(participants: ChatParticipantConfig[]): string {
   const counts = new Map<string, number>();
   for (const participant of participants) {
-    const label = participantProviderLabel(participant.kind);
+    const label = participantProviderLabel(participant.kind, participant.endpoint);
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   return Array.from(counts.entries())

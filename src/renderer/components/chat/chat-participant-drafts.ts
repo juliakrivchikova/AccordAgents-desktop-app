@@ -7,6 +7,7 @@ import type {
   CloudRunRemoteExecutionMode,
   ChatParticipant,
   ChatParticipantConfig,
+  ChatParticipantEndpoint,
   ChatProviderKind,
   ChatReasoningEffort,
   ChatRoleConfig,
@@ -27,6 +28,16 @@ import {
 } from "../../../shared/agentPermissions";
 import { normalizeChatReasoningEffort } from "../../../shared/reasoningEffort";
 import { chatProviderKind, preferredChatProviderSetting } from "../../../shared/chatProviders";
+import {
+  ZAI_ENDPOINT_PRESET,
+  chatParticipantEndpointDefaultModel,
+  chatParticipantEndpointFor,
+  chatParticipantEndpointLabel,
+  chatParticipantEndpointValidationError,
+  defaultChatParticipantEndpoint,
+  isChatParticipantEndpointPreset,
+  sameChatParticipantEndpoint
+} from "../../../shared/chatParticipantEndpoint";
 import {
   readyProviderKinds
 } from "../../../shared/cliReadiness";
@@ -57,6 +68,7 @@ export interface ChatParticipantDraft {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   avatarId?: string;
+  endpoint?: ChatParticipantEndpoint;
   agentMode: ChatAgentMode;
   permissions: ChatAgentPermissions;
   remoteExecution?: ChatParticipantConfig["remoteExecution"];
@@ -128,9 +140,9 @@ export function chatAgentModeLabel(mode: ChatAgentMode | undefined): string {
   }
 }
 
-export function chatCliProviderLabel(kind: ChatProviderKind | undefined): string {
+export function chatCliProviderLabel(kind: ChatProviderKind | undefined, endpoint?: ChatParticipantEndpoint): string {
   if (kind === "claude-code") {
-    return "Claude Code";
+    return chatParticipantEndpointLabel(endpoint) ?? "Claude Code";
   }
   if (kind === "codex-cli") {
     return "Codex CLI";
@@ -141,8 +153,56 @@ export function chatCliProviderLabel(kind: ChatProviderKind | undefined): string
   return "CLI";
 }
 
-export function chatInheritedCliSettingLabel(kind: ChatProviderKind | undefined): string {
+export function chatInheritedCliSettingLabel(kind: ChatProviderKind | undefined, endpoint?: ChatParticipantEndpoint): string {
+  const endpointDefault = kind ? chatParticipantEndpointDefaultModel(chatParticipantEndpointFor(kind, endpoint)) : undefined;
+  if (endpointDefault) {
+    return `${endpointDefault} (default)`;
+  }
   return `${chatCliProviderLabel(kind)} setting`;
+}
+
+/** Composite id for the Provider / CLI picker: an endpoint member is its own
+ *  entry ("GLM (Z.ai)") next to Claude Code / Codex / Antigravity. */
+export type ChatProviderOptionId = ChatProviderKind | `claude-code:${NonNullable<ChatParticipantEndpoint["preset"]>}`;
+
+export function chatProviderOptionId(kind: ChatProviderKind, endpoint: ChatParticipantEndpoint | undefined): ChatProviderOptionId {
+  const scoped = chatParticipantEndpointFor(kind, endpoint);
+  return scoped ? `claude-code:${scoped.preset}` : kind;
+}
+
+export interface ChatProviderOption {
+  id: ChatProviderOptionId;
+  kind: ChatProviderKind;
+  endpoint?: ChatParticipantEndpoint;
+  label: string;
+}
+
+/** Picker entries for the given CLI kinds; Claude Code also contributes its
+ *  endpoint presets so "GLM (Z.ai)" sits next to the CLIs it is built on. */
+export function chatProviderOptions(kinds: ChatProviderKind[]): ChatProviderOption[] {
+  return kinds.flatMap((kind) => {
+    const base: ChatProviderOption = { id: kind, kind, label: chatCliProviderLabel(kind) };
+    if (kind !== "claude-code") {
+      return [base];
+    }
+    const zai = defaultChatParticipantEndpoint(ZAI_ENDPOINT_PRESET);
+    return [base, { id: chatProviderOptionId(kind, zai), kind, endpoint: zai, label: chatCliProviderLabel(kind, zai) }];
+  });
+}
+
+/** Draft patch for a picker choice; keeps an existing endpoint's edited URL /
+ *  variable when the preset itself did not change. */
+export function chatProviderOptionPatch(
+  optionId: string,
+  current: Pick<ChatParticipantDraft, "kind" | "endpoint">
+): Pick<ChatParticipantDraft, "kind" | "endpoint"> {
+  const [kind, preset] = optionId.split(":");
+  const nextKind = chatProviderKind(kind);
+  if (nextKind !== "claude-code" || !isChatParticipantEndpointPreset(preset)) {
+    return { kind: nextKind, endpoint: undefined };
+  }
+  const existing = chatParticipantEndpointFor(current.kind, current.endpoint);
+  return { kind: nextKind, endpoint: existing?.preset === preset ? existing : defaultChatParticipantEndpoint(preset) };
 }
 
 export const CHAT_AGENT_MODE_OPTIONS: Array<{ value: ChatAgentMode; label: string }> = [
@@ -214,6 +274,7 @@ export function chatParticipantConfigToDraft(
     model: participant.model,
     reasoningEffort: normalizeChatReasoningEffort(participant.reasoningEffort, participant.kind),
     avatarId: normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle),
+    endpoint: chatParticipantEndpointFor(participant.kind, participant.endpoint),
     agentMode: normalizeChatAgentMode(participant.agentMode),
     permissions: normalizeChatAgentPermissions(participant.permissions),
     remoteExecution: normalizeChatRunLocation(participant.remoteExecution),
@@ -287,6 +348,7 @@ export function sameParticipantDraft(draft: ChatParticipantDraft, participant: C
     (draft.model ?? "") === (participant.model ?? "") &&
     (draft.reasoningEffort ?? "") === (participant.reasoningEffort ?? "") &&
     normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle) === normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle) &&
+    sameChatParticipantEndpoint(chatParticipantEndpointFor(draft.kind, draft.endpoint), chatParticipantEndpointFor(participant.kind, participant.endpoint)) &&
     normalizeChatAgentMode(draft.agentMode) === normalizeChatAgentMode(participant.agentMode) &&
     chatAgentPermissionsEqual(draft.permissions, participant.permissions) &&
     normalizeChatRunLocation(draft.remoteExecution) === normalizeChatRunLocation(participant.remoteExecution) &&
@@ -339,9 +401,10 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
       .map((rule) => rule.id)
       .filter((id) => selectedRuleIds.has(id)),
     kind,
-    model: draft.model ?? provider?.model,
+    model: draft.model ?? chatParticipantEndpointDefaultModel(chatParticipantEndpointFor(kind, draft.endpoint)) ?? provider?.model,
     reasoningEffort: normalizeChatReasoningEffort(draft.reasoningEffort, kind),
     avatarId: normalizedChatAvatarId(kind, draft.avatarId, handle || roleConfigId),
+    endpoint: chatParticipantEndpointFor(kind, draft.endpoint),
     agentMode: normalizeChatAgentMode(draft.agentMode),
     permissions: normalizeChatAgentPermissions(draft.permissions),
     remoteExecution: normalizeChatRunLocation(draft.remoteExecution),
@@ -353,14 +416,20 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
 export function updateChatParticipantDraft(
   draft: ChatParticipantDraft,
   settings: AppSettings,
-  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "model" | "reasoningEffort" | "avatarId" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">>
+  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "model" | "reasoningEffort" | "avatarId" | "endpoint" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">>
 ): ChatParticipantDraft {
   let next = { ...draft, ...patch };
   const kindChanged = patch.kind !== undefined && patch.kind !== draft.kind;
-  if (kindChanged && patch.model === undefined) {
+  // An endpoint only exists on Claude Code; leaving Claude Code drops it.
+  next = { ...next, endpoint: chatParticipantEndpointFor(next.kind, next.endpoint) };
+  const previousEndpoint = chatParticipantEndpointFor(draft.kind, draft.endpoint);
+  const endpointPresetChanged = previousEndpoint?.preset !== next.endpoint?.preset;
+  // A model id is only meaningful on the side it came from (glm-* vs Anthropic
+  // aliases), so switching provider or endpoint resets it to that side's default.
+  if ((kindChanged || endpointPresetChanged) && patch.model === undefined) {
     next = {
       ...next,
-      model: settings.providers.find((provider) => provider.kind === next.kind)?.model
+      model: chatParticipantEndpointDefaultModel(next.endpoint) ?? settings.providers.find((provider) => provider.kind === next.kind)?.model
     };
   }
   if (kindChanged && patch.reasoningEffort === undefined) {
@@ -421,8 +490,8 @@ export function updateChatParticipantDraft(
       autoWatch: true
     };
   }
-  if (!draft.handle.trim() || ((roleChanged || kindChanged) && isGeneratedChatHandle(draft.handle))) {
-    const handle = generatedChatHandle(settings, next.kind, next.roleConfigId);
+  if (!draft.handle.trim() || ((roleChanged || kindChanged || endpointPresetChanged) && isGeneratedChatHandle(draft.handle))) {
+    const handle = generatedChatHandle(settings, next.kind, next.roleConfigId, new Set(), next.endpoint);
     return {
       ...next,
       handle,
@@ -465,6 +534,7 @@ export function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatPartic
     model: draft.model?.trim() || undefined,
     reasoningEffort: normalizeChatReasoningEffort(draft.reasoningEffort, draft.kind),
     avatarId: normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle),
+    endpoint: chatParticipantEndpointFor(draft.kind, draft.endpoint),
     agentMode: normalizeChatAgentMode(draft.agentMode),
     permissions: normalizeChatAgentPermissions(draft.permissions),
     remoteExecution: normalizeChatRunLocation(draft.remoteExecution),
@@ -504,6 +574,10 @@ export function validateChatParticipantDrafts(
     }
     if (draft.avatarId && !isChatAvatarIdForKind(draft.avatarId, draft.kind)) {
       return "Select an avatar that matches the member CLI.";
+    }
+    const endpointError = chatParticipantEndpointValidationError(chatParticipantEndpointFor(draft.kind, draft.endpoint));
+    if (endpointError) {
+      return endpointError;
     }
     const shellRules = draft.permissions.shell.enabled ? draft.permissions.shell.rules : [];
     for (const rule of shellRules) {

@@ -26,7 +26,7 @@ export function ChatAppToolRosterOperation({ operation, roles }: { operation: Ch
   const participant = operation.participant;
   const label = chatParticipantDisplayName(participant);
   const details = [
-    participantProviderLabel(participant.kind),
+    participantProviderLabel(participant.kind, participant.endpoint),
     participant.model,
     participant.reasoningEffort ? `reasoning ${chatReasoningEffortLabel(participant.reasoningEffort)}` : "",
     roleLabelForRosterParticipant(participant, roles)

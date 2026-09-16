@@ -153,7 +153,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
               />
               <ChatAppToolInlineSelectRow
                 label="Provider / CLI"
-                value={participantProviderLabel(participant.kind)}
+                value={participantProviderLabel(participant.kind, participant.endpoint)}
                 current={participant.kind}
                 options={[{ value: "codex-cli", label: "Codex CLI" }, { value: "claude-code", label: "Claude Code" }, { value: "gemini-cli", label: "Gemini CLI" }]}
                 onSelect={(value) => {
@@ -277,7 +277,7 @@ export function ChatAppToolExistingParticipantSpec(props: {
     <>
       <div className="chat-app-tool-review-spec-row">
         <span>Provider / CLI</span>
-        <strong>{participantProviderLabel(preset.kind)}</strong>
+        <strong>{participantProviderLabel(preset.kind, preset.endpoint)}</strong>
       </div>
       <ChatAppToolInlineModelRow
         kind={preset.kind}

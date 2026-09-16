@@ -119,6 +119,14 @@ import {
   limitChatBehaviorRulePromptText
 } from "../../shared/chatBehaviorRules";
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../shared/reasoningEffort";
+import {
+  chatParticipantEndpointDefaultModel,
+  chatParticipantEndpointEnv,
+  chatParticipantEndpointEnvKey,
+  chatParticipantEndpointFor,
+  normalizeChatParticipantEndpoint,
+  sameChatParticipantEndpoint
+} from "../../shared/chatParticipantEndpoint";
 import { CODEX_APPROVAL_TOOL_NAME, codexApprovalCancellationResult, prepareCodexApproval } from "./codexApprovals";
 import {
   CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID,
@@ -147,7 +155,7 @@ import {
 } from "../../shared/appTools";
 import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
-import { CliAgentRunner, type CliAgentCodexServerRequest, type CliAgentOutputEvent, type CliAgentRoleOptions } from "./cliAgents";
+import { CliAgentRunner, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentRoleOptions } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type {
   RemoteDetachedRunState,
@@ -695,6 +703,31 @@ export class ChatService {
     return settings.getManualAgentEnvironment();
   }
 
+  /** Settings → Environment plus, for an endpoint member, the variables that
+   *  point Claude Code at that endpoint. Local runs, compaction and remote workers
+   *  all take this same map, so the member behaves identically wherever it runs.
+   *  `missingEnvKey` names the Settings variable the endpoint needs but lacks. */
+  private async agentEnvironmentForParticipant(
+    participant: ChatParticipant,
+    cliParticipant: Pick<ParticipantConfig, "model">
+  ): Promise<{ env: NodeJS.ProcessEnv; version: string; missingEnvKey?: string }> {
+    const manual = await this.manualAgentEnvironmentForRun();
+    const endpoint = chatParticipantEndpointFor(participant.kind, participant.endpoint);
+    if (!endpoint) {
+      return manual;
+    }
+    const resolved = chatParticipantEndpointEnv(endpoint, manual.env, cliParticipant.model);
+    return {
+      env: { ...manual.env, ...resolved.env },
+      version: `${manual.version}|${chatParticipantEndpointEnvKey(endpoint, cliParticipant.model)}`,
+      missingEnvKey: resolved.missingEnvKey
+    };
+  }
+
+  private endpointEnvMissingMessage(participant: ChatParticipant, envKey: string): string {
+    return `@${participant.handle} cannot start: add ${envKey} in Settings → Environment. Its GLM (Z.ai) endpoint reads the API key from that variable.`;
+  }
+
   setRemoteRunService(remoteRuns: RemoteRunStarter): void {
     this.remoteRuns = remoteRuns;
   }
@@ -952,6 +985,7 @@ export class ChatService {
         model: participant.model,
         reasoningEffort: participant.reasoningEffort,
         avatarId: participant.avatarId,
+        endpoint: participant.endpoint,
         agentMode: participant.agentMode,
         permissions: enableRepoRead
           ? {
@@ -1461,29 +1495,31 @@ export class ChatService {
       session.participantPermissions = permissions;
       const runPath = this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions);
       const cliParticipant = this.cliParticipantForSession(participant, session);
-      const agentEnvironment = await this.manualAgentEnvironmentForRun();
+      const agentEnvironment = await this.agentEnvironmentForParticipant(participant, cliParticipant);
       const appMcpToolInventoryKey = this.appMcpToolInventoryKey(
         this.appMcpToolNames(this.appToolCapabilitiesForRun(session, permissions))
       );
-      const result = await this.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
-        persistSession: true,
-        sessionId: session.sessionId,
-        extraReadableDirs: [workspacePath],
-        agentMode,
-        permissions,
-        agentEnv: agentEnvironment.env,
-        agentEnvKey: agentEnvironment.version,
-        ...(compactInstructions ? { compactInstructions } : {}),
-        onSessionId: (sessionId) => {
-          this.persistParticipantSessionId(conversation, session, sessionId);
-        },
-        warm: {
-          conversationId: conversation.id,
-          participantId: participant.id,
-          contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
-          idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
-        }
-      });
+      const result: CliAgentCompactResult = agentEnvironment.missingEnvKey
+        ? { participant: cliParticipant, ok: false, error: this.endpointEnvMissingMessage(participant, agentEnvironment.missingEnvKey) }
+        : await this.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
+            persistSession: true,
+            sessionId: session.sessionId,
+            extraReadableDirs: [workspacePath],
+            agentMode,
+            permissions,
+            agentEnv: agentEnvironment.env,
+            agentEnvKey: agentEnvironment.version,
+            ...(compactInstructions ? { compactInstructions } : {}),
+            onSessionId: (sessionId) => {
+              this.persistParticipantSessionId(conversation, session, sessionId);
+            },
+            warm: {
+              conversationId: conversation.id,
+              participantId: participant.id,
+              contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
+              idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
+            }
+          });
       await this.refreshStoredChatState(conversation);
       const now = new Date().toISOString();
       session.updatedAt = now;
@@ -1556,14 +1592,14 @@ export class ChatService {
 
   async syncSavedParticipantAvatar(
     previous: Pick<ChatParticipantConfig, "handle" | "kind"> | undefined,
-    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId">
+    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId" | "endpoint">
   ): Promise<void> {
     await this.syncSavedParticipantConfig(previous, next, { behaviorRules: false });
   }
 
   async syncSavedParticipantConfig(
     previous: Pick<ChatParticipantConfig, "handle" | "kind"> | undefined,
-    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId" | "behaviorRuleIds">,
+    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId" | "behaviorRuleIds" | "endpoint">,
     options: { behaviorRules?: boolean } = {}
   ): Promise<void> {
     const normalizedPreviousHandle = previous?.handle.trim().replace(/^@/, "").toLowerCase();
@@ -3600,6 +3636,7 @@ export class ChatService {
         model: participant.model,
         reasoningEffort: participant.reasoningEffort,
         avatarId: participant.avatarId,
+        endpoint: participant.endpoint,
         agentMode: normalizeChatAgentMode(participant.agentMode),
         permissions: normalizeChatAgentPermissions(participant.permissions),
         manageRolesParticipants: this.manageRolesParticipantsResolutionForRole(roleById.get(participant.roleConfigId), participant.permissions),
@@ -6620,7 +6657,7 @@ export class ChatService {
         messageId: pendingMessage.id
       }
     });
-    const agentEnvironment = await this.manualAgentEnvironmentForRun();
+    const agentEnvironment = await this.agentEnvironmentForParticipant(participant, cliParticipant);
     const persistSessionId = (sessionId: string): void => {
       this.persistParticipantSessionId(conversation, session, sessionId);
     };
@@ -6628,6 +6665,13 @@ export class ChatService {
     let awsRemoteRunRefHeld = false;
     try {
       progressSink.beginAttempt();
+      if (agentEnvironment.missingEnvKey) {
+        const message = this.endpointEnvMissingMessage(participant, agentEnvironment.missingEnvKey);
+        pendingMessage.status = "error";
+        pendingMessage.content = message;
+        options.warnings.push(message);
+        return [pendingMessage];
+      }
       const participantRunsRemotely = this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) === "remote";
       if (nativeGoal && participantRunsRemotely) {
         const message = `@${participant.handle} native /goal requires the local dedicated CLI transport; remote execution does not expose the provider's native goal protocol.`;
@@ -7947,7 +7991,9 @@ export class ChatService {
       id: participant.id,
       kind: session.participantKind ?? participant.kind,
       label: `@${participant.handle}`,
-      model: this.normalizedModel(session.participantModel) || undefined,
+      // An endpoint member never inherits the CLI's default model: that alias
+      // (e.g. "opus[1m]") only exists on Anthropic's side.
+      model: this.normalizedModel(session.participantModel) || chatParticipantEndpointDefaultModel(participant.endpoint),
       reasoningEffort: normalizeChatReasoningEffort(session.participantReasoningEffort, session.participantKind ?? participant.kind)
     };
   }
@@ -9736,6 +9782,7 @@ export class ChatService {
         model: item.model?.trim() || undefined,
         reasoningEffort: normalizeChatReasoningEffort(item.reasoningEffort, item.kind as ChatProviderKind),
         avatarId: item.avatarId?.trim() || undefined,
+        endpoint: chatParticipantEndpointFor(item.kind as ChatProviderKind, normalizeChatParticipantEndpoint(item.endpoint)),
         agentMode: normalizeChatAgentMode(item.agentMode),
         permissions: this.normalizeParticipantPermissionsForRole(role, item.permissions, item.permissions === undefined),
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(item.remoteExecution),
@@ -10049,6 +10096,7 @@ export class ChatService {
       roleLabel: this.roleLabelForParticipant(conversation, participant),
       behaviorRuleIds: this.normalizeBehaviorRuleIds(participant.behaviorRuleIds),
       kind: participant.kind,
+      endpoint: participant.endpoint,
       model: participant.model,
       reasoningEffort: participant.reasoningEffort,
       agentMode: normalizeChatAgentMode(participant.agentMode),
@@ -10153,6 +10201,7 @@ export class ChatService {
           model: participant.model,
           reasoningEffort: participant.reasoningEffort,
           avatarId: participant.avatarId,
+          endpoint: participant.endpoint,
           agentMode: normalizeChatAgentMode(participant.agentMode),
           permissions: normalizeChatAgentPermissions(participant.permissions),
           remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
@@ -10666,6 +10715,7 @@ export class ChatService {
             ? normalizeChatReasoningEffort(overrides.reasoningEffort, preset.kind)
             : preset.reasoningEffort,
           avatarId: preset.avatarId,
+          endpoint: preset.endpoint,
           agentMode: overrides && "agentMode" in overrides ? normalizeChatAgentMode(overrides.agentMode) : preset.agentMode,
           permissions: overrides && "permissions" in overrides ? overrides.permissions : preset.permissions,
           remoteExecution: overrides && "remoteExecution" in overrides ? overrides.remoteExecution : preset.remoteExecution,
@@ -10730,6 +10780,7 @@ export class ChatService {
         model: participant.model,
         reasoningEffort: participant.reasoningEffort,
         avatarId: participant.avatarId,
+        endpoint: participant.endpoint,
         agentMode: participant.agentMode,
         permissions: participant.permissions,
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
@@ -10778,6 +10829,7 @@ export class ChatService {
         model: preset.model,
         reasoningEffort: preset.reasoningEffort,
         avatarId: preset.avatarId,
+        endpoint: preset.endpoint,
         agentMode: preset.agentMode,
         permissions: preset.permissions,
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(preset.remoteExecution),
@@ -10799,6 +10851,7 @@ export class ChatService {
             model: participant.model,
             reasoningEffort: participant.reasoningEffort,
             avatarId: participant.avatarId,
+            endpoint: participant.endpoint,
             agentMode: participant.agentMode,
             permissions: participant.permissions,
             remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
@@ -10826,6 +10879,7 @@ export class ChatService {
       model: preset.model,
       reasoningEffort: preset.reasoningEffort,
       avatarId: preset.avatarId,
+      endpoint: preset.endpoint,
       agentMode: preset.agentMode,
       permissions: preset.permissions,
       remoteExecution: this.normalizeConcreteRemoteExecutionMode(preset.remoteExecution),
@@ -10852,6 +10906,7 @@ export class ChatService {
             model: participant.model,
             reasoningEffort: participant.reasoningEffort,
             avatarId: participant.avatarId,
+            endpoint: participant.endpoint,
             agentMode: participant.agentMode,
             permissions: participant.permissions,
             remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
@@ -16496,7 +16551,7 @@ export class ChatService {
 
   private syncParticipantFromSavedConfig(
     participant: ChatParticipant,
-    config: Pick<ChatParticipantConfig, "id" | "kind" | "avatarId" | "behaviorRuleIds">,
+    config: Pick<ChatParticipantConfig, "id" | "kind" | "avatarId" | "behaviorRuleIds" | "endpoint">,
     options: { behaviorRules?: boolean } = {}
   ): ChatParticipant {
     let synced = participant;
@@ -16513,6 +16568,12 @@ export class ChatService {
       const avatarId = config.avatarId?.trim() || undefined;
       if ((synced.avatarId?.trim() || undefined) !== avatarId) {
         synced = { ...synced, avatarId };
+      }
+      // The endpoint is plumbing (where Claude Code sends requests), so a preset
+      // edit follows into every chat the same way an avatar change does.
+      const endpoint = chatParticipantEndpointFor(config.kind, normalizeChatParticipantEndpoint(config.endpoint));
+      if (!sameChatParticipantEndpoint(synced.endpoint, endpoint)) {
+        synced = { ...synced, endpoint };
       }
     }
     return synced;

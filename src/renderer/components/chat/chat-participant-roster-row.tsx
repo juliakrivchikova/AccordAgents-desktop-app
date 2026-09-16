@@ -58,7 +58,7 @@ export function ChatParticipantRosterRow(props: {
             <span className="chat-participant-name-line">
               <strong className="chat-participant-name">{displayName}</strong>
               <span className="chat-participant-meta-sep" aria-hidden />
-              <span className="chat-participant-provider">{chatCliProviderLabel(props.participant.kind)}</span>
+              <span className="chat-participant-provider">{chatCliProviderLabel(props.participant.kind, props.participant.endpoint)}</span>
               <span className="chat-participant-status-slot">
                 <RosterStatusIndicator
                   status={props.status}
@@ -173,7 +173,7 @@ export function ChatParticipantSelectableRosterRow(props: {
             <span className="chat-participant-name-line">
               <strong className="chat-participant-name">{displayName}</strong>
               <span className="chat-participant-meta-sep" aria-hidden />
-              <span className="chat-participant-provider">{chatCliProviderLabel(props.participant.kind)}</span>
+              <span className="chat-participant-provider">{chatCliProviderLabel(props.participant.kind, props.participant.endpoint)}</span>
               <span className="chat-participant-status-slot">
                 <RosterStatusIndicator status="idle" />
               </span>

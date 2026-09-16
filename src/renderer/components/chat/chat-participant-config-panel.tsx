@@ -15,12 +15,18 @@ import {
 } from "../../../shared/agentPermissions";
 import type {
   ChatAgentPermissions,
+  ChatParticipantEndpoint,
   ChatParticipantRequestPermission,
   ChatProviderKind,
   ChatRoleParticipantDefaults,
   ChatRosterChangeParticipantInput,
   ProviderModelCatalog
 } from "../../../shared/types";
+import {
+  chatParticipantEndpointFor,
+  chatParticipantEndpointModelCatalog,
+  defaultChatParticipantEndpoint
+} from "../../../shared/chatParticipantEndpoint";
 import { Avatar } from "../avatar/avatar";
 import { avatarForChatAvatarOption, avatarForChatParticipant, chatAvatarOptionsForKind, normalizedChatAvatarId } from "./chat-avatars";
 import { chatAgentModeLabel, chatInheritedCliSettingLabel } from "./chat-participant-drafts";
@@ -196,6 +202,7 @@ export function ChatParticipantInlineSelectRow(props: {
 
 export function ChatParticipantInlineModelRow(props: {
   kind: ChatProviderKind;
+  endpoint?: ChatParticipantEndpoint;
   model?: string;
   onSelect: (model: string | undefined) => void;
 }): JSX.Element {
@@ -203,9 +210,19 @@ export function ChatParticipantInlineModelRow(props: {
   const [catalog, setCatalog] = useState<ProviderModelCatalog | undefined>();
   const [manual, setManual] = useState("");
   const value = props.model?.trim() || undefined;
+  const endpoint = chatParticipantEndpointFor(props.kind, props.endpoint);
+  const endpointPreset = endpoint?.preset;
 
   useEffect(() => {
     let cancelled = false;
+    // Endpoint members have a fixed, known model list; the CLI's own catalog
+    // would describe Anthropic models that the endpoint does not serve.
+    if (endpointPreset) {
+      setCatalog(chatParticipantEndpointModelCatalog(defaultChatParticipantEndpoint(endpointPreset)));
+      return () => {
+        cancelled = true;
+      };
+    }
     void window.consensus
       .listProviderModels(props.kind)
       .then((next) => {
@@ -221,10 +238,10 @@ export function ChatParticipantInlineModelRow(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.kind]);
+  }, [endpointPreset, props.kind]);
 
   const models = catalog?.models ?? [];
-  const inheritedLabel = chatInheritedCliSettingLabel(props.kind);
+  const inheritedLabel = chatInheritedCliSettingLabel(props.kind, endpoint);
 
   return (
     <ChatParticipantSpecRow label="Model">
@@ -483,4 +500,26 @@ export function participantRequestPermissionLabel(value: ChatParticipantRequestP
     return "Deny";
   }
   return "Always ask approval";
+}
+
+/** Text field for an endpoint member's URL / API-key variable; the surface that
+ *  hosts it supplies the row (Settings spec row or new-chat form row). */
+export function ChatParticipantEndpointField(props: {
+  value: string;
+  ariaLabel: string;
+  placeholder?: string;
+  onChange: (value: string) => void;
+}): JSX.Element {
+  return (
+    <span className="chat-app-tool-inline-handle chat-participant-endpoint-field">
+      <input
+        value={props.value}
+        aria-label={props.ariaLabel}
+        placeholder={props.placeholder}
+        spellCheck={false}
+        size={Math.max(props.value.length + 1, 12)}
+        onChange={(event) => props.onChange(event.currentTarget.value)}
+      />
+    </span>
+  );
 }

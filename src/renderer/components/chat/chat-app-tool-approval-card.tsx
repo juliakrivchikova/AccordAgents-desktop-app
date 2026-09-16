@@ -156,7 +156,7 @@ export function ChatAppToolApprovalCard(props: {
         <div className="chat-app-tool-approval-body">
           <div className="chat-app-tool-approval-meta">
             <strong>{requesterLabel}</strong>
-            {requester && <span className="message-provider">{participantProviderLabel(requester.kind)}</span>}
+            {requester && <span className="message-provider">{participantProviderLabel(requester.kind, requester.endpoint)}</span>}
             <span className="message-when">{formatChatTime(props.approval.createdAt)}</span>
           </div>
           <ChatCodexApprovalResult approval={props.approval} />
@@ -219,7 +219,7 @@ export function ChatAppToolApprovalCard(props: {
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
           <strong>{requesterLabel}</strong>
-          {requester && <span className="message-provider">{reviewChange ? "Proposes changes for your approval" : participantProviderLabel(requester.kind)}</span>}
+          {requester && <span className="message-provider">{reviewChange ? "Proposes changes for your approval" : participantProviderLabel(requester.kind, requester.endpoint)}</span>}
           <span className="message-when">{formatChatTime(props.approval.createdAt)}</span>
         </div>
         <div className={`chat-app-tool-approval-panel ${rosterApproval ? "is-roster-request" : ""} ${reviewChange ? "is-review-change" : ""}`}>

@@ -10,6 +10,7 @@ import { participantProviderLabel } from "../chat/chat-conversation-data";
 import { displayChatRoleLabel } from "../chat/chat-role-labels";
 import {
   ChatParticipantAvatarField,
+  ChatParticipantEndpointField,
   ChatParticipantInlineManageRolesParticipantsRow,
   ChatParticipantInlineModelRow,
   ChatParticipantInlinePermissionsRow,
@@ -19,7 +20,7 @@ import {
   ChatParticipantSpecRow
 } from "../chat/chat-participant-config-panel";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
-import { CHAT_AGENT_MODE_OPTIONS, CHAT_RUN_LOCATION_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatCliProviderLabel, normalizeChatRunLocation, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
+import { CHAT_AGENT_MODE_OPTIONS, CHAT_RUN_LOCATION_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatProviderOptionId, chatProviderOptionPatch, chatProviderOptions, normalizeChatRunLocation, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 import {
   ParticipantEditorHandleField,
@@ -81,9 +82,9 @@ export function ParticipantEditorDialog(props: {
   const roleOptions = props.settings.chatRoleConfigs
     .filter((role) => !role.archivedAt || role.id === draft.roleConfigId)
     .map((role) => ({ value: role.id, label: role.archivedAt ? `${displayChatRoleLabel(role)} (deleted)` : displayChatRoleLabel(role) }));
-  const providerOptions = (["codex-cli", "claude-code", "gemini-cli"] as ChatProviderKind[]).map((kind) => ({
-    value: kind,
-    label: chatCliProviderLabel(kind)
+  const providerOptions = chatProviderOptions(["codex-cli", "claude-code", "gemini-cli"] as ChatProviderKind[]).map((option) => ({
+    value: option.id,
+    label: option.label
   }));
   const editorHandle = normalized.handle || draft.handle.trim().replace(/^@/, "") || "new-participant";
   const draftParticipant: ChatRosterChangeParticipantInput = {
@@ -94,6 +95,7 @@ export function ParticipantEditorDialog(props: {
     model: draft.model,
     reasoningEffort: draft.reasoningEffort,
     avatarId: draft.avatarId,
+    endpoint: draft.endpoint,
     agentMode: draft.agentMode,
     permissions: draft.permissions
   };
@@ -197,11 +199,32 @@ export function ParticipantEditorDialog(props: {
             />
             <ChatParticipantInlineSelectRow
               label="Provider / CLI"
-              value={participantProviderLabel(draft.kind)}
-              current={draft.kind}
+              value={participantProviderLabel(draft.kind, draft.endpoint)}
+              current={chatProviderOptionId(draft.kind, draft.endpoint)}
               options={providerOptions}
-              onSelect={(value) => patchDraft({ kind: value as ChatProviderKind })}
+              onSelect={(value) => patchDraft(chatProviderOptionPatch(value, draft))}
             />
+            {draft.endpoint && (
+              <>
+                <ChatParticipantSpecRow label="Endpoint">
+                  <ChatParticipantEndpointField
+                    value={draft.endpoint.baseUrl}
+                    ariaLabel="Endpoint URL"
+                    onChange={(baseUrl) => patchDraft({ endpoint: { ...draft.endpoint!, baseUrl } })}
+                  />
+                </ChatParticipantSpecRow>
+                <ChatParticipantSpecRow label="API key variable">
+                  <span className="participants-editor-endpoint-key">
+                    <ChatParticipantEndpointField
+                      value={draft.endpoint.authTokenEnvKey}
+                      ariaLabel="API key environment variable"
+                      onChange={(authTokenEnvKey) => patchDraft({ endpoint: { ...draft.endpoint!, authTokenEnvKey } })}
+                    />
+                    <small>Set it in Settings → Environment.</small>
+                  </span>
+                </ChatParticipantSpecRow>
+              </>
+            )}
             {draft.kind === "codex-cli" && (
               <ChatParticipantInlineSelectRow
                 label="Run location"
@@ -213,6 +236,7 @@ export function ParticipantEditorDialog(props: {
             )}
             <ChatParticipantInlineModelRow
               kind={draft.kind}
+              endpoint={draft.endpoint}
               model={draft.model}
               onSelect={(model) => setDraft({ ...draft, model })}
             />

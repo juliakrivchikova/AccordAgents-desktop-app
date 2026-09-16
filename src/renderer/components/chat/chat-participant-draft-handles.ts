@@ -1,14 +1,21 @@
 import type {
   AppSettings,
+  ChatParticipantEndpoint,
   ChatProviderKind
 } from "../../../shared/types";
 
 const CHAT_NAME_POOL = ["alex", "blake", "casey", "drew", "ellis", "harper", "jamie", "jordan", "morgan", "quinn", "riley", "sam", "taylor"];
 
-export function generatedChatHandle(settings: AppSettings, kind: ChatProviderKind, roleConfigId: string, existingHandles: Set<string> = new Set()): string {
+export function generatedChatHandle(
+  settings: AppSettings,
+  kind: ChatProviderKind,
+  roleConfigId: string,
+  existingHandles: Set<string> = new Set(),
+  endpoint?: ChatParticipantEndpoint
+): string {
   const roleLabel = settings.chatRoleConfigs.find((role) => role.id === roleConfigId)?.label ?? roleConfigId;
   const name = CHAT_NAME_POOL[Math.floor(Math.random() * CHAT_NAME_POOL.length)] ?? "alex";
-  const cli = kind === "claude-code" ? "claude" : kind === "gemini-cli" ? "gemini" : "codex";
+  const cli = kind === "claude-code" ? (endpoint?.preset === "zai" ? "glm" : "claude") : kind === "gemini-cli" ? "gemini" : "codex";
   const role = compactRoleSlug(roleLabel);
   const base = truncateHandle(`${name}-${cli}-${role}`, 32);
   let candidate = base;
@@ -23,7 +30,7 @@ export function generatedChatHandle(settings: AppSettings, kind: ChatProviderKin
 
 export function isGeneratedChatHandle(handle: string): boolean {
   const [name, cli] = handle.toLowerCase().split("-");
-  return CHAT_NAME_POOL.includes(name) && (cli === "codex" || cli === "claude" || cli === "gemini");
+  return CHAT_NAME_POOL.includes(name) && (cli === "codex" || cli === "claude" || cli === "gemini" || cli === "glm");
 }
 
 function compactRoleSlug(label: string): string {

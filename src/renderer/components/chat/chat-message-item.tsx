@@ -321,7 +321,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           <div className="message-meta">
             <strong>{author}</strong>
             {participant && message.role === "participant" && (
-              <span className="message-provider">{participantProviderLabel(participant.kind)}</span>
+              <span className="message-provider">{participantProviderLabel(participant.kind, participant.endpoint)}</span>
             )}
             {message.role === "participant" && (
               queuedBehind ? (

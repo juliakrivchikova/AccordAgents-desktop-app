@@ -23,6 +23,7 @@ import type {
   CloudRunWorkerMode,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
+  ChatParticipantEndpoint,
   ChatParticipantSeedState,
   ChatPromptContextSettings,
   ChatProviderKind,
@@ -78,6 +79,7 @@ import {
   normalizeChatSavedPromptTrigger
 } from "../../shared/chatSavedPrompts";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
+import { chatParticipantEndpointFor, chatParticipantEndpointValidationError, normalizeChatParticipantEndpoint } from "../../shared/chatParticipantEndpoint";
 import { CLI_PROVIDER_SETUP, preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
 import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
@@ -2133,6 +2135,7 @@ export class SettingsService {
         model: update.model?.trim() || undefined,
         reasoningEffort: normalizeChatReasoningEffort(update.reasoningEffort, update.kind),
         avatarId: update.avatarId?.trim() || undefined,
+        endpoint: this.participantEndpointForUpdate(update),
         agentMode: normalizeChatAgentMode(update.agentMode),
         permissions: normalizeChatAgentPermissions(update.permissions),
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
@@ -2336,6 +2339,7 @@ export class SettingsService {
       model: update.model?.trim() || undefined,
       reasoningEffort: normalizeChatReasoningEffort(update.reasoningEffort, update.kind),
       avatarId: update.avatarId?.trim() || undefined,
+      endpoint: this.participantEndpointForUpdate(update),
       agentMode: normalizeChatAgentMode(update.agentMode),
       permissions: normalizeChatAgentPermissions(update.permissions),
       remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
@@ -3362,6 +3366,7 @@ export class SettingsService {
           model: participant.model?.trim() || undefined,
           reasoningEffort: normalizeChatReasoningEffort((participant as { reasoningEffort?: unknown }).reasoningEffort, participant.kind),
           avatarId: participant.avatarId?.trim() || undefined,
+          endpoint: chatParticipantEndpointFor(participant.kind, normalizeChatParticipantEndpoint((participant as { endpoint?: unknown }).endpoint)),
           agentMode: normalizeChatAgentMode((participant as { agentMode?: ChatAgentMode }).agentMode),
           permissions: options.migrateWorkflowManagerParticipantManagement && participant.roleConfigId === WORKFLOW_MANAGER_ROLE_ID
             ? { ...permissions, manageRolesParticipants: "allow" as const }
@@ -3375,6 +3380,18 @@ export class SettingsService {
           updatedAt: participant.updatedAt || new Date().toISOString()
         };
       });
+  }
+
+  private participantEndpointForUpdate(update: Pick<ChatParticipantConfigUpdate, "kind" | "endpoint">): ChatParticipantEndpoint | undefined {
+    const endpoint = chatParticipantEndpointFor(update.kind, normalizeChatParticipantEndpoint(update.endpoint));
+    if (update.endpoint && update.kind === "claude-code" && !endpoint) {
+      throw new Error("Member endpoint is not recognized.");
+    }
+    const error = chatParticipantEndpointValidationError(endpoint);
+    if (error) {
+      throw new Error(error);
+    }
+    return endpoint;
   }
 
   private normalizeSeedState(value: unknown): ChatParticipantSeedState {

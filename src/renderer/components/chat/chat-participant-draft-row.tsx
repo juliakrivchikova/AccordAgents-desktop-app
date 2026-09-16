@@ -25,6 +25,7 @@ import {
   ChatReasoningEffortPicker
 } from "./chat-model-reasoning-pickers";
 import {
+  ChatParticipantEndpointField,
   ChatParticipantInlinePermissionsRow,
   ChatParticipantInlineManageRolesParticipantsRow,
   ChatParticipantInlineRequestParticipantsRow
@@ -35,6 +36,9 @@ import {
   CHAT_RUN_LOCATION_OPTIONS,
   WORKFLOW_MANAGER_ROLE_ID,
   activeChatRoleConfigs,
+  chatProviderOptionId,
+  chatProviderOptionPatch,
+  chatProviderOptions,
   normalizeChatRunLocation,
   updateChatParticipantDraft
 } from "./chat-participant-drafts";
@@ -94,20 +98,40 @@ export function ChatParticipantDraftRow(props: {
       </FormRow>
       <FormRow label="CLI">
         <AppSelect
-          value={props.draft.kind}
+          value={chatProviderOptionId(props.draft.kind, props.draft.endpoint)}
           placeholder="Select CLI"
           ariaLabel="Member CLI"
-          options={cliProviders.map((provider) => {
-            const health = props.agents.find((agent) => agent.kind === provider.kind);
+          options={chatProviderOptions(cliProviders.map((provider) => provider.kind).filter(isCliProviderKind)).map((option) => {
+            const provider = cliProviders.find((item) => item.kind === option.kind);
+            const health = props.agents.find((agent) => agent.kind === option.kind);
+            const label = option.endpoint ? option.label : provider?.label ?? option.label;
             return {
-              value: provider.kind,
-              label: `${provider.label}${health?.installed ? "" : " (missing)"}`,
+              value: option.id,
+              label: `${label}${health?.installed ? "" : " (missing)"}`,
               disabled: !health?.installed
             };
           })}
-          onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { kind: value as ChatProviderKind }))}
+          onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, chatProviderOptionPatch(value, props.draft)))}
         />
       </FormRow>
+      {props.draft.endpoint && (
+        <>
+          <FormRow label="Endpoint">
+            <ChatParticipantEndpointField
+              value={props.draft.endpoint.baseUrl}
+              ariaLabel="Endpoint URL"
+              onChange={(baseUrl) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { endpoint: { ...props.draft.endpoint!, baseUrl } }))}
+            />
+          </FormRow>
+          <FormRow label="API key variable" hint="Set it in Settings → Environment.">
+            <ChatParticipantEndpointField
+              value={props.draft.endpoint.authTokenEnvKey}
+              ariaLabel="API key environment variable"
+              onChange={(authTokenEnvKey) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { endpoint: { ...props.draft.endpoint!, authTokenEnvKey } }))}
+            />
+          </FormRow>
+        </>
+      )}
       {props.draft.kind === "codex-cli" && (
         <FormRow label="Run location">
           <AppSelect
@@ -124,6 +148,7 @@ export function ChatParticipantDraftRow(props: {
       <FormRow label="Model">
         <ChatModelPicker
           kind={props.draft.kind}
+          endpoint={props.draft.endpoint}
           model={props.draft.model}
           onChange={(model) => props.onChange({ ...props.draft, model })}
         />

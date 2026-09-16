@@ -10,10 +10,16 @@ import {
   normalizeOptionalChatParticipantRequestPermission
 } from "../../../shared/agentPermissions";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
+import {
+  chatParticipantEndpointFor,
+  chatParticipantEndpointModelCatalog,
+  defaultChatParticipantEndpoint
+} from "../../../shared/chatParticipantEndpoint";
 import type {
   ChatAgentMode,
   ChatAgentPermissions,
   ChatParticipant,
+  ChatParticipantEndpoint,
   ChatParticipantRequestPermission,
   ChatRoleParticipantDefaults,
   ChatParticipantWatcherPausedReason,
@@ -59,8 +65,10 @@ export function ParticipantRuntimeControls(props: {
   const mode = normalizeChatAgentMode(participant.agentMode);
   const runLocation = normalizeChatRunLocation(participant.remoteExecution);
   const reasoningValue = participant.reasoningEffort ?? REASONING_DEFAULT_VALUE;
+  const endpoint = chatParticipantEndpointFor(participant.kind, participant.endpoint);
   const cliSettingLabel = chatInheritedCliSettingLabel(participant.kind);
-  const providerLabel = chatCliProviderLabel(participant.kind);
+  const modelDefaultLabel = chatInheritedCliSettingLabel(participant.kind, endpoint);
+  const providerLabel = chatCliProviderLabel(participant.kind, endpoint);
   const controlsDisabled = props.disabled || props.readOnly === true;
 
   // Build the patch by key presence so an intentional reset (model: "") is forwarded
@@ -131,8 +139,9 @@ export function ParticipantRuntimeControls(props: {
           <span className="chat-rt-dot" aria-hidden />
           <GhostModelSelect
             kind={participant.kind}
+            endpoint={endpoint}
             model={participant.model}
-            defaultLabel={cliSettingLabel}
+            defaultLabel={modelDefaultLabel}
             disabled={controlsDisabled}
             onChange={(model) => update({ model })}
           />
@@ -294,6 +303,7 @@ function GhostSelect(props: {
 
 function GhostModelSelect(props: {
   kind: ChatProviderKind;
+  endpoint?: ChatParticipantEndpoint;
   model?: string;
   defaultLabel: string;
   disabled: boolean;
@@ -302,10 +312,19 @@ function GhostModelSelect(props: {
   const [catalog, setCatalog] = useState<ProviderModelCatalog | undefined>();
   const [manual, setManual] = useState(false);
   const model = props.model?.trim() || undefined;
+  const endpointPreset = props.endpoint?.preset;
 
   useEffect(() => {
     let cancelled = false;
     setCatalog(undefined);
+    // Endpoint members have a fixed, known model list; the CLI's own catalog
+    // would describe Anthropic models that the endpoint does not serve.
+    if (endpointPreset) {
+      setCatalog(chatParticipantEndpointModelCatalog(defaultChatParticipantEndpoint(endpointPreset)));
+      return () => {
+        cancelled = true;
+      };
+    }
     void window.consensus.listProviderModels(props.kind)
       .then((next) => {
         if (!cancelled) {
@@ -320,7 +339,7 @@ function GhostModelSelect(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.kind]);
+  }, [endpointPreset, props.kind]);
 
   const models = catalog?.models ?? [];
   const known = model ? models.find((item) => item.id === model) : undefined;

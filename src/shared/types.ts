@@ -398,6 +398,18 @@ export interface ChatBehaviorRuleSnapshot {
 
 export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
 
+/** Anthropic-compatible endpoint a Claude Code participant talks to instead of
+ *  Anthropic. Part of the member's identity like `kind`; not a per-chat override.
+ *  The token is never stored here: `authTokenEnvKey` names the Settings →
+ *  Environment variable whose value becomes `ANTHROPIC_AUTH_TOKEN` for the run. */
+export type ChatParticipantEndpointPreset = "zai";
+
+export interface ChatParticipantEndpoint {
+  preset: ChatParticipantEndpointPreset;
+  baseUrl: string;
+  authTokenEnvKey: string;
+}
+
 export interface ChatParticipantSeedRecord {
   participantConfigId: string;
   updatedAt: string;
@@ -656,6 +668,7 @@ export interface ChatParticipant {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   avatarId?: string;
+  endpoint?: ChatParticipantEndpoint;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
@@ -731,6 +744,7 @@ export interface ChatRosterChangeParticipantInput {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   avatarId?: string;
+  endpoint?: ChatParticipantEndpoint;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
@@ -961,6 +975,7 @@ export interface ChatRosterCurrentParticipant {
   roleLabel: string;
   behaviorRuleIds?: string[];
   kind: ChatProviderKind;
+  endpoint?: ChatParticipantEndpoint;
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   agentMode?: ChatAgentMode;
@@ -1305,6 +1320,7 @@ export interface ChatParticipantConfig {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   avatarId?: string;
+  endpoint?: ChatParticipantEndpoint;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
@@ -1322,6 +1338,7 @@ export interface ChatParticipantConfigUpdate {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   avatarId?: string;
+  endpoint?: ChatParticipantEndpoint;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
@@ -1338,6 +1355,7 @@ export interface ChatParticipantInput {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   avatarId?: string;
+  endpoint?: ChatParticipantEndpoint;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;

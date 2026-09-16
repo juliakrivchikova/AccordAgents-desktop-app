@@ -5,6 +5,7 @@ import {
   AppSelect
 } from "../primitives";
 import type {
+  ChatParticipantEndpoint,
   ChatProviderKind,
   ChatReasoningEffort,
   ProviderModel,
@@ -12,6 +13,11 @@ import type {
   ProviderReasoningEffortOption
 } from "../../../shared/types";
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
+import {
+  chatParticipantEndpointFor,
+  chatParticipantEndpointModelCatalog,
+  defaultChatParticipantEndpoint
+} from "../../../shared/chatParticipantEndpoint";
 import { chatInheritedCliSettingLabel } from "./chat-participant-drafts";
 
 const MODEL_DEFAULT_VALUE = "__accordagents_default_model__";
@@ -20,6 +26,7 @@ const REASONING_DEFAULT_VALUE = "__accordagents_default_reasoning__";
 
 export function ChatModelPicker(props: {
   kind: ChatProviderKind;
+  endpoint?: ChatParticipantEndpoint;
   model?: string;
   onChange: (model?: string) => void;
 }): JSX.Element {
@@ -28,12 +35,23 @@ export function ChatModelPicker(props: {
   const [error, setError] = useState<string | undefined>();
   const [manualMode, setManualMode] = useState(false);
   const model = props.model?.trim() || undefined;
+  const endpoint = chatParticipantEndpointFor(props.kind, props.endpoint);
+  const endpointPreset = endpoint?.preset;
 
   useEffect(() => {
     let cancelled = false;
     setManualMode(false);
     setCatalog(undefined);
     setError(undefined);
+    // Endpoint members have a fixed, known model list; the CLI's own catalog
+    // would describe Anthropic models that the endpoint does not serve.
+    if (endpointPreset) {
+      setCatalog(chatParticipantEndpointModelCatalog(defaultChatParticipantEndpoint(endpointPreset)));
+      setLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
     setLoading(true);
     void window.consensus.listProviderModels(props.kind)
       .then((nextCatalog) => {
@@ -54,7 +72,7 @@ export function ChatModelPicker(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.kind]);
+  }, [endpointPreset, props.kind]);
 
   const models = useMemo(() => catalog?.models ?? [], [catalog]);
   const selectedDiscoveredModel = model ? models.some((item) => item.id === model) : false;
@@ -66,8 +84,8 @@ export function ChatModelPicker(props: {
       ? model
       : MODEL_MANUAL_VALUE
     : MODEL_DEFAULT_VALUE;
-  const status = modelPickerStatus(catalog, loading, error);
-  const cliSettingLabel = chatInheritedCliSettingLabel(props.kind);
+  const status = endpoint ? undefined : modelPickerStatus(catalog, loading, error);
+  const cliSettingLabel = chatInheritedCliSettingLabel(props.kind, endpoint);
 
   return (
     <div className="chat-model-picker">
@@ -103,7 +121,7 @@ export function ChatModelPicker(props: {
           className="chat-model-picker-manual"
           value={model ?? ""}
           onChange={(event) => props.onChange(event.target.value)}
-          placeholder={props.kind === "claude-code" ? "opus, sonnet, haiku..." : props.kind === "gemini-cli" ? "Gemini 3.5 Flash (Medium)..." : "gpt-5.5..."}
+          placeholder={endpoint ? "glm-5.3..." : props.kind === "claude-code" ? "opus, sonnet, haiku..." : props.kind === "gemini-cli" ? "Gemini 3.5 Flash (Medium)..." : "gpt-5.5..."}
         />
       )}
       {status && <small className="chat-model-picker-status">{status}</small>}
