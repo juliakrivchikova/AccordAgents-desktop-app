@@ -11969,14 +11969,6 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-async function untilTrue(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
-
 test("Stop reaches the machine when this desktop holds a pending row for the run", async () => {
   const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine" };
   const conversation = chatConversation([participant], { activeRunIds: ["run-on-machine"] });
@@ -11991,7 +11983,7 @@ test("Stop reaches the machine when this desktop holds a pending row for the run
     cancelMachineRun: async (request: any) => { cancels.push({ machineId: request.machineId, runId: request.runId }); }
   } as any);
   assert.equal(service.cancelRun("run-on-machine"), true);
-  await untilTrue(() => cancels.length === 1);
+  await waitFor(() => cancels.length === 1, 2000);
   assert.deepEqual(cancels, [{ machineId: "machine", runId: "run-on-machine" }]);
 });
 
@@ -12011,7 +12003,7 @@ test("Stop still reaches the machine when this desktop has no pending row for th
     cancelMachineRun: async (request: any) => { cancels.push({ machineId: request.machineId, runId: request.runId }); }
   } as any);
   assert.equal(service.cancelRun("run-on-machine"), true);
-  await untilTrue(() => cancels.length === 1);
+  await waitFor(() => cancels.length === 1, 2000);
   assert.deepEqual(cancels, [{ machineId: "machine", runId: "run-on-machine" }],
     "a Stop for a machine-hosted run must be published to that machine");
 });
@@ -12035,7 +12027,7 @@ test("Stop for a local member's run stays local even when the chat also has a ma
     cancelMachineRun: async (request: any) => { cancels.push({ machineId: request.machineId, runId: request.runId }); }
   } as any);
   assert.equal(service.cancelRun("run-local"), true);
-  await untilTrue(() => storage.current.messages.some((message: ChatMessage) =>
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
     message.id === "local-bubble" && message.metadata?.terminalReason === "user-stopped"));
   assert.equal(storage.current.messages.find((message: ChatMessage) => message.id === "local-bubble")?.metadata?.terminalReason, "user-stopped",
     "the local run is swept here");
@@ -12075,7 +12067,7 @@ test("a picture a machine does not hold is fetched from the desktop that owns th
   assert.deepEqual(asked, [{ conversationId: conversation.id, attachmentId: attachment.id }]);
 });
 
-test("a picture no owner can supply is still reported as missing, not as empty bytes", async () => {
+test("a picture the owner cannot supply is reported as unavailable with the reason, not as empty bytes", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
   const attachment = {
@@ -12092,8 +12084,12 @@ test("a picture no owner can supply is still reported as missing, not as empty b
     runTurn: async () => { throw new Error("not a turn"); },
     fetchAttachment: async () => { throw new Error("The desktop did not answer with this picture in time."); }
   } as any);
+  // The desktop was asked and could not supply it: the picture is not lost,
+  // so the member is told what happened rather than to ask for a resend.
   await assert.rejects(
     service.readChatAttachment({ conversationId: conversation.id, attachmentId: attachment.id }),
-    /AttachmentMissing/
+    (error: Error) => /AttachmentUnavailable/.test(error.message)
+      && error.message.includes("The desktop did not answer with this picture in time.")
+      && error.message.includes("do not ask for a resend")
   );
 });

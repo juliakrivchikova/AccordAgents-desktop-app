@@ -12,7 +12,7 @@
  * same card builder with the same conversation.
  */
 import assert from "node:assert/strict";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from "node:crypto";
 import { mkdtemp, writeFile, readFile, readdir } from "node:fs/promises";

@@ -212,13 +212,10 @@ async function main() {
     /choice|action|chat-action|owns|deferred|unshown/i.test(line)).slice(-25).join("\n");
   log("machine lines:\n" + interesting);
 
-  const query = machineQuery; const unusedQuery = (db, sql) => {
-    try { return JSON.parse(execFileSync("sqlite3", ["-json", path.join(machineUserData, db), sql], { encoding: "utf8" }) || "[]"); }
-    catch (error) { return [{ error: String(error && error.message || error).slice(0, 200) }]; }
-  };
-  log("machine chat_events:", JSON.stringify(query("accordagents.sqlite3",
+  
+  log("machine chat_events:", JSON.stringify(machineQuery("accordagents.sqlite3",
     "select kind, log_scope_id, event_id from chat_events order by rowid desc limit 12;")));
-  const stored = query("accordagents.sqlite3",
+  const stored = machineQuery("accordagents.sqlite3",
     `select json_extract(payload_json,'$.metadata') as meta from conversation_messages where message_id='${CHOICE_MESSAGE_ID}';`);
   log("machine's copy of the choice:", JSON.stringify(stored));
 

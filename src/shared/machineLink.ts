@@ -268,12 +268,23 @@ export interface MachineAttachmentResultBody {
   conversationId: string;
   attachmentId: string;
   ok: boolean;
-  /** Base64 of the file, present only when ok. */
+  /** Base64 of this part of the file, present only when ok. */
   dataBase64?: string;
+  /** Which part this is, 0-based, and how many the picture has. A picture
+   *  travels in bounded parts because one relay logical message may not
+   *  exceed the provider's limit (10 MiB), while a picture may be 10 MB before
+   *  base64 and sealing. Absent on a refusal. */
+  part?: number;
+  parts?: number;
   mediaType?: string;
   fileName?: string;
   error?: string;
 }
+
+/** Raw bytes per machine.attachment.result part: ~2.8 MiB once base64-encoded
+ *  and sealed, well under the 10 MiB relay logical-message limit, and short
+ *  enough that the link's other traffic is not held behind one picture. */
+export const MACHINE_ATTACHMENT_PART_BYTES = 1_572_864;
 
 /** Desktop -> machine: the first copy of a chat (shell plus every batch) has
  *  been sent in full; the machine may now compare its own rows against what

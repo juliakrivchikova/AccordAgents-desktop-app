@@ -367,10 +367,12 @@ interface ClaudeWarmPendingTurn {
   /** Tasks whose notification already arrived; a stale `background_tasks_changed`
    *  ordered after it must not resurrect them and re-arm the hold. */
   finishedTaskIds: Set<string>;
-  /** Notifications the CLI has emitted since it last started a model turn
-   *  (`system/init`). A `result` with one outstanding is not the end of the
-   *  turn: the CLI resumes the model to deliver it, even when the task finished
-   *  while the reply was still being written. */
+  /** Task notifications the CLI still holds for the model. The CLI queues a
+   *  notification until it builds the model's next request, which happens
+   *  right after a tool result is fed back or, when the reply has already
+   *  ended, by resuming the model (`system/init`). A `result` with one still
+   *  queued is therefore not the end of the turn: the CLI is about to resume,
+   *  and the held reply waits for that continuation. */
   notificationsSinceInit: number;
   /** Final text of every sub-turn already closed by a held `result`; the reply
    *  is these segments plus the last one, separated by paragraph breaks. */
@@ -400,6 +402,11 @@ interface ClaudeWarmPendingTurn {
    *  call has not started yet. The first `assistant` event after that is a new
    *  call (when the CLI streams no `message_start` frames to tell us). */
   awaitingModelCall: boolean;
+  /** How many of the queued notifications the CLI had when it last fed a tool
+   *  result back: the request it builds right then carries exactly those.
+   *  Anything that arrives later, while that request is in flight, is still
+   *  queued and is what a resume after the result delivers. */
+  deliveredAtLastToolResult: number;
   /** The visible "waiting" activity row of the current hold, completed when the
    *  CLI resumes so it does not stay "started" forever. */
   holdActivity?: { itemId: string; label: string };
@@ -5345,6 +5352,7 @@ export class CliAgentRunner {
             notificationsSinceInit: 0,
             modelStepActive: false,
             awaitingModelCall: false,
+            deliveredAtLastToolResult: 0,
             heldSegments: [],
             heldResultEvents: [],
             holds: 0,
@@ -5481,27 +5489,28 @@ export class CliAgentRunner {
     // Recorded before the notification bookkeeping below, because a
     // notification that lands inside a running step must not arm the timer
     // that waits for a step to start.
-    if (this.claudeWarmEventShowsModelStep(event)) {
-      const eventType = this.stringField(this.asRecord(event) ?? {}, "type");
+    const eventType = this.stringField(this.asRecord(event) ?? {}, "type");
+    if (this.claudeWarmEventShowsModelStep(eventType)) {
       if (!pending.modelStepActive) {
         // A step this copy did not see start. Its own output is the proof it is
         // running, and a running step is where any outstanding notification was
         // delivered -- the same thing `system/init` states explicitly.
-        pending.notificationsSinceInit = 0;
-        pending.modelStepActive = true;
-        this.finishClaudeHoldActivity(pending, "completed");
+        this.markClaudeModelStepStarted(pending);
       }
       // A task notification is queued by the CLI until it builds the model's
-      // next call, whichever comes first: a resume after the result (`init`),
-      // or the call that follows a tool result inside the same step. Only a
-      // notification still queued when the result arrives makes the CLI
-      // resume, so the count is reset at every call start (verified on Claude
-      // Code 2.1.257: a task finishing during a foreground command is handed
-      // to the model with that command's result and no resume follows).
+      // next request. Inside a step that request is built the moment a tool
+      // result is fed back (the `user` event), so the notifications queued by
+      // then ride along with it; one arriving after that, while the request is
+      // in flight, is still queued and is delivered by a resume after the
+      // result -- which the hold must wait for. Verified on Claude Code
+      // 2.1.257: a task finishing during a foreground command is handed to the
+      // model with that command's result and no resume follows.
       if (eventType === "user") {
         pending.awaitingModelCall = true;
+        pending.deliveredAtLastToolResult = pending.notificationsSinceInit;
       } else if (this.claudeWarmMessageStarted(event) || (eventType === "assistant" && pending.awaitingModelCall)) {
-        pending.notificationsSinceInit = 0;
+        pending.notificationsSinceInit = Math.max(0, pending.notificationsSinceInit - pending.deliveredAtLastToolResult);
+        pending.deliveredAtLastToolResult = 0;
         pending.awaitingModelCall = false;
       }
       this.clearClaudeHoldGraceTimer(pending);
@@ -5758,10 +5767,8 @@ export class CliAgentRunner {
     if (subtype === "init") {
       // A model turn started: every notification seen so far has been delivered
       // to the model, and a held reply is now being continued.
-      pending.notificationsSinceInit = 0;
-      pending.modelStepActive = true;
+      this.markClaudeModelStepStarted(pending);
       this.clearClaudeHoldGraceTimer(pending);
-      this.finishClaudeHoldActivity(pending, "completed");
       return;
     }
     if (subtype === "task_started") {
@@ -5892,9 +5899,18 @@ export class CliAgentRunner {
    *  frames, and the tool results fed back into it. `system` events are not
    *  included — `init` states the step itself, and the rest (notifications,
    *  task bookkeeping) say nothing about whether one is running. */
-  private claudeWarmEventShowsModelStep(event: unknown): boolean {
-    const type = this.stringField(this.asRecord(event) ?? {}, "type");
-    return type === "assistant" || type === "stream_event" || type === "user";
+  private claudeWarmEventShowsModelStep(eventType: string | undefined): boolean {
+    return eventType === "assistant" || eventType === "stream_event" || eventType === "user";
+  }
+
+  /** A model step is running: whatever the CLI had queued went into the
+   *  request that started it, and a held reply is being continued. */
+  private markClaudeModelStepStarted(pending: ClaudeWarmPendingTurn): void {
+    pending.notificationsSinceInit = 0;
+    pending.deliveredAtLastToolResult = 0;
+    pending.awaitingModelCall = false;
+    pending.modelStepActive = true;
+    this.finishClaudeHoldActivity(pending, "completed");
   }
 
   /** The first frame of one model call (`--include-partial-messages`). */

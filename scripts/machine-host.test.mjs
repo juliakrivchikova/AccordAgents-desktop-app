@@ -134,6 +134,57 @@ test("a turn waiting for a chat copy counts as held, and a stop removes it befor
   host.close();
 });
 
+test("a picture arrives in parts and is reassembled; a desktop that leaves fails the read at once", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const store = new Map();
+  const host = new MachineHostService(
+    {
+      runMachineHostedTurn: async () => ({ messages: [], warnings: [] }),
+      cancelRun: () => true,
+      respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) store.set(id, next); }
+    },
+    { getConversation: async (id) => store.get(id) },
+    { importMachineSettingsSnapshot: async () => undefined },
+    { write: async () => undefined },
+    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
+  );
+  await host.start();
+  await settle();
+  const inbound = async (body) => {
+    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
+    await host.inbound;
+  };
+  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
+
+  const answered = host.requestAttachment("conv-1", "att-1", 5000);
+  await settle();
+  const request = (await sentBodies(client, host.options.pairing)).find((body) => body.type === "machine.attachment.request");
+  assert.ok(request, "the machine asks the desktop");
+  const reply = (extra) => ({ type: "machine.attachment.result", requestId: request.requestId, conversationId: "conv-1", attachmentId: "att-1", ok: true, parts: 2, ...extra });
+  // A stale answer for another request is ignored; parts may arrive out of order.
+  await inbound({ ...reply({ part: 0, dataBase64: Buffer.from("XX").toString("base64") }), requestId: "stale" });
+  await inbound(reply({ part: 1, dataBase64: Buffer.from("NG!").toString("base64") }));
+  await inbound(reply({ part: 0, dataBase64: Buffer.from("P").toString("base64"), mediaType: "image/png", fileName: "shot.png" }));
+  const bytes = await answered;
+  assert.equal(Buffer.from(bytes.dataBase64, "base64").toString(), "PNG!");
+  assert.equal(bytes.mediaType, "image/png"); assert.equal(bytes.fileName, "shot.png");
+
+  const refused = host.requestAttachment("conv-1", "att-2", 5000);
+  await settle();
+  const second = (await sentBodies(client, host.options.pairing)).filter((body) => body.type === "machine.attachment.request").at(-1);
+  await inbound({ type: "machine.attachment.result", requestId: second.requestId, conversationId: "conv-1", attachmentId: "att-2", ok: false, error: "This chat has no member on this machine." });
+  await assert.rejects(refused, /no member on this machine/);
+
+  const orphaned = host.requestAttachment("conv-1", "att-3", 60_000);
+  await settle();
+  client.emit("peer", { type: "peer-disconnected", peer: { role: "desktop", deviceId: DESKTOP_ISSUER.originId } });
+  await assert.rejects(Promise.race([orphaned, new Promise((_, reject) => setTimeout(() => reject(new Error("still waiting")), 1000))]),
+    /desktop went away/, "a read outstanding when the desktop leaves fails now, not after the bound");
+  host.close();
+});
+
 test("the machine's hello lists turns waiting for a copy as active", async () => {
   const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
   const client = stubClient();

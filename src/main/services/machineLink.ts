@@ -14,6 +14,7 @@ import { EventEmitter } from "node:events";
 import {
   MACHINE_LINK_PROTOCOL,
   isMachineLinkEnvelope,
+  MACHINE_ATTACHMENT_PART_BYTES,
   type MachineConversationDeletedBody,
   type MachineConversationDeltaBody,
   type MachineHelloBody,
@@ -23,6 +24,7 @@ import {
   type MachineRecord,
   type MachineTurnFinishedBody
 } from "../../shared/machineLink";
+import type { MachineAttachmentRequestBody } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
 import type { ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatAppToolApprovalRequest, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
@@ -1228,25 +1230,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
       case "machine.conversation.resync":
         await this.handleResync(connection, body.conversationId);
         return;
-      case "machine.attachment.request": {
-        // Answered either way: a refusal tells the member the picture is
-        // unavailable, where silence would leave it waiting out its turn.
-        // ChatService checks the attachment belongs to the chat that asked.
-        const reply = { type: "machine.attachment.result" as const, requestId: body.requestId,
-          conversationId: body.conversationId, attachmentId: body.attachmentId };
-        try {
-          if (!this.options.readChatAttachment) throw new Error("This desktop cannot read chat pictures.");
-          const read = await this.options.readChatAttachment({
-            conversationId: body.conversationId, attachmentId: body.attachmentId
-          });
-          await this.send(connection, { ...reply, ok: true, dataBase64: read.dataBase64,
-            ...(read.attachment?.mimeType ? { mediaType: read.attachment.mimeType } : {}),
-            ...(read.attachment?.filename ? { fileName: read.attachment.filename } : {}) });
-        } catch (error) {
-          await this.send(connection, { ...reply, ok: false, error: errorMessage(error) }).catch(() => undefined);
-        }
+      case "machine.attachment.request":
+        // Served off the inbound chain: reading a chat and sending a picture
+        // takes seconds on a large chat, and the machine's turn results,
+        // progress and approvals must not wait behind it.
+        void this.answerAttachmentRequest(connection, body);
         return;
-      }
       case "machine.choice.result": {
         const pending = connection.pendingChoices.get(body.decisionId);
         try {
@@ -1599,6 +1588,40 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   /** The machine could not store a batch of the first copy: send the whole
    *  copy again from the desktop's current state. */
+  /** The bytes of a picture a machine asked for. Answered either way: a
+   *  refusal tells the member the picture is unavailable, where silence would
+   *  leave it waiting out its turn. Only a machine that hosts a member of the
+   *  chat is served -- the same scope replication uses -- and ChatService
+   *  checks the attachment belongs to that chat. Sent in bounded parts (see
+   *  MACHINE_ATTACHMENT_PART_BYTES). */
+  private async answerAttachmentRequest(connection: MachineConnection, body: MachineAttachmentRequestBody): Promise<void> {
+    const reply = { type: "machine.attachment.result" as const, requestId: body.requestId,
+      conversationId: body.conversationId, attachmentId: body.attachmentId };
+    try {
+      if (!this.options.readChatAttachment) throw new Error("This desktop cannot read chat pictures.");
+      const conversation = await this.conversationLoader?.(body.conversationId);
+      const participants = conversation?.metadata.participants as import("../../shared/types").ChatParticipant[] | undefined;
+      if (!participants?.some((member) => member.homeMachineId === connection.record.id)) {
+        throw new Error("This chat has no member on this machine.");
+      }
+      const read = await this.options.readChatAttachment({
+        conversationId: body.conversationId, attachmentId: body.attachmentId
+      });
+      const bytes = Buffer.from(read.dataBase64, "base64");
+      const parts = Math.max(1, Math.ceil(bytes.length / MACHINE_ATTACHMENT_PART_BYTES));
+      for (let part = 0; part < parts; part += 1) {
+        const slice = bytes.subarray(part * MACHINE_ATTACHMENT_PART_BYTES, (part + 1) * MACHINE_ATTACHMENT_PART_BYTES);
+        await this.send(connection, { ...reply, ok: true, part, parts, dataBase64: slice.toString("base64"),
+          ...(part === 0 && read.attachment?.mimeType ? { mediaType: read.attachment.mimeType } : {}),
+          ...(part === 0 && read.attachment?.filename ? { fileName: read.attachment.filename } : {}) });
+      }
+    } catch (error) {
+      void this.debugLogs.write("machine-link.attachment.refused", { machineId: connection.record.id,
+        conversationId: body.conversationId, attachmentId: body.attachmentId, message: errorMessage(error) });
+      await this.send(connection, { ...reply, ok: false, error: errorMessage(error) }).catch(() => undefined);
+    }
+  }
+
   private async handleResync(connection: MachineConnection, conversationId: string): Promise<void> {
     void this.debugLogs.write("machine-link.resync", { machineId: connection.record.id, conversationId });
     connection.replicated.delete(conversationId);

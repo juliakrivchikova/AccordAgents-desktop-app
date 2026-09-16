@@ -15415,16 +15415,25 @@ export class ChatService {
       // A machine holds the chat's text but not its pictures: replication
       // carries attachment metadata without the file. Ask the desktop that
       // owns the chat, and keep what it sends, so the next read is local.
+      let ownerRefusal: string | undefined;
       const fetched = await this.fetchAttachmentFromOwner(conversationId, attachment).catch((fetchError) => {
+        ownerRefusal = fetchError instanceof Error ? fetchError.message : String(fetchError);
         void this.debugLogs.write("chat.attachments.fetch-failed", {
           conversationId,
           attachmentId: attachment.id,
-          message: fetchError instanceof Error ? fetchError.message : String(fetchError)
+          message: ownerRefusal
         });
         return undefined;
       });
       if (fetched) {
         return fetched;
+      }
+      if (ownerRefusal) {
+        // The desktop was asked and said no (or never answered): the picture
+        // is not lost, so a resend would not help. Say what happened instead.
+        throw new Error(
+          `AttachmentUnavailable. Problem: the image exists on the desktop that owns this chat, but it could not be fetched from there. Cause: ${ownerRefusal} Fix: tell User the picture could not be fetched from the desktop; do not ask for a resend.`
+        );
       }
       void this.debugLogs.write("chat.attachments.missing", {
         conversationId,
@@ -15452,16 +15461,22 @@ export class ChatService {
       return undefined;
     }
     const filePath = this.attachmentPath(conversationId, attachment.storageKey);
+    // Written beside its final name and renamed into place, so a parallel read
+    // (a member issues tool calls concurrently) never sees a half-written file.
+    const partialPath = `${filePath}.${randomUUID()}.part`;
     await mkdir(path.dirname(filePath), { recursive: true }).catch(() => undefined);
-    await writeFile(filePath, Buffer.from(dataBase64, "base64"), { mode: 0o600 }).catch((error) => {
-      // Not fatal: the member gets its picture even when this machine cannot
-      // keep a copy, it just pays for the fetch again next time.
-      void this.debugLogs.write("chat.attachments.cache-failed", {
-        conversationId,
-        attachmentId: attachment.id,
-        message: error instanceof Error ? error.message : String(error)
+    await writeFile(partialPath, Buffer.from(dataBase64, "base64"), { mode: 0o600 })
+      .then(() => rename(partialPath, filePath))
+      .catch(async (error) => {
+        // Not fatal: the member gets its picture even when this machine cannot
+        // keep a copy, it just pays for the fetch again next time.
+        await rm(partialPath, { force: true }).catch(() => undefined);
+        void this.debugLogs.write("chat.attachments.cache-failed", {
+          conversationId,
+          attachmentId: attachment.id,
+          message: error instanceof Error ? error.message : String(error)
+        });
       });
-    });
     return dataBase64;
   }
 
@@ -17320,9 +17335,14 @@ export class ChatService {
       // alive there. Requiring a *pending* row meant such a Stop was never
       // published to the machine at all, while cancelRun still reported it as
       // requested -- the User pressed Stop and nothing happened.
-      const runRow = conversation.messages.find((message) => message.role === "participant" && message.metadata?.runId === targetRunId);
-      const pending = runRow?.status === "pending" ? runRow : undefined;
-      const knownHere = Boolean(runRow) || activeRunIds.includes(targetRunId) || this.chatRunId(conversation) === targetRunId;
+      // A run can own several rows (a resumed reply, a message the member posted
+      // through an app tool, a cloud preparation row): the pending one is the
+      // one Stop feedback belongs on, and a preparation row must not hide a
+      // reply row that names the member.
+      const runRows = conversation.messages.filter((message) => message.role === "participant" && message.metadata?.runId === targetRunId);
+      const pending = runRows.find((message) => message.status === "pending");
+      const runRow = pending ?? runRows.find((message) => !message.metadata?.cloudRunPreparation) ?? runRows[0];
+      const knownHere = runRows.length > 0 || activeRunIds.includes(targetRunId) || this.chatRunId(conversation) === targetRunId;
       const participant = runRow && this.chatParticipants(conversation).find((member) => member.id === runRow.participantId);
       // A row that names a member settles where the run lives: a local member's
       // run stays local even when the chat also has a machine member. The

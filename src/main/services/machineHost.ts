@@ -10,6 +10,7 @@ import { conversationOnMachine } from "../../shared/machineRepository";
 
 import { randomUUID } from "node:crypto";
 import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -24,6 +25,7 @@ import {
   type MachineTurnFinishedBody,
   type MachineTurnRequestBody
 } from "../../shared/machineLink";
+import type { MachineAttachmentResultBody } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type { AgentHealth, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
 import type { ChatParticipantRun, ChatService } from "./chat";
@@ -106,6 +108,23 @@ export interface MachineHostOptions {
 const MACHINE_OWNED_METADATA_KEYS = ["participantSessions", "participantWatchers", "activeRunIds", "running", "runId", "pendingAppToolApprovals"] as const;
 /** How soon a failed outbox write is tried again. */
 const OUTBOX_RETRY_MS = 30_000;
+/** How long one part of a picture may take to arrive from the desktop before
+ *  the member's read fails. Restarted by every part, so it bounds silence,
+ *  not the whole transfer. */
+const ATTACHMENT_PART_TIMEOUT_MS = 120_000;
+
+interface MachineAttachmentBytes { dataBase64: string; mediaType?: string; fileName?: string }
+
+interface MachineAttachmentWaiter {
+  resolve: (value: MachineAttachmentBytes) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+  timeoutMs: number;
+  chunks: Map<number, Buffer>;
+  parts?: number;
+  mediaType?: string;
+  fileName?: string;
+}
 /** How many times an incomplete first copy is requested again. */
 const MAX_RESYNC_ATTEMPTS = 3;
 
@@ -163,45 +182,81 @@ export class MachineHostService {
     return this.choiceExecutor.applyAction(event, payload);
   }
 
-  /** requestId -> whoever is waiting for those picture bytes. */
-  private readonly pendingAttachments = new Map<string, {
-    resolve: (value: { dataBase64: string; mediaType?: string; fileName?: string }) => void;
-    reject: (error: Error) => void;
-    timer: ReturnType<typeof setTimeout>;
-  }>();
+  /** requestId -> whoever is waiting for those picture bytes, and the parts
+   *  that have arrived so far. */
+  private readonly pendingAttachments = new Map<string, MachineAttachmentWaiter>();
 
   /**
    * The bytes of a picture this chat carries, from the desktop that holds it.
    *
    * Replication brings the attachment's metadata here but not its file, so
    * without this a member on a machine sees that the User attached a picture
-   * and can never read it. Bounded: a desktop that never answers fails the
-   * read rather than leaving the member waiting for the rest of its turn. The
-   * bound leaves room for the picture itself: a 10 MB image is ~18 MB once
-   * base64-encoded and sealed, carried in 10 KiB relay frames.
+   * and can never read it. The picture arrives in parts; the wait is bounded
+   * per part, so a desktop that stops answering fails the read rather than
+   * leaving the member waiting for the rest of its turn, while a large picture
+   * on a slow link is not cut off as long as parts keep arriving.
    */
-  async requestAttachment(conversationId: string, attachmentId: string, timeoutMs = 120_000):
-  Promise<{ dataBase64: string; mediaType?: string; fileName?: string }> {
+  async requestAttachment(conversationId: string, attachmentId: string, timeoutMs = ATTACHMENT_PART_TIMEOUT_MS): Promise<MachineAttachmentBytes> {
     const requestId = randomUUID();
-    const pending = new Promise<{ dataBase64: string; mediaType?: string; fileName?: string }>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingAttachments.delete(requestId);
-        reject(new Error("The desktop did not answer with this picture in time."));
-      }, timeoutMs);
-      timer.unref?.();
-      this.pendingAttachments.set(requestId, { resolve, reject, timer });
+    const pending = new Promise<MachineAttachmentBytes>((resolve, reject) => {
+      const waiter: MachineAttachmentWaiter = {
+        resolve, reject, timeoutMs, chunks: new Map(),
+        timer: setTimeout(() => this.failAttachment(requestId, "The desktop did not answer with this picture in time."), timeoutMs)
+      };
+      waiter.timer.unref?.();
+      this.pendingAttachments.set(requestId, waiter);
     });
     try {
       await this.send({ type: "machine.attachment.request", requestId, conversationId, attachmentId });
     } catch (error) {
-      const waiter = this.pendingAttachments.get(requestId);
-      if (waiter) {
-        this.pendingAttachments.delete(requestId);
-        clearTimeout(waiter.timer);
-      }
-      throw error instanceof Error ? error : new Error(String(error));
+      this.failAttachment(requestId, errorMessage(error));
     }
     return pending;
+  }
+
+  private failAttachment(requestId: string, message: string): void {
+    const waiter = this.pendingAttachments.get(requestId);
+    if (!waiter) return;
+    this.pendingAttachments.delete(requestId);
+    clearTimeout(waiter.timer);
+    waiter.reject(new Error(message));
+  }
+
+  /** Every picture still awaited fails now: the desktop is gone or this
+   *  runtime is closing, and nothing will answer. */
+  private failAllAttachments(message: string): void {
+    for (const requestId of [...this.pendingAttachments.keys()]) this.failAttachment(requestId, message);
+  }
+
+  private receiveAttachmentPart(body: MachineAttachmentResultBody): void {
+    const waiter = this.pendingAttachments.get(body.requestId);
+    if (!waiter) return;
+    if (!body.ok || typeof body.dataBase64 !== "string") {
+      this.failAttachment(body.requestId, body.error ?? "The desktop could not read this picture.");
+      return;
+    }
+    const parts = Number.isInteger(body.parts) && (body.parts as number) > 0 ? (body.parts as number) : 1;
+    const part = Number.isInteger(body.part) && (body.part as number) >= 0 ? (body.part as number) : 0;
+    if (part >= parts) return;
+    waiter.parts = parts;
+    waiter.chunks.set(part, Buffer.from(body.dataBase64, "base64"));
+    if (body.mediaType) waiter.mediaType = body.mediaType;
+    if (body.fileName) waiter.fileName = body.fileName;
+    if (waiter.chunks.size < parts) {
+      // Progress: the bound restarts with every part that arrives.
+      clearTimeout(waiter.timer);
+      waiter.timer = setTimeout(() => this.failAttachment(body.requestId, "The desktop stopped sending this picture."), waiter.timeoutMs);
+      waiter.timer.unref?.();
+      return;
+    }
+    this.pendingAttachments.delete(body.requestId);
+    clearTimeout(waiter.timer);
+    const ordered = Array.from({ length: parts }, (_, index) => waiter.chunks.get(index) as Buffer);
+    waiter.resolve({
+      dataBase64: Buffer.concat(ordered).toString("base64"),
+      ...(waiter.mediaType ? { mediaType: waiter.mediaType } : {}),
+      ...(waiter.fileName ? { fileName: waiter.fileName } : {})
+    });
   }
 
   applyApprovalAction(event: ChatEventEnvelope, payload: import("../../shared/chatActionEvents").ChatActionPayload): Promise<import("../../shared/machineLink").MachineApprovalResultBody> {
@@ -352,6 +407,7 @@ export class MachineHostService {
       } else if (event.type === "peer-disconnected" && event.peer.deviceId === options.pairing.issuer.originId) {
         this.desktopDeviceId = undefined;
         void this.debugLogs.write("machine-host.desktop.away", { deviceId: event.peer.deviceId, pendingTerminals: this.pendingTerminals.size });
+        this.failAllAttachments("The desktop went away before answering with this picture.");
       }
     });
     // Inbound messages are applied strictly in arrival order: a conversation
@@ -437,6 +493,7 @@ export class MachineHostService {
   }
 
   close(): void {
+    this.failAllAttachments("The machine runtime is closing; this picture was not fetched.");
     this.closed = true;
     for (const sender of this.progressSenders.values()) sender.close();
     this.peers.close();
@@ -982,22 +1039,9 @@ export class MachineHostService {
         }
         void this.runTurn(body);
         return;
-      case "machine.attachment.result": {
-        const waiter = this.pendingAttachments.get(body.requestId);
-        if (!waiter) return;
-        this.pendingAttachments.delete(body.requestId);
-        clearTimeout(waiter.timer);
-        if (body.ok && typeof body.dataBase64 === "string") {
-          waiter.resolve({
-            dataBase64: body.dataBase64,
-            ...(body.mediaType ? { mediaType: body.mediaType } : {}),
-            ...(body.fileName ? { fileName: body.fileName } : {})
-          });
-        } else {
-          waiter.reject(new Error(body.error ?? "The desktop could not read this picture."));
-        }
+      case "machine.attachment.result":
+        this.receiveAttachmentPart(body);
         return;
-      }
       case "machine.turn.query":
         if (await this.options.eventStorage.nativeCommands().forRun(body.runId)) {
           await this.repeatCommandResult(body.runId);
@@ -1230,6 +1274,10 @@ export class MachineHostService {
       throw new Error("The machine cannot prove that this chat's providers and stored copy were deleted.");
     }
     await this.chat.closeReplicatedConversationSessions(conversationId);
+    // Pictures fetched for this chat were kept beside its copy; they go with it.
+    await rm(path.join(userDataPath(), "chats", conversationId), { recursive: true, force: true }).catch((error: unknown) => {
+      void this.debugLogs.write("machine-host.conversation.attachments-delete-error", { conversationId, message: errorMessage(error) });
+    });
     if (this.storage.deleteConversation) {
       await this.storage.deleteConversation(conversationId).catch((error: unknown) => {
         void this.debugLogs.write("machine-host.conversation.delete-error", { conversationId, message: errorMessage(error) });

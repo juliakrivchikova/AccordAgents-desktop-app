@@ -352,6 +352,15 @@ function base64DecodedBytes(value: string): number {
   return Math.floor((value.length * 3) / 4) - padding;
 }
 
+/** Some answers from the phone could not be applied here; the rest of the batch
+ *  went through. Carries the event ids to leave out of the ack. */
+class MobileDecisionDeliveryError extends Error {
+  constructor(readonly eventIds: string[], detail: string) {
+    super(`A card answer from the phone could not be applied: ${detail}`);
+    this.name = "MobileDecisionDeliveryError";
+  }
+}
+
 export class MobileRelayControlService {
   private readonly client: RelayTunnelClient;
   private readonly abortController = new AbortController();
@@ -636,10 +645,21 @@ export class MobileRelayControlService {
     // decision event was ever written, the peer holding the request never
     // acted on it, and the card stayed pending above the composer for ever.
     // Delivered before the ack, like a cancellation, so an answer this desktop
-    // could not take is not reported to the phone as delivered.
-    await this.deliverAcceptedDecisionEvents(accepted);
+    // could not take is not reported to the phone as delivered -- and only
+    // that answer is left out of the ack: the messages and cancellations
+    // accepted in the same batch are still delivered, not stranded behind it.
+    let acked = accepted;
+    try {
+      await this.deliverAcceptedDecisionEvents(accepted);
+    } catch (error) {
+      if (!(error instanceof MobileDecisionDeliveryError)) {
+        throw error;
+      }
+      const failed = new Set(error.eventIds);
+      acked = { ...accepted, eventIds: accepted.eventIds.filter((eventId) => !failed.has(eventId)) };
+    }
     await this.deliverAcceptedCancellationEvents(accepted);
-    await this.sendAck(message.logicalMessageId, accepted);
+    await this.sendAck(message.logicalMessageId, acked);
     this.markRunIdsAcked(accepted.runIds);
     await this.sendAcceptedRunningBatches(message.logicalMessageId, accepted).catch(() => {
       // The phone may have gone away after ack; durable sync remains the source of truth.
@@ -736,14 +756,19 @@ export class MobileRelayControlService {
    *  action any device would and lets the peer that holds the request act on it
    *  once; delivery here is not the answer being applied. */
   private async deliverAcceptedDecisionEvents(accepted: MobileRelayAcceptedDetail): Promise<void> {
+    // One answer the desktop cannot take must not take the rest of the batch
+    // with it: every decision is attempted, a failed one is released so the
+    // phone's retry applies it again, and the failures are reported together
+    // once the others are through.
+    const failures: Array<{ eventId: string; error: unknown }> = [];
     for (const item of accepted.outboxEvents) {
       if (item.kind !== "decision") {
         continue;
       }
-      if (!this.chat.applyMobileDecision) {
-        throw new Error("Answering a card from a phone is unavailable.");
-      }
       try {
+        if (!this.chat.applyMobileDecision) {
+          throw new Error("Answering a card from a phone is unavailable.");
+        }
         await this.chat.applyMobileDecision({
           conversationId: item.event.conversationId,
           kind: item.event.kind,
@@ -751,8 +776,12 @@ export class MobileRelayControlService {
         });
       } catch (error) {
         this.acceptedMobileEventKeys.delete(mobileEventScopeKey(item.event.conversationId, item.event.eventId));
-        throw error;
+        failures.push({ eventId: item.event.eventId, error });
       }
+    }
+    if (failures.length > 0) {
+      const detail = failures.map((failure) => failure.error instanceof Error ? failure.error.message : String(failure.error)).join("; ");
+      throw new MobileDecisionDeliveryError(failures.map((failure) => failure.eventId), detail);
     }
   }
 

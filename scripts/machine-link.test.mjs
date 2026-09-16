@@ -18,6 +18,47 @@ test("every link message type passes the envelope validator, including picture r
   assert.equal(isMachineLinkEnvelope(envelope({ type: "machine.not.a.message" })), false);
 });
 
+test("the desktop answers a picture request in bounded parts, only for a machine that hosts a member of the chat", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { MACHINE_ATTACHMENT_PART_BYTES } = await import("../dist/main/shared/machineLink.js");
+  const picture = Buffer.alloc(MACHINE_ATTACHMENT_PART_BYTES * 2 + 12345, 7);
+  const record = { id: "machine-1", name: "Box", deviceId: "", pairingKey: "rv-att", createdAt: new Date().toISOString() };
+  const reads = [];
+  const link = new MachineLinkService({
+    listMachines: async () => [record],
+    saveMachine: async () => [record],
+    removeMachine: async () => [],
+    getMachinePairing: async () => undefined,
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
+  }, { write: async () => undefined }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID,
+    readChatAttachment: async (request) => { reads.push(request); return { attachment: { mimeType: "image/png", filename: "shot.png" }, dataBase64: picture.toString("base64") }; } });
+  const chats = new Map([
+    ["chat-on-box", { id: "chat-on-box", kind: "chat", messages: [], metadata: { participants: [{ id: "p1", handle: "bot", homeMachineId: "machine-1" }] } }],
+    ["chat-elsewhere", { id: "chat-elsewhere", kind: "chat", messages: [], metadata: { participants: [{ id: "p2", handle: "local" }] } }]
+  ]);
+  link.setConversationLoader(async (id) => chats.get(id));
+  const sent = [];
+  link.send = async (_connection, body) => { sent.push(body); };
+  const connection = { record };
+  const request = (conversationId) => ({ type: "machine.attachment.request", requestId: `r-${conversationId}`, conversationId, attachmentId: "a1" });
+
+  await link.answerAttachmentRequest(connection, request("chat-on-box"));
+  const parts = sent.filter((body) => body.type === "machine.attachment.result" && body.requestId === "r-chat-on-box");
+  assert.equal(parts.length, 3, "a picture above one part travels in several");
+  assert.ok(parts.every((body) => body.ok && body.parts === 3), "every part says how many there are");
+  assert.deepEqual(parts.map((body) => body.part), [0, 1, 2]);
+  assert.equal(parts[0].mediaType, "image/png"); assert.equal(parts[0].fileName, "shot.png");
+  assert.ok(Buffer.concat(parts.map((body) => Buffer.from(body.dataBase64, "base64"))).equals(picture), "the parts reassemble to the picture");
+  assert.ok(parts.every((body) => Buffer.byteLength(body.dataBase64) < 3 * 1024 * 1024), "no part approaches the relay's 10 MiB logical-message limit once sealed");
+
+  await link.answerAttachmentRequest(connection, request("chat-elsewhere"));
+  const refused = sent.find((body) => body.requestId === "r-chat-elsewhere");
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /no member on this machine/);
+  assert.deepEqual(reads.map((read) => read.conversationId), ["chat-on-box"], "a chat the machine does not host is never read");
+  link.close();
+});
+
 test("approval receipts resolve only their decision and every caller retrying that decision", async () => {
   const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
   const resolved = [], rejected = [];
