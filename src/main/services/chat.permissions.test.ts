@@ -12016,6 +12016,32 @@ test("Stop still reaches the machine when this desktop has no pending row for th
     "a Stop for a machine-hosted run must be published to that machine");
 });
 
+test("Stop for a local member's run stays local even when the chat also has a machine member", async () => {
+  // The single-machine fallback exists for a run this copy cannot attribute
+  // at all. A row that names a local member settles the question: routing its
+  // Stop to the machine would send a cancel for a run the machine never had
+  // and leave the local row pending for ever.
+  const local = chatParticipant("codex-cli");
+  const remote = { ...chatParticipant("codex-cli"), id: "remote-member", handle: "remote", homeMachineId: "machine" };
+  const conversation = chatConversation([local, remote], { activeRunIds: ["run-local"] });
+  conversation.messages.push({
+    id: "local-bubble", role: "participant", participantId: local.id, content: "",
+    status: "pending", createdAt: NOW, metadata: { runId: "run-local" }
+  } as any);
+  const { service, storage } = testService({ conversation });
+  const cancels: Array<{ machineId: string; runId: string }> = [];
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    cancelMachineRun: async (request: any) => { cancels.push({ machineId: request.machineId, runId: request.runId }); }
+  } as any);
+  assert.equal(service.cancelRun("run-local"), true);
+  await untilTrue(() => storage.current.messages.some((message: ChatMessage) =>
+    message.id === "local-bubble" && message.metadata?.terminalReason === "user-stopped"));
+  assert.equal(storage.current.messages.find((message: ChatMessage) => message.id === "local-bubble")?.metadata?.terminalReason, "user-stopped",
+    "the local run is swept here");
+  assert.deepEqual(cancels, [], "no cancel is published to a machine that does not own the run");
+});
+
 test("a picture a machine does not hold is fetched from the desktop that owns the chat", async () => {
   // The defect: conversation replication carries an attachment's metadata but
   // never its file, and the machine link had no notion of attachments at all

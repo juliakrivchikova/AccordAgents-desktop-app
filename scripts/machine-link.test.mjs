@@ -6,6 +6,18 @@ import { desktopEvents, hostEvents, DESKTOP_ID, MACHINE_ID, DESKTOP_ISSUER } fro
 const require = createRequire(import.meta.url);
 const { createReferenceRelayServer } = require("./relay-reference-server.cjs");
 
+test("every link message type passes the envelope validator, including picture requests", async () => {
+  // The defect: machine.attachment.request/result were added to the message
+  // union but not to the validator's allowlist, so both sides dropped them on
+  // receipt and a member on a machine waited 30 s for a picture that never
+  // came. The allowlist is now typed over the union; this pins the runtime.
+  const { isMachineLinkEnvelope, MACHINE_LINK_PROTOCOL } = await import("../dist/main/shared/machineLink.js");
+  const envelope = (body) => ({ protocol: MACHINE_LINK_PROTOCOL, messageId: "m1", sentAt: new Date().toISOString(), body });
+  assert.equal(isMachineLinkEnvelope(envelope({ type: "machine.attachment.request", requestId: "r1", conversationId: "c1", attachmentId: "a1" })), true);
+  assert.equal(isMachineLinkEnvelope(envelope({ type: "machine.attachment.result", requestId: "r1", conversationId: "c1", attachmentId: "a1", ok: true, dataBase64: "AA==" })), true);
+  assert.equal(isMachineLinkEnvelope(envelope({ type: "machine.not.a.message" })), false);
+});
+
 test("approval receipts resolve only their decision and every caller retrying that decision", async () => {
   const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
   const resolved = [], rejected = [];

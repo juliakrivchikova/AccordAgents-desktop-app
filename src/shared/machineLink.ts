@@ -412,36 +412,43 @@ export function isMachineDurableMessage(body: MachineLinkMessage): boolean {
 export function machineCommandId(runId: string): string { return `machine-command:${runId}`; }
 export function machineCommandTerminalId(runId: string): string { return `machine-terminal:${machineCommandId(runId)}`; }
 
-const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
-  "machine.hello",
-  "machine.hello.ack",
-  "machine.settings.sync",
-  "machine.settings.sealed",
-  "machine.conversation.sync",
-  "machine.conversation.delta",
-  "machine.conversation.deleted",
-  "machine.turn.request",
-  "machine.turn.cancel",
-  "machine.turn.progress",
-  "machine.turn.progress.delta",
-  "machine.participants.delegate",
-  "machine.trust.roster",
-  "machine.turn.started",
-  "machine.turn.finished",
-  "machine.conversation.backdelta",
-  "machine.approval.requested",
-  "machine.approval.updated",
-  "machine.approval.decision",
-  "machine.approval.result",
-  "machine.turn.finished.ack",
-  "machine.turn.unknown",
-  "machine.turn.query",
-  "machine.hello.request",
-  "machine.conversation.sync.done",
-  "machine.conversation.resync",
-  "machine.choice.result",
-  "machine.choice.answer"
-]);
+/** Every message the link accepts. Typed as a table over the union so that a
+ *  body added to `MachineLinkMessage` without a row here is a compile error,
+ *  not a message both sides silently drop on receipt. */
+const MESSAGE_TYPE_TABLE: Record<MachineLinkMessageType, true> = {
+  "machine.hello": true,
+  "machine.hello.ack": true,
+  "machine.settings.sync": true,
+  "machine.settings.sealed": true,
+  "machine.conversation.sync": true,
+  "machine.conversation.delta": true,
+  "machine.conversation.deleted": true,
+  "machine.turn.request": true,
+  "machine.turn.cancel": true,
+  "machine.turn.progress": true,
+  "machine.turn.progress.delta": true,
+  "machine.participants.delegate": true,
+  "machine.trust.roster": true,
+  "machine.turn.started": true,
+  "machine.turn.finished": true,
+  "machine.conversation.backdelta": true,
+  "machine.approval.requested": true,
+  "machine.approval.updated": true,
+  "machine.approval.decision": true,
+  "machine.approval.result": true,
+  "machine.turn.finished.ack": true,
+  "machine.turn.unknown": true,
+  "machine.turn.query": true,
+  "machine.hello.request": true,
+  "machine.conversation.sync.done": true,
+  "machine.conversation.resync": true,
+  "machine.choice.result": true,
+  "machine.choice.answer": true,
+  "machine.attachment.request": true,
+  "machine.attachment.result": true,
+};
+
+const MESSAGE_TYPES: ReadonlySet<string> = new Set<string>(Object.keys(MESSAGE_TYPE_TABLE));
 
 export function isMachineLinkEnvelope(value: unknown): value is MachineLinkEnvelope {
   if (!value || typeof value !== "object") {

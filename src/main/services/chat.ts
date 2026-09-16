@@ -17324,7 +17324,11 @@ export class ChatService {
       const pending = runRow?.status === "pending" ? runRow : undefined;
       const knownHere = Boolean(runRow) || activeRunIds.includes(targetRunId) || this.chatRunId(conversation) === targetRunId;
       const participant = runRow && this.chatParticipants(conversation).find((member) => member.id === runRow.participantId);
-      const homeMachineId = participant?.homeMachineId ?? this.soleMachineMemberHome(conversation);
+      // A row that names a member settles where the run lives: a local member's
+      // run stays local even when the chat also has a machine member. The
+      // single-machine fallback is only for a run this copy cannot attribute at
+      // all -- no row replicated yet, or a member since removed.
+      const homeMachineId = participant ? participant.homeMachineId : this.soleMachineMemberHome(conversation);
       if (knownHere && !runRow?.metadata?.cloudRunPreparation && homeMachineId && homeMachineId !== this.hostMachineId && this.machineLink?.cancelMachineRun) {
         await this.machineLink.cancelMachineRun({
           machineId: homeMachineId, conversationId: conversation.id, runId: targetRunId,

@@ -176,9 +176,11 @@ export class MachineHostService {
    * Replication brings the attachment's metadata here but not its file, so
    * without this a member on a machine sees that the User attached a picture
    * and can never read it. Bounded: a desktop that never answers fails the
-   * read rather than leaving the member waiting for the rest of its turn.
+   * read rather than leaving the member waiting for the rest of its turn. The
+   * bound leaves room for the picture itself: a 10 MB image is ~18 MB once
+   * base64-encoded and sealed, carried in 10 KiB relay frames.
    */
-  async requestAttachment(conversationId: string, attachmentId: string, timeoutMs = 30_000):
+  async requestAttachment(conversationId: string, attachmentId: string, timeoutMs = 120_000):
   Promise<{ dataBase64: string; mediaType?: string; fileName?: string }> {
     const requestId = randomUUID();
     const pending = new Promise<{ dataBase64: string; mediaType?: string; fileName?: string }>((resolve, reject) => {
