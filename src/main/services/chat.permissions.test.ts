@@ -11967,3 +11967,50 @@ function skillMention(kind: ChatParticipant["kind"]): unknown {
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
+
+async function untilTrue(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("Stop reaches the machine when this desktop holds a pending row for the run", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine" };
+  const conversation = chatConversation([participant], { activeRunIds: ["run-on-machine"] });
+  conversation.messages.push({
+    id: "machine-bubble", role: "participant", participantId: participant.id, content: "",
+    status: "pending", createdAt: NOW, metadata: { runId: "run-on-machine" }
+  } as any);
+  const { service } = testService({ conversation });
+  const cancels: Array<{ machineId: string; runId: string }> = [];
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    cancelMachineRun: async (request: any) => { cancels.push({ machineId: request.machineId, runId: request.runId }); }
+  } as any);
+  assert.equal(service.cancelRun("run-on-machine"), true);
+  await untilTrue(() => cancels.length === 1);
+  assert.deepEqual(cancels, [{ machineId: "machine", runId: "run-on-machine" }]);
+});
+
+test("Stop still reaches the machine when this desktop has no pending row for the run", async () => {
+  // The defect: cancelStoredRun published machine.turn.cancel only when this
+  // copy happened to hold a pending participant row for the run. A run the
+  // machine has started but whose row has not been replicated here yet -- or
+  // whose row this copy has already settled -- was therefore never cancelled
+  // on the machine, while cancelRun reported success to the User all the same.
+  // The machine owns the run; a missing row here is not evidence it stopped.
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine" };
+  const conversation = chatConversation([participant], { activeRunIds: ["run-on-machine"] });
+  const { service } = testService({ conversation });
+  const cancels: Array<{ machineId: string; runId: string }> = [];
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    cancelMachineRun: async (request: any) => { cancels.push({ machineId: request.machineId, runId: request.runId }); }
+  } as any);
+  assert.equal(service.cancelRun("run-on-machine"), true);
+  await untilTrue(() => cancels.length === 1);
+  assert.deepEqual(cancels, [{ machineId: "machine", runId: "run-on-machine" }],
+    "a Stop for a machine-hosted run must be published to that machine");
+});

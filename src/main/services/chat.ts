@@ -17243,6 +17243,17 @@ export class ChatService {
     return false;
   }
 
+  /** The machine to send a Stop to when this copy cannot name the run's member.
+   *  Only answered when the chat leaves no doubt: exactly one member lives on a
+   *  machine, so the run can only be that machine's. The phone's own Stop makes
+   *  the same call for the same reason (`machineRunForCancel`). */
+  private soleMachineMemberHome(conversation: Conversation): string | undefined {
+    const homes = new Set(this.chatParticipants(conversation)
+      .map((member) => member.homeMachineId)
+      .filter((home): home is string => Boolean(home) && home !== this.hostMachineId));
+    return homes.size === 1 ? [...homes][0] : undefined;
+  }
+
   private async cancelStoredRun(runId: string): Promise<boolean> {
     const targetRunId = runId.trim();
     if (!targetRunId) {
@@ -17258,12 +17269,22 @@ export class ChatService {
         continue;
       }
       const activeRunIds = readActiveRunIds(conversation.metadata);
-      const pending = conversation.messages.find((message) => message.role === "participant" && message.status === "pending" && message.metadata?.runId === targetRunId);
-      const participant = pending && this.chatParticipants(conversation).find((member) => member.id === pending.participantId);
-      if (pending && !pending.metadata?.cloudRunPreparation && participant?.homeMachineId && participant.homeMachineId !== this.hostMachineId && this.machineLink?.cancelMachineRun) {
+      // A row here is evidence about the run, not the authority over it. The
+      // machine owns its own runs: one it has started but not yet replicated
+      // here, and one whose row this copy has already settled, are both still
+      // alive there. Requiring a *pending* row meant such a Stop was never
+      // published to the machine at all, while cancelRun still reported it as
+      // requested -- the User pressed Stop and nothing happened.
+      const runRow = conversation.messages.find((message) => message.role === "participant" && message.metadata?.runId === targetRunId);
+      const pending = runRow?.status === "pending" ? runRow : undefined;
+      const knownHere = Boolean(runRow) || activeRunIds.includes(targetRunId) || this.chatRunId(conversation) === targetRunId;
+      const participant = runRow && this.chatParticipants(conversation).find((member) => member.id === runRow.participantId);
+      const homeMachineId = participant?.homeMachineId ?? this.soleMachineMemberHome(conversation);
+      if (knownHere && !runRow?.metadata?.cloudRunPreparation && homeMachineId && homeMachineId !== this.hostMachineId && this.machineLink?.cancelMachineRun) {
         await this.machineLink.cancelMachineRun({
-          machineId: participant.homeMachineId, conversationId: conversation.id, runId: targetRunId,
+          machineId: homeMachineId, conversationId: conversation.id, runId: targetRunId,
           onStopPending: async (machineName) => {
+            if (!pending) return;
             await this.withChatMutation(conversation, async () => {
               const bubble = conversation.messages.find((message) => message.id === pending.id);
               if (bubble?.status === "pending") {
