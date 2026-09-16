@@ -686,9 +686,17 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-/** Reads the process table so an unreaped zombie counts as gone and a reused pid is not mistaken for our fixture. */
+/**
+ * Reads the process table so an unreaped zombie counts as gone and a reused
+ * pid is not mistaken for our fixture. `ps -p` exits 1 silently for a pid that
+ * no longer exists; any other failure (sandbox, missing `ps`) fails loudly so
+ * a termination check can never pass by being unable to look.
+ */
 function processCommand(pid: number): string {
   const result = spawnSync("ps", ["-o", "stat=,command=", "-p", String(pid)], { encoding: "utf8" });
+  if (result.error || (result.status !== 0 && result.stderr.trim())) {
+    throw new Error(`cannot inspect process ${pid}: ${result.error?.message ?? result.stderr.trim()}`);
+  }
   const line = result.status === 0 ? result.stdout.trim() : "";
   return line.startsWith("Z") ? "" : line;
 }
