@@ -5,6 +5,7 @@ import type {
   AppSettings,
   ChatBehaviorRuleConfigUpdate,
   ChatParticipantConfigUpdate,
+  CliProviderHostUpdate,
   ChatProviderKind,
   ChatPromptContextSettings,
   ChatRoleConfigUpdate,
@@ -44,6 +45,8 @@ export function SettingsView(props: {
   deleteChatSavedPromptConfig: (id: string) => Promise<void>;
   saveChatParticipantConfig: (update: ChatParticipantConfigUpdate) => Promise<void>;
   deleteChatParticipantConfig: (id: string) => Promise<void>;
+  saveCliProviderHost: (update: CliProviderHostUpdate) => Promise<void>;
+  deleteCliProviderHost: (id: string) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
@@ -158,6 +161,9 @@ export function SettingsView(props: {
         {props.section === "general" && (
           <GeneralSettingsSection
             providers={props.settings.providers}
+            cliProviderHosts={props.settings.cliProviderHosts}
+            saveCliProviderHost={props.saveCliProviderHost}
+            deleteCliProviderHost={props.deleteCliProviderHost}
             agents={props.agents}
             assistantProviderKind={props.settings.assistantProviderKind}
             repoFileOpenAction={props.settings.repoFileOpenAction}

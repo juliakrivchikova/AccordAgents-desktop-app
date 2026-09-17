@@ -9,6 +9,7 @@ import type {
   ChatParticipant,
   ChatParticipantChangeRequest,
   ChatParticipantConfig,
+  CliProviderHost,
   ChatRoleChangeRequest,
   ChatRoleConfig,
   ChatRoleParticipantChangeRequest
@@ -32,6 +33,7 @@ export function ChatAppToolApprovalCard(props: {
   approval: ChatAppToolApproval;
   participants: ChatParticipant[];
   savedParticipants: ChatParticipantConfig[];
+  cliProviderHosts?: CliProviderHost[];
   roles: ChatRoleConfig[];
   submitting: boolean;
   embedded?: boolean;
@@ -170,7 +172,7 @@ export function ChatAppToolApprovalCard(props: {
         <div className="chat-app-tool-approval-body">
           <div className="chat-app-tool-approval-meta">
             <strong>{requesterLabel}</strong>
-            {requester && <span className="message-provider">{participantProviderLabel(requester.kind)}</span>}
+            {requester && <span className="message-provider">{participantProviderLabel(requester.kind, requester.hostLabel)}</span>}
             <span className="message-when">{formatChatTime(props.approval.createdAt)}</span>
           </div>
           <ChatCodexApprovalResult approval={props.approval} />
@@ -233,7 +235,7 @@ export function ChatAppToolApprovalCard(props: {
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
           <strong>{requesterLabel}</strong>
-          {requester && <span className="message-provider">{reviewChange ? "Proposes changes for your approval" : participantProviderLabel(requester.kind)}</span>}
+          {requester && <span className="message-provider">{reviewChange ? "Proposes changes for your approval" : participantProviderLabel(requester.kind, requester.hostLabel)}</span>}
           <span className="message-when">{formatChatTime(props.approval.createdAt)}</span>
         </div>
         <div className={`chat-app-tool-approval-panel ${rosterApproval ? "is-roster-request" : ""} ${reviewChange ? "is-review-change" : ""}`}>
@@ -274,6 +276,7 @@ export function ChatAppToolApprovalCard(props: {
                 request={effectiveCombinedRequest.participantRequest}
                 roles={[...props.roles, ...temporaryRolesForReview(effectiveCombinedRequest.roleRequest)]}
                 savedParticipants={props.savedParticipants}
+                cliProviderHosts={props.cliProviderHosts ?? []}
                 onChange={(nextParticipantRequest) => {
                   setParticipantDraft(nextParticipantRequest);
                   setCombinedDraft((current) => ({
@@ -295,6 +298,7 @@ export function ChatAppToolApprovalCard(props: {
               request={effectiveParticipantChange}
               roles={props.roles}
               savedParticipants={props.savedParticipants}
+              cliProviderHosts={props.cliProviderHosts ?? []}
               onChange={setParticipantDraft}
             />
           ) : participantRequest ? (

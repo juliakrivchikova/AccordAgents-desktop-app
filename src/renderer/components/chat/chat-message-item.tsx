@@ -13,6 +13,7 @@ import type {
   ChatAppToolApprovalScope,
   ChatParticipant,
   ChatParticipantConfig,
+  CliProviderHost,
   ChatParticipantRequestBatch,
   ChatRoleConfig,
   Conversation
@@ -86,6 +87,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   liveProgress?: AgentRunProgress;
   appToolApprovals?: ChatAppToolApproval[];
   savedParticipants?: ChatParticipantConfig[];
+  cliProviderHosts?: CliProviderHost[];
   roles?: ChatRoleConfig[];
   submittingApprovalIds?: ReadonlySet<string>;
   onOpenThread?: (messageId: string) => void;
@@ -323,7 +325,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           <div className="message-meta">
             <strong>{author}</strong>
             {participant && message.role === "participant" && (
-              <span className="message-provider">{participantProviderLabel(participant.kind)}</span>
+              <span className="message-provider">{participantProviderLabel(participant.kind, participant.hostLabel)}</span>
             )}
             {message.role === "participant" && (
               queuedBehind ? (
@@ -377,6 +379,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 approvals={props.appToolApprovals}
                 participants={props.participants ?? []}
                 savedParticipants={props.savedParticipants ?? []}
+                cliProviderHosts={props.cliProviderHosts ?? []}
                 roles={props.roles ?? []}
                 submittingIds={props.submittingApprovalIds ?? new Set<string>()}
                 embedded

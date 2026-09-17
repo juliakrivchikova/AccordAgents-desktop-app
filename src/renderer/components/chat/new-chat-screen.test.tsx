@@ -50,7 +50,8 @@ const SETTINGS: AppSettings = {
   }],
   chatBehaviorRules: [],
   chatSavedPrompts: [],
-  chatParticipantConfigs: []
+  chatParticipantConfigs: [],
+  cliProviderHosts: [],
 };
 
 test("multiple ready providers silently use Codex without rendering a chooser", () => {

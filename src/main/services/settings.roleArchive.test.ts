@@ -63,7 +63,8 @@ function settingsServiceWith(
     chatBehaviorRules: [],
     chatSavedPrompts: [],
     chatParticipantConfigs: initial.chatParticipantConfigs ?? [],
-    chatParticipantSeedState: {}
+    chatParticipantSeedState: {},
+    cliProviderHosts: [],
   };
   let writeCount = 0;
   service.readStored = async () => stored;
@@ -87,7 +88,8 @@ function settingsServiceWith(
     chatBehaviorRules: stored.chatBehaviorRules,
     chatSavedPrompts: stored.chatSavedPrompts,
     chatParticipantConfigs: stored.chatParticipantConfigs,
-    chatParticipantSeedState: stored.chatParticipantSeedState
+    chatParticipantSeedState: stored.chatParticipantSeedState,
+    cliProviderHosts: [],
   });
   return { service, stored: () => stored, writeCount: () => writeCount };
 }

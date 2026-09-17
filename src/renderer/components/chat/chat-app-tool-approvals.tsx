@@ -4,6 +4,7 @@ import type {
   ChatAppToolApprovalScope,
   ChatParticipant,
   ChatParticipantConfig,
+  CliProviderHost,
   ChatRoleConfig
 } from "../../../shared/types";
 import { ChatAppToolApprovalCard } from "./chat-app-tool-approval-card";
@@ -12,6 +13,7 @@ export function ChatAppToolApprovalList(props: {
   approvals: ChatAppToolApproval[];
   participants: ChatParticipant[];
   savedParticipants: ChatParticipantConfig[];
+  cliProviderHosts?: CliProviderHost[];
   roles: ChatRoleConfig[];
   submittingIds: ReadonlySet<string>;
   embedded?: boolean;
@@ -30,6 +32,7 @@ export function ChatAppToolApprovalList(props: {
           approval={approval}
           participants={props.participants}
           savedParticipants={props.savedParticipants}
+          cliProviderHosts={props.cliProviderHosts}
           roles={props.roles}
           submitting={props.submittingIds.has(approval.id)}
           embedded={props.embedded}

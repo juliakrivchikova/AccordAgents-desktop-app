@@ -446,6 +446,7 @@ export interface AppSettings {
   cloudRuns: CloudRunsSettings;
   mobileControl: MobileControlSettings;
   providers: ProviderSettings[];
+  cliProviderHosts: CliProviderHost[];
   chatRoleConfigs: ChatRoleConfig[];
   chatBehaviorRules: ChatBehaviorRuleConfig[];
   chatSavedPrompts: ChatSavedPromptConfig[];
@@ -511,6 +512,36 @@ export interface ChatBehaviorRuleSnapshot {
 }
 
 export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
+
+/** Which local CLI an added provider runs through. Antigravity has no vendor
+ *  that can be reached this way, so it is not included. */
+export type CliProviderHostCli = Extract<ChatProviderKind, "claude-code" | "codex-cli">;
+
+export type CliProviderHostVendor = "anthropic" | "zai" | "moonshot" | "minimax" | "deepseek" | "openai" | "custom";
+
+/** An added provider (General Settings → Add provider): a vendor endpoint
+ *  reached through one of the local CLIs with the user's own API key. It sits
+ *  next to the built-in, subscription-authenticated CLIs and a member can be
+ *  bound to either. The key itself never crosses the bridge. */
+export interface CliProviderHost {
+  id: string;
+  label: string;
+  cli: CliProviderHostCli;
+  vendor: CliProviderHostVendor;
+  baseUrl: string;
+  hasApiKey: boolean;
+  updatedAt: string;
+}
+
+export interface CliProviderHostUpdate {
+  id?: string;
+  label: string;
+  cli: CliProviderHostCli;
+  vendor: CliProviderHostVendor;
+  baseUrl: string;
+  /** Omit to keep the stored key; empty string clears it. */
+  apiKey?: string;
+}
 
 export interface ChatParticipantSeedRecord {
   participantConfigId: string;
@@ -770,6 +801,14 @@ export interface ChatParticipant {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   avatarId?: string;
+  /** Added provider this member runs through (see CliProviderHost); absent =
+   *  the built-in CLI with its own sign-in. */
+  hostId?: string;
+  /** Display snapshot of the provider's name and vendor, refreshed when the
+   *  provider is edited; kept on the member so old chats still read correctly
+   *  and the vendor's model defaults resolve without a settings lookup. */
+  hostLabel?: string;
+  hostVendor?: CliProviderHostVendor;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
@@ -855,6 +894,7 @@ export interface ChatRosterChangeParticipantInput {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   avatarId?: string;
+  hostId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
@@ -1085,6 +1125,7 @@ export interface ChatRosterCurrentParticipant {
   roleLabel: string;
   behaviorRuleIds?: string[];
   kind: ChatProviderKind;
+  hostId?: string;
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   agentMode?: ChatAgentMode;
@@ -1468,6 +1509,7 @@ export interface ChatParticipantConfig {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   avatarId?: string;
+  hostId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
@@ -1490,6 +1532,7 @@ export interface ChatParticipantConfigUpdate {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   avatarId?: string;
+  hostId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
@@ -1509,6 +1552,7 @@ export interface ChatParticipantInput {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   avatarId?: string;
+  hostId?: string;
   agentMode?: ChatAgentMode;
   permissions?: ChatAgentPermissions;
   remoteExecution?: CloudRunRemoteExecutionMode;
@@ -1727,6 +1771,10 @@ export interface ParticipantConfig {
   label: string;
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
+  /** `key=value` Codex config overrides passed as `-c` to every codex launch
+   *  (exec, app-server, compact); used to route a member through an added
+   *  provider's Responses endpoint. */
+  codexConfigOverrides?: string[];
 }
 
 export type AppSkillSyncStatus = "not-installed" | "synced" | "skipped" | "collision" | "error";
@@ -2709,6 +2757,8 @@ export interface AppBridge {
   getAgentEnvironment(): Promise<AgentEnvironmentSnapshot>;
   saveAgentEnvironmentVariable(request: SaveAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot>;
   deleteAgentEnvironmentVariable(request: DeleteAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot>;
+  saveCliProviderHost(update: CliProviderHostUpdate): Promise<AppSettings>;
+  deleteCliProviderHost(id: string): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;
   setAssistantProviderKind(kind: ChatProviderKind): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;

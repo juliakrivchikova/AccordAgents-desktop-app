@@ -33,6 +33,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   mobileControl: EMPTY_MOBILE_CONTROL_SETTINGS,
   providers: [],
+  cliProviderHosts: [],
   chatRoleConfigs: [],
   chatBehaviorRules: [],
   chatSavedPrompts: [],

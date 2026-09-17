@@ -404,6 +404,7 @@ function settings(): AppSettings {
     }],
     chatBehaviorRules: [],
     chatSavedPrompts: [],
-    chatParticipantConfigs: []
+    chatParticipantConfigs: [],
+    cliProviderHosts: [],
   };
 }

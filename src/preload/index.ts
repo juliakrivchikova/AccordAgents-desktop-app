@@ -25,6 +25,7 @@ import type {
   AppBridge,
   AddChatParticipantRequest,
   AgentDetectionRequest,
+  CliProviderHostUpdate,
   ArtifactsUpdatedEvent,
   ChatBehaviorRuleConfigUpdate,
   ChatProviderKind,
@@ -146,6 +147,8 @@ const bridge: AppBridge = {
     ipcRenderer.invoke("settings:save-agent-environment-variable", request),
   deleteAgentEnvironmentVariable: (request: DeleteAgentEnvironmentVariableRequest) =>
     ipcRenderer.invoke("settings:delete-agent-environment-variable", request),
+  saveCliProviderHost: (update: CliProviderHostUpdate) => ipcRenderer.invoke("settings:save-cli-provider-host", update),
+  deleteCliProviderHost: (id: string) => ipcRenderer.invoke("settings:delete-cli-provider-host", id),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   setAssistantProviderKind: (kind: ChatProviderKind) => ipcRenderer.invoke("settings:set-assistant-provider", kind),
   updateProviderSettings: (update: ProviderSettingsUpdate) => ipcRenderer.invoke("settings:update-provider", update),

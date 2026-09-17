@@ -2,6 +2,7 @@ import type {
   AgentEnvironmentSnapshot,
   ChatBehaviorRuleConfigUpdate,
   ChatParticipantConfigUpdate,
+  CliProviderHostUpdate,
   ChatProviderKind,
   ChatPromptContextSettings,
   ChatRoleConfigUpdate,
@@ -37,6 +38,8 @@ export interface SettingsActions {
   deleteChatSavedPromptConfig: (id: string) => Promise<void>;
   saveChatParticipantConfig: (update: ChatParticipantConfigUpdate) => Promise<void>;
   deleteChatParticipantConfig: (id: string) => Promise<void>;
+  saveCliProviderHost: (update: CliProviderHostUpdate) => Promise<void>;
+  deleteCliProviderHost: (id: string) => Promise<void>;
 }
 
 export function useSettingsActions(state: AppState): SettingsActions {
@@ -187,6 +190,15 @@ export function useSettingsActions(state: AppState): SettingsActions {
     }
   }
 
+  // Errors surface inside the provider dialog, so they are rethrown for it.
+  async function saveCliProviderHost(update: CliProviderHostUpdate): Promise<void> {
+    await updateSettings(() => window.consensus.saveCliProviderHost(update), { rethrow: true });
+  }
+
+  async function deleteCliProviderHost(id: string): Promise<void> {
+    await updateSettings(() => window.consensus.deleteCliProviderHost(id), { rethrow: true });
+  }
+
   async function updateSettings(load: () => Promise<typeof state.settings>, options: { rethrow?: boolean } = {}): Promise<void> {
     state.setError(undefined);
     try {
@@ -232,6 +244,8 @@ export function useSettingsActions(state: AppState): SettingsActions {
     saveChatSavedPromptConfig,
     deleteChatSavedPromptConfig,
     saveChatParticipantConfig,
-    deleteChatParticipantConfig
+    deleteChatParticipantConfig,
+    saveCliProviderHost,
+    deleteCliProviderHost
   };
 }

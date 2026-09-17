@@ -28,6 +28,7 @@ import type {
   ChatImageInput,
   ChatParticipant,
   ChatParticipantConfig,
+  CliProviderHost,
   ConversationSummary,
   ChatSkillMention,
   GitRepoInfo,
@@ -203,7 +204,8 @@ export function NewChatScreen(props: {
     props.settings.chatRoleConfigs,
     props.agents,
     props.settings.chatBehaviorRules,
-    props.settings.providers
+    props.settings.providers,
+    props.settings.cliProviderHosts
   );
   const hasPrompt = props.prompt.trim().length > 0;
   const canSubmit = Boolean(assistantProviderKind) && (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
@@ -497,6 +499,7 @@ export function NewChatScreen(props: {
           <ParticipantPicker
             assistantParticipant={assistantParticipant}
             savedParticipantOptions={savedParticipantOptions}
+            cliProviderHosts={props.settings.cliProviderHosts}
             selectedParticipantIds={props.selectedParticipantIds}
             selectedParticipantRuntimeOverrides={props.selectedParticipantRuntimeOverrides}
             renderParticipantAvatar={props.renderParticipantAvatar}
@@ -627,6 +630,7 @@ function FolderPicker(props: {
 
 function ParticipantPicker(props: {
   assistantParticipant?: ChatParticipantConfig;
+  cliProviderHosts: CliProviderHost[];
   savedParticipantOptions: AddableSavedParticipantConfig[];
   selectedParticipantIds: Set<string>;
   selectedParticipantRuntimeOverrides: Record<string, ChatParticipantRuntimeOverride>;
@@ -724,6 +728,7 @@ function ParticipantPicker(props: {
               <ChatParticipantSelectableRosterRow
                 key={participant.id}
                 participant={participant}
+                cliProviderHosts={props.cliProviderHosts}
                 selected={selected}
                 locked={locked}
                 disabledReason={invalidReason}

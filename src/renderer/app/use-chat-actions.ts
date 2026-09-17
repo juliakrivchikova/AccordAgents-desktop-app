@@ -152,7 +152,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.settings.chatRoleConfigs,
       agents,
       state.settings.chatBehaviorRules,
-      state.settings.providers
+      state.settings.providers,
+      state.settings.cliProviderHosts
     );
     if (validation) {
       state.setError(validation);
@@ -532,7 +533,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
   async function commitChatParticipant(participant: ChatParticipantDraft): Promise<boolean> {
     if (!state.conversation || state.conversation.kind !== "chat") return false;
     const existingHandles = new Set(chatParticipants(state.conversation).map((item) => item.handle.toLowerCase()));
-    const validation = validateChatParticipantDrafts([participant], activeChatRoleConfigs(state.settings), existingHandles, state.settings.chatBehaviorRules) ?? validateChatCliAgents([participant], state.agents, state.settings.providers);
+    const validation = validateChatParticipantDrafts([participant], activeChatRoleConfigs(state.settings), existingHandles, state.settings.chatBehaviorRules) ?? validateChatCliAgents([participant], state.agents, state.settings.providers, state.settings.cliProviderHosts);
     if (validation) {
       state.setError(validation);
       return false;

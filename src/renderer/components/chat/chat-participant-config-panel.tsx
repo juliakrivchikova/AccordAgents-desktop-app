@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type React from "react";
 import { Check, ChevronDown, ShieldCheck, Sparkles } from "lucide-react";
 
@@ -18,17 +18,18 @@ import type {
   AppSettings,
   ChatAgentPermissions,
   ChatParticipantRequestPermission,
+  CliProviderHost,
   ChatProviderKind,
   ChatRoleParticipantDefaults,
-  ChatRosterChangeParticipantInput,
-  ProviderModelCatalog
+  ChatRosterChangeParticipantInput
 } from "../../../shared/types";
+import { useProviderModelCatalog } from "./use-provider-model-catalog";
 import { Avatar } from "../avatar/avatar";
 import { AvatarStudioDialog } from "../avatar/avatar-studio-dialog";
 import { useCustomAvatarLibrary } from "../avatar/custom-avatars";
 import { customAvatarId } from "../../../shared/avatarStudio";
 import { avatarForChatAvatarOption, avatarForChatParticipant, chatAvatarOptionsForKind, normalizedChatAvatarId } from "./chat-avatars";
-import { chatAgentModeLabel, chatInheritedCliSettingLabel } from "./chat-participant-drafts";
+import { chatAgentModeLabel, chatModelDefaultLabel } from "./chat-participant-drafts";
 
 const PARTICIPANT_REQUEST_PERMISSION_OPTIONS: Array<{ value: ChatParticipantRequestPermission; label: string }> = [
   { value: "ask", label: "Always ask approval" },
@@ -257,35 +258,18 @@ export function ChatParticipantInlineSelectRow(props: {
 
 export function ChatParticipantInlineModelRow(props: {
   kind: ChatProviderKind;
+  host?: Pick<CliProviderHost, "vendor" | "cli">;
   model?: string;
   onSelect: (model: string | undefined) => void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const [catalog, setCatalog] = useState<ProviderModelCatalog | undefined>();
   const [manual, setManual] = useState("");
   const value = props.model?.trim() || undefined;
-
-  useEffect(() => {
-    let cancelled = false;
-    void window.consensus
-      .listProviderModels(props.kind)
-      .then((next) => {
-        if (!cancelled) {
-          setCatalog(next);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCatalog(undefined);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [props.kind]);
+  const host = props.host && props.host.cli === props.kind ? props.host : undefined;
+  const { catalog } = useProviderModelCatalog(props.kind, host);
 
   const models = catalog?.models ?? [];
-  const inheritedLabel = chatInheritedCliSettingLabel(props.kind);
+  const inheritedLabel = chatModelDefaultLabel(props.kind, host);
 
   return (
     <ChatParticipantSpecRow label="Model">

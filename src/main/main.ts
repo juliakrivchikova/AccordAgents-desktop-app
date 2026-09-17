@@ -6,6 +6,7 @@ import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared
 import type {
   AddChatParticipantRequest,
   AgentDetectionRequest,
+  CliProviderHostUpdate,
   DeleteAgentEnvironmentVariableRequest,
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
@@ -2334,6 +2335,19 @@ function registerIpc(): void {
     await cliAgentRunner.shutdownWarmAgents();
     cliAgentRunner.invalidateAgentReadiness();
     return agentEnvironmentService.snapshot();
+  });
+  ipcMain.handle("settings:save-cli-provider-host", async (_event, update: CliProviderHostUpdate) => {
+    const settings = await settingsService.saveCliProviderHost(update);
+    const saved = update.id?.trim() ? settings.cliProviderHosts.find((host) => host.id === update.id?.trim()) : undefined;
+    if (saved) {
+      await chatService.syncCliProviderHost(saved);
+    }
+    return settings;
+  });
+  ipcMain.handle("settings:delete-cli-provider-host", async (_event, id: string) => {
+    const settings = await settingsService.deleteCliProviderHost(id);
+    await chatService.retireCliProviderHost(id);
+    return settings;
   });
   ipcMain.handle("settings:delete-agent-environment-variable", async (_event, request: DeleteAgentEnvironmentVariableRequest) => {
     await settingsService.deleteAgentEnvironmentVariable(request.key);

@@ -6,13 +6,16 @@ import {
 } from "../primitives";
 import type {
   ChatProviderKind,
+  CliProviderHost,
   ChatReasoningEffort,
   ProviderModel,
   ProviderModelCatalog,
   ProviderReasoningEffortOption
 } from "../../../shared/types";
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
-import { chatInheritedCliSettingLabel } from "./chat-participant-drafts";
+import { cliProviderHostDefaultModel } from "../../../shared/cliProviderHosts";
+import { chatInheritedCliSettingLabel, chatModelDefaultLabel } from "./chat-participant-drafts";
+import { useProviderModelCatalog } from "./use-provider-model-catalog";
 
 const MODEL_DEFAULT_VALUE = "__accordagents_default_model__";
 const MODEL_MANUAL_VALUE = "__accordagents_manual_model__";
@@ -20,41 +23,19 @@ const REASONING_DEFAULT_VALUE = "__accordagents_default_reasoning__";
 
 export function ChatModelPicker(props: {
   kind: ChatProviderKind;
+  host?: Pick<CliProviderHost, "vendor" | "cli">;
   model?: string;
   onChange: (model?: string) => void;
 }): JSX.Element {
-  const [catalog, setCatalog] = useState<ProviderModelCatalog | undefined>();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | undefined>();
   const [manualMode, setManualMode] = useState(false);
   const model = props.model?.trim() || undefined;
+  const host = props.host && props.host.cli === props.kind ? props.host : undefined;
+  const hostVendor = host?.vendor;
+  const { catalog, loading, error } = useProviderModelCatalog(props.kind, host);
 
   useEffect(() => {
-    let cancelled = false;
     setManualMode(false);
-    setCatalog(undefined);
-    setError(undefined);
-    setLoading(true);
-    void window.consensus.listProviderModels(props.kind)
-      .then((nextCatalog) => {
-        if (!cancelled) {
-          setCatalog(nextCatalog);
-        }
-      })
-      .catch((nextError) => {
-        if (!cancelled) {
-          setError(nextError instanceof Error ? nextError.message : String(nextError));
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [props.kind]);
+  }, [hostVendor, props.kind]);
 
   const models = useMemo(() => catalog?.models ?? [], [catalog]);
   const selectedDiscoveredModel = model ? models.some((item) => item.id === model) : false;
@@ -67,7 +48,7 @@ export function ChatModelPicker(props: {
       : MODEL_MANUAL_VALUE
     : MODEL_DEFAULT_VALUE;
   const status = modelPickerStatus(catalog, loading, error);
-  const cliSettingLabel = chatInheritedCliSettingLabel(props.kind);
+  const cliSettingLabel = chatModelDefaultLabel(props.kind, host);
 
   return (
     <div className="chat-model-picker">
@@ -79,7 +60,7 @@ export function ChatModelPicker(props: {
           { value: MODEL_DEFAULT_VALUE, label: cliSettingLabel },
           ...models.map((item) => ({
             value: item.id,
-            label: formatModelOption(item)
+            label: formatModelOption(item, catalog?.authoritative === true)
           })),
           { value: MODEL_MANUAL_VALUE, label: model && !selectedDiscoveredModel ? `Manual: ${model}` : "Manual override" }
         ]}
@@ -103,7 +84,7 @@ export function ChatModelPicker(props: {
           className="chat-model-picker-manual"
           value={model ?? ""}
           onChange={(event) => props.onChange(event.target.value)}
-          placeholder={props.kind === "claude-code" ? "opus, sonnet, haiku..." : props.kind === "gemini-cli" ? "Gemini 3.5 Flash (Medium)..." : "gpt-5.5..."}
+          placeholder={cliProviderHostDefaultModel(host) ? `${cliProviderHostDefaultModel(host)}...` : props.kind === "claude-code" ? "opus, sonnet, haiku..." : props.kind === "gemini-cli" ? "Gemini 3.5 Flash (Medium)..." : "gpt-5.5..."}
         />
       )}
       {status && <small className="chat-model-picker-status">{status}</small>}
@@ -113,41 +94,14 @@ export function ChatModelPicker(props: {
 
 export function ChatReasoningEffortPicker(props: {
   kind: ChatProviderKind;
+  host?: Pick<CliProviderHost, "vendor" | "cli">;
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   onChange: (reasoningEffort?: ChatReasoningEffort) => void;
 }): JSX.Element {
-  const [catalog, setCatalog] = useState<ProviderModelCatalog | undefined>();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | undefined>();
   const selectedModel = props.model?.trim() || undefined;
   const reasoningEffort = normalizeChatReasoningEffort(props.reasoningEffort, props.kind);
-
-  useEffect(() => {
-    let cancelled = false;
-    setCatalog(undefined);
-    setError(undefined);
-    setLoading(true);
-    void window.consensus.listProviderModels(props.kind)
-      .then((nextCatalog) => {
-        if (!cancelled) {
-          setCatalog(nextCatalog);
-        }
-      })
-      .catch((nextError) => {
-        if (!cancelled) {
-          setError(nextError instanceof Error ? nextError.message : String(nextError));
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [props.kind]);
+  const { catalog, loading, error } = useProviderModelCatalog(props.kind, props.host);
 
   const options = useMemo(() => {
     const modelOptions = selectedModel
@@ -191,11 +145,13 @@ export function ChatReasoningEffortPicker(props: {
   );
 }
 
-function formatModelOption(model: ProviderModel): string {
+// Source tags describe how a detected catalog was assembled; an authoritative
+// (fixed) catalog has nothing to explain, so only "recommended" survives there.
+function formatModelOption(model: ProviderModel, authoritative = false): string {
   const tags = [
     model.recommended ? "recommended" : "",
-    model.source === "configured" ? "configured" : "",
-    model.source === "builtin" ? "fallback" : ""
+    !authoritative && model.source === "configured" ? "configured" : "",
+    !authoritative && model.source === "builtin" ? "fallback" : ""
   ].filter(Boolean);
   return `${model.label}${tags.length ? ` - ${tags.join(", ")}` : ""}`;
 }

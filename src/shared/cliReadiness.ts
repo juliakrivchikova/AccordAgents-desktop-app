@@ -2,6 +2,7 @@ import type {
   AgentHealth,
   AgentReadinessState,
   ChatProviderKind,
+  CliProviderHost,
   ProviderSettings
 } from "./types";
 import { CHAT_PROVIDER_PREFERENCE } from "./chatProviders";
@@ -120,6 +121,27 @@ export function readinessForProvider(
     agents.find((agent) => agent.kind === kind),
     providerEnabled(providers, kind)
   );
+}
+
+/** Readiness for one member. A member bound to an added provider brings its own
+ *  credential (the provider's API key, checked when it runs), and the CLI itself
+ *  reports it as signed in with that key in its environment — so the built-in
+ *  sign-in requirement does not apply; a provider without a key is the
+ *  equivalent of "sign-in required". */
+export function readinessForParticipant(
+  participant: { kind: ChatProviderKind; host?: Pick<CliProviderHost, "cli" | "hasApiKey"> },
+  agents: AgentHealth[],
+  providers: Array<Pick<ProviderSettings, "kind" | "enabled">>
+): AgentReadinessState {
+  const state = readinessForProvider(participant.kind, agents, providers);
+  const host = participant.host && participant.host.cli === participant.kind ? participant.host : undefined;
+  if (!host) {
+    return state;
+  }
+  if (state === "ready" || state === "sign-in-required") {
+    return host.hasApiKey ? "ready" : "sign-in-required";
+  }
+  return state;
 }
 
 export function readyProviderKinds(
