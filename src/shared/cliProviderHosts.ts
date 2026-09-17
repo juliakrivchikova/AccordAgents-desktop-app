@@ -42,9 +42,11 @@ interface CliProviderHostVendorPreset {
 }
 
 const ZAI_CLAUDE_EXTRA_ENV = {
-  // Z.ai's guide: longer request timeout and a 1M auto-compact window for GLM.
+  // Z.ai's guide: longer request timeout, a 1M auto-compact window for GLM, and
+  // no non-essential Anthropic traffic (updates, telemetry, /bug).
   API_TIMEOUT_MS: "3000000",
-  CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000"
+  CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000",
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
 };
 
 const VENDOR_PRESETS: Record<CliProviderHostVendor, CliProviderHostVendorPreset> = {
@@ -345,7 +347,6 @@ export function cliProviderHostRunConfig(
       env.ANTHROPIC_DEFAULT_FABLE_MODEL = mainModel;
       env.ANTHROPIC_DEFAULT_HAIKU_MODEL = preset.claudeSmallModel ?? mainModel;
     }
-    env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
     Object.assign(env, preset.claudeExtraEnv ?? {});
   }
   return { env };

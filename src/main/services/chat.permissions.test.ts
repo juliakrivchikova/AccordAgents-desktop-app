@@ -11935,6 +11935,64 @@ test("a provider edit follows only members bound to it, refreshing their label a
   assert.deepEqual(closed, ["bound"]);
 });
 
+test("after a provider is removed, hydration keeps the member's binding so it fails visibly instead of switching backends", async () => {
+  const runs: unknown[] = [];
+  const closed: string[] = [];
+  const preset: ChatParticipantConfig = { id: "preset-glm", handle: "glm", roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "claude-code", model: "glm-5.3", hostId: ZAI_HOST.id, updatedAt: NOW };
+  const member: ChatParticipant = { ...chatParticipant("claude-code"), id: "bound", handle: "glm", participantConfigId: preset.id, hostId: ZAI_HOST.id, hostLabel: ZAI_HOST.label, hostVendor: "zai", model: "glm-5.3" };
+  const conversation = chatConversation([member], {
+    participantSessions: [{ participantId: "bound", sessionId: "glm-session", roleConfigId: ROLE.id, roleConfigVersion: 1, updatedAt: NOW }]
+  });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    settings: { chatRoleConfigs: [ROLE], chatParticipantConfigs: [preset] },
+    run: async (runParticipant) => {
+      runs.push(runParticipant);
+      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  // The provider is gone from settings; the preset keeps its dangling hostId.
+  installHosts(service, [], {});
+  (service as any).cliRunner.closeWarmAgents = async (_conversationId: string, participantId: string) => {
+    closed.push(participantId);
+  };
+
+  await service.retireCliProviderHost(ZAI_HOST.id);
+  assert.deepEqual(closed, ["bound"]);
+
+  const hydrated = await service.hydrateContextUsage(clone(storage.current));
+  const synced = (hydrated.metadata.participants as ChatParticipant[]).find((item) => item.id === "bound");
+  assert.equal(synced?.hostId, ZAI_HOST.id, "binding kept");
+  assert.equal(synced?.hostLabel, "Z.ai GLM");
+  assert.equal(synced?.model, "glm-5.3");
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-removed", content: "@glm ping" });
+  await waitFor(() => (storage.current.messages as ChatMessage[]).some((message) => message.status === "error"));
+  assert.equal(runs.length, 0, "the built-in CLI is never spawned with the vendor model");
+  assert.match((storage.current.messages as ChatMessage[]).find((message) => message.status === "error")?.content ?? "", /Z\.ai GLM was removed from Settings/);
+});
+
+test("a member on an added provider is refused the remote run location until that path is verified", async () => {
+  const runs: unknown[] = [];
+  const participant: ChatParticipant = { ...chatParticipant("codex-cli"), hostId: ZAI_CODEX_HOST.id, hostLabel: ZAI_CODEX_HOST.label, hostVendor: "zai", remoteExecution: "remote" };
+  const conversation = chatConversation([participant]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runs.push(runParticipant);
+      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  installHosts(service, [ZAI_CODEX_HOST], { [ZAI_CODEX_HOST.id]: "zai-secret" });
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-remote", content: "@codex ping" });
+  await waitFor(() => (storage.current.messages as ChatMessage[]).some((message) => message.status === "error"));
+  assert.equal(runs.length, 0);
+  assert.match((storage.current.messages as ChatMessage[]).find((message) => message.status === "error")?.content ?? "", /run locally only/);
+});
+
 test("run termination preserves Codex Stop and provider-exit lifecycle states", () => {
   const participant = chatParticipant("codex-cli");
   const approval = {

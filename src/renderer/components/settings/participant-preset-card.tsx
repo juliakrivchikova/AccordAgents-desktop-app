@@ -2,8 +2,9 @@ import type { AppSettings, ChatParticipantConfig, ChatProviderKind } from "../..
 import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import { Avatar } from "../avatar/avatar";
 import { avatarForChatParticipant } from "../chat/chat-avatars";
-import { chatRoleLabel, participantProviderLabel } from "../chat/chat-conversation-data";
+import { chatRoleLabel } from "../chat/chat-conversation-data";
 import { cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
+import { chatConfigProviderLabel } from "../chat/chat-participant-drafts";
 import { participantModeLabel, participantPermissionChips, participantRequestPermissionLabel, participantRules, providerClass } from "./participant-settings-utils";
 
 export function AvatarStack({ participants, max = 3 }: { participants: ChatParticipantConfig[]; max?: number }): JSX.Element {
@@ -61,7 +62,7 @@ export function ParticipantPresetCard(props: {
       <dl className="participant-preset-facts">
         <ParticipantFact
           label="Provider"
-          value={participantProviderLabel(props.participant.kind, host?.label)}
+          value={chatConfigProviderLabel(props.participant, props.settings.cliProviderHosts ?? [])}
           // The brand dot/color names the CLI vendor; a member on an added
           // provider names a different vendor, so it stays neutral.
           providerKind={host ? undefined : props.participant.kind}

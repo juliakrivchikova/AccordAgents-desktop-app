@@ -114,6 +114,8 @@ test("Claude Code run config mirrors the vendor's guide and clears every first-p
   assert.equal(deepseek.ANTHROPIC_AUTH_TOKEN, "");
   assert.equal(deepseek.ANTHROPIC_DEFAULT_HAIKU_MODEL, "deepseek-flash");
   assert.equal(deepseek.API_TIMEOUT_MS, undefined);
+  // Only Z.ai's guide turns off Claude Code's non-essential traffic.
+  assert.equal(deepseek.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, undefined);
 
   // Anthropic with the user's own key: the CLI keeps its own models and aliases.
   const anthropic = cliProviderHostRunConfig({ ...ZAI, vendor: "anthropic", baseUrl: "https://api.anthropic.com" }, "sk-ant", "opus").env;

@@ -731,7 +731,11 @@ function registerIpc(): void {
     }
     return settings;
   });
-  ipcMain.handle("settings:delete-cli-provider-host", (_event, id: string) => settingsService.deleteCliProviderHost(id));
+  ipcMain.handle("settings:delete-cli-provider-host", async (_event, id: string) => {
+    const settings = await settingsService.deleteCliProviderHost(id);
+    await chatService.retireCliProviderHost(id);
+    return settings;
+  });
   ipcMain.handle("settings:delete-agent-environment-variable", async (_event, request: DeleteAgentEnvironmentVariableRequest) => {
     await settingsService.deleteAgentEnvironmentVariable(request.key);
     await cliAgentRunner.shutdownWarmAgents();

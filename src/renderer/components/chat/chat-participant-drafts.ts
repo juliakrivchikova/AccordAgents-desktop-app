@@ -176,6 +176,21 @@ export function chatParticipantHost(
   return cliProviderHostForParticipant(participant.kind, participant.hostId, hosts);
 }
 
+export const REMOVED_PROVIDER_LABEL = "Removed provider";
+
+/** Provider label for a saved preset / draft: the added provider's name, a
+ *  "removed" marker when its binding no longer resolves, else the CLI. */
+export function chatConfigProviderLabel(
+  participant: { kind: ChatProviderKind; hostId?: string },
+  hosts: ReadonlyArray<CliProviderHost>
+): string {
+  const host = chatParticipantHost(participant, hosts);
+  if (host) {
+    return host.label;
+  }
+  return participant.hostId?.trim() ? REMOVED_PROVIDER_LABEL : chatCliProviderLabel(participant.kind);
+}
+
 /** Composite id for the Provider / CLI picker: an added provider is its own
  *  entry next to Claude Code / Codex / Antigravity. */
 const HOST_OPTION_PREFIX = "host:";
@@ -434,10 +449,14 @@ export function updateChatParticipantDraft(
   let next = { ...draft, ...patch };
   const kindChanged = patch.kind !== undefined && patch.kind !== draft.kind;
   const hosts = settings.cliProviderHosts ?? [];
-  // A binding only holds for a provider that runs through the draft's CLI.
+  // A binding only holds for a provider that runs through the draft's CLI. A
+  // dangling binding (provider removed) is kept as long as the user has not
+  // touched provider or CLI, so the editor can show it and ask for a new one.
   const nextHost = chatParticipantHost(next, hosts);
-  next = { ...next, hostId: nextHost?.id };
-  const hostChanged = (next.hostId ?? undefined) !== (chatParticipantHost(draft, hosts)?.id ?? undefined);
+  if (kindChanged || patch.hostId !== undefined) {
+    next = { ...next, hostId: nextHost?.id };
+  }
+  const hostChanged = (next.hostId ?? undefined) !== (draft.hostId ?? undefined);
   // A model id is only meaningful on the side it came from (glm-* vs first-party
   // aliases), so switching provider or binding resets it to that side's default.
   if ((kindChanged || hostChanged) && patch.model === undefined) {

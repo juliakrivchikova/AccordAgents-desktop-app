@@ -132,10 +132,21 @@ test("member presets bind only to an existing provider on their own CLI, and los
 
   // Changing the provider's CLI underneath bound presets is refused.
   await assert.rejects(service.saveCliProviderHost({ id: host.id, label: "GLM", cli: "codex-cli", vendor: "zai", baseUrl: "https://api.z.ai/api/v1" }), /Members are bound/);
+  // Changing its vendor moves bound presets to the new vendor's default model.
+  await service.saveCliProviderHost({ id: host.id, label: "Kimi", cli: "claude-code", vendor: "moonshot", baseUrl: "https://api.moonshot.ai/anthropic" });
+  assert.equal(stored().chatParticipantConfigs[0]?.model, "kimi-k3");
 
+  // Removing the provider keeps the preset's (now dangling) binding: it fails
+  // visibly until the user picks another provider.
   const after = await service.deleteCliProviderHost(host.id);
   assert.deepEqual(after.cliProviderHosts, []);
-  assert.equal(stored().chatParticipantConfigs[0]?.hostId, undefined);
+  assert.equal(stored().chatParticipantConfigs[0]?.hostId, host.id);
+  // Re-saving the preset with other edits keeps the dangling binding...
+  const presetId = stored().chatParticipantConfigs[0]!.id;
+  await service.saveChatParticipantConfig({ ...base, id: presetId, hostId: host.id, model: "kimi-k3", reasoningEffort: "high" });
+  assert.equal(stored().chatParticipantConfigs[0]?.hostId, host.id);
+  // ...while a new binding to the missing provider is refused.
+  await assert.rejects(service.saveChatParticipantConfig({ ...base, handle: "glm2", hostId: host.id }), /no longer exists/);
   // Deleting again is a no-op.
   assert.deepEqual((await service.deleteCliProviderHost(host.id)).cliProviderHosts, []);
 });

@@ -6,7 +6,6 @@ import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, Di
 import type { AgentHealth, AppSettings, ChatAgentMode, ChatParticipantConfigUpdate, ChatProviderKind, ChatRosterChangeParticipantInput } from "../../../shared/types";
 import { normalizeChatAgentMode } from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
-import { participantProviderLabel } from "../chat/chat-conversation-data";
 import { displayChatRoleLabel } from "../chat/chat-role-labels";
 import {
   ChatParticipantAvatarField,
@@ -19,7 +18,7 @@ import {
   ChatParticipantSpecRow
 } from "../chat/chat-participant-config-panel";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
-import { CHAT_AGENT_MODE_OPTIONS, CHAT_RUN_LOCATION_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatParticipantHost, chatProviderOptionId, chatProviderOptionPatch, chatProviderOptions, normalizeChatRunLocation, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
+import { CHAT_AGENT_MODE_OPTIONS, CHAT_RUN_LOCATION_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatConfigProviderLabel, chatParticipantHost, chatProviderOptionId, chatProviderOptionPatch, chatProviderOptions, normalizeChatRunLocation, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 import {
   ParticipantEditorHandleField,
@@ -200,7 +199,7 @@ export function ParticipantEditorDialog(props: {
             />
             <ChatParticipantInlineSelectRow
               label="Provider / CLI"
-              value={participantProviderLabel(draft.kind, draftHost?.label)}
+              value={chatConfigProviderLabel(draft, hosts)}
               current={chatProviderOptionId(draft.kind, draftHost?.id)}
               options={providerOptions}
               onSelect={(value) => patchDraft(chatProviderOptionPatch(value, draft, hosts))}

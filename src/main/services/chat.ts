@@ -6737,6 +6737,15 @@ export class ChatService {
         return [pendingMessage];
       }
       const participantRunsRemotely = this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) === "remote";
+      if (participantRunsRemotely && participant.hostId) {
+        // The worker path has not been exercised with an added provider's key
+        // and overrides; keep such members local until it is.
+        const message = `@${participant.handle} cannot start: members on an added provider (${participant.hostLabel ?? "provider"}) run locally only. Switch its run location to Local.`;
+        pendingMessage.status = "error";
+        pendingMessage.content = message;
+        options.warnings.push(message);
+        return [pendingMessage];
+      }
       if (nativeGoal && participantRunsRemotely) {
         const message = `@${participant.handle} native /goal requires the local dedicated CLI transport; remote execution does not expose the provider's native goal protocol.`;
         pendingMessage.status = "error";
@@ -9982,6 +9991,26 @@ export class ChatService {
     return host
       ? { hostId: host.id, hostLabel: host.label, hostVendor: host.vendor }
       : { hostId: undefined, hostLabel: undefined, hostVendor: undefined };
+  }
+
+  /** A provider was removed in Settings: retire every warm process still holding
+   *  its key. Bindings stay (members fail visibly on their next turn). */
+  async retireCliProviderHost(hostId: string): Promise<void> {
+    const summaries = await this.storage.listConversations();
+    for (const summary of summaries) {
+      if (summary.kind !== "chat") {
+        continue;
+      }
+      const conversation = await this.storage.getConversation(summary.id);
+      if (!conversation || conversation.kind !== "chat") {
+        continue;
+      }
+      for (const participant of this.chatParticipants(conversation)) {
+        if (participant.hostId === hostId) {
+          await this.closeWarmAgentsForParticipant(conversation.id, participant.id);
+        }
+      }
+    }
   }
 
   /** A provider was edited in Settings: refresh the name/vendor snapshot on every
@@ -16726,7 +16755,12 @@ export class ChatService {
       }
       // The provider binding is plumbing (where the CLI sends requests), so a
       // preset edit follows into every chat bound to that preset, like an avatar.
-      if (options.host !== false) {
+      // A preset whose provider was removed keeps a dangling id; the member keeps
+      // its own binding then and fails with "was removed" instead of silently
+      // running on the built-in CLI.
+      const presetHostDangling = Boolean(config.hostId?.trim()) &&
+        !cliProviderHostForParticipant(config.kind, config.hostId, options.hosts ?? []);
+      if (options.host !== false && !presetHostDangling) {
         const fields = this.participantHostFields(config.kind, config.hostId, options.hosts ?? []);
         if ((synced.hostId ?? undefined) !== (fields.hostId ?? undefined)) {
           // A model id only exists on the side it came from (glm-* vs first-party

@@ -83,6 +83,7 @@ import {
 } from "../../shared/chatSavedPrompts";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import {
+  cliProviderHostDefaultModel,
   cliProviderHostValidationError,
   normalizeCliProviderHostBaseUrl,
   normalizeCliProviderHostLabel,
@@ -3408,13 +3409,20 @@ export class SettingsService {
 
   /** A member preset may only be bound to an added provider that exists and
    *  runs through the preset's own CLI. */
-  private participantHostIdForUpdate(stored: StoredSettings, update: Pick<ChatParticipantConfigUpdate, "kind" | "hostId">): string | undefined {
+  private participantHostIdForUpdate(stored: StoredSettings, update: Pick<ChatParticipantConfigUpdate, "id" | "kind" | "hostId">): string | undefined {
     const hostId = update.hostId?.trim();
     if (!hostId) {
       return undefined;
     }
     const host = this.normalizedCliProviderHosts(stored).find((item) => item.id === hostId);
     if (!host) {
+      // A preset whose provider was removed keeps its dangling binding (so its
+      // members fail visibly rather than switch backends) until the user picks
+      // another provider; only a new binding to a missing provider is refused.
+      const existing = update.id?.trim() ? (stored.chatParticipantConfigs ?? []).find((config) => config.id === update.id?.trim()) : undefined;
+      if (existing?.hostId === hostId && existing.kind === update.kind) {
+        return hostId;
+      }
       throw new Error("That provider no longer exists. Pick another provider for the member.");
     }
     if (host.cli !== update.kind) {
@@ -3507,6 +3515,14 @@ export class SettingsService {
     stored.cliProviderHosts = existing
       ? hosts.map((host) => (host.id === existing.id ? next : host))
       : [...hosts, next];
+    if (existing && existing.vendor !== next.vendor) {
+      // A model id only exists on the vendor it came from; presets bound to this
+      // provider take the new vendor's default (chat members are handled by
+      // ChatService.syncCliProviderHost).
+      stored.chatParticipantConfigs = (stored.chatParticipantConfigs ?? []).map((config) =>
+        config.hostId === existing.id ? { ...config, model: cliProviderHostDefaultModel(next) } : config
+      );
+    }
     await this.writeStored(stored);
     return this.getPublicSettings();
   }
@@ -3519,11 +3535,9 @@ export class SettingsService {
       return this.getPublicSettings();
     }
     stored.cliProviderHosts = hosts.filter((host) => host.id !== normalizedId);
-    // Presets lose the binding; chat members keep theirs and fail with a clear
-    // message on their next turn (the member stays visible in old chats).
-    stored.chatParticipantConfigs = (stored.chatParticipantConfigs ?? []).map((config) =>
-      config.hostId === normalizedId ? { ...config, hostId: undefined } : config
-    );
+    // Presets and chat members keep their (now dangling) binding on purpose:
+    // they fail with a clear "was removed" message until the user binds them
+    // to another provider, instead of silently switching to the built-in CLI.
     await this.writeStored(stored);
     return this.getPublicSettings();
   }

@@ -1,10 +1,8 @@
 import type { AppSettings, ChatParticipantConfig, ChatProviderKind, CliProviderHost } from "../../../shared/types";
-import { cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../../shared/agentPermissions";
-import { participantProviderLabel } from "../chat/chat-conversation-data";
 import { displayChatRoleLabel } from "../chat/chat-role-labels";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
-import { chatParticipantConfigToDraft, defaultChatParticipantDraft } from "../chat/chat-participant-drafts";
+import { chatConfigProviderLabel, chatParticipantConfigToDraft, defaultChatParticipantDraft } from "../chat/chat-participant-drafts";
 
 export interface ParticipantRoleGroup {
   id: string;
@@ -46,7 +44,7 @@ export function participantMatchesQuery(
   query: string,
   hosts: ReadonlyArray<CliProviderHost> = []
 ): boolean {
-  return [participant.handle, roleLabel, participantProviderLabel(participant.kind, cliProviderHostForParticipant(participant.kind, participant.hostId, hosts)?.label), participant.model ?? ""]
+  return [participant.handle, roleLabel, chatConfigProviderLabel(participant, hosts), participant.model ?? ""]
     .join(" ")
     .toLowerCase()
     .includes(query);
@@ -55,7 +53,7 @@ export function participantMatchesQuery(
 export function providerSummary(participants: ChatParticipantConfig[], hosts: ReadonlyArray<CliProviderHost> = []): string {
   const counts = new Map<string, number>();
   for (const participant of participants) {
-    const label = participantProviderLabel(participant.kind, cliProviderHostForParticipant(participant.kind, participant.hostId, hosts)?.label);
+    const label = chatConfigProviderLabel(participant, hosts);
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   return Array.from(counts.entries())

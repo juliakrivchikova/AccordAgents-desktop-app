@@ -6,6 +6,7 @@ import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
 import { validateChatCliAgents } from "./chat-cli-readiness";
 import {
   chatCliProviderLabel,
+  chatConfigProviderLabel,
   chatModelDefaultLabel,
   chatProviderOptionId,
   chatProviderOptionPatch,
@@ -102,9 +103,19 @@ test("binding to and unbinding from an added provider moves model and generated 
   assert.equal(codex.hostId, undefined);
   assert.equal(codex.model, "gpt-5.5");
 
-  // A binding to a provider that no longer exists is dropped silently.
+  // A binding to a provider that no longer exists survives unrelated edits (the
+  // editor shows it as removed and asks for a new provider) and clears as soon
+  // as the user picks a provider or CLI.
   const stale = updateChatParticipantDraft(draft({ hostId: "gone" }), SETTINGS, { model: "opus" });
-  assert.equal(stale.hostId, undefined);
+  assert.equal(stale.hostId, "gone");
+  assert.equal(updateChatParticipantDraft(draft({ hostId: "gone" }), SETTINGS, { kind: "codex-cli" }).hostId, undefined);
+  assert.equal(updateChatParticipantDraft(draft({ hostId: "gone" }), SETTINGS, chatProviderOptionPatch("claude-code", plain, [ZAI])).hostId, undefined);
+});
+
+test("removed-provider bindings read as such in preset views", () => {
+  assert.equal(chatConfigProviderLabel(draft({ hostId: ZAI.id }), [ZAI]), "Z.ai GLM");
+  assert.equal(chatConfigProviderLabel(draft({ hostId: "gone" }), [ZAI]), "Removed provider");
+  assert.equal(chatConfigProviderLabel(draft(), [ZAI]), "Claude Code");
 });
 
 test("labels follow the provider", () => {
