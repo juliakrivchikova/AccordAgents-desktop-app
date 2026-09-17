@@ -1,6 +1,6 @@
-import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -28,17 +28,17 @@ await cp(
 );
 // Every built-in avatar the desktop can show, copied under its catalog id so
 // the phone resolves `assetId` -> file without a list of its own. The catalog
-// is read from the same module the desktop ships, bundled once as ESM here.
-const catalogModulePath = path.join(target, "mobile-avatar-catalog.tmp.mjs");
+// is read from the same module the desktop ships, bundled as ESM in memory:
+// nothing temporary is written into the directory that gets deployed.
 const catalogBundle = await build({ entryPoints: [path.join(repoRoot, "src/shared/chatAvatarCatalog.ts")],
   bundle: true, format: "esm", platform: "neutral", target: "es2022", write: false });
-await writeFile(catalogModulePath, catalogBundle.outputFiles[0].text);
-const { CHAT_AVATAR_CATALOG } = await import(pathToFileURL(catalogModulePath).href);
-await rm(catalogModulePath, { force: true });
+const { CHAT_AVATAR_CATALOG, chatAvatarAssetFileName } = await import(
+  "data:text/javascript;base64," + Buffer.from(catalogBundle.outputFiles[0].text, "utf8").toString("base64")
+);
 const avatarTarget = path.join(assetTarget, "avatars");
 await mkdir(avatarTarget, { recursive: true });
 for (const entry of CHAT_AVATAR_CATALOG) {
-  await cp(path.join(rendererAssets, entry.assetFile), path.join(avatarTarget, `${entry.id}${path.extname(entry.assetFile)}`));
+  await cp(path.join(rendererAssets, entry.assetFile), path.join(avatarTarget, chatAvatarAssetFileName(entry)));
 }
 // QR decoder for in-app pairing. Copied rather than bundled because the mobile
 // shell ships as plain static files with no build step.

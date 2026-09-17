@@ -41,6 +41,16 @@ test("avatar specs carry explicit glyph/photo media modes", () => {
   assert.ok(optionRows.length > 0, "expected avatar option rows");
   for (const row of optionRows) {
     assert.match(row, /mediaMode: "(glyph|photo)"/, row.trim());
+    // The renderer's URL map is looked up by catalog id with a cast, so a
+    // catalog entry without a matching URL — or with a different file — would
+    // only show up as a missing picture at runtime. Pin both here.
+    const id = row.match(/id: "([^"]+)"/)?.[1];
+    const assetFile = row.match(/assetFile: "([^"]+)"/)?.[1];
+    assert.ok(id && assetFile, row.trim());
+    assert.ok(
+      chatAvatars.includes(`"${id}": new URL("../../assets/${assetFile}", import.meta.url).href`),
+      `${id} must map to ${assetFile} in chat-avatars.ts`
+    );
   }
 });
 

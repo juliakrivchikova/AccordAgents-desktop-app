@@ -104,6 +104,8 @@ export interface MobileRelayChatMember {
   roleLabel: string;
   kind: "claude-code" | "codex-cli" | "gemini-cli";
   avatarId?: string;
+  /** The chat assistant, which shows the app mark rather than a member avatar. */
+  isAssistant?: boolean;
   /** The machine this member runs on, when it is not this desktop. Carried so
    *  the phone can reach that machine itself with the desktop closed. */
   homeMachineId?: string;
@@ -123,8 +125,11 @@ export interface MobileRelayChatCatalog {
   listTimelinePage?(conversationId: string, options: { beforeMessageId?: string }): Promise<MobileTimelinePage>;
   /** Cards a member is waiting on in this chat. */
   listControlCards?(conversationId: string): Promise<MobileControlCard[]>;
-  /** The picture of a drawn (studio) avatar, answered only for a member of
-   *  the named chat: the id alone must not fetch another chat's pictures. */
+  /** The picture of a drawn (studio) avatar, answered only when the chat is
+   *  one the phone may see and a member of it owns the avatar: the id alone
+   *  must not fetch another chat's pictures. The catalog applies its own
+   *  allow rule here on one trimmed read; the service checks only the
+   *  pairing's scope. */
   readMemberAvatar?(request: { conversationId: string; avatarId: string }): Promise<{ mediaType: string; dataBase64: string } | undefined>;
   /** What the desktop composer would list after "/" for this draft. */
   composerOptions?(request: { conversationId: string; query: string; content: string }): Promise<MobileComposerOptions>;
@@ -241,6 +246,11 @@ interface MobileTimelineEvent {
   /** Id of the message this one is filed under, so the phone can collapse
    *  replies exactly the way the desktop does. Absent on main-timeline rows. */
   threadRootId?: string;
+  /** A member's message the desktop keeps off its timeline (a waiting status,
+   *  an inferred request carrier). It still travels because it can be the end
+   *  of a run: the phone settles the run's pending row on it and stores no
+   *  bubble. Internal system and user rows are not sent at all. */
+  hidden?: true;
 }
 
 export interface MobileTimelineEvents {
@@ -343,7 +353,7 @@ interface MobileAvatarResponse {
   type: "mobile.avatar";
   conversationId: string;
   avatarId: string;
-  mediaType?: string;
+  mimeType?: string;
   dataBase64?: string;
   reason?: "unavailable" | "too-large";
 }
@@ -1023,7 +1033,13 @@ export class MobileRelayControlService {
     if (!this.isActive()) {
       return;
     }
-    if (!(await this.isConversationAllowed(request.conversationId))) {
+    // Only the pairing's own scope is checked here. The catalog's rule (a chat,
+    // not archived, and a member of it owns the avatar) is applied by
+    // readMemberAvatar on one trimmed read of the conversation: asking
+    // isConversationAllowed without a snapshot would read the whole chat —
+    // megabytes through the sqlite CLI on the User's data — only to be told
+    // its kind.
+    if (this.options.conversationId && request.conversationId !== this.options.conversationId) {
       throw new Error("Mobile relay avatar request is outside the paired scope.");
     }
     const unavailable: MobileAvatarResponse = {
@@ -1050,7 +1066,7 @@ export class MobileRelayControlService {
         type: "mobile.avatar",
         conversationId: request.conversationId,
         avatarId: request.avatarId,
-        mediaType: read.mediaType,
+        mimeType: read.mediaType,
         dataBase64: read.dataBase64
       };
     };
@@ -1406,7 +1422,8 @@ function timelineEventDeliverySignature(event: MobileTimelineEvent): string {
     // suppressed as already delivered and never reaches the phone.
     attachments: (event.attachments ?? []).map((attachment) => attachment.id),
     status: event.status,
-    runId: event.runId ?? ""
+    runId: event.runId ?? "",
+    hidden: event.hidden === true
   });
 }
 
@@ -1590,7 +1607,7 @@ function mobileEventScopeKey(conversationId: string, eventId: string): string {
 export function timelineEventsFromConversation(conversation: Conversation): MobileTimelineEvent[] {
   const threadRoots = chatParticipantRequestReplyRootMap(conversation);
   return conversation.messages
-    .filter((message) => message.role !== "summary" && message.role !== "user" && messageIsVisibleOnPhone(conversation, message))
+    .filter((message) => message.role !== "summary" && message.role !== "user" && messageTravelsToPhone(conversation, message))
     .slice(-40)
     // Each message falls back to its OWN id, never to the sending run's. Lending
     // one run's identity to forty unrelated history rows made every one of them
@@ -1605,23 +1622,33 @@ export function timelineEventsFromConversation(conversation: Conversation): Mobi
 export function timelineEventsFromSnapshot(conversation: Conversation, limit = 40): MobileTimelineEvent[] {
   const threadRoots = chatParticipantRequestReplyRootMap(conversation);
   return conversation.messages
-    .filter((message) => message.role !== "summary" && messageIsVisibleOnPhone(conversation, message))
+    .filter((message) => message.role !== "summary" && messageTravelsToPhone(conversation, message))
     .slice(-limit)
     .map((message) => timelineEventFromMessage(message, message.id, conversation, threadRoots));
 }
 
 /** Waiting for the first token is visible work, just like an image without a
- *  caption is still a message. Both must survive a timeline reload. What the
- *  desktop keeps off its timeline — internal system triggers such as
- *  "Auto-resumed @x after member request", hidden carriers, waiting statuses
- *  — stays off the phone's too, by the same rule; only artifact notes among
- *  system messages are the User's to see. */
-export function messageIsVisibleOnPhone(conversation: Pick<Conversation, "messages">, message: ChatMessage): boolean {
-  if (chatMessageHiddenFromTimeline(conversation, message)) {
-    return false;
-  }
+ *  caption is still a message. Both must survive a timeline reload. */
+function messageIsVisibleOnPhone(message: ChatMessage): boolean {
   return Boolean(message.content.trim()) || timelineAttachmentsFromMessage(message).length > 0 ||
     (message.role === "participant" && message.status === "pending");
+}
+
+/** What the desktop keeps off its timeline — internal system triggers such as
+ *  "Auto-resumed @x after member request", control text, waiting statuses,
+ *  inferred request carriers — is off the phone's too, by the same rule; only
+ *  artifact notes among system messages are the User's to see. A hidden
+ *  member message still travels, flagged: it can be the message that ends a
+ *  run, and without it the phone's pending row for that run never settles. */
+export function messageIsHiddenOnPhone(conversation: Pick<Conversation, "messages">, message: ChatMessage): boolean {
+  return chatMessageHiddenFromTimeline(conversation, message);
+}
+
+function messageTravelsToPhone(conversation: Pick<Conversation, "messages">, message: ChatMessage): boolean {
+  if (!messageIsVisibleOnPhone(message)) {
+    return false;
+  }
+  return message.role === "participant" || !messageIsHiddenOnPhone(conversation, message);
 }
 
 function pendingParticipantContent(participantLabel?: string): string {
@@ -1660,9 +1687,11 @@ function timelineEventFromMessage(
     ? chatMessageVisualThreadRootId(conversation, message, threadRoots)
     : undefined;
   const attachments = timelineAttachmentsFromMessage(message);
+  const hidden = conversation && message.role === "participant" && messageIsHiddenOnPhone(conversation, message);
   return {
     id: message.id,
     ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
+    ...(hidden ? { hidden: true as const } : {}),
     role: message.role === "participant" ? "participant" : message.role === "system" ? "system" : "you",
     ...(message.participantLabel ? { participantLabel: message.participantLabel } : {}),
     content: message.content.trim() || message.role !== "participant" || message.status !== "pending"

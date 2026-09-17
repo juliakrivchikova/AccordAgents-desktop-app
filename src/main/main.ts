@@ -2074,9 +2074,10 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
         const conversation = opened?.conversation;
         // The last line the User can see, not the last line stored: an internal
         // system trigger is hidden on the desktop and must not become the
-        // phone's preview of the chat.
-        const lastMessage = conversation?.messages.slice().reverse().find((message) =>
-          message.content.trim() && !chatMessageHiddenFromTimeline(conversation, message));
+        // phone's preview of the chat. When the whole window is internal, the
+        // newest line stands in rather than "No messages yet" on a busy chat.
+        const newest = conversation?.messages.slice().reverse().filter((message) => message.content.trim()) ?? [];
+        const lastMessage = newest.find((message) => !chatMessageHiddenFromTimeline(conversation as Conversation, message)) ?? newest[0];
         const members = mobileRelayChatMembers(conversation);
         items.push({
           id: summary.id,
@@ -2097,6 +2098,7 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
             roleLabel: roleLabels.get(participant.roleConfigId) ?? participant.roleConfigId,
             kind: participant.kind,
             ...(participant.avatarId ? { avatarId: participant.avatarId } : {}),
+            ...(mobileParticipantIsAssistant(participant) ? { isAssistant: true } : {}),
             // A member that lives on a machine travels with what that machine
             // needs to run it, so the phone can ask the machine itself when
             // this desktop is closed. Local members carry nothing extra.
@@ -2120,9 +2122,15 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
         return undefined;
       }
       // Members only: the chat is opened for its metadata, with the smallest
-      // message page storage allows rather than its history.
+      // message page storage allows rather than its history. The same read
+      // answers whether the phone may see this chat at all (a chat, not
+      // archived) — the rule isConversationAllowed applies to a whole snapshot.
       const opened = await storageService.openConversation(request.conversationId, 1);
-      const owned = mobileRelayChatMembers(opened?.conversation).some((participant) => participant.avatarId === request.avatarId);
+      const conversation = opened?.conversation;
+      if (!conversation || conversation.kind !== "chat" || conversation.metadata.archived === true) {
+        return undefined;
+      }
+      const owned = mobileRelayChatMembers(conversation).some((participant) => participant.avatarId === request.avatarId);
       if (!owned) {
         return undefined;
       }

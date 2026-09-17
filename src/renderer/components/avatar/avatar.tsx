@@ -4,6 +4,7 @@ import type {
   ChatParticipant,
   Conversation
 } from "../../../shared/types";
+import { resolveChatAvatarByName } from "../../../shared/chatAvatarCatalog";
 import type { AvatarSpec } from "../chat/chat-avatars";
 import { avatarForChatParticipant } from "../chat/chat-avatars";
 
@@ -45,16 +46,11 @@ export function avatarForParticipant(label: string, participantId?: string): Ava
   if (text.includes("arbiter") || text.includes("planner")) {
     return ARBITER_AVATAR;
   }
-  if (text.includes("claude") || text.includes("anthropic")) {
-    return { kind: "anthropic", label, mediaMode: "glyph" };
-  }
-  if (text.includes("codex") || text.includes("openai")) {
-    return { kind: "codex", label, mediaMode: "glyph" };
-  }
-  if (text.includes("gemini")) {
-    return { kind: "gemini", label, mediaMode: "glyph" };
-  }
-  return { kind: "generic", label, initials: initials(label), mediaMode: "glyph" };
+  // The same rule the phone applies to an author it has no member record for.
+  const resolved = resolveChatAvatarByName(label, participantId);
+  return resolved.glyphKind === "generic"
+    ? { kind: "generic", label, initials: resolved.initials, mediaMode: "glyph" }
+    : { kind: resolved.glyphKind, label, mediaMode: "glyph" };
 }
 
 function avatarGraphic(spec: AvatarSpec, mediaMode: NonNullable<AvatarSpec["mediaMode"]>): ReactNode {

@@ -237,14 +237,18 @@ textarea {
   padding-bottom: calc(18px + env(safe-area-inset-bottom));
 }
 
+/* A project's header folds the project, so it is a real tap target: 44px
+   tall, with the label where the plain heading used to sit. */
 .mobile-chat-group-title {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   width: 100%;
+  min-height: 44px;
   margin: 0;
-  padding: 14px 20px 6px;
+  padding: 12px 20px 4px;
   border: 0;
+  border-radius: 0;
   background: none;
   font: 600 12.5px var(--mono);
   letter-spacing: 0.02em;
@@ -254,23 +258,24 @@ textarea {
   -webkit-tap-highlight-color: transparent;
 }
 
-.mobile-chat-group-title:active {
-  color: var(--fg);
+button.mobile-chat-group-title:active {
+  background: var(--s2);
 }
 
-/* The desktop's chevron: right when folded, down when open. */
+/* The desktop's chevron (a 14px stroke icon): right when folded, down when
+   open. */
 .mobile-chat-group-chevron {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   flex: 0 0 auto;
-  border-right: 1.6px solid currentColor;
-  border-bottom: 1.6px solid currentColor;
-  transform: translateY(-2px) rotate(45deg);
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: translateY(-3px) rotate(45deg);
   transition: transform 120ms ease;
 }
 
 .mobile-chat-group-title[aria-expanded="false"] .mobile-chat-group-chevron {
-  transform: translateX(-1px) rotate(-45deg);
+  transform: translateX(-2px) rotate(-45deg);
 }
 
 .mobile-chat-group-name {
@@ -282,7 +287,6 @@ textarea {
 
 .mobile-chat-group-count {
   font: 500 11.5px var(--mono);
-  color: var(--mut);
 }
 
 .mobile-chat-group {
@@ -373,6 +377,7 @@ textarea {
 }
 
 .avatar-icon.avatar-codex {
+  background: var(--accs);
   background: color-mix(in srgb, var(--accs) 72%, var(--avatar-bg));
   color: var(--brand-codex);
 }
@@ -388,6 +393,7 @@ textarea {
 }
 
 .avatar-icon.avatar-generic {
+  background: var(--accs);
   background: color-mix(in srgb, var(--accs) 58%, var(--avatar-bg));
   color: var(--acc);
 }

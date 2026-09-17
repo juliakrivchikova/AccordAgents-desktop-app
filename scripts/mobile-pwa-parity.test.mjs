@@ -138,7 +138,7 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     { id: "p-taylor", handle: "taylor", mentionHandle: "taylor", displayName: "@taylor", roleLabel: "Reviewer", kind: "claude-code", avatarId: "claude-logo" },
     { id: "p-morgan", handle: "morgan", mentionHandle: "morgan", displayName: "@morgan", roleLabel: "Designer", kind: "claude-code" },
     { id: "p-gera", handle: "gera", mentionHandle: "gera", displayName: "@gera", roleLabel: "Strategist", kind: "codex-cli", avatarId: "custom:drawn-1" },
-    { id: "p-admin", handle: "admin", mentionHandle: "assistant", displayName: "Chat Assistant", roleLabel: "Chat Assistant", kind: "codex-cli" }
+    { id: "p-admin", handle: "admin", mentionHandle: "assistant", displayName: "Chat Assistant", roleLabel: "Chat Assistant", kind: "codex-cli", isAssistant: true }
   ];
   const morganDefault = defaultChatAvatarId("claude-code", "p-morgan");
   assert.ok(CHAT_AVATAR_CATALOG.some((entry) => entry.id === morganDefault && entry.mediaMode === "photo"), "the hashed default is a catalog photo");
@@ -296,25 +296,32 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     const headers = async () => await evaluate(`(() => [...document.querySelectorAll("#chat-list .mobile-chat-group-title")].map((n) => ({
       name: n.querySelector(".mobile-chat-group-name").textContent, expanded: n.getAttribute("aria-expanded"),
       count: n.querySelector(".mobile-chat-group-count") ? n.querySelector(".mobile-chat-group-count").textContent : null,
-      rows: n.nextElementSibling.hidden ? 0 : n.nextElementSibling.querySelectorAll(".mobile-chat-row").length
+      rows: n.nextElementSibling && n.nextElementSibling.classList.contains("mobile-chat-group") ? n.nextElementSibling.querySelectorAll(".mobile-chat-row").length : 0,
+      tag: n.tagName, height: Math.round(n.getBoundingClientRect().height)
     })))()`);
-    assert.deepEqual(await headers(), [
+    const plainHeaders = async () => (await headers()).map(({ name, expanded, count, rows }) => ({ name, expanded, count, rows }));
+    assert.deepEqual(await plainHeaders(), [
       { name: "AccordAgents", expanded: "true", count: null, rows: 2 },
       { name: "Other project", expanded: "true", count: null, rows: 1 }
     ], "both projects start open");
+    assert.ok((await headers()).every((header) => header.tag === "BUTTON" && header.height >= 44), "a project header is a real tap target");
     await evaluate(`(() => { document.querySelector('#chat-list .mobile-chat-group-title[data-group="AccordAgents"]').click(); return true; })()`);
-    assert.deepEqual(await headers(), [
+    assert.deepEqual(await plainHeaders(), [
       { name: "AccordAgents", expanded: "false", count: "2", rows: 0 },
       { name: "Other project", expanded: "true", count: null, rows: 1 }
     ], "tapping a project folds it and shows how many chats it holds; the other project is now one tap away");
     await app.send("Page.reload", {});
     await settle();
     await waitFor(headers, (list) => list.length === 2, "the list is back after the reload");
-    assert.deepEqual((await headers())[0], { name: "AccordAgents", expanded: "false", count: "2", rows: 0 }, "the fold survives a reload");
+    assert.deepEqual((await plainHeaders())[0], { name: "AccordAgents", expanded: "false", count: "2", rows: 0 }, "the fold survives a reload");
     await evaluate(`(() => { document.getElementById("chat-search-toggle").click(); const i = document.getElementById("chat-search-input"); i.value = "alpha"; i.dispatchEvent(new Event("input", { bubbles: true })); return true; })()`);
-    assert.deepEqual(await headers(), [{ name: "AccordAgents", expanded: "true", count: null, rows: 1 }], "a search shows what it matches even inside a folded project");
+    assert.deepEqual(await plainHeaders(), [{ name: "AccordAgents", expanded: null, count: null, rows: 1 }], "a search shows what it matches even inside a folded project, and the header is a plain label");
+    assert.equal((await headers())[0].tag, "DIV");
+    // A tap on the label while searching changes nothing — not even the fold
+    // it does not show.
+    await evaluate(`(() => { document.querySelector('#chat-list .mobile-chat-group-title[data-group="AccordAgents"]').click(); return true; })()`);
     await evaluate(`(() => { document.getElementById("chat-search-close").click(); return true; })()`);
-    assert.equal((await headers())[0].expanded, "false", "closing the search restores the fold");
+    assert.equal((await plainHeaders())[0].expanded, "false", "closing the search restores the fold exactly as it was");
     // A reply into a folded project is not lost: its dot shows on the header.
     await postEnvelope(CHAT_B, "mobile.timeline.events", {
       type: "mobile.timeline.events", conversationId: CHAT_B,
@@ -351,6 +358,22 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     assert.ok(sheet[3].src.startsWith("data:image/png;base64,"), "the drawn avatar is cached for the session, not fetched again");
     assert.equal(avatarReads.length, 1);
     await evaluate(`(() => { document.getElementById("members-sheet-close").click(); return true; })()`);
+
+    // --- a run whose last message the desktop hides still ends on the phone
+    await postEnvelope(CHAT_A, "mobile.timeline.events", {
+      type: "mobile.timeline.events", conversationId: CHAT_A,
+      events: [{ id: "run-9-live", messageId: "run-9-live", role: "participant", participantLabel: "@drew", content: "@drew is running...", status: "pending", createdAt: at(30), runId: "run-9" }]
+    });
+    // The phone renders a pending row as an animated "Thinking"; it is
+    // identified by its status.
+    const pendingRows = async () => await evaluate(`(() => [...document.querySelectorAll('#message-list .message-row[data-status="Running"]')].map((n) => n.dataset.rowKey))()`);
+    await waitFor(pendingRows, (rows) => rows.length === 1, "the member's live row is shown");
+    await postEnvelope(CHAT_A, "mobile.timeline.events", {
+      type: "mobile.timeline.events", conversationId: CHAT_A,
+      events: [{ id: "run-9-end", messageId: "run-9-end", role: "participant", participantLabel: "@drew", content: "Awaiting user approval.", status: "done", createdAt: at(31), runId: "run-9", hidden: true }]
+    });
+    await waitFor(pendingRows, (rows) => rows.length === 0, "a hidden terminal settles the live row");
+    assert.ok(!(await evaluate(`(() => [...document.querySelectorAll("#message-list .message-content")].some((n) => n.textContent.includes("Awaiting user approval")))()`)), "and stores no bubble for it");
 
     // --- internal system rows stored before the desktop stopped sending them
     // are dropped once; the phone's own machine notes stay ------------------

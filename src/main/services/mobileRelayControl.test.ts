@@ -3384,10 +3384,81 @@ test("the phone timeline hides what the desktop hides: internal system triggers,
     metadata: {}
   };
 
-  assert.deepEqual(timelineEventsFromSnapshot(conversation as never).map((event) => event.id),
-    ["user-ask", "artifact-note", "answer"]);
-  assert.deepEqual(timelineEventsFromConversation(conversation as never).map((event) => event.id),
-    ["artifact-note", "answer"]);
+  // The hidden member row travels flagged (it may end a run — next test); the
+  // internal system row does not travel at all.
+  assert.deepEqual(timelineEventsFromSnapshot(conversation as never).map((event) => [event.id, event.hidden === true]),
+    [["user-ask", false], ["hidden-carrier", true], ["artifact-note", false], ["answer", false]]);
+  assert.deepEqual(timelineEventsFromConversation(conversation as never).map((event) => [event.id, event.hidden === true]),
+    [["hidden-carrier", true], ["artifact-note", false], ["answer", false]]);
+  const serialized = JSON.stringify(timelineEventsFromSnapshot(conversation as never));
+  assert.doesNotMatch(serialized, /Auto-resumed/);
+});
+
+// A member's message the desktop hides can be the one that ends its run — a
+// reply that is exactly the instructed "Awaiting user approval.", or an
+// inferred request carrier. Dropping it left the phone's pending row for that
+// run spinning forever; it travels flagged so the phone settles the row and
+// stores no bubble.
+test("a hidden member message still travels to the phone, flagged, so the run it ends can settle", () => {
+  const conversation = {
+    id: "conversation-hidden-terminal",
+    kind: "chat" as const,
+    title: "Hidden terminal",
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:00:04.000Z",
+    messages: [
+      {
+        id: "user-ask",
+        role: "user" as const,
+        content: "@drew ask taylor",
+        createdAt: "2026-09-01T00:00:01.000Z",
+        status: "done" as const
+      },
+      {
+        id: "waiting",
+        role: "participant" as const,
+        participantId: "participant-1",
+        participantLabel: "@drew",
+        content: "Awaiting user approval.",
+        createdAt: "2026-09-01T00:00:02.000Z",
+        status: "done" as const,
+        metadata: { runId: "run-1" }
+      },
+      {
+        id: "carrier",
+        role: "participant" as const,
+        participantId: "participant-1",
+        participantLabel: "@drew",
+        content: "@drew asked @taylor: review this",
+        createdAt: "2026-09-01T00:00:03.000Z",
+        status: "done" as const,
+        metadata: {
+          hiddenFromTimeline: true,
+          participantRequest: { source: "inferred", triggerMessageId: "user-ask", items: [] }
+        }
+      },
+      {
+        id: "auto-resume",
+        role: "system" as const,
+        content: "Auto-resumed @drew after member request.",
+        createdAt: "2026-09-01T00:00:04.000Z",
+        status: "done" as const
+      }
+    ],
+    findings: [],
+    metadata: {}
+  };
+  const events = timelineEventsFromSnapshot(conversation as never);
+  assert.deepEqual(events.map((event) => [event.id, event.hidden === true]), [
+    ["user-ask", false],
+    ["waiting", true],
+    ["carrier", true]
+  ]);
+  assert.equal(events[1].runId, "run-1", "the terminal keeps the run it ends");
+  assert.deepEqual(timelineEventsFromConversation(conversation as never).map((event) => [event.id, event.hidden === true]), [
+    ["waiting", true],
+    ["carrier", true]
+  ]);
 });
 
 // A drawn avatar is a file on the desktop; the member record names it and the
@@ -3464,7 +3535,7 @@ test("the phone can ask for a member's drawn avatar, and gets a reason instead o
       type: "mobile.avatar",
       conversationId: "conversation-1",
       avatarId: "custom:drawn",
-      mediaType: "image/svg+xml",
+      mimeType: "image/svg+xml",
       dataBase64: "PHN2Zy8+"
     });
     assert.equal(byId.get("custom:huge")?.reason, "too-large");

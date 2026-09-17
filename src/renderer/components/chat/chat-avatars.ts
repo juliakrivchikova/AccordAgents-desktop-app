@@ -97,10 +97,6 @@ export function chatAvatarOptionsForKind(kind: ChatProviderKind): ChatAvatarOpti
   return CHAT_AVATAR_OPTIONS.filter((option) => option.kind === kind);
 }
 
-export function chatAvatarOption(avatarId: string | undefined): ChatAvatarOption | undefined {
-  return CHAT_AVATAR_OPTIONS.find((option) => option.id === avatarId);
-}
-
 export function isChatAvatarIdForKind(avatarId: string | undefined, kind: ChatProviderKind): boolean {
   return sharedIsChatAvatarIdForKind(avatarId, kind);
 }

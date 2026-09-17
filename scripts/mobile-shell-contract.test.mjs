@@ -88,11 +88,12 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.ok(html.indexOf('src="mobile-shared.js') < html.indexOf('src="mobile-app.js'), "the shared rules load before the app");
   assert.ok(worker.includes("./mobile-shared.js?v="), "service worker must precache the shared rules");
   assert.doesNotMatch(app, /assets\/avatars\/(claude|codex)-(bunny|cat|dog|frog|hamster)\.png/, "the app names no avatar file itself; the catalog does");
-  const { CHAT_AVATAR_CATALOG } = await import(pathToFileURL(path.join(repoRoot, "dist/main/shared/chatAvatarCatalog.js")).href);
+  const { CHAT_AVATAR_CATALOG, chatAvatarAssetFileName } = await import(pathToFileURL(path.join(repoRoot, "dist/main/shared/chatAvatarCatalog.js")).href);
   for (const entry of CHAT_AVATAR_CATALOG) {
-    const file = path.join(repoRoot, "dist/mobile/assets/avatars", `${entry.id}${path.extname(entry.assetFile)}`);
+    const file = path.join(repoRoot, "dist/mobile/assets/avatars", chatAvatarAssetFileName(entry));
     assert.ok((await stat(file)).size > 0, `${entry.id} avatar is shipped with the phone`);
   }
+  assert.ok(!(await stat(path.join(repoRoot, "dist/mobile/mobile-avatar-catalog.tmp.mjs")).catch(() => undefined)), "no build scratch file ships with the phone");
   assert.match(headers, /\/service-worker\.js\n\s+Cache-Control: public, max-age=0, must-revalidate/);
   assert.match(headers, /\/mobile-app\.js\n\s+Cache-Control: public, max-age=0, must-revalidate/);
   // W-E: the mobile origin holds a pairing seal key, so the policy that guards
@@ -132,9 +133,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(html, /<meta name="viewport"[^>]*viewport-fit=cover/);
   const assetVersion = /const ASSET_VERSION = "([^"]+)"/.exec(worker)?.[1];
   assert.ok(assetVersion, "service worker must declare an asset version");
-  const htmlAssetVersions = [...html.matchAll(/(?:mobile-app\.css|jsqr\.js|mobile-app\.js)\?v=([^"']+)/g)]
+  const htmlAssetVersions = [...html.matchAll(/(?:mobile-app\.css|jsqr\.js|mobile-shared\.js|mobile-app\.js)\?v=([^"']+)/g)]
     .map((match) => match[1]);
-  assert.deepEqual(htmlAssetVersions, [assetVersion, assetVersion, assetVersion]);
+  assert.deepEqual(htmlAssetVersions, [assetVersion, assetVersion, assetVersion, assetVersion]);
   assert.match(html, /data-screen-label="Mobile control"/);
   assert.match(html, /id="chats-screen"/);
   assert.match(html, />Chats</);

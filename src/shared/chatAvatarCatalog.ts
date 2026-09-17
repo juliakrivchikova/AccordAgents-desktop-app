@@ -7,7 +7,7 @@ import type { ChatProviderKind } from "./types";
 // phone used to guess from the handle ("codex" -> frog) and never read
 // `avatarId` at all. Image URLs stay with each surface (Vite bundles the
 // desktop's, the phone build copies `assetFile` next to itself); this file
-// holds only the rule.
+// holds the rule and the file names, not the URLs.
 
 export type ChatAvatarMediaMode = "glyph" | "photo";
 
@@ -24,8 +24,6 @@ export interface ChatAvatarCatalogEntry {
   glyphKind?: ChatAvatarGlyphKind;
   defaultEligible?: boolean;
 }
-
-export const CHAT_ASSISTANT_AVATAR_ASSET_FILE = "accordagents-mark.png";
 
 // Order within each provider group is intentional and drives the picker layout
 // (chatAvatarCatalogForKind preserves array order): logo first, then people
@@ -71,6 +69,13 @@ export const CHAT_AVATAR_CATALOG: ChatAvatarCatalogEntry[] = [
   { id: "claude-hamster", kind: "claude-code", label: "Claude hamster", assetFile: "participant-claude-hamster.png", mediaMode: "photo" },
   { id: "gemini-logo", kind: "gemini-cli", label: "Gemini logo", assetFile: "gemini-cli.svg", mediaMode: "glyph", glyphKind: "gemini" }
 ];
+
+/** The file name a surface that copies the catalog next to itself (the phone)
+ *  serves an entry under: the catalog id with the source file's extension. */
+export function chatAvatarAssetFileName(entry: Pick<ChatAvatarCatalogEntry, "id" | "assetFile">): string {
+  const dot = entry.assetFile.lastIndexOf(".");
+  return `${entry.id}${dot >= 0 ? entry.assetFile.slice(dot) : ""}`;
+}
 
 export function chatAvatarCatalogForKind(kind: ChatProviderKind): ChatAvatarCatalogEntry[] {
   return CHAT_AVATAR_CATALOG.filter((entry) => entry.kind === kind);
@@ -197,7 +202,7 @@ export function chatAvatarInitials(label: string): string {
     .join("") || "?";
 }
 
-export function stableHash(value: string): number {
+function stableHash(value: string): number {
   let hash = 0;
   for (let index = 0; index < value.length; index += 1) {
     hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
