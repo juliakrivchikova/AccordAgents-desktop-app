@@ -2119,7 +2119,6 @@
   background: var(--app-surface);
   outline: none;
 }
-
 .chat-app-tool-review-instructions {
   max-height: 7.6em;
   overflow: hidden;

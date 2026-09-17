@@ -115,6 +115,7 @@ export function ChatConversationTimeline(props: {
                   approvals={[row.approval]}
                   participants={props.participants}
                   savedParticipants={props.settings.chatParticipantConfigs}
+                  cliProviderHosts={props.settings.cliProviderHosts}
                   roles={props.settings.chatRoleConfigs}
                   submittingIds={props.submittingApprovalIds}
                   onRespond={props.onRespondToAppToolApproval}
@@ -139,6 +140,7 @@ export function ChatConversationTimeline(props: {
                   liveProgress={props.liveProgressById.get(row.message.id)}
                   appToolApprovals={props.approvalsByMessageId.get(row.message.id)}
                   savedParticipants={props.settings.chatParticipantConfigs}
+                  cliProviderHosts={props.settings.cliProviderHosts}
                   roles={props.settings.chatRoleConfigs}
                   submittingApprovalIds={props.submittingApprovalIds}
                   onOpenThread={props.onOpenThread}
@@ -161,6 +163,7 @@ export function ChatConversationTimeline(props: {
             approvals={props.pendingApprovalRows}
             participants={props.participants}
             savedParticipants={props.settings.chatParticipantConfigs}
+                  cliProviderHosts={props.settings.cliProviderHosts}
             roles={props.settings.chatRoleConfigs}
             submittingIds={props.submittingApprovalIds}
             onRespond={props.onRespondToAppToolApproval}

@@ -30,6 +30,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     pollIntervalMs: 2_500
   },
   providers: [],
+  cliProviderHosts: [],
   chatRoleConfigs: [],
   chatBehaviorRules: [],
   chatSavedPrompts: [],

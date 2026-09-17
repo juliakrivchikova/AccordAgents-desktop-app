@@ -8,6 +8,7 @@ import type {
   ChatParticipant,
   ChatParticipantConfig,
   ChatProviderKind,
+  CliProviderHost,
   ChatReasoningEffort,
   ChatRoleConfig,
   ChatShellPermissionAction,
@@ -27,6 +28,11 @@ import {
 } from "../../../shared/agentPermissions";
 import { normalizeChatReasoningEffort } from "../../../shared/reasoningEffort";
 import { chatProviderKind, preferredChatProviderSetting } from "../../../shared/chatProviders";
+import {
+  cliProviderHostDefaultModel,
+  cliProviderHostDefaultModelLabel,
+  cliProviderHostForParticipant
+} from "../../../shared/cliProviderHosts";
 import {
   readyProviderKinds
 } from "../../../shared/cliReadiness";
@@ -57,6 +63,8 @@ export interface ChatParticipantDraft {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   avatarId?: string;
+  /** Added provider the member runs through; must run through `kind`. */
+  hostId?: string;
   agentMode: ChatAgentMode;
   permissions: ChatAgentPermissions;
   remoteExecution?: ChatParticipantConfig["remoteExecution"];
@@ -128,7 +136,11 @@ export function chatAgentModeLabel(mode: ChatAgentMode | undefined): string {
   }
 }
 
-export function chatCliProviderLabel(kind: ChatProviderKind | undefined): string {
+/** `hostLabel` is the added provider's name when the member runs through one. */
+export function chatCliProviderLabel(kind: ChatProviderKind | undefined, hostLabel?: string): string {
+  if (hostLabel?.trim()) {
+    return hostLabel.trim();
+  }
   if (kind === "claude-code") {
     return "Claude Code";
   }
@@ -141,8 +153,83 @@ export function chatCliProviderLabel(kind: ChatProviderKind | undefined): string
   return "CLI";
 }
 
+/** Label of the "leave it to the CLI" choice for a setting the CLI owns
+ *  (reasoning effort, or the model of a plain member). */
 export function chatInheritedCliSettingLabel(kind: ChatProviderKind | undefined): string {
   return `${chatCliProviderLabel(kind)} setting`;
+}
+
+/** Label of the model picker's default entry: the CLI's own setting for a
+ *  built-in member, the vendor's fixed default for a member on an added
+ *  provider (first-party vendors have no fixed default and keep the CLI's). */
+export function chatModelDefaultLabel(kind: ChatProviderKind | undefined, host?: Pick<CliProviderHost, "vendor" | "cli">): string {
+  const hostDefault = kind && host && host.cli === kind ? cliProviderHostDefaultModelLabel(host) : undefined;
+  return hostDefault ? `${hostDefault} (default)` : chatInheritedCliSettingLabel(kind);
+}
+
+/** The added provider a draft / member runs through, if it still exists and
+ *  runs through the member's CLI. */
+export function chatParticipantHost(
+  participant: { kind: ChatProviderKind; hostId?: string },
+  hosts: ReadonlyArray<CliProviderHost>
+): CliProviderHost | undefined {
+  return cliProviderHostForParticipant(participant.kind, participant.hostId, hosts);
+}
+
+export const REMOVED_PROVIDER_LABEL = "Removed provider";
+
+/** Provider label for a saved preset / draft: the added provider's name, a
+ *  "removed" marker when its binding no longer resolves, else the CLI. */
+export function chatConfigProviderLabel(
+  participant: { kind: ChatProviderKind; hostId?: string },
+  hosts: ReadonlyArray<CliProviderHost>
+): string {
+  const host = chatParticipantHost(participant, hosts);
+  if (host) {
+    return host.label;
+  }
+  return participant.hostId?.trim() ? REMOVED_PROVIDER_LABEL : chatCliProviderLabel(participant.kind);
+}
+
+/** Composite id for the Provider / CLI picker: an added provider is its own
+ *  entry next to Claude Code / Codex / Antigravity. */
+const HOST_OPTION_PREFIX = "host:";
+export type ChatProviderOptionId = ChatProviderKind | `host:${string}`;
+
+export function chatProviderOptionId(kind: ChatProviderKind, hostId: string | undefined): ChatProviderOptionId {
+  return hostId ? `${HOST_OPTION_PREFIX}${hostId}` : kind;
+}
+
+export interface ChatProviderOption {
+  id: ChatProviderOptionId;
+  kind: ChatProviderKind;
+  host?: CliProviderHost;
+  label: string;
+}
+
+/** Picker entries: the built-in CLIs given, then every added provider whose CLI
+ *  is among them. */
+export function chatProviderOptions(kinds: ChatProviderKind[], hosts: ReadonlyArray<CliProviderHost> = []): ChatProviderOption[] {
+  return [
+    ...kinds.map((kind): ChatProviderOption => ({ id: kind, kind, label: chatCliProviderLabel(kind) })),
+    ...hosts
+      .filter((host) => kinds.includes(host.cli))
+      .map((host): ChatProviderOption => ({ id: chatProviderOptionId(host.cli, host.id), kind: host.cli, host, label: host.label }))
+  ];
+}
+
+/** Draft patch for a picker choice. An unknown host id falls back to the
+ *  current kind without a binding. */
+export function chatProviderOptionPatch(
+  optionId: string,
+  current: Pick<ChatParticipantDraft, "kind">,
+  hosts: ReadonlyArray<CliProviderHost> = []
+): Pick<ChatParticipantDraft, "kind" | "hostId"> {
+  if (optionId.startsWith(HOST_OPTION_PREFIX)) {
+    const host = hosts.find((item) => item.id === optionId.slice(HOST_OPTION_PREFIX.length));
+    return host ? { kind: host.cli, hostId: host.id } : { kind: current.kind, hostId: undefined };
+  }
+  return { kind: chatProviderKind(optionId, current.kind), hostId: undefined };
 }
 
 export const CHAT_AGENT_MODE_OPTIONS: Array<{ value: ChatAgentMode; label: string }> = [
@@ -214,6 +301,7 @@ export function chatParticipantConfigToDraft(
     model: participant.model,
     reasoningEffort: normalizeChatReasoningEffort(participant.reasoningEffort, participant.kind),
     avatarId: normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle),
+    hostId: participant.hostId?.trim() || undefined,
     agentMode: normalizeChatAgentMode(participant.agentMode),
     permissions: normalizeChatAgentPermissions(participant.permissions),
     remoteExecution: normalizeChatRunLocation(participant.remoteExecution),
@@ -273,7 +361,7 @@ export function addableSavedParticipantConfigs(
       const draft = chatParticipantConfigToDraft(config);
       return {
         config,
-        invalidReason: validateChatParticipantDrafts([draft], settings.chatRoleConfigs, new Set(), settings.chatBehaviorRules) ?? validateChatCliAgents([draft], agents, settings.providers)
+        invalidReason: validateChatParticipantDrafts([draft], settings.chatRoleConfigs, new Set(), settings.chatBehaviorRules) ?? validateChatCliAgents([draft], agents, settings.providers, settings.cliProviderHosts)
       };
     });
 }
@@ -287,6 +375,7 @@ export function sameParticipantDraft(draft: ChatParticipantDraft, participant: C
     (draft.model ?? "") === (participant.model ?? "") &&
     (draft.reasoningEffort ?? "") === (participant.reasoningEffort ?? "") &&
     normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle) === normalizedChatAvatarId(participant.kind, participant.avatarId, participant.id || participant.handle) &&
+    (draft.hostId?.trim() || "") === (participant.hostId?.trim() || "") &&
     normalizeChatAgentMode(draft.agentMode) === normalizeChatAgentMode(participant.agentMode) &&
     chatAgentPermissionsEqual(draft.permissions, participant.permissions) &&
     normalizeChatRunLocation(draft.remoteExecution) === normalizeChatRunLocation(participant.remoteExecution) &&
@@ -329,7 +418,8 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
     : fallback.roleConfigId;
   const provider = settings.providers.find((item) => item.kind === draft.kind) ?? settings.providers.find((item) => item.kind === fallback.kind);
   const kind = chatProviderKind(provider?.kind, fallback.kind);
-  const handle = draft.handle.trim() || (roleConfigId ? generatedChatHandle(settings, kind, roleConfigId) : "");
+  const host = chatParticipantHost({ kind, hostId: draft.hostId }, settings.cliProviderHosts ?? []);
+  const handle = draft.handle.trim() || (roleConfigId ? generatedChatHandle(settings, kind, roleConfigId, new Set(), host) : "");
   const selectedRuleIds = new Set(normalizeBehaviorRuleIds(draft.behaviorRuleIds));
   return {
     ...draft,
@@ -339,9 +429,10 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
       .map((rule) => rule.id)
       .filter((id) => selectedRuleIds.has(id)),
     kind,
-    model: draft.model ?? provider?.model,
+    model: draft.model ?? cliProviderHostDefaultModel(host) ?? provider?.model,
     reasoningEffort: normalizeChatReasoningEffort(draft.reasoningEffort, kind),
     avatarId: normalizedChatAvatarId(kind, draft.avatarId, handle || roleConfigId),
+    hostId: host?.id,
     agentMode: normalizeChatAgentMode(draft.agentMode),
     permissions: normalizeChatAgentPermissions(draft.permissions),
     remoteExecution: normalizeChatRunLocation(draft.remoteExecution),
@@ -353,14 +444,25 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
 export function updateChatParticipantDraft(
   draft: ChatParticipantDraft,
   settings: AppSettings,
-  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "model" | "reasoningEffort" | "avatarId" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">>
+  patch: Partial<Pick<ChatParticipantDraft, "roleConfigId" | "behaviorRuleIds" | "kind" | "model" | "reasoningEffort" | "avatarId" | "hostId" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">>
 ): ChatParticipantDraft {
   let next = { ...draft, ...patch };
   const kindChanged = patch.kind !== undefined && patch.kind !== draft.kind;
-  if (kindChanged && patch.model === undefined) {
+  const hosts = settings.cliProviderHosts ?? [];
+  // A binding only holds for a provider that runs through the draft's CLI. A
+  // dangling binding (provider removed) is kept as long as the user has not
+  // touched provider or CLI, so the editor can show it and ask for a new one.
+  const nextHost = chatParticipantHost(next, hosts);
+  if (kindChanged || patch.hostId !== undefined) {
+    next = { ...next, hostId: nextHost?.id };
+  }
+  const hostChanged = (next.hostId ?? undefined) !== (draft.hostId ?? undefined);
+  // A model id is only meaningful on the side it came from (glm-* vs first-party
+  // aliases), so switching provider or binding resets it to that side's default.
+  if ((kindChanged || hostChanged) && patch.model === undefined) {
     next = {
       ...next,
-      model: settings.providers.find((provider) => provider.kind === next.kind)?.model
+      model: cliProviderHostDefaultModel(nextHost) ?? settings.providers.find((provider) => provider.kind === next.kind)?.model
     };
   }
   if (kindChanged && patch.reasoningEffort === undefined) {
@@ -421,8 +523,8 @@ export function updateChatParticipantDraft(
       autoWatch: true
     };
   }
-  if (!draft.handle.trim() || ((roleChanged || kindChanged) && isGeneratedChatHandle(draft.handle))) {
-    const handle = generatedChatHandle(settings, next.kind, next.roleConfigId);
+  if (!draft.handle.trim() || ((roleChanged || kindChanged || hostChanged) && isGeneratedChatHandle(draft.handle))) {
+    const handle = generatedChatHandle(settings, next.kind, next.roleConfigId, new Set(), nextHost);
     return {
       ...next,
       handle,
@@ -465,6 +567,7 @@ export function normalizedChatDrafts(drafts: ChatParticipantDraft[]): ChatPartic
     model: draft.model?.trim() || undefined,
     reasoningEffort: normalizeChatReasoningEffort(draft.reasoningEffort, draft.kind),
     avatarId: normalizedChatAvatarId(draft.kind, draft.avatarId, draft.handle),
+    hostId: draft.hostId?.trim() || undefined,
     agentMode: normalizeChatAgentMode(draft.agentMode),
     permissions: normalizeChatAgentPermissions(draft.permissions),
     remoteExecution: normalizeChatRunLocation(draft.remoteExecution),
@@ -535,7 +638,8 @@ export function validateChatStartupDrafts(
   roles: ChatRoleConfig[],
   agents: AgentHealth[],
   behaviorRules: ChatBehaviorRuleConfig[] = [],
-  providers: Array<Pick<ProviderSettings, "kind" | "enabled">> = []
+  providers: Array<Pick<ProviderSettings, "kind" | "enabled">> = [],
+  hosts: ReadonlyArray<CliProviderHost> = []
 ): string | undefined {
   if (drafts.length === 0) {
     if (!roles.some((role) => role.id === "administrator")) {
@@ -546,7 +650,7 @@ export function validateChatStartupDrafts(
     }
     return undefined;
   }
-  return validateChatParticipantDrafts(drafts, roles, new Set(), behaviorRules) ?? validateChatCliAgents(drafts, agents, providers);
+  return validateChatParticipantDrafts(drafts, roles, new Set(), behaviorRules) ?? validateChatCliAgents(drafts, agents, providers, hosts);
 }
 
 function normalizeBehaviorRuleIds(value: unknown): string[] {

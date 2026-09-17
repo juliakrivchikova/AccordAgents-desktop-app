@@ -411,6 +411,8 @@ function App(): JSX.Element {
           deleteChatSavedPromptConfig={settingsActions.deleteChatSavedPromptConfig}
           saveChatParticipantConfig={settingsActions.saveChatParticipantConfig}
           deleteChatParticipantConfig={settingsActions.deleteChatParticipantConfig}
+          saveCliProviderHost={settingsActions.saveCliProviderHost}
+          deleteCliProviderHost={settingsActions.deleteCliProviderHost}
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
           setBetaUpdates={settingsActions.setBetaUpdates}
           setCliAgentRunTimeoutMs={settingsActions.setCliAgentRunTimeoutMs}

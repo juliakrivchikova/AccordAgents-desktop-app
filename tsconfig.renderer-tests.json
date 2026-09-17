@@ -12,6 +12,7 @@
     "src/renderer/components/chat/chat-active-run-popover.test.tsx",
     "src/renderer/components/chat/chat-composer-mention-token.test.ts",
     "src/renderer/components/chat/chat-composer-plugin-token.test.ts",
+    "src/renderer/components/chat/chat-participant-drafts.test.ts",
     "src/renderer/components/artifacts/artifact-drafts.test.tsx",
     "src/renderer/components/artifacts/artifact-navigation.test.ts",
     "src/renderer/components/chat/chat-progress-rendering.test.tsx",

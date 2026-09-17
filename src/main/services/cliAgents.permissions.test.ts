@@ -2483,6 +2483,96 @@ test("every non-interactive Codex exec path explicitly disables approvals", () =
   }
 });
 
+test("codex exec carries a member's provider -c overrides on fresh and resumed sessions, never the key", () => {
+  const participant = {
+    id: "participant",
+    kind: "codex-cli" as const,
+    label: "Codex",
+    model: "glm-5.3",
+    codexConfigOverrides: [
+      'model_provider="accordagents_host"',
+      'model_providers.accordagents_host.base_url="https://api.z.ai/api/v1"',
+      'model_providers.accordagents_host.wire_api="responses"',
+      'model_providers.accordagents_host.env_key="CODEX_PROVIDER_HOST_API_KEY"'
+    ]
+  };
+  const fresh = buildCodexExecInvocation({ participant, prompt: "Prompt", outputPath: "/tmp/output", repoPath: "/tmp/repo", kind: "chat", options: { agentMode: "default" } });
+  const resumed = buildCodexExecInvocation({ participant, prompt: "Prompt", outputPath: "/tmp/output", repoPath: "/tmp/repo", kind: "chat", options: { agentMode: "default", sessionId: "session-1" } });
+  for (const [label, invocation] of [["fresh", fresh], ["resumed", resumed]] as const) {
+    const args = invocation.args;
+    for (const override of participant.codexConfigOverrides) {
+      const index = args.indexOf(override);
+      assert.ok(index > 0, `${label}: ${override} missing in ${args.join(" ")}`);
+      assert.equal(args[index - 1], "-c", label);
+      // Options precede the prompt placeholder / session id, as codex requires.
+      assert.ok(index < args.lastIndexOf("-"), `${label}: override after prompt in ${args.join(" ")}`);
+    }
+    assert.equal(args.some((arg) => /CODEX_PROVIDER_HOST_API_KEY=/.test(arg) || /zai-secret/.test(arg)), false, label);
+  }
+  assert.equal(resumed.args.indexOf("session-1") > resumed.args.lastIndexOf("-c"), true, "resume: session id stays after -c options");
+});
+
+test("codex app-server is launched with a member's provider overrides before --listen, sees the key only in env, and closeWarmAgents retires it", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-app-server-host-"));
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+    return;
+  }
+  if (message.method === "thread/start" || message.method === "thread/resume") {
+    send({ id: message.id, result: { thread: { id: "thread-fixture" }, model: "glm-5.3" } });
+    return;
+  }
+  if (message.method === "turn/start") {
+    send({ id: message.id, result: { turn: { id: "turn-fixture" } } });
+    const report = JSON.stringify({ argv: process.argv.slice(1), keyPresent: process.env.CODEX_PROVIDER_HOST_API_KEY === "zai-secret" });
+    send({ method: "item/agentMessage/delta", params: { threadId: "thread-fixture", turnId: "turn-fixture", itemId: "agent-fixture", delta: report } });
+    send({ method: "item/completed", params: { threadId: "thread-fixture", turnId: "turn-fixture", item: { id: "agent-fixture", type: "agentMessage", text: report } } });
+    send({ method: "turn/completed", params: { threadId: "thread-fixture", turn: { id: "turn-fixture", status: "completed" } } });
+  }
+});
+`);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const overrides = ['model_provider="accordagents_host"', 'model_providers.accordagents_host.env_key="CODEX_PROVIDER_HOST_API_KEY"'];
+  try {
+    const result = await runner.runCodexAppServerWarmOrOneShot(
+      { id: "participant-fixture", kind: "codex-cli", label: "Codex", codexConfigOverrides: overrides },
+      "Report your launch.",
+      fixtureDir,
+      undefined,
+      "chat",
+      undefined,
+      {
+        agentMode: "default",
+        agentEnv: { CODEX_PROVIDER_HOST_API_KEY: "zai-secret" },
+        agentEnvKey: "host:h1",
+        warm: { conversationId: "conversation-fixture", participantId: "participant-fixture", contextKey: "context-fixture", idleTimeoutMs: 60_000 }
+      }
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const report = JSON.parse(result.content) as { argv: string[]; keyPresent: boolean };
+    const listenIndex = report.argv.indexOf("--listen");
+    for (const override of overrides) {
+      const index = report.argv.indexOf(override);
+      assert.ok(index > 0 && report.argv[index - 1] === "-c", report.argv.join(" "));
+      assert.ok(index < listenIndex, "overrides precede --listen");
+    }
+    assert.equal(report.argv.some((arg) => arg.includes("zai-secret")), false, "key never in argv");
+    assert.equal(report.keyPresent, true, "key reaches the process env");
+    assert.equal(runner.warmAgents.size, 1);
+    await runner.closeWarmAgents("conversation-fixture", "participant-fixture", "provider-binding-changed");
+    assert.equal(runner.warmAgents.size, 0);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 test("codex app-server production transport round-trips an approval and acknowledges delivery", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-app-server-"));
   const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node

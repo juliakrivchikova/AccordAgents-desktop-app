@@ -112,6 +112,54 @@ test("chat:send routes @participant /compact instructions to participant compact
   }
 });
 
+test("/compact on a member with an added provider carries the provider env, and fails cleanly without its key", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-glm-"));
+  try {
+    const host = { id: "host-zai", label: "Z.ai GLM", cli: "claude-code" as const, vendor: "zai" as const, baseUrl: "https://api.z.ai/api/anthropic", hasApiKey: true, updatedAt: NOW };
+    const participant = chatParticipant({ id: "glm-admin", kind: "claude-code", hostId: host.id, hostLabel: host.label, hostVendor: "zai" });
+    const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    const compactOptions: any[] = [];
+    let usageLookups = 0;
+    const { service, storage } = testService({
+      conversation,
+      compactSession: async (runParticipant, _repoPath, _diffMode, _kind, _signal, options) => {
+        compactOptions.push({ model: runParticipant.model, options });
+        return { participant: runParticipant, ok: true, sessionId: "session-1" };
+      },
+      contextUsageForSession: async () => {
+        usageLookups += 1;
+        return undefined;
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    let apiKey: string | undefined = "zai-secret";
+    (service as any).settings.getManualAgentEnvironment = async () => ({ env: {}, version: "env-v1" });
+    (service as any).settings.getCliProviderHostSecret = async (id: string) => (id === host.id ? { host, apiKey } : undefined);
+
+    await service.sendMessage({ conversationId: conversation.id, runId: "compact-glm", content: "@admin /compact" });
+    assert.equal(compactOptions.length, 1);
+    assert.equal(compactOptions[0].model, "glm-5.3");
+    assert.equal(compactOptions[0].options.agentEnv.ANTHROPIC_BASE_URL, host.baseUrl);
+    assert.equal(compactOptions[0].options.agentEnv.ANTHROPIC_AUTH_TOKEN, "zai-secret");
+    assert.match(compactOptions[0].options.agentEnvKey, /^env-v1\|host:host-zai\|/);
+    assert.equal(storage.current.messages.at(-1)?.content, "Compacted @admin context.");
+    const lookupsAfterSuccess = usageLookups;
+
+    // The key is gone: nothing is spawned, nothing is probed, one clean sentence.
+    apiKey = undefined;
+    const result = await service.sendMessage({ conversationId: conversation.id, runId: "compact-glm-missing", content: "@admin /compact" });
+    assert.equal(compactOptions.length, 1);
+    assert.equal(usageLookups, lookupsAfterSuccess);
+    const last = storage.current.messages.at(-1);
+    assert.match(last?.content ?? "", /Could not compact @admin context: @admin cannot start: Z\.ai GLM has no API key\. Add one under Local CLI setup in Settings\.$/);
+    assert.equal(last?.metadata?.compaction?.outcome, "failed");
+    assert.equal(result.warnings.length, 1);
+    assert.equal(storage.current.metadata.activeRunIds, undefined);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("compactParticipant refreshes stored context usage from the session after compact", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-usage-"));
   try {
