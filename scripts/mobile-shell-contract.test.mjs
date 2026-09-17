@@ -78,6 +78,21 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(worker.slice(resetStart, resetEnd), /await new Promise[\s\S]+oncomplete/);
   const html = await readFile(path.join(repoRoot, "dist/mobile/index.html"), "utf8");
   const headers = await readFile(path.join(repoRoot, "dist/mobile/_headers"), "utf8");
+  // The rules the phone shares with the desktop verbatim travel as one bundle
+  // built from src/shared, loaded before the app, precached with it, and every
+  // built-in avatar the desktop can show is copied under its catalog id.
+  const shared = await readFile(path.join(repoRoot, "dist/mobile/mobile-shared.js"), "utf8");
+  assert.match(shared, /AccordMobileShared/);
+  assert.match(shared, /resolveChatParticipantAvatar/);
+  assert.match(shared, /isChatMessageHiddenFromTimeline/);
+  assert.ok(html.indexOf('src="mobile-shared.js') < html.indexOf('src="mobile-app.js'), "the shared rules load before the app");
+  assert.ok(worker.includes("./mobile-shared.js?v="), "service worker must precache the shared rules");
+  assert.doesNotMatch(app, /assets\/avatars\/(claude|codex)-(bunny|cat|dog|frog|hamster)\.png/, "the app names no avatar file itself; the catalog does");
+  const { CHAT_AVATAR_CATALOG } = await import(pathToFileURL(path.join(repoRoot, "dist/main/shared/chatAvatarCatalog.js")).href);
+  for (const entry of CHAT_AVATAR_CATALOG) {
+    const file = path.join(repoRoot, "dist/mobile/assets/avatars", `${entry.id}${path.extname(entry.assetFile)}`);
+    assert.ok((await stat(file)).size > 0, `${entry.id} avatar is shipped with the phone`);
+  }
   assert.match(headers, /\/service-worker\.js\n\s+Cache-Control: public, max-age=0, must-revalidate/);
   assert.match(headers, /\/mobile-app\.js\n\s+Cache-Control: public, max-age=0, must-revalidate/);
   // W-E: the mobile origin holds a pairing seal key, so the policy that guards

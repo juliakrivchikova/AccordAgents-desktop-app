@@ -19,6 +19,13 @@
   --pre-fg: #f9fafb;
   --link: #2563eb;
   --danger: #b4443a;
+  /* Avatar discs, the desktop's values: a member's picture must sit on the
+     same colour here as on the desktop. */
+  --avatar-bg: #f8fbff;
+  --brand-anthropic: #d97757;
+  --brand-codex: #3941ff;
+  --brand-gemini: #6e8bf0;
+  --info-soft: #edf4ff;
   --press: rgba(22, 25, 31, 0.08);
   --menu-shadow: 0 12px 30px rgba(22, 25, 31, 0.16);
   --pill-shadow: 0 6px 18px rgba(22, 25, 31, 0.12);
@@ -231,9 +238,50 @@ textarea {
 }
 
 .mobile-chat-group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
   padding: 14px 20px 6px;
+  border: 0;
+  background: none;
   font: 600 12.5px var(--mono);
   letter-spacing: 0.02em;
+  color: var(--mut);
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-chat-group-title:active {
+  color: var(--fg);
+}
+
+/* The desktop's chevron: right when folded, down when open. */
+.mobile-chat-group-chevron {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 120ms ease;
+}
+
+.mobile-chat-group-title[aria-expanded="false"] .mobile-chat-group-chevron {
+  transform: translateX(-1px) rotate(-45deg);
+}
+
+.mobile-chat-group-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-chat-group-count {
+  font: 500 11.5px var(--mono);
   color: var(--mut);
 }
 
@@ -281,11 +329,67 @@ textarea {
   font: 700 14px var(--disp);
 }
 
-.mobile-chat-avatar img,
-.message-avatar img {
+/* One avatar contract, the desktop's: the element is the disc and takes its
+   size and radius from the surface's own class; the picture inside is either a
+   glyph (75%, contained) or a photo (100%, covering); each kind's disc colour
+   is stated once, below (paired with .avatar-icon so it outranks a surface's
+   own base tint). No per-surface or per-member geometry beyond that — that is
+   exactly what drifted on the desktop until it was unified. */
+.avatar-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.avatar-icon .avatar-media {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.avatar-icon .avatar-media-glyph {
+  width: 75%;
+  height: 75%;
+  object-fit: contain;
+}
+
+.avatar-icon .avatar-media-photo {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.avatar-icon span.avatar-media {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.avatar-icon.avatar-anthropic {
+  background: var(--brand-anthropic);
+  color: var(--surface);
+}
+
+.avatar-icon.avatar-codex {
+  background: color-mix(in srgb, var(--accs) 72%, var(--avatar-bg));
+  color: var(--brand-codex);
+}
+
+.avatar-icon.avatar-gemini {
+  background: var(--info-soft);
+  color: var(--brand-gemini);
+}
+
+.avatar-icon.avatar-custom {
+  background: var(--avatar-bg);
+  color: var(--acc);
+}
+
+.avatar-icon.avatar-generic {
+  background: color-mix(in srgb, var(--accs) 58%, var(--avatar-bg));
+  color: var(--acc);
 }
 
 .mobile-chat-avatar + .mobile-chat-avatar {
@@ -855,12 +959,6 @@ textarea {
   place-items: center;
   overflow: hidden;
   font: 700 12px var(--sans);
-}
-
-.mobile-mention-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
 }
 
 .mobile-mention-copy {
@@ -1690,6 +1788,11 @@ textarea {
     --pre-fg: #e5e9f0;
     --link: #8ab4ff;
     --danger: #ff8a80;
+    --avatar-bg: #1b202b;
+    --brand-anthropic: #e8896b;
+    --brand-codex: #b1a7ff;
+    --brand-gemini: #8ba2f6;
+    --info-soft: #182740;
     --press: rgba(255, 255, 255, 0.08);
     --menu-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
     --pill-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);

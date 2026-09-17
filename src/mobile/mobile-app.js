@@ -889,6 +889,36 @@
 
 
 
+  // Before 2026-09-18-pwa-parity-v1 the desktop's projection sent every
+  // system message and the phone stored each as a bubble. Those the desktop
+  // never showed ("Auto-resumed @x after member request", tool-approval
+  // notes) are dropped once; a system row the User can see (an artifact note)
+  // is fetched again with the chat's last page and comes back. Rows the phone
+  // itself wrote — machine warnings and errors — are not from the desktop and
+  // stay.
+  const INTERNAL_SYSTEM_ROWS_DROPPED_KEY = "accordagents.mobile.internalSystemRowsDropped.v1";
+
+  function dropStoredInternalSystemRows() {
+    if (localStorage.getItem(INTERNAL_SYSTEM_ROWS_DROPPED_KEY) === "1") {
+      return Promise.resolve(0);
+    }
+    return withTimeline("readwrite", function (store) {
+      return requestToPromise(store.getAll()).then(function (entries) {
+        const deletes = entries.filter(function (entry) {
+          return entry && entry.role === "system" && !/^machine-/.test(String(entry.sourceId || ""));
+        }).map(function (entry) {
+          return requestToPromise(store.delete(entry.id));
+        });
+        return Promise.all(deletes).then(function () {
+          return deletes.length;
+        });
+      });
+    }).then(function (dropped) {
+      localStorage.setItem(INTERNAL_SYSTEM_ROWS_DROPPED_KEY, "1");
+      return dropped;
+    });
+  }
+
   // W1+W5: one (epoch, cursor) pair, shared with the service worker through
   // the IndexedDB meta record, which also mirrors the non-decrypting mailbox
   // credentials a push-woken background fetch needs — endpoint URL, mailbox
@@ -1204,7 +1234,7 @@
     if (await isMachineConversationDeleted(conversationId)) return "applied";
     if (body.type === "machine.turn.finished") {
       const stopped = body.status === "interrupted";
-      const events = (body.messages || []).map(function (message) {
+      const events = (body.messages || []).filter(machineMessageVisibleOnPhone).map(function (message) {
         return machineTimelineEvent(message, body.status === "failed" ? "error" : "done", body.runId);
       });
       // A stopped run often produced nothing, and only a settled row for this
@@ -1288,7 +1318,7 @@
       await handleRelayTimelinePayload({
         type: "mobile.timeline.events",
         conversationId: conversationId,
-        events: (body.messages || []).map(function (message) { return machineTimelineEvent(message, "done"); })
+        events: (body.messages || []).filter(machineMessageVisibleOnPhone).map(function (message) { return machineTimelineEvent(message, "done"); })
       }, conversationId);
       // A member on a machine asks the User things as well as answering them.
       // Without this the question existed on the machine and nowhere the User
@@ -1326,6 +1356,22 @@
     }
     recordRelayDebug({ event: "machine-event-unshown", kind: event.kind });
     return "applied";
+  }
+
+  // A machine hands the phone its messages whole, so the desktop's own
+  // timeline rule applies here as it does in the desktop's projection: an
+  // internal system trigger ("Auto-resumed @x after member request") is not a
+  // message the User sees anywhere else.
+  function machineMessageVisibleOnPhone(message) {
+    const shared = globalThis.AccordMobileShared;
+    if (!shared || !message || typeof message !== "object") {
+      return true;
+    }
+    return !shared.isChatMessageHiddenFromTimeline({
+      role: message.role,
+      content: typeof message.content === "string" ? message.content : "",
+      metadata: message.metadata && typeof message.metadata === "object" ? message.metadata : undefined
+    });
   }
 
   function machineTimelineEvent(message, status, runId) {
@@ -2281,7 +2327,10 @@
   }
 
   function selectedConversationMembers() {
-    const conversationId = selectedConversationId();
+    return conversationMembers(selectedConversationId());
+  }
+
+  function conversationMembers(conversationId) {
     const chat = loadChats().find(function (item) {
       return item.id === conversationId;
     });
@@ -4002,58 +4051,194 @@
     return Math.floor(hours / 24) + "d";
   }
 
-  function chatInitial(title, index) {
-    const normalized = (title || "Chat").trim();
-    return normalized.charAt(0).toUpperCase() || String(index + 1);
+  // Which picture a member shows is decided by the same code the desktop
+  // runs (bundled as mobile-shared.js from src/shared/chatAvatarCatalog.ts):
+  // the member's `avatarId` and provider, never a guess from the handle. A
+  // member the phone has no record for gets what the desktop gives an unknown
+  // author — the provider glyph its name suggests, or initials.
+  const CHAT_ASSISTANT_DISPLAY_NAME = "Chat Assistant";
+
+  function mobileSharedRules() {
+    return globalThis.AccordMobileShared;
   }
 
-  function avatarAssetFor(label) {
-    const normalized = String(label || "").toLowerCase();
-    if (normalized.includes("taylor") || normalized.includes("claude-reviewer") || normalized.includes("bunny")) {
-      return "assets/avatars/claude-bunny.png";
+  function avatarAssetUrl(assetId) {
+    const shared = mobileSharedRules();
+    if (!shared || !assetId) {
+      return undefined;
     }
-    if (normalized.includes("morgan") || normalized.includes("claude-cat")) {
-      return "assets/avatars/claude-cat.png";
+    if (assetId === shared.CHAT_ASSISTANT_AVATAR_ASSET_ID) {
+      return "assets/accordagents-mark.png";
     }
-    if (normalized.includes("admin") || normalized.includes("perf") || normalized.includes("hamster")) {
-      return "assets/avatars/codex-hamster.png";
+    const entry = shared.chatAvatarCatalogEntry(assetId);
+    if (!entry) {
+      return undefined;
     }
-    if (normalized.includes("dog")) {
-      return "assets/avatars/codex-dog.png";
-    }
-    if (normalized.includes("drew") || normalized.includes("codex")) {
-      return "assets/avatars/codex-frog.png";
-    }
-    return undefined;
+    const dot = entry.assetFile.lastIndexOf(".");
+    return "assets/avatars/" + assetId + (dot >= 0 ? entry.assetFile.slice(dot) : "");
   }
 
-  function fillAvatar(avatar, label, index, size) {
-    const asset = avatarAssetFor(label);
-    if (asset) {
+  function normalizeMemberHandle(value) {
+    return String(value || "").trim().replace(/^@/, "").toLowerCase();
+  }
+
+  function memberForLabel(conversationId, label) {
+    const wanted = normalizeMemberHandle(label);
+    if (!wanted) {
+      return undefined;
+    }
+    return conversationMembers(conversationId).find(function (member) {
+      return normalizeMemberHandle(member.handle) === wanted ||
+        normalizeMemberHandle(member.mentionHandle) === wanted ||
+        normalizeMemberHandle(member.displayName) === wanted;
+    });
+  }
+
+  function avatarForMember(member) {
+    const shared = mobileSharedRules();
+    const label = member.displayName || "@" + member.handle;
+    if (!shared) {
+      return { glyphKind: "generic", label: label, mediaMode: "glyph", initials: label.replace(/^@/, "").charAt(0).toUpperCase() || "?" };
+    }
+    // A member the list only knows by handle (an older chat list) has no
+    // provider to pick a default from; its name is all there is to go on.
+    if (member.kind !== "claude-code" && member.kind !== "codex-cli" && member.kind !== "gemini-cli") {
+      return shared.resolveChatAvatarByName(label);
+    }
+    return shared.resolveChatParticipantAvatar(
+      { id: member.id, handle: member.handle, kind: member.kind, avatarId: member.avatarId },
+      label,
+      { isAssistant: label === CHAT_ASSISTANT_DISPLAY_NAME }
+    );
+  }
+
+  function avatarForLabel(conversationId, label) {
+    const member = memberForLabel(conversationId, label);
+    if (member) {
+      return avatarForMember(member);
+    }
+    const shared = mobileSharedRules();
+    const text = String(label || "").trim() || "Agent";
+    return shared
+      ? shared.resolveChatAvatarByName(text)
+      : { glyphKind: "generic", label: text, mediaMode: "glyph", initials: text.replace(/^@/, "").charAt(0).toUpperCase() || "?" };
+  }
+
+  /** What the frame will show, for change detection: repainting on every
+   *  render would restart the image load. */
+  function avatarSignature(resolved) {
+    return [resolved.glyphKind, resolved.mediaMode, resolved.assetId || "", resolved.customAvatarId || "", resolved.initials || ""].join("\0");
+  }
+
+  const AVATAR_GLYPH_CLASSES = ["avatar-anthropic", "avatar-codex", "avatar-gemini", "avatar-custom", "avatar-generic"];
+
+  // One frame contract, the desktop's: the element is the disc, sized by its
+  // own class; the picture inside is either a glyph (75%, contained) or a
+  // photo (100%, covering). Nothing per member or per surface beyond that.
+  function paintAvatar(avatar, resolved, conversationId) {
+    const signature = avatarSignature(resolved);
+    if (avatar.dataset.avatarSignature === signature) {
+      return;
+    }
+    avatar.dataset.avatarSignature = signature;
+    avatar.textContent = "";
+    avatar.removeAttribute("style");
+    for (const className of AVATAR_GLYPH_CLASSES) {
+      avatar.classList.remove(className);
+    }
+    avatar.classList.add("avatar-icon", "avatar-" + resolved.glyphKind);
+    avatar.setAttribute("aria-label", resolved.label || "");
+    if (resolved.customAvatarId) {
+      // Initials stand in until the bytes arrive; a drawn avatar that cannot be
+      // fetched (no desktop reachable) stays initials, as on the desktop
+      // before its bytes load.
+      const initials = document.createElement("span");
+      initials.className = "avatar-media avatar-media-glyph";
+      initials.textContent = resolved.initials || "?";
+      avatar.classList.remove("avatar-custom");
+      avatar.classList.add("avatar-generic");
+      avatar.append(initials);
+      loadCustomAvatarInto(avatar, conversationId, resolved.customAvatarId, signature);
+      return;
+    }
+    const assetUrl = avatarAssetUrl(resolved.assetId);
+    if (assetUrl) {
       const img = document.createElement("img");
-      img.src = asset;
+      img.className = "avatar-media avatar-media-" + resolved.mediaMode;
+      img.src = assetUrl;
       img.alt = "";
-      avatar.textContent = "";
+      img.decoding = "async";
       avatar.append(img);
       return;
     }
-    const [color, soft] = avatarColor(index);
-    avatar.style.color = color;
-    avatar.style.background = soft;
-    avatar.textContent = chatInitial(label, index);
-    if (size) {
-      avatar.style.fontSize = size;
-    }
+    const initials = document.createElement("span");
+    initials.className = "avatar-media avatar-media-glyph";
+    initials.textContent = resolved.initials || "?";
+    avatar.append(initials);
   }
 
-  function avatarColor(index) {
-    const colors = [
-      ["#7d5fd3", "#efebfb"],
-      ["#6e8bf0", "#ebeefc"],
-      ["#0e9f6e", "#e7f6ef"],
-      ["#d97706", "#fff3df"]
-    ];
-    return colors[index % colors.length];
+  // Drawn avatars live as files on the desktop; the member record names the
+  // id and the bytes come once per session, like a picture in a message.
+  const customAvatarDataUrls = new Map();
+  const customAvatarFetches = new Map();
+
+  function loadCustomAvatarInto(avatar, conversationId, customId, signature) {
+    const avatarId = "custom:" + customId;
+    const cached = customAvatarDataUrls.get(avatarId);
+    if (cached) {
+      applyCustomAvatar(avatar, cached, signature);
+      return;
+    }
+    if (!customAvatarFetches.has(avatarId)) {
+      const pairing = loadPairing();
+      customAvatarFetches.set(avatarId, (async function () {
+        if (!pairing || !relayCanSync(pairing) || !conversationId) {
+          return "retry";
+        }
+        const payload = await sendRelayPayload(pairing, "avatar-" + customId + "-" + createEventId(), {
+          type: "mobile.avatar.request",
+          conversationId: conversationId,
+          avatarId: avatarId
+        });
+        if (payload && payload.type === "mobile.avatar" && typeof payload.dataBase64 === "string") {
+          return "data:" + (typeof payload.mediaType === "string" ? payload.mediaType : "image/png") + ";base64," + payload.dataBase64;
+        }
+        // "unavailable" and "too-large" are answers: initials stay, and the
+        // id is not asked for again this session.
+        return payload && typeof payload.reason === "string" ? "unavailable" : "retry";
+      })().catch(function () {
+        return "retry";
+      }).then(function (result) {
+        if (result !== "retry") {
+          customAvatarDataUrls.set(avatarId, result);
+        }
+        customAvatarFetches.delete(avatarId);
+        return result;
+      }));
+    }
+    customAvatarFetches.get(avatarId).then(function (result) {
+      if (avatar.isConnected && avatar.dataset.avatarSignature === signature) {
+        applyCustomAvatar(avatar, result, signature);
+      }
+    });
+  }
+
+  function applyCustomAvatar(avatar, result, signature) {
+    if (typeof result !== "string" || !result.startsWith("data:")) {
+      return;
+    }
+    if (avatar.dataset.avatarSignature !== signature) {
+      return;
+    }
+    avatar.textContent = "";
+    avatar.classList.remove("avatar-generic");
+    avatar.classList.add("avatar-custom");
+    const img = document.createElement("img");
+    img.className = "avatar-media avatar-media-photo";
+    img.src = result;
+    img.alt = "";
+    img.decoding = "async";
+    avatar.append(img);
   }
 
   function renderMessageContent(container, markdown) {
@@ -4189,6 +4374,30 @@
     });
   }
 
+  // Which projects are folded in the chat list. Persisted: the phone reopens
+  // the app many times a day, and a second project that takes a long scroll to
+  // reach every time was the complaint. The desktop folds its project groups
+  // the same way, with the same chevron.
+  const COLLAPSED_CHAT_GROUPS_KEY = "accordagents.mobile.collapsedChatGroups.v1";
+
+  function loadCollapsedChatGroups() {
+    try {
+      const raw = localStorage.getItem(COLLAPSED_CHAT_GROUPS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter(function (name) { return typeof name === "string"; }) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function toggleChatGroupCollapsed(name) {
+    const current = loadCollapsedChatGroups();
+    const next = current.indexOf(name) >= 0
+      ? current.filter(function (item) { return item !== name; })
+      : current.concat([name]);
+    localStorage.setItem(COLLAPSED_CHAT_GROUPS_KEY, JSON.stringify(next));
+  }
+
   function groupedChats(chats) {
     const groups = [];
     const groupByName = new Map();
@@ -4238,10 +4447,13 @@
     const chats = filterChatsByQuery(allChats, chatSearchQuery);
     const activeId = selectedConversationId();
     const unreadIds = loadUnreadConversationIds();
+    // A search shows everything it matches; folding applies to the plain list.
+    const collapsedGroups = chatSearchQuery.trim() ? [] : loadCollapsedChatGroups();
     const renderSignature = JSON.stringify({
       activeId,
       query: chatSearchQuery,
       unreadIds,
+      collapsedGroups,
       chats: chats.map(function (chat) {
         return {
           id: chat.id,
@@ -4284,11 +4496,44 @@
       return;
     }
     for (const group of groupedChats(chats)) {
-      const title = document.createElement("div");
+      const collapsed = collapsedGroups.indexOf(group.name) >= 0;
+      const title = document.createElement("button");
+      title.type = "button";
       title.className = "mobile-chat-group-title";
-      title.textContent = group.name;
+      title.dataset.group = group.name;
+      title.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      const chevron = document.createElement("span");
+      chevron.className = "mobile-chat-group-chevron";
+      chevron.setAttribute("aria-hidden", "true");
+      const name = document.createElement("span");
+      name.className = "mobile-chat-group-name";
+      name.textContent = group.name;
+      title.append(chevron, name);
+      if (collapsed) {
+        // Folded away, not silenced: the count says what is inside, and a
+        // fresh message in a folded project still shows its dot here.
+        const count = document.createElement("span");
+        count.className = "mobile-chat-group-count";
+        count.textContent = String(group.items.length);
+        title.append(count);
+        if (group.items.some(function (chat) { return unreadIds.indexOf(chat.id) >= 0; })) {
+          const dot = document.createElement("span");
+          dot.className = "mobile-unread-dot";
+          dot.setAttribute("aria-label", "Unread messages");
+          title.append(dot);
+        }
+      }
+      title.addEventListener("click", function () {
+        toggleChatGroupCollapsed(group.name);
+        renderChatList();
+      });
       const list = document.createElement("div");
       list.className = "mobile-chat-group";
+      if (collapsed) {
+        list.hidden = true;
+        container.append(title, list);
+        continue;
+      }
       for (const chat of group.items) {
         const row = document.createElement("button");
         const unread = unreadIds.indexOf(chat.id) >= 0;
@@ -4328,10 +4573,10 @@
         // the whole list down with it.
         const chatParticipants = Array.isArray(chat.participants) ? chat.participants : [];
         const participants = chatParticipants.length > 0 ? chatParticipants : [chat.title];
-        participants.slice(0, 2).forEach(function (participant, index) {
+        participants.slice(0, 2).forEach(function (participant) {
           const avatar = document.createElement("span");
           avatar.className = "mobile-chat-avatar";
-          fillAvatar(avatar, participant.replace(/^@/, ""), index);
+          paintAvatar(avatar, avatarForLabel(chat.id, participant), chat.id);
           avatars.append(avatar);
         });
         const copy = document.createElement("div");
@@ -5411,21 +5656,23 @@
 
   function applyRowIdentity(avatar, entry) {
     if (entry.identified === false) {
-      if (avatar.dataset.avatarLabel !== "") {
+      if (avatar.dataset.avatarSignature !== "") {
         avatar.textContent = "";
         avatar.removeAttribute("style");
-        avatar.dataset.avatarLabel = "";
+        for (const className of AVATAR_GLYPH_CLASSES) {
+          avatar.classList.remove(className);
+        }
+        avatar.dataset.avatarSignature = "";
       }
       avatar.dataset.identified = "0";
       return;
     }
     const participantLabel = entry.participantLabel || "Agent";
-    if (avatar.dataset.avatarLabel !== participantLabel) {
-      avatar.textContent = "";
-      avatar.removeAttribute("style");
-      fillAvatar(avatar, participantLabel, 0, "13px");
-      avatar.dataset.avatarLabel = participantLabel;
-    }
+    // Resolved on every pass on purpose: the member list can arrive after the
+    // row did, and the picture must follow it. paintAvatar itself is a no-op
+    // while the result is unchanged.
+    const conversationId = entry.conversationId || selectedConversationId();
+    paintAvatar(avatar, avatarForLabel(conversationId, participantLabel), conversationId);
     avatar.dataset.identified = "1";
   }
 
@@ -5704,13 +5951,13 @@
       list.append(empty);
       return;
     }
-    members.forEach(function (member, index) {
+    members.forEach(function (member) {
       const row = document.createElement("div");
       row.className = "members-sheet-row";
       row.dataset.handle = member.handle;
       const avatar = document.createElement("span");
       avatar.className = "mobile-mention-avatar";
-      fillAvatar(avatar, member.displayName, index);
+      paintAvatar(avatar, avatarForMember(member), selectedConversationId());
       const copy = document.createElement("span");
       copy.className = "members-sheet-copy";
       const name = document.createElement("strong");
@@ -6256,7 +6503,7 @@
           });
           const avatar = document.createElement("span");
           avatar.className = "mobile-mention-avatar";
-          fillAvatar(avatar, member.displayName, index);
+          paintAvatar(avatar, avatarForMember(member), selectedConversationId());
           const copy = document.createElement("span");
           copy.className = "mobile-mention-copy";
           const name = document.createElement("strong");
@@ -6625,6 +6872,10 @@
     wireStreamView();
     startThinkingClock();
     startSyncProgressClock();
+    // Internal system rows stored before the desktop stopped sending them
+    // would otherwise sit in the timeline forever: nothing ever asks the phone
+    // to drop a row it once received.
+    await dropStoredInternalSystemRows().catch(function () { return 0; });
     await render();
     // What a push-woken worker counted while the app was closed, folded in
     // before the lists paint again; the icon number follows.

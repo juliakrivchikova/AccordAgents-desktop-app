@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ChatMessage, ChatParticipant, ChatSkillMention, Conversation, ReviewProgress, SendChatMessageRequest, StartReviewResult } from "../../shared/types";
 import {
+  chatMessageHiddenFromTimeline,
   chatMessageVisualThreadRootId,
   chatParticipantRequestReplyRootMap
 } from "../../shared/chatParticipantRequestThreads";
@@ -122,6 +123,9 @@ export interface MobileRelayChatCatalog {
   listTimelinePage?(conversationId: string, options: { beforeMessageId?: string }): Promise<MobileTimelinePage>;
   /** Cards a member is waiting on in this chat. */
   listControlCards?(conversationId: string): Promise<MobileControlCard[]>;
+  /** The picture of a drawn (studio) avatar, answered only for a member of
+   *  the named chat: the id alone must not fetch another chat's pictures. */
+  readMemberAvatar?(request: { conversationId: string; avatarId: string }): Promise<{ mediaType: string; dataBase64: string } | undefined>;
   /** What the desktop composer would list after "/" for this draft. */
   composerOptions?(request: { conversationId: string; query: string; content: string }): Promise<MobileComposerOptions>;
   isConversationAllowed?(conversationId: string, snapshot?: Conversation): Promise<boolean> | boolean;
@@ -323,6 +327,23 @@ interface MobileAttachmentResponse {
   conversationId: string;
   attachmentId: string;
   mimeType?: string;
+  dataBase64?: string;
+  reason?: "unavailable" | "too-large";
+}
+
+/** A drawn avatar's bytes, on demand: the member record carries only the id,
+ *  and the chat list is re-sent far too often to carry pictures. */
+interface MobileAvatarRequest {
+  type: "mobile.avatar.request";
+  conversationId: string;
+  avatarId: string;
+}
+
+interface MobileAvatarResponse {
+  type: "mobile.avatar";
+  conversationId: string;
+  avatarId: string;
+  mediaType?: string;
   dataBase64?: string;
   reason?: "unavailable" | "too-large";
 }
@@ -619,6 +640,10 @@ export class MobileRelayControlService {
     }
     if (isMobileAttachmentRequest(payload)) {
       await this.sendAttachment(payload, `${message.logicalMessageId}:attachment`);
+      return;
+    }
+    if (isMobileAvatarRequest(payload)) {
+      await this.sendMemberAvatar(payload, `${message.logicalMessageId}:avatar`);
       return;
     }
     if (isMobileDeviceIdentity(payload)) {
@@ -987,6 +1012,45 @@ export class MobileRelayControlService {
         conversationId: request.conversationId,
         attachmentId: request.attachmentId,
         mimeType: read.attachment.mimeType,
+        dataBase64: read.dataBase64
+      };
+    };
+    const ciphertext = await sealMobileRelayPayload(await answer(), this.options.relaySealKeyBase64);
+    await this.client.sendCiphertext({ logicalMessageId, ciphertext });
+  }
+
+  private async sendMemberAvatar(request: MobileAvatarRequest, logicalMessageId: string): Promise<void> {
+    if (!this.isActive()) {
+      return;
+    }
+    if (!(await this.isConversationAllowed(request.conversationId))) {
+      throw new Error("Mobile relay avatar request is outside the paired scope.");
+    }
+    const unavailable: MobileAvatarResponse = {
+      type: "mobile.avatar", conversationId: request.conversationId, avatarId: request.avatarId, reason: "unavailable"
+    };
+    const answer = async (): Promise<MobileAvatarResponse> => {
+      if (!this.catalog?.readMemberAvatar) {
+        return unavailable;
+      }
+      let read;
+      try {
+        read = await this.catalog.readMemberAvatar({ conversationId: request.conversationId, avatarId: request.avatarId });
+      } catch {
+        // A deleted or unknown id is an ordinary answer, not a relay failure.
+        return unavailable;
+      }
+      if (!read) {
+        return unavailable;
+      }
+      if (Buffer.byteLength(read.dataBase64, "base64") > MOBILE_ATTACHMENT_MAX_BYTES) {
+        return { ...unavailable, reason: "too-large" };
+      }
+      return {
+        type: "mobile.avatar",
+        conversationId: request.conversationId,
+        avatarId: request.avatarId,
+        mediaType: read.mediaType,
         dataBase64: read.dataBase64
       };
     };
@@ -1419,6 +1483,13 @@ function mobileUploadImages(
   return accepted;
 }
 
+function isMobileAvatarRequest(value: unknown): value is MobileAvatarRequest {
+  return Boolean(value && typeof value === "object" &&
+    (value as Partial<MobileAvatarRequest>).type === "mobile.avatar.request" &&
+    typeof (value as Partial<MobileAvatarRequest>).conversationId === "string" &&
+    typeof (value as Partial<MobileAvatarRequest>).avatarId === "string");
+}
+
 function isMobileAttachmentRequest(value: unknown): value is MobileAttachmentRequest {
   return Boolean(value && typeof value === "object" &&
     (value as Partial<MobileAttachmentRequest>).type === "mobile.attachment.request" &&
@@ -1519,7 +1590,7 @@ function mobileEventScopeKey(conversationId: string, eventId: string): string {
 export function timelineEventsFromConversation(conversation: Conversation): MobileTimelineEvent[] {
   const threadRoots = chatParticipantRequestReplyRootMap(conversation);
   return conversation.messages
-    .filter((message) => message.role !== "summary" && message.role !== "user" && messageIsVisibleOnPhone(message))
+    .filter((message) => message.role !== "summary" && message.role !== "user" && messageIsVisibleOnPhone(conversation, message))
     .slice(-40)
     // Each message falls back to its OWN id, never to the sending run's. Lending
     // one run's identity to forty unrelated history rows made every one of them
@@ -1534,14 +1605,21 @@ export function timelineEventsFromConversation(conversation: Conversation): Mobi
 export function timelineEventsFromSnapshot(conversation: Conversation, limit = 40): MobileTimelineEvent[] {
   const threadRoots = chatParticipantRequestReplyRootMap(conversation);
   return conversation.messages
-    .filter((message) => message.role !== "summary" && messageIsVisibleOnPhone(message))
+    .filter((message) => message.role !== "summary" && messageIsVisibleOnPhone(conversation, message))
     .slice(-limit)
     .map((message) => timelineEventFromMessage(message, message.id, conversation, threadRoots));
 }
 
 /** Waiting for the first token is visible work, just like an image without a
- *  caption is still a message. Both must survive a timeline reload. */
-function messageIsVisibleOnPhone(message: ChatMessage): boolean {
+ *  caption is still a message. Both must survive a timeline reload. What the
+ *  desktop keeps off its timeline — internal system triggers such as
+ *  "Auto-resumed @x after member request", hidden carriers, waiting statuses
+ *  — stays off the phone's too, by the same rule; only artifact notes among
+ *  system messages are the User's to see. */
+export function messageIsVisibleOnPhone(conversation: Pick<Conversation, "messages">, message: ChatMessage): boolean {
+  if (chatMessageHiddenFromTimeline(conversation, message)) {
+    return false;
+  }
   return Boolean(message.content.trim()) || timelineAttachmentsFromMessage(message).length > 0 ||
     (message.role === "participant" && message.status === "pending");
 }

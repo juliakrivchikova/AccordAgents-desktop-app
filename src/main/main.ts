@@ -2,7 +2,8 @@ import path from "node:path";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { createHash, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
+import { parseCustomAvatarId, type AvatarStudioTurnRequest, type SaveCustomAvatarRequest } from "../shared/avatarStudio";
+import { chatMessageHiddenFromTimeline } from "../shared/chatParticipantRequestThreads";
 import type {
   AddChatParticipantRequest,
   AgentDetectionRequest,
@@ -2071,7 +2072,11 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
         // list on every return to the foreground and every pull to refresh.
         const opened = await storageService.openConversation(summary.id, MOBILE_CHAT_LIST_SNIPPET_WINDOW);
         const conversation = opened?.conversation;
-        const lastMessage = conversation?.messages.slice().reverse().find((message) => message.content.trim());
+        // The last line the User can see, not the last line stored: an internal
+        // system trigger is hidden on the desktop and must not become the
+        // phone's preview of the chat.
+        const lastMessage = conversation?.messages.slice().reverse().find((message) =>
+          message.content.trim() && !chatMessageHiddenFromTimeline(conversation, message));
         const members = mobileRelayChatMembers(conversation);
         items.push({
           id: summary.id,
@@ -2108,6 +2113,21 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
         });
       }
       return items;
+    },
+    async readMemberAvatar(request: { conversationId: string; avatarId: string }) {
+      const customId = parseCustomAvatarId(request.avatarId);
+      if (!customId) {
+        return undefined;
+      }
+      // Members only: the chat is opened for its metadata, with the smallest
+      // message page storage allows rather than its history.
+      const opened = await storageService.openConversation(request.conversationId, 1);
+      const owned = mobileRelayChatMembers(opened?.conversation).some((participant) => participant.avatarId === request.avatarId);
+      if (!owned) {
+        return undefined;
+      }
+      const read = await settingsService.readCustomAvatar(customId);
+      return { mediaType: read.mediaType, dataBase64: read.dataBase64 };
     },
     async listControlCards(conversationId: string) {
       // Straight from the stored conversation, so a card cannot exist on the
