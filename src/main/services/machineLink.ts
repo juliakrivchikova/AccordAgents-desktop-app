@@ -170,6 +170,23 @@ const TURN_ACK_TIMEOUT_MS = 24 * 60 * 60_000;
 /** How long a freshly connected desktop waits for the machine's own hello
  *  before asking for one. */
 const HELLO_REQUEST_GRACE_MS = 750;
+/** How long a connected machine gets to answer a hello request before its
+ *  last known hello is used instead. */
+const MACHINE_ACTIVITY_TIMEOUT_MS = 15_000;
+
+export interface MachineActivity {
+  machineId: string;
+  connected: boolean;
+  /** Runtime version the machine reports. */
+  appVersion?: string;
+  activeRunIds: string[];
+  pendingTerminalRunIds: string[];
+  dispatchedRunIds: string[];
+}
+
+export function machineActivityIsBusy(activity: MachineActivity): boolean {
+  return activity.activeRunIds.length > 0 || activity.pendingTerminalRunIds.length > 0 || activity.dispatchedRunIds.length > 0;
+}
 
 export class MachineLinkService implements MachineTurnDispatcher {
   private readonly emitter = new EventEmitter();
@@ -695,6 +712,57 @@ export class MachineLinkService implements MachineTurnDispatcher {
       }
     }
     return false;
+  }
+
+  /** Every hello a machine sends: a (re)connect, a restart, an outbox state
+   *  change, or an answer to `machine.hello.request`. */
+  onHello(listener: (event: { machineId: string; appVersion?: string; deviceId?: string }) => void): () => void {
+    this.emitter.on("hello", listener);
+    return () => { this.emitter.off("hello", listener); };
+  }
+
+  /** What one machine is doing right now, from a hello it sends on request
+   *  rather than the one it sent when it connected: a hello is a snapshot,
+   *  and a turn that started or ended since is not in it. Answered with the
+   *  last known hello when the machine does not reply in time, and undefined
+   *  when the machine is not enrolled or not connected. `dispatchedRunIds`
+   *  are turns this desktop sent and has not seen finish, whichever hello
+   *  lists them. */
+  async machineActivity(machineId: string, options: { fresh?: boolean; timeoutMs?: number } = {}): Promise<MachineActivity | undefined> {
+    const connection = this.connections.get(machineId);
+    if (!connection?.machineDeviceId) return undefined;
+    if (options.fresh !== false) {
+      const answered = new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => finish(false), options.timeoutMs ?? MACHINE_ACTIVITY_TIMEOUT_MS);
+        timer.unref?.();
+        const onHello = (event: { machineId: string }): void => { if (event.machineId === machineId) finish(true); };
+        const finish = (value: boolean): void => {
+          clearTimeout(timer);
+          this.emitter.off("hello", onHello);
+          resolve(value);
+        };
+        this.emitter.on("hello", onHello);
+      });
+      await this.send(connection, { type: "machine.hello.request", desktopDeviceId: this.options.desktopDeviceId }).catch(() => undefined);
+      const fresh = await answered;
+      void this.debugLogs.write("machine-link.activity", { machineId, fresh });
+    }
+    const hello = connection.record.lastHello;
+    return {
+      machineId,
+      connected: Boolean(connection.machineDeviceId),
+      appVersion: hello?.appVersion,
+      activeRunIds: [...(hello?.activeRunIds ?? [])],
+      pendingTerminalRunIds: [...(hello?.pendingTerminalRunIds ?? [])],
+      dispatchedRunIds: [...new Set([...connection.pendingTurns.keys(), ...connection.pendingRuns.keys()])]
+    };
+  }
+
+  /** True while any connected machine is running or holding a turn, asked
+   *  afresh from every machine. */
+  async anyMachineBusy(): Promise<boolean> {
+    const activities = await Promise.all([...this.connections.keys()].map((machineId) => this.machineActivity(machineId)));
+    return activities.some((activity) => activity !== undefined && machineActivityIsBusy(activity));
   }
 
   isMachineConnected(machineId: string): boolean {

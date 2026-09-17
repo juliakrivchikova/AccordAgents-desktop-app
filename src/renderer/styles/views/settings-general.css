@@ -1010,6 +1010,12 @@
   color: var(--app-muted);
 }
 
+/* The runtime's update state on a machine row: in progress, failed, or owed. */
+.settings-view .machines-runtime-status {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
 /* Machine setup: installing and upgrading the runtime over SSH. */
 .machine-setup {
   margin-top: 12px;

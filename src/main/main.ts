@@ -163,7 +163,8 @@ import {
 import { AppSkillsService } from "./services/appSkills";
 import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
-import { bootstrapAppUpdater } from "./services/appUpdater";
+import { bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
+import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
 import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService, enabledCloudProviders } from "./services/cloudRunDoctor";
@@ -192,6 +193,8 @@ let mainWindow: BrowserWindow | undefined;
 let quitCleanupStarted = false;
 let quitCleanupFinished = false;
 let quittingForUpdate = false;
+let updateRestartGate: ReturnType<typeof createUpdateRestartGate> | undefined;
+let machineAutoUpgradeService: MachineAutoUpgradeService | undefined;
 
 function sendToMainWindow(channel: string, ...args: unknown[]): boolean {
   const window = mainWindow;
@@ -3179,7 +3182,22 @@ void app.whenReady().then(async () => {
       error: error instanceof Error ? error.message : String(error)
     });
   }
-  bootstrapAppUpdater(debugLogService, betaUpdates);
+  // A downloaded update is applied only when no member is working anywhere:
+  // restarting kills the local members' CLI processes, and the new desktop
+  // then upgrades every machine's runtime, which kills the members there.
+  updateRestartGate = createUpdateRestartGate({
+    isBusy: async () => chatService.activeParticipantRuns().length > 0
+      || (await machineLinkService?.anyMachineBusy().catch(() => true)) === true,
+    onActivitySettled: (listener) => {
+      const offRun = chatService.onParticipantRunSettled(() => listener());
+      const offHello = machineLinkService?.onHello(() => listener());
+      return () => { offRun(); offHello?.(); };
+    },
+    prompt: showUpdateRestartPrompt,
+    quitAndInstall: quitAndInstallUpdate,
+    log: (event, payload) => { void debugLogService.write(event, payload); }
+  });
+  bootstrapAppUpdater(debugLogService, betaUpdates, updateRestartGate);
   await appMcpService.start();
   await storageService.init();
   // Before any pairing is restored: a revocation the owner made is a fact
@@ -3302,7 +3320,28 @@ void app.whenReady().then(async () => {
     );
     machineLinkService.setConversationLoader((conversationId) => storageService.getConversation(conversationId));
     chatService.setMachineLink(machineLinkService);
-    void machineLinkService.start().catch((error) => {
+    // Machines update together with the desktop: a machine whose runtime is
+    // older than this desktop is upgraded as soon as it is connected and idle.
+    const link = machineLinkService;
+    machineAutoUpgradeService = new MachineAutoUpgradeService({
+      desktopVersion: app.getVersion(),
+      listInstalls: () => settingsService.listMachineInstalls(),
+      machineName: async (machineId) => (await settingsService.listMachines()).find((machine) => machine.id === machineId)?.name,
+      machineActivity: (machineId) => link.machineActivity(machineId),
+      payloadReady: () => machineInstallerService.readPayload().ok,
+      upgrade: (request, onProgress) => machineInstallerService.upgrade(request, onProgress),
+      onProgress: (snapshot) => sendToMainWindow("machines:install-progress", snapshot),
+      onChanged: async () => { sendToMainWindow("machines:updated", await machineListResult()); },
+      logger: (event, payload) => { void debugLogService.write(event, payload); }
+    });
+    const autoUpgrade = machineAutoUpgradeService;
+    link.onHello((event) => { void autoUpgrade.evaluate(event.machineId); });
+    chatService.onParticipantRunSettled(() => { if (autoUpgrade.hasWaiting()) void autoUpgrade.evaluate(); });
+    // A turn started from the phone ends on the machine without an event this
+    // desktop subscribes to; while a machine waits for idle, ask again.
+    const autoUpgradeTimer = setInterval(() => { if (autoUpgrade.hasWaiting()) void autoUpgrade.evaluate(); }, 60_000);
+    autoUpgradeTimer.unref?.();
+    void machineLinkService.start().then(() => autoUpgrade.evaluate()).catch((error) => {
       void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });
     });
   } catch (error) {

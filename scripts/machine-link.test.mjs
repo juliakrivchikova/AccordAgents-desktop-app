@@ -679,6 +679,73 @@ test("a damaged outbox that cannot be set aside is never overwritten", async () 
   }
 });
 
+test("machineActivity asks the machine afresh: a turn that started or ended since its last hello is seen", async () => {
+  // The hello a machine sends when it connects is a snapshot; a desktop that
+  // decides to upgrade (drain) the runtime from it would cut short a turn
+  // that started since, or wait for one that ended since.
+  const { MachineLinkService, machineActivityIsBusy } = await import("../dist/main/main/services/machineLink.js");
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  let host;
+  try {
+    const pairing = machinePairing(address.url);
+    const record = { id: "machine-act", name: "Act box", deviceId: "", pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
+    const logs = [];
+    const debugLogs = { write: async (event, payload) => logs.push({ event, payload }) };
+    const link = new MachineLinkService({
+      listMachines: async () => [record], saveMachine: async (next) => { Object.assign(record, next); return [record]; }, removeMachine: async () => [],
+      getMachinePairing: async (key) => (key === pairing.rendezvousId ? pairing : undefined),
+      exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: "{}", agentEnvironment: [] })
+    }, debugLogs, { ...desktopEvents, appVersion: "desktop-v", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50 });
+    const conversations = new Map();
+    let releaseTurn;
+    const hostRuns = [];
+    let turnRunning = false;
+    host = new MachineHostService({
+      runMachineHostedTurn: async (request) => {
+        hostRuns.push(request.runId); turnRunning = true;
+        await new Promise((resolve) => { releaseTurn = resolve; });
+        turnRunning = false;
+        return { messages: [], warnings: [] };
+      },
+      activeParticipantRuns: () => (turnRunning ? hostRuns.map((runId) => ({ runId })) : []),
+      cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async (id, merge) => { const next = merge(conversations.get(id)); if (next) conversations.set(id, next); }
+    }, { getConversation: async (id) => conversations.get(id) }, { importMachineSettingsSnapshot: async () => undefined }, debugLogs,
+    { ...hostEvents, pairing, deviceId: MACHINE_ID, appVersion: "machine-v", createClient: undefined, reconnectDelayMs: 50 });
+    assert.equal(await link.machineActivity("machine-act"), undefined, "not connected: nothing to ask");
+    await link.start();
+    await host.start();
+    await waitFor(() => link.isMachineConnected("machine-act"), 10_000);
+    const idle = await link.machineActivity("machine-act");
+    assert.equal(idle.connected, true);
+    assert.equal(idle.appVersion, "machine-v", "the runtime's own version, not the desktop's");
+    assert.equal(machineActivityIsBusy(idle), false);
+    assert.ok(logs.some((entry) => entry.event === "machine-link.activity" && entry.payload.fresh === true), "answered by a fresh hello");
+
+    const participant = { id: "p-act", homeMachineId: record.id, handle: "bot", kind: "codex-cli" };
+    const triggerMessage = { id: "m-act", role: "user", content: "go", createdAt: new Date().toISOString() };
+    const conversation = { id: "chat-act", kind: "chat", title: "act", messages: [triggerMessage], metadata: { participants: [participant] }, findings: [], createdAt: triggerMessage.createdAt, updatedAt: triggerMessage.createdAt };
+    const turn = link.runTurn({ conversation, participant, triggerMessage, runId: "run-act", pendingMessageId: "pm-act" });
+    await waitFor(() => hostRuns.includes("run-act"), 10_000);
+    const busy = await link.machineActivity("machine-act");
+    assert.equal(machineActivityIsBusy(busy), true, "a turn running now is seen without waiting for the next reconnect");
+    assert.ok(busy.dispatchedRunIds.includes("run-act"), "the desktop's own dispatch counts");
+    assert.ok(busy.activeRunIds.includes("run-act"), "and the machine reports it in its fresh hello");
+    releaseTurn();
+    const result = await turn;
+    // The chat service acknowledges once the result is stored; until then the
+    // machine rightly keeps the run in its outbox and the desktop keeps waiting.
+    assert.equal(machineActivityIsBusy(await link.machineActivity("machine-act")), true, "a result not yet stored still counts");
+    await result.acknowledge();
+    await waitFor(async () => !machineActivityIsBusy(await link.machineActivity("machine-act")), 10_000);
+    const again = await link.machineActivity("machine-act", { fresh: false });
+    assert.equal(again.dispatchedRunIds.length, 0, "the finished turn is no longer counted");
+    link.close();
+  } finally { host?.close(); await relay.close(); }
+});
+
 test("machine link fails fast when the machine is not connected", async () => {
   const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
   const relay = createReferenceRelayServer();

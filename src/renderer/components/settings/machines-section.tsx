@@ -3,7 +3,7 @@ import { Copy, Loader2, Plus, Server, Settings2, Trash2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { CreateMachineResult, MachineLinkStatus, MachineListResult, MachineRecord } from "../../../shared/machineLink";
-import type { MachineInstallRecord, MachineRuntimePayloadInfo } from "../../../shared/machineInstall";
+import { compareVersions, type MachineInstallRecord, type MachineInstallSnapshot, type MachineRuntimePayloadInfo } from "../../../shared/machineInstall";
 import type { MachineTrustedDevicesResult } from "../../../shared/machineLink";
 import { writeClipboardText } from "../../../shared/clipboard";
 import { MachineSetupPanel } from "./machine-setup-panel";
@@ -31,6 +31,9 @@ export function MachinesSection(): JSX.Element {
   const [setupFor, setSetupFor] = useState<string | undefined>();
   const [payload, setPayload] = useState<MachineRuntimePayloadInfo | undefined>();
   const [trust, setTrust] = useState<MachineTrustedDevicesResult | undefined>();
+  /** The setup or update running on each machine right now, as it streams. */
+  const [liveOps, setLiveOps] = useState<Record<string, MachineInstallSnapshot>>({});
+  const [appVersion, setAppVersion] = useState<string | undefined>();
   const [trustDraft, setTrustDraft] = useState({ name: "", deviceId: "", publicKeyDerBase64: "" });
   const [trustError, setTrustError] = useState<string | undefined>();
   const [identityCopied, setIdentityCopied] = useState(false);
@@ -65,8 +68,12 @@ export function MachinesSection(): JSX.Element {
     void window.consensus.listTrustedDevices().then((result) => {
       if (!cancelled) setTrust(result);
     }).catch(() => undefined);
+    void window.consensus.getAppVersion().then((version) => {
+      if (!cancelled) setAppVersion(version);
+    }).catch(() => undefined);
     const off = window.consensus.onMachinesUpdated(apply);
-    const offInstall = window.consensus.onMachineInstallProgress(() => {
+    const offInstall = window.consensus.onMachineInstallProgress((snapshot) => {
+      setLiveOps((current) => ({ ...current, [snapshot.machineId]: snapshot }));
       void window.consensus.listMachineInstalls().then((records) => {
         if (!cancelled) setInstalls(records);
       }).catch(() => undefined);
@@ -225,6 +232,7 @@ export function MachinesSection(): JSX.Element {
                 const live = statusById.get(machine.id);
                 const install = installById.get(machine.id);
                 const connected = live?.connected === true;
+                const runtimeStatus = runtimeStatusText(install, liveOps[machine.id], live?.lastHello?.appVersion, appVersion);
                 return (
                   <li key={machine.id} className="gen-row machines-row" data-testid="machine-row" data-connected={connected ? "true" : "false"}>
                     <div className="gen-row-text">
@@ -245,6 +253,11 @@ export function MachinesSection(): JSX.Element {
                             ? " Set up from this desktop is unfinished."
                             : ""}
                       </div>
+                      {runtimeStatus ? (
+                        <div className="gen-row-desc machines-runtime-status" data-testid="machine-runtime-status" data-state={runtimeStatus.state} role="status">
+                          {runtimeStatus.text}
+                        </div>
+                      ) : null}
                       {setupFor === machine.id ? (
                         <MachineSetupPanel
                           machineId={machine.id}
@@ -396,4 +409,34 @@ export function MachinesSection(): JSX.Element {
       </div>
     </section>
   );
+}
+
+/**
+ * What the machine's runtime is doing relative to this desktop: an update in
+ * progress (automatic or from the button), the last update's failure, or an
+ * update the desktop still owes the machine. Nothing when the runtime is
+ * current, so a healthy row stays quiet.
+ */
+export function runtimeStatusText(
+  install: MachineInstallRecord | undefined,
+  live: MachineInstallSnapshot | undefined,
+  runningVersion: string | undefined,
+  desktopVersion: string | undefined
+): { state: "updating" | "failed" | "pending"; text: string } | undefined {
+  if (live && !isTerminalPhase(live.phase)) {
+    return { state: "updating", text: live.message };
+  }
+  const last = install?.lastOperation;
+  if (last && (last.phase === "error" || last.phase === "needs-attention")) {
+    return { state: "failed", text: `${last.kind === "upgrade" ? "Runtime update" : "Runtime setup"} failed: ${last.error ?? last.message}` };
+  }
+  const running = runningVersion ?? install?.installedVersion;
+  if (install?.installedVersion && running && desktopVersion && compareVersions(desktopVersion, running) > 0) {
+    return { state: "pending", text: `Runtime update to ${desktopVersion} pending; it starts when the machine is connected and idle.` };
+  }
+  return undefined;
+}
+
+function isTerminalPhase(phase: MachineInstallSnapshot["phase"]): boolean {
+  return phase === "ready" || phase === "error" || phase === "needs-attention";
 }

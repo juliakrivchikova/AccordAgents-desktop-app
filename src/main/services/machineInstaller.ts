@@ -1,3 +1,4 @@
+import { compareVersions } from "../../shared/machineInstall";
 /**
  * Installs, upgrades and supervises the headless machine runtime on a Linux
  * computer, and bootstraps a project mirror there once.
@@ -963,49 +964,6 @@ export function versionFence(
     + "Installing an older runtime over a newer one opens the machine's data with an old binary, so it was refused.";
 }
 
-/** Semver precedence, because this app ships betas: `1.10.4-beta.2` must be
- *  older than `1.10.4`, not newer. Getting this backwards would make the
- *  version fence refuse the one upgrade a beta tester needs most. */
-export function compareVersions(a: string, b: string): number {
-  const left = splitVersion(a);
-  const right = splitVersion(b);
-  for (let index = 0; index < 3; index += 1) {
-    if (left.core[index] !== right.core[index]) return left.core[index] < right.core[index] ? -1 : 1;
-  }
-  if (!left.pre.length && !right.pre.length) return 0;
-  // A version with a prerelease tag has lower precedence than one without.
-  if (!left.pre.length) return 1;
-  if (!right.pre.length) return -1;
-  for (let index = 0; index < Math.max(left.pre.length, right.pre.length); index += 1) {
-    const x = left.pre[index];
-    const y = right.pre[index];
-    if (x === undefined) return -1;
-    if (y === undefined) return 1;
-    const numeric = typeof x === "number" && typeof y === "number";
-    if (numeric) {
-      if (x !== y) return x < y ? -1 : 1;
-      continue;
-    }
-    if (typeof x === "number") return -1;
-    if (typeof y === "number") return 1;
-    if (x !== y) return x < y ? -1 : 1;
-  }
-  return 0;
-}
-
-function splitVersion(value: string): { core: [number, number, number]; pre: Array<string | number> } {
-  const [head, ...rest] = value.trim().replace(/^v/, "").split("+")[0].split("-");
-  const core = head.split(".").map((part) => {
-    const parsed = Number.parseInt(part, 10);
-    return Number.isInteger(parsed) ? parsed : 0;
-  });
-  const pre = rest.join("-").split(".").filter(Boolean).map((part) => {
-    const parsed = Number.parseInt(part, 10);
-    return /^\d+$/.test(part) && Number.isInteger(parsed) ? parsed : part;
-  });
-  return { core: [core[0] ?? 0, core[1] ?? 0, core[2] ?? 0], pre };
-}
-
 /** Where the runtime payload the desktop would install came from. It decides
  *  what a failure means: a checkout can rebuild, an installed application
  *  cannot. */
@@ -1265,3 +1223,4 @@ export function redactKeyLikeText(value: string): string {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+export { compareVersions };
