@@ -359,6 +359,22 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     assert.equal(avatarReads.length, 1);
     await evaluate(`(() => { document.getElementById("members-sheet-close").click(); return true; })()`);
 
+    // --- a thread has one way back, and it leads to the chat ----------------
+    // Judged by what is painted, not by the attribute: the [hidden] rule is
+    // what removes the button, and losing it must fail here.
+    const visibleBacks = async () => await evaluate(`(() => [...document.querySelectorAll("#timeline-screen .mobile-chat-header .mobile-icon-button")].filter((n) => n.getClientRects().length > 0).map((n) => n.id))()`);
+    assert.deepEqual(await visibleBacks(), ["back-to-chats"], "a chat shows one arrow, to the list");
+    await evaluate(`(() => { sessionStorage.setItem("accordagents.mobile.openThreadRootId.v1", "a-001"); return true; })()`);
+    await postEnvelope(CHAT_A, "mobile.timeline.events", {
+      type: "mobile.timeline.events", conversationId: CHAT_A,
+      events: [row("a-001-reply", 20, "participant", "@drew", "In the thread.", { threadRootId: "a-001" })]
+    });
+    await waitFor(() => evaluate(`(() => document.getElementById("chat-title").textContent)()`), (text) => text === "Thread", "the thread opens");
+    assert.deepEqual(await visibleBacks(), ["back-to-timeline"], "a thread shows one arrow, to the chat — not two");
+    await evaluate(`(() => { document.getElementById("back-to-timeline").click(); return true; })()`);
+    await waitFor(visibleBacks, (ids) => ids.length === 1 && ids[0] === "back-to-chats", "leaving the thread brings the list arrow back");
+    assert.ok(await evaluate(`(() => document.getElementById("timeline-screen").classList.contains("is-active"))()`), "and stays in the chat");
+
     // --- a run whose last message the desktop hides still ends on the phone
     await postEnvelope(CHAT_A, "mobile.timeline.events", {
       type: "mobile.timeline.events", conversationId: CHAT_A,

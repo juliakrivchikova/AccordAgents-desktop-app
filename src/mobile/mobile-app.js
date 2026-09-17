@@ -4830,8 +4830,12 @@
     return { rows: visible, replyCountByRoot, latestReplyAtByRoot };
   }
 
+  // One way back at a time, as on the desktop: a thread goes back to its
+  // chat, a chat goes back to the list. Both arrows side by side read as a
+  // mistake, and the second one skipped a level.
   function renderThreadHeader(openThreadRoot) {
     const back = document.getElementById("back-to-timeline");
+    const backToChats = document.getElementById("back-to-chats");
     const title = document.getElementById("chat-title");
     if (!back) {
       return;
@@ -4839,6 +4843,9 @@
     const shouldShow = Boolean(openThreadRoot);
     if (back.classList.contains("is-visible") !== shouldShow) {
       back.classList.toggle("is-visible", shouldShow);
+    }
+    if (backToChats && backToChats.hidden !== shouldShow) {
+      backToChats.hidden = shouldShow;
     }
     if (openThreadRoot && title) {
       title.textContent = "Thread";

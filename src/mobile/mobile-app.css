@@ -501,6 +501,12 @@ button.mobile-chat-group-title:active {
   color: var(--fg);
 }
 
+/* The author rule above sets display, which outranks the browser's own
+   [hidden] rule; state it here so a hidden button is really gone. */
+.mobile-icon-button[hidden] {
+  display: none;
+}
+
 .mobile-header-spacer {
   width: 44px;
   height: 44px;
