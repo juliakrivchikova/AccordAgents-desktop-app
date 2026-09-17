@@ -1,5 +1,4 @@
 import type { AgentContextUsage, AgentContextUsageSource, ProviderKind } from "./types";
-import { ZAI_MODEL_CONTEXT_WINDOWS } from "./chatParticipantEndpoint";
 
 const OPENAI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "gpt-5.2": 400_000,
@@ -70,7 +69,6 @@ export function contextWindowForModel(kind: ProviderKind, model: string | undefi
   }
   if (kind === "claude-code" || kind === "anthropic") {
     return contextWindowFromMap(CLAUDE_MODEL_CONTEXT_WINDOWS, normalized)
-      ?? contextWindowFromMap(ZAI_MODEL_CONTEXT_WINDOWS, normalized)
       ?? claudeFamilyContextWindow(normalized)
       ?? glmFamilyContextWindow(normalized);
   }
@@ -116,8 +114,10 @@ function claudeFamilyContextWindow(normalizedModel: string): number | undefined 
   return undefined;
 }
 
-// GLM-5.x served through Claude Code (Z.ai endpoint): Claude Code treats the ids
-// as unrecognized and assumes 200k, which is what its context display shows.
+// GLM-5.x served through Claude Code (Z.ai endpoint). Z.ai's sheet says 1M, but
+// Claude Code 2.1.257 does not recognize GLM ids and reports `contextWindow:
+// 200000` for them in its own stream, which is what the CLI's context display
+// uses; the session-log fallback here matches that so both paths agree.
 function glmFamilyContextWindow(normalizedModel: string): number | undefined {
   return /^glm-5(\.\d+)?(-flash)?$/.test(normalizedModel) ? 200_000 : undefined;
 }

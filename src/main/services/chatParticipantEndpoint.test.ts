@@ -8,7 +8,9 @@ import {
   ZAI_MODELS,
   chatParticipantEndpointDefaultModel,
   chatParticipantEndpointEnv,
-  chatParticipantEndpointEnvKey,
+  chatParticipantEndpointEnvVersion,
+  chatParticipantEndpointHandleSlug,
+  chatParticipantEndpointDefaultModelLabel,
   chatParticipantEndpointFor,
   chatParticipantEndpointLabel,
   chatParticipantEndpointValidationError,
@@ -31,11 +33,19 @@ test("normalizeChatParticipantEndpoint repairs partial records and rejects unkno
   assert.equal(normalizeChatParticipantEndpoint(undefined), undefined);
 });
 
-test("endpoint validation names the field that is wrong", () => {
+test("endpoint validation runs on the raw value and names the field that is wrong", () => {
   assert.equal(chatParticipantEndpointValidationError(ZAI), undefined);
+  assert.equal(chatParticipantEndpointValidationError({ preset: "zai", baseUrl: " https://proxy.example/ ", authTokenEnvKey: " MY_KEY " }), undefined);
   assert.match(chatParticipantEndpointValidationError({ ...ZAI, baseUrl: "ftp://x" }) ?? "", /Endpoint URL/);
+  assert.match(chatParticipantEndpointValidationError({ ...ZAI, baseUrl: "not a url" }) ?? "", /Endpoint URL/);
   assert.match(chatParticipantEndpointValidationError({ ...ZAI, authTokenEnvKey: "with-dash" }) ?? "", /API key variable/);
+  // Names Settings → Environment refuses (managed by the app or the OS) are refused here too.
+  assert.match(chatParticipantEndpointValidationError({ ...ZAI, authTokenEnvKey: "PATH" }) ?? "", /API key variable/);
+  assert.match(chatParticipantEndpointValidationError({ ...ZAI, authTokenEnvKey: "ACCORD_AGENTS_MCP_TOKEN" }) ?? "", /API key variable/);
+  assert.match(chatParticipantEndpointValidationError({ preset: "nope" }) ?? "", /not recognized/);
+  assert.match(chatParticipantEndpointValidationError("zai") ?? "", /not recognized/);
   assert.equal(chatParticipantEndpointValidationError(undefined), undefined);
+  assert.equal(chatParticipantEndpointValidationError(null), undefined);
 });
 
 test("only Claude Code members carry an endpoint", () => {
@@ -46,6 +56,9 @@ test("only Claude Code members carry an endpoint", () => {
   assert.equal(chatParticipantEndpointLabel(undefined), undefined);
   assert.equal(chatParticipantEndpointDefaultModel(ZAI), ZAI_DEFAULT_MODEL);
   assert.equal(chatParticipantEndpointDefaultModel(undefined), undefined);
+  assert.equal(chatParticipantEndpointDefaultModelLabel(ZAI), "GLM-5.3");
+  assert.equal(chatParticipantEndpointHandleSlug(ZAI), "glm");
+  assert.equal(chatParticipantEndpointHandleSlug(undefined), undefined);
   assert.equal(sameChatParticipantEndpoint(ZAI, { ...ZAI }), true);
   assert.equal(sameChatParticipantEndpoint(ZAI, { ...ZAI, authTokenEnvKey: "OTHER" }), false);
   assert.equal(sameChatParticipantEndpoint(undefined, undefined), true);
@@ -63,7 +76,15 @@ test("endpoint env mirrors the Z.ai Claude Code guide and reads the token from S
     ANTHROPIC_DEFAULT_HAIKU_MODEL: "glm-5.3-flash",
     API_TIMEOUT_MS: "3000000",
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000",
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    // Inherited Anthropic credentials and cloud-provider switches are cleared so
+    // the user's own Anthropic key is never sent to the endpoint (Claude Code
+    // otherwise sends it as x-api-key next to the Bearer token).
+    ANTHROPIC_API_KEY: "",
+    CLAUDE_CODE_OAUTH_TOKEN: "",
+    CLAUDE_CODE_USE_BEDROCK: "",
+    CLAUDE_CODE_USE_VERTEX: "",
+    CLAUDE_CODE_USE_FOUNDRY: ""
   });
   // No model on the member → the preset default, never the CLI's Anthropic alias.
   assert.equal(chatParticipantEndpointEnv(ZAI, { ZAI_API_KEY: "t" }, undefined).env.ANTHROPIC_DEFAULT_OPUS_MODEL, ZAI_DEFAULT_MODEL);
@@ -75,15 +96,19 @@ test("endpoint env mirrors the Z.ai Claude Code guide and reads the token from S
 test("a missing or blank token variable is reported, not silently sent as an empty header", () => {
   assert.deepEqual(chatParticipantEndpointEnv(ZAI, {}, "glm-5.3"), { env: {}, missingEnvKey: "ZAI_API_KEY" });
   assert.deepEqual(chatParticipantEndpointEnv(ZAI, { ZAI_API_KEY: "   " }, "glm-5.3"), { env: {}, missingEnvKey: "ZAI_API_KEY" });
+  // Object prototype members are not Settings values.
+  for (const key of ["constructor", "__proto__", "toString"]) {
+    assert.deepEqual(chatParticipantEndpointEnv({ ...ZAI, authTokenEnvKey: key }, {}, "glm-5.3"), { env: {}, missingEnvKey: key });
+  }
 });
 
-test("endpoint env key changes with endpoint or model so a warm process is recycled", () => {
-  assert.equal(chatParticipantEndpointEnvKey(undefined, "glm-5.3"), "");
-  const base = chatParticipantEndpointEnvKey(ZAI, "glm-5.3");
-  assert.notEqual(base, chatParticipantEndpointEnvKey(ZAI, "glm-5.2"));
-  assert.notEqual(base, chatParticipantEndpointEnvKey({ ...ZAI, baseUrl: "https://other.example" }, "glm-5.3"));
-  assert.notEqual(base, chatParticipantEndpointEnvKey({ ...ZAI, authTokenEnvKey: "OTHER" }, "glm-5.3"));
-  assert.equal(base, chatParticipantEndpointEnvKey({ ...ZAI }, " glm-5.3 "));
+test("endpoint env version changes with endpoint or model so a warm process is recycled", () => {
+  assert.equal(chatParticipantEndpointEnvVersion(undefined, "glm-5.3"), "");
+  const base = chatParticipantEndpointEnvVersion(ZAI, "glm-5.3");
+  assert.notEqual(base, chatParticipantEndpointEnvVersion(ZAI, "glm-5.2"));
+  assert.notEqual(base, chatParticipantEndpointEnvVersion({ ...ZAI, baseUrl: "https://other.example" }, "glm-5.3"));
+  assert.notEqual(base, chatParticipantEndpointEnvVersion({ ...ZAI, authTokenEnvKey: "OTHER" }, "glm-5.3"));
+  assert.equal(base, chatParticipantEndpointEnvVersion({ ...ZAI }, " glm-5.3 "));
 });
 
 test("GLM models resolve the context window Claude Code itself reports for them", () => {

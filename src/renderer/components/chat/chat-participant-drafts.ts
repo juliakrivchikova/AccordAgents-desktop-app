@@ -31,6 +31,7 @@ import { chatProviderKind, preferredChatProviderSetting } from "../../../shared/
 import {
   ZAI_ENDPOINT_PRESET,
   chatParticipantEndpointDefaultModel,
+  chatParticipantEndpointDefaultModelLabel,
   chatParticipantEndpointFor,
   chatParticipantEndpointLabel,
   chatParticipantEndpointValidationError,
@@ -153,21 +154,27 @@ export function chatCliProviderLabel(kind: ChatProviderKind | undefined, endpoin
   return "CLI";
 }
 
-export function chatInheritedCliSettingLabel(kind: ChatProviderKind | undefined, endpoint?: ChatParticipantEndpoint): string {
-  const endpointDefault = kind ? chatParticipantEndpointDefaultModel(chatParticipantEndpointFor(kind, endpoint)) : undefined;
-  if (endpointDefault) {
-    return `${endpointDefault} (default)`;
-  }
+/** Label of the "leave it to the CLI" choice for a setting the CLI owns
+ *  (reasoning effort, or the model of a plain member). */
+export function chatInheritedCliSettingLabel(kind: ChatProviderKind | undefined): string {
   return `${chatCliProviderLabel(kind)} setting`;
+}
+
+/** Label of the model picker's default entry: the CLI's own setting for a plain
+ *  member, the endpoint's fixed default for an endpoint member. */
+export function chatModelDefaultLabel(kind: ChatProviderKind | undefined, endpoint?: ChatParticipantEndpoint): string {
+  const endpointDefault = kind ? chatParticipantEndpointDefaultModelLabel(chatParticipantEndpointFor(kind, endpoint)) : undefined;
+  return endpointDefault ? `${endpointDefault} (default)` : chatInheritedCliSettingLabel(kind);
 }
 
 /** Composite id for the Provider / CLI picker: an endpoint member is its own
  *  entry ("GLM (Z.ai)") next to Claude Code / Codex / Antigravity. */
-export type ChatProviderOptionId = ChatProviderKind | `claude-code:${NonNullable<ChatParticipantEndpoint["preset"]>}`;
+const PROVIDER_OPTION_SEPARATOR = ":";
+export type ChatProviderOptionId = ChatProviderKind | `${ChatProviderKind}${typeof PROVIDER_OPTION_SEPARATOR}${ChatParticipantEndpoint["preset"]}`;
 
 export function chatProviderOptionId(kind: ChatProviderKind, endpoint: ChatParticipantEndpoint | undefined): ChatProviderOptionId {
   const scoped = chatParticipantEndpointFor(kind, endpoint);
-  return scoped ? `claude-code:${scoped.preset}` : kind;
+  return scoped ? `${kind}${PROVIDER_OPTION_SEPARATOR}${scoped.preset}` : kind;
 }
 
 export interface ChatProviderOption {
@@ -196,7 +203,7 @@ export function chatProviderOptionPatch(
   optionId: string,
   current: Pick<ChatParticipantDraft, "kind" | "endpoint">
 ): Pick<ChatParticipantDraft, "kind" | "endpoint"> {
-  const [kind, preset] = optionId.split(":");
+  const [kind, preset] = optionId.split(PROVIDER_OPTION_SEPARATOR);
   const nextKind = chatProviderKind(kind);
   if (nextKind !== "claude-code" || !isChatParticipantEndpointPreset(preset)) {
     return { kind: nextKind, endpoint: undefined };
@@ -391,7 +398,8 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
     : fallback.roleConfigId;
   const provider = settings.providers.find((item) => item.kind === draft.kind) ?? settings.providers.find((item) => item.kind === fallback.kind);
   const kind = chatProviderKind(provider?.kind, fallback.kind);
-  const handle = draft.handle.trim() || (roleConfigId ? generatedChatHandle(settings, kind, roleConfigId) : "");
+  const endpoint = chatParticipantEndpointFor(kind, draft.endpoint);
+  const handle = draft.handle.trim() || (roleConfigId ? generatedChatHandle(settings, kind, roleConfigId, new Set(), endpoint) : "");
   const selectedRuleIds = new Set(normalizeBehaviorRuleIds(draft.behaviorRuleIds));
   return {
     ...draft,
@@ -401,10 +409,10 @@ export function normalizeChatParticipantDraftForSettings(draft: ChatParticipantD
       .map((rule) => rule.id)
       .filter((id) => selectedRuleIds.has(id)),
     kind,
-    model: draft.model ?? chatParticipantEndpointDefaultModel(chatParticipantEndpointFor(kind, draft.endpoint)) ?? provider?.model,
+    model: draft.model ?? chatParticipantEndpointDefaultModel(endpoint) ?? provider?.model,
     reasoningEffort: normalizeChatReasoningEffort(draft.reasoningEffort, kind),
     avatarId: normalizedChatAvatarId(kind, draft.avatarId, handle || roleConfigId),
-    endpoint: chatParticipantEndpointFor(kind, draft.endpoint),
+    endpoint,
     agentMode: normalizeChatAgentMode(draft.agentMode),
     permissions: normalizeChatAgentPermissions(draft.permissions),
     remoteExecution: normalizeChatRunLocation(draft.remoteExecution),

@@ -3383,15 +3383,16 @@ export class SettingsService {
   }
 
   private participantEndpointForUpdate(update: Pick<ChatParticipantConfigUpdate, "kind" | "endpoint">): ChatParticipantEndpoint | undefined {
-    const endpoint = chatParticipantEndpointFor(update.kind, normalizeChatParticipantEndpoint(update.endpoint));
-    if (update.endpoint && update.kind === "claude-code" && !endpoint) {
-      throw new Error("Member endpoint is not recognized.");
+    if (update.kind !== "claude-code") {
+      return undefined;
     }
-    const error = chatParticipantEndpointValidationError(endpoint);
+    // Validate what the user actually typed; normalizing first would repair a
+    // bad URL or variable name to the preset default and hide the mistake.
+    const error = chatParticipantEndpointValidationError(update.endpoint);
     if (error) {
       throw new Error(error);
     }
-    return endpoint;
+    return normalizeChatParticipantEndpoint(update.endpoint);
   }
 
   private normalizeSeedState(value: unknown): ChatParticipantSeedState {

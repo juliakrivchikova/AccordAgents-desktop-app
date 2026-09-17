@@ -8,6 +8,7 @@ import { normalizeChatAgentMode } from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { participantProviderLabel } from "../chat/chat-conversation-data";
 import { displayChatRoleLabel } from "../chat/chat-role-labels";
+import { defaultChatParticipantEndpoint } from "../../../shared/chatParticipantEndpoint";
 import {
   ChatParticipantAvatarField,
   ChatParticipantEndpointField,
@@ -210,6 +211,7 @@ export function ParticipantEditorDialog(props: {
                   <ChatParticipantEndpointField
                     value={draft.endpoint.baseUrl}
                     ariaLabel="Endpoint URL"
+                    placeholder={defaultChatParticipantEndpoint(draft.endpoint.preset).baseUrl}
                     onChange={(baseUrl) => patchDraft({ endpoint: { ...draft.endpoint!, baseUrl } })}
                   />
                 </ChatParticipantSpecRow>
@@ -218,9 +220,10 @@ export function ParticipantEditorDialog(props: {
                     <ChatParticipantEndpointField
                       value={draft.endpoint.authTokenEnvKey}
                       ariaLabel="API key environment variable"
+                      placeholder={defaultChatParticipantEndpoint(draft.endpoint.preset).authTokenEnvKey}
                       onChange={(authTokenEnvKey) => patchDraft({ endpoint: { ...draft.endpoint!, authTokenEnvKey } })}
                     />
-                    <small>Set it in Settings → Environment.</small>
+                    <small>Add it under Environment in Settings.</small>
                   </span>
                 </ChatParticipantSpecRow>
               </>

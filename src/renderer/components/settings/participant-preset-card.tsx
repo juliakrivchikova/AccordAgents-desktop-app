@@ -60,7 +60,9 @@ export function ParticipantPresetCard(props: {
         <ParticipantFact
           label="Provider"
           value={participantProviderLabel(props.participant.kind, props.participant.endpoint)}
-          providerKind={props.participant.kind}
+          // The brand dot/color names the CLI vendor; an endpoint member's label
+          // names a different vendor, so it stays neutral.
+          providerKind={props.participant.endpoint ? undefined : props.participant.kind}
         />
         <ParticipantFact label="Model" value={props.participant.model?.trim() || "CLI default"} />
         <ParticipantFact

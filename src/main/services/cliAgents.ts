@@ -5320,6 +5320,17 @@ export class CliAgentRunner {
     return `${warm.conversationId}:${warm.participantId}`;
   }
 
+  /** Retire every warm process of one member, e.g. when the credential it was
+   *  started with is removed; otherwise it would linger until the idle timeout. */
+  async closeWarmAgents(conversationId: string, participantId: string, reason = "context-changed"): Promise<void> {
+    const scopeKey = this.warmAgentScopeKey({ conversationId, participantId, contextKey: "", idleTimeoutMs: 0 });
+    const entries = Array.from(this.warmAgents.values()).filter((entry) => entry.scopeKey === scopeKey);
+    for (const entry of entries) {
+      this.warmAgents.delete(entry.key);
+      await this.closeWarmAgent(entry, reason);
+    }
+  }
+
   private async closeStaleWarmAgents(scopeKey: string, nextKey: string): Promise<void> {
     const stale = Array.from(this.warmAgents.values()).filter((entry) => entry.scopeKey === scopeKey && entry.key !== nextKey);
     for (const entry of stale) {

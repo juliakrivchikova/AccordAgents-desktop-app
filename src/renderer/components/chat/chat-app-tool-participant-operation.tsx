@@ -6,11 +6,12 @@ import {
   resolveChatManageRolesParticipantsPermission
 } from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
-import type { ChatAgentMode, ChatExistingParticipantOverrides, ChatParticipantChangeRequest, ChatParticipantConfig, ChatProviderKind, ChatRoleConfig, ChatRosterChangeParticipantInput } from "../../../shared/types";
+import type { ChatAgentMode, ChatExistingParticipantOverrides, ChatParticipantChangeRequest, ChatParticipantConfig, ChatRoleConfig, ChatRosterChangeParticipantInput } from "../../../shared/types";
 import { Avatar, avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant, mapChatAvatarIdToKind } from "./chat-avatars";
-import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel } from "./chat-participant-drafts";
+import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel, chatProviderOptionId, chatProviderOptionPatch, chatProviderOptions } from "./chat-participant-drafts";
+import { chatParticipantEndpointDefaultModel } from "../../../shared/chatParticipantEndpoint";
 import {
   ChatParticipantAvatarField as ChatAppToolAvatarField,
   ChatParticipantInlineAutoWatchRow as ChatAppToolInlineAutoWatchRow,
@@ -154,16 +155,21 @@ export function ChatAppToolParticipantChangeOperation(props: {
               <ChatAppToolInlineSelectRow
                 label="Provider / CLI"
                 value={participantProviderLabel(participant.kind, participant.endpoint)}
-                current={participant.kind}
-                options={[{ value: "codex-cli", label: "Codex CLI" }, { value: "claude-code", label: "Claude Code" }, { value: "gemini-cli", label: "Gemini CLI" }]}
+                current={chatProviderOptionId(participant.kind, participant.endpoint)}
+                options={chatProviderOptions(["codex-cli", "claude-code", "gemini-cli"]).map((option) => ({ value: option.id, label: option.label }))}
                 onSelect={(value) => {
-                  const nextKind: ChatProviderKind = value === "claude-code" ? "claude-code" : value === "gemini-cli" ? "gemini-cli" : "codex-cli";
-                  if (nextKind === participant.kind) {
+                  if (value === chatProviderOptionId(participant.kind, participant.endpoint)) {
                     return;
                   }
-                  // Model is provider-specific (e.g. gpt-5.5 is Codex-only), so reset to CLI
-                  // default on a provider switch; the model picker re-fetches the new catalog.
-                  const next: Partial<ChatRosterChangeParticipantInput> = { kind: nextKind, model: undefined };
+                  const { kind: nextKind, endpoint } = chatProviderOptionPatch(value, participant);
+                  // Model is provider-specific (e.g. gpt-5.5 is Codex-only, glm-* is
+                  // endpoint-only), so reset it on a provider switch; the model picker
+                  // re-fetches the new catalog.
+                  const next: Partial<ChatRosterChangeParticipantInput> = {
+                    kind: nextKind,
+                    endpoint,
+                    model: chatParticipantEndpointDefaultModel(endpoint)
+                  };
                   if (participant.avatarId) {
                     next.avatarId = mapChatAvatarIdToKind(nextKind, participant.avatarId, participant.handle);
                   }
@@ -172,6 +178,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
               />
               <ChatAppToolInlineModelRow
                 kind={participant.kind}
+                endpoint={participant.endpoint}
                 model={participant.model}
                 onSelect={(model) => patchParticipant({ model })}
               />
@@ -281,6 +288,7 @@ export function ChatAppToolExistingParticipantSpec(props: {
       </div>
       <ChatAppToolInlineModelRow
         kind={preset.kind}
+        endpoint={preset.endpoint}
         model={model}
         onSelect={(next) => props.onOverride({ model: next })}
       />

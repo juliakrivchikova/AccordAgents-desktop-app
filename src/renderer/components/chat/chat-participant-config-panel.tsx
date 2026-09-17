@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type React from "react";
 import { Check, ChevronDown, ShieldCheck } from "lucide-react";
 
@@ -19,17 +19,13 @@ import type {
   ChatParticipantRequestPermission,
   ChatProviderKind,
   ChatRoleParticipantDefaults,
-  ChatRosterChangeParticipantInput,
-  ProviderModelCatalog
+  ChatRosterChangeParticipantInput
 } from "../../../shared/types";
-import {
-  chatParticipantEndpointFor,
-  chatParticipantEndpointModelCatalog,
-  defaultChatParticipantEndpoint
-} from "../../../shared/chatParticipantEndpoint";
+import { chatParticipantEndpointFor } from "../../../shared/chatParticipantEndpoint";
+import { useProviderModelCatalog } from "./use-provider-model-catalog";
 import { Avatar } from "../avatar/avatar";
 import { avatarForChatAvatarOption, avatarForChatParticipant, chatAvatarOptionsForKind, normalizedChatAvatarId } from "./chat-avatars";
-import { chatAgentModeLabel, chatInheritedCliSettingLabel } from "./chat-participant-drafts";
+import { chatAgentModeLabel, chatModelDefaultLabel } from "./chat-participant-drafts";
 
 const PARTICIPANT_REQUEST_PERMISSION_OPTIONS: Array<{ value: ChatParticipantRequestPermission; label: string }> = [
   { value: "ask", label: "Always ask approval" },
@@ -207,41 +203,13 @@ export function ChatParticipantInlineModelRow(props: {
   onSelect: (model: string | undefined) => void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const [catalog, setCatalog] = useState<ProviderModelCatalog | undefined>();
   const [manual, setManual] = useState("");
   const value = props.model?.trim() || undefined;
   const endpoint = chatParticipantEndpointFor(props.kind, props.endpoint);
-  const endpointPreset = endpoint?.preset;
-
-  useEffect(() => {
-    let cancelled = false;
-    // Endpoint members have a fixed, known model list; the CLI's own catalog
-    // would describe Anthropic models that the endpoint does not serve.
-    if (endpointPreset) {
-      setCatalog(chatParticipantEndpointModelCatalog(defaultChatParticipantEndpoint(endpointPreset)));
-      return () => {
-        cancelled = true;
-      };
-    }
-    void window.consensus
-      .listProviderModels(props.kind)
-      .then((next) => {
-        if (!cancelled) {
-          setCatalog(next);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCatalog(undefined);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [endpointPreset, props.kind]);
+  const { catalog } = useProviderModelCatalog(props.kind, endpoint);
 
   const models = catalog?.models ?? [];
-  const inheritedLabel = chatInheritedCliSettingLabel(props.kind, endpoint);
+  const inheritedLabel = chatModelDefaultLabel(props.kind, endpoint);
 
   return (
     <ChatParticipantSpecRow label="Model">

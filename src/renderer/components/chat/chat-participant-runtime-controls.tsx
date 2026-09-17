@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ChevronDown, FileText, Globe2, Pencil, Terminal } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -10,11 +10,8 @@ import {
   normalizeOptionalChatParticipantRequestPermission
 } from "../../../shared/agentPermissions";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
-import {
-  chatParticipantEndpointFor,
-  chatParticipantEndpointModelCatalog,
-  defaultChatParticipantEndpoint
-} from "../../../shared/chatParticipantEndpoint";
+import { chatParticipantEndpointFor } from "../../../shared/chatParticipantEndpoint";
+import { useProviderModelCatalog } from "./use-provider-model-catalog";
 import type {
   ChatAgentMode,
   ChatAgentPermissions,
@@ -24,14 +21,14 @@ import type {
   ChatRoleParticipantDefaults,
   ChatParticipantWatcherPausedReason,
   ChatProviderKind,
-  ChatReasoningEffort,
-  ProviderModelCatalog
+  ChatReasoningEffort
 } from "../../../shared/types";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import {
   CHAT_AGENT_MODE_OPTIONS,
   chatCliProviderLabel,
   chatInheritedCliSettingLabel,
+  chatModelDefaultLabel,
   normalizeChatRunLocation
 } from "./chat-participant-drafts";
 
@@ -67,7 +64,7 @@ export function ParticipantRuntimeControls(props: {
   const reasoningValue = participant.reasoningEffort ?? REASONING_DEFAULT_VALUE;
   const endpoint = chatParticipantEndpointFor(participant.kind, participant.endpoint);
   const cliSettingLabel = chatInheritedCliSettingLabel(participant.kind);
-  const modelDefaultLabel = chatInheritedCliSettingLabel(participant.kind, endpoint);
+  const modelDefaultLabel = chatModelDefaultLabel(participant.kind, endpoint);
   const providerLabel = chatCliProviderLabel(participant.kind, endpoint);
   const controlsDisabled = props.disabled || props.readOnly === true;
 
@@ -309,37 +306,9 @@ function GhostModelSelect(props: {
   disabled: boolean;
   onChange: (model: string) => void;
 }): JSX.Element {
-  const [catalog, setCatalog] = useState<ProviderModelCatalog | undefined>();
   const [manual, setManual] = useState(false);
   const model = props.model?.trim() || undefined;
-  const endpointPreset = props.endpoint?.preset;
-
-  useEffect(() => {
-    let cancelled = false;
-    setCatalog(undefined);
-    // Endpoint members have a fixed, known model list; the CLI's own catalog
-    // would describe Anthropic models that the endpoint does not serve.
-    if (endpointPreset) {
-      setCatalog(chatParticipantEndpointModelCatalog(defaultChatParticipantEndpoint(endpointPreset)));
-      return () => {
-        cancelled = true;
-      };
-    }
-    void window.consensus.listProviderModels(props.kind)
-      .then((next) => {
-        if (!cancelled) {
-          setCatalog(next);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCatalog(undefined);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [endpointPreset, props.kind]);
+  const { catalog } = useProviderModelCatalog(props.kind, props.endpoint);
 
   const models = catalog?.models ?? [];
   const known = model ? models.find((item) => item.id === model) : undefined;

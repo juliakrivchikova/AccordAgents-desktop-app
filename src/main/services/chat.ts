@@ -32,6 +32,7 @@ import type {
   ChatParticipantActivitySnapshot,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
+  ChatParticipantEndpoint,
   ChatParticipantInput,
   ChatParticipantRequestPermission,
   ChatParticipantWatcherState,
@@ -122,8 +123,11 @@ import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from 
 import {
   chatParticipantEndpointDefaultModel,
   chatParticipantEndpointEnv,
-  chatParticipantEndpointEnvKey,
+  chatParticipantEndpointEnvVersion,
   chatParticipantEndpointFor,
+  chatParticipantEndpointLabel,
+  defaultChatParticipantEndpoint,
+  isChatParticipantEndpointPreset,
   normalizeChatParticipantEndpoint,
   sameChatParticipantEndpoint
 } from "../../shared/chatParticipantEndpoint";
@@ -213,6 +217,7 @@ import {
   agentReadinessReason,
   cliProviderMetadata,
   providerEnabled,
+  readinessForParticipant,
   readinessForProvider,
   readyProviderKinds,
   resolveAssistantProviderKind
@@ -703,29 +708,63 @@ export class ChatService {
     return settings.getManualAgentEnvironment();
   }
 
+  /** The member's endpoint as the run should see it: scoped to Claude Code and
+   *  repaired if a stored record is damaged, so a run never starts half-configured
+   *  (endpoint model but no endpoint env). */
+  private participantEndpoint(participant: Pick<ChatParticipant, "kind" | "endpoint">): ChatParticipantEndpoint | undefined {
+    return chatParticipantEndpointFor(participant.kind, normalizeChatParticipantEndpoint(participant.endpoint));
+  }
+
+  /** Endpoint taken from a member record that an agent or an approval card
+   *  produced. Only the preset choice is honored: the URL and the token variable
+   *  always come from the preset defaults, so a proposed member can never point
+   *  a Settings → Environment secret at an arbitrary host. The user changes those
+   *  two fields on the saved preset in Settings, where they are visible. */
+  private presetEndpointFromRecord(kind: ChatProviderKind, value: unknown): ChatParticipantEndpoint | undefined {
+    const preset = value && typeof value === "object" && !Array.isArray(value)
+      ? (value as { preset?: unknown }).preset
+      : undefined;
+    return kind === "claude-code" && isChatParticipantEndpointPreset(preset)
+      ? defaultChatParticipantEndpoint(preset)
+      : undefined;
+  }
+
   /** Settings → Environment plus, for an endpoint member, the variables that
-   *  point Claude Code at that endpoint. Local runs, compaction and remote workers
-   *  all take this same map, so the member behaves identically wherever it runs.
-   *  `missingEnvKey` names the Settings variable the endpoint needs but lacks. */
+   *  point Claude Code at that endpoint. Local runs and compaction take this same
+   *  map (and the remote `extraEnv` will, once Claude members can run remotely),
+   *  so the member behaves identically wherever it runs. `missingEnvKey` names the
+   *  Settings variable the endpoint needs but has no usable value for. */
   private async agentEnvironmentForParticipant(
     participant: ChatParticipant,
     cliParticipant: Pick<ParticipantConfig, "model">
   ): Promise<{ env: NodeJS.ProcessEnv; version: string; missingEnvKey?: string }> {
     const manual = await this.manualAgentEnvironmentForRun();
-    const endpoint = chatParticipantEndpointFor(participant.kind, participant.endpoint);
+    const endpoint = this.participantEndpoint(participant);
     if (!endpoint) {
       return manual;
     }
     const resolved = chatParticipantEndpointEnv(endpoint, manual.env, cliParticipant.model);
     return {
       env: { ...manual.env, ...resolved.env },
-      version: `${manual.version}|${chatParticipantEndpointEnvKey(endpoint, cliParticipant.model)}`,
+      version: `${manual.version}|${chatParticipantEndpointEnvVersion(endpoint, cliParticipant.model)}`,
       missingEnvKey: resolved.missingEnvKey
     };
   }
 
+  /** No trailing period: the compaction path embeds this in its own sentence. */
   private endpointEnvMissingMessage(participant: ChatParticipant, envKey: string): string {
-    return `@${participant.handle} cannot start: add ${envKey} in Settings → Environment. Its GLM (Z.ai) endpoint reads the API key from that variable.`;
+    const label = chatParticipantEndpointLabel(this.participantEndpoint(participant)) ?? "endpoint";
+    return `@${participant.handle} cannot start: ${envKey} has no value in Settings → Environment (add it, or enable it if it is listed). Its ${label} endpoint reads the API key from that variable`;
+  }
+
+  /** A member whose credential went away must not keep a warm process that still
+   *  holds the old token; the runner would otherwise keep it until the idle timeout. */
+  private async closeWarmAgentsForParticipant(conversationId: string, participantId: string): Promise<void> {
+    const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "closeWarmAgents">>;
+    if (typeof runner.closeWarmAgents !== "function") {
+      return;
+    }
+    await runner.closeWarmAgents.call(this.cliRunner, conversationId, participantId, "endpoint-credential-missing").catch(() => undefined);
   }
 
   setRemoteRunService(remoteRuns: RemoteRunStarter): void {
@@ -1499,6 +1538,9 @@ export class ChatService {
       const appMcpToolInventoryKey = this.appMcpToolInventoryKey(
         this.appMcpToolNames(this.appToolCapabilitiesForRun(session, permissions))
       );
+      if (agentEnvironment.missingEnvKey) {
+        await this.closeWarmAgentsForParticipant(conversation.id, participant.id);
+      }
       const result: CliAgentCompactResult = agentEnvironment.missingEnvKey
         ? { participant: cliParticipant, ok: false, error: this.endpointEnvMissingMessage(participant, agentEnvironment.missingEnvKey) }
         : await this.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
@@ -1527,7 +1569,7 @@ export class ChatService {
         session.sessionId = result.sessionId;
       }
       let usage = result.contextUsage;
-      if (!usage) {
+      if (!usage && !agentEnvironment.missingEnvKey) {
         try {
           usage = await this.cliRunner.contextUsageForSession(cliParticipant, session.sessionId);
         } catch (error) {
@@ -1592,14 +1634,14 @@ export class ChatService {
 
   async syncSavedParticipantAvatar(
     previous: Pick<ChatParticipantConfig, "handle" | "kind"> | undefined,
-    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId" | "endpoint">
+    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId" | "endpoint" | "model">
   ): Promise<void> {
     await this.syncSavedParticipantConfig(previous, next, { behaviorRules: false });
   }
 
   async syncSavedParticipantConfig(
     previous: Pick<ChatParticipantConfig, "handle" | "kind"> | undefined,
-    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId" | "behaviorRuleIds" | "endpoint">,
+    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId" | "behaviorRuleIds" | "endpoint" | "model">,
     options: { behaviorRules?: boolean } = {}
   ): Promise<void> {
     const normalizedPreviousHandle = previous?.handle.trim().replace(/^@/, "").toLowerCase();
@@ -1618,6 +1660,7 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         const participants = this.chatParticipants(conversation);
         let changed = false;
+        const endpointMoved = new Set<string>();
         const syncedParticipants = participants.map((participant) => {
           const sameSavedParticipant = participant.participantConfigId === next.id || participant.id === next.id;
           const sameLegacyHandleAndKind = !participant.participantConfigId &&
@@ -1626,7 +1669,12 @@ export class ChatService {
           if (!sameSavedParticipant && !sameLegacyHandleAndKind) {
             return participant;
           }
-          const synced = this.syncParticipantFromSavedConfig(participant, next, options);
+          // The handle+kind fallback exists for members created before presets
+          // carried ids; it may follow cosmetics, but never a backend switch.
+          const synced = this.syncParticipantFromSavedConfig(participant, next, { ...options, endpoint: sameSavedParticipant });
+          if (synced.endpoint?.preset !== participant.endpoint?.preset) {
+            endpointMoved.add(participant.id);
+          }
           changed = changed || synced !== participant;
           return synced;
         });
@@ -1637,7 +1685,20 @@ export class ChatService {
           ...conversation.metadata,
           participants: syncedParticipants
         };
+        if (endpointMoved.size > 0) {
+          // A CLI session transcript belongs to the backend that produced it
+          // (thinking blocks are signed by that side), so a member that moved on
+          // or off an endpoint starts a fresh session on its next turn.
+          for (const participantId of endpointMoved) {
+            await this.closeWarmAgentsForParticipant(conversation.id, participantId);
+          }
+          conversation.metadata = {
+            ...conversation.metadata,
+            participantSessions: this.chatSessions(conversation).filter((session) => !endpointMoved.has(session.participantId))
+          };
+        }
         await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
       });
     }
   }
@@ -1698,7 +1759,7 @@ export class ChatService {
       if (!config) {
         return participant;
       }
-      const synced = this.syncParticipantFromSavedConfig(participant, config);
+      const synced = this.syncParticipantFromSavedConfig(participant, config, { endpoint: Boolean(participant.participantConfigId) });
       changed = changed || synced !== participant;
       return synced;
     });
@@ -6666,7 +6727,8 @@ export class ChatService {
     try {
       progressSink.beginAttempt();
       if (agentEnvironment.missingEnvKey) {
-        const message = this.endpointEnvMissingMessage(participant, agentEnvironment.missingEnvKey);
+        const message = `${this.endpointEnvMissingMessage(participant, agentEnvironment.missingEnvKey)}.`;
+        await this.closeWarmAgentsForParticipant(conversation.id, participant.id);
         pendingMessage.status = "error";
         pendingMessage.content = message;
         options.warnings.push(message);
@@ -7993,7 +8055,7 @@ export class ChatService {
       label: `@${participant.handle}`,
       // An endpoint member never inherits the CLI's default model: that alias
       // (e.g. "opus[1m]") only exists on Anthropic's side.
-      model: this.normalizedModel(session.participantModel) || chatParticipantEndpointDefaultModel(participant.endpoint),
+      model: this.normalizedModel(session.participantModel) || chatParticipantEndpointDefaultModel(this.participantEndpoint(participant)),
       reasoningEffort: normalizeChatReasoningEffort(session.participantReasoningEffort, session.participantKind ?? participant.kind)
     };
   }
@@ -9909,7 +9971,7 @@ export class ChatService {
         continue;
       }
       const kind = item.kind as ChatProviderKind;
-      const state = readinessForProvider(kind, agents, providers);
+      const state = readinessForParticipant({ kind, endpoint: this.participantEndpoint({ kind, endpoint: item.endpoint }) }, agents, providers);
       if (state !== "ready") {
         const label = cliProviderMetadata(kind).label;
         throw new Error(`@${item.handle.replace(/^@/, "")}: ${agentReadinessReason(state, label) ?? `${label} is not ready.`}`);
@@ -10169,6 +10231,7 @@ export class ChatService {
             model: typeof participantRecord.model === "string" ? participantRecord.model.trim() || undefined : undefined,
             reasoningEffort: normalizeChatReasoningEffort(participantRecord.reasoningEffort, kind),
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
+            endpoint: this.presetEndpointFromRecord(kind, participantRecord.endpoint),
             agentMode: normalizeChatAgentMode(participantRecord.agentMode),
             permissions: normalizeChatAgentPermissions(participantRecord.permissions),
             remoteExecution: this.normalizeConcreteRemoteExecutionMode(participantRecord.remoteExecution),
@@ -10634,6 +10697,7 @@ export class ChatService {
             model: typeof participantRecord.model === "string" ? participantRecord.model.trim() || undefined : undefined,
             reasoningEffort: normalizeChatReasoningEffort(participantRecord.reasoningEffort, kind),
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
+            endpoint: this.presetEndpointFromRecord(kind, participantRecord.endpoint),
             agentMode: normalizeChatAgentMode(participantRecord.agentMode),
             permissions: permissionsProvided
               ? normalizeChatAgentPermissions(participantRecord.permissions)
@@ -16551,8 +16615,8 @@ export class ChatService {
 
   private syncParticipantFromSavedConfig(
     participant: ChatParticipant,
-    config: Pick<ChatParticipantConfig, "id" | "kind" | "avatarId" | "behaviorRuleIds" | "endpoint">,
-    options: { behaviorRules?: boolean } = {}
+    config: Pick<ChatParticipantConfig, "id" | "kind" | "avatarId" | "behaviorRuleIds" | "endpoint" | "model">,
+    options: { behaviorRules?: boolean; endpoint?: boolean } = {}
   ): ChatParticipant {
     let synced = participant;
     if (synced.participantConfigId !== config.id) {
@@ -16570,10 +16634,17 @@ export class ChatService {
         synced = { ...synced, avatarId };
       }
       // The endpoint is plumbing (where Claude Code sends requests), so a preset
-      // edit follows into every chat the same way an avatar change does.
+      // edit follows into every chat bound to that preset, like an avatar change.
       const endpoint = chatParticipantEndpointFor(config.kind, normalizeChatParticipantEndpoint(config.endpoint));
-      if (!sameChatParticipantEndpoint(synced.endpoint, endpoint)) {
-        synced = { ...synced, endpoint };
+      if (options.endpoint !== false && !sameChatParticipantEndpoint(synced.endpoint, endpoint)) {
+        // A model id only exists on the side it came from (glm-* vs Anthropic
+        // aliases), so moving the preset on or off an endpoint also takes the
+        // preset's model; otherwise the member would keep sending the old id to
+        // a backend that does not serve it.
+        const model = synced.endpoint?.preset !== endpoint?.preset
+          ? config.model?.trim() || undefined
+          : synced.model;
+        synced = { ...synced, endpoint, model };
       }
     }
     return synced;

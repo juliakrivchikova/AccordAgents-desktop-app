@@ -1,6 +1,7 @@
 import type {
   AgentHealth,
   AgentReadinessState,
+  ChatParticipantEndpoint,
   ChatProviderKind,
   ProviderSettings
 } from "./types";
@@ -120,6 +121,22 @@ export function readinessForProvider(
     agents.find((agent) => agent.kind === kind),
     providerEnabled(providers, kind)
   );
+}
+
+/** Readiness for one member. A Claude Code member with an endpoint brings its
+ *  own credential (the endpoint token from Settings → Environment, checked when
+ *  it runs), and Claude Code itself reports `loggedIn: true` with that token in
+ *  its environment — so the Anthropic sign-in requirement does not apply to it. */
+export function readinessForParticipant(
+  participant: { kind: ChatProviderKind; endpoint?: ChatParticipantEndpoint },
+  agents: AgentHealth[],
+  providers: Array<Pick<ProviderSettings, "kind" | "enabled">>
+): AgentReadinessState {
+  const state = readinessForProvider(participant.kind, agents, providers);
+  if (state === "sign-in-required" && participant.kind === "claude-code" && participant.endpoint) {
+    return "ready";
+  }
+  return state;
 }
 
 export function readyProviderKinds(

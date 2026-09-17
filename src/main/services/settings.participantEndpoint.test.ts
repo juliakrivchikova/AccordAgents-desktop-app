@@ -110,9 +110,23 @@ test("an endpoint never attaches to Codex or Antigravity presets", async () => {
 
 test("an invalid endpoint URL or variable name is rejected instead of stored", async () => {
   const { service, stored } = settingsServiceWith();
+  const base = { handle: "glm", roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "claude-code" as const };
   await assert.rejects(
-    service.saveChatParticipantConfig({ handle: "glm", roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "claude-code", endpoint: { preset: "nope" } }),
+    service.saveChatParticipantConfig({ ...base, endpoint: { preset: "nope" } as never }),
     /Member endpoint is not recognized/
+  );
+  // A typo must surface, not be replaced by the Z.ai default behind the user's back.
+  await assert.rejects(
+    service.saveChatParticipantConfig({ ...base, endpoint: { preset: "zai", baseUrl: "not a url", authTokenEnvKey: "ZAI_API_KEY" } }),
+    /Endpoint URL must be an http\(s\) URL/
+  );
+  await assert.rejects(
+    service.saveChatParticipantConfig({ ...base, endpoint: { preset: "zai", baseUrl: ZAI_DEFAULT_BASE_URL, authTokenEnvKey: "with-dash" } }),
+    /API key variable/
+  );
+  await assert.rejects(
+    service.saveChatParticipantConfig({ ...base, endpoint: { preset: "zai", baseUrl: ZAI_DEFAULT_BASE_URL, authTokenEnvKey: "PATH" } }),
+    /API key variable/
   );
   assert.equal(stored().chatParticipantConfigs.length, 0);
 });

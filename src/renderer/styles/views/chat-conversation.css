@@ -2134,6 +2134,11 @@
   font-variant-ligatures: none;
 }
 
+.chat-participant-endpoint-field input:focus-visible {
+  border-color: var(--app-border);
+  box-shadow: var(--focus-ring);
+}
+
 .chat-app-tool-review-instructions {
   max-height: 7.6em;
   overflow: hidden;

@@ -1,12 +1,13 @@
-import type { AgentHealth, ProviderSettings } from "../../../shared/types";
+import type { AgentHealth, ChatParticipantEndpoint, ProviderSettings } from "../../../shared/types";
 import {
   agentReadinessReason,
   cliProviderMetadata,
-  readinessForProvider
+  readinessForParticipant
 } from "../../../shared/cliReadiness";
+import { chatParticipantEndpointFor } from "../../../shared/chatParticipantEndpoint";
 
 export function validateChatCliAgents(
-  drafts: Array<{ kind: AgentHealth["kind"]; remoteExecution?: "local" | "remote" | "inherit" }>,
+  drafts: Array<{ kind: AgentHealth["kind"]; endpoint?: ChatParticipantEndpoint; remoteExecution?: "local" | "remote" | "inherit" }>,
   agents: AgentHealth[],
   providers: Array<Pick<ProviderSettings, "kind" | "enabled">> = []
 ): string | undefined {
@@ -14,7 +15,11 @@ export function validateChatCliAgents(
     if (draft.remoteExecution === "remote") {
       continue;
     }
-    const readiness = readinessForProvider(draft.kind, agents, providers);
+    const readiness = readinessForParticipant(
+      { kind: draft.kind, endpoint: chatParticipantEndpointFor(draft.kind, draft.endpoint) },
+      agents,
+      providers
+    );
     if (readiness !== "ready") {
       const label = cliProviderMetadata(draft.kind).label;
       return agentReadinessReason(readiness, label) ?? `${label} is not ready.`;

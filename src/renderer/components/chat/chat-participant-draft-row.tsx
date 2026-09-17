@@ -15,6 +15,7 @@ import type {
   ChatProviderKind,
   ProviderKind
 } from "../../../shared/types";
+import { defaultChatParticipantEndpoint } from "../../../shared/chatParticipantEndpoint";
 import type { ChatAvatarOption } from "./chat-avatars";
 import {
   chatAvatarOptionsForKind,
@@ -25,7 +26,6 @@ import {
   ChatReasoningEffortPicker
 } from "./chat-model-reasoning-pickers";
 import {
-  ChatParticipantEndpointField,
   ChatParticipantInlinePermissionsRow,
   ChatParticipantInlineManageRolesParticipantsRow,
   ChatParticipantInlineRequestParticipantsRow
@@ -117,17 +117,21 @@ export function ChatParticipantDraftRow(props: {
       {props.draft.endpoint && (
         <>
           <FormRow label="Endpoint">
-            <ChatParticipantEndpointField
+            <Input
               value={props.draft.endpoint.baseUrl}
-              ariaLabel="Endpoint URL"
-              onChange={(baseUrl) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { endpoint: { ...props.draft.endpoint!, baseUrl } }))}
+              aria-label="Endpoint URL"
+              placeholder={defaultChatParticipantEndpoint(props.draft.endpoint.preset).baseUrl}
+              spellCheck={false}
+              onChange={(event) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { endpoint: { ...props.draft.endpoint!, baseUrl: event.target.value } }))}
             />
           </FormRow>
-          <FormRow label="API key variable" hint="Set it in Settings → Environment.">
-            <ChatParticipantEndpointField
+          <FormRow label="API key variable" hint="Add it under Environment in Settings.">
+            <Input
               value={props.draft.endpoint.authTokenEnvKey}
-              ariaLabel="API key environment variable"
-              onChange={(authTokenEnvKey) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { endpoint: { ...props.draft.endpoint!, authTokenEnvKey } }))}
+              aria-label="API key environment variable"
+              placeholder={defaultChatParticipantEndpoint(props.draft.endpoint.preset).authTokenEnvKey}
+              spellCheck={false}
+              onChange={(event) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { endpoint: { ...props.draft.endpoint!, authTokenEnvKey: event.target.value } }))}
             />
           </FormRow>
         </>
@@ -156,6 +160,7 @@ export function ChatParticipantDraftRow(props: {
       <FormRow label="Reasoning">
         <ChatReasoningEffortPicker
           kind={props.draft.kind}
+          endpoint={props.draft.endpoint}
           model={props.draft.model}
           reasoningEffort={props.draft.reasoningEffort}
           onChange={(reasoningEffort) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { reasoningEffort }))}
