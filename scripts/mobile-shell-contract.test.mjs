@@ -712,3 +712,30 @@ function nextMessage(client) {
 function bytesToBase64Url(bytes) {
   return Buffer.from(bytes).toString("base64url");
 }
+
+// A machine hands the phone whole messages. What the desktop keeps off its
+// timeline is marked, not dropped: a hidden row can be the one that ends a
+// run, and the phone settles the run on it without storing a bubble.
+test("mobile shell marks machine-delivered rows the desktop hides, by the desktop's own rule", async () => {
+  await execFileAsync("npm", ["run", "build:main"], { cwd: repoRoot });
+  await execFileAsync(process.execPath, ["scripts/build-mobile-shell.mjs"], { cwd: repoRoot });
+  const shared = await import(pathToFileURL(path.join(repoRoot, "dist/main/shared/mobileSharedRules.js")).href);
+  globalThis.AccordMobileShared = shared;
+  await import(pathToFileURL(path.join(repoRoot, "dist/mobile/mobile-app.js")).toString());
+  const mobile = globalThis.AccordAgentsMobile;
+  const events = [
+    { id: "trigger", role: "system", content: "Auto-resumed @drew after member request.", createdAt: "2026-09-18T00:00:00.000Z" },
+    { id: "carrier", role: "participant", participantLabel: "@drew", content: "@drew asked @taylor: review", createdAt: "2026-09-18T00:00:01.000Z", metadata: { hiddenFromTimeline: true } },
+    { id: "waiting", role: "participant", participantLabel: "@drew", content: "Awaiting user approval.", createdAt: "2026-09-18T00:00:02.000Z" },
+    { id: "note", role: "system", content: "@gera revised [Plan] · v3", createdAt: "2026-09-18T00:00:03.000Z", metadata: { appMessageSource: "app_artifact_note" } },
+    { id: "reply", role: "participant", participantLabel: "@drew", content: "Done.", createdAt: "2026-09-18T00:00:04.000Z" }
+  ].map((message) => mobile.machineTimelineEvent(message, "done", "run-1"));
+  assert.deepEqual(events.map((event) => [event.id, event.hidden === true, event.runId]), [
+    ["trigger", true, "run-1"],
+    ["carrier", true, "run-1"],
+    ["waiting", true, "run-1"],
+    ["note", false, "run-1"],
+    ["reply", false, "run-1"]
+  ]);
+  delete globalThis.AccordMobileShared;
+});

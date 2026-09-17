@@ -797,6 +797,19 @@
     return status === "error" && Boolean(mobileEventId) && runId === "mobile-" + mobileEventId;
   }
 
+  function deleteTimelineEntry(entryId) {
+    return withTimeline("readwrite", function (store) {
+      return requestToPromise(store.get(entryId)).then(function (existing) {
+        if (!existing) {
+          return false;
+        }
+        return requestToPromise(store.delete(entryId)).then(function () {
+          return true;
+        });
+      });
+    });
+  }
+
   function deletePendingTimelineEntriesForRun(conversationId, runId, mobileEventId, messageId, status) {
     if (!runId && !mobileEventId && !messageId) {
       return Promise.resolve(0);
@@ -1244,7 +1257,9 @@
         events.push({
           id: MACHINE_ROW_ID_PREFIX + "stopped:" + body.runId, messageId: MACHINE_ROW_ID_PREFIX + "stopped:" + body.runId,
           role: "participant", participantLabel: machineRunLabel(body.runId),
-          content: events.length ? "Stopped." : machineRunLabel(body.runId) + " was stopped before answering.",
+          content: events.some(function (event) { return event.hidden !== true; })
+            ? "Stopped."
+            : machineRunLabel(body.runId) + " was stopped before answering.",
           status: "done", createdAt: body.finishedAt, runId: body.runId
         });
       }
@@ -2042,17 +2057,28 @@
   // The list is read for every avatar painted and every row reconciled;
   // parsing a hundred chats with their member records each time was tens of
   // megabytes of JSON per list rebuild on the User's phone. The parse is kept
-  // until the stored text changes; the objects are never mutated by readers.
-  let cachedChatListRaw;
-  let cachedChatList = [];
+  // until the list is saved again here, or changed by another window of this
+  // origin (the storage event); the objects are never mutated by readers.
+  let cachedChatList;
+
+  function forgetCachedChatList() {
+    cachedChatList = undefined;
+  }
+
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("storage", function (event) {
+      if (!event || event.key === null || event.key === CHAT_LIST_KEY) {
+        forgetCachedChatList();
+      }
+    });
+  }
 
   function loadChats() {
     try {
-      const raw = localStorage.getItem(CHAT_LIST_KEY);
-      if (raw !== cachedChatListRaw) {
+      if (!cachedChatList) {
+        const raw = localStorage.getItem(CHAT_LIST_KEY);
         const parsed = raw ? JSON.parse(raw) : [];
         cachedChatList = Array.isArray(parsed) ? parsed : [];
-        cachedChatListRaw = raw;
       }
       return cachedChatList.filter(chat => !deletedMachineConversations.has(chat.id));
     } catch {
@@ -2085,6 +2111,7 @@
       };
     }) : [];
     localStorage.setItem(CHAT_LIST_KEY, JSON.stringify(normalized));
+    forgetCachedChatList();
     // Same rule as the desktop sidebar: a chat that moved while it was not the
     // one on screen is unread. The list this phone held before is the "seen"
     // baseline, so the first list after an update marks nothing.
@@ -3793,8 +3820,13 @@
       }
       // What the desktop keeps off its timeline travels only to end a run:
       // the bookkeeping above ran, and no bubble is stored for it. It counts
-      // as handled so the settled row is drawn now, not on the next batch.
+      // as handled so the settled row is drawn now, not on the next batch. A
+      // copy stored before the desktop hid it (an older shell, a page read
+      // that could not see the row's trigger) goes with it.
       if (event.hidden === true) {
+        if (await deleteTimelineEntry(conversationId ? conversationId + ":" + id : id)) {
+          changed += 1;
+        }
         stored += 1;
         continue;
       }
@@ -4185,6 +4217,7 @@
     }
     avatar.dataset.avatarSignature = signature;
     delete avatar.dataset.avatarLoaded;
+    delete avatar.dataset.avatarCustomId;
     avatar.textContent = "";
     avatar.removeAttribute("style");
     clearAvatarKindClasses(avatar);
@@ -4256,6 +4289,7 @@
       applyCustomAvatar(avatar, cached, signature);
       return;
     }
+    avatar.dataset.avatarCustomId = customId;
     if (!customAvatarFetches.has(avatarId)) {
       if ((customAvatarRetryAfter.get(avatarId) || 0) > Date.now()) {
         return;
@@ -4281,10 +4315,20 @@
       }).then(function (result) {
         if (result !== "retry") {
           rememberCustomAvatar(avatarId, result);
-        } else {
+        }
+        if (result !== "retry" && !result.startsWith("data:")) {
+          // Answered "no" — not asked again while the answer is remembered.
+          customAvatarRetryAfter.set(avatarId, Date.now() + CUSTOM_AVATAR_RETRY_PAUSE_MS);
+        } else if (result === "retry") {
           customAvatarRetryAfter.set(avatarId, Date.now() + CUSTOM_AVATAR_RETRY_PAUSE_MS);
         }
         customAvatarFetches.delete(avatarId);
+        // Every disc on screen that shows this member gets the picture: a row
+        // painted while the desktop was unreachable is patched in place and
+        // would otherwise keep its initials for the session.
+        for (const node of document.querySelectorAll('[data-avatar-custom-id="' + CSS.escape(customId) + '"]')) {
+          applyCustomAvatar(node, result, node.dataset.avatarSignature);
+        }
         return result;
       }));
     }
@@ -4538,7 +4582,12 @@
           who: chat.who,
           running: chat.running,
           updatedAt: chat.updatedAt,
-          participants: chat.participants
+          participants: chat.participants,
+          // What each row's avatars are drawn from: a member's changed picture
+          // must repaint the row even when nothing else about the chat moved.
+          members: chatMembers(chat).map(function (member) {
+            return [member.handle, member.kind, member.avatarId || "", member.isAssistant === true];
+          })
         };
       })
     });
@@ -7017,6 +7066,7 @@
     flushOutboxViaRelay,
     handleRelayChatListPayload,
     handleRelayTimelinePayload,
+    machineTimelineEvent,
     activeMentionQuery,
     mentionOptions,
     replaceActiveMention,

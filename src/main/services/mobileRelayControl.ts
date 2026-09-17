@@ -1367,6 +1367,8 @@ export class MobileRelayControlService {
         ? events
           .filter((event) =>
             event.role === "participant" &&
+            // A hidden terminal shows nothing to reply to; no ring for it.
+            event.hidden !== true &&
             typeof event.status === "string" &&
             event.status !== "pending" &&
             typeof event.runId === "string" &&
@@ -1641,7 +1643,11 @@ function messageIsVisibleOnPhone(message: ChatMessage): boolean {
  *  member message still travels, flagged: it can be the message that ends a
  *  run, and without it the phone's pending row for that run never settles. */
 export function messageIsHiddenOnPhone(conversation: Pick<Conversation, "messages">, message: ChatMessage): boolean {
-  return chatMessageHiddenFromTimeline(conversation, message);
+  // The flag is honoured on its own as well: the shared rule lets an inferred
+  // request carrier's hidden-ness depend on its trigger being in the message
+  // list, and the phone's projections read pages, so at a page boundary the
+  // same carrier would otherwise flip between hidden and shown.
+  return message.metadata?.hiddenFromTimeline === true || chatMessageHiddenFromTimeline(conversation, message);
 }
 
 function messageTravelsToPhone(conversation: Pick<Conversation, "messages">, message: ChatMessage): boolean {

@@ -2074,10 +2074,12 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
         const conversation = opened?.conversation;
         // The last line the User can see, not the last line stored: an internal
         // system trigger is hidden on the desktop and must not become the
-        // phone's preview of the chat. When the whole window is internal, the
-        // newest line stands in rather than "No messages yet" on a busy chat.
+        // phone's preview of the chat. When the whole window is internal, a
+        // member's own words the desktop merely tidies away (a waiting status)
+        // may stand in; a system trigger or a control message never does.
         const newest = conversation?.messages.slice().reverse().filter((message) => message.content.trim()) ?? [];
-        const lastMessage = newest.find((message) => !chatMessageHiddenFromTimeline(conversation as Conversation, message)) ?? newest[0];
+        const lastMessage = newest.find((message) => !chatMessageHiddenFromTimeline(conversation as Conversation, message)) ??
+          newest.find((message) => message.role === "participant" && message.metadata?.hiddenFromTimeline !== true);
         const members = mobileRelayChatMembers(conversation);
         items.push({
           id: summary.id,
@@ -2123,11 +2125,12 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
       }
       // Members only: the chat is opened for its metadata, with the smallest
       // message page storage allows rather than its history. The same read
-      // answers whether the phone may see this chat at all (a chat, not
-      // archived) — the rule isConversationAllowed applies to a whole snapshot.
+      // answers that this is a chat at all; the pairing's scope is the
+      // service's check, and an archived chat a scoped pairing still shows
+      // keeps its members' pictures.
       const opened = await storageService.openConversation(request.conversationId, 1);
       const conversation = opened?.conversation;
-      if (!conversation || conversation.kind !== "chat" || conversation.metadata.archived === true) {
+      if (!conversation || conversation.kind !== "chat") {
         return undefined;
       }
       const owned = mobileRelayChatMembers(conversation).some((participant) => participant.avatarId === request.avatarId);
