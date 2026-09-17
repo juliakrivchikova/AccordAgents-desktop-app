@@ -39,8 +39,9 @@ function makeGate(overrides: { busy?: () => boolean; choice?: "restart" | "later
     recheckIntervalMs: 20
   });
   const settle = async (): Promise<void> => { for (const listener of [...listeners]) listener(); await new Promise((resolve) => setTimeout(resolve, 5)); };
+  const quitCount = { count: 0 };
   return {
-    gate, log, prompts, settle,
+    gate, log, prompts, settle, listenersRef: listeners, quitCount,
     setBusy: (next: () => boolean) => { busy = next; },
     setChoice: (next: "restart" | "later") => { choice = next; },
     quits: () => quits,
@@ -89,10 +90,47 @@ test("the periodic re-check catches work that ends without an event", async () =
   harness.gate.onDownloaded({ releaseName: "v1" });
   await tick();
   running = false;
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  const deadline = Date.now() + 2_000;
+  while (harness.prompts.length === 0 && Date.now() < deadline) await tick();
   assert.equal(harness.prompts.length, 1, "the interval re-check prompted");
   assert.equal(harness.quits(), 1);
   harness.gate.dispose();
+});
+
+test("a busy check that throws after Restart was chosen keeps the app running", async () => {
+  let checks = 0;
+  const harness = makeGate({ busy: () => { checks += 1; if (checks === 2) throw new Error("relay down"); return false; } });
+  harness.gate.onDownloaded({ releaseName: "v1" });
+  await tick();
+  assert.equal(harness.prompts.length, 1);
+  assert.equal(harness.quits(), 0, "an unknown answer is never taken as idle");
+  assert.ok(harness.gate.pending());
+  await harness.settle();
+  assert.equal(harness.quits(), 1, "restarted once the answer is idle");
+});
+
+test("a prompt that cannot be shown keeps the update pending instead of postponing it", async () => {
+  let fail = true;
+  const harness = makeGate();
+  const gate = createUpdateRestartGate({
+    isBusy: async () => false,
+    onActivitySettled: (listener) => { harness.listenersRef.add(listener); return () => { harness.listenersRef.delete(listener); }; },
+    prompt: async (info) => { harness.prompts.push(info); if (fail) throw new Error("no window"); return "restart"; },
+    quitAndInstall: () => { harness.quitCount.count += 1; },
+    log: (event, payload) => { harness.log.push({ event, payload }); },
+    recheckIntervalMs: 20
+  });
+  gate.onDownloaded({ releaseName: "v1" });
+  await tick();
+  assert.equal(harness.prompts.length, 1);
+  assert.ok(gate.pending(), "still pending");
+  assert.ok(harness.events().includes("app-update-prompt-error"));
+  fail = false;
+  for (const listener of [...harness.listenersRef]) listener();
+  await tick();
+  assert.equal(harness.prompts.length, 2, "asked again at the next quiet moment");
+  assert.equal(harness.quitCount.count, 1);
+  gate.dispose();
 });
 
 test("Later keeps the library's meaning: no further prompt for this download", async () => {

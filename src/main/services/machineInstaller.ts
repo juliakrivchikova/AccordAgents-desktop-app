@@ -1,4 +1,3 @@
-import { compareVersions } from "../../shared/machineInstall";
 /**
  * Installs, upgrades and supervises the headless machine runtime on a Linux
  * computer, and bootstraps a project mirror there once.
@@ -19,6 +18,7 @@ import { compareVersions } from "../../shared/machineInstall";
  * instead of forcing it, because the alternative is a duplicate executor.
  */
 
+import { compareVersions, isMachineInstallTerminalPhase } from "../../shared/machineInstall";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
@@ -161,6 +161,12 @@ export interface MachineInstallerOptions {
   payload: MachineRuntimePayloadLocation | (() => MachineRuntimePayloadLocation);
   machineName?: (machineId: string) => Promise<string | undefined>;
   prepareProfile?: (record: MachineInstallRecord) => Promise<void>;
+  /** Asked right before the drain, minutes after the preflight: a reason not
+   *  to stop the runtime now (a member started work on the machine while the
+   *  new release was being staged). The upgrade then ends with
+   *  `needs-attention` / `machine-busy`, nothing replaced, and the staged
+   *  files wait for the next attempt. */
+  beforeDrain?: (record: MachineInstallRecord) => Promise<string | undefined>;
   sshExec?: MachineSshExec;
   uploadBundle?: MachineBundleUpload;
   mirrorSync?: RemoteMirrorSyncRunner;
@@ -191,7 +197,7 @@ export class MachineInstallerService {
   async recoverInterruptedOperation(): Promise<void> {
     for (const record of await this.options.store.listMachineInstalls()) {
       const operation = record.lastOperation;
-      if (!operation || isTerminalPhase(operation.phase)) continue;
+      if (!operation || isMachineInstallTerminalPhase(operation.phase)) continue;
       await this.options.store.saveMachineInstall({
         ...record,
         lastOperation: {
@@ -341,6 +347,19 @@ export class MachineInstallerService {
     return this.enqueue("upgrade", request, onProgress);
   }
 
+  /** A setup or update running on any machine right now. The desktop must
+   *  not restart for an update while one is: the SSH session would die
+   *  mid-drain and leave the machine without a runtime. */
+  hasActiveOperations(): boolean {
+    return this.active.size > 0;
+  }
+
+  /** The setup or update running on this machine, to wait for rather than
+   *  collide with. */
+  activeOperation(machineId: string): Promise<MachineInstallResult> | undefined {
+    return this.active.get(machineId);
+  }
+
   private enqueue(
     kind: MachineInstallKind,
     request: MachineUpgradeRequest,
@@ -394,8 +413,8 @@ export class MachineInstallerService {
       // A phase counts as completed only when the next step actually starts.
       // A failure marks the phase it failed in as unfinished, so the UI shows
       // where the setup stopped rather than a full row of ticks.
-      const advancing = phase === "ready" || !isTerminalPhase(phase);
-      if (advancing && snapshot.phase !== phase && !isTerminalPhase(snapshot.phase) && !completed.includes(snapshot.phase)) {
+      const advancing = phase === "ready" || !isMachineInstallTerminalPhase(phase);
+      if (advancing && snapshot.phase !== phase && !isMachineInstallTerminalPhase(snapshot.phase) && !completed.includes(snapshot.phase)) {
         completed.push(snapshot.phase);
       }
       snapshot = {
@@ -608,6 +627,20 @@ export class MachineInstallerService {
       // members. So the drain always runs. Skipping it on a stale reading
       // would flip the symlink under a live runtime, and the connect check
       // below would then see the OLD process answer and call the upgrade done.
+      const busyReason = await this.options.beforeDrain?.(record).catch(() => undefined);
+      if (busyReason) {
+        return await fail(
+          "needs-attention",
+          busyReason,
+          {
+            kind: "machine-busy",
+            detail: `Nothing was replaced: ${probe.installedVersion ?? "the installed version"} is still the one the machine runs, `
+              + `and the new files are staged in ${layout.releasesDir}/${release} without being used. `
+              + "The update is attempted again once the machine is idle.",
+            activeVersion: probe.installedVersion
+          }
+        );
+      }
       const wasRunning = probe.runtimePids.length > 0
         || probe.supervisorPids.length > 0
         || probe.providerPids.length > 0
@@ -903,9 +936,6 @@ export class MachineInstallerService {
 
 // ---- helpers --------------------------------------------------------------
 
-function isTerminalPhase(phase: MachineInstallPhase): boolean {
-  return phase === "ready" || phase === "error" || phase === "needs-attention";
-}
 
 function maintenanceFor(layout: { installRoot: string; userDataDir: string }): MachineMaintenanceTarget {
   if (!layout.installRoot || !layout.userDataDir) throw new Error("The machine did not report its maintenance paths.");
@@ -1223,4 +1253,5 @@ export function redactKeyLikeText(value: string): string {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
 export { compareVersions };

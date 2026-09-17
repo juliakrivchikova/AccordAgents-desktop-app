@@ -718,11 +718,27 @@ test("machineActivity asks the machine afresh: a turn that started or ended sinc
     await link.start();
     await host.start();
     await waitFor(() => link.isMachineConnected("machine-act"), 10_000);
+    const announced = [];
+    const offHello = link.onHello((event) => announced.push(event));
     const idle = await link.machineActivity("machine-act");
     assert.equal(idle.connected, true);
+    assert.equal(idle.fresh, true, "answered by a fresh hello");
     assert.equal(idle.appVersion, "machine-v", "the runtime's own version, not the desktop's");
     assert.equal(machineActivityIsBusy(idle), false);
-    assert.ok(logs.some((entry) => entry.event === "machine-link.activity" && entry.payload.fresh === true), "answered by a fresh hello");
+    assert.ok(logs.some((entry) => entry.event === "machine-link.activity" && entry.payload.fresh === true));
+    assert.deepEqual(announced, [], "a hello the desktop asked for is not announced: a listener that asks on every hello would loop");
+    offHello();
+    // A machine that does not answer in time: its last hello, marked stale.
+    const realSend = link.send.bind(link);
+    link.send = async (connection, body) => (body.type === "machine.hello.request" ? undefined : realSend(connection, body));
+    // The settings sync that follows a hello makes the machine greet again
+    // (its power status); let that settle so the dropped request is the only
+    // thing the next probe could be answered by.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const stale = await link.machineActivity("machine-act", { timeoutMs: 150 });
+    assert.equal(stale.fresh, false, "no answer: the caller must not treat this as idle");
+    assert.equal(await link.anyMachineBusy({ timeoutMs: 150 }), true, "a connected machine that did not answer is not known to be idle");
+    link.send = realSend;
 
     const participant = { id: "p-act", homeMachineId: record.id, handle: "bot", kind: "codex-cli" };
     const triggerMessage = { id: "m-act", role: "user", content: "go", createdAt: new Date().toISOString() };
@@ -742,6 +758,23 @@ test("machineActivity asks the machine afresh: a turn that started or ended sinc
     await waitFor(async () => !machineActivityIsBusy(await link.machineActivity("machine-act")), 10_000);
     const again = await link.machineActivity("machine-act", { fresh: false });
     assert.equal(again.dispatchedRunIds.length, 0, "the finished turn is no longer counted");
+
+    // While the runtime is being replaced, a turn waits instead of being
+    // dispatched into a process about to be stopped; Stop ends the wait.
+    const release = link.holdTurns("machine-act", "updating the runtime");
+    const heldProgress = [];
+    const held = link.runTurn({ conversation, participant, triggerMessage, runId: "run-act-held", pendingMessageId: "pm-act-held", progress: (frame) => heldProgress.push(frame) });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.ok(!hostRuns.includes("run-act-held"), "not dispatched while held");
+    assert.match(heldProgress[0]?.message ?? "", /Act box: updating the runtime/, "the chat sees why the member has not started");
+    const stopper = new AbortController();
+    const stopped = link.runTurn({ conversation, participant, triggerMessage, runId: "run-act-stopped", pendingMessageId: "pm-act-stopped", signal: stopper.signal });
+    stopper.abort();
+    assert.equal((await stopped).status, "interrupted", "a held turn that is stopped ends without being sent");
+    release();
+    await waitFor(() => hostRuns.includes("run-act-held"), 10_000);
+    releaseTurn();
+    await (await held).acknowledge();
     link.close();
   } finally { host?.close(); await relay.close(); }
 });

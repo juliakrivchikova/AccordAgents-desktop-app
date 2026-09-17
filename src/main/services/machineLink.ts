@@ -152,6 +152,13 @@ interface MachineConnection {
    *  to greet a desktop that just connected. */
   helloSeen: boolean;
   helloRequestTimer?: ReturnType<typeof setTimeout>;
+  /** Hello requests in flight from machineActivity(); a hello arriving while
+   *  one is out answers it and is not announced to onHello listeners, so a
+   *  listener that probes on every hello cannot loop. */
+  activityProbes: number;
+  /** While the runtime is being replaced, turns wait here instead of being
+   *  dispatched into a process that is about to be stopped. */
+  turnHold?: { reason: string; released: Promise<void>; release: () => void };
   /** Start time of the newest runtime instance seen; a late hello from an
    *  older instance is ignored. */
   latestInstanceStartedAt?: string;
@@ -177,10 +184,15 @@ const MACHINE_ACTIVITY_TIMEOUT_MS = 15_000;
 export interface MachineActivity {
   machineId: string;
   connected: boolean;
+  /** True when the machine answered the request; false when this is its
+   *  last known hello, which may predate turns that started or ended since.
+   *  A decision that would stop the runtime must not act on a stale answer. */
+  fresh: boolean;
   /** Runtime version the machine reports. */
   appVersion?: string;
   activeRunIds: string[];
   pendingTerminalRunIds: string[];
+  /** Turns this desktop dispatched and has not seen finish. */
   dispatchedRunIds: string[];
 }
 
@@ -453,7 +465,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       pendingTurnConversations: new Map(),
       inbound: Promise.resolve(),
       outbound: Promise.resolve(),
-      helloSeen: false
+      helloSeen: false, activityProbes: 0
     };
     this.connections.set(record.id, connection);
     if (record.deviceId && record.lastHello?.publicKeyDerBase64) {
@@ -717,8 +729,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
   /** Every hello a machine sends: a (re)connect, a restart, an outbox state
    *  change, or an answer to `machine.hello.request`. */
   onHello(listener: (event: { machineId: string; appVersion?: string; deviceId?: string }) => void): () => void {
-    this.emitter.on("hello", listener);
-    return () => { this.emitter.off("hello", listener); };
+    const wrapped = (event: { machineId: string; appVersion?: string; deviceId?: string; solicited?: boolean }): void => {
+      if (!event.solicited) listener(event);
+    };
+    this.emitter.on("hello", wrapped);
+    return () => { this.emitter.off("hello", wrapped); };
   }
 
   /** What one machine is doing right now, from a hello it sends on request
@@ -731,38 +746,69 @@ export class MachineLinkService implements MachineTurnDispatcher {
   async machineActivity(machineId: string, options: { fresh?: boolean; timeoutMs?: number } = {}): Promise<MachineActivity | undefined> {
     const connection = this.connections.get(machineId);
     if (!connection?.machineDeviceId) return undefined;
+    let fresh = false;
     if (options.fresh !== false) {
-      const answered = new Promise<boolean>((resolve) => {
-        const timer = setTimeout(() => finish(false), options.timeoutMs ?? MACHINE_ACTIVITY_TIMEOUT_MS);
-        timer.unref?.();
-        const onHello = (event: { machineId: string }): void => { if (event.machineId === machineId) finish(true); };
-        const finish = (value: boolean): void => {
-          clearTimeout(timer);
-          this.emitter.off("hello", onHello);
-          resolve(value);
-        };
-        this.emitter.on("hello", onHello);
-      });
-      await this.send(connection, { type: "machine.hello.request", desktopDeviceId: this.options.desktopDeviceId }).catch(() => undefined);
-      const fresh = await answered;
+      connection.activityProbes += 1;
+      try {
+        const answered = new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => finish(false), options.timeoutMs ?? MACHINE_ACTIVITY_TIMEOUT_MS);
+          timer.unref?.();
+          const onHello = (event: { machineId: string }): void => { if (event.machineId === machineId) finish(true); };
+          const finish = (value: boolean): void => {
+            clearTimeout(timer);
+            this.emitter.off("hello", onHello);
+            resolve(value);
+          };
+          this.emitter.on("hello", onHello);
+        });
+        await this.send(connection, { type: "machine.hello.request", desktopDeviceId: this.options.desktopDeviceId }).catch(() => undefined);
+        fresh = await answered;
+      } finally {
+        connection.activityProbes -= 1;
+      }
       void this.debugLogs.write("machine-link.activity", { machineId, fresh });
     }
     const hello = connection.record.lastHello;
+    const listed = new Set([...(hello?.activeRunIds ?? []), ...(hello?.pendingTerminalRunIds ?? [])]);
+    // A remembered run the machine's fresh hello does not list is one the
+    // reconciliation is closing, not work in progress; on a stale hello every
+    // remembered run still counts.
+    const remembered = [...connection.pendingRuns.keys()].filter((runId) => !fresh || listed.has(runId));
     return {
       machineId,
       connected: Boolean(connection.machineDeviceId),
+      fresh,
       appVersion: hello?.appVersion,
       activeRunIds: [...(hello?.activeRunIds ?? [])],
       pendingTerminalRunIds: [...(hello?.pendingTerminalRunIds ?? [])],
-      dispatchedRunIds: [...new Set([...connection.pendingTurns.keys(), ...connection.pendingRuns.keys()])]
+      dispatchedRunIds: [...new Set([...connection.pendingTurns.keys(), ...remembered])]
     };
+  }
+
+  /** Holds every turn for this machine until released: the runtime is being
+   *  replaced, and a turn dispatched now would be killed by the drain. A held
+   *  turn that is stopped by the User ends as interrupted without being sent. */
+  holdTurns(machineId: string, reason: string): () => void {
+    const connection = this.connections.get(machineId);
+    if (!connection) return () => undefined;
+    if (connection.turnHold) return connection.turnHold.release;
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const hold = { reason, released, release: () => {
+      if (connection.turnHold === hold) connection.turnHold = undefined;
+      release();
+    } };
+    connection.turnHold = hold;
+    void this.debugLogs.write("machine-link.turns.held", { machineId, reason });
+    return hold.release;
   }
 
   /** True while any connected machine is running or holding a turn, asked
    *  afresh from every machine. */
-  async anyMachineBusy(): Promise<boolean> {
-    const activities = await Promise.all([...this.connections.keys()].map((machineId) => this.machineActivity(machineId)));
-    return activities.some((activity) => activity !== undefined && machineActivityIsBusy(activity));
+  async anyMachineBusy(options: { timeoutMs?: number } = {}): Promise<boolean> {
+    const activities = await Promise.all([...this.connections.keys()].map((machineId) => this.machineActivity(machineId, options)));
+    // A connected machine that did not answer is not known to be idle.
+    return activities.some((activity) => activity !== undefined && (!activity.fresh || machineActivityIsBusy(activity)));
   }
 
   isMachineConnected(machineId: string): boolean {
@@ -992,10 +1038,27 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (!connection) {
       return { status: "failed", messages: [], warnings: [], error: `@${request.participant.handle} is hosted on a machine that is not enrolled on this desktop.` };
     }
+    const interrupted: MachineTurnDispatchResult = { status: "interrupted", messages: [], warnings: [] };
+    if (connection.turnHold) {
+      void this.debugLogs.write("machine-link.turn.held", { machineId, runId: request.runId, reason: connection.turnHold.reason });
+      request.progress?.({
+        runId: request.runId, phase: "debate", createdAt: this.now().toISOString(),
+        message: `${connection.record.name}: ${connection.turnHold.reason}`,
+        participantLabel: `@${request.participant.handle}`,
+        agentProgress: { participantId: request.participant.id, participantLabel: `@${request.participant.handle}`, state: "running", messageId: request.pendingMessageId }
+      });
+      const stopped = await Promise.race([
+        connection.turnHold.released.then(() => false),
+        new Promise<boolean>((resolve) => {
+          if (request.signal?.aborted) resolve(true);
+          else request.signal?.addEventListener("abort", () => resolve(true), { once: true });
+        })
+      ]);
+      if (stopped) return interrupted;
+    }
     if (!connection.eventChannel && !connection.machineDeviceId) {
       return { status: "failed", messages: [], warnings: [], error: `@${request.participant.handle} is hosted on ${connection.record.name}, which is not connected.` };
     }
-    const interrupted: MachineTurnDispatchResult = { status: "interrupted", messages: [], warnings: [] };
     if (request.signal?.aborted) {
       return interrupted;
     }
@@ -1513,7 +1576,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     // Machine setup waits for a hello that arrives AFTER it restarted the
     // runtime, and checks the version it reports: a live connection alone can
     // still be the old process that never went away.
-    this.emitter.emit("hello", { machineId: connection.record.id, appVersion: hello.appVersion, deviceId: hello.deviceId });
+    this.emitter.emit("hello", { machineId: connection.record.id, appVersion: hello.appVersion, deviceId: hello.deviceId, solicited: connection.activityProbes > 0 });
     await this.reconcileAfterHello(connection, hello);
   }
 

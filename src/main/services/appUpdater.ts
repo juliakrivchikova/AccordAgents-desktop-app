@@ -13,6 +13,11 @@ export function supportsAutoUpdates(isPackaged: boolean, platform: NodeJS.Platfo
   return isPackaged && (platform === "darwin" || platform === "win32");
 }
 
+/** How often a pending update, or a machine waiting for idle, is re-checked
+ *  when no event announces the change: a turn a phone started on a machine
+ *  ends without one reaching this desktop. */
+export const ACTIVITY_RECHECK_MS = 60_000;
+
 export interface UpdateRestartInfo {
   releaseName?: string;
   releaseNotes?: string;
@@ -72,7 +77,7 @@ export function createUpdateRestartGate(options: UpdateRestartGateOptions): Upda
   const watch = (): void => {
     if (unsubscribe) return;
     unsubscribe = options.onActivitySettled(() => { void attempt(); });
-    timer = setInterval(() => { void attempt(); }, options.recheckIntervalMs ?? 60_000);
+    timer = setInterval(() => { void attempt(); }, options.recheckIntervalMs ?? ACTIVITY_RECHECK_MS);
     timer.unref?.();
   };
 
@@ -99,7 +104,7 @@ export function createUpdateRestartGate(options: UpdateRestartGateOptions): Upda
     stopWatching();
     prompting = true;
     const info = pending;
-    let choice: "restart" | "later" = "later";
+    let choice: "restart" | "later" | "unanswered" = "unanswered";
     try {
       choice = await options.prompt(info);
     } catch (error) {
@@ -107,14 +112,23 @@ export function createUpdateRestartGate(options: UpdateRestartGateOptions): Upda
     } finally {
       prompting = false;
     }
+    if (choice === "unanswered") {
+      // The dialog could not be shown (no window yet): the update is still
+      // pending, and the next quiet moment asks again.
+      watch();
+      return;
+    }
     if (choice === "later") {
       options.log("app-update-postponed", { releaseName: info.releaseName ?? "" });
       pending = undefined;
       return;
     }
-    // A member may have started while the prompt was open.
-    let busyAgain = false;
-    try { busyAgain = await options.isBusy(); } catch { busyAgain = false; }
+    // A member may have started while the prompt was open; an answer that
+    // cannot be had counts as busy, never as idle.
+    let busyAgain = true;
+    try { busyAgain = await options.isBusy(); } catch (error) {
+      options.log("app-update-busy-check-error", { error: error instanceof Error ? error.message : String(error) });
+    }
     if (busyAgain) {
       options.log("app-update-restart-deferred", { releaseName: info.releaseName ?? "" });
       deferredLogged = false;
@@ -138,7 +152,7 @@ export function createUpdateRestartGate(options: UpdateRestartGateOptions): Upda
   };
 }
 
-export function bootstrapAppUpdater(debugLogs: DebugLogService, betaUpdates: boolean, gate?: UpdateRestartGate): void {
+export function bootstrapAppUpdater(debugLogs: DebugLogService, betaUpdates: boolean, gate: UpdateRestartGate): void {
   if (!supportsAutoUpdates(app.isPackaged, process.platform)) {
     return;
   }
@@ -157,7 +171,7 @@ export function bootstrapAppUpdater(debugLogs: DebugLogService, betaUpdates: boo
       },
       updateInterval: "1 hour",
       notifyUser: true,
-      ...(gate ? { onNotifyUser: (info) => gate.onDownloaded({ releaseName: info.releaseName, releaseNotes: info.releaseNotes }) } : {})
+      onNotifyUser: (info) => gate.onDownloaded({ releaseName: info.releaseName, releaseNotes: info.releaseNotes })
     });
   } catch (error) {
     void debugLogs.write("app-updater-bootstrap-error", {

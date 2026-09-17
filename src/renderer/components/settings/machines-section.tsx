@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { Copy, Loader2, Plus, Server, Settings2, Trash2 } from "lucide-react";
+import { Copy, Loader2, Plus, Trash2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { CreateMachineResult, MachineLinkStatus, MachineListResult, MachineRecord } from "../../../shared/machineLink";
-import { compareVersions, type MachineInstallRecord, type MachineInstallSnapshot, type MachineRuntimePayloadInfo } from "../../../shared/machineInstall";
+import type { MachineInstallRecord, MachineInstallSnapshot, MachineRuntimePayloadInfo } from "../../../shared/machineInstall";
 import type { MachineTrustedDevicesResult } from "../../../shared/machineLink";
 import { writeClipboardText } from "../../../shared/clipboard";
-import { MachineSetupPanel } from "./machine-setup-panel";
+import { MachineRow } from "./machine-row";
 
 /**
  * Machines transport: computers that run the app without a window and host
@@ -228,67 +228,22 @@ export function MachinesSection(): JSX.Element {
           <>
             <div className="gen-card-divider" />
             <ul className="machines-list" data-testid="machines-list">
-              {machines.map((machine) => {
-                const live = statusById.get(machine.id);
-                const install = installById.get(machine.id);
-                const connected = live?.connected === true;
-                const runtimeStatus = runtimeStatusText(install, liveOps[machine.id], live?.lastHello?.appVersion, appVersion);
-                return (
-                  <li key={machine.id} className="gen-row machines-row" data-testid="machine-row" data-connected={connected ? "true" : "false"}>
-                    <div className="gen-row-text">
-                      <div className="gen-row-title machines-row-title">
-                        <Server size={14} aria-hidden />
-                        <span>{machine.name}</span>
-                        <span className={`machines-state${connected ? " is-connected" : ""}`}>{connected ? "Connected" : "Not connected"}</span>
-                        {live?.warning && <span className="machines-warning" role="status">{live.warning}</span>}
-                      </div>
-                      <div className="gen-row-desc">
-                        {live?.lastHello
-                          ? `${live.lastHello.machineName} · ${live.lastHello.platform} · app ${live.lastHello.appVersion}`
-                          : "Waiting for the machine runtime to connect."}
-                        {machine.lastSeenAt ? ` Last seen ${new Date(machine.lastSeenAt).toLocaleString()}.` : ""}
-                        {install?.installedVersion
-                          ? ` Runtime ${install.installedVersion} installed from this desktop.`
-                          : install
-                            ? " Set up from this desktop is unfinished."
-                            : ""}
-                      </div>
-                      {runtimeStatus ? (
-                        <div className="gen-row-desc machines-runtime-status" data-testid="machine-runtime-status" data-state={runtimeStatus.state} role="status">
-                          {runtimeStatus.text}
-                        </div>
-                      ) : null}
-                      {setupFor === machine.id ? (
-                        <MachineSetupPanel
-                          machineId={machine.id}
-                          machineName={machine.name}
-                          install={install}
-                          onDone={refreshInstalls}
-                        />
-                      ) : null}
-                    </div>
-                    <div className="gen-row-control machines-row-actions">
-                      <button
-                        type="button"
-                        className="gen-pill"
-                        data-testid="machine-setup-toggle"
-                        aria-expanded={setupFor === machine.id}
-                        onClick={() => setSetupFor((current) => (current === machine.id ? undefined : machine.id))}
-                      >
-                        <span className="gen-pill-lead"><Settings2 size={14} aria-hidden /></span>
-                        <span className="gen-pill-label">{install?.installedVersion ? "Upgrade" : "Set up"}</span>
-                      </button>
-                      <button type="button" className="gen-pill" onClick={() => void showEnrollment(machine)} data-testid="machine-show-enrollment">
-                        <span className="gen-pill-label">Enrollment</span>
-                      </button>
-                      <button type="button" className="gen-pill machines-remove" onClick={() => void removeMachine(machine)} data-testid="machine-remove" disabled={busy}>
-                        <span className="gen-pill-lead"><Trash2 size={14} aria-hidden /></span>
-                        <span className="gen-pill-label">Remove</span>
-                      </button>
-                    </div>
-                  </li>
-                );
-              })}
+              {machines.map((machine) => (
+                <MachineRow
+                  key={machine.id}
+                  machine={machine}
+                  live={statusById.get(machine.id)}
+                  install={installById.get(machine.id)}
+                  liveOp={liveOps[machine.id]}
+                  desktopVersion={appVersion}
+                  setupOpen={setupFor === machine.id}
+                  busy={busy}
+                  onToggleSetup={() => setSetupFor((current) => (current === machine.id ? undefined : machine.id))}
+                  onSetupDone={refreshInstalls}
+                  onShowEnrollment={() => void showEnrollment(machine)}
+                  onRemove={() => void removeMachine(machine)}
+                />
+              ))}
             </ul>
           </>
         ) : null}
@@ -409,34 +364,4 @@ export function MachinesSection(): JSX.Element {
       </div>
     </section>
   );
-}
-
-/**
- * What the machine's runtime is doing relative to this desktop: an update in
- * progress (automatic or from the button), the last update's failure, or an
- * update the desktop still owes the machine. Nothing when the runtime is
- * current, so a healthy row stays quiet.
- */
-export function runtimeStatusText(
-  install: MachineInstallRecord | undefined,
-  live: MachineInstallSnapshot | undefined,
-  runningVersion: string | undefined,
-  desktopVersion: string | undefined
-): { state: "updating" | "failed" | "pending"; text: string } | undefined {
-  if (live && !isTerminalPhase(live.phase)) {
-    return { state: "updating", text: live.message };
-  }
-  const last = install?.lastOperation;
-  if (last && (last.phase === "error" || last.phase === "needs-attention")) {
-    return { state: "failed", text: `${last.kind === "upgrade" ? "Runtime update" : "Runtime setup"} failed: ${last.error ?? last.message}` };
-  }
-  const running = runningVersion ?? install?.installedVersion;
-  if (install?.installedVersion && running && desktopVersion && compareVersions(desktopVersion, running) > 0) {
-    return { state: "pending", text: `Runtime update to ${desktopVersion} pending; it starts when the machine is connected and idle.` };
-  }
-  return undefined;
-}
-
-function isTerminalPhase(phase: MachineInstallSnapshot["phase"]): boolean {
-  return phase === "ready" || phase === "error" || phase === "needs-attention";
 }

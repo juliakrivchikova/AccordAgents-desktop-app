@@ -163,7 +163,7 @@ import {
 import { AppSkillsService } from "./services/appSkills";
 import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
-import { bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
+import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
 import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
@@ -193,8 +193,6 @@ let mainWindow: BrowserWindow | undefined;
 let quitCleanupStarted = false;
 let quitCleanupFinished = false;
 let quittingForUpdate = false;
-let updateRestartGate: ReturnType<typeof createUpdateRestartGate> | undefined;
-let machineAutoUpgradeService: MachineAutoUpgradeService | undefined;
 
 function sendToMainWindow(channel: string, ...args: unknown[]): boolean {
   const window = mainWindow;
@@ -460,6 +458,18 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
   payload: machineRuntimePayload,
   machineName: async (machineId) => (await settingsService.listMachines()).find((machine) => machine.id === machineId)?.name,
   prepareProfile: prepareMachineProfile,
+  // Minutes pass between the preflight and the drain; a member may have
+  // started on the machine meanwhile. Asked afresh, and a stale answer is not
+  // taken as idle.
+  beforeDrain: async (record) => {
+    const activity = await machineLinkService?.machineActivity(record.machineId);
+    if (!activity?.connected) return undefined;
+    if (!activity.fresh) return "The machine did not say what it is doing in time, so its runtime was not stopped.";
+    if (activity.activeRunIds.length > 0 || activity.pendingTerminalRunIds.length > 0 || activity.dispatchedRunIds.length > 0) {
+      return "A member started work on the machine while the update was being staged, so its runtime was not stopped.";
+    }
+    return undefined;
+  },
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
   }
@@ -474,6 +484,7 @@ const cloudRunPreparation = new CloudRunPreparationService({
   listInstalls: () => settingsService.listMachineInstalls(),
   createMachine: async (name, instanceId) => (await createMachine({ name }, instanceId)).machine,
   install: (request, progress) => machineInstallerService.install(request, progress),
+  awaitActiveInstall: async (machineId) => { await machineInstallerService.activeOperation(machineId)?.catch(() => undefined); },
   isConnected: (machineId) => Boolean(machineLinkService?.isMachineConnected(machineId)),
   bootstrapProject: (machineId, localPath, signal, progress) => machineInstallerService.bootstrapProjectMirror({ machineId, localPath }, signal, progress),
   saveInstall: (record) => settingsService.saveMachineInstall(record),
@@ -3185,8 +3196,9 @@ void app.whenReady().then(async () => {
   // A downloaded update is applied only when no member is working anywhere:
   // restarting kills the local members' CLI processes, and the new desktop
   // then upgrades every machine's runtime, which kills the members there.
-  updateRestartGate = createUpdateRestartGate({
+  const updateRestartGate = createUpdateRestartGate({
     isBusy: async () => chatService.activeParticipantRuns().length > 0
+      || machineInstallerService.hasActiveOperations()
       || (await machineLinkService?.anyMachineBusy().catch(() => true)) === true,
     onActivitySettled: (listener) => {
       const offRun = chatService.onParticipantRunSettled(() => listener());
@@ -3323,23 +3335,38 @@ void app.whenReady().then(async () => {
     // Machines update together with the desktop: a machine whose runtime is
     // older than this desktop is upgraded as soon as it is connected and idle.
     const link = machineLinkService;
-    machineAutoUpgradeService = new MachineAutoUpgradeService({
+    const autoUpgrade = new MachineAutoUpgradeService({
       desktopVersion: app.getVersion(),
       listInstalls: () => settingsService.listMachineInstalls(),
       machineName: async (machineId) => (await settingsService.listMachines()).find((machine) => machine.id === machineId)?.name,
       machineActivity: (machineId) => link.machineActivity(machineId),
-      payloadReady: () => machineInstallerService.readPayload().ok,
+      resolveTarget: async (record) => {
+        // An AWS instance gets a new public address every stop/start; the
+        // record remembers the one the last setup used. Ask AWS for the
+        // running instance's address without waking anything.
+        const machine = (await settingsService.listMachines()).find((item) => item.id === record.machineId);
+        if (!machine?.awsInstanceId) return record.target;
+        const worker = await cloudRunAwsService.workerForInspection().catch(() => undefined);
+        if (!worker?.host || worker.hostKeyAlias !== `accordagents-${machine.awsInstanceId}`) return undefined;
+        return { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias };
+      },
+      payloadReady: () => {
+        const payload = machineInstallerService.readPayload();
+        return payload.ok ? { ok: true } : { ok: false, message: payload.message };
+      },
       upgrade: (request, onProgress) => machineInstallerService.upgrade(request, onProgress),
+      holdTurns: (machineId, reason) => link.holdTurns(machineId, reason),
       onProgress: (snapshot) => sendToMainWindow("machines:install-progress", snapshot),
       onChanged: async () => { sendToMainWindow("machines:updated", await machineListResult()); },
       logger: (event, payload) => { void debugLogService.write(event, payload); }
     });
-    const autoUpgrade = machineAutoUpgradeService;
+    // A hello the desktop itself asked for (machineActivity) is not announced
+    // here, so evaluating on every hello cannot feed itself.
     link.onHello((event) => { void autoUpgrade.evaluate(event.machineId); });
     chatService.onParticipantRunSettled(() => { if (autoUpgrade.hasWaiting()) void autoUpgrade.evaluate(); });
     // A turn started from the phone ends on the machine without an event this
     // desktop subscribes to; while a machine waits for idle, ask again.
-    const autoUpgradeTimer = setInterval(() => { if (autoUpgrade.hasWaiting()) void autoUpgrade.evaluate(); }, 60_000);
+    const autoUpgradeTimer = setInterval(() => { if (autoUpgrade.hasWaiting()) void autoUpgrade.evaluate(); }, ACTIVITY_RECHECK_MS);
     autoUpgradeTimer.unref?.();
     void machineLinkService.start().then(() => autoUpgrade.evaluate()).catch((error) => {
       void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });

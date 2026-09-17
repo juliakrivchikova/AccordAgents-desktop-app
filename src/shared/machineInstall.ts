@@ -75,7 +75,10 @@ export type MachineInstallRecoveryKind =
   /** The old runtime or a provider process it owns is still alive; nothing
    *  was replaced, because two runtimes on one user-data directory would be
    *  two executors for the same participant session. */
-  | "manual-drain-required";
+  | "manual-drain-required"
+  /** The machine started work while the new release was being staged, so the
+   *  runtime was not stopped; the staged files wait for the next attempt. */
+  | "machine-busy";
 
 export interface MachineInstallRecovery {
   kind: MachineInstallRecoveryKind;
@@ -306,4 +309,65 @@ function splitVersion(value: string): { core: [number, number, number]; pre: Arr
     return /^\d+$/.test(part) && Number.isInteger(parsed) ? parsed : part;
   });
   return { core: [core[0] ?? 0, core[1] ?? 0, core[2] ?? 0], pre };
+}
+
+/** A setup or update that has ended, one way or another. */
+export function isMachineInstallTerminalPhase(phase: MachineInstallPhase): boolean {
+  return phase === "ready" || phase === "error" || phase === "needs-attention";
+}
+
+/** Operation id prefix of the automatic upgrade this desktop version runs on a
+ *  machine; the bare prefix is the "waiting for idle" notice, a suffixed id is
+ *  an attempt. */
+export function machineAutoUpgradeOperationPrefix(desktopVersion: string): string {
+  return `auto-upgrade-${desktopVersion}`;
+}
+
+export interface MachineRuntimeStatus {
+  state: "updating" | "failed" | "pending";
+  text: string;
+}
+
+/**
+ * What a machine's runtime is doing relative to this desktop, for its row in
+ * Settings → Machines: an update in progress (automatic or from the button),
+ * the last update's failure, or an update the desktop still owes the machine.
+ * Nothing when the runtime is current, so a healthy row stays quiet.
+ *
+ * `live` is the latest progress snapshot streamed for the machine; the
+ * automatic upgrade's "waiting for idle" notice is only believed while the
+ * machine is connected and behind, because the notice is not withdrawn when
+ * the machine goes away or turns out to be current.
+ */
+export function machineRuntimeStatus(input: {
+  install: MachineInstallRecord | undefined;
+  live: MachineInstallSnapshot | undefined;
+  connected: boolean;
+  runningVersion: string | undefined;
+  desktopVersion: string | undefined;
+}): MachineRuntimeStatus | undefined {
+  const { install, live, connected, desktopVersion } = input;
+  const running = input.runningVersion ?? install?.installedVersion;
+  const behind = Boolean(install?.installedVersion && running && desktopVersion && compareVersions(desktopVersion, running) > 0);
+  const waitingNotice = Boolean(live && desktopVersion && live.operationId === machineAutoUpgradeOperationPrefix(desktopVersion));
+  if (live && !isMachineInstallTerminalPhase(live.phase) && (!waitingNotice || (connected && behind))) {
+    return { state: "updating", text: live.message };
+  }
+  const last = install?.lastOperation;
+  if (last && !isMachineInstallTerminalPhase(last.phase)) {
+    // Settings opened while an update was already running: its progress is
+    // on the record until the next snapshot arrives.
+    return { state: "updating", text: last.message };
+  }
+  if (live?.phase === "error" && waitingNotice) {
+    // The automatic upgrade could not be attempted at all (no payload).
+    return { state: "failed", text: live.error ?? live.message };
+  }
+  if (last && (last.phase === "error" || last.phase === "needs-attention")) {
+    return { state: "failed", text: `${last.kind === "upgrade" ? "Runtime update" : "Runtime setup"} failed: ${last.error ?? last.message}` };
+  }
+  if (behind && desktopVersion) {
+    return { state: "pending", text: `Runtime update to ${desktopVersion} pending; it starts when the machine is connected and idle.` };
+  }
+  return undefined;
 }
