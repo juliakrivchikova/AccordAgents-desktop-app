@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ChevronDown, Loader2 } from "lucide-react";
 import type { AwsWorkerOperationSnapshot, AwsWorkerStatus } from "../../../shared/types";
 import type { MachineListResult } from "../../../shared/machineLink";
+import { machineRuntimeStatus, type MachineInstallRecord, type MachineInstallSnapshot } from "../../../shared/machineInstall";
 
 export function AwsWorkerTransition(props: { state: string; since?: number; checkedAt?: number; checking: boolean; error?: string }): JSX.Element {
   const [began] = useState(() => props.since ?? Date.now());
@@ -40,12 +41,27 @@ export function AwsWorkerHistory(props: { operation?: AwsWorkerOperationSnapshot
 export function AwsCloudRunNextStep({ status }: { status: AwsWorkerStatus | null }): JSX.Element | null {
   const [machines, setMachines] = useState<MachineListResult>();
   const [unavailable, setUnavailable] = useState(false);
+  // The machine's runtime ships with the desktop and is updated by it; what
+  // the desktop is doing to that runtime right now is part of Cloud run's
+  // readiness, not a separate screen.
+  const [installs, setInstalls] = useState<MachineInstallRecord[]>([]);
+  const [liveOps, setLiveOps] = useState<Record<string, MachineInstallSnapshot>>({});
+  const [appVersion, setAppVersion] = useState<string | undefined>();
   useEffect(() => {
     let cancelled = false;
     let version = 0;
     void window.consensus.listMachines().then(value => { if (!cancelled && version === 0) setMachines(value); }).catch(() => { if (!cancelled && version === 0) setUnavailable(true); });
     const off = window.consensus.onMachinesUpdated(value => { version++; if (!cancelled) { setMachines(value); setUnavailable(false); } });
-    return () => { cancelled = true; off(); };
+    const refreshInstalls = (): void => {
+      void window.consensus.listMachineInstalls?.().then(records => { if (!cancelled) setInstalls(records); }).catch(() => undefined);
+    };
+    refreshInstalls();
+    void window.consensus.getAppVersion?.().then(value => { if (!cancelled) setAppVersion(value); }).catch(() => undefined);
+    const offInstall = window.consensus.onMachineInstallProgress?.(snapshot => {
+      setLiveOps(current => ({ ...current, [snapshot.machineId]: snapshot }));
+      refreshInstalls();
+    });
+    return () => { cancelled = true; off(); offInstall?.(); };
   }, []);
   if (!status?.configured) return null;
   const id = status.actualSpec?.instanceId ?? status.handle?.instanceId;
@@ -58,5 +74,18 @@ export function AwsCloudRunNextStep({ status }: { status: AwsWorkerStatus | null
           : !machines ? "Cloud run: checking connection…"
             : machine ? "Cloud run: reconnecting to this instance…"
               : "Cloud run: select it in a member’s settings to finish setup automatically.";
-  return text ? <div className="gen-row-desc" data-testid="aws-cloud-run-readiness">{text}</div> : null;
+  const runtime = machine && status.state === "running"
+    ? machineRuntimeStatus({
+      install: installs.find(item => item.machineId === machine.id),
+      live: liveOps[machine.id],
+      connected: link?.connected === true,
+      runningVersion: link?.lastHello?.appVersion,
+      desktopVersion: appVersion
+    })
+    : undefined;
+  if (!text) return null;
+  return <>
+    <div className="gen-row-desc" data-testid="aws-cloud-run-readiness">{text}</div>
+    {runtime ? <div className="gen-row-desc" data-testid="aws-cloud-run-runtime" data-state={runtime.state} role="status">{runtime.text}</div> : null}
+  </>;
 }

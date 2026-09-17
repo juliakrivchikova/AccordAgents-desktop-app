@@ -197,3 +197,39 @@ test("a missed completion after reopening Settings is recovered even when AWS ke
     globalThis.setTimeout = realSetTimeout;
   }
 });
+
+test("Cloud run says what the desktop is doing to the machine's runtime: owed, running, stepped back, failed, or nothing", async () => {
+  const machine = { id: "m-cloud", name: "Cloud run", awsInstanceId: "i-shared", pairingKey: "rv", createdAt: "2026-09-17T00:00:00Z" };
+  const connected = { machineId: "m-cloud", name: "Cloud run", connected: true, lastHello: { appVersion: "1.10.4-beta.11", machineName: "Cloud", platform: "linux-x64", providers: [], deviceId: "d" } };
+  const install = { machineId: "m-cloud", target: { host: "1.2.3.4" }, installRoot: "/r", userDataDir: "/u", serviceName: "s", serviceScope: "system", installedVersion: "1.10.4-beta.11" };
+  const owed = await renderPanel({ status: RUNNING, machines: { machines: [machine], status: [connected] }, installs: [install], appVersion: "1.10.4-beta.12" });
+  assert.match(textOf(owed.root.findByProps({ "data-testid": "aws-cloud-run-readiness" })), /Cloud run: connected/);
+  const owedLine = owed.root.findByProps({ "data-testid": "aws-cloud-run-runtime" });
+  assert.equal(owedLine.props["data-state"], "pending");
+  assert.match(textOf(owedLine), /Runtime update to 1\.10\.4-beta\.12 pending; it starts when the machine is connected and idle/);
+  unmount(owed);
+
+  let publish: ((snapshot: any) => void) | undefined;
+  const running = await renderPanel({ status: RUNNING, machines: { machines: [machine], status: [connected] }, installs: [install], appVersion: "1.10.4-beta.12", onInstallProgress: listener => { publish = listener; } });
+  await act(async () => { publish?.({ machineId: "m-cloud", operationId: "auto-upgrade-1.10.4-beta.12-1", kind: "upgrade", phase: "transfer", message: "Copying the runtime to the machine…", updatedAt: "", completed: ["preflight", "bundle"] }); await flush(); });
+  const runningLine = running.root.findByProps({ "data-testid": "aws-cloud-run-runtime" });
+  assert.equal(runningLine.props["data-state"], "updating");
+  assert.equal(textOf(runningLine), "Copying the runtime to the machine…");
+  unmount(running);
+
+  const stepped = await renderPanel({ status: RUNNING, machines: { machines: [machine], status: [connected] }, appVersion: "1.10.4-beta.12",
+    installs: [{ ...install, lastOperation: { machineId: "m-cloud", operationId: "auto-upgrade-1.10.4-beta.12-1", kind: "upgrade", phase: "needs-attention", message: "A member started work…", updatedAt: "", completed: [], recovery: { kind: "machine-busy", detail: "staged" } } }] });
+  assert.match(textOf(stepped.root.findByProps({ "data-testid": "aws-cloud-run-runtime" })), /waits for the machine to be idle/);
+  unmount(stepped);
+
+  const failed = await renderPanel({ status: RUNNING, machines: { machines: [machine], status: [connected] }, appVersion: "1.10.4-beta.12",
+    installs: [{ ...install, lastOperation: { machineId: "m-cloud", operationId: "auto-upgrade-1.10.4-beta.12-1", kind: "upgrade", phase: "error", message: "ssh: connect timed out", error: "ssh: connect timed out", updatedAt: "", completed: [] } }] });
+  const failedLine = failed.root.findByProps({ "data-testid": "aws-cloud-run-runtime" });
+  assert.equal(failedLine.props["data-state"], "failed");
+  assert.match(textOf(failedLine), /Runtime update failed: ssh: connect timed out/);
+  unmount(failed);
+
+  const current = await renderPanel({ status: RUNNING, machines: { machines: [machine], status: [connected] }, installs: [install], appVersion: "1.10.4-beta.11" });
+  assert.equal(current.root.findAllByProps({ "data-testid": "aws-cloud-run-runtime" }).length, 0, "a current runtime says nothing");
+  unmount(current);
+});
