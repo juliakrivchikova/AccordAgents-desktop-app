@@ -40,3 +40,29 @@ own appearance setting. Under `prefers-color-scheme: dark` the stylesheet restat
 its surface variables with the desktop's dark palette (`src/renderer/styles/app-theme.css`,
 `.dark`), so a chat looks the same on both. The light values stay the handoff's;
 component geometry and typography do not change between the two.
+
+## Members' avatars, hidden rows, folded projects (2026-09-18 parity round)
+
+Avatars are the desktop's, by the desktop's own rule. `src/shared/chatAvatarCatalog.ts`
+is the one description of which picture a member shows (catalog id, provider,
+glyph or photo, the hashed default when nothing was chosen, a drawn avatar by
+id, the app mark for the chat assistant); the desktop renderer derives its
+options from it and the phone loads it verbatim as `mobile-shared.js`, with
+every built-in avatar copied under its catalog id by the mobile build. A drawn
+avatar's bytes are asked for once per session (`mobile.avatar.request`); initials
+stand in until they arrive, as on the desktop. The phone never guesses a picture
+from a handle. The disc contract is the desktop's too: one frame, a glyph at
+75 % or a photo at 100 %, per-kind disc colours stated once.
+
+What the desktop keeps off its timeline stays off the phone's: internal system
+triggers ("Auto-resumed @x after member request"), control text, waiting
+statuses, inferred request carriers. A hidden member message still travels,
+flagged, because it can be the message that ends a run; the phone settles the
+run's row on it and stores no bubble. Rows stored before the desktop stopped
+sending them are swept once on the first launch of this shell.
+
+Projects in the chat list fold and unfold from their header, with the desktop's
+chevron. Phone-only, because the phone is reopened many times a day: the fold is
+remembered across launches, and a folded header shows how many chats it holds
+and the unread dot when one of them has news. While a search is open the headers
+are plain labels and every match is shown.
