@@ -21,13 +21,20 @@ export async function renderPanel(options: {
   stop?: () => Promise<AwsWorkerStatus>;
   remove?: () => Promise<AwsWorkerStatus>;
   onDeleted?: () => Promise<void>;
+  /** The enrolled machines and their link status, as Settings lists them. */
+  machines?: { machines: any[]; status: any[] };
+  installs?: any[];
+  appVersion?: string;
+  onInstallProgress?: (listener: (snapshot: any) => void) => void;
 }): Promise<ReactTestRenderer> {
   const bridge = {
     getAwsWorkerStatus: options.getStatus ?? (async () => options.status),
     onAwsWorkerProgress: (listener: (operation: AwsWorkerOperationSnapshot) => void) => { options.onProgress?.(listener); return () => undefined; },
     startAwsWorker: options.start ?? (async request => ready(request)),
     stopAwsWorker: options.stop ?? (async () => options.status), deleteAwsWorker: options.remove ?? (async () => options.status),
-    listMachines: async () => ({ machines: [], status: [] }), onMachinesUpdated: () => () => undefined,
+    listMachines: async () => options.machines ?? { machines: [], status: [] }, onMachinesUpdated: () => () => undefined,
+    listMachineInstalls: async () => options.installs ?? [], getAppVersion: async () => options.appVersion ?? "1.0.0",
+    onMachineInstallProgress: (listener: (snapshot: any) => void) => { options.onInstallProgress?.(listener); return () => undefined; },
     getAwsWorkerBootstrapCommand: options.command ?? (async () => "command"), openExternal: async () => undefined,
     onCloudRunSetupProgress: () => () => undefined,
     diagnoseCloudRunWorker: async () => ({ ok: true, message: "Checked", checks: [] }),

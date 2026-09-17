@@ -2,12 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Check, Download, FolderInput, Loader2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type {
-  MachineInstallRecord,
-  MachineInstallSnapshot,
-  MachineMirrorBootstrapResult,
-  MachineSshTarget
-} from "../../../shared/machineInstall";
+import { isMachineInstallTerminalPhase, type MachineInstallRecord, type MachineInstallSnapshot, type MachineMirrorBootstrapResult, type MachineSshTarget } from "../../../shared/machineInstall";
 import { MACHINE_INSTALL_PHASE_ORDER, machineInstallPhaseLabel } from "../../../shared/machineInstall";
 import { CloudProviderAuth } from "../cloud-provider-auth";
 
@@ -233,5 +228,5 @@ function MachineSetupSteps(props: { snapshot: MachineInstallSnapshot }): JSX.Ele
 }
 
 function isTerminal(snapshot: MachineInstallSnapshot): boolean {
-  return snapshot.phase === "ready" || snapshot.phase === "error" || snapshot.phase === "needs-attention";
+  return isMachineInstallTerminalPhase(snapshot.phase);
 }

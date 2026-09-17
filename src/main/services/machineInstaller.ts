@@ -18,6 +18,7 @@
  * instead of forcing it, because the alternative is a duplicate executor.
  */
 
+import { compareVersions, isMachineInstallTerminalPhase } from "../../shared/machineInstall";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
@@ -160,6 +161,12 @@ export interface MachineInstallerOptions {
   payload: MachineRuntimePayloadLocation | (() => MachineRuntimePayloadLocation);
   machineName?: (machineId: string) => Promise<string | undefined>;
   prepareProfile?: (record: MachineInstallRecord) => Promise<void>;
+  /** Asked right before the drain, minutes after the preflight: a reason not
+   *  to stop the runtime now (a member started work on the machine while the
+   *  new release was being staged). The upgrade then ends with
+   *  `needs-attention` / `machine-busy`, nothing replaced, and the staged
+   *  files wait for the next attempt. */
+  beforeDrain?: (record: MachineInstallRecord, operationId: string) => Promise<string | undefined>;
   sshExec?: MachineSshExec;
   uploadBundle?: MachineBundleUpload;
   mirrorSync?: RemoteMirrorSyncRunner;
@@ -190,7 +197,7 @@ export class MachineInstallerService {
   async recoverInterruptedOperation(): Promise<void> {
     for (const record of await this.options.store.listMachineInstalls()) {
       const operation = record.lastOperation;
-      if (!operation || isTerminalPhase(operation.phase)) continue;
+      if (!operation || isMachineInstallTerminalPhase(operation.phase)) continue;
       await this.options.store.saveMachineInstall({
         ...record,
         lastOperation: {
@@ -340,6 +347,19 @@ export class MachineInstallerService {
     return this.enqueue("upgrade", request, onProgress);
   }
 
+  /** A setup or update running on any machine right now. The desktop must
+   *  not restart for an update while one is: the SSH session would die
+   *  mid-drain and leave the machine without a runtime. */
+  hasActiveOperations(): boolean {
+    return this.active.size > 0;
+  }
+
+  /** The setup or update running on this machine, to wait for rather than
+   *  collide with. */
+  activeOperation(machineId: string): Promise<MachineInstallResult> | undefined {
+    return this.active.get(machineId);
+  }
+
   private enqueue(
     kind: MachineInstallKind,
     request: MachineUpgradeRequest,
@@ -393,8 +413,8 @@ export class MachineInstallerService {
       // A phase counts as completed only when the next step actually starts.
       // A failure marks the phase it failed in as unfinished, so the UI shows
       // where the setup stopped rather than a full row of ticks.
-      const advancing = phase === "ready" || !isTerminalPhase(phase);
-      if (advancing && snapshot.phase !== phase && !isTerminalPhase(snapshot.phase) && !completed.includes(snapshot.phase)) {
+      const advancing = phase === "ready" || !isMachineInstallTerminalPhase(phase);
+      if (advancing && snapshot.phase !== phase && !isMachineInstallTerminalPhase(snapshot.phase) && !completed.includes(snapshot.phase)) {
         completed.push(snapshot.phase);
       }
       snapshot = {
@@ -607,6 +627,20 @@ export class MachineInstallerService {
       // members. So the drain always runs. Skipping it on a stale reading
       // would flip the symlink under a live runtime, and the connect check
       // below would then see the OLD process answer and call the upgrade done.
+      const busyReason = await this.options.beforeDrain?.(record, request.operationId).catch(() => undefined);
+      if (busyReason) {
+        return await fail(
+          "needs-attention",
+          busyReason,
+          {
+            kind: "machine-busy",
+            detail: `Nothing was replaced: ${probe.installedVersion ?? "the installed version"} is still the one the machine runs, `
+              + `and the new files are staged in ${layout.releasesDir}/${release} without being used. `
+              + "The update is attempted again once the machine is idle.",
+            activeVersion: probe.installedVersion
+          }
+        );
+      }
       const wasRunning = probe.runtimePids.length > 0
         || probe.supervisorPids.length > 0
         || probe.providerPids.length > 0
@@ -902,9 +936,6 @@ export class MachineInstallerService {
 
 // ---- helpers --------------------------------------------------------------
 
-function isTerminalPhase(phase: MachineInstallPhase): boolean {
-  return phase === "ready" || phase === "error" || phase === "needs-attention";
-}
 
 function maintenanceFor(layout: { installRoot: string; userDataDir: string }): MachineMaintenanceTarget {
   if (!layout.installRoot || !layout.userDataDir) throw new Error("The machine did not report its maintenance paths.");
@@ -961,49 +992,6 @@ export function versionFence(
   if (compareVersions(bundle.version, probe.installedVersion) >= 0) return undefined;
   return `The machine runs ${probe.installedVersion}; this desktop would install the older ${bundle.version}. `
     + "Installing an older runtime over a newer one opens the machine's data with an old binary, so it was refused.";
-}
-
-/** Semver precedence, because this app ships betas: `1.10.4-beta.2` must be
- *  older than `1.10.4`, not newer. Getting this backwards would make the
- *  version fence refuse the one upgrade a beta tester needs most. */
-export function compareVersions(a: string, b: string): number {
-  const left = splitVersion(a);
-  const right = splitVersion(b);
-  for (let index = 0; index < 3; index += 1) {
-    if (left.core[index] !== right.core[index]) return left.core[index] < right.core[index] ? -1 : 1;
-  }
-  if (!left.pre.length && !right.pre.length) return 0;
-  // A version with a prerelease tag has lower precedence than one without.
-  if (!left.pre.length) return 1;
-  if (!right.pre.length) return -1;
-  for (let index = 0; index < Math.max(left.pre.length, right.pre.length); index += 1) {
-    const x = left.pre[index];
-    const y = right.pre[index];
-    if (x === undefined) return -1;
-    if (y === undefined) return 1;
-    const numeric = typeof x === "number" && typeof y === "number";
-    if (numeric) {
-      if (x !== y) return x < y ? -1 : 1;
-      continue;
-    }
-    if (typeof x === "number") return -1;
-    if (typeof y === "number") return 1;
-    if (x !== y) return x < y ? -1 : 1;
-  }
-  return 0;
-}
-
-function splitVersion(value: string): { core: [number, number, number]; pre: Array<string | number> } {
-  const [head, ...rest] = value.trim().replace(/^v/, "").split("+")[0].split("-");
-  const core = head.split(".").map((part) => {
-    const parsed = Number.parseInt(part, 10);
-    return Number.isInteger(parsed) ? parsed : 0;
-  });
-  const pre = rest.join("-").split(".").filter(Boolean).map((part) => {
-    const parsed = Number.parseInt(part, 10);
-    return /^\d+$/.test(part) && Number.isInteger(parsed) ? parsed : part;
-  });
-  return { core: [core[0] ?? 0, core[1] ?? 0, core[2] ?? 0], pre };
 }
 
 /** Where the runtime payload the desktop would install came from. It decides
@@ -1265,3 +1253,5 @@ export function redactKeyLikeText(value: string): string {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+export { compareVersions };

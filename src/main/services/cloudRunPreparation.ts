@@ -17,6 +17,10 @@ interface Options {
   listInstalls(): Promise<MachineInstallRecord[]>;
   createMachine(name: string, awsInstanceId: string): Promise<MachineRecord>;
   install(request: MachineInstallRequest, progress: (snapshot: MachineInstallSnapshot) => void): Promise<MachineInstallResult>;
+  /** A setup or update already running on the machine (the automatic
+   *  upgrade after a desktop update): waited for, so selecting a member does
+   *  not fail on a lock held by a background action. */
+  awaitActiveInstall?: (machineId: string) => Promise<void>;
   isConnected(machineId: string): boolean;
   bootstrapProject(machineId: string, localPath: string, signal?: AbortSignal, progress?: (message: string) => void): Promise<MachineMirrorBootstrapResult>;
   saveInstall(record: MachineInstallRecord): Promise<void>;
@@ -245,6 +249,11 @@ export class CloudRunPreparationService {
     const installed = installs.find(item => item.target.hostKeyAlias === `accordagents-${instanceId}`);
     let machine = machines.find(item => item.awsInstanceId === instanceId)
       ?? machines.find(item => item.id === installed?.machineId);
+    if (machine && this.options.awaitActiveInstall) {
+      await this.options.awaitActiveInstall(machine.id);
+      const refreshed = (await this.options.listMachines()).find(item => item.id === machine?.id);
+      if (refreshed) machine = refreshed;
+    }
     this.report({ message: "Connecting to your AWS instance…" });
     const worker = await this.options.aws.ensureExistingWorkerForRun(instanceId);
     if (!worker.host) throw new Error("AWS did not return an address for this instance.");

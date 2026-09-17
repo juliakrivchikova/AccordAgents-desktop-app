@@ -128,6 +128,7 @@ function harness(options: {
   restoreEnrollment?: (machineId: string, requested: string, installed: string, installedMachineId?: string) => Promise<string | void>;
   recoveryOutput?: string;
   readRecovery?: () => Promise<string>;
+  beforeDrain?: (record: MachineInstallRecord, operationId: string) => Promise<string | undefined>;
 } = {}): Harness {
   const calls: MachineSshExecRequest[] = [];
   const uploads: Array<{ remoteDir: string }> = [];
@@ -163,6 +164,7 @@ function harness(options: {
     },
     payload: { dir: bundleDir, source: "checkout" },
     machineName: async () => "cloud-box",
+    beforeDrain: options.beforeDrain,
     now: () => new Date("2026-09-07T00:00:00.000Z"),
     logger: (event, payload) => logged.push({ event, ...payload }),
     sshExec: async (request) => {
@@ -719,6 +721,31 @@ test("an upgrade that cannot prove the old runtime is gone replaces nothing", as
   assert.ok(!h.calls.some((call) => call.script.includes("daemon-reload")), "the service must not be rewritten");
   assert.equal(result.record.installedVersion, "1.3.0");
   assert.ok(!result.snapshot.completed.includes("drain"));
+});
+
+test("an upgrade asks once more right before the drain and leaves a machine that started work alone", async () => {
+  // The preflight said idle; minutes of staging later a member started a
+  // turn on the machine. Stopping the runtime now would kill it.
+  const asked: string[] = [];
+  const h = harness({
+    probe: probeOutput({
+      state: JSON.stringify({ version: "1.3.0", digest: "old" }),
+      "active-release": "1.3.0-old", enrollment: "present", "service-scope": "system", "service-state": "active",
+      "runtime-pids": "4210"
+    }, ["1.3.0-old"]),
+    beforeDrain: async (record, operationId) => { asked.push(`${record.machineId}:${operationId}`); return "A member started work on the machine while the update was being staged, so its runtime was not stopped."; }
+  });
+  const result = await h.service.upgrade({ machineId: "m1", operationId: "auto-upgrade-1.4.0-1", target: TARGET });
+  assert.deepEqual(asked, ["m1:auto-upgrade-1.4.0-1"], "the hook knows which operation asks, so the button can be exempt");
+  assert.equal(result.snapshot.phase, "needs-attention");
+  assert.equal(result.snapshot.recovery?.kind, "machine-busy");
+  assert.match(result.snapshot.message, /started work on the machine while the update was being staged/);
+  assert.match(result.snapshot.recovery?.detail ?? "", /attempted again once the machine is idle/);
+  assert.ok(h.uploads.length > 0, "the release was staged");
+  assert.ok(!h.calls.some((call) => call.script.includes("printf 'drained=")), "the runtime was not stopped");
+  assert.ok(!h.calls.some((call) => call.script.includes("mv -Tf")), "the release must not be switched");
+  assert.equal(result.record.installedVersion, "1.3.0");
+  assert.equal(h.records.get("m1")?.lastOperation?.recovery?.kind, "machine-busy", "the outcome is on the record for the row and the retry");
 });
 
 test("a refused drain on a machine that is still running says so instead", async () => {

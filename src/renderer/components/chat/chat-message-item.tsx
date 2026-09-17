@@ -405,7 +405,10 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           )}
           {isStreaming && message.metadata?.machinePending && !stopPending && (
             <div className="chat-queued-badge">
-              <span>Waiting for machine {message.metadata.machinePending.machineName}</span>
+              <span>
+                Waiting for machine {message.metadata.machinePending.machineName}
+                {message.metadata.machinePending.reason ? `: ${message.metadata.machinePending.reason}` : ""}
+              </span>
             </div>
           )}
           {repoFileMentions.length > 0 && (

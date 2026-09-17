@@ -323,7 +323,7 @@ export class MachineHostService {
   private readonly knownMessages = new Map<string, Map<string, string>>();
 
   constructor(
-    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady">>,
+    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady">>,
     private readonly storage: Pick<StorageService, "getConversation"> & Partial<Pick<StorageService, "deleteConversation">>,
     private readonly settings: Pick<SettingsService, "importMachineSettingsSnapshot">,
     private readonly debugLogs: Pick<DebugLogService, "write">,
@@ -720,7 +720,7 @@ export class MachineHostService {
       platform: `${process.platform}-${process.arch}`,
       providers,
       publicKeyDerBase64: this.options.publicKeyDerBase64,
-      activeRunIds: [...new Set([...this.activeTurns.keys(), ...this.queuedRunIds(), ...this.settlingRuns.keys(), ...(this.chat.activeParticipantRuns?.() ?? []).map((run) => run.runId)])],
+      activeRunIds: [...new Set([...this.activeTurns.keys(), ...this.queuedRunIds(), ...this.settlingRuns.keys(), ...(this.chat.activeParticipantRuns?.() ?? []).map((run) => run.runId), ...(this.chat.liveRunIds?.() ?? [])])],
       pendingTerminalRunIds: [...this.pendingTerminals.keys()],
       instanceId: this.instanceId,
       instanceStartedAt: this.instanceStartedAt,
