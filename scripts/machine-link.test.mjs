@@ -720,7 +720,12 @@ test("machineActivity asks the machine afresh: a turn that started or ended sinc
     await waitFor(() => link.isMachineConnected("machine-act"), 10_000);
     const announced = [];
     const offHello = link.onHello((event) => announced.push(event));
-    const idle = await link.machineActivity("machine-act");
+    // Two callers asking at once (the restart gate and the automatic upgrade)
+    // share one request; the one hello that answers it is not announced.
+    const [idle, alsoIdle] = await Promise.all([link.machineActivity("machine-act"), link.machineActivity("machine-act")]);
+    assert.equal(alsoIdle.fresh, true);
+    assert.equal(logs.filter((entry) => entry.event === "machine-link.hello.requested").length, 0);
+    assert.equal(logs.filter((entry) => entry.event === "machine-link.activity").length, 1, "one request for both callers");
     assert.equal(idle.connected, true);
     assert.equal(idle.fresh, true, "answered by a fresh hello");
     assert.equal(idle.appVersion, "machine-v", "the runtime's own version, not the desktop's");
@@ -762,11 +767,11 @@ test("machineActivity asks the machine afresh: a turn that started or ended sinc
     // While the runtime is being replaced, a turn waits instead of being
     // dispatched into a process about to be stopped; Stop ends the wait.
     const release = link.holdTurns("machine-act", "updating the runtime");
-    const heldProgress = [];
-    const held = link.runTurn({ conversation, participant, triggerMessage, runId: "run-act-held", pendingMessageId: "pm-act-held", progress: (frame) => heldProgress.push(frame) });
+    const waitingMarks = [];
+    const held = link.runTurn({ conversation, participant, triggerMessage, runId: "run-act-held", pendingMessageId: "pm-act-held", onMachineWaiting: async (name, reason) => { waitingMarks.push({ name, reason }); } });
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.ok(!hostRuns.includes("run-act-held"), "not dispatched while held");
-    assert.match(heldProgress[0]?.message ?? "", /Act box: updating the runtime/, "the chat sees why the member has not started");
+    assert.deepEqual(waitingMarks, [{ name: "Act box", reason: "updating the runtime" }], "the bubble says why the member has not started");
     const stopper = new AbortController();
     const stopped = link.runTurn({ conversation, participant, triggerMessage, runId: "run-act-stopped", pendingMessageId: "pm-act-stopped", signal: stopper.signal });
     stopper.abort();

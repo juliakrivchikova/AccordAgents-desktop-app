@@ -323,6 +323,10 @@ export function machineAutoUpgradeOperationPrefix(desktopVersion: string): strin
   return `auto-upgrade-${desktopVersion}`;
 }
 
+export function isMachineAutoUpgradeOperation(operationId: string): boolean {
+  return operationId.startsWith("auto-upgrade-");
+}
+
 export interface MachineRuntimeStatus {
   state: "updating" | "failed" | "pending";
   text: string;
@@ -362,6 +366,10 @@ export function machineRuntimeStatus(input: {
   if (live?.phase === "error" && waitingNotice) {
     // The automatic upgrade could not be attempted at all (no payload).
     return { state: "failed", text: live.error ?? live.message };
+  }
+  if (last && last.recovery?.kind === "machine-busy" && behind && desktopVersion) {
+    // Not a failure: the update stepped back for a member's work and waits.
+    return { state: "pending", text: `Runtime update to ${desktopVersion} waits for the machine to be idle; a member started work while the update was being staged.` };
   }
   if (last && (last.phase === "error" || last.phase === "needs-attention")) {
     return { state: "failed", text: `${last.kind === "upgrade" ? "Runtime update" : "Runtime setup"} failed: ${last.error ?? last.message}` };

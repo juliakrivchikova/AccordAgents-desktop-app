@@ -165,6 +165,7 @@ import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
+import { isMachineAutoUpgradeOperation } from "../shared/machineInstall";
 import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService, enabledCloudProviders } from "./services/cloudRunDoctor";
@@ -461,9 +462,12 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
   // Minutes pass between the preflight and the drain; a member may have
   // started on the machine meanwhile. Asked afresh, and a stale answer is not
   // taken as idle.
-  beforeDrain: async (record) => {
+  // Only for the automatic update: the button is the recovery path and must
+  // still be able to replace a runtime that no longer answers.
+  beforeDrain: async (record, operationId) => {
+    if (!isMachineAutoUpgradeOperation(operationId)) return undefined;
     const activity = await machineLinkService?.machineActivity(record.machineId);
-    if (!activity?.connected) return undefined;
+    if (!activity?.connected) return "The machine is not connected right now, so its runtime was not stopped.";
     if (!activity.fresh) return "The machine did not say what it is doing in time, so its runtime was not stopped.";
     if (activity.activeRunIds.length > 0 || activity.pendingTerminalRunIds.length > 0 || activity.dispatchedRunIds.length > 0) {
       return "A member started work on the machine while the update was being staged, so its runtime was not stopped.";
@@ -3197,7 +3201,7 @@ void app.whenReady().then(async () => {
   // restarting kills the local members' CLI processes, and the new desktop
   // then upgrades every machine's runtime, which kills the members there.
   const updateRestartGate = createUpdateRestartGate({
-    isBusy: async () => chatService.activeParticipantRuns().length > 0
+    isBusy: async () => chatService.liveRunIds().length > 0
       || machineInstallerService.hasActiveOperations()
       || (await machineLinkService?.anyMachineBusy().catch(() => true)) === true,
     onActivitySettled: (listener) => {

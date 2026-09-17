@@ -15,8 +15,10 @@ export function supportsAutoUpdates(isPackaged: boolean, platform: NodeJS.Platfo
 
 /** How often a pending update, or a machine waiting for idle, is re-checked
  *  when no event announces the change: a turn a phone started on a machine
- *  ends without one reaching this desktop. */
-export const ACTIVITY_RECHECK_MS = 60_000;
+ *  ends without one reaching this desktop. Asking a machine costs it a full
+ *  greeting (provider detection, re-sent results), so this is minutes, not
+ *  seconds; the events cover the common case. */
+export const ACTIVITY_RECHECK_MS = 5 * 60_000;
 
 export interface UpdateRestartInfo {
   releaseName?: string;

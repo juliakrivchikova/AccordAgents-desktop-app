@@ -664,7 +664,9 @@ export interface MachineTurnDispatchRequest {
    *  requested but the machine has not confirmed it, so the User sees the
    *  honest state instead of a silent wait. */
   onStopPending?: (machineName: string) => void;
-  onMachineWaiting?: (machineName: string) => Promise<void>;
+  /** The machine is not ready to take the turn: not connected, or its
+   *  runtime is being updated (`reason`). Shown on the pending bubble. */
+  onMachineWaiting?: (machineName: string, reason?: string) => Promise<void>;
 }
 
 export interface MachineTurnDispatchResult {
@@ -772,6 +774,12 @@ export class ChatService {
 
   activeParticipantRuns(): ChatParticipantRun[] {
     return [...this.chatRunMeta.entries()].map(([runId, meta]) => ({ runId, ...meta }));
+  }
+
+  /** Every run alive here: members' turns and the runs that carry no member
+   *  bubble, such as a compaction. Restarting the app kills all of them. */
+  liveRunIds(): string[] {
+    return [...new Set([...this.activeRunIds, ...this.chatRunMeta.keys()])];
   }
 
   onParticipantRunSettled(listener: (run: ChatParticipantRun) => Promise<void> | void): () => void {
@@ -5832,10 +5840,10 @@ export class ChatService {
         pendingMessageId: pendingMessage.id,
         signal,
         progress,
-        onMachineWaiting: async (machineName) => {
+        onMachineWaiting: async (machineName, reason) => {
           await this.withChatMutation(conversation, async () => {
             for (const bubble of bubbleObjects().filter(item => item.status === "pending")) {
-              bubble.metadata = { ...bubble.metadata, machinePending: { machineName, at: new Date().toISOString() } };
+              bubble.metadata = { ...bubble.metadata, machinePending: { machineName, at: new Date().toISOString(), ...(reason ? { reason } : {}) } };
             }
             this.queueSnapshot(conversation);
           });

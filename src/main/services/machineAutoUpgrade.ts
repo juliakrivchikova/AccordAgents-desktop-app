@@ -131,8 +131,10 @@ export class MachineAutoUpgradeService {
     }
     const target = await this.options.resolveTarget(record);
     if (!target?.host) {
-      if (!this.noticed.has(id)) {
-        this.noticed.add(id);
+      // Its address is not known right now (AWS throttled, instance state
+      // changing); the periodic re-check asks again.
+      if (!this.waiting.has(id)) {
+        this.waiting.add(id);
         this.log("machines.auto-upgrade.unreachable", { machineId: id, running, desktop: this.options.desktopVersion });
       }
       return;

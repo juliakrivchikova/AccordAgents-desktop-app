@@ -128,7 +128,7 @@ function harness(options: {
   restoreEnrollment?: (machineId: string, requested: string, installed: string, installedMachineId?: string) => Promise<string | void>;
   recoveryOutput?: string;
   readRecovery?: () => Promise<string>;
-  beforeDrain?: (record: MachineInstallRecord) => Promise<string | undefined>;
+  beforeDrain?: (record: MachineInstallRecord, operationId: string) => Promise<string | undefined>;
 } = {}): Harness {
   const calls: MachineSshExecRequest[] = [];
   const uploads: Array<{ remoteDir: string }> = [];
@@ -733,10 +733,10 @@ test("an upgrade asks once more right before the drain and leaves a machine that
       "active-release": "1.3.0-old", enrollment: "present", "service-scope": "system", "service-state": "active",
       "runtime-pids": "4210"
     }, ["1.3.0-old"]),
-    beforeDrain: async (record) => { asked.push(record.machineId); return "A member started work on the machine while the update was being staged, so its runtime was not stopped."; }
+    beforeDrain: async (record, operationId) => { asked.push(`${record.machineId}:${operationId}`); return "A member started work on the machine while the update was being staged, so its runtime was not stopped."; }
   });
-  const result = await h.service.upgrade({ machineId: "m1", operationId: "op-busy", target: TARGET });
-  assert.deepEqual(asked, ["m1"]);
+  const result = await h.service.upgrade({ machineId: "m1", operationId: "auto-upgrade-1.4.0-1", target: TARGET });
+  assert.deepEqual(asked, ["m1:auto-upgrade-1.4.0-1"], "the hook knows which operation asks, so the button can be exempt");
   assert.equal(result.snapshot.phase, "needs-attention");
   assert.equal(result.snapshot.recovery?.kind, "machine-busy");
   assert.match(result.snapshot.message, /started work on the machine while the update was being staged/);

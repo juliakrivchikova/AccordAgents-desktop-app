@@ -166,7 +166,7 @@ export interface MachineInstallerOptions {
    *  new release was being staged). The upgrade then ends with
    *  `needs-attention` / `machine-busy`, nothing replaced, and the staged
    *  files wait for the next attempt. */
-  beforeDrain?: (record: MachineInstallRecord) => Promise<string | undefined>;
+  beforeDrain?: (record: MachineInstallRecord, operationId: string) => Promise<string | undefined>;
   sshExec?: MachineSshExec;
   uploadBundle?: MachineBundleUpload;
   mirrorSync?: RemoteMirrorSyncRunner;
@@ -627,7 +627,7 @@ export class MachineInstallerService {
       // members. So the drain always runs. Skipping it on a stale reading
       // would flip the symlink under a live runtime, and the connect check
       // below would then see the OLD process answer and call the upgrade done.
-      const busyReason = await this.options.beforeDrain?.(record).catch(() => undefined);
+      const busyReason = await this.options.beforeDrain?.(record, request.operationId).catch(() => undefined);
       if (busyReason) {
         return await fail(
           "needs-attention",

@@ -191,13 +191,19 @@ test("a failed automatic attempt for this desktop version is not retried on the 
   assert.equal(manual.upgrades.length, 1);
 });
 
-test("a machine whose current address is unknown is not dialed at a dead one", async () => {
-  const h = harness({ resolveTarget: async () => undefined });
+test("a machine whose current address is unknown is not dialed at a dead one, and is asked again later", async () => {
+  let address: { host: string } | undefined;
+  const h = harness({ resolveTarget: async () => address });
   await h.service.evaluate();
   assert.equal(h.upgrades.length, 0);
   assert.deepEqual(h.events(), ["machines.auto-upgrade.unreachable"]);
+  assert.equal(h.service.hasWaiting(), true, "the periodic re-check keeps asking");
   await h.service.evaluate();
   assert.equal(h.events().length, 1, "logged once");
+  address = { host: "10.0.0.9" };
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1);
+  assert.equal(h.upgrades[0].target.host, "10.0.0.9", "dialed at the current address, not the record's");
 });
 
 test("without a runtime payload nothing is attempted and the machine's row says why", async () => {
@@ -256,6 +262,10 @@ test("the Machines row says when an update runs, failed, or is still owed, and s
   const failed = record({ lastOperation: snapshot({ phase: "needs-attention", message: "The machine's current runtime did not stop, so it was not replaced.", error: "The machine's current runtime did not stop, so it was not replaced." }) });
   assert.deepEqual(machineRuntimeStatus({ install: failed, live: undefined, connected: true, runningVersion: "1.10.4-beta.10", desktopVersion }),
     { state: "failed", text: "Runtime update failed: The machine's current runtime did not stop, so it was not replaced." });
+  // Stepping back for a member's work is not a failure.
+  const stepped = record({ lastOperation: snapshot({ phase: "needs-attention", message: "A member started work…", recovery: { kind: "machine-busy", detail: "staged" } }) });
+  assert.equal(machineRuntimeStatus({ install: stepped, live: undefined, connected: true, runningVersion: "1.10.4-beta.10", desktopVersion })?.state, "pending");
+  assert.match(machineRuntimeStatus({ install: stepped, live: undefined, connected: true, runningVersion: "1.10.4-beta.10", desktopVersion })?.text ?? "", /waits for the machine to be idle/);
 });
 
 test("the waiting notice is believed only while the machine is connected and behind", () => {

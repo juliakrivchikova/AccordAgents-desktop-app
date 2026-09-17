@@ -1275,7 +1275,7 @@ export interface ChatMessageMetadata {
    *  machine has not confirmed it yet (shown honestly instead of "stopped");
    *  kept apart from the content so delivered text is never overwritten. */
   stopPending?: { machineName: string; at: string };
-  machinePending?: { machineName: string; at: string };
+  machinePending?: { machineName: string; at: string; reason?: string };
   cloudRunPreparation?: import("./cloudRunPreparation").CloudRunPreparationProgress;
   /** Machines transport: the result already folded into this bubble
    *  (identified by the machine's finishedAt), so a redelivery of the same
