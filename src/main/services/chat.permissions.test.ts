@@ -1,4 +1,5 @@
 import { NativeProcessUnavailableError } from "./nativeProcess";
+import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11967,3 +11968,128 @@ function skillMention(kind: ChatParticipant["kind"]): unknown {
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
+
+test("Stop reaches the machine when this desktop holds a pending row for the run", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine" };
+  const conversation = chatConversation([participant], { activeRunIds: ["run-on-machine"] });
+  conversation.messages.push({
+    id: "machine-bubble", role: "participant", participantId: participant.id, content: "",
+    status: "pending", createdAt: NOW, metadata: { runId: "run-on-machine" }
+  } as any);
+  const { service } = testService({ conversation });
+  const cancels: Array<{ machineId: string; runId: string }> = [];
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    cancelMachineRun: async (request: any) => { cancels.push({ machineId: request.machineId, runId: request.runId }); }
+  } as any);
+  assert.equal(service.cancelRun("run-on-machine"), true);
+  await waitFor(() => cancels.length === 1, 2000);
+  assert.deepEqual(cancels, [{ machineId: "machine", runId: "run-on-machine" }]);
+});
+
+test("Stop still reaches the machine when this desktop has no pending row for the run", async () => {
+  // The defect: cancelStoredRun published machine.turn.cancel only when this
+  // copy happened to hold a pending participant row for the run. A run the
+  // machine has started but whose row has not been replicated here yet -- or
+  // whose row this copy has already settled -- was therefore never cancelled
+  // on the machine, while cancelRun reported success to the User all the same.
+  // The machine owns the run; a missing row here is not evidence it stopped.
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine" };
+  const conversation = chatConversation([participant], { activeRunIds: ["run-on-machine"] });
+  const { service } = testService({ conversation });
+  const cancels: Array<{ machineId: string; runId: string }> = [];
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    cancelMachineRun: async (request: any) => { cancels.push({ machineId: request.machineId, runId: request.runId }); }
+  } as any);
+  assert.equal(service.cancelRun("run-on-machine"), true);
+  await waitFor(() => cancels.length === 1, 2000);
+  assert.deepEqual(cancels, [{ machineId: "machine", runId: "run-on-machine" }],
+    "a Stop for a machine-hosted run must be published to that machine");
+});
+
+test("Stop for a local member's run stays local even when the chat also has a machine member", async () => {
+  // The single-machine fallback exists for a run this copy cannot attribute
+  // at all. A row that names a local member settles the question: routing its
+  // Stop to the machine would send a cancel for a run the machine never had
+  // and leave the local row pending for ever.
+  const local = chatParticipant("codex-cli");
+  const remote = { ...chatParticipant("codex-cli"), id: "remote-member", handle: "remote", homeMachineId: "machine" };
+  const conversation = chatConversation([local, remote], { activeRunIds: ["run-local"] });
+  conversation.messages.push({
+    id: "local-bubble", role: "participant", participantId: local.id, content: "",
+    status: "pending", createdAt: NOW, metadata: { runId: "run-local" }
+  } as any);
+  const { service, storage } = testService({ conversation });
+  const cancels: Array<{ machineId: string; runId: string }> = [];
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    cancelMachineRun: async (request: any) => { cancels.push({ machineId: request.machineId, runId: request.runId }); }
+  } as any);
+  assert.equal(service.cancelRun("run-local"), true);
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.id === "local-bubble" && message.metadata?.terminalReason === "user-stopped"));
+  assert.equal(storage.current.messages.find((message: ChatMessage) => message.id === "local-bubble")?.metadata?.terminalReason, "user-stopped",
+    "the local run is swept here");
+  assert.deepEqual(cancels, [], "no cancel is published to a machine that does not own the run");
+});
+
+test("a picture a machine does not hold is fetched from the desktop that owns the chat", async () => {
+  // The defect: conversation replication carries an attachment's metadata but
+  // never its file, and the machine link had no notion of attachments at all
+  // (zero references). A member running in the cloud could therefore see that
+  // the User attached a picture and could never read it: every read failed
+  // with AttachmentMissing, telling the User to resend an image that was not
+  // lost. The bytes now come from the desktop on demand.
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const attachment = {
+    id: "attachment-1", filename: "shot.png", mimeType: "image/png",
+    sizeBytes: 3, width: 1, height: 1,
+    storageKey: `attachments/${randomUUID()}.png`, createdAt: NOW
+  };
+  conversation.messages.push({
+    id: "user-picture", role: "user", content: "Look at this.", status: "done", createdAt: NOW,
+    metadata: { imageAttachments: [attachment] }
+  } as any);
+  const { service } = testService({ conversation });
+  const asked: Array<{ conversationId: string; attachmentId: string }> = [];
+  const bytes = Buffer.from("PNG").toString("base64");
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    fetchAttachment: async (conversationId: string, attachmentId: string) => {
+      asked.push({ conversationId, attachmentId });
+      return { dataBase64: bytes };
+    }
+  } as any);
+  const read = await service.readChatAttachment({ conversationId: conversation.id, attachmentId: attachment.id });
+  assert.equal(read.dataBase64, bytes, "the member must receive the picture the desktop holds");
+  assert.deepEqual(asked, [{ conversationId: conversation.id, attachmentId: attachment.id }]);
+});
+
+test("a picture the owner cannot supply is reported as unavailable with the reason, not as empty bytes", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const attachment = {
+    id: "attachment-2", filename: "shot.png", mimeType: "image/png",
+    sizeBytes: 3, width: 1, height: 1,
+    storageKey: `attachments/${randomUUID()}.png`, createdAt: NOW
+  };
+  conversation.messages.push({
+    id: "user-picture-2", role: "user", content: "Look at this.", status: "done", createdAt: NOW,
+    metadata: { imageAttachments: [attachment] }
+  } as any);
+  const { service } = testService({ conversation });
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    fetchAttachment: async () => { throw new Error("The desktop did not answer with this picture in time."); }
+  } as any);
+  // The desktop was asked and could not supply it: the picture is not lost,
+  // so the member is told what happened rather than to ask for a resend.
+  await assert.rejects(
+    service.readChatAttachment({ conversationId: conversation.id, attachmentId: attachment.id }),
+    (error: Error) => /AttachmentUnavailable/.test(error.message)
+      && error.message.includes("The desktop did not answer with this picture in time.")
+      && error.message.includes("do not ask for a resend")
+  );
+});

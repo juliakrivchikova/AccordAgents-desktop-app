@@ -706,6 +706,10 @@ export interface ChatParticipantRequestDelegate {
 export interface MachineTurnDispatcher {
   runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult>;
   cancelMachineRun?(request: { machineId: string; conversationId: string; runId: string; onStopPending?: (machineName: string) => Promise<void> }): Promise<void>;
+  /** The bytes of a picture this copy does not hold on disk. Only a machine
+   *  supplies this: replication brings an attachment's metadata here without
+   *  its file, and the desktop that owns the chat still has it. */
+  fetchAttachment?(conversationId: string, attachmentId: string): Promise<{ dataBase64: string }>;
   /** Forwards the desktop's decision on an approval raised on a machine. */
   respondToMachineApproval?(request: {
     machineId: string;
@@ -15408,6 +15412,29 @@ export class ChatService {
     try {
       bytes = await readFile(filePath);
     } catch (error) {
+      // A machine holds the chat's text but not its pictures: replication
+      // carries attachment metadata without the file. Ask the desktop that
+      // owns the chat, and keep what it sends, so the next read is local.
+      let ownerRefusal: string | undefined;
+      const fetched = await this.fetchAttachmentFromOwner(conversationId, attachment).catch((fetchError) => {
+        ownerRefusal = fetchError instanceof Error ? fetchError.message : String(fetchError);
+        void this.debugLogs.write("chat.attachments.fetch-failed", {
+          conversationId,
+          attachmentId: attachment.id,
+          message: ownerRefusal
+        });
+        return undefined;
+      });
+      if (fetched) {
+        return fetched;
+      }
+      if (ownerRefusal) {
+        // The desktop was asked and said no (or never answered): the picture
+        // is not lost, so a resend would not help. Say what happened instead.
+        throw new Error(
+          `AttachmentUnavailable. Problem: the image exists on the desktop that owns this chat, but it could not be fetched from there. Cause: ${ownerRefusal} Fix: tell User the picture could not be fetched from the desktop; do not ask for a resend.`
+        );
+      }
       void this.debugLogs.write("chat.attachments.missing", {
         conversationId,
         attachmentId: attachment.id,
@@ -15418,6 +15445,39 @@ export class ChatService {
       );
     }
     return bytes.toString("base64");
+  }
+
+  /** The picture's bytes from the desktop that owns the chat, written to this
+   *  machine's own store so one fetch serves every later read. A copy that is
+   *  not a machine has no owner to ask and simply reports it missing. */
+  private async fetchAttachmentFromOwner(conversationId: string, attachment: ChatImageAttachment): Promise<string | undefined> {
+    const fetch = this.machineLink?.fetchAttachment;
+    if (!fetch) {
+      return undefined;
+    }
+    const result = await fetch.call(this.machineLink, conversationId, attachment.id);
+    const dataBase64 = typeof result?.dataBase64 === "string" ? result.dataBase64 : "";
+    if (!dataBase64) {
+      return undefined;
+    }
+    const filePath = this.attachmentPath(conversationId, attachment.storageKey);
+    // Written beside its final name and renamed into place, so a parallel read
+    // (a member issues tool calls concurrently) never sees a half-written file.
+    const partialPath = `${filePath}.${randomUUID()}.part`;
+    await mkdir(path.dirname(filePath), { recursive: true }).catch(() => undefined);
+    await writeFile(partialPath, Buffer.from(dataBase64, "base64"), { mode: 0o600 })
+      .then(() => rename(partialPath, filePath))
+      .catch(async (error) => {
+        // Not fatal: the member gets its picture even when this machine cannot
+        // keep a copy, it just pays for the fetch again next time.
+        await rm(partialPath, { force: true }).catch(() => undefined);
+        void this.debugLogs.write("chat.attachments.cache-failed", {
+          conversationId,
+          attachmentId: attachment.id,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+    return dataBase64;
   }
 
   private async prepareImageAttachments(conversationId: string, inputs: ChatImageInput[] | undefined): Promise<PreparedImageAttachments> {
@@ -17243,6 +17303,17 @@ export class ChatService {
     return false;
   }
 
+  /** The machine to send a Stop to when this copy cannot name the run's member.
+   *  Only answered when the chat leaves no doubt: exactly one member lives on a
+   *  machine, so the run can only be that machine's. The phone's own Stop makes
+   *  the same call for the same reason (`machineRunForCancel`). */
+  private soleMachineMemberHome(conversation: Conversation): string | undefined {
+    const homes = new Set(this.chatParticipants(conversation)
+      .map((member) => member.homeMachineId)
+      .filter((home): home is string => Boolean(home) && home !== this.hostMachineId));
+    return homes.size === 1 ? [...homes][0] : undefined;
+  }
+
   private async cancelStoredRun(runId: string): Promise<boolean> {
     const targetRunId = runId.trim();
     if (!targetRunId) {
@@ -17258,12 +17329,31 @@ export class ChatService {
         continue;
       }
       const activeRunIds = readActiveRunIds(conversation.metadata);
-      const pending = conversation.messages.find((message) => message.role === "participant" && message.status === "pending" && message.metadata?.runId === targetRunId);
-      const participant = pending && this.chatParticipants(conversation).find((member) => member.id === pending.participantId);
-      if (pending && !pending.metadata?.cloudRunPreparation && participant?.homeMachineId && participant.homeMachineId !== this.hostMachineId && this.machineLink?.cancelMachineRun) {
+      // A row here is evidence about the run, not the authority over it. The
+      // machine owns its own runs: one it has started but not yet replicated
+      // here, and one whose row this copy has already settled, are both still
+      // alive there. Requiring a *pending* row meant such a Stop was never
+      // published to the machine at all, while cancelRun still reported it as
+      // requested -- the User pressed Stop and nothing happened.
+      // A run can own several rows (a resumed reply, a message the member posted
+      // through an app tool, a cloud preparation row): the pending one is the
+      // one Stop feedback belongs on, and a preparation row must not hide a
+      // reply row that names the member.
+      const runRows = conversation.messages.filter((message) => message.role === "participant" && message.metadata?.runId === targetRunId);
+      const pending = runRows.find((message) => message.status === "pending");
+      const runRow = pending ?? runRows.find((message) => !message.metadata?.cloudRunPreparation) ?? runRows[0];
+      const knownHere = runRows.length > 0 || activeRunIds.includes(targetRunId) || this.chatRunId(conversation) === targetRunId;
+      const participant = runRow && this.chatParticipants(conversation).find((member) => member.id === runRow.participantId);
+      // A row that names a member settles where the run lives: a local member's
+      // run stays local even when the chat also has a machine member. The
+      // single-machine fallback is only for a run this copy cannot attribute at
+      // all -- no row replicated yet, or a member since removed.
+      const homeMachineId = participant ? participant.homeMachineId : this.soleMachineMemberHome(conversation);
+      if (knownHere && !runRow?.metadata?.cloudRunPreparation && homeMachineId && homeMachineId !== this.hostMachineId && this.machineLink?.cancelMachineRun) {
         await this.machineLink.cancelMachineRun({
-          machineId: participant.homeMachineId, conversationId: conversation.id, runId: targetRunId,
+          machineId: homeMachineId, conversationId: conversation.id, runId: targetRunId,
           onStopPending: async (machineName) => {
+            if (!pending) return;
             await this.withChatMutation(conversation, async () => {
               const bubble = conversation.messages.find((message) => message.id === pending.id);
               if (bubble?.status === "pending") {

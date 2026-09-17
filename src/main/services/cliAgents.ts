@@ -367,10 +367,12 @@ interface ClaudeWarmPendingTurn {
   /** Tasks whose notification already arrived; a stale `background_tasks_changed`
    *  ordered after it must not resurrect them and re-arm the hold. */
   finishedTaskIds: Set<string>;
-  /** Notifications the CLI has emitted since it last started a model turn
-   *  (`system/init`). A `result` with one outstanding is not the end of the
-   *  turn: the CLI resumes the model to deliver it, even when the task finished
-   *  while the reply was still being written. */
+  /** Task notifications the CLI still holds for the model. The CLI queues a
+   *  notification until it builds the model's next request, which happens
+   *  right after a tool result is fed back or, when the reply has already
+   *  ended, by resuming the model (`system/init`). A `result` with one still
+   *  queued is therefore not the end of the turn: the CLI is about to resume,
+   *  and the held reply waits for that continuation. */
   notificationsSinceInit: number;
   /** Final text of every sub-turn already closed by a held `result`; the reply
    *  is these segments plus the last one, separated by paragraph breaks. */
@@ -389,6 +391,22 @@ interface ClaudeWarmPendingTurn {
   /** Armed when the hold is waiting only for the CLI to resume (no task still
    *  running); if no model turn starts in time, the held reply is delivered. */
   holdGraceTimer?: NodeJS.Timeout;
+  /** True while the model is inside a step: from `system/init` (or any output
+   *  of that step) until its `result`. A notification that lands mid-step is
+   *  delivered to the running step as a tool result and is never followed by a
+   *  fresh `init`, so waiting for one finished the turn while the member was
+   *  still working, dropped everything it produced afterwards, and let the
+   *  idle timer kill the process mid-command. */
+  modelStepActive: boolean;
+  /** True once a tool result has been fed back to the CLI and the model's next
+   *  call has not started yet. The first `assistant` event after that is a new
+   *  call (when the CLI streams no `message_start` frames to tell us). */
+  awaitingModelCall: boolean;
+  /** How many of the queued notifications the CLI had when it last fed a tool
+   *  result back: the request it builds right then carries exactly those.
+   *  Anything that arrives later, while that request is in flight, is still
+   *  queued and is what a resume after the result delivers. */
+  deliveredAtLastToolResult: number;
   /** The visible "waiting" activity row of the current hold, completed when the
    *  CLI resumes so it does not stay "started" forever. */
   holdActivity?: { itemId: string; label: string };
@@ -5332,6 +5350,9 @@ export class CliAgentRunner {
             backgroundTaskLabels: new Map(),
             finishedTaskIds: new Set(),
             notificationsSinceInit: 0,
+            modelStepActive: false,
+            awaitingModelCall: false,
+            deliveredAtLastToolResult: 0,
             heldSegments: [],
             heldResultEvents: [],
             holds: 0,
@@ -5464,6 +5485,36 @@ export class CliAgentRunner {
       rejectPending(new Error(streamError));
       return;
     }
+    // Anything the model itself produces is proof that a step is running now.
+    // Recorded before the notification bookkeeping below, because a
+    // notification that lands inside a running step must not arm the timer
+    // that waits for a step to start.
+    const eventType = this.stringField(this.asRecord(event) ?? {}, "type");
+    if (this.claudeWarmEventShowsModelStep(eventType)) {
+      if (!pending.modelStepActive) {
+        // A step this copy did not see start. Its own output is the proof it is
+        // running, and a running step is where any outstanding notification was
+        // delivered -- the same thing `system/init` states explicitly.
+        this.markClaudeModelStepStarted(pending);
+      }
+      // A task notification is queued by the CLI until it builds the model's
+      // next request. Inside a step that request is built the moment a tool
+      // result is fed back (the `user` event), so the notifications queued by
+      // then ride along with it; one arriving after that, while the request is
+      // in flight, is still queued and is delivered by a resume after the
+      // result -- which the hold must wait for. Verified on Claude Code
+      // 2.1.257: a task finishing during a foreground command is handed to the
+      // model with that command's result and no resume follows.
+      if (eventType === "user") {
+        pending.awaitingModelCall = true;
+        pending.deliveredAtLastToolResult = pending.notificationsSinceInit;
+      } else if (this.claudeWarmMessageStarted(event) || (eventType === "assistant" && pending.awaitingModelCall)) {
+        pending.notificationsSinceInit = Math.max(0, pending.notificationsSinceInit - pending.deliveredAtLastToolResult);
+        pending.deliveredAtLastToolResult = 0;
+        pending.awaitingModelCall = false;
+      }
+      this.clearClaudeHoldGraceTimer(pending);
+    }
     this.trackClaudeBackgroundTasks(event, pending, participant, options, fallbackSessionId, cleanupPending);
     const toolSummary = this.claudeWarmToolSummary(event);
     if (toolSummary) {
@@ -5496,6 +5547,9 @@ export class CliAgentRunner {
     if (!this.isClaudeWarmResult(event)) {
       return;
     }
+    // The step is over. From here a continuation has to start a new one, which
+    // is exactly what the grace timer below waits for.
+    pending.modelStepActive = false;
     const segment = this.claudeWarmSegmentText(pending, event);
     if (pending.backgroundTasks.size > 0 || pending.notificationsSinceInit > 0) {
       // Parity with the dedicated CLI: the model's reply is not the end of the
@@ -5713,9 +5767,8 @@ export class CliAgentRunner {
     if (subtype === "init") {
       // A model turn started: every notification seen so far has been delivered
       // to the model, and a held reply is now being continued.
-      pending.notificationsSinceInit = 0;
+      this.markClaudeModelStepStarted(pending);
       this.clearClaudeHoldGraceTimer(pending);
-      this.finishClaudeHoldActivity(pending, "completed");
       return;
     }
     if (subtype === "task_started") {
@@ -5749,18 +5802,27 @@ export class CliAgentRunner {
     if (subtype === "task_notification") {
       const taskId = this.stringField(record, "task_id");
       const status = this.stringField(record, "status") ?? "stopped";
-      const description = (taskId ? pending.backgroundTaskLabels.get(taskId) : undefined)
-        ?? this.claudeBackgroundTaskLabel(this.stringField(record, "summary") ?? taskId ?? "background task");
+      const backgroundLabel = taskId ? pending.backgroundTaskLabels.get(taskId) : undefined;
       if (taskId) {
         pending.backgroundTasks.delete(taskId);
         pending.finishedTaskIds.add(taskId);
       }
+      // Every notification is queued for the model until its next call starts
+      // (see handleClaudeWarmLine); one still queued at the result is what
+      // makes the CLI resume, and the hold waits for that resume.
       pending.notificationsSinceInit += 1;
-      const completed = status === "completed";
-      this.emitLiveOutput(pending.onOutput, "tool", `Background task ${completed ? "finished" : status}: ${description}\n`, undefined, {
-        activityKind: "status",
-        activityStatus: completed ? "completed" : "failed"
-      });
+      // The CLI also reports a long *foreground* command as a task
+      // (`task_started` with is_backgrounded false, then a notification when it
+      // ends). Its result reaches the model inline and its own tool activity
+      // is already shown, so only a task the member put in the background gets
+      // a "background task finished" row.
+      if (backgroundLabel !== undefined) {
+        const completed = status === "completed";
+        this.emitLiveOutput(pending.onOutput, "tool", `Background task ${completed ? "finished" : status}: ${backgroundLabel}\n`, undefined, {
+          activityKind: "status",
+          activityStatus: completed ? "completed" : "failed"
+        });
+      }
       this.armClaudeHoldGraceTimerIfIdle(pending, participant, options, fallbackSessionId, cleanupPending);
     }
   }
@@ -5812,7 +5874,8 @@ export class CliAgentRunner {
     fallbackSessionId: string | undefined,
     cleanupPending: () => ClaudeWarmPendingTurn | undefined
   ): void {
-    if (pending.holds === 0 || pending.backgroundTasks.size > 0) {
+    // A step already running is the resume this timer exists to wait for.
+    if (pending.holds === 0 || pending.backgroundTasks.size > 0 || pending.modelStepActive) {
       return;
     }
     this.clearClaudeHoldGraceTimer(pending);
@@ -5830,6 +5893,34 @@ export class CliAgentRunner {
       this.finishClaudeWarmTurn(current, "", undefined, participant, options, fallbackSessionId);
     }, this.claudeBackgroundResumeGraceMs);
     pending.holdGraceTimer.unref();
+  }
+
+  /** Output only a running model step produces: its own text, its stream
+   *  frames, and the tool results fed back into it. `system` events are not
+   *  included — `init` states the step itself, and the rest (notifications,
+   *  task bookkeeping) say nothing about whether one is running. */
+  private claudeWarmEventShowsModelStep(eventType: string | undefined): boolean {
+    return eventType === "assistant" || eventType === "stream_event" || eventType === "user";
+  }
+
+  /** A model step is running: whatever the CLI had queued went into the
+   *  request that started it, and a held reply is being continued. */
+  private markClaudeModelStepStarted(pending: ClaudeWarmPendingTurn): void {
+    pending.notificationsSinceInit = 0;
+    pending.deliveredAtLastToolResult = 0;
+    pending.awaitingModelCall = false;
+    pending.modelStepActive = true;
+    this.finishClaudeHoldActivity(pending, "completed");
+  }
+
+  /** The first frame of one model call (`--include-partial-messages`). */
+  private claudeWarmMessageStarted(event: unknown): boolean {
+    const record = this.asRecord(event);
+    if (!record || this.stringField(record, "type") !== "stream_event") {
+      return false;
+    }
+    const inner = this.asRecord(record.event);
+    return Boolean(inner) && this.stringField(inner ?? {}, "type") === "message_start";
   }
 
   private clearClaudeHoldGraceTimer(pending: ClaudeWarmPendingTurn): void {

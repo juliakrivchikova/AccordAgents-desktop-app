@@ -244,6 +244,48 @@ export interface MachineConversationResyncBody {
   conversationId: string;
 }
 
+/** Machine -> desktop: the bytes of a picture this chat carries.
+ *
+ *  Conversation replication carries an attachment's metadata but not its file,
+ *  so a member running on a machine could see that a picture exists and never
+ *  read it. Fetched on demand rather than replicated with the chat: a chat's
+ *  pictures are far larger than its text and a member usually needs none of
+ *  them. The phone asks the desktop for the same bytes the same way
+ *  (`mobile.attachment.request`). */
+export interface MachineAttachmentRequestBody {
+  type: "machine.attachment.request";
+  requestId: string;
+  conversationId: string;
+  attachmentId: string;
+}
+
+/** Desktop -> machine: the answer to one machine.attachment.request. `ok`
+ *  false carries why, so the member is told the picture is unavailable rather
+ *  than waiting for bytes that will never come. */
+export interface MachineAttachmentResultBody {
+  type: "machine.attachment.result";
+  requestId: string;
+  conversationId: string;
+  attachmentId: string;
+  ok: boolean;
+  /** Base64 of this part of the file, present only when ok. */
+  dataBase64?: string;
+  /** Which part this is, 0-based, and how many the picture has. A picture
+   *  travels in bounded parts because one relay logical message may not
+   *  exceed the provider's limit (10 MiB), while a picture may be 10 MB before
+   *  base64 and sealing. Absent on a refusal. */
+  part?: number;
+  parts?: number;
+  mediaType?: string;
+  fileName?: string;
+  error?: string;
+}
+
+/** Raw bytes per machine.attachment.result part: ~2.8 MiB once base64-encoded
+ *  and sealed, well under the 10 MiB relay logical-message limit, and short
+ *  enough that the link's other traffic is not held behind one picture. */
+export const MACHINE_ATTACHMENT_PART_BYTES = 1_572_864;
+
 /** Desktop -> machine: the first copy of a chat (shell plus every batch) has
  *  been sent in full; the machine may now compare its own rows against what
  *  the desktop holds. */
@@ -359,7 +401,9 @@ export type MachineLinkMessage =
   | MachineTrustRosterBody
   | MachineParticipantsDelegateBody
   | MachineChoiceAnswerBody
-  | MachineChoiceResultBody;
+  | MachineChoiceResultBody
+  | MachineAttachmentRequestBody
+  | MachineAttachmentResultBody;
 
 export type MachineLinkMessageType = MachineLinkMessage["type"];
 
@@ -379,36 +423,43 @@ export function isMachineDurableMessage(body: MachineLinkMessage): boolean {
 export function machineCommandId(runId: string): string { return `machine-command:${runId}`; }
 export function machineCommandTerminalId(runId: string): string { return `machine-terminal:${machineCommandId(runId)}`; }
 
-const MESSAGE_TYPES: ReadonlySet<string> = new Set<MachineLinkMessageType>([
-  "machine.hello",
-  "machine.hello.ack",
-  "machine.settings.sync",
-  "machine.settings.sealed",
-  "machine.conversation.sync",
-  "machine.conversation.delta",
-  "machine.conversation.deleted",
-  "machine.turn.request",
-  "machine.turn.cancel",
-  "machine.turn.progress",
-  "machine.turn.progress.delta",
-  "machine.participants.delegate",
-  "machine.trust.roster",
-  "machine.turn.started",
-  "machine.turn.finished",
-  "machine.conversation.backdelta",
-  "machine.approval.requested",
-  "machine.approval.updated",
-  "machine.approval.decision",
-  "machine.approval.result",
-  "machine.turn.finished.ack",
-  "machine.turn.unknown",
-  "machine.turn.query",
-  "machine.hello.request",
-  "machine.conversation.sync.done",
-  "machine.conversation.resync",
-  "machine.choice.result",
-  "machine.choice.answer"
-]);
+/** Every message the link accepts. Typed as a table over the union so that a
+ *  body added to `MachineLinkMessage` without a row here is a compile error,
+ *  not a message both sides silently drop on receipt. */
+const MESSAGE_TYPE_TABLE: Record<MachineLinkMessageType, true> = {
+  "machine.hello": true,
+  "machine.hello.ack": true,
+  "machine.settings.sync": true,
+  "machine.settings.sealed": true,
+  "machine.conversation.sync": true,
+  "machine.conversation.delta": true,
+  "machine.conversation.deleted": true,
+  "machine.turn.request": true,
+  "machine.turn.cancel": true,
+  "machine.turn.progress": true,
+  "machine.turn.progress.delta": true,
+  "machine.participants.delegate": true,
+  "machine.trust.roster": true,
+  "machine.turn.started": true,
+  "machine.turn.finished": true,
+  "machine.conversation.backdelta": true,
+  "machine.approval.requested": true,
+  "machine.approval.updated": true,
+  "machine.approval.decision": true,
+  "machine.approval.result": true,
+  "machine.turn.finished.ack": true,
+  "machine.turn.unknown": true,
+  "machine.turn.query": true,
+  "machine.hello.request": true,
+  "machine.conversation.sync.done": true,
+  "machine.conversation.resync": true,
+  "machine.choice.result": true,
+  "machine.choice.answer": true,
+  "machine.attachment.request": true,
+  "machine.attachment.result": true,
+};
+
+const MESSAGE_TYPES: ReadonlySet<string> = new Set<string>(Object.keys(MESSAGE_TYPE_TABLE));
 
 export function isMachineLinkEnvelope(value: unknown): value is MachineLinkEnvelope {
   if (!value || typeof value !== "object") {

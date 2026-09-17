@@ -89,6 +89,9 @@ function makeClaudeWarmPendingTurn(overrides: Partial<Record<string, unknown>> =
     backgroundTaskLabels: new Map<string, string>(),
     finishedTaskIds: new Set<string>(),
     notificationsSinceInit: 0,
+    modelStepActive: false,
+    awaitingModelCall: false,
+    deliveredAtLastToolResult: 0,
     heldSegments: [],
     heldResultEvents: [],
     holds: 0,
@@ -5489,4 +5492,238 @@ test("a host admission completing after shutdown cannot start its earlier comman
     assert.equal(result.ok, false); assert.match(result.error, /shut down while/);
     assert.equal(executions, 0); assert.equal(runner.hasActiveNativeWork(), false);
   }
+});
+
+test("claude warm hold: a notification during a running model step does not end the turn", async () => {
+  // The defect: once a reply was held, every system/task_notification armed the
+  // 10 s resume timer, and only system/init cleared it. The CLI also emits a
+  // notification for a long *foreground* command, which lands inside a step
+  // that is already running, so no init ever follows -- the app finalized the
+  // turn while the member was still working, dropped everything it produced
+  // afterwards, and ten minutes later killed the process mid-command.
+  const runner = makeRunner() as any;
+  runner.claudeBackgroundResumeGraceMs = 20;
+  const resolved: unknown[] = [];
+  let current: any = makeClaudeWarmPendingTurn({ resolve: (result: unknown) => resolved.push(result) });
+  const pending = current;
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const cleanup = (): unknown => { const value = current; current = undefined; return value; };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event), participant, {}, undefined, pending, cleanup, fail
+  );
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "system", subtype: "task_started", task_id: "t1", description: "suite", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "ACK" }] } });
+  send({ type: "result", result: "ACK" });
+  send({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed" });
+  send({ type: "system", subtype: "init" });
+
+  // The resumed step runs a long foreground command; the CLI reports it as a
+  // task too (task_started with is_backgrounded false, then a notification
+  // when it ends), and no further init follows because this step is already
+  // running. Verified order on Claude Code 2.1.257: notification, then the
+  // command's own tool result, then the model's next call.
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "u1", name: "Bash", input: {} }] } });
+  send({ type: "system", subtype: "task_started", task_id: "t2", tool_use_id: "u1", description: "long command", is_backgrounded: false });
+  send({ type: "system", subtype: "task_notification", task_id: "t2", tool_use_id: "u1", status: "completed", summary: "long command" });
+  assert.equal(pending.holdGraceTimer, undefined, "a notification inside a running step must not arm the resume timer");
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(resolved.length, 0, "the turn must still be open while the model is working");
+  assert.ok(current, "the turn must not have been finalized");
+
+  send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "u1", content: "1" }] } });
+  send({ type: "stream_event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "DONE" }] } });
+  send({ type: "result", result: "DONE" });
+  assert.equal(resolved.length, 1, "the turn ends on the model's own result");
+  assert.equal((resolved[0] as { content: string }).content, "ACK\n\nDONE");
+});
+
+test("claude warm hold: a background task finishing during a foreground command is delivered with that command's result, so the reply ends the turn", async () => {
+  // Verified on Claude Code 2.1.257: a background task that completes while a
+  // foreground tool call is running is handed to the model together with that
+  // tool's result, and the CLI does not resume the model after the reply. The
+  // hold must therefore not wait for a resume that never comes -- with the
+  // 10 s grace timer that would only delay the reply, but it would also show
+  // a "waiting for the background task result" row for nothing.
+  const runner = makeRunner() as any;
+  runner.claudeBackgroundResumeGraceMs = 20;
+  const resolved: unknown[] = [];
+  const outputs: Array<{ activityStatus?: string; activityItemId?: string }> = [];
+  let current: any = makeClaudeWarmPendingTurn({
+    onOutput: (event: { activityStatus?: string; activityItemId?: string }) => outputs.push(event),
+    resolve: (result: unknown) => resolved.push(result)
+  });
+  const pending = current;
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const cleanup = (): unknown => { const value = current; current = undefined; return value; };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event), participant, {}, undefined, pending, cleanup, fail
+  );
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "stream_event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "bg", name: "Bash", input: { run_in_background: true } }] } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "fg", name: "Bash", input: {} }] } });
+  send({ type: "system", subtype: "task_started", task_id: "t1", tool_use_id: "bg", description: "suite", is_backgrounded: true });
+  send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "bg", content: "Command running in background with ID: t1" }] } });
+  send({ type: "system", subtype: "task_started", task_id: "t2", tool_use_id: "fg", description: "long command", is_backgrounded: false });
+  // The background task ends while the foreground command is still running.
+  send({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+  send({ type: "system", subtype: "task_notification", task_id: "t1", tool_use_id: "bg", status: "completed" });
+  send({ type: "system", subtype: "task_notification", task_id: "t2", tool_use_id: "fg", status: "completed", summary: "long command" });
+  send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "fg", content: "1" }] } });
+  // The next call is where the CLI hands the model everything queued so far.
+  send({ type: "stream_event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "started" }] } });
+  send({ type: "result", result: "started" });
+  assert.equal(resolved.length, 1, "nothing is queued for a resume, so the result ends the turn");
+  assert.equal((resolved[0] as { content: string }).content, "started");
+  assert.ok(outputs.some((event) => event.activityItemId === undefined && event.activityStatus === "completed"),
+    "the background task's own finish row is still shown");
+  assert.ok(!outputs.some((event) => event.activityItemId?.startsWith("claude-background-wait")), "no waiting row for a delivered notification");
+});
+
+test("claude warm hold: a notification arriving while the reply streams still waits for the CLI's resume", async () => {
+  // The other order the CLI produces: the task ends while the model is already
+  // generating its reply. That call was built before the notification, so the
+  // CLI resumes the model after the result to deliver it -- and the turn must
+  // stay open for that continuation even though a call was in flight.
+  const runner = makeRunner() as any;
+  runner.claudeBackgroundResumeGraceMs = 20;
+  const resolved: unknown[] = [];
+  let current: any = makeClaudeWarmPendingTurn({ resolve: (result: unknown) => resolved.push(result) });
+  const pending = current;
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const cleanup = (): unknown => { const value = current; current = undefined; return value; };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event), participant, {}, undefined, pending, cleanup, fail
+  );
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "stream_event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "bg", name: "Bash", input: { run_in_background: true } }] } });
+  send({ type: "system", subtype: "task_started", task_id: "t1", tool_use_id: "bg", description: "quick", is_backgrounded: true });
+  send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "bg", content: "Command running in background with ID: t1" }] } });
+  send({ type: "stream_event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
+  send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "ACK" } } });
+  // Ends mid-generation: this call cannot carry it, the next one will.
+  send({ type: "system", subtype: "task_notification", task_id: "t1", tool_use_id: "bg", status: "completed" });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "ACK" }] } });
+  send({ type: "result", result: "ACK" });
+  assert.equal(resolved.length, 0, "a notification the model has not been given yet keeps the turn open");
+  assert.ok(pending.holdGraceTimer, "bounded by the grace timer in case the CLI never resumes");
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "stream_event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "DONE" }] } });
+  send({ type: "result", result: "DONE" });
+  assert.equal(resolved.length, 1);
+  assert.equal((resolved[0] as { content: string }).content, "ACK\n\nDONE");
+});
+
+test("claude warm hold: a notification arriving after the tool result was fed back, while the next request is in flight, still waits for the resume", async () => {
+  // The CLI builds the model's next request the moment a tool result is fed
+  // back (the `user` event) and drains its notification queue into it. A task
+  // that ends after that, during the seconds before the first frame of the
+  // reply, is still queued: the CLI resumes the model for it after the result.
+  // Resetting the count at message_start would call it delivered and end the
+  // turn at the result, dropping the continuation as a stray one.
+  const runner = makeRunner() as any;
+  runner.claudeBackgroundResumeGraceMs = 20;
+  const resolved: unknown[] = [];
+  let current: any = makeClaudeWarmPendingTurn({ resolve: (result: unknown) => resolved.push(result) });
+  const pending = current;
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const cleanup = (): unknown => { const value = current; current = undefined; return value; };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event), participant, {}, undefined, pending, cleanup, fail
+  );
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "stream_event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "bg", name: "Bash", input: { run_in_background: true } }] } });
+  send({ type: "system", subtype: "task_started", task_id: "t1", tool_use_id: "bg", description: "quick", is_backgrounded: true });
+  send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "bg", content: "Command running in background with ID: t1" }] } });
+  // The request for the next call has left; this lands while it is in flight.
+  send({ type: "system", subtype: "task_notification", task_id: "t1", tool_use_id: "bg", status: "completed" });
+  send({ type: "stream_event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "ACK" }] } });
+  send({ type: "result", result: "ACK" });
+  assert.equal(resolved.length, 0, "a notification queued after the request left is delivered by a resume the turn must wait for");
+  assert.ok(pending.holdGraceTimer, "bounded by the grace timer in case the CLI never resumes");
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "stream_event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "DONE" }] } });
+  send({ type: "result", result: "DONE" });
+  assert.equal(resolved.length, 1);
+  assert.equal((resolved[0] as { content: string }).content, "ACK\n\nDONE");
+});
+
+test("claude warm hold: a notification that arrived before the tool result rides along with the next request and does not hold", async () => {
+  // Two tool calls in parallel: the notification lands between their results.
+  // The request built after the last result carries it, so the reply ends the
+  // turn without waiting.
+  const runner = makeRunner() as any;
+  runner.claudeBackgroundResumeGraceMs = 20;
+  const resolved: unknown[] = [];
+  let current: any = makeClaudeWarmPendingTurn({ resolve: (result: unknown) => resolved.push(result) });
+  const pending = current;
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const cleanup = (): unknown => { const value = current; current = undefined; return value; };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event), participant, {}, undefined, pending, cleanup, fail
+  );
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "stream_event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "bg", name: "Bash", input: { run_in_background: true } }, { type: "tool_use", id: "fg", name: "Bash", input: {} }] } });
+  send({ type: "system", subtype: "task_started", task_id: "t1", tool_use_id: "bg", description: "quick", is_backgrounded: true });
+  send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "bg", content: "Command running in background with ID: t1" }] } });
+  send({ type: "system", subtype: "task_notification", task_id: "t1", tool_use_id: "bg", status: "completed" });
+  send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "fg", content: "1" }] } });
+  send({ type: "stream_event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done" }] } });
+  send({ type: "result", result: "done" });
+  assert.equal(resolved.length, 1, "the last tool result's request carried the notification");
+  assert.equal((resolved[0] as { content: string }).content, "done");
+});
+
+test("claude warm hold: model output while the resume timer is armed keeps the turn open", async () => {
+  const runner = makeRunner() as any;
+  runner.claudeBackgroundResumeGraceMs = 40;
+  const resolved: unknown[] = [];
+  let current: any = makeClaudeWarmPendingTurn({ resolve: (result: unknown) => resolved.push(result) });
+  const pending = current;
+  const participant = { id: "p1", label: "Agent", kind: "claude-code" };
+  const cleanup = (): unknown => { const value = current; current = undefined; return value; };
+  const fail = (error: Error): never => { throw error; };
+  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+    JSON.stringify(event), participant, {}, undefined, pending, cleanup, fail
+  );
+
+  send({ type: "system", subtype: "init" });
+  send({ type: "system", subtype: "task_started", task_id: "t1", description: "suite", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "ACK" }] } });
+  send({ type: "result", result: "ACK" });
+  send({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed" });
+  assert.ok(pending.holdGraceTimer, "with no step running the timer waits for the CLI to resume");
+
+  // The CLI resumed without an init this copy could see: its output is the
+  // evidence, and it must be enough to stand the timer down.
+  send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "still here" } } });
+  assert.equal(pending.holdGraceTimer, undefined, "the model's own output stands the timer down");
+
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  assert.equal(resolved.length, 0, "the turn must still be open");
+  send({ type: "result", result: "DONE" });
+  assert.equal(resolved.length, 1);
 });
