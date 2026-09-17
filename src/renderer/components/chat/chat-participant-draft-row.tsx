@@ -15,7 +15,6 @@ import type {
   ChatProviderKind,
   ProviderKind
 } from "../../../shared/types";
-import { defaultChatParticipantEndpoint } from "../../../shared/chatParticipantEndpoint";
 import type { ChatAvatarOption } from "./chat-avatars";
 import {
   chatAvatarOptionsForKind,
@@ -36,6 +35,7 @@ import {
   CHAT_RUN_LOCATION_OPTIONS,
   WORKFLOW_MANAGER_ROLE_ID,
   activeChatRoleConfigs,
+  chatParticipantHost,
   chatProviderOptionId,
   chatProviderOptionPatch,
   chatProviderOptions,
@@ -57,6 +57,8 @@ export function ChatParticipantDraftRow(props: {
   onRemove?: () => void;
 }): JSX.Element {
   const cliProviders = props.settings.providers.filter((provider) => isCliProviderKind(provider.kind));
+  const hosts = props.settings.cliProviderHosts ?? [];
+  const draftHost = chatParticipantHost(props.draft, hosts);
   const roleOptions = activeChatRoleConfigs(props.settings).map((role) => ({ value: role.id, label: role.label }));
   const avatarId = normalizedChatAvatarId(props.draft.kind, props.draft.avatarId, props.draft.handle);
   const avatarOptions = chatAvatarOptionsForKind(props.draft.kind);
@@ -98,44 +100,23 @@ export function ChatParticipantDraftRow(props: {
       </FormRow>
       <FormRow label="CLI">
         <AppSelect
-          value={chatProviderOptionId(props.draft.kind, props.draft.endpoint)}
+          value={chatProviderOptionId(props.draft.kind, draftHost?.id)}
           placeholder="Select CLI"
           ariaLabel="Member CLI"
-          options={chatProviderOptions(cliProviders.map((provider) => provider.kind).filter(isCliProviderKind)).map((option) => {
+          options={chatProviderOptions(cliProviders.map((provider) => provider.kind).filter(isCliProviderKind), hosts).map((option) => {
             const provider = cliProviders.find((item) => item.kind === option.kind);
             const health = props.agents.find((agent) => agent.kind === option.kind);
-            const label = option.endpoint ? option.label : provider?.label ?? option.label;
+            const label = option.host ? option.label : provider?.label ?? option.label;
+            const missingKey = option.host ? !option.host.hasApiKey : false;
             return {
               value: option.id,
-              label: `${label}${health?.installed ? "" : " (missing)"}`,
+              label: `${label}${health?.installed ? "" : " (missing)"}${missingKey ? " (no API key)" : ""}`,
               disabled: !health?.installed
             };
           })}
-          onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, chatProviderOptionPatch(value, props.draft)))}
+          onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, chatProviderOptionPatch(value, props.draft, hosts)))}
         />
       </FormRow>
-      {props.draft.endpoint && (
-        <>
-          <FormRow label="Endpoint">
-            <Input
-              value={props.draft.endpoint.baseUrl}
-              aria-label="Endpoint URL"
-              placeholder={defaultChatParticipantEndpoint(props.draft.endpoint.preset).baseUrl}
-              spellCheck={false}
-              onChange={(event) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { endpoint: { ...props.draft.endpoint!, baseUrl: event.target.value } }))}
-            />
-          </FormRow>
-          <FormRow label="API key variable" hint="Add it under Environment in Settings.">
-            <Input
-              value={props.draft.endpoint.authTokenEnvKey}
-              aria-label="API key environment variable"
-              placeholder={defaultChatParticipantEndpoint(props.draft.endpoint.preset).authTokenEnvKey}
-              spellCheck={false}
-              onChange={(event) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { endpoint: { ...props.draft.endpoint!, authTokenEnvKey: event.target.value } }))}
-            />
-          </FormRow>
-        </>
-      )}
       {props.draft.kind === "codex-cli" && (
         <FormRow label="Run location">
           <AppSelect
@@ -152,7 +133,7 @@ export function ChatParticipantDraftRow(props: {
       <FormRow label="Model">
         <ChatModelPicker
           kind={props.draft.kind}
-          endpoint={props.draft.endpoint}
+          host={draftHost}
           model={props.draft.model}
           onChange={(model) => props.onChange({ ...props.draft, model })}
         />
@@ -160,7 +141,7 @@ export function ChatParticipantDraftRow(props: {
       <FormRow label="Reasoning">
         <ChatReasoningEffortPicker
           kind={props.draft.kind}
-          endpoint={props.draft.endpoint}
+          host={draftHost}
           model={props.draft.model}
           reasoningEffort={props.draft.reasoningEffort}
           onChange={(reasoningEffort) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { reasoningEffort }))}

@@ -21,9 +21,12 @@ import type {
   CloudRunsSettingsUpdate,
   CloudRunRemoteExecutionMode,
   CloudRunWorkerMode,
+  CliProviderHost,
+  CliProviderHostCli,
+  CliProviderHostUpdate,
+  CliProviderHostVendor,
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
-  ChatParticipantEndpoint,
   ChatParticipantSeedState,
   ChatPromptContextSettings,
   ChatProviderKind,
@@ -79,7 +82,12 @@ import {
   normalizeChatSavedPromptTrigger
 } from "../../shared/chatSavedPrompts";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
-import { chatParticipantEndpointFor, chatParticipantEndpointValidationError, normalizeChatParticipantEndpoint } from "../../shared/chatParticipantEndpoint";
+import {
+  cliProviderHostValidationError,
+  normalizeCliProviderHostBaseUrl,
+  normalizeCliProviderHostLabel,
+  normalizeCliProviderHostRecord
+} from "../../shared/cliProviderHosts";
 import { CLI_PROVIDER_SETUP, preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
 import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
@@ -94,6 +102,17 @@ interface StoredAgentEnvironmentVariable {
   enabled?: boolean;
   updatedAt: string;
   protection?: AgentEnvironmentValueProtection;
+}
+
+interface StoredCliProviderHost {
+  id: string;
+  label: string;
+  cli: CliProviderHostCli;
+  vendor: CliProviderHostVendor;
+  baseUrl: string;
+  encryptedApiKey?: string;
+  protection?: AgentEnvironmentValueProtection;
+  updatedAt: string;
 }
 
 interface StoredAgentEnvironmentSettings {
@@ -123,6 +142,7 @@ interface StoredSettings {
   };
   awsWorkerVolumeExpansion?: AwsWorkerVolumeExpansion;
   agentEnvironment?: StoredAgentEnvironmentSettings;
+  cliProviderHosts?: StoredCliProviderHost[];
   assistantProviderKind?: ChatProviderKind;
   lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
@@ -1769,6 +1789,7 @@ export class SettingsService {
       chatSavedPrompts: stored.chatSavedPrompts ?? [],
       chatParticipantConfigs: stored.chatParticipantConfigs ?? [],
       chatParticipantSeedState: stored.chatParticipantSeedState,
+      cliProviderHosts: this.publicCliProviderHosts(stored),
       providers: stored.providers.map((provider) => ({
         kind: provider.kind,
         label: canonicalProviderLabel(provider.kind, provider.label),
@@ -2135,7 +2156,7 @@ export class SettingsService {
         model: update.model?.trim() || undefined,
         reasoningEffort: normalizeChatReasoningEffort(update.reasoningEffort, update.kind),
         avatarId: update.avatarId?.trim() || undefined,
-        endpoint: this.participantEndpointForUpdate(update),
+        hostId: this.participantHostIdForUpdate(stored, update),
         agentMode: normalizeChatAgentMode(update.agentMode),
         permissions: normalizeChatAgentPermissions(update.permissions),
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
@@ -2339,7 +2360,7 @@ export class SettingsService {
       model: update.model?.trim() || undefined,
       reasoningEffort: normalizeChatReasoningEffort(update.reasoningEffort, update.kind),
       avatarId: update.avatarId?.trim() || undefined,
-      endpoint: this.participantEndpointForUpdate(update),
+      hostId: this.participantHostIdForUpdate(stored, update),
       agentMode: normalizeChatAgentMode(update.agentMode),
       permissions: normalizeChatAgentPermissions(update.permissions),
       remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
@@ -2722,6 +2743,7 @@ export class SettingsService {
       agentEnvironment: {
         variables: this.normalizeAgentEnvironmentVariables(settings.agentEnvironment?.variables)
       },
+      cliProviderHosts: this.normalizedCliProviderHosts(settings),
       assistantProviderKind: this.normalizeChatProviderKind(settings.assistantProviderKind),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(settings.lastSuccessfulChatProviderKind),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
@@ -3366,7 +3388,9 @@ export class SettingsService {
           model: participant.model?.trim() || undefined,
           reasoningEffort: normalizeChatReasoningEffort((participant as { reasoningEffort?: unknown }).reasoningEffort, participant.kind),
           avatarId: participant.avatarId?.trim() || undefined,
-          endpoint: chatParticipantEndpointFor(participant.kind, normalizeChatParticipantEndpoint((participant as { endpoint?: unknown }).endpoint)),
+          hostId: typeof (participant as { hostId?: unknown }).hostId === "string"
+            ? ((participant as { hostId: string }).hostId.trim() || undefined)
+            : undefined,
           agentMode: normalizeChatAgentMode((participant as { agentMode?: ChatAgentMode }).agentMode),
           permissions: options.migrateWorkflowManagerParticipantManagement && participant.roleConfigId === WORKFLOW_MANAGER_ROLE_ID
             ? { ...permissions, manageRolesParticipants: "allow" as const }
@@ -3382,17 +3406,142 @@ export class SettingsService {
       });
   }
 
-  private participantEndpointForUpdate(update: Pick<ChatParticipantConfigUpdate, "kind" | "endpoint">): ChatParticipantEndpoint | undefined {
-    if (update.kind !== "claude-code") {
+  /** A member preset may only be bound to an added provider that exists and
+   *  runs through the preset's own CLI. */
+  private participantHostIdForUpdate(stored: StoredSettings, update: Pick<ChatParticipantConfigUpdate, "kind" | "hostId">): string | undefined {
+    const hostId = update.hostId?.trim();
+    if (!hostId) {
       return undefined;
     }
-    // Validate what the user actually typed; normalizing first would repair a
-    // bad URL or variable name to the preset default and hide the mistake.
-    const error = chatParticipantEndpointValidationError(update.endpoint);
+    const host = this.normalizedCliProviderHosts(stored).find((item) => item.id === hostId);
+    if (!host) {
+      throw new Error("That provider no longer exists. Pick another provider for the member.");
+    }
+    if (host.cli !== update.kind) {
+      throw new Error(`${host.label} runs through ${host.cli === "claude-code" ? "Claude Code" : "Codex"}, not the member's CLI.`);
+    }
+    return host.id;
+  }
+
+  // ---- Added providers (General Settings → Add provider) ----
+
+  private normalizedCliProviderHosts(stored: StoredSettings): StoredCliProviderHost[] {
+    const seen = new Set<string>();
+    const hosts: StoredCliProviderHost[] = [];
+    for (const raw of Array.isArray(stored.cliProviderHosts) ? stored.cliProviderHosts : []) {
+      const host = normalizeCliProviderHostRecord(raw);
+      if (!host || seen.has(host.id)) {
+        continue;
+      }
+      seen.add(host.id);
+      const record = raw as Partial<StoredCliProviderHost>;
+      hosts.push({
+        ...host,
+        encryptedApiKey: typeof record.encryptedApiKey === "string" && record.encryptedApiKey ? record.encryptedApiKey : undefined,
+        protection: record.protection === "os-encrypted" ? "os-encrypted" : record.protection === "local-obfuscated" ? "local-obfuscated" : undefined
+      });
+    }
+    return hosts;
+  }
+
+  private publicCliProviderHosts(stored: StoredSettings): CliProviderHost[] {
+    return this.normalizedCliProviderHosts(stored).map((host) => ({
+      id: host.id,
+      label: host.label,
+      cli: host.cli,
+      vendor: host.vendor,
+      baseUrl: host.baseUrl,
+      hasApiKey: Boolean(host.encryptedApiKey),
+      updatedAt: host.updatedAt
+    }));
+  }
+
+  async listCliProviderHosts(): Promise<CliProviderHost[]> {
+    return this.publicCliProviderHosts(await this.readStored());
+  }
+
+  async saveCliProviderHost(update: CliProviderHostUpdate): Promise<AppSettings> {
+    const error = cliProviderHostValidationError(update);
     if (error) {
       throw new Error(error);
     }
-    return normalizeChatParticipantEndpoint(update.endpoint);
+    const stored = await this.readStored();
+    const hosts = this.normalizedCliProviderHosts(stored);
+    const normalizedId = update.id?.trim();
+    const existing = normalizedId ? hosts.find((host) => host.id === normalizedId) : undefined;
+    if (normalizedId && !existing) {
+      throw new Error("That provider no longer exists.");
+    }
+    const label = normalizeCliProviderHostLabel(update.label);
+    if (hosts.some((host) => host.id !== existing?.id && host.label.toLowerCase() === label.toLowerCase())) {
+      throw new Error(`A provider named "${label}" already exists.`);
+    }
+    // Members bound to this provider run through its CLI; changing the CLI
+    // underneath them would silently switch their runtime.
+    if (existing && existing.cli !== update.cli && (stored.chatParticipantConfigs ?? []).some((config) => config.hostId === existing.id)) {
+      throw new Error("Members are bound to this provider; remove them from it before changing its CLI.");
+    }
+    let encryptedApiKey = existing?.encryptedApiKey;
+    let protection = existing?.protection;
+    if (update.apiKey !== undefined) {
+      const apiKey = update.apiKey.trim();
+      if (apiKey) {
+        const encoded = this.encodeAgentEnvironmentValue(apiKey);
+        encryptedApiKey = encoded.encryptedValue;
+        protection = encoded.protection;
+      } else {
+        encryptedApiKey = undefined;
+        protection = undefined;
+      }
+    }
+    const next: StoredCliProviderHost = {
+      id: existing?.id ?? randomUUID(),
+      label,
+      cli: update.cli,
+      vendor: update.vendor,
+      baseUrl: normalizeCliProviderHostBaseUrl(update.baseUrl) ?? "",
+      encryptedApiKey,
+      protection,
+      updatedAt: new Date().toISOString()
+    };
+    stored.cliProviderHosts = existing
+      ? hosts.map((host) => (host.id === existing.id ? next : host))
+      : [...hosts, next];
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
+  async deleteCliProviderHost(id: string): Promise<AppSettings> {
+    const stored = await this.readStored();
+    const hosts = this.normalizedCliProviderHosts(stored);
+    const normalizedId = id.trim();
+    if (!hosts.some((host) => host.id === normalizedId)) {
+      return this.getPublicSettings();
+    }
+    stored.cliProviderHosts = hosts.filter((host) => host.id !== normalizedId);
+    // Presets lose the binding; chat members keep theirs and fail with a clear
+    // message on their next turn (the member stays visible in old chats).
+    stored.chatParticipantConfigs = (stored.chatParticipantConfigs ?? []).map((config) =>
+      config.hostId === normalizedId ? { ...config, hostId: undefined } : config
+    );
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
+  /** The host plus its decrypted key, for a run. Never crosses the bridge. */
+  async getCliProviderHostSecret(id: string): Promise<{ host: CliProviderHost; apiKey: string | undefined } | undefined> {
+    const stored = await this.readStored();
+    const host = this.normalizedCliProviderHosts(stored).find((item) => item.id === id.trim());
+    if (!host) {
+      return undefined;
+    }
+    const apiKey = host.encryptedApiKey
+      ? this.decodeAgentEnvironmentValue({ key: host.id, encryptedValue: host.encryptedApiKey, updatedAt: host.updatedAt, protection: host.protection })
+      : undefined;
+    return {
+      host: { id: host.id, label: host.label, cli: host.cli, vendor: host.vendor, baseUrl: host.baseUrl, hasApiKey: Boolean(host.encryptedApiKey), updatedAt: host.updatedAt },
+      apiKey: apiKey?.trim() || undefined
+    };
   }
 
   private normalizeSeedState(value: unknown): ChatParticipantSeedState {

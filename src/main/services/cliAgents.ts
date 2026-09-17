@@ -2500,7 +2500,11 @@ export class CliAgentRunner {
     options: CliAgentRunOptions,
     codexExecutable: string
   ): WarmAgentEntry {
-    const child = spawnCommand(codexExecutable, ["app-server", "--listen", "stdio://"], {
+    // `-c` overrides are global codex options; the app-server honors them for
+    // every thread it hosts, which is how a member on an added provider reaches
+    // that provider's Responses endpoint.
+    const configArgs = (participant.codexConfigOverrides ?? []).flatMap((override) => ["-c", override]);
+    const child = spawnCommand(codexExecutable, ["app-server", ...configArgs, "--listen", "stdio://"], {
       cwd: repoPath,
       env: commandEnvironment(this.agentRunEnv(options)),
       stdio: ["pipe", "pipe", "pipe"]
@@ -5312,6 +5316,7 @@ export class CliAgentRunner {
       kind,
       extraReadableDirs: this.normalizedExtraReadableDirs(options.extraReadableDirs),
       agentEnvKey: options.agentEnvKey ?? "",
+      codexConfigOverrides: participant.codexConfigOverrides ?? [],
       contextKey: options.warm?.contextKey ?? ""
     });
   }

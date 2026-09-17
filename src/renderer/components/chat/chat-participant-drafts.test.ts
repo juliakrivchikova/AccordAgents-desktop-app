@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { AgentHealth, AppSettings, ChatRoleConfig } from "../../../shared/types";
+import type { AgentHealth, AppSettings, ChatRoleConfig, CliProviderHost } from "../../../shared/types";
 import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
-import { ZAI_DEFAULT_AUTH_TOKEN_ENV_KEY, ZAI_DEFAULT_BASE_URL } from "../../../shared/chatParticipantEndpoint";
 import { validateChatCliAgents } from "./chat-cli-readiness";
 import {
   chatCliProviderLabel,
@@ -13,7 +12,6 @@ import {
   chatProviderOptions,
   normalizeChatParticipantDraftForSettings,
   updateChatParticipantDraft,
-  validateChatParticipantDrafts,
   type ChatParticipantDraft
 } from "./chat-participant-drafts";
 
@@ -25,16 +23,27 @@ const ROLE: ChatRoleConfig = {
   updatedAt: "2026-09-17T00:00:00.000Z"
 };
 
+const ZAI: CliProviderHost = {
+  id: "host-zai",
+  label: "Z.ai GLM",
+  cli: "claude-code",
+  vendor: "zai",
+  baseUrl: "https://api.z.ai/api/anthropic",
+  hasApiKey: true,
+  updatedAt: "2026-09-17T00:00:00.000Z"
+};
+
+const ZAI_CODEX: CliProviderHost = { ...ZAI, id: "host-zai-codex", label: "Z.ai GLM · Codex", cli: "codex-cli", baseUrl: "https://api.z.ai/api/v1" };
+
 const SETTINGS = {
   providers: [
     { kind: "codex-cli", label: "Codex CLI", enabled: true, model: "gpt-5.5" },
     { kind: "claude-code", label: "Claude Code", enabled: true, model: "opus" }
   ],
   chatRoleConfigs: [ROLE],
-  chatBehaviorRules: []
+  chatBehaviorRules: [],
+  cliProviderHosts: [ZAI, ZAI_CODEX]
 } as unknown as AppSettings;
-
-const ZAI = { preset: "zai" as const, baseUrl: ZAI_DEFAULT_BASE_URL, authTokenEnvKey: ZAI_DEFAULT_AUTH_TOKEN_ENV_KEY };
 
 function draft(patch: Partial<ChatParticipantDraft> = {}): ChatParticipantDraft {
   return {
@@ -52,82 +61,77 @@ function draft(patch: Partial<ChatParticipantDraft> = {}): ChatParticipantDraft 
   };
 }
 
-test("the provider picker lists GLM (Z.ai) once, next to Claude Code only", () => {
-  const options = chatProviderOptions(["codex-cli", "claude-code", "gemini-cli"]);
-  assert.deepEqual(options.map((option) => option.id), ["codex-cli", "claude-code", "claude-code:zai", "gemini-cli"]);
-  assert.equal(options.find((option) => option.id === "claude-code:zai")?.label, "GLM (Z.ai)");
-  assert.deepEqual(chatProviderOptions(["codex-cli"]).map((option) => option.id), ["codex-cli"]);
-  assert.equal(chatProviderOptionId("claude-code", ZAI), "claude-code:zai");
+test("the provider picker lists built-in CLIs first, then every added provider whose CLI is offered", () => {
+  const options = chatProviderOptions(["codex-cli", "claude-code", "gemini-cli"], [ZAI, ZAI_CODEX]);
+  assert.deepEqual(options.map((option) => option.id), ["codex-cli", "claude-code", "gemini-cli", "host:host-zai", "host:host-zai-codex"]);
+  assert.equal(options.find((option) => option.id === "host:host-zai")?.label, "Z.ai GLM");
+  assert.deepEqual(chatProviderOptions(["codex-cli"], [ZAI, ZAI_CODEX]).map((option) => option.id), ["codex-cli", "host:host-zai-codex"]);
+  assert.equal(chatProviderOptionId("claude-code", ZAI.id), "host:host-zai");
   assert.equal(chatProviderOptionId("claude-code", undefined), "claude-code");
-  // An endpoint never counts on a non-Claude kind, even if a record carries one.
-  assert.equal(chatProviderOptionId("codex-cli", ZAI), "codex-cli");
 });
 
-test("picking a provider option resolves to kind + endpoint, keeping an edited endpoint on the same preset", () => {
+test("picking a provider option resolves to kind + binding; unknown bindings fall back to the current kind", () => {
   const plain = draft();
-  assert.deepEqual(chatProviderOptionPatch("claude-code:zai", plain), { kind: "claude-code", endpoint: ZAI });
-  assert.deepEqual(chatProviderOptionPatch("claude-code", plain), { kind: "claude-code", endpoint: undefined });
-  assert.deepEqual(chatProviderOptionPatch("codex-cli", plain), { kind: "codex-cli", endpoint: undefined });
-  assert.deepEqual(chatProviderOptionPatch("claude-code:bogus", plain), { kind: "claude-code", endpoint: undefined });
-  assert.deepEqual(chatProviderOptionPatch("bogus", plain), { kind: "codex-cli", endpoint: undefined });
-  const edited = { ...ZAI, baseUrl: "https://proxy.example/anthropic" };
-  assert.deepEqual(chatProviderOptionPatch("claude-code:zai", draft({ endpoint: edited })), { kind: "claude-code", endpoint: edited });
+  assert.deepEqual(chatProviderOptionPatch("host:host-zai", plain, [ZAI]), { kind: "claude-code", hostId: ZAI.id });
+  assert.deepEqual(chatProviderOptionPatch("host:host-zai-codex", plain, [ZAI, ZAI_CODEX]), { kind: "codex-cli", hostId: ZAI_CODEX.id });
+  assert.deepEqual(chatProviderOptionPatch("claude-code", plain, [ZAI]), { kind: "claude-code", hostId: undefined });
+  assert.deepEqual(chatProviderOptionPatch("codex-cli", plain, [ZAI]), { kind: "codex-cli", hostId: undefined });
+  assert.deepEqual(chatProviderOptionPatch("host:gone", plain, [ZAI]), { kind: "claude-code", hostId: undefined });
+  assert.deepEqual(chatProviderOptionPatch("bogus", plain, [ZAI]), { kind: "claude-code", hostId: undefined });
 });
 
-test("switching to GLM (Z.ai) and back moves model and generated handle to the right side", () => {
+test("binding to and unbinding from an added provider moves model and generated handle to the right side", () => {
   const plain = draft();
-  const glm = updateChatParticipantDraft(plain, SETTINGS, chatProviderOptionPatch("claude-code:zai", plain));
-  assert.deepEqual(glm.endpoint, ZAI);
+  const glm = updateChatParticipantDraft(plain, SETTINGS, chatProviderOptionPatch("host:host-zai", plain, [ZAI]));
+  assert.equal(glm.hostId, ZAI.id);
   assert.equal(glm.model, "glm-5.3");
   assert.match(glm.handle, /^[a-z]+-glm-engineer$/);
 
-  // Editing the URL keeps the chosen model and the handle.
-  const edited = updateChatParticipantDraft({ ...glm, model: "glm-5.2" }, SETTINGS, { endpoint: { ...ZAI, baseUrl: "https://proxy.example" } });
-  assert.equal(edited.model, "glm-5.2");
-  assert.equal(edited.handle, glm.handle);
-
-  const back = updateChatParticipantDraft(glm, SETTINGS, chatProviderOptionPatch("claude-code", glm));
-  assert.equal(back.endpoint, undefined);
+  const back = updateChatParticipantDraft(glm, SETTINGS, chatProviderOptionPatch("claude-code", glm, [ZAI]));
+  assert.equal(back.hostId, undefined);
   assert.equal(back.model, "opus");
   assert.match(back.handle, /^[a-z]+-claude-engineer$/);
 
   // A custom handle and an explicit model in the same patch both survive.
-  const custom = updateChatParticipantDraft(draft({ handle: "my-bot" }), SETTINGS, { ...chatProviderOptionPatch("claude-code:zai", plain), model: "glm-5.2" });
+  const custom = updateChatParticipantDraft(draft({ handle: "my-bot" }), SETTINGS, { ...chatProviderOptionPatch("host:host-zai", plain, [ZAI]), model: "glm-5.2" });
   assert.equal(custom.handle, "my-bot");
   assert.equal(custom.model, "glm-5.2");
 
-  // Leaving Claude Code drops the endpoint entirely.
+  // Switching the CLI drops a binding that does not run through it.
   const codex = updateChatParticipantDraft(glm, SETTINGS, { kind: "codex-cli" });
-  assert.equal(codex.endpoint, undefined);
+  assert.equal(codex.hostId, undefined);
   assert.equal(codex.model, "gpt-5.5");
+
+  // A binding to a provider that no longer exists is dropped silently.
+  const stale = updateChatParticipantDraft(draft({ hostId: "gone" }), SETTINGS, { model: "opus" });
+  assert.equal(stale.hostId, undefined);
 });
 
-test("labels follow the endpoint", () => {
-  assert.equal(chatCliProviderLabel("claude-code", ZAI), "GLM (Z.ai)");
+test("labels follow the provider", () => {
+  assert.equal(chatCliProviderLabel("claude-code", "Z.ai GLM"), "Z.ai GLM");
   assert.equal(chatCliProviderLabel("claude-code"), "Claude Code");
+  assert.equal(chatCliProviderLabel("claude-code", "  "), "Claude Code");
   assert.equal(chatModelDefaultLabel("claude-code", ZAI), "GLM-5.3 (default)");
   assert.equal(chatModelDefaultLabel("claude-code"), "Claude Code setting");
+  // First-party vendors keep the CLI's own default; a host for another CLI is ignored.
+  assert.equal(chatModelDefaultLabel("claude-code", { ...ZAI, vendor: "anthropic" }), "Claude Code setting");
   assert.equal(chatModelDefaultLabel("codex-cli", ZAI), "Codex CLI setting");
 });
 
-test("a blank GLM draft normalized for settings gets the endpoint default model and a glm handle", () => {
-  const normalized = normalizeChatParticipantDraftForSettings(draft({ handle: "", model: undefined, endpoint: ZAI }), SETTINGS);
+test("a blank bound draft normalized for settings gets the vendor default model and a vendor handle", () => {
+  const normalized = normalizeChatParticipantDraftForSettings(draft({ handle: "", model: undefined, hostId: ZAI.id }), SETTINGS);
   assert.equal(normalized.model, "glm-5.3");
   assert.match(normalized.handle, /-glm-/);
-  assert.deepEqual(normalized.endpoint, ZAI);
+  assert.equal(normalized.hostId, ZAI.id);
 });
 
-test("draft validation reports an invalid endpoint URL or variable name", () => {
-  assert.match(validateChatParticipantDrafts([draft({ endpoint: { ...ZAI, baseUrl: "nope" } })], [ROLE]) ?? "", /Endpoint URL/);
-  assert.match(validateChatParticipantDrafts([draft({ endpoint: { ...ZAI, authTokenEnvKey: "bad-name" } })], [ROLE]) ?? "", /API key variable/);
-  assert.equal(validateChatParticipantDrafts([draft({ endpoint: ZAI })], [ROLE]), undefined);
-});
-
-test("a GLM member passes readiness when Claude Code is installed but not signed in", () => {
+test("readiness: a bound member passes when its CLI is installed but not signed in; a keyless or missing provider does not", () => {
   const agents: AgentHealth[] = [
     { kind: "claude-code", label: "Claude Code", installed: true, detection: "detected", runnable: "ready", authentication: "required" }
   ];
   const providers = [{ kind: "claude-code" as const, enabled: true }];
-  assert.equal(validateChatCliAgents([draft({ endpoint: ZAI })], agents, providers), undefined);
-  assert.match(validateChatCliAgents([draft()], agents, providers) ?? "", /sign/i);
+  assert.equal(validateChatCliAgents([draft({ hostId: ZAI.id })], agents, providers, [ZAI]), undefined);
+  assert.match(validateChatCliAgents([draft()], agents, providers, [ZAI]) ?? "", /sign/i);
+  assert.match(validateChatCliAgents([draft({ hostId: ZAI.id })], agents, providers, [{ ...ZAI, hasApiKey: false }]) ?? "", /Z\.ai GLM has no API key/);
+  assert.match(validateChatCliAgents([draft({ hostId: "gone" })], agents, providers, [ZAI]) ?? "", /no longer exists/);
 });

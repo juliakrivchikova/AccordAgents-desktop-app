@@ -15,13 +15,12 @@ import {
 } from "../../../shared/agentPermissions";
 import type {
   ChatAgentPermissions,
-  ChatParticipantEndpoint,
   ChatParticipantRequestPermission,
+  CliProviderHost,
   ChatProviderKind,
   ChatRoleParticipantDefaults,
   ChatRosterChangeParticipantInput
 } from "../../../shared/types";
-import { chatParticipantEndpointFor } from "../../../shared/chatParticipantEndpoint";
 import { useProviderModelCatalog } from "./use-provider-model-catalog";
 import { Avatar } from "../avatar/avatar";
 import { avatarForChatAvatarOption, avatarForChatParticipant, chatAvatarOptionsForKind, normalizedChatAvatarId } from "./chat-avatars";
@@ -198,18 +197,18 @@ export function ChatParticipantInlineSelectRow(props: {
 
 export function ChatParticipantInlineModelRow(props: {
   kind: ChatProviderKind;
-  endpoint?: ChatParticipantEndpoint;
+  host?: Pick<CliProviderHost, "vendor" | "cli">;
   model?: string;
   onSelect: (model: string | undefined) => void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
   const [manual, setManual] = useState("");
   const value = props.model?.trim() || undefined;
-  const endpoint = chatParticipantEndpointFor(props.kind, props.endpoint);
-  const { catalog } = useProviderModelCatalog(props.kind, endpoint);
+  const host = props.host && props.host.cli === props.kind ? props.host : undefined;
+  const { catalog } = useProviderModelCatalog(props.kind, host);
 
   const models = catalog?.models ?? [];
-  const inheritedLabel = chatModelDefaultLabel(props.kind, endpoint);
+  const inheritedLabel = chatModelDefaultLabel(props.kind, host);
 
   return (
     <ChatParticipantSpecRow label="Model">
@@ -468,26 +467,4 @@ export function participantRequestPermissionLabel(value: ChatParticipantRequestP
     return "Deny";
   }
   return "Always ask approval";
-}
-
-/** Text field for an endpoint member's URL / API-key variable; the surface that
- *  hosts it supplies the row (Settings spec row or new-chat form row). */
-export function ChatParticipantEndpointField(props: {
-  value: string;
-  ariaLabel: string;
-  placeholder?: string;
-  onChange: (value: string) => void;
-}): JSX.Element {
-  return (
-    <span className="chat-app-tool-inline-handle chat-participant-endpoint-field">
-      <input
-        value={props.value}
-        aria-label={props.ariaLabel}
-        placeholder={props.placeholder}
-        spellCheck={false}
-        size={Math.max(props.value.length + 1, 12)}
-        onChange={(event) => props.onChange(event.currentTarget.value)}
-      />
-    </span>
-  );
 }

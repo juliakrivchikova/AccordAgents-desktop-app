@@ -59,6 +59,7 @@ import type {
   ChatRoleConfig,
   ChatRoleConfigUpdate,
   ChatSkillMention,
+  CliProviderHost,
   Conversation,
   ParticipantConfig,
   ProviderSettings
@@ -11674,12 +11675,41 @@ test("stale Codex approval is expired when a conversation is hydrated after rest
   assert.match(approval.error ?? "", /connection.*no longer active/i);
 });
 
-test("a GLM (Z.ai) member runs Claude Code against the endpoint with the token from Settings → Environment", async () => {
-  const runs: Array<{ participant: ParticipantConfig; options: any }> = [];
-  const participant: ChatParticipant = {
-    ...chatParticipant("claude-code"),
-    endpoint: { preset: "zai", baseUrl: "https://api.z.ai/api/anthropic", authTokenEnvKey: "ZAI_API_KEY" }
+const ZAI_HOST: CliProviderHost = {
+  id: "host-zai",
+  label: "Z.ai GLM",
+  cli: "claude-code",
+  vendor: "zai",
+  baseUrl: "https://api.z.ai/api/anthropic",
+  hasApiKey: true,
+  updatedAt: NOW
+};
+
+const ZAI_CODEX_HOST: CliProviderHost = {
+  id: "host-zai-codex",
+  label: "Z.ai GLM · Codex",
+  cli: "codex-cli",
+  vendor: "zai",
+  baseUrl: "https://api.z.ai/api/v1",
+  hasApiKey: true,
+  updatedAt: NOW
+};
+
+function installHosts(service: ChatService, hosts: CliProviderHost[], secrets: Record<string, string | undefined>): void {
+  const settings = (service as any).settings;
+  for (const method of ["getPublicSettings", "ensureAssistantProviderDefault", "ensureGenericChatParticipantSeeds"] as const) {
+    const original = settings[method].bind(settings);
+    settings[method] = async (...args: unknown[]) => ({ ...(await original(...args)), cliProviderHosts: hosts });
+  }
+  settings.getCliProviderHostSecret = async (id: string) => {
+    const host = hosts.find((item) => item.id === id);
+    return host ? { host, apiKey: secrets[id] } : undefined;
   };
+}
+
+test("a member on an added provider runs its CLI against that provider with the stored key", async () => {
+  const runs: Array<{ participant: ParticipantConfig; options: any }> = [];
+  const participant: ChatParticipant = { ...chatParticipant("claude-code"), hostId: ZAI_HOST.id, hostLabel: ZAI_HOST.label, hostVendor: "zai" };
   const conversation = chatConversation([participant]);
   const { service, tempRoot } = testService({
     conversation,
@@ -11689,15 +11719,13 @@ test("a GLM (Z.ai) member runs Claude Code against the endpoint with the token f
     }
   });
   (service as any).ensureHistoryFiles = async () => tempRoot;
-  (service as any).settings.getManualAgentEnvironment = async () => ({
-    env: { ZAI_API_KEY: "zai-secret", OTHER_VAR: "kept" },
-    version: "env-v1"
-  });
+  (service as any).settings.getManualAgentEnvironment = async () => ({ env: { OTHER_VAR: "kept", ANTHROPIC_API_KEY: "sk-inherited" }, version: "env-v1" });
+  installHosts(service, [ZAI_HOST], { [ZAI_HOST.id]: "zai-secret" });
 
   await service.sendMessage({ conversationId: conversation.id, runId: "run-glm", content: "@drew ping" });
   await waitFor(() => runs.length === 1);
 
-  // Still the Claude Code runner, but explicitly on the preset model — never the CLI's Anthropic alias.
+  // Still the Claude Code runner, explicitly on the vendor default model — never the CLI's Anthropic alias.
   assert.equal(runs[0].participant.kind, "claude-code");
   assert.equal(runs[0].participant.model, "glm-5.3");
   const env = runs[0].options.agentEnv;
@@ -11705,19 +11733,42 @@ test("a GLM (Z.ai) member runs Claude Code against the endpoint with the token f
   assert.equal(env.ANTHROPIC_AUTH_TOKEN, "zai-secret");
   assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, "glm-5.3");
   assert.equal(env.OTHER_VAR, "kept");
-  // The warm-process key changes with the endpoint so a plain Claude process is never reused.
-  assert.match(runs[0].options.agentEnvKey, /^env-v1\|zai\|/);
+  // The user's own Anthropic key from Settings → Environment never travels to the provider.
+  assert.equal(env.ANTHROPIC_API_KEY, "");
+  // The warm-process key changes with the provider so a plain Claude process is never reused.
+  assert.match(runs[0].options.agentEnvKey, /^env-v1\|host:host-zai\|/);
 });
 
-test("a GLM (Z.ai) member's chosen model and a plain Claude member's env stay independent", async () => {
+test("a Codex member on an added provider gets the provider's -c overrides and key variable", async () => {
   const runs: Array<{ participant: ParticipantConfig; options: any }> = [];
-  const glm: ChatParticipant = {
-    ...chatParticipant("claude-code"),
-    id: "glm-participant",
-    handle: "glm",
-    model: "glm-5.2",
-    endpoint: { preset: "zai", baseUrl: "https://api.z.ai/api/anthropic", authTokenEnvKey: "ZAI_API_KEY" }
-  };
+  const participant: ChatParticipant = { ...chatParticipant("codex-cli"), hostId: ZAI_CODEX_HOST.id, hostLabel: ZAI_CODEX_HOST.label, hostVendor: "zai" };
+  const conversation = chatConversation([participant]);
+  const { service, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push({ participant: runParticipant, options });
+      return { participant: runParticipant, ok: true, content: "pong", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  installHosts(service, [ZAI_CODEX_HOST], { [ZAI_CODEX_HOST.id]: "zai-secret" });
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-glm-codex", content: "@codex ping" });
+  await waitFor(() => runs.length === 1);
+  assert.equal(runs[0].participant.model, "glm-5.3");
+  assert.equal(runs[0].options.agentEnv.CODEX_PROVIDER_HOST_API_KEY, "zai-secret");
+  assert.deepEqual(runs[0].participant.codexConfigOverrides, [
+    'model_provider="accordagents_host"',
+    'model_providers.accordagents_host.name="Z.ai GLM · Codex"',
+    'model_providers.accordagents_host.base_url="https://api.z.ai/api/v1"',
+    'model_providers.accordagents_host.wire_api="responses"',
+    'model_providers.accordagents_host.env_key="CODEX_PROVIDER_HOST_API_KEY"'
+  ]);
+});
+
+test("a member on an added provider and a built-in member keep independent env", async () => {
+  const runs: Array<{ participant: ParticipantConfig; options: any }> = [];
+  const glm: ChatParticipant = { ...chatParticipant("claude-code"), id: "glm-participant", handle: "glm", model: "glm-5.2", hostId: ZAI_HOST.id, hostLabel: ZAI_HOST.label, hostVendor: "zai" };
   const claude = chatParticipant("claude-code");
   const conversation = chatConversation([glm, claude]);
   const { service, tempRoot } = testService({
@@ -11728,7 +11779,8 @@ test("a GLM (Z.ai) member's chosen model and a plain Claude member's env stay in
     }
   });
   (service as any).ensureHistoryFiles = async () => tempRoot;
-  (service as any).settings.getManualAgentEnvironment = async () => ({ env: { ZAI_API_KEY: "zai-secret" }, version: "env-v1" });
+  (service as any).settings.getManualAgentEnvironment = async () => ({ env: {}, version: "env-v1" });
+  installHosts(service, [ZAI_HOST], { [ZAI_HOST.id]: "zai-secret" });
 
   await service.sendMessage({ conversationId: conversation.id, runId: "run-both", content: "@glm @drew ping" });
   await waitFor(() => runs.length === 2);
@@ -11738,41 +11790,46 @@ test("a GLM (Z.ai) member's chosen model and a plain Claude member's env stay in
   assert.ok(glmRun && claudeRun);
   assert.equal(glmRun.participant.model, "glm-5.2");
   assert.equal(glmRun.options.agentEnv.ANTHROPIC_DEFAULT_SONNET_MODEL, "glm-5.2");
-  // The plain Claude member keeps Settings → Environment as-is: no base URL, no token, same version key.
   assert.equal(claudeRun.participant.model, undefined);
   assert.equal(claudeRun.options.agentEnv.ANTHROPIC_BASE_URL, undefined);
   assert.equal(claudeRun.options.agentEnv.ANTHROPIC_AUTH_TOKEN, undefined);
   assert.equal(claudeRun.options.agentEnvKey, "env-v1");
 });
 
-test("a GLM (Z.ai) member whose token variable is missing fails its turn with a clear message and never spawns", async () => {
-  const runs: unknown[] = [];
-  const participant: ChatParticipant = {
-    ...chatParticipant("claude-code"),
-    endpoint: { preset: "zai", baseUrl: "https://api.z.ai/api/anthropic", authTokenEnvKey: "ZAI_API_KEY" }
-  };
-  const conversation = chatConversation([participant]);
-  const { service, storage, tempRoot } = testService({
-    conversation,
-    run: async (runParticipant) => {
-      runs.push(runParticipant);
-      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1 };
-    }
-  });
-  (service as any).ensureHistoryFiles = async () => tempRoot;
-  (service as any).settings.getManualAgentEnvironment = async () => ({ env: { UNRELATED: "x" }, version: "env-v1" });
+test("a member whose provider lost its key or was removed fails its turn clearly, never spawns, and retires its warm process", async () => {
+  for (const [scenario, hosts, secrets, expected] of [
+    ["no key", [ZAI_HOST], {}, /Z\.ai GLM has no API key\. Add one under Local CLI setup in Settings\.$/],
+    ["removed", [], {}, /Z\.ai GLM was removed from Settings\./]
+  ] as const) {
+    const runs: unknown[] = [];
+    const closed: string[] = [];
+    const participant: ChatParticipant = { ...chatParticipant("claude-code"), hostId: ZAI_HOST.id, hostLabel: ZAI_HOST.label, hostVendor: "zai" };
+    const conversation = chatConversation([participant]);
+    const { service, storage, tempRoot } = testService({
+      conversation,
+      run: async (runParticipant) => {
+        runs.push(runParticipant);
+        return { participant: runParticipant, ok: true, content: "ok", durationMs: 1 };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    installHosts(service, [...hosts], { ...secrets });
+    (service as any).cliRunner.closeWarmAgents = async (_conversationId: string, participantId: string) => {
+      closed.push(participantId);
+    };
 
-  await service.sendMessage({ conversationId: conversation.id, runId: "run-missing", content: "@drew ping" });
-  await waitFor(() => (storage.current.messages as ChatMessage[]).some((message) => message.status === "error"));
-
-  assert.equal(runs.length, 0);
-  const failed = (storage.current.messages as ChatMessage[]).find((message) => message.status === "error");
-  assert.ok(failed);
-  assert.match(failed.content, /ZAI_API_KEY has no value in Settings → Environment/);
-  assert.equal(storage.current.metadata.activeRunIds?.length ?? 0, 0);
+    await service.sendMessage({ conversationId: conversation.id, runId: `run-${scenario}`, content: "@drew ping" });
+    await waitFor(() => (storage.current.messages as ChatMessage[]).some((message) => message.status === "error"));
+    assert.equal(runs.length, 0, scenario);
+    assert.deepEqual(closed, [participant.id], scenario);
+    const failed = (storage.current.messages as ChatMessage[]).find((message) => message.status === "error");
+    assert.match(failed?.content ?? "", expected, scenario);
+    assert.doesNotMatch(failed?.content ?? "", /\.\.$/, scenario);
+    assert.equal(storage.current.metadata.activeRunIds?.length ?? 0, 0, scenario);
+  }
 });
 
-test("a new chat member copies the endpoint from its saved preset and follows later preset edits", async () => {
+test("a new chat member copies its preset's provider binding and follows later preset edits", async () => {
   const preset: ChatParticipantConfig = {
     id: "preset-glm",
     handle: "glm",
@@ -11780,7 +11837,7 @@ test("a new chat member copies the endpoint from its saved preset and follows la
     behaviorRuleIds: [],
     kind: "claude-code",
     model: "glm-5.3",
-    endpoint: { preset: "zai", baseUrl: "https://api.z.ai/api/anthropic", authTokenEnvKey: "ZAI_API_KEY" },
+    hostId: ZAI_HOST.id,
     updatedAt: NOW
   };
   const { service, storage, tempRoot } = testService({
@@ -11788,112 +11845,68 @@ test("a new chat member copies the endpoint from its saved preset and follows la
     settings: { chatRoleConfigs: [ROLE], chatParticipantConfigs: [preset] }
   });
   (service as any).ensureHistoryFiles = async () => tempRoot;
+  installHosts(service, [ZAI_HOST], { [ZAI_HOST.id]: "zai-secret" });
   const created = await service.createConversation({
     title: "GLM member",
-    participants: [{ participantConfigId: preset.id, handle: preset.handle, roleConfigId: preset.roleConfigId, kind: preset.kind, model: preset.model, endpoint: preset.endpoint }]
+    participants: [{ participantConfigId: preset.id, handle: preset.handle, roleConfigId: preset.roleConfigId, kind: preset.kind, model: preset.model, hostId: preset.hostId }]
   });
   const member = (created.conversation.metadata.participants as ChatParticipant[]).find((item) => item.handle === "glm");
-  assert.deepEqual(member?.endpoint, preset.endpoint);
+  assert.equal(member?.hostId, ZAI_HOST.id);
+  assert.equal(member?.hostLabel, "Z.ai GLM");
+  assert.equal(member?.hostVendor, "zai");
 
-  // Editing the preset's endpoint (e.g. a different variable name) reaches the chat member, like an avatar change.
-  await service.syncSavedParticipantConfig(undefined, { ...preset, endpoint: { ...preset.endpoint!, authTokenEnvKey: "GLM_TOKEN" } });
-  const synced = storage.current.metadata.participants.find((item: ChatParticipant) => item.handle === "glm");
-  assert.equal(synced?.endpoint?.authTokenEnvKey, "GLM_TOKEN");
-  // Same preset, only the variable changed: the member's model is left alone.
-  assert.equal(synced?.model, "glm-5.3");
-
-  // Switching the preset back to plain Claude Code drops the endpoint AND the
+  // Switching the preset back to plain Claude Code drops the binding AND the
   // glm-* model, which Anthropic would reject; the member takes the preset's model.
-  await service.syncSavedParticipantConfig(undefined, { ...preset, endpoint: undefined, model: "opus" });
-  const plain = storage.current.metadata.participants.find((item: ChatParticipant) => item.handle === "glm");
-  assert.equal(plain?.endpoint, undefined);
+  await service.syncSavedParticipantConfig(undefined, { ...preset, hostId: undefined, model: "opus" });
+  const plain = (storage.current.metadata.participants as ChatParticipant[]).find((item) => item.handle === "glm");
+  assert.equal(plain?.hostId, undefined);
+  assert.equal(plain?.hostLabel, undefined);
   assert.equal(plain?.model, "opus");
 });
 
-test("a GLM (Z.ai) member can be added when Claude Code is installed but not signed in to Anthropic", async () => {
-  // The dedicated CLI configured per Z.ai's guide needs no `claude auth login`
-  // (verified: `claude auth status` reports loggedIn with the endpoint token in env).
+test("a member on an added provider can be added when its CLI is installed but not signed in", async () => {
+  // The dedicated CLI configured per the vendor's guide needs no first-party
+  // login (verified: `claude auth status` reports loggedIn with the key in env).
   const agents: AgentHealth[] = [
     { kind: "codex-cli", label: "Codex CLI", installed: true, detection: "detected", runnable: "ready", authentication: "ready" },
     { kind: "claude-code", label: "Claude Code", installed: true, detection: "detected", runnable: "ready", authentication: "required" }
   ];
   const { service, tempRoot } = testService({ agents, settings: { chatRoleConfigs: [ROLE] } });
   (service as any).ensureHistoryFiles = async () => tempRoot;
-  const endpoint = { preset: "zai" as const, baseUrl: "https://api.z.ai/api/anthropic", authTokenEnvKey: "ZAI_API_KEY" };
+  installHosts(service, [ZAI_HOST, { ...ZAI_HOST, id: "host-nokey", label: "Kimi", hasApiKey: false }], { [ZAI_HOST.id]: "zai-secret" });
 
   const created = await service.createConversation({
     title: "GLM without Anthropic login",
-    participants: [{ handle: "glm", roleConfigId: ROLE.id, kind: "claude-code", endpoint }]
+    participants: [{ handle: "glm", roleConfigId: ROLE.id, kind: "claude-code", hostId: ZAI_HOST.id }]
   });
   const member = (created.conversation.metadata.participants as ChatParticipant[]).find((item) => item.handle === "glm");
-  assert.deepEqual(member?.endpoint, endpoint);
+  assert.equal(member?.hostId, ZAI_HOST.id);
 
-  // A plain Claude Code member still needs the Anthropic sign-in.
+  // A plain Claude Code member still needs the Anthropic sign-in...
   await assert.rejects(
     service.addParticipant({ conversationId: created.conversation.id, participant: { handle: "claude", roleConfigId: ROLE.id, kind: "claude-code" } }),
     /sign/i
   );
+  // ...and a provider without a key is the equivalent for its members.
+  await assert.rejects(
+    service.addParticipant({ conversationId: created.conversation.id, participant: { handle: "kimi", roleConfigId: ROLE.id, kind: "claude-code", hostId: "host-nokey" } }),
+    /Kimi has no API key/
+  );
+  // A binding to a provider that no longer exists is refused outright.
+  await assert.rejects(
+    service.addParticipant({ conversationId: created.conversation.id, participant: { handle: "gone", roleConfigId: ROLE.id, kind: "claude-code", hostId: "host-gone" } }),
+    /no longer exists/
+  );
 });
 
-test("a damaged stored endpoint is repaired before a GLM member runs, never half-applied", async () => {
-  const runs: Array<{ participant: ParticipantConfig; options: any }> = [];
-  const participant = {
-    ...chatParticipant("claude-code"),
-    // Legacy/hand-edited record: preset only, no URL, no variable name.
-    endpoint: { preset: "zai" } as ChatParticipant["endpoint"]
-  } as ChatParticipant;
-  const conversation = chatConversation([participant]);
-  const { service, tempRoot } = testService({
-    conversation,
-    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
-      runs.push({ participant: runParticipant, options });
-      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1 };
-    }
-  });
-  (service as any).ensureHistoryFiles = async () => tempRoot;
-  (service as any).settings.getManualAgentEnvironment = async () => ({ env: { ZAI_API_KEY: "zai-secret" }, version: "env-v1" });
-
-  await service.sendMessage({ conversationId: conversation.id, runId: "run-damaged", content: "@drew ping" });
-  await waitFor(() => runs.length === 1);
-  assert.equal(runs[0].participant.model, "glm-5.3");
-  assert.equal(runs[0].options.agentEnv.ANTHROPIC_BASE_URL, "https://api.z.ai/api/anthropic");
-  assert.equal(runs[0].options.agentEnv.ANTHROPIC_AUTH_TOKEN, "zai-secret");
-  // The member's own Anthropic credentials never travel to the endpoint.
-  assert.equal(runs[0].options.agentEnv.ANTHROPIC_API_KEY, "");
-});
-
-test("a GLM (Z.ai) member whose token variable went away retires its warm process", async () => {
-  const closed: Array<{ conversationId: string; participantId: string }> = [];
-  const participant: ChatParticipant = {
-    ...chatParticipant("claude-code"),
-    endpoint: { preset: "zai", baseUrl: "https://api.z.ai/api/anthropic", authTokenEnvKey: "ZAI_API_KEY" }
-  };
-  const conversation = chatConversation([participant]);
-  const { service, storage, tempRoot } = testService({ conversation });
-  (service as any).ensureHistoryFiles = async () => tempRoot;
-  (service as any).settings.getManualAgentEnvironment = async () => ({ env: {}, version: "env-v1" });
-  (service as any).cliRunner.closeWarmAgents = async (conversationId: string, participantId: string) => {
-    closed.push({ conversationId, participantId });
-  };
-
-  await service.sendMessage({ conversationId: conversation.id, runId: "run-missing-warm", content: "@drew ping" });
-  await waitFor(() => (storage.current.messages as ChatMessage[]).some((message) => message.status === "error"));
-  assert.deepEqual(closed, [{ conversationId: conversation.id, participantId: participant.id }]);
-  const failed = (storage.current.messages as ChatMessage[]).find((message) => message.status === "error");
-  assert.match(failed?.content ?? "", /ZAI_API_KEY has no value in Settings → Environment/);
-  assert.doesNotMatch(failed?.content ?? "", /\.\.$/);
-});
-
-test("a preset endpoint change follows only members bound to that preset, and gives them a fresh session", async () => {
+test("a provider edit follows only members bound to it, refreshing their label and resetting sessions on a vendor change", async () => {
   const closed: string[] = [];
-  const zai = { preset: "zai" as const, baseUrl: "https://api.z.ai/api/anthropic", authTokenEnvKey: "ZAI_API_KEY" };
-  const bound: ChatParticipant = { ...chatParticipant("claude-code"), id: "bound", handle: "glm", participantConfigId: "preset-glm", model: "opus" };
-  // A one-off member with the same handle and kind, created before presets carried ids.
-  const legacy: ChatParticipant = { ...chatParticipant("claude-code"), id: "legacy", handle: "glm", participantConfigId: undefined, model: "opus" };
-  const conversation = chatConversation([bound, legacy], {
+  const bound: ChatParticipant = { ...chatParticipant("claude-code"), id: "bound", handle: "glm", participantConfigId: "preset-glm", hostId: ZAI_HOST.id, hostLabel: "Z.ai GLM", hostVendor: "zai", model: "glm-5.3" };
+  const other: ChatParticipant = { ...chatParticipant("claude-code"), id: "other", handle: "drew", model: "opus" };
+  const conversation = chatConversation([bound, other], {
     participantSessions: [
       { participantId: "bound", sessionId: "bound-session", roleConfigId: ROLE.id, roleConfigVersion: 1, updatedAt: NOW },
-      { participantId: "legacy", sessionId: "legacy-session", roleConfigId: ROLE.id, roleConfigVersion: 1, updatedAt: NOW }
+      { participantId: "other", sessionId: "other-session", roleConfigId: ROLE.id, roleConfigVersion: 1, updatedAt: NOW }
     ]
   });
   const snapshots: Conversation[] = [];
@@ -11902,23 +11915,24 @@ test("a preset endpoint change follows only members bound to that preset, and gi
     closed.push(participantId);
   };
 
-  await service.syncSavedParticipantConfig(
-    { handle: "glm", kind: "claude-code" },
-    { id: "preset-glm", handle: "glm", kind: "claude-code", behaviorRuleIds: [], endpoint: zai, model: "glm-5.3" }
-  );
+  // Rename only: label follows, session and model untouched.
+  await service.syncCliProviderHost({ ...ZAI_HOST, label: "GLM via Z.ai" });
+  let participants = storage.current.metadata.participants as ChatParticipant[];
+  assert.equal(participants.find((item) => item.id === "bound")?.hostLabel, "GLM via Z.ai");
+  assert.equal(participants.find((item) => item.id === "bound")?.model, "glm-5.3");
+  assert.equal(participants.find((item) => item.id === "other")?.hostLabel, undefined);
+  assert.deepEqual((storage.current.metadata.participantSessions as ChatParticipantSession[]).map((session) => session.participantId), ["bound", "other"]);
+  assert.deepEqual(closed, []);
+  assert.ok(snapshots.length > 0);
 
-  const participants = storage.current.metadata.participants as ChatParticipant[];
-  const boundAfter = participants.find((item) => item.id === "bound");
-  const legacyAfter = participants.find((item) => item.id === "legacy");
-  assert.deepEqual(boundAfter?.endpoint, zai);
-  assert.equal(boundAfter?.model, "glm-5.3");
-  // The legacy match may adopt the preset id, but never a backend switch.
-  assert.equal(legacyAfter?.endpoint, undefined);
-  assert.equal(legacyAfter?.model, "opus");
-  const sessions = storage.current.metadata.participantSessions as ChatParticipantSession[];
-  assert.deepEqual(sessions.map((session) => session.participantId), ["legacy"]);
+  // Vendor change: the transcript belongs to the old backend, so the session is dropped and the model reset.
+  await service.syncCliProviderHost({ ...ZAI_HOST, label: "Kimi", vendor: "moonshot", baseUrl: "https://api.moonshot.ai/anthropic" });
+  participants = storage.current.metadata.participants as ChatParticipant[];
+  const rebound = participants.find((item) => item.id === "bound");
+  assert.equal(rebound?.hostVendor, "moonshot");
+  assert.equal(rebound?.model, "kimi-k3");
+  assert.deepEqual((storage.current.metadata.participantSessions as ChatParticipantSession[]).map((session) => session.participantId), ["other"]);
   assert.deepEqual(closed, ["bound"]);
-  assert.ok(snapshots.length > 0, "open chats learn about the backend switch through a snapshot");
 });
 
 test("run termination preserves Codex Stop and provider-exit lifecycle states", () => {
@@ -12056,6 +12070,7 @@ function testService(options: {
     chatSavedPrompts: [],
     chatParticipantConfigs: clone(settingsState.chatParticipantConfigs),
     chatParticipantSeedState: {},
+    cliProviderHosts: [],
     assistantProviderKind,
     lastSuccessfulChatProviderKind: options.settings?.lastSuccessfulChatProviderKind
   });

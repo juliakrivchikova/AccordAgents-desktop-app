@@ -3,12 +3,10 @@ import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import type {
   AgentContextUsage,
   ChatParticipant,
-  ChatParticipantEndpoint,
   ChatParticipantSession,
   ChatProviderKind,
   ChatRoleConfig
 } from "../../../shared/types";
-import { chatParticipantEndpointLabel } from "../../../shared/chatParticipantEndpoint";
 import type { ParticipantProfile } from "../content/participant-hover-card";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { avatarForChatParticipant } from "./chat-avatars";
@@ -31,7 +29,7 @@ export function chatMentionDirectory(
   const directory = new Map<string, ParticipantProfile>();
   for (const participant of participants) {
     const providerValue = [
-      participantProviderLabel(participant.kind, participant.endpoint),
+      participantProviderLabel(participant.kind, participant.hostLabel),
       participant.model,
       participant.reasoningEffort ? `reasoning ${chatReasoningEffortLabel(participant.reasoningEffort)}` : ""
     ].filter(Boolean).join(" · ");
@@ -59,12 +57,16 @@ export function providerLabel(providerKind: ChatProviderKind): string {
   return providerKind === "codex-cli" ? "Codex" : providerKind === "gemini-cli" ? "Gemini" : "Claude";
 }
 
-export function participantProviderLabel(providerKind: ChatProviderKind, endpoint?: ChatParticipantEndpoint): string {
+/** `hostLabel` is the added provider's name when the member runs through one. */
+export function participantProviderLabel(providerKind: ChatProviderKind, hostLabel?: string): string {
+  if (hostLabel?.trim()) {
+    return hostLabel.trim();
+  }
   if (providerKind === "codex-cli") {
     return "Codex CLI";
   }
   if (providerKind === "gemini-cli") {
     return "Gemini CLI";
   }
-  return chatParticipantEndpointLabel(endpoint) ?? "Claude Code";
+  return "Claude Code";
 }

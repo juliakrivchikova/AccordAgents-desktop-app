@@ -112,11 +112,11 @@ test("chat:send routes @participant /compact instructions to participant compact
   }
 });
 
-test("/compact on a GLM (Z.ai) member carries the endpoint env, and fails cleanly without its token variable", async () => {
+test("/compact on a member with an added provider carries the provider env, and fails cleanly without its key", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-glm-"));
   try {
-    const endpoint = { preset: "zai" as const, baseUrl: "https://api.z.ai/api/anthropic", authTokenEnvKey: "ZAI_API_KEY" };
-    const participant = chatParticipant({ id: "glm-admin", kind: "claude-code", endpoint });
+    const host = { id: "host-zai", label: "Z.ai GLM", cli: "claude-code" as const, vendor: "zai" as const, baseUrl: "https://api.z.ai/api/anthropic", hasApiKey: true, updatedAt: NOW };
+    const participant = chatParticipant({ id: "glm-admin", kind: "claude-code", hostId: host.id, hostLabel: host.label, hostVendor: "zai" });
     const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
     const compactOptions: any[] = [];
     let usageLookups = 0;
@@ -132,26 +132,26 @@ test("/compact on a GLM (Z.ai) member carries the endpoint env, and fails cleanl
       }
     });
     (service as any).ensureHistoryFiles = async () => tempRoot;
-    let manualEnv: Record<string, string> = { ZAI_API_KEY: "zai-secret" };
-    (service as any).settings.getManualAgentEnvironment = async () => ({ env: manualEnv, version: "env-v1" });
+    let apiKey: string | undefined = "zai-secret";
+    (service as any).settings.getManualAgentEnvironment = async () => ({ env: {}, version: "env-v1" });
+    (service as any).settings.getCliProviderHostSecret = async (id: string) => (id === host.id ? { host, apiKey } : undefined);
 
     await service.sendMessage({ conversationId: conversation.id, runId: "compact-glm", content: "@admin /compact" });
     assert.equal(compactOptions.length, 1);
     assert.equal(compactOptions[0].model, "glm-5.3");
-    assert.equal(compactOptions[0].options.agentEnv.ANTHROPIC_BASE_URL, endpoint.baseUrl);
+    assert.equal(compactOptions[0].options.agentEnv.ANTHROPIC_BASE_URL, host.baseUrl);
     assert.equal(compactOptions[0].options.agentEnv.ANTHROPIC_AUTH_TOKEN, "zai-secret");
-    assert.match(compactOptions[0].options.agentEnvKey, /^env-v1\|zai\|/);
+    assert.match(compactOptions[0].options.agentEnvKey, /^env-v1\|host:host-zai\|/);
     assert.equal(storage.current.messages.at(-1)?.content, "Compacted @admin context.");
     const lookupsAfterSuccess = usageLookups;
 
-    // The variable disappears: nothing is spawned, nothing is probed, one clean sentence.
-    manualEnv = {};
+    // The key is gone: nothing is spawned, nothing is probed, one clean sentence.
+    apiKey = undefined;
     const result = await service.sendMessage({ conversationId: conversation.id, runId: "compact-glm-missing", content: "@admin /compact" });
     assert.equal(compactOptions.length, 1);
     assert.equal(usageLookups, lookupsAfterSuccess);
     const last = storage.current.messages.at(-1);
-    assert.match(last?.content ?? "", /Could not compact @admin context: @admin cannot start: ZAI_API_KEY has no value in Settings → Environment/);
-    assert.doesNotMatch(last?.content ?? "", /\.\.$/);
+    assert.match(last?.content ?? "", /Could not compact @admin context: @admin cannot start: Z\.ai GLM has no API key\. Add one under Local CLI setup in Settings\.$/);
     assert.equal(last?.metadata?.compaction?.outcome, "failed");
     assert.equal(result.warnings.length, 1);
     assert.equal(storage.current.metadata.activeRunIds, undefined);

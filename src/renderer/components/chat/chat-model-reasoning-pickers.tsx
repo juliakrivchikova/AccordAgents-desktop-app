@@ -5,15 +5,15 @@ import {
   AppSelect
 } from "../primitives";
 import type {
-  ChatParticipantEndpoint,
   ChatProviderKind,
+  CliProviderHost,
   ChatReasoningEffort,
   ProviderModel,
   ProviderModelCatalog,
   ProviderReasoningEffortOption
 } from "../../../shared/types";
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
-import { chatParticipantEndpointDefaultModel, chatParticipantEndpointFor } from "../../../shared/chatParticipantEndpoint";
+import { cliProviderHostDefaultModel } from "../../../shared/cliProviderHosts";
 import { chatInheritedCliSettingLabel, chatModelDefaultLabel } from "./chat-participant-drafts";
 import { useProviderModelCatalog } from "./use-provider-model-catalog";
 
@@ -23,19 +23,19 @@ const REASONING_DEFAULT_VALUE = "__accordagents_default_reasoning__";
 
 export function ChatModelPicker(props: {
   kind: ChatProviderKind;
-  endpoint?: ChatParticipantEndpoint;
+  host?: Pick<CliProviderHost, "vendor" | "cli">;
   model?: string;
   onChange: (model?: string) => void;
 }): JSX.Element {
   const [manualMode, setManualMode] = useState(false);
   const model = props.model?.trim() || undefined;
-  const endpoint = chatParticipantEndpointFor(props.kind, props.endpoint);
-  const endpointPreset = endpoint?.preset;
-  const { catalog, loading, error } = useProviderModelCatalog(props.kind, endpoint);
+  const host = props.host && props.host.cli === props.kind ? props.host : undefined;
+  const hostVendor = host?.vendor;
+  const { catalog, loading, error } = useProviderModelCatalog(props.kind, host);
 
   useEffect(() => {
     setManualMode(false);
-  }, [endpointPreset, props.kind]);
+  }, [hostVendor, props.kind]);
 
   const models = useMemo(() => catalog?.models ?? [], [catalog]);
   const selectedDiscoveredModel = model ? models.some((item) => item.id === model) : false;
@@ -48,7 +48,7 @@ export function ChatModelPicker(props: {
       : MODEL_MANUAL_VALUE
     : MODEL_DEFAULT_VALUE;
   const status = modelPickerStatus(catalog, loading, error);
-  const cliSettingLabel = chatModelDefaultLabel(props.kind, endpoint);
+  const cliSettingLabel = chatModelDefaultLabel(props.kind, host);
 
   return (
     <div className="chat-model-picker">
@@ -84,7 +84,7 @@ export function ChatModelPicker(props: {
           className="chat-model-picker-manual"
           value={model ?? ""}
           onChange={(event) => props.onChange(event.target.value)}
-          placeholder={endpoint ? `${chatParticipantEndpointDefaultModel(endpoint)}...` : props.kind === "claude-code" ? "opus, sonnet, haiku..." : props.kind === "gemini-cli" ? "Gemini 3.5 Flash (Medium)..." : "gpt-5.5..."}
+          placeholder={cliProviderHostDefaultModel(host) ? `${cliProviderHostDefaultModel(host)}...` : props.kind === "claude-code" ? "opus, sonnet, haiku..." : props.kind === "gemini-cli" ? "Gemini 3.5 Flash (Medium)..." : "gpt-5.5..."}
         />
       )}
       {status && <small className="chat-model-picker-status">{status}</small>}
@@ -94,14 +94,14 @@ export function ChatModelPicker(props: {
 
 export function ChatReasoningEffortPicker(props: {
   kind: ChatProviderKind;
-  endpoint?: ChatParticipantEndpoint;
+  host?: Pick<CliProviderHost, "vendor" | "cli">;
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   onChange: (reasoningEffort?: ChatReasoningEffort) => void;
 }): JSX.Element {
   const selectedModel = props.model?.trim() || undefined;
   const reasoningEffort = normalizeChatReasoningEffort(props.reasoningEffort, props.kind);
-  const { catalog, loading, error } = useProviderModelCatalog(props.kind, props.endpoint);
+  const { catalog, loading, error } = useProviderModelCatalog(props.kind, props.host);
 
   const options = useMemo(() => {
     const modelOptions = selectedModel

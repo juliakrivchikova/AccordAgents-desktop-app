@@ -1,25 +1,29 @@
-import type { AgentHealth, ChatParticipantEndpoint, ProviderSettings } from "../../../shared/types";
+import type { AgentHealth, CliProviderHost, ProviderSettings } from "../../../shared/types";
 import {
   agentReadinessReason,
   cliProviderMetadata,
   readinessForParticipant
 } from "../../../shared/cliReadiness";
-import { chatParticipantEndpointFor } from "../../../shared/chatParticipantEndpoint";
+import { cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
 
 export function validateChatCliAgents(
-  drafts: Array<{ kind: AgentHealth["kind"]; endpoint?: ChatParticipantEndpoint; remoteExecution?: "local" | "remote" | "inherit" }>,
+  drafts: Array<{ kind: AgentHealth["kind"]; hostId?: string; remoteExecution?: "local" | "remote" | "inherit" }>,
   agents: AgentHealth[],
-  providers: Array<Pick<ProviderSettings, "kind" | "enabled">> = []
+  providers: Array<Pick<ProviderSettings, "kind" | "enabled">> = [],
+  hosts: ReadonlyArray<CliProviderHost> = []
 ): string | undefined {
   for (const draft of drafts) {
     if (draft.remoteExecution === "remote") {
       continue;
     }
-    const readiness = readinessForParticipant(
-      { kind: draft.kind, endpoint: chatParticipantEndpointFor(draft.kind, draft.endpoint) },
-      agents,
-      providers
-    );
+    const host = cliProviderHostForParticipant(draft.kind, draft.hostId, hosts);
+    if (draft.hostId && !host) {
+      return "That provider no longer exists. Pick another provider for the member.";
+    }
+    const readiness = readinessForParticipant({ kind: draft.kind, host }, agents, providers);
+    if (readiness === "sign-in-required" && host) {
+      return `${host.label} has no API key. Add one under Local CLI setup in Settings.`;
+    }
     if (readiness !== "ready") {
       const label = cliProviderMetadata(draft.kind).label;
       return agentReadinessReason(readiness, label) ?? `${label} is not ready.`;

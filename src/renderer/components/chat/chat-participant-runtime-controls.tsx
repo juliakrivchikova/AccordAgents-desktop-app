@@ -10,14 +10,13 @@ import {
   normalizeOptionalChatParticipantRequestPermission
 } from "../../../shared/agentPermissions";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
-import { chatParticipantEndpointFor } from "../../../shared/chatParticipantEndpoint";
 import { useProviderModelCatalog } from "./use-provider-model-catalog";
 import type {
   ChatAgentMode,
   ChatAgentPermissions,
   ChatParticipant,
-  ChatParticipantEndpoint,
   ChatParticipantRequestPermission,
+  CliProviderHost,
   ChatRoleParticipantDefaults,
   ChatParticipantWatcherPausedReason,
   ChatProviderKind,
@@ -62,10 +61,14 @@ export function ParticipantRuntimeControls(props: {
   const mode = normalizeChatAgentMode(participant.agentMode);
   const runLocation = normalizeChatRunLocation(participant.remoteExecution);
   const reasoningValue = participant.reasoningEffort ?? REASONING_DEFAULT_VALUE;
-  const endpoint = chatParticipantEndpointFor(participant.kind, participant.endpoint);
+  // The member carries a vendor snapshot of its added provider, enough for the
+  // model list and labels without a settings lookup.
+  const host = participant.hostId && participant.hostVendor && participant.kind !== "gemini-cli"
+    ? { vendor: participant.hostVendor, cli: participant.kind }
+    : undefined;
   const cliSettingLabel = chatInheritedCliSettingLabel(participant.kind);
-  const modelDefaultLabel = chatModelDefaultLabel(participant.kind, endpoint);
-  const providerLabel = chatCliProviderLabel(participant.kind, endpoint);
+  const modelDefaultLabel = chatModelDefaultLabel(participant.kind, host);
+  const providerLabel = chatCliProviderLabel(participant.kind, participant.hostId ? participant.hostLabel : undefined);
   const controlsDisabled = props.disabled || props.readOnly === true;
 
   // Build the patch by key presence so an intentional reset (model: "") is forwarded
@@ -136,7 +139,7 @@ export function ParticipantRuntimeControls(props: {
           <span className="chat-rt-dot" aria-hidden />
           <GhostModelSelect
             kind={participant.kind}
-            endpoint={endpoint}
+            host={host}
             model={participant.model}
             defaultLabel={modelDefaultLabel}
             disabled={controlsDisabled}
@@ -300,7 +303,7 @@ function GhostSelect(props: {
 
 function GhostModelSelect(props: {
   kind: ChatProviderKind;
-  endpoint?: ChatParticipantEndpoint;
+  host?: Pick<CliProviderHost, "vendor" | "cli">;
   model?: string;
   defaultLabel: string;
   disabled: boolean;
@@ -308,7 +311,7 @@ function GhostModelSelect(props: {
 }): JSX.Element {
   const [manual, setManual] = useState(false);
   const model = props.model?.trim() || undefined;
-  const { catalog } = useProviderModelCatalog(props.kind, props.endpoint);
+  const { catalog } = useProviderModelCatalog(props.kind, props.host);
 
   const models = catalog?.models ?? [];
   const known = model ? models.find((item) => item.id === model) : undefined;

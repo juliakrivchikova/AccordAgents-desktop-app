@@ -6,12 +6,12 @@ import {
   resolveChatManageRolesParticipantsPermission
 } from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
-import type { ChatAgentMode, ChatExistingParticipantOverrides, ChatParticipantChangeRequest, ChatParticipantConfig, ChatRoleConfig, ChatRosterChangeParticipantInput } from "../../../shared/types";
+import type { ChatAgentMode, ChatExistingParticipantOverrides, ChatParticipantChangeRequest, ChatParticipantConfig, ChatRoleConfig, ChatRosterChangeParticipantInput, CliProviderHost } from "../../../shared/types";
 import { Avatar, avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant, mapChatAvatarIdToKind } from "./chat-avatars";
 import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel, chatProviderOptionId, chatProviderOptionPatch, chatProviderOptions } from "./chat-participant-drafts";
-import { chatParticipantEndpointDefaultModel } from "../../../shared/chatParticipantEndpoint";
+import { cliProviderHostDefaultModel, cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
 import {
   ChatParticipantAvatarField as ChatAppToolAvatarField,
   ChatParticipantInlineAutoWatchRow as ChatAppToolInlineAutoWatchRow,
@@ -31,8 +31,10 @@ export function ChatAppToolParticipantChangeOperation(props: {
   request: ChatParticipantChangeRequest;
   roles: ChatRoleConfig[];
   savedParticipants: ChatParticipantConfig[];
+  cliProviderHosts?: CliProviderHost[];
   onChange: (request: ChatParticipantChangeRequest) => void;
 }): JSX.Element {
+  const hosts = props.cliProviderHosts ?? [];
   function updateNewParticipant(
     index: number,
     patch: { saveAsPreset?: boolean; participant?: Partial<ChatRosterChangeParticipantInput> }
@@ -108,6 +110,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
                 {savedParticipant && (
               <ChatAppToolExistingParticipantSpec
                 preset={savedParticipant}
+                host={cliProviderHostForParticipant(savedParticipant.kind, savedParticipant.hostId, hosts)}
                 role={savedRole}
                 overrides={operation.overrides}
                 onOverride={(patch) => updateExistingOverride(index, patch)}
@@ -119,6 +122,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
         }
         const participant = operation.participant;
         const role = props.roles.find((item) => item.id === participant.roleConfigId);
+        const participantHost = cliProviderHostForParticipant(participant.kind, participant.hostId, hosts);
         const rawPermissionLabels = rosterPermissionGrantLabels(participant);
         const customAccess = normalizeChatAgentMode(participant.agentMode) === "default";
         const broaderThanDefault = customAccess && rawPermissionLabels.some((label) => label !== "repo read");
@@ -154,21 +158,22 @@ export function ChatAppToolParticipantChangeOperation(props: {
               />
               <ChatAppToolInlineSelectRow
                 label="Provider / CLI"
-                value={participantProviderLabel(participant.kind, participant.endpoint)}
-                current={chatProviderOptionId(participant.kind, participant.endpoint)}
-                options={chatProviderOptions(["codex-cli", "claude-code", "gemini-cli"]).map((option) => ({ value: option.id, label: option.label }))}
+                value={participantProviderLabel(participant.kind, participantHost?.label)}
+                current={chatProviderOptionId(participant.kind, participantHost?.id)}
+                options={chatProviderOptions(["codex-cli", "claude-code", "gemini-cli"], hosts).map((option) => ({ value: option.id, label: option.label }))}
                 onSelect={(value) => {
-                  if (value === chatProviderOptionId(participant.kind, participant.endpoint)) {
+                  if (value === chatProviderOptionId(participant.kind, participantHost?.id)) {
                     return;
                   }
-                  const { kind: nextKind, endpoint } = chatProviderOptionPatch(value, participant);
+                  const { kind: nextKind, hostId } = chatProviderOptionPatch(value, participant, hosts);
+                  const nextHost = cliProviderHostForParticipant(nextKind, hostId, hosts);
                   // Model is provider-specific (e.g. gpt-5.5 is Codex-only, glm-* is
-                  // endpoint-only), so reset it on a provider switch; the model picker
+                  // vendor-only), so reset it on a provider switch; the model picker
                   // re-fetches the new catalog.
                   const next: Partial<ChatRosterChangeParticipantInput> = {
                     kind: nextKind,
-                    endpoint,
-                    model: chatParticipantEndpointDefaultModel(endpoint)
+                    hostId,
+                    model: cliProviderHostDefaultModel(nextHost)
                   };
                   if (participant.avatarId) {
                     next.avatarId = mapChatAvatarIdToKind(nextKind, participant.avatarId, participant.handle);
@@ -178,7 +183,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
               />
               <ChatAppToolInlineModelRow
                 kind={participant.kind}
-                endpoint={participant.endpoint}
+                host={participantHost}
                 model={participant.model}
                 onSelect={(model) => patchParticipant({ model })}
               />
@@ -259,6 +264,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
 // chat-level overrides — they apply only to this chat and never touch the saved preset.
 export function ChatAppToolExistingParticipantSpec(props: {
   preset: ChatParticipantConfig;
+  host?: CliProviderHost;
   role?: ChatRoleConfig;
   overrides?: ChatExistingParticipantOverrides;
   onOverride: (patch: Partial<ChatExistingParticipantOverrides>) => void;
@@ -284,11 +290,11 @@ export function ChatAppToolExistingParticipantSpec(props: {
     <>
       <div className="chat-app-tool-review-spec-row">
         <span>Provider / CLI</span>
-        <strong>{participantProviderLabel(preset.kind, preset.endpoint)}</strong>
+        <strong>{participantProviderLabel(preset.kind, props.host?.label)}</strong>
       </div>
       <ChatAppToolInlineModelRow
         kind={preset.kind}
-        endpoint={preset.endpoint}
+        host={props.host}
         model={model}
         onSelect={(next) => props.onOverride({ model: next })}
       />

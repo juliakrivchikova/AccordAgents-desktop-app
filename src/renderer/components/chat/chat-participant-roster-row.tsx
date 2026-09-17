@@ -6,6 +6,7 @@ import { canCompactParticipant } from "../../../shared/chatParticipantStatus";
 import type {
   ChatParticipant,
   ChatParticipantConfig,
+  CliProviderHost,
   ChatRoleParticipantDefaults,
   ChatParticipantWatcherPausedReason
 } from "../../../shared/types";
@@ -13,6 +14,7 @@ import { IconButton } from "../primitives";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { ParticipantRuntimeControls } from "./chat-participant-runtime-controls";
 import { chatCliProviderLabel, normalizeChatRunLocation, type ChatParticipantRuntimeOverride } from "./chat-participant-drafts";
+import { cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
 import { RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-roster-status";
 
 type ParticipantRuntimePatch = Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">;
@@ -58,7 +60,7 @@ export function ChatParticipantRosterRow(props: {
             <span className="chat-participant-name-line">
               <strong className="chat-participant-name">{displayName}</strong>
               <span className="chat-participant-meta-sep" aria-hidden />
-              <span className="chat-participant-provider">{chatCliProviderLabel(props.participant.kind, props.participant.endpoint)}</span>
+              <span className="chat-participant-provider">{chatCliProviderLabel(props.participant.kind, props.participant.hostId ? props.participant.hostLabel : undefined)}</span>
               <span className="chat-participant-status-slot">
                 <RosterStatusIndicator
                   status={props.status}
@@ -138,13 +140,18 @@ export function ChatParticipantSelectableRosterRow(props: {
   onToggleSelected: (participantId: string) => void;
   onRunLocationChange: (participant: ChatParticipantConfig, remoteExecution: Exclude<ChatParticipant["remoteExecution"], undefined | "inherit">) => void;
   onRuntimeChange: (participant: ChatParticipantConfig, patch: ParticipantRuntimePatch) => void;
+  cliProviderHosts?: CliProviderHost[];
 }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const displayName = chatParticipantDisplayName(props.participant);
   const checkboxDisabled = Boolean(props.locked) || Boolean(props.disabledReason);
   const runtimeOverride = props.runtimeOverride ?? {};
+  const host = cliProviderHostForParticipant(props.participant.kind, props.participant.hostId, props.cliProviderHosts ?? []);
   const participant: ChatParticipant = {
     ...props.participant,
+    hostId: host?.id,
+    hostLabel: host?.label,
+    hostVendor: host?.vendor,
     model: "model" in runtimeOverride ? runtimeOverride.model : props.participant.model,
     reasoningEffort: "reasoningEffort" in runtimeOverride ? runtimeOverride.reasoningEffort : props.participant.reasoningEffort,
     agentMode: runtimeOverride.agentMode ?? props.participant.agentMode,
@@ -173,7 +180,7 @@ export function ChatParticipantSelectableRosterRow(props: {
             <span className="chat-participant-name-line">
               <strong className="chat-participant-name">{displayName}</strong>
               <span className="chat-participant-meta-sep" aria-hidden />
-              <span className="chat-participant-provider">{chatCliProviderLabel(props.participant.kind, props.participant.endpoint)}</span>
+              <span className="chat-participant-provider">{chatCliProviderLabel(props.participant.kind, host?.label)}</span>
               <span className="chat-participant-status-slot">
                 <RosterStatusIndicator status="idle" />
               </span>

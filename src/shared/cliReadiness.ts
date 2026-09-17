@@ -1,8 +1,8 @@
 import type {
   AgentHealth,
   AgentReadinessState,
-  ChatParticipantEndpoint,
   ChatProviderKind,
+  CliProviderHost,
   ProviderSettings
 } from "./types";
 import { CHAT_PROVIDER_PREFERENCE } from "./chatProviders";
@@ -123,18 +123,23 @@ export function readinessForProvider(
   );
 }
 
-/** Readiness for one member. A Claude Code member with an endpoint brings its
- *  own credential (the endpoint token from Settings → Environment, checked when
- *  it runs), and Claude Code itself reports `loggedIn: true` with that token in
- *  its environment — so the Anthropic sign-in requirement does not apply to it. */
+/** Readiness for one member. A member bound to an added provider brings its own
+ *  credential (the provider's API key, checked when it runs), and the CLI itself
+ *  reports it as signed in with that key in its environment — so the built-in
+ *  sign-in requirement does not apply; a provider without a key is the
+ *  equivalent of "sign-in required". */
 export function readinessForParticipant(
-  participant: { kind: ChatProviderKind; endpoint?: ChatParticipantEndpoint },
+  participant: { kind: ChatProviderKind; host?: Pick<CliProviderHost, "cli" | "hasApiKey"> },
   agents: AgentHealth[],
   providers: Array<Pick<ProviderSettings, "kind" | "enabled">>
 ): AgentReadinessState {
   const state = readinessForProvider(participant.kind, agents, providers);
-  if (state === "sign-in-required" && participant.kind === "claude-code" && participant.endpoint) {
-    return "ready";
+  const host = participant.host && participant.host.cli === participant.kind ? participant.host : undefined;
+  if (!host) {
+    return state;
+  }
+  if (state === "ready" || state === "sign-in-required") {
+    return host.hasApiKey ? "ready" : "sign-in-required";
   }
   return state;
 }

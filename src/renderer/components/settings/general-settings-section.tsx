@@ -5,6 +5,8 @@ import { Check, CheckCircle2, ChevronDown, Code2, Copy, ExternalLink, FolderOpen
 import type {
   AgentHealth,
   ChatProviderKind,
+  CliProviderHost,
+  CliProviderHostUpdate,
   CloudRunsSettings,
   CloudRunsSettingsUpdate,
   CloudRunWorkerDoctorReport,
@@ -37,6 +39,7 @@ import { AwsWorkerPanel as SharedAwsWorkerPanel } from "./aws-worker-panel";
 import { cliProviderMetadata, deriveAgentReadiness } from "../../../shared/cliReadiness";
 import { isChatProviderKind } from "../../../shared/chatProviders";
 import { AppSelect } from "../primitives";
+import { ProviderHostEditorDialog, ProviderHostRows, type ProviderHostEditorState } from "./provider-hosts-section";
 
 const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive member-to-member request nesting, not repeated rounds by the same requester.";
 const PARTICIPANT_REQUEST_PROMPT_MAX_HELP = "Maximum characters accepted for each member request prompt. Longer prompts are rejected, not truncated.";
@@ -55,6 +58,9 @@ function providerDisplayLabel(provider: Pick<ProviderSettings, "kind" | "label">
 
 export function GeneralSettingsSection(props: {
   providers: ProviderSettings[];
+  cliProviderHosts: CliProviderHost[];
+  saveCliProviderHost: (update: CliProviderHostUpdate) => Promise<void>;
+  deleteCliProviderHost: (id: string) => Promise<void>;
   agents: AgentHealth[];
   assistantProviderKind?: ChatProviderKind;
   repoFileOpenAction?: RepoFileOpenAction;
@@ -76,20 +82,31 @@ export function GeneralSettingsSection(props: {
   setChatPromptContext: (settings: ChatPromptContextSettings) => Promise<void>;
   saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
 }): JSX.Element {
+  const [hostEditor, setHostEditor] = useState<ProviderHostEditorState | undefined>();
   const readyCount = props.providers.filter(
     (provider) => deriveAgentReadiness(
       props.agents.find((agent) => agent.kind === provider.kind),
       provider.enabled
     ) === "ready"
+  ).length + props.cliProviderHosts.filter(
+    (host) => host.hasApiKey && deriveAgentReadiness(props.agents.find((agent) => agent.kind === host.cli)) === "ready"
   ).length;
+  const totalCount = props.providers.length + props.cliProviderHosts.length;
   return (
     <>
       <section className="gen-section">
         <div className="gen-section-head">
           <h2 className="gen-section-title">Local CLI setup</h2>
-          <span className="gen-section-meta">{readyCount} of {props.providers.length} ready</span>
+          <span className="gen-section-meta">{readyCount} of {totalCount} ready</span>
         </div>
         <div className="gen-card">
+          <ProviderHostEditorDialog
+            editor={hostEditor}
+            hosts={props.cliProviderHosts}
+            onSave={props.saveCliProviderHost}
+            onDelete={props.deleteCliProviderHost}
+            onClose={() => setHostEditor(undefined)}
+          />
           {props.providers.map((provider, index) => {
             const health = props.agents.find((agent) => agent.kind === provider.kind);
             const iconUrl = CLI_ICON_URLS[provider.kind];
@@ -118,6 +135,12 @@ export function GeneralSettingsSection(props: {
               </Fragment>
             );
           })}
+          <ProviderHostRows
+            hosts={props.cliProviderHosts}
+            agents={props.agents}
+            onAdd={() => setHostEditor({ type: "create" })}
+            onEdit={(host) => setHostEditor({ type: "edit", host })}
+          />
         </div>
       </section>
 

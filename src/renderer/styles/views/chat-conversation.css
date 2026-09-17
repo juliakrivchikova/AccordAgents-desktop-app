@@ -2119,26 +2119,6 @@
   background: var(--app-surface);
   outline: none;
 }
-
-/* Endpoint URL / API-key variable share the inline handle look but read as
-   plain values, not as a bold identity. */
-.chat-participant-endpoint-field {
-  max-width: 100%;
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.chat-participant-endpoint-field input {
-  max-width: 100%;
-  font-weight: 500;
-  font-variant-ligatures: none;
-}
-
-.chat-participant-endpoint-field input:focus-visible {
-  border-color: var(--app-border);
-  box-shadow: var(--focus-ring);
-}
-
 .chat-app-tool-review-instructions {
   max-height: 7.6em;
   overflow: hidden;
