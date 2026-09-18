@@ -9,6 +9,9 @@ function read(path) {
 
 const avatarComponent = read("src/renderer/components/avatar/avatar.tsx");
 const chatAvatars = read("src/renderer/components/chat/chat-avatars.ts");
+// The catalog itself lives in src/shared so the phone and the main process
+// resolve avatars by the same rule as the desktop renderer.
+const chatAvatarCatalog = read("src/shared/chatAvatarCatalog.ts");
 const settingsGeneral = read("src/renderer/components/settings/general-settings-section.tsx");
 const avatarCssFiles = [
   "src/renderer/styles/views/content-markdown.css",
@@ -27,14 +30,27 @@ test("avatar specs carry explicit glyph/photo media modes", () => {
   assert.match(chatAvatars, /export type AvatarMediaMode = "glyph" \| "photo";/);
   assert.match(chatAvatars, /mediaMode\?: AvatarMediaMode;/);
   assert.match(chatAvatars, /"accordagents-mark"[\s\S]*mediaMode: "glyph"/);
-  assert.match(chatAvatars, /id: "codex-logo"[\s\S]*mediaMode: "glyph"/);
-  assert.match(chatAvatars, /id: "claude-logo"[\s\S]*mediaMode: "glyph"/);
+  assert.match(chatAvatarCatalog, /id: "codex-logo"[\s\S]*mediaMode: "glyph"/);
+  assert.match(chatAvatarCatalog, /id: "claude-logo"[\s\S]*mediaMode: "glyph"/);
+  // The renderer derives its options from the shared catalog rather than
+  // keeping a list of its own that could drift from the phone's.
+  assert.match(chatAvatars, /CHAT_AVATAR_CATALOG\.map\(chatAvatarOptionFromCatalog\)/);
 
-  const options = chatAvatars.match(/const CHAT_AVATAR_OPTIONS: ChatAvatarOption\[] = \[([\s\S]*?)\n\];/)?.[1] ?? "";
+  const options = chatAvatarCatalog.match(/const CHAT_AVATAR_CATALOG: ChatAvatarCatalogEntry\[] = \[([\s\S]*?)\n\];/)?.[1] ?? "";
   const optionRows = options.split("\n").filter((line) => line.includes("{ id:"));
   assert.ok(optionRows.length > 0, "expected avatar option rows");
   for (const row of optionRows) {
     assert.match(row, /mediaMode: "(glyph|photo)"/, row.trim());
+    // The renderer's URL map is looked up by catalog id with a cast, so a
+    // catalog entry without a matching URL — or with a different file — would
+    // only show up as a missing picture at runtime. Pin both here.
+    const id = row.match(/id: "([^"]+)"/)?.[1];
+    const assetFile = row.match(/assetFile: "([^"]+)"/)?.[1];
+    assert.ok(id && assetFile, row.trim());
+    assert.ok(
+      chatAvatars.includes(`"${id}": new URL("../../assets/${assetFile}", import.meta.url).href`),
+      `${id} must map to ${assetFile} in chat-avatars.ts`
+    );
   }
 });
 

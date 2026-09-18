@@ -78,6 +78,22 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(worker.slice(resetStart, resetEnd), /await new Promise[\s\S]+oncomplete/);
   const html = await readFile(path.join(repoRoot, "dist/mobile/index.html"), "utf8");
   const headers = await readFile(path.join(repoRoot, "dist/mobile/_headers"), "utf8");
+  // The rules the phone shares with the desktop verbatim travel as one bundle
+  // built from src/shared, loaded before the app, precached with it, and every
+  // built-in avatar the desktop can show is copied under its catalog id.
+  const shared = await readFile(path.join(repoRoot, "dist/mobile/mobile-shared.js"), "utf8");
+  assert.match(shared, /AccordMobileShared/);
+  assert.match(shared, /resolveChatParticipantAvatar/);
+  assert.match(shared, /isChatMessageHiddenFromTimeline/);
+  assert.ok(html.indexOf('src="mobile-shared.js') < html.indexOf('src="mobile-app.js'), "the shared rules load before the app");
+  assert.ok(worker.includes("./mobile-shared.js?v="), "service worker must precache the shared rules");
+  assert.doesNotMatch(app, /assets\/avatars\/(claude|codex)-(bunny|cat|dog|frog|hamster)\.png/, "the app names no avatar file itself; the catalog does");
+  const { CHAT_AVATAR_CATALOG, chatAvatarAssetFileName } = await import(pathToFileURL(path.join(repoRoot, "dist/main/shared/chatAvatarCatalog.js")).href);
+  for (const entry of CHAT_AVATAR_CATALOG) {
+    const file = path.join(repoRoot, "dist/mobile/assets/avatars", chatAvatarAssetFileName(entry));
+    assert.ok((await stat(file)).size > 0, `${entry.id} avatar is shipped with the phone`);
+  }
+  assert.ok(!(await stat(path.join(repoRoot, "dist/mobile/mobile-avatar-catalog.tmp.mjs")).catch(() => undefined)), "no build scratch file ships with the phone");
   assert.match(headers, /\/service-worker\.js\n\s+Cache-Control: public, max-age=0, must-revalidate/);
   assert.match(headers, /\/mobile-app\.js\n\s+Cache-Control: public, max-age=0, must-revalidate/);
   // W-E: the mobile origin holds a pairing seal key, so the policy that guards
@@ -117,9 +133,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(html, /<meta name="viewport"[^>]*viewport-fit=cover/);
   const assetVersion = /const ASSET_VERSION = "([^"]+)"/.exec(worker)?.[1];
   assert.ok(assetVersion, "service worker must declare an asset version");
-  const htmlAssetVersions = [...html.matchAll(/(?:mobile-app\.css|jsqr\.js|mobile-app\.js)\?v=([^"']+)/g)]
+  const htmlAssetVersions = [...html.matchAll(/(?:mobile-app\.css|jsqr\.js|mobile-shared\.js|mobile-app\.js)\?v=([^"']+)/g)]
     .map((match) => match[1]);
-  assert.deepEqual(htmlAssetVersions, [assetVersion, assetVersion, assetVersion]);
+  assert.deepEqual(htmlAssetVersions, [assetVersion, assetVersion, assetVersion, assetVersion]);
   assert.match(html, /data-screen-label="Mobile control"/);
   assert.match(html, /id="chats-screen"/);
   assert.match(html, />Chats</);
@@ -696,3 +712,30 @@ function nextMessage(client) {
 function bytesToBase64Url(bytes) {
   return Buffer.from(bytes).toString("base64url");
 }
+
+// A machine hands the phone whole messages. What the desktop keeps off its
+// timeline is marked, not dropped: a hidden row can be the one that ends a
+// run, and the phone settles the run on it without storing a bubble.
+test("mobile shell marks machine-delivered rows the desktop hides, by the desktop's own rule", async () => {
+  await execFileAsync("npm", ["run", "build:main"], { cwd: repoRoot });
+  await execFileAsync(process.execPath, ["scripts/build-mobile-shell.mjs"], { cwd: repoRoot });
+  const shared = await import(pathToFileURL(path.join(repoRoot, "dist/main/shared/mobileSharedRules.js")).href);
+  globalThis.AccordMobileShared = shared;
+  await import(pathToFileURL(path.join(repoRoot, "dist/mobile/mobile-app.js")).toString());
+  const mobile = globalThis.AccordAgentsMobile;
+  const events = [
+    { id: "trigger", role: "system", content: "Auto-resumed @drew after member request.", createdAt: "2026-09-18T00:00:00.000Z" },
+    { id: "carrier", role: "participant", participantLabel: "@drew", content: "@drew asked @taylor: review", createdAt: "2026-09-18T00:00:01.000Z", metadata: { hiddenFromTimeline: true } },
+    { id: "waiting", role: "participant", participantLabel: "@drew", content: "Awaiting user approval.", createdAt: "2026-09-18T00:00:02.000Z" },
+    { id: "note", role: "system", content: "@gera revised [Plan] · v3", createdAt: "2026-09-18T00:00:03.000Z", metadata: { appMessageSource: "app_artifact_note" } },
+    { id: "reply", role: "participant", participantLabel: "@drew", content: "Done.", createdAt: "2026-09-18T00:00:04.000Z" }
+  ].map((message) => mobile.machineTimelineEvent(message, "done", "run-1"));
+  assert.deepEqual(events.map((event) => [event.id, event.hidden === true, event.runId]), [
+    ["trigger", true, "run-1"],
+    ["carrier", true, "run-1"],
+    ["waiting", true, "run-1"],
+    ["note", false, "run-1"],
+    ["reply", false, "run-1"]
+  ]);
+  delete globalThis.AccordMobileShared;
+});

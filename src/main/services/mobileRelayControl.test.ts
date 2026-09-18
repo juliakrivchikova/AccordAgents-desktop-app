@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import type { Conversation, SendChatMessageRequest, StartReviewResult } from "../../shared/types";
 import { RelayTunnelClient } from "./relayTunnelClient";
-import { MobileRelayControlService, timelineEventsFromSnapshot, type MobileRelayChatSender, type MobileTimelineEvents } from "./mobileRelayControl";
+import { MobileRelayControlService, timelineEventsFromConversation, timelineEventsFromSnapshot, type MobileRelayChatSender, type MobileTimelineEvents } from "./mobileRelayControl";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
 
 const requireScript = createRequire(__filename);
@@ -3324,4 +3324,229 @@ test("a card answered on the phone over the live tunnel is delivered, not only a
       kind: "choice.answered", targetKey: "choice:choice-1", conversationId: "conversation-1"
     }], "the answer must reach the desktop's decision path, not stop at the ack");
   } finally { phone.close(); desktop.close(); await relay.close(); }
+});
+
+// The desktop keeps internal system triggers off its timeline; the phone got
+// every one of them as a bubble ("Auto-resumed @claude after member request.")
+// because this projection never asked the desktop's rule.
+test("the phone timeline hides what the desktop hides: internal system triggers, but not artifact notes", () => {
+  const conversation = {
+    id: "conversation-system",
+    kind: "chat" as const,
+    title: "System rows",
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:00:05.000Z",
+    messages: [
+      {
+        id: "user-ask",
+        role: "user" as const,
+        content: "@claude ask codex",
+        createdAt: "2026-09-01T00:00:01.000Z",
+        status: "done" as const
+      },
+      {
+        id: "auto-resume",
+        role: "system" as const,
+        content: "Auto-resumed @claude after member request.\nTarget replies/errors are in the transcript above.",
+        createdAt: "2026-09-01T00:00:02.000Z",
+        status: "done" as const,
+        metadata: { sourceMessageId: "user-ask" }
+      },
+      {
+        id: "hidden-carrier",
+        role: "participant" as const,
+        participantId: "participant-1",
+        participantLabel: "@claude",
+        content: "context the desktop never shows",
+        createdAt: "2026-09-01T00:00:03.000Z",
+        status: "done" as const,
+        metadata: { hiddenFromTimeline: true }
+      },
+      {
+        id: "artifact-note",
+        role: "system" as const,
+        content: "@gera revised [Plan] · v3",
+        createdAt: "2026-09-01T00:00:04.000Z",
+        status: "done" as const,
+        metadata: { appMessageSource: "app_artifact_note" }
+      },
+      {
+        id: "answer",
+        role: "participant" as const,
+        participantId: "participant-1",
+        participantLabel: "@claude",
+        content: "Done.",
+        createdAt: "2026-09-01T00:00:05.000Z",
+        status: "done" as const
+      }
+    ],
+    findings: [],
+    metadata: {}
+  };
+
+  // The hidden member row travels flagged (it may end a run — next test); the
+  // internal system row does not travel at all.
+  assert.deepEqual(timelineEventsFromSnapshot(conversation as never).map((event) => [event.id, event.hidden === true]),
+    [["user-ask", false], ["hidden-carrier", true], ["artifact-note", false], ["answer", false]]);
+  assert.deepEqual(timelineEventsFromConversation(conversation as never).map((event) => [event.id, event.hidden === true]),
+    [["hidden-carrier", true], ["artifact-note", false], ["answer", false]]);
+  const serialized = JSON.stringify(timelineEventsFromSnapshot(conversation as never));
+  assert.doesNotMatch(serialized, /Auto-resumed/);
+});
+
+// A member's message the desktop hides can be the one that ends its run — a
+// reply that is exactly the instructed "Awaiting user approval.", or an
+// inferred request carrier. Dropping it left the phone's pending row for that
+// run spinning forever; it travels flagged so the phone settles the row and
+// stores no bubble.
+test("a hidden member message still travels to the phone, flagged, so the run it ends can settle", () => {
+  const conversation = {
+    id: "conversation-hidden-terminal",
+    kind: "chat" as const,
+    title: "Hidden terminal",
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:00:04.000Z",
+    messages: [
+      {
+        id: "user-ask",
+        role: "user" as const,
+        content: "@drew ask taylor",
+        createdAt: "2026-09-01T00:00:01.000Z",
+        status: "done" as const
+      },
+      {
+        id: "waiting",
+        role: "participant" as const,
+        participantId: "participant-1",
+        participantLabel: "@drew",
+        content: "Awaiting user approval.",
+        createdAt: "2026-09-01T00:00:02.000Z",
+        status: "done" as const,
+        metadata: { runId: "run-1" }
+      },
+      {
+        id: "carrier",
+        role: "participant" as const,
+        participantId: "participant-1",
+        participantLabel: "@drew",
+        content: "@drew asked @taylor: review this",
+        createdAt: "2026-09-01T00:00:03.000Z",
+        status: "done" as const,
+        metadata: {
+          hiddenFromTimeline: true,
+          participantRequest: { source: "inferred", triggerMessageId: "user-ask", items: [] }
+        }
+      },
+      {
+        id: "auto-resume",
+        role: "system" as const,
+        content: "Auto-resumed @drew after member request.",
+        createdAt: "2026-09-01T00:00:04.000Z",
+        status: "done" as const
+      }
+    ],
+    findings: [],
+    metadata: {}
+  };
+  const events = timelineEventsFromSnapshot(conversation as never);
+  assert.deepEqual(events.map((event) => [event.id, event.hidden === true]), [
+    ["user-ask", false],
+    ["waiting", true],
+    ["carrier", true]
+  ]);
+  assert.equal(events[1].runId, "run-1", "the terminal keeps the run it ends");
+  assert.deepEqual(timelineEventsFromConversation(conversation as never).map((event) => [event.id, event.hidden === true]), [
+    ["waiting", true],
+    ["carrier", true]
+  ]);
+});
+
+// A drawn avatar is a file on the desktop; the member record names it and the
+// phone asks for the bytes once. Only a member of the named chat can be asked
+// for, so a scoped pairing cannot enumerate pictures from other chats.
+test("the phone can ask for a member's drawn avatar, and gets a reason instead of bytes when it cannot be served", async () => {
+  const key = Buffer.from("k".repeat(32)).toString("base64url");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  const reads: Array<{ conversationId: string; avatarId: string }> = [];
+  const desktop = new MobileRelayControlService(
+    {
+      relayUrl: address.url,
+      rendezvousId: "rv-avatar",
+      relayCapability: "PAIRING-FINGERPRINT",
+      relaySealKeyBase64: key,
+      conversationId: "conversation-1",
+      streamId: "route-avatar:phone"
+    },
+    {
+      async sendMessage() {
+        throw new Error("not used");
+      }
+    } as never,
+    {
+      async listChats() { return []; },
+      async listTimeline() { return []; },
+      async readMemberAvatar(request: { conversationId: string; avatarId: string }) {
+        reads.push(request);
+        if (request.avatarId === "custom:huge") {
+          return { mediaType: "image/png", dataBase64: Buffer.alloc(5 * 1024 * 1024).toString("base64") };
+        }
+        if (request.avatarId === "custom:missing") {
+          throw new Error("Avatar not found.");
+        }
+        if (request.avatarId === "custom:other-chat") {
+          return undefined;
+        }
+        return { mediaType: "image/svg+xml", dataBase64: "PHN2Zy8+" };
+      }
+    }
+  );
+  const phone = new RelayTunnelClient({
+    relayUrl: address.url,
+    rendezvousId: "rv-avatar",
+    role: "phone",
+    capability: "PAIRING-FINGERPRINT",
+    streamId: "route-avatar:phone"
+  });
+  try {
+    const answers = nextMessages(phone, 4);
+    await desktop.connect();
+    await phone.connect();
+    await phone.sendCiphertext({
+      logicalMessageId: "ask-outside",
+      ciphertext: await sealMobileRelayPayload({
+        type: "mobile.avatar.request",
+        conversationId: "conversation-outside-pairing",
+        avatarId: "custom:drawn"
+      }, key)
+    });
+    for (const avatarId of ["custom:drawn", "custom:huge", "custom:missing", "custom:other-chat"]) {
+      await phone.sendCiphertext({
+        logicalMessageId: `ask-${avatarId}`,
+        ciphertext: await sealMobileRelayPayload({ type: "mobile.avatar.request", conversationId: "conversation-1", avatarId }, key)
+      });
+    }
+    const payloads = [] as Array<Record<string, unknown>>;
+    for (const message of await answers) {
+      payloads.push(await openMobileRelayPayload<Record<string, unknown>>(message.ciphertext, key));
+    }
+    const byId = new Map(payloads.map((payload) => [payload.avatarId as string, payload]));
+    assert.deepEqual(byId.get("custom:drawn"), {
+      type: "mobile.avatar",
+      conversationId: "conversation-1",
+      avatarId: "custom:drawn",
+      mimeType: "image/svg+xml",
+      dataBase64: "PHN2Zy8+"
+    });
+    assert.equal(byId.get("custom:huge")?.reason, "too-large");
+    assert.equal(byId.get("custom:huge")?.dataBase64, undefined);
+    assert.equal(byId.get("custom:missing")?.reason, "unavailable");
+    assert.equal(byId.get("custom:other-chat")?.reason, "unavailable");
+    assert.ok(reads.every((read) => read.conversationId === "conversation-1"),
+      "a request outside the pairing must not reach avatar storage");
+  } finally {
+    phone.close();
+    desktop.close();
+    await relay.close();
+  }
 });

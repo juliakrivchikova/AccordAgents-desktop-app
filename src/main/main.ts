@@ -2,7 +2,8 @@ import path from "node:path";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { createHash, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
+import { parseCustomAvatarId, type AvatarStudioTurnRequest, type SaveCustomAvatarRequest } from "../shared/avatarStudio";
+import { chatMessageHiddenFromTimeline } from "../shared/chatParticipantRequestThreads";
 import type {
   AddChatParticipantRequest,
   AgentDetectionRequest,
@@ -2071,7 +2072,14 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
         // list on every return to the foreground and every pull to refresh.
         const opened = await storageService.openConversation(summary.id, MOBILE_CHAT_LIST_SNIPPET_WINDOW);
         const conversation = opened?.conversation;
-        const lastMessage = conversation?.messages.slice().reverse().find((message) => message.content.trim());
+        // The last line the User can see, not the last line stored: an internal
+        // system trigger is hidden on the desktop and must not become the
+        // phone's preview of the chat. When the whole window is internal, a
+        // member's own words the desktop merely tidies away (a waiting status)
+        // may stand in; a system trigger or a control message never does.
+        const newest = conversation?.messages.slice().reverse().filter((message) => message.content.trim()) ?? [];
+        const lastMessage = newest.find((message) => !chatMessageHiddenFromTimeline(conversation as Conversation, message)) ??
+          newest.find((message) => message.role === "participant" && message.metadata?.hiddenFromTimeline !== true);
         const members = mobileRelayChatMembers(conversation);
         items.push({
           id: summary.id,
@@ -2092,6 +2100,7 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
             roleLabel: roleLabels.get(participant.roleConfigId) ?? participant.roleConfigId,
             kind: participant.kind,
             ...(participant.avatarId ? { avatarId: participant.avatarId } : {}),
+            ...(mobileParticipantIsAssistant(participant) ? { isAssistant: true } : {}),
             // A member that lives on a machine travels with what that machine
             // needs to run it, so the phone can ask the machine itself when
             // this desktop is closed. Local members carry nothing extra.
@@ -2108,6 +2117,28 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
         });
       }
       return items;
+    },
+    async readMemberAvatar(request: { conversationId: string; avatarId: string }) {
+      const customId = parseCustomAvatarId(request.avatarId);
+      if (!customId) {
+        return undefined;
+      }
+      // Members only: the chat is opened for its metadata, with the smallest
+      // message page storage allows rather than its history. The same read
+      // answers that this is a chat at all; the pairing's scope is the
+      // service's check, and an archived chat a scoped pairing still shows
+      // keeps its members' pictures.
+      const opened = await storageService.openConversation(request.conversationId, 1);
+      const conversation = opened?.conversation;
+      if (!conversation || conversation.kind !== "chat") {
+        return undefined;
+      }
+      const owned = mobileRelayChatMembers(conversation).some((participant) => participant.avatarId === request.avatarId);
+      if (!owned) {
+        return undefined;
+      }
+      const read = await settingsService.readCustomAvatar(customId);
+      return { mediaType: read.mediaType, dataBase64: read.dataBase64 };
     },
     async listControlCards(conversationId: string) {
       // Straight from the stored conversation, so a card cannot exist on the

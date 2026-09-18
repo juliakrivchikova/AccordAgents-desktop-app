@@ -797,6 +797,19 @@
     return status === "error" && Boolean(mobileEventId) && runId === "mobile-" + mobileEventId;
   }
 
+  function deleteTimelineEntry(entryId) {
+    return withTimeline("readwrite", function (store) {
+      return requestToPromise(store.get(entryId)).then(function (existing) {
+        if (!existing) {
+          return false;
+        }
+        return requestToPromise(store.delete(entryId)).then(function () {
+          return true;
+        });
+      });
+    });
+  }
+
   function deletePendingTimelineEntriesForRun(conversationId, runId, mobileEventId, messageId, status) {
     if (!runId && !mobileEventId && !messageId) {
       return Promise.resolve(0);
@@ -888,6 +901,36 @@
   }
 
 
+
+  // Before 2026-09-18-pwa-parity-v1 the desktop's projection sent every
+  // system message and the phone stored each as a bubble. Those the desktop
+  // never showed ("Auto-resumed @x after member request", tool-approval
+  // notes) are dropped once; a system row the User can see (an artifact note)
+  // is fetched again with the chat's last page and comes back. Rows the phone
+  // itself wrote — machine warnings and errors — are not from the desktop and
+  // stay.
+  const INTERNAL_SYSTEM_ROWS_DROPPED_KEY = "accordagents.mobile.internalSystemRowsDropped.v1";
+
+  function dropStoredInternalSystemRows() {
+    if (localStorage.getItem(INTERNAL_SYSTEM_ROWS_DROPPED_KEY) === "1") {
+      return Promise.resolve(0);
+    }
+    return withTimeline("readwrite", function (store) {
+      return requestToPromise(store.getAll()).then(function (entries) {
+        const deletes = entries.filter(function (entry) {
+          return entry && entry.role === "system" && !String(entry.sourceId || "").startsWith(MACHINE_ROW_ID_PREFIX);
+        }).map(function (entry) {
+          return requestToPromise(store.delete(entry.id));
+        });
+        return Promise.all(deletes).then(function () {
+          return deletes.length;
+        });
+      });
+    }).then(function (dropped) {
+      localStorage.setItem(INTERNAL_SYSTEM_ROWS_DROPPED_KEY, "1");
+      return dropped;
+    });
+  }
 
   // W1+W5: one (epoch, cursor) pair, shared with the service worker through
   // the IndexedDB meta record, which also mirrors the non-decrypting mailbox
@@ -1212,18 +1255,20 @@
       // phone showed "Stopping..." for a member that had already gone.
       if (stopped) {
         events.push({
-          id: "machine-stopped:" + body.runId, messageId: "machine-stopped:" + body.runId,
+          id: MACHINE_ROW_ID_PREFIX + "stopped:" + body.runId, messageId: MACHINE_ROW_ID_PREFIX + "stopped:" + body.runId,
           role: "participant", participantLabel: machineRunLabel(body.runId),
-          content: events.length ? "Stopped." : machineRunLabel(body.runId) + " was stopped before answering.",
+          content: events.some(function (event) { return event.hidden !== true; })
+            ? "Stopped."
+            : machineRunLabel(body.runId) + " was stopped before answering.",
           status: "done", createdAt: body.finishedAt, runId: body.runId
         });
       }
       for (const [index, warning] of (body.warnings || []).entries()) {
-        events.push({ id: "machine-warning:" + body.runId + ":" + index, role: "system", content: warning,
+        events.push({ id: MACHINE_ROW_ID_PREFIX + "warning:" + body.runId + ":" + index, role: "system", content: warning,
           status: "done", createdAt: body.finishedAt });
       }
       if (body.error) {
-        events.push({ id: "machine-error:" + body.runId, role: "system", content: body.error,
+        events.push({ id: MACHINE_ROW_ID_PREFIX + "error:" + body.runId, role: "system", content: body.error,
           status: "error", createdAt: body.finishedAt });
       }
       await handleRelayTimelinePayload({ type: "mobile.timeline.events", conversationId: conversationId, events: events },
@@ -1258,7 +1303,7 @@
         // contract, and it holds because this source posts one live row per
         // run and no intermediate messages.
         events: [{
-          id: "machine-run:" + body.runId, role: "participant",
+          id: MACHINE_ROW_ID_PREFIX + "run:" + body.runId, role: "participant",
           participantLabel: machineRunLabel(body.runId), content: machineRunLabel(body.runId) + " is running...",
           status: "pending", createdAt: body.startedAt, runId: body.runId
         }]
@@ -1276,7 +1321,7 @@
         await handleRelayTimelinePayload({
           type: "mobile.timeline.events", conversationId: conversationId,
           events: [{
-            id: "machine-run:" + body.runId, role: "participant",
+            id: MACHINE_ROW_ID_PREFIX + "run:" + body.runId, role: "participant",
             participantLabel: machineRunLabel(body.runId), content: next,
             status: "pending", createdAt: new Date().toISOString(), runId: body.runId
           }]
@@ -1328,6 +1373,28 @@
     return "applied";
   }
 
+  // A machine hands the phone its messages whole, so the per-message half of
+  // the desktop's timeline rule applies here (the desktop applies the whole
+  // rule before it projects for the phone): an internal system trigger
+  // ("Auto-resumed @x after member request") is not a message the User sees
+  // anywhere else. A hidden row still settles its run's pending row; it is
+  // simply never stored.
+  function machineMessageHiddenOnPhone(message) {
+    const shared = globalThis.AccordMobileShared;
+    if (!shared || !message || typeof message !== "object") {
+      return false;
+    }
+    return shared.isChatMessageHiddenFromTimeline({
+      role: message.role,
+      content: typeof message.content === "string" ? message.content : "",
+      metadata: message.metadata && typeof message.metadata === "object" ? message.metadata : undefined
+    });
+  }
+
+  // Rows this phone writes about a machine run, never received from the
+  // desktop. The sweep of stored internal rows spares them by this prefix.
+  const MACHINE_ROW_ID_PREFIX = "machine-";
+
   function machineTimelineEvent(message, status, runId) {
     const content = typeof message.content === "string" ? message.content : "";
     return {
@@ -1339,7 +1406,8 @@
       status: status,
       createdAt: message.createdAt || nowIso(),
       ...(runId ? { runId: runId } : {}),
-      ...(message.threadRootId ? { threadRootId: message.threadRootId } : {})
+      ...(message.threadRootId ? { threadRootId: message.threadRootId } : {}),
+      ...(machineMessageHiddenOnPhone(message) ? { hidden: true } : {})
     };
   }
 
@@ -1986,11 +2054,33 @@
     });
   }
 
+  // The list is read for every avatar painted and every row reconciled;
+  // parsing a hundred chats with their member records each time was tens of
+  // megabytes of JSON per list rebuild on the User's phone. The parse is kept
+  // until the list is saved again here, or changed by another window of this
+  // origin (the storage event); the objects are never mutated by readers.
+  let cachedChatList;
+
+  function forgetCachedChatList() {
+    cachedChatList = undefined;
+  }
+
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    window.addEventListener("storage", function (event) {
+      if (!event || event.key === null || event.key === CHAT_LIST_KEY) {
+        forgetCachedChatList();
+      }
+    });
+  }
+
   function loadChats() {
     try {
-      const raw = localStorage.getItem(CHAT_LIST_KEY);
-      const parsed = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed) ? parsed.filter(chat => !deletedMachineConversations.has(chat.id)) : [];
+      if (!cachedChatList) {
+        const raw = localStorage.getItem(CHAT_LIST_KEY);
+        const parsed = raw ? JSON.parse(raw) : [];
+        cachedChatList = Array.isArray(parsed) ? parsed : [];
+      }
+      return cachedChatList.filter(chat => !deletedMachineConversations.has(chat.id));
     } catch {
       return [];
     }
@@ -2021,6 +2111,7 @@
       };
     }) : [];
     localStorage.setItem(CHAT_LIST_KEY, JSON.stringify(normalized));
+    forgetCachedChatList();
     // Same rule as the desktop sidebar: a chat that moved while it was not the
     // one on screen is unread. The list this phone held before is the "seen"
     // baseline, so the first list after an update marks nothing.
@@ -2197,6 +2288,7 @@
       roleLabel: typeof value.roleLabel === "string" ? value.roleLabel.trim() : "",
       kind: typeof value.kind === "string" ? value.kind : "",
       avatarId: typeof value.avatarId === "string" ? value.avatarId : undefined,
+      isAssistant: value.isAssistant === true,
       // Where this member actually runs, and what that machine needs to run
       // it. Present only for members that live on a machine.
       homeMachineId: typeof value.homeMachineId === "string" ? value.homeMachineId : undefined,
@@ -2281,13 +2373,17 @@
   }
 
   function selectedConversationMembers() {
-    const conversationId = selectedConversationId();
+    return conversationMembers(selectedConversationId());
+  }
+
+  function conversationMembers(conversationId) {
     const chat = loadChats().find(function (item) {
       return item.id === conversationId;
     });
-    if (!chat) {
-      return [];
-    }
+    return chat ? chatMembers(chat) : [];
+  }
+
+  function chatMembers(chat) {
     if (Array.isArray(chat.members) && chat.members.length > 0) {
       return chat.members;
     }
@@ -3722,6 +3818,18 @@
       if (!historyPage && status === "pending" && isSupersededPendingEvent(runId, mobileEventId, createdAt)) {
         continue;
       }
+      // What the desktop keeps off its timeline travels only to end a run:
+      // the bookkeeping above ran, and no bubble is stored for it. It counts
+      // as handled so the settled row is drawn now, not on the next batch. A
+      // copy stored before the desktop hid it (an older shell, a page read
+      // that could not see the row's trigger) goes with it.
+      if (event.hidden === true) {
+        if (await deleteTimelineEntry(conversationId ? conversationId + ":" + id : id)) {
+          changed += 1;
+        }
+        stored += 1;
+        continue;
+      }
       const written = await putTimelineEntryDeduped({
         id: conversationId ? conversationId + ":" + id : id,
         sourceId: id,
@@ -4002,58 +4110,247 @@
     return Math.floor(hours / 24) + "d";
   }
 
-  function chatInitial(title, index) {
-    const normalized = (title || "Chat").trim();
-    return normalized.charAt(0).toUpperCase() || String(index + 1);
+  // Which picture a member shows is decided by the same code the desktop
+  // runs (bundled as mobile-shared.js from src/shared/chatAvatarCatalog.ts):
+  // the member's `avatarId` and provider, never a guess from the handle. A
+  // member the phone has no record for gets what the desktop gives an unknown
+  // author — the provider glyph its name suggests, or initials.
+  const CHAT_ASSISTANT_DISPLAY_NAME = "Chat Assistant";
+
+  function mobileSharedRules() {
+    return globalThis.AccordMobileShared;
   }
 
-  function avatarAssetFor(label) {
-    const normalized = String(label || "").toLowerCase();
-    if (normalized.includes("taylor") || normalized.includes("claude-reviewer") || normalized.includes("bunny")) {
-      return "assets/avatars/claude-bunny.png";
+  function avatarAssetUrl(assetId) {
+    const shared = mobileSharedRules();
+    if (!shared || !assetId) {
+      return undefined;
     }
-    if (normalized.includes("morgan") || normalized.includes("claude-cat")) {
-      return "assets/avatars/claude-cat.png";
+    if (assetId === shared.CHAT_ASSISTANT_AVATAR_ASSET_ID) {
+      return "assets/accordagents-mark.png";
     }
-    if (normalized.includes("admin") || normalized.includes("perf") || normalized.includes("hamster")) {
-      return "assets/avatars/codex-hamster.png";
-    }
-    if (normalized.includes("dog")) {
-      return "assets/avatars/codex-dog.png";
-    }
-    if (normalized.includes("drew") || normalized.includes("codex")) {
-      return "assets/avatars/codex-frog.png";
-    }
-    return undefined;
+    const entry = shared.chatAvatarCatalogEntry(assetId);
+    return entry ? "assets/avatars/" + shared.chatAvatarAssetFileName(entry) : undefined;
   }
 
-  function fillAvatar(avatar, label, index, size) {
-    const asset = avatarAssetFor(label);
-    if (asset) {
-      const img = document.createElement("img");
-      img.src = asset;
-      img.alt = "";
-      avatar.textContent = "";
-      avatar.append(img);
+  function normalizeMemberHandle(value) {
+    return String(value || "").trim().replace(/^@/, "").toLowerCase();
+  }
+
+  function memberForLabel(members, label) {
+    const wanted = normalizeMemberHandle(label);
+    if (!wanted) {
+      return undefined;
+    }
+    return (members || []).find(function (member) {
+      return normalizeMemberHandle(member.handle) === wanted ||
+        normalizeMemberHandle(member.mentionHandle) === wanted ||
+        normalizeMemberHandle(member.displayName) === wanted;
+    });
+  }
+
+  // Without the shared bundle (an old cached shell) the phone can still name
+  // the member: initials on a plain disc, the same stand-in the desktop uses
+  // while a picture is missing.
+  function initialsAvatar(label) {
+    const text = String(label || "").trim() || "Agent";
+    return { glyphKind: "generic", label: text, mediaMode: "glyph", initials: text.replace(/^@/, "").charAt(0).toUpperCase() || "?" };
+  }
+
+  function avatarForMember(member) {
+    const shared = mobileSharedRules();
+    const label = member.displayName || "@" + member.handle;
+    if (!shared) {
+      return initialsAvatar(label);
+    }
+    // A member the list only knows by handle (an older chat list) has no
+    // provider to pick a default from; its name is all there is to go on.
+    if (member.kind !== "claude-code" && member.kind !== "codex-cli" && member.kind !== "gemini-cli") {
+      return shared.resolveChatAvatarByName(label);
+    }
+    return shared.resolveChatParticipantAvatar(
+      { id: member.id, handle: member.handle, kind: member.kind, avatarId: member.avatarId },
+      label,
+      // The desktop says which member is the assistant; a list from an older
+      // desktop is recognised by the name it gave.
+      { isAssistant: member.isAssistant === true || label === CHAT_ASSISTANT_DISPLAY_NAME }
+    );
+  }
+
+  function avatarForLabel(members, label) {
+    const member = memberForLabel(members, label);
+    if (member) {
+      return avatarForMember(member);
+    }
+    const shared = mobileSharedRules();
+    const text = String(label || "").trim() || "Agent";
+    return shared ? shared.resolveChatAvatarByName(text) : initialsAvatar(text);
+  }
+
+  /** What the frame will show, for change detection: repainting on every
+   *  render would restart the image load. */
+  function avatarSignature(resolved) {
+    return [resolved.glyphKind, resolved.mediaMode, resolved.assetId || "", resolved.customAvatarId || "", resolved.initials || ""].join("\0");
+  }
+
+  function clearAvatarKindClasses(avatar) {
+    for (const className of [...avatar.classList]) {
+      if (className.startsWith("avatar-") && className !== "avatar-icon") {
+        avatar.classList.remove(className);
+      }
+    }
+  }
+
+  // One frame contract, the desktop's: the element is the disc, sized by its
+  // own class; the picture inside is either a glyph (75%, contained) or a
+  // photo (100%, covering). Nothing per member or per surface beyond that.
+  function paintAvatar(avatar, resolved, conversationId) {
+    const signature = avatarSignature(resolved);
+    if (avatar.dataset.avatarSignature === signature) {
+      // A drawn avatar still waiting for its bytes is asked for again on a
+      // repaint (once the retry pause has passed): a missed answer must not
+      // leave initials on a row that is patched in place for the session.
+      if (resolved.customAvatarId && avatar.dataset.avatarLoaded !== "1") {
+        loadCustomAvatarInto(avatar, conversationId, resolved.customAvatarId, signature);
+      }
       return;
     }
-    const [color, soft] = avatarColor(index);
-    avatar.style.color = color;
-    avatar.style.background = soft;
-    avatar.textContent = chatInitial(label, index);
-    if (size) {
-      avatar.style.fontSize = size;
+    avatar.dataset.avatarSignature = signature;
+    delete avatar.dataset.avatarLoaded;
+    delete avatar.dataset.avatarCustomId;
+    avatar.textContent = "";
+    avatar.removeAttribute("style");
+    clearAvatarKindClasses(avatar);
+    avatar.classList.add("avatar-icon", "avatar-" + resolved.glyphKind);
+    avatar.setAttribute("aria-label", resolved.label || "");
+    if (resolved.customAvatarId) {
+      // Initials stand in until the bytes arrive; a drawn avatar that cannot be
+      // fetched (no desktop reachable) stays initials, as on the desktop
+      // before its bytes load.
+      const initials = document.createElement("span");
+      initials.className = "avatar-media avatar-media-glyph";
+      initials.textContent = resolved.initials || "?";
+      avatar.classList.remove("avatar-custom");
+      avatar.classList.add("avatar-generic");
+      avatar.append(initials);
+      loadCustomAvatarInto(avatar, conversationId, resolved.customAvatarId, signature);
+      return;
     }
+    const assetUrl = avatarAssetUrl(resolved.assetId);
+    if (assetUrl) {
+      avatar.append(avatarImage(assetUrl, resolved.mediaMode));
+      avatar.dataset.avatarLoaded = "1";
+      return;
+    }
+    const initials = document.createElement("span");
+    initials.className = "avatar-media avatar-media-glyph";
+    initials.textContent = resolved.initials || "?";
+    avatar.append(initials);
+    avatar.dataset.avatarLoaded = "1";
   }
 
-  function avatarColor(index) {
-    const colors = [
-      ["#7d5fd3", "#efebfb"],
-      ["#6e8bf0", "#ebeefc"],
-      ["#0e9f6e", "#e7f6ef"],
-      ["#d97706", "#fff3df"]
-    ];
-    return colors[index % colors.length];
+  function avatarImage(src, mediaMode) {
+    const img = document.createElement("img");
+    img.className = "avatar-media avatar-media-" + mediaMode;
+    img.src = src;
+    img.alt = "";
+    img.decoding = "async";
+    // A hundred chat rows and eighty message rows are built at once; only
+    // the discs on screen need their picture now.
+    img.loading = "lazy";
+    return img;
+  }
+
+  // Drawn avatars live as files on the desktop; the member record names the
+  // id and the bytes come once per session, like a picture in a message.
+  // Bounded like the picture cache: a drawn avatar can be megabytes.
+  const customAvatarDataUrls = new Map();
+  const customAvatarFetches = new Map();
+  const customAvatarRetryAfter = new Map();
+  const CUSTOM_AVATAR_CACHE_MAX_ENTRIES = 24;
+  // A desktop that is off answers nothing for the relay's whole wait; asking
+  // again on every repaint would keep a request in flight for the session.
+  const CUSTOM_AVATAR_RETRY_PAUSE_MS = 60 * 1000;
+
+  function rememberCustomAvatar(avatarId, result) {
+    if (customAvatarDataUrls.size >= CUSTOM_AVATAR_CACHE_MAX_ENTRIES) {
+      const oldest = customAvatarDataUrls.keys().next();
+      if (!oldest.done) {
+        customAvatarDataUrls.delete(oldest.value);
+      }
+    }
+    customAvatarDataUrls.set(avatarId, result);
+  }
+
+  function loadCustomAvatarInto(avatar, conversationId, customId, signature) {
+    const avatarId = "custom:" + customId;
+    const cached = customAvatarDataUrls.get(avatarId);
+    if (cached) {
+      applyCustomAvatar(avatar, cached, signature);
+      return;
+    }
+    avatar.dataset.avatarCustomId = customId;
+    if (!customAvatarFetches.has(avatarId)) {
+      if ((customAvatarRetryAfter.get(avatarId) || 0) > Date.now()) {
+        return;
+      }
+      const pairing = loadPairing();
+      customAvatarFetches.set(avatarId, (async function () {
+        if (!pairing || !relayCanSync(pairing) || !conversationId) {
+          return "retry";
+        }
+        const payload = await sendRelayPayload(pairing, "avatar-" + customId + "-" + createEventId(), {
+          type: "mobile.avatar.request",
+          conversationId: conversationId,
+          avatarId: avatarId
+        });
+        if (payload && payload.type === "mobile.avatar" && typeof payload.dataBase64 === "string") {
+          return "data:" + (typeof payload.mimeType === "string" ? payload.mimeType : "image/png") + ";base64," + payload.dataBase64;
+        }
+        // "unavailable" and "too-large" are answers: initials stay, and the
+        // id is not asked for again this session.
+        return payload && typeof payload.reason === "string" ? "unavailable" : "retry";
+      })().catch(function () {
+        return "retry";
+      }).then(function (result) {
+        if (result !== "retry") {
+          rememberCustomAvatar(avatarId, result);
+        }
+        if (result !== "retry" && !result.startsWith("data:")) {
+          // Answered "no" — not asked again while the answer is remembered.
+          customAvatarRetryAfter.set(avatarId, Date.now() + CUSTOM_AVATAR_RETRY_PAUSE_MS);
+        } else if (result === "retry") {
+          customAvatarRetryAfter.set(avatarId, Date.now() + CUSTOM_AVATAR_RETRY_PAUSE_MS);
+        }
+        customAvatarFetches.delete(avatarId);
+        // Every disc on screen that shows this member gets the picture: a row
+        // painted while the desktop was unreachable is patched in place and
+        // would otherwise keep its initials for the session.
+        for (const node of document.querySelectorAll('[data-avatar-custom-id="' + CSS.escape(customId) + '"]')) {
+          applyCustomAvatar(node, result, node.dataset.avatarSignature);
+        }
+        return result;
+      }));
+    }
+    customAvatarFetches.get(avatarId).then(function (result) {
+      if (avatar.isConnected && avatar.dataset.avatarSignature === signature) {
+        applyCustomAvatar(avatar, result, signature);
+      }
+    });
+  }
+
+  function applyCustomAvatar(avatar, result, signature) {
+    if (typeof result !== "string" || !result.startsWith("data:")) {
+      return;
+    }
+    if (avatar.dataset.avatarSignature !== signature || avatar.dataset.avatarLoaded === "1") {
+      return;
+    }
+    avatar.textContent = "";
+    avatar.classList.remove("avatar-generic");
+    avatar.classList.add("avatar-custom");
+    avatar.append(avatarImage(result, "photo"));
+    avatar.dataset.avatarLoaded = "1";
   }
 
   function renderMessageContent(container, markdown) {
@@ -4189,6 +4486,34 @@
     });
   }
 
+  // Which projects are folded in the chat list. Persisted: the phone reopens
+  // the app many times a day, and a second project that takes a long scroll to
+  // reach every time was the complaint. The desktop folds its project groups
+  // the same way, with the same chevron.
+  const COLLAPSED_CHAT_GROUPS_KEY = "accordagents.mobile.collapsedChatGroups.v1";
+
+  function loadCollapsedChatGroups() {
+    try {
+      const raw = localStorage.getItem(COLLAPSED_CHAT_GROUPS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter(function (name) { return typeof name === "string"; }) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function toggleChatGroupCollapsed(name) {
+    const current = loadCollapsedChatGroups();
+    const next = current.indexOf(name) >= 0
+      ? current.filter(function (item) { return item !== name; })
+      : current.concat([name]);
+    try {
+      localStorage.setItem(COLLAPSED_CHAT_GROUPS_KEY, JSON.stringify(next));
+    } catch {
+      // Storage full or unavailable: the fold is lost with the tap, not the app.
+    }
+  }
+
   function groupedChats(chats) {
     const groups = [];
     const groupByName = new Map();
@@ -4238,10 +4563,16 @@
     const chats = filterChatsByQuery(allChats, chatSearchQuery);
     const activeId = selectedConversationId();
     const unreadIds = loadUnreadConversationIds();
+    // A search shows everything it matches; folding applies to the plain list,
+    // and the headers are plain labels while a search is open so a tap cannot
+    // change a fold it does not show.
+    const searching = Boolean(chatSearchQuery.trim());
+    const collapsedGroups = searching ? [] : loadCollapsedChatGroups();
     const renderSignature = JSON.stringify({
       activeId,
       query: chatSearchQuery,
       unreadIds,
+      collapsedGroups,
       chats: chats.map(function (chat) {
         return {
           id: chat.id,
@@ -4251,7 +4582,12 @@
           who: chat.who,
           running: chat.running,
           updatedAt: chat.updatedAt,
-          participants: chat.participants
+          participants: chat.participants,
+          // What each row's avatars are drawn from: a member's changed picture
+          // must repaint the row even when nothing else about the chat moved.
+          members: chatMembers(chat).map(function (member) {
+            return [member.handle, member.kind, member.avatarId || "", member.isAssistant === true];
+          })
         };
       })
     });
@@ -4284,9 +4620,47 @@
       return;
     }
     for (const group of groupedChats(chats)) {
-      const title = document.createElement("div");
+      const collapsed = collapsedGroups.indexOf(group.name) >= 0;
+      const title = document.createElement(searching ? "div" : "button");
       title.className = "mobile-chat-group-title";
-      title.textContent = group.name;
+      title.dataset.group = group.name;
+      const name = document.createElement("span");
+      name.className = "mobile-chat-group-name";
+      name.textContent = group.name;
+      if (searching) {
+        title.append(name);
+      } else {
+        title.type = "button";
+        title.setAttribute("aria-expanded", collapsed ? "false" : "true");
+        const chevron = document.createElement("span");
+        chevron.className = "mobile-chat-group-chevron";
+        chevron.setAttribute("aria-hidden", "true");
+        title.append(chevron, name);
+      }
+      if (collapsed) {
+        // Folded away, not silenced: the count says what is inside, and a
+        // fresh message in a folded project still shows its dot here.
+        const count = document.createElement("span");
+        count.className = "mobile-chat-group-count";
+        count.textContent = String(group.items.length);
+        title.append(count);
+        if (group.items.some(function (chat) { return unreadIds.indexOf(chat.id) >= 0; })) {
+          const dot = document.createElement("span");
+          dot.className = "mobile-unread-dot";
+          dot.setAttribute("aria-label", "Unread messages");
+          title.append(dot);
+        }
+      }
+      if (!searching) {
+        title.addEventListener("click", function () {
+          toggleChatGroupCollapsed(group.name);
+          renderChatList();
+        });
+      }
+      if (collapsed) {
+        container.append(title);
+        continue;
+      }
       const list = document.createElement("div");
       list.className = "mobile-chat-group";
       for (const chat of group.items) {
@@ -4328,10 +4702,11 @@
         // the whole list down with it.
         const chatParticipants = Array.isArray(chat.participants) ? chat.participants : [];
         const participants = chatParticipants.length > 0 ? chatParticipants : [chat.title];
-        participants.slice(0, 2).forEach(function (participant, index) {
+        const rowMembers = chatMembers(chat);
+        participants.slice(0, 2).forEach(function (participant) {
           const avatar = document.createElement("span");
           avatar.className = "mobile-chat-avatar";
-          fillAvatar(avatar, participant.replace(/^@/, ""), index);
+          paintAvatar(avatar, avatarForLabel(rowMembers, participant), chat.id);
           avatars.append(avatar);
         });
         const copy = document.createElement("div");
@@ -4455,8 +4830,12 @@
     return { rows: visible, replyCountByRoot, latestReplyAtByRoot };
   }
 
+  // One way back at a time, as on the desktop: a thread goes back to its
+  // chat, a chat goes back to the list. Both arrows side by side read as a
+  // mistake, and the second one skipped a level.
   function renderThreadHeader(openThreadRoot) {
     const back = document.getElementById("back-to-timeline");
+    const backToChats = document.getElementById("back-to-chats");
     const title = document.getElementById("chat-title");
     if (!back) {
       return;
@@ -4464,6 +4843,9 @@
     const shouldShow = Boolean(openThreadRoot);
     if (back.classList.contains("is-visible") !== shouldShow) {
       back.classList.toggle("is-visible", shouldShow);
+    }
+    if (backToChats && backToChats.hidden !== shouldShow) {
+      backToChats.hidden = shouldShow;
     }
     if (openThreadRoot && title) {
       title.textContent = "Thread";
@@ -5312,6 +5694,7 @@
       replyCount: entry.replyCount,
       author: entry.author,
       participantLabel: entry.participantLabel,
+      avatar: entry.author === "agent" && entry.identified !== false ? avatarSignature(rowAvatar(entry)) : undefined,
       identified: entry.identified,
       scaffolding: entry.scaffolding,
       content: entry.content,
@@ -5409,23 +5792,28 @@
     return entry.identified === false ? "" : (entry.participantLabel || "Agent");
   }
 
+  // The member list can arrive after the row did, and a member's picture can
+  // change on the desktop; the row's signature carries the resolved avatar so
+  // the row is patched when either happens.
+  function rowAvatar(entry) {
+    const conversationId = entry.conversationId || selectedConversationId();
+    return avatarForLabel(conversationMembers(conversationId), entry.participantLabel || "Agent");
+  }
+
   function applyRowIdentity(avatar, entry) {
     if (entry.identified === false) {
-      if (avatar.dataset.avatarLabel !== "") {
+      if (avatar.dataset.avatarSignature !== "") {
         avatar.textContent = "";
         avatar.removeAttribute("style");
-        avatar.dataset.avatarLabel = "";
+        clearAvatarKindClasses(avatar);
+        avatar.dataset.avatarSignature = "";
+        delete avatar.dataset.avatarLoaded;
       }
       avatar.dataset.identified = "0";
       return;
     }
-    const participantLabel = entry.participantLabel || "Agent";
-    if (avatar.dataset.avatarLabel !== participantLabel) {
-      avatar.textContent = "";
-      avatar.removeAttribute("style");
-      fillAvatar(avatar, participantLabel, 0, "13px");
-      avatar.dataset.avatarLabel = participantLabel;
-    }
+    const conversationId = entry.conversationId || selectedConversationId();
+    paintAvatar(avatar, rowAvatar(entry), conversationId);
     avatar.dataset.identified = "1";
   }
 
@@ -5704,13 +6092,13 @@
       list.append(empty);
       return;
     }
-    members.forEach(function (member, index) {
+    members.forEach(function (member) {
       const row = document.createElement("div");
       row.className = "members-sheet-row";
       row.dataset.handle = member.handle;
       const avatar = document.createElement("span");
       avatar.className = "mobile-mention-avatar";
-      fillAvatar(avatar, member.displayName, index);
+      paintAvatar(avatar, avatarForMember(member), selectedConversationId());
       const copy = document.createElement("span");
       copy.className = "members-sheet-copy";
       const name = document.createElement("strong");
@@ -6256,7 +6644,7 @@
           });
           const avatar = document.createElement("span");
           avatar.className = "mobile-mention-avatar";
-          fillAvatar(avatar, member.displayName, index);
+          paintAvatar(avatar, avatarForMember(member), selectedConversationId());
           const copy = document.createElement("span");
           copy.className = "mobile-mention-copy";
           const name = document.createElement("strong");
@@ -6625,6 +7013,10 @@
     wireStreamView();
     startThinkingClock();
     startSyncProgressClock();
+    // Internal system rows stored before the desktop stopped sending them
+    // would otherwise sit in the timeline forever: nothing ever asks the phone
+    // to drop a row it once received.
+    await dropStoredInternalSystemRows().catch(function () { return 0; });
     await render();
     // What a push-woken worker counted while the app was closed, folded in
     // before the lists paint again; the icon number follows.
@@ -6681,6 +7073,7 @@
     flushOutboxViaRelay,
     handleRelayChatListPayload,
     handleRelayTimelinePayload,
+    machineTimelineEvent,
     activeMentionQuery,
     mentionOptions,
     replaceActiveMention,
