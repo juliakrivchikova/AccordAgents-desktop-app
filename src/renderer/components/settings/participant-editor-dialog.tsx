@@ -6,7 +6,6 @@ import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, Di
 import type { AgentHealth, AppSettings, ChatAgentMode, ChatParticipantConfigUpdate, ChatProviderKind, ChatRosterChangeParticipantInput } from "../../../shared/types";
 import { normalizeChatAgentMode } from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
-import { participantProviderLabel } from "../chat/chat-conversation-data";
 import { displayChatRoleLabel } from "../chat/chat-role-labels";
 import {
   ChatParticipantAvatarField,
@@ -19,7 +18,7 @@ import {
   ChatParticipantSpecRow
 } from "../chat/chat-participant-config-panel";
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
-import { CHAT_AGENT_MODE_OPTIONS, CHAT_RUN_LOCATION_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatCliProviderLabel, normalizeChatRunLocation, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
+import { CHAT_AGENT_MODE_OPTIONS, CHAT_RUN_LOCATION_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatConfigProviderLabel, chatParticipantHost, chatProviderOptionId, chatProviderOptionPatch, chatProviderOptions, normalizeChatRunLocation, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 import {
   ParticipantEditorHandleField,
@@ -68,7 +67,7 @@ export function ParticipantEditorDialog(props: {
   const normalizedMode = normalizeChatAgentMode(draft.agentMode);
   const changed = !participant || !sameParticipantDraft(normalized, participant);
   const validation = validateChatParticipantDrafts([draft], props.settings.chatRoleConfigs, existingHandles, props.settings.chatBehaviorRules)
-    ?? validateChatCliAgents([normalized], props.agents, props.settings.providers);
+    ?? validateChatCliAgents([normalized], props.agents, props.settings.providers, props.settings.cliProviderHosts);
   const canSave = changed && !validation && !saving;
   const roleLabel = displayChatRoleLabel(
     props.settings.chatRoleConfigs.find((role) => role.id === draft.roleConfigId),
@@ -81,9 +80,11 @@ export function ParticipantEditorDialog(props: {
   const roleOptions = props.settings.chatRoleConfigs
     .filter((role) => !role.archivedAt || role.id === draft.roleConfigId)
     .map((role) => ({ value: role.id, label: role.archivedAt ? `${displayChatRoleLabel(role)} (deleted)` : displayChatRoleLabel(role) }));
-  const providerOptions = (["codex-cli", "claude-code", "gemini-cli"] as ChatProviderKind[]).map((kind) => ({
-    value: kind,
-    label: chatCliProviderLabel(kind)
+  const hosts = props.settings.cliProviderHosts ?? [];
+  const draftHost = chatParticipantHost(draft, hosts);
+  const providerOptions = chatProviderOptions(["codex-cli", "claude-code", "gemini-cli"] as ChatProviderKind[], hosts).map((option) => ({
+    value: option.id,
+    label: option.host && !option.host.hasApiKey ? `${option.label} (no API key)` : option.label
   }));
   const editorHandle = normalized.handle || draft.handle.trim().replace(/^@/, "") || "new-participant";
   const draftParticipant: ChatRosterChangeParticipantInput = {
@@ -94,6 +95,7 @@ export function ParticipantEditorDialog(props: {
     model: draft.model,
     reasoningEffort: draft.reasoningEffort,
     avatarId: draft.avatarId,
+    hostId: draft.hostId,
     agentMode: draft.agentMode,
     permissions: draft.permissions
   };
@@ -197,10 +199,10 @@ export function ParticipantEditorDialog(props: {
             />
             <ChatParticipantInlineSelectRow
               label="Provider / CLI"
-              value={participantProviderLabel(draft.kind)}
-              current={draft.kind}
+              value={chatConfigProviderLabel(draft, hosts)}
+              current={chatProviderOptionId(draft.kind, draftHost?.id)}
               options={providerOptions}
-              onSelect={(value) => patchDraft({ kind: value as ChatProviderKind })}
+              onSelect={(value) => patchDraft(chatProviderOptionPatch(value, draft, hosts))}
             />
             {draft.kind === "codex-cli" && (
               <ChatParticipantInlineSelectRow
@@ -213,6 +215,7 @@ export function ParticipantEditorDialog(props: {
             )}
             <ChatParticipantInlineModelRow
               kind={draft.kind}
+              host={draftHost}
               model={draft.model}
               onSelect={(model) => setDraft({ ...draft, model })}
             />

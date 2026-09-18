@@ -33,7 +33,8 @@ const SETTINGS: AppSettings = {
   chatRoleConfigs: [],
   chatBehaviorRules: [],
   chatSavedPrompts: [],
-  chatParticipantConfigs: []
+  chatParticipantConfigs: [],
+  cliProviderHosts: [],
 };
 
 const MISSING: AgentHealth[] = [

@@ -110,6 +110,12 @@ export function buildCodexExecInvocation(request: BuildCodexExecInvocationReques
   if (reasoningEffort) {
     insertCodexOptionBeforePrompt(args, resuming, "-c", `model_reasoning_effort=${tomlString(reasoningEffort)}`);
   }
+  // Added-provider routing (custom model_provider, key env var, auth preference)
+  // applies to fresh and resumed sessions alike: a resumed thread still has to
+  // reach the same backend.
+  for (const override of request.participant.codexConfigOverrides ?? []) {
+    insertCodexOptionBeforePrompt(args, resuming, "-c", override);
+  }
   if (!resuming) {
     for (const dir of normalizedExtraReadableDirs(options.extraReadableDirs)) {
       args.splice(args.length - 1, 0, "--add-dir", dir);

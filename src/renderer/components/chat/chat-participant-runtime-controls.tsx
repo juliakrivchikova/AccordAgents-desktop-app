@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ChevronDown, FileText, Globe2, Pencil, Terminal } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -10,22 +10,24 @@ import {
   normalizeOptionalChatParticipantRequestPermission
 } from "../../../shared/agentPermissions";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
+import { useProviderModelCatalog } from "./use-provider-model-catalog";
 import type {
   ChatAgentMode,
   ChatAgentPermissions,
   ChatParticipant,
   ChatParticipantRequestPermission,
+  CliProviderHost,
   ChatRoleParticipantDefaults,
   ChatParticipantWatcherPausedReason,
   ChatProviderKind,
-  ChatReasoningEffort,
-  ProviderModelCatalog
+  ChatReasoningEffort
 } from "../../../shared/types";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import {
   CHAT_AGENT_MODE_OPTIONS,
   chatCliProviderLabel,
   chatInheritedCliSettingLabel,
+  chatModelDefaultLabel,
   normalizeChatRunLocation
 } from "./chat-participant-drafts";
 
@@ -59,8 +61,14 @@ export function ParticipantRuntimeControls(props: {
   const mode = normalizeChatAgentMode(participant.agentMode);
   const runLocation = normalizeChatRunLocation(participant.remoteExecution);
   const reasoningValue = participant.reasoningEffort ?? REASONING_DEFAULT_VALUE;
+  // The member carries a vendor snapshot of its added provider, enough for the
+  // model list and labels without a settings lookup.
+  const host = participant.hostId && participant.hostVendor && participant.kind !== "gemini-cli"
+    ? { vendor: participant.hostVendor, cli: participant.kind }
+    : undefined;
   const cliSettingLabel = chatInheritedCliSettingLabel(participant.kind);
-  const providerLabel = chatCliProviderLabel(participant.kind);
+  const modelDefaultLabel = chatModelDefaultLabel(participant.kind, host);
+  const providerLabel = chatCliProviderLabel(participant.kind, participant.hostId ? participant.hostLabel : undefined);
   const controlsDisabled = props.disabled || props.readOnly === true;
 
   // Build the patch by key presence so an intentional reset (model: "") is forwarded
@@ -131,8 +139,9 @@ export function ParticipantRuntimeControls(props: {
           <span className="chat-rt-dot" aria-hidden />
           <GhostModelSelect
             kind={participant.kind}
+            host={host}
             model={participant.model}
-            defaultLabel={cliSettingLabel}
+            defaultLabel={modelDefaultLabel}
             disabled={controlsDisabled}
             onChange={(model) => update({ model })}
           />
@@ -294,33 +303,15 @@ function GhostSelect(props: {
 
 function GhostModelSelect(props: {
   kind: ChatProviderKind;
+  host?: Pick<CliProviderHost, "vendor" | "cli">;
   model?: string;
   defaultLabel: string;
   disabled: boolean;
   onChange: (model: string) => void;
 }): JSX.Element {
-  const [catalog, setCatalog] = useState<ProviderModelCatalog | undefined>();
   const [manual, setManual] = useState(false);
   const model = props.model?.trim() || undefined;
-
-  useEffect(() => {
-    let cancelled = false;
-    setCatalog(undefined);
-    void window.consensus.listProviderModels(props.kind)
-      .then((next) => {
-        if (!cancelled) {
-          setCatalog(next);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCatalog(undefined);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [props.kind]);
+  const { catalog } = useProviderModelCatalog(props.kind, props.host);
 
   const models = catalog?.models ?? [];
   const known = model ? models.find((item) => item.id === model) : undefined;

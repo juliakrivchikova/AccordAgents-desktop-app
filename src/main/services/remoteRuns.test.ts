@@ -2833,7 +2833,8 @@ async function testRemoteRun(options: {
         chatBehaviorRules: [],
         chatSavedPrompts: [],
         chatParticipantConfigs: [],
-        chatParticipantSeedState: {}
+        chatParticipantSeedState: {},
+        cliProviderHosts: [],
       };
     }
   };
@@ -3254,7 +3255,8 @@ function coordinatorSettings(patch: { maxRuntimeMs: number; pollIntervalMs: numb
         chatRoleConfigs: [],
         chatBehaviorRules: [],
         chatSavedPrompts: [],
-        chatParticipantConfigs: []
+        chatParticipantConfigs: [],
+        cliProviderHosts: []
       };
     },
     async listRemoteSessionCleanupTombstones(): Promise<[]> {

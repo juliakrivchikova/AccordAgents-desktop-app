@@ -49,7 +49,8 @@ function chatServiceWithRoles(roles: ChatRoleConfig[]) {
         chatBehaviorRules: [],
         chatSavedPrompts: [],
         chatParticipantConfigs: [],
-        chatParticipantSeedState: {}
+        chatParticipantSeedState: {},
+        cliProviderHosts: [],
       };
     }
   };

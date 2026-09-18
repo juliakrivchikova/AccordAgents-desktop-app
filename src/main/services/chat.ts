@@ -33,6 +33,7 @@ import type {
   ChatParticipantConfig,
   ChatParticipantConfigUpdate,
   ChatParticipantInput,
+  CliProviderHost,
   ChatParticipantRequestPermission,
   ChatParticipantWatcherState,
   CloudRunRemoteExecutionMode,
@@ -119,6 +120,12 @@ import {
   limitChatBehaviorRulePromptText
 } from "../../shared/chatBehaviorRules";
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../shared/reasoningEffort";
+import {
+  cliProviderHostDefaultModel,
+  cliProviderHostForParticipant,
+  cliProviderHostRunConfig,
+  cliProviderHostRunVersion
+} from "../../shared/cliProviderHosts";
 import { CODEX_APPROVAL_TOOL_NAME, codexApprovalCancellationResult, prepareCodexApproval } from "./codexApprovals";
 import {
   CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID,
@@ -147,7 +154,7 @@ import {
 } from "../../shared/appTools";
 import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
-import { CliAgentRunner, type CliAgentCodexServerRequest, type CliAgentOutputEvent, type CliAgentRoleOptions } from "./cliAgents";
+import { CliAgentRunner, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentRoleOptions } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type {
   RemoteDetachedRunState,
@@ -205,6 +212,7 @@ import {
   agentReadinessReason,
   cliProviderMetadata,
   providerEnabled,
+  readinessForParticipant,
   readinessForProvider,
   readyProviderKinds,
   resolveAssistantProviderKind
@@ -695,6 +703,65 @@ export class ChatService {
     return settings.getManualAgentEnvironment();
   }
 
+  /** Host binding for a member on an added provider, with the key decrypted for
+   *  the run. `problem` is a finished sentence for the pending message when the
+   *  member cannot start (provider removed, key missing, wrong CLI). */
+  private async participantHostBinding(
+    participant: Pick<ChatParticipant, "kind" | "handle" | "hostId" | "hostLabel">
+  ): Promise<{ host: CliProviderHost; apiKey: string } | { problem: string } | undefined> {
+    const hostId = participant.hostId?.trim();
+    if (!hostId) {
+      return undefined;
+    }
+    const settings = this.settings as Partial<Pick<SettingsService, "getCliProviderHostSecret">>;
+    if (typeof settings.getCliProviderHostSecret !== "function") {
+      return undefined;
+    }
+    const secret = await settings.getCliProviderHostSecret.call(this.settings, hostId);
+    const label = secret?.host.label ?? participant.hostLabel ?? "its provider";
+    if (!secret || secret.host.cli !== participant.kind) {
+      return { problem: `@${participant.handle} cannot start: ${label} was removed from Settings. Bind the member to another provider or add ${label} again` };
+    }
+    if (!secret.apiKey) {
+      return { problem: `@${participant.handle} cannot start: ${label} has no API key. Add one under Local CLI setup in Settings` };
+    }
+    return { host: secret.host, apiKey: secret.apiKey };
+  }
+
+  /** Settings → Environment plus, for a member on an added provider, what makes
+   *  its CLI talk to that provider. Local runs and compaction take this same map
+   *  (and the remote `extraEnv` will, once such members can run remotely), so
+   *  the member behaves identically wherever it runs. */
+  private async agentEnvironmentForParticipant(
+    participant: ChatParticipant,
+    model: string | undefined
+  ): Promise<{ env: NodeJS.ProcessEnv; version: string; codexConfigOverrides?: string[]; problem?: string }> {
+    const manual = await this.manualAgentEnvironmentForRun();
+    const binding = await this.participantHostBinding(participant);
+    if (!binding) {
+      return manual;
+    }
+    if ("problem" in binding) {
+      return { ...manual, problem: binding.problem };
+    }
+    const runConfig = cliProviderHostRunConfig(binding.host, binding.apiKey, model);
+    return {
+      env: { ...manual.env, ...runConfig.env },
+      version: `${manual.version}|${cliProviderHostRunVersion(binding.host, model)}`,
+      codexConfigOverrides: runConfig.codexConfigOverrides
+    };
+  }
+
+  /** A member whose provider went away must not keep a warm process that still
+   *  holds the old key; the runner would otherwise keep it until the idle timeout. */
+  private async closeWarmAgentsForParticipant(conversationId: string, participantId: string): Promise<void> {
+    const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "closeWarmAgents">>;
+    if (typeof runner.closeWarmAgents !== "function") {
+      return;
+    }
+    await runner.closeWarmAgents.call(this.cliRunner, conversationId, participantId, "provider-binding-changed").catch(() => undefined);
+  }
+
   setRemoteRunService(remoteRuns: RemoteRunStarter): void {
     this.remoteRuns = remoteRuns;
   }
@@ -864,7 +931,7 @@ export class ChatService {
             readyKinds,
             Boolean(requestedRepoPath)
           );
-      this.assertParticipantProvidersReady(participantInputs, agents, settings.providers);
+      this.assertParticipantProvidersReady(participantInputs, agents, settings.providers, settings.cliProviderHosts ?? []);
       const requestedParticipants = await this.validateParticipants(participantInputs, [], true);
       const participants = await this.ensureAdministratorParticipant(requestedParticipants, assistantProviderKind);
       conversation = {
@@ -952,6 +1019,7 @@ export class ChatService {
         model: participant.model,
         reasoningEffort: participant.reasoningEffort,
         avatarId: participant.avatarId,
+        hostId: participant.hostId,
         agentMode: participant.agentMode,
         permissions: enableRepoRead
           ? {
@@ -1249,7 +1317,7 @@ export class ChatService {
       const nextParticipant = (await this.validateParticipants([request.participant], participants))[0];
       const settings = await this.settings.getPublicSettings();
       const agents = await this.detectAgentsForReadiness();
-      this.assertParticipantProvidersReady([request.participant], agents, settings.providers ?? []);
+      this.assertParticipantProvidersReady([request.participant], agents, settings.providers ?? [], settings.cliProviderHosts ?? []);
       conversation.metadata = {
         ...conversation.metadata,
         participants: [...participants, nextParticipant]
@@ -1460,30 +1528,36 @@ export class ChatService {
       const permissions = normalizeChatAgentPermissions(participant.permissions);
       session.participantPermissions = permissions;
       const runPath = this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions);
-      const cliParticipant = this.cliParticipantForSession(participant, session);
-      const agentEnvironment = await this.manualAgentEnvironmentForRun();
+      const baseCliParticipant = this.cliParticipantForSession(participant, session);
+      const agentEnvironment = await this.agentEnvironmentForParticipant(participant, baseCliParticipant.model);
+      const cliParticipant = this.cliParticipantWithHost(baseCliParticipant, agentEnvironment.codexConfigOverrides);
       const appMcpToolInventoryKey = this.appMcpToolInventoryKey(
         this.appMcpToolNames(this.appToolCapabilitiesForRun(session, permissions))
       );
-      const result = await this.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
-        persistSession: true,
-        sessionId: session.sessionId,
-        extraReadableDirs: [workspacePath],
-        agentMode,
-        permissions,
-        agentEnv: agentEnvironment.env,
-        agentEnvKey: agentEnvironment.version,
-        ...(compactInstructions ? { compactInstructions } : {}),
-        onSessionId: (sessionId) => {
-          this.persistParticipantSessionId(conversation, session, sessionId);
-        },
-        warm: {
-          conversationId: conversation.id,
-          participantId: participant.id,
-          contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
-          idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
-        }
-      });
+      if (agentEnvironment.problem) {
+        await this.closeWarmAgentsForParticipant(conversation.id, participant.id);
+      }
+      const result: CliAgentCompactResult = agentEnvironment.problem
+        ? { participant: cliParticipant, ok: false, error: agentEnvironment.problem }
+        : await this.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
+            persistSession: true,
+            sessionId: session.sessionId,
+            extraReadableDirs: [workspacePath],
+            agentMode,
+            permissions,
+            agentEnv: agentEnvironment.env,
+            agentEnvKey: agentEnvironment.version,
+            ...(compactInstructions ? { compactInstructions } : {}),
+            onSessionId: (sessionId) => {
+              this.persistParticipantSessionId(conversation, session, sessionId);
+            },
+            warm: {
+              conversationId: conversation.id,
+              participantId: participant.id,
+              contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
+              idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
+            }
+          });
       await this.refreshStoredChatState(conversation);
       const now = new Date().toISOString();
       session.updatedAt = now;
@@ -1491,7 +1565,7 @@ export class ChatService {
         session.sessionId = result.sessionId;
       }
       let usage = result.contextUsage;
-      if (!usage) {
+      if (!usage && !agentEnvironment.problem) {
         try {
           usage = await this.cliRunner.contextUsageForSession(cliParticipant, session.sessionId);
         } catch (error) {
@@ -1556,16 +1630,17 @@ export class ChatService {
 
   async syncSavedParticipantAvatar(
     previous: Pick<ChatParticipantConfig, "handle" | "kind"> | undefined,
-    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId">
+    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId" | "hostId" | "model">
   ): Promise<void> {
     await this.syncSavedParticipantConfig(previous, next, { behaviorRules: false });
   }
 
   async syncSavedParticipantConfig(
     previous: Pick<ChatParticipantConfig, "handle" | "kind"> | undefined,
-    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId" | "behaviorRuleIds">,
+    next: Pick<ChatParticipantConfig, "id" | "handle" | "kind" | "avatarId" | "behaviorRuleIds" | "hostId" | "model">,
     options: { behaviorRules?: boolean } = {}
   ): Promise<void> {
+    const hosts = (await this.settings.getPublicSettings()).cliProviderHosts ?? [];
     const normalizedPreviousHandle = previous?.handle.trim().replace(/^@/, "").toLowerCase();
     const normalizedNextHandle = next.handle.trim().replace(/^@/, "").toLowerCase();
     const handleMatches = new Set([normalizedPreviousHandle, normalizedNextHandle].filter((handle): handle is string => Boolean(handle)));
@@ -1582,6 +1657,7 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         const participants = this.chatParticipants(conversation);
         let changed = false;
+        const hostMoved = new Set<string>();
         const syncedParticipants = participants.map((participant) => {
           const sameSavedParticipant = participant.participantConfigId === next.id || participant.id === next.id;
           const sameLegacyHandleAndKind = !participant.participantConfigId &&
@@ -1590,7 +1666,12 @@ export class ChatService {
           if (!sameSavedParticipant && !sameLegacyHandleAndKind) {
             return participant;
           }
-          const synced = this.syncParticipantFromSavedConfig(participant, next, options);
+          // The handle+kind fallback exists for members created before presets
+          // carried ids; it may follow cosmetics, but never a backend switch.
+          const synced = this.syncParticipantFromSavedConfig(participant, next, { ...options, host: sameSavedParticipant, hosts });
+          if ((synced.hostId ?? undefined) !== (participant.hostId ?? undefined)) {
+            hostMoved.add(participant.id);
+          }
           changed = changed || synced !== participant;
           return synced;
         });
@@ -1601,7 +1682,20 @@ export class ChatService {
           ...conversation.metadata,
           participants: syncedParticipants
         };
+        if (hostMoved.size > 0) {
+          // A CLI session transcript belongs to the backend that produced it
+          // (thinking blocks are signed by that side), so a member that moved on
+          // or off a provider starts a fresh session on its next turn.
+          for (const participantId of hostMoved) {
+            await this.closeWarmAgentsForParticipant(conversation.id, participantId);
+          }
+          conversation.metadata = {
+            ...conversation.metadata,
+            participantSessions: this.chatSessions(conversation).filter((session) => !hostMoved.has(session.participantId))
+          };
+        }
         await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
       });
     }
   }
@@ -1645,10 +1739,12 @@ export class ChatService {
   }
 
   private async syncConversationParticipantsFromSettings(conversation: Conversation): Promise<boolean> {
-    const participantConfigs = (await this.settings.getPublicSettings()).chatParticipantConfigs ?? [];
+    const settings = await this.settings.getPublicSettings();
+    const participantConfigs = settings.chatParticipantConfigs ?? [];
     if (participantConfigs.length === 0) {
       return false;
     }
+    const hosts = settings.cliProviderHosts ?? [];
     const configsById = new Map(participantConfigs.map((config) => [config.id, config]));
     const configsByHandleAndKind = new Map(
       participantConfigs.map((config) => [this.participantConfigSyncKey(config.handle, config.kind), config])
@@ -1662,7 +1758,7 @@ export class ChatService {
       if (!config) {
         return participant;
       }
-      const synced = this.syncParticipantFromSavedConfig(participant, config);
+      const synced = this.syncParticipantFromSavedConfig(participant, config, { host: Boolean(participant.participantConfigId), hosts });
       changed = changed || synced !== participant;
       return synced;
     });
@@ -3600,6 +3696,7 @@ export class ChatService {
         model: participant.model,
         reasoningEffort: participant.reasoningEffort,
         avatarId: participant.avatarId,
+        hostId: participant.hostId,
         agentMode: normalizeChatAgentMode(participant.agentMode),
         permissions: normalizeChatAgentPermissions(participant.permissions),
         manageRolesParticipants: this.manageRolesParticipantsResolutionForRole(roleById.get(participant.roleConfigId), participant.permissions),
@@ -6510,7 +6607,7 @@ export class ChatService {
       roleInstructionsSize: role?.instructions.length ?? 0
     });
     const runPath = this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions);
-    const cliParticipant = this.cliParticipantForSession(participant, session);
+    let cliParticipant = this.cliParticipantForSession(participant, session);
     let pendingMessage: ChatMessage;
     if (options.existingPendingMessage) {
       pendingMessage = await this.prepareExistingPendingMessageForRun(
@@ -6620,7 +6717,10 @@ export class ChatService {
         messageId: pendingMessage.id
       }
     });
-    const agentEnvironment = await this.manualAgentEnvironmentForRun();
+    const agentEnvironment = await this.agentEnvironmentForParticipant(participant, cliParticipant.model);
+    if (agentEnvironment.codexConfigOverrides) {
+      cliParticipant = this.cliParticipantWithHost(cliParticipant, agentEnvironment.codexConfigOverrides);
+    }
     const persistSessionId = (sessionId: string): void => {
       this.persistParticipantSessionId(conversation, session, sessionId);
     };
@@ -6628,7 +6728,24 @@ export class ChatService {
     let awsRemoteRunRefHeld = false;
     try {
       progressSink.beginAttempt();
+      if (agentEnvironment.problem) {
+        const message = `${agentEnvironment.problem}.`;
+        await this.closeWarmAgentsForParticipant(conversation.id, participant.id);
+        pendingMessage.status = "error";
+        pendingMessage.content = message;
+        options.warnings.push(message);
+        return [pendingMessage];
+      }
       const participantRunsRemotely = this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution) === "remote";
+      if (participantRunsRemotely && participant.hostId) {
+        // The worker path has not been exercised with an added provider's key
+        // and overrides; keep such members local until it is.
+        const message = `@${participant.handle} cannot start: members on an added provider (${participant.hostLabel ?? "provider"}) run locally only. Switch its run location to Local.`;
+        pendingMessage.status = "error";
+        pendingMessage.content = message;
+        options.warnings.push(message);
+        return [pendingMessage];
+      }
       if (nativeGoal && participantRunsRemotely) {
         const message = `@${participant.handle} native /goal requires the local dedicated CLI transport; remote execution does not expose the provider's native goal protocol.`;
         pendingMessage.status = "error";
@@ -7947,9 +8064,23 @@ export class ChatService {
       id: participant.id,
       kind: session.participantKind ?? participant.kind,
       label: `@${participant.handle}`,
-      model: this.normalizedModel(session.participantModel) || undefined,
+      // A member on an added provider never inherits the CLI's default model:
+      // that alias (e.g. "opus[1m]") only exists on the first-party side.
+      model: this.normalizedModel(session.participantModel) || this.participantHostDefaultModel(participant),
       reasoningEffort: normalizeChatReasoningEffort(session.participantReasoningEffort, session.participantKind ?? participant.kind)
     };
+  }
+
+  /** Vendor default model for a member on an added provider; undefined for
+   *  built-in members and for vendors whose catalog is the CLI's own. */
+  private participantHostDefaultModel(participant: Pick<ChatParticipant, "hostId" | "hostVendor">): string | undefined {
+    return participant.hostId && participant.hostVendor ? cliProviderHostDefaultModel({ vendor: participant.hostVendor }) : undefined;
+  }
+
+  private cliParticipantWithHost(cliParticipant: ParticipantConfig, codexConfigOverrides: string[] | undefined): ParticipantConfig {
+    return codexConfigOverrides && codexConfigOverrides.length > 0
+      ? { ...cliParticipant, codexConfigOverrides }
+      : cliParticipant;
   }
 
   private runPathForParticipant(
@@ -9696,6 +9827,7 @@ export class ChatService {
     }
     const settings = await this.settings.getPublicSettings();
     const roles = availableRoles ?? settings.chatRoleConfigs.filter((role) => !role.archivedAt);
+    const hosts = settings.cliProviderHosts ?? [];
     const handles = new Set(existing.map((participant) => participant.handle.toLowerCase()));
     let autoWatchAlreadyAssigned = existing.some((participant) => participant.autoWatch === true);
     return items.map((item) => {
@@ -9736,6 +9868,7 @@ export class ChatService {
         model: item.model?.trim() || undefined,
         reasoningEffort: normalizeChatReasoningEffort(item.reasoningEffort, item.kind as ChatProviderKind),
         avatarId: item.avatarId?.trim() || undefined,
+        ...this.participantHostFields(item.kind as ChatProviderKind, item.hostId, hosts),
         agentMode: normalizeChatAgentMode(item.agentMode),
         permissions: this.normalizeParticipantPermissionsForRole(role, item.permissions, item.permissions === undefined),
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(item.remoteExecution),
@@ -9846,10 +9979,98 @@ export class ChatService {
     return kind;
   }
 
+  /** Member fields for a host binding: the id plus a display snapshot of the
+   *  provider's name and vendor. A binding that no longer resolves is dropped so
+   *  the member falls back to its built-in CLI instead of failing forever. */
+  private participantHostFields(
+    kind: ChatProviderKind,
+    hostId: string | undefined,
+    hosts: ReadonlyArray<CliProviderHost>
+  ): Pick<ChatParticipant, "hostId" | "hostLabel" | "hostVendor"> {
+    const host = cliProviderHostForParticipant(kind, hostId?.trim() || undefined, hosts);
+    return host
+      ? { hostId: host.id, hostLabel: host.label, hostVendor: host.vendor }
+      : { hostId: undefined, hostLabel: undefined, hostVendor: undefined };
+  }
+
+  /** A provider was removed in Settings: retire every warm process still holding
+   *  its key. Bindings stay (members fail visibly on their next turn). */
+  async retireCliProviderHost(hostId: string): Promise<void> {
+    const summaries = await this.storage.listConversations();
+    for (const summary of summaries) {
+      if (summary.kind !== "chat") {
+        continue;
+      }
+      const conversation = await this.storage.getConversation(summary.id);
+      if (!conversation || conversation.kind !== "chat") {
+        continue;
+      }
+      for (const participant of this.chatParticipants(conversation)) {
+        if (participant.hostId === hostId) {
+          await this.closeWarmAgentsForParticipant(conversation.id, participant.id);
+        }
+      }
+    }
+  }
+
+  /** A provider was edited in Settings: refresh the name/vendor snapshot on every
+   *  chat member bound to it, and give members whose vendor changed a fresh CLI
+   *  session (transcripts belong to the backend that produced them). */
+  async syncCliProviderHost(host: CliProviderHost): Promise<void> {
+    const summaries = await this.storage.listConversations();
+    for (const summary of summaries) {
+      if (summary.kind !== "chat") {
+        continue;
+      }
+      const conversation = await this.storage.getConversation(summary.id);
+      if (!conversation || conversation.kind !== "chat") {
+        continue;
+      }
+      await this.withChatMutation(conversation, async () => {
+        const vendorChanged = new Set<string>();
+        let changed = false;
+        const participants = this.chatParticipants(conversation).map((participant) => {
+          if (participant.hostId !== host.id || participant.kind !== host.cli) {
+            return participant;
+          }
+          if (participant.hostLabel === host.label && participant.hostVendor === host.vendor) {
+            return participant;
+          }
+          if (participant.hostVendor !== host.vendor) {
+            vendorChanged.add(participant.id);
+          }
+          changed = true;
+          return {
+            ...participant,
+            hostLabel: host.label,
+            hostVendor: host.vendor,
+            model: participant.hostVendor !== host.vendor ? cliProviderHostDefaultModel(host) : participant.model
+          };
+        });
+        if (!changed) {
+          return;
+        }
+        for (const participantId of vendorChanged) {
+          await this.closeWarmAgentsForParticipant(conversation.id, participantId);
+        }
+        conversation.metadata = {
+          ...conversation.metadata,
+          participants,
+          participantSessions: vendorChanged.size > 0
+            ? this.chatSessions(conversation).filter((session) => !vendorChanged.has(session.participantId))
+            : conversation.metadata.participantSessions
+        };
+        await this.saveConversation(conversation);
+        this.queueSnapshot(conversation);
+      });
+    }
+  }
+
   private assertParticipantProvidersReady(
     items: CreateChatConversationRequest["participants"],
     agents: AgentHealth[],
-    providers: Array<Pick<ProviderSettings, "kind" | "enabled">>
+    providers: Array<Pick<ProviderSettings, "kind" | "enabled">>,
+    hosts: ReadonlyArray<CliProviderHost> = []
   ): void {
     // Production detection always returns one normalized entry per CLI,
     // including environment-check failures. Empty snapshots are accepted only
@@ -9862,10 +10083,18 @@ export class ChatService {
         continue;
       }
       const kind = item.kind as ChatProviderKind;
-      const state = readinessForProvider(kind, agents, providers);
+      const host = cliProviderHostForParticipant(kind, item.hostId, hosts);
+      const handle = item.handle.replace(/^@/, "");
+      if (item.hostId?.trim() && !host) {
+        throw new Error(`@${handle}: that provider no longer exists. Pick another provider for the member.`);
+      }
+      const state = readinessForParticipant({ kind, host }, agents, providers);
+      if (state === "sign-in-required" && host) {
+        throw new Error(`@${handle}: ${host.label} has no API key. Add one under Local CLI setup in Settings.`);
+      }
       if (state !== "ready") {
         const label = cliProviderMetadata(kind).label;
-        throw new Error(`@${item.handle.replace(/^@/, "")}: ${agentReadinessReason(state, label) ?? `${label} is not ready.`}`);
+        throw new Error(`@${handle}: ${agentReadinessReason(state, label) ?? `${label} is not ready.`}`);
       }
     }
   }
@@ -10049,6 +10278,7 @@ export class ChatService {
       roleLabel: this.roleLabelForParticipant(conversation, participant),
       behaviorRuleIds: this.normalizeBehaviorRuleIds(participant.behaviorRuleIds),
       kind: participant.kind,
+      hostId: participant.hostId,
       model: participant.model,
       reasoningEffort: participant.reasoningEffort,
       agentMode: normalizeChatAgentMode(participant.agentMode),
@@ -10121,6 +10351,7 @@ export class ChatService {
             model: typeof participantRecord.model === "string" ? participantRecord.model.trim() || undefined : undefined,
             reasoningEffort: normalizeChatReasoningEffort(participantRecord.reasoningEffort, kind),
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
+            hostId: typeof participantRecord.hostId === "string" ? participantRecord.hostId.trim() || undefined : undefined,
             agentMode: normalizeChatAgentMode(participantRecord.agentMode),
             permissions: normalizeChatAgentPermissions(participantRecord.permissions),
             remoteExecution: this.normalizeConcreteRemoteExecutionMode(participantRecord.remoteExecution),
@@ -10139,7 +10370,7 @@ export class ChatService {
     const participantInputs = request.operations.map((operation) => operation.participant);
     const participants = await this.validateParticipants(participantInputs, existing, false, settings.chatRoleConfigs);
     const agents = await this.detectAgentsForReadiness();
-    this.assertParticipantProvidersReady(participantInputs, agents, settings.providers ?? []);
+    this.assertParticipantProvidersReady(participantInputs, agents, settings.providers ?? [], settings.cliProviderHosts ?? []);
     const normalizedRequest: ChatRosterChangeRequest = {
       reason: request.reason,
       operations: participants.map((participant) => ({
@@ -10153,6 +10384,7 @@ export class ChatService {
           model: participant.model,
           reasoningEffort: participant.reasoningEffort,
           avatarId: participant.avatarId,
+          hostId: participant.hostId,
           agentMode: normalizeChatAgentMode(participant.agentMode),
           permissions: normalizeChatAgentPermissions(participant.permissions),
           remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
@@ -10585,6 +10817,7 @@ export class ChatService {
             model: typeof participantRecord.model === "string" ? participantRecord.model.trim() || undefined : undefined,
             reasoningEffort: normalizeChatReasoningEffort(participantRecord.reasoningEffort, kind),
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
+            hostId: typeof participantRecord.hostId === "string" ? participantRecord.hostId.trim() || undefined : undefined,
             agentMode: normalizeChatAgentMode(participantRecord.agentMode),
             permissions: permissionsProvided
               ? normalizeChatAgentPermissions(participantRecord.permissions)
@@ -10666,6 +10899,7 @@ export class ChatService {
             ? normalizeChatReasoningEffort(overrides.reasoningEffort, preset.kind)
             : preset.reasoningEffort,
           avatarId: preset.avatarId,
+          hostId: preset.hostId,
           agentMode: overrides && "agentMode" in overrides ? normalizeChatAgentMode(overrides.agentMode) : preset.agentMode,
           permissions: overrides && "permissions" in overrides ? overrides.permissions : preset.permissions,
           remoteExecution: overrides && "remoteExecution" in overrides ? overrides.remoteExecution : preset.remoteExecution,
@@ -10702,7 +10936,7 @@ export class ChatService {
       participantConfigId: participant.participantConfigId ?? savedPresetIdByOperationIndex.get(index)
     }));
     const agents = await this.detectAgentsForReadiness();
-    this.assertParticipantProvidersReady(participantInputs, agents, settings.providers ?? []);
+    this.assertParticipantProvidersReady(participantInputs, agents, settings.providers ?? [], settings.cliProviderHosts ?? []);
     const managementEscalation = participants.some((participant, index) => {
       const operation = request.operations[index];
       const role = roleById.get(participant.roleConfigId);
@@ -10730,6 +10964,7 @@ export class ChatService {
         model: participant.model,
         reasoningEffort: participant.reasoningEffort,
         avatarId: participant.avatarId,
+        hostId: participant.hostId,
         agentMode: participant.agentMode,
         permissions: participant.permissions,
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
@@ -10778,6 +11013,7 @@ export class ChatService {
         model: preset.model,
         reasoningEffort: preset.reasoningEffort,
         avatarId: preset.avatarId,
+        hostId: preset.hostId,
         agentMode: preset.agentMode,
         permissions: preset.permissions,
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(preset.remoteExecution),
@@ -10799,6 +11035,7 @@ export class ChatService {
             model: participant.model,
             reasoningEffort: participant.reasoningEffort,
             avatarId: participant.avatarId,
+            hostId: participant.hostId,
             agentMode: participant.agentMode,
             permissions: participant.permissions,
             remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
@@ -10826,6 +11063,7 @@ export class ChatService {
       model: preset.model,
       reasoningEffort: preset.reasoningEffort,
       avatarId: preset.avatarId,
+      hostId: preset.hostId,
       agentMode: preset.agentMode,
       permissions: preset.permissions,
       remoteExecution: this.normalizeConcreteRemoteExecutionMode(preset.remoteExecution),
@@ -10852,6 +11090,7 @@ export class ChatService {
             model: participant.model,
             reasoningEffort: participant.reasoningEffort,
             avatarId: participant.avatarId,
+            hostId: participant.hostId,
             agentMode: participant.agentMode,
             permissions: participant.permissions,
             remoteExecution: this.normalizeConcreteRemoteExecutionMode(participant.remoteExecution),
@@ -16496,8 +16735,8 @@ export class ChatService {
 
   private syncParticipantFromSavedConfig(
     participant: ChatParticipant,
-    config: Pick<ChatParticipantConfig, "id" | "kind" | "avatarId" | "behaviorRuleIds">,
-    options: { behaviorRules?: boolean } = {}
+    config: Pick<ChatParticipantConfig, "id" | "kind" | "avatarId" | "behaviorRuleIds" | "hostId" | "model">,
+    options: { behaviorRules?: boolean; host?: boolean; hosts?: ReadonlyArray<CliProviderHost> } = {}
   ): ChatParticipant {
     let synced = participant;
     if (synced.participantConfigId !== config.id) {
@@ -16513,6 +16752,25 @@ export class ChatService {
       const avatarId = config.avatarId?.trim() || undefined;
       if ((synced.avatarId?.trim() || undefined) !== avatarId) {
         synced = { ...synced, avatarId };
+      }
+      // The provider binding is plumbing (where the CLI sends requests), so a
+      // preset edit follows into every chat bound to that preset, like an avatar.
+      // A preset whose provider was removed keeps a dangling id; the member keeps
+      // its own binding then and fails with "was removed" instead of silently
+      // running on the built-in CLI.
+      const presetHostDangling = Boolean(config.hostId?.trim()) &&
+        !cliProviderHostForParticipant(config.kind, config.hostId, options.hosts ?? []);
+      if (options.host !== false && !presetHostDangling) {
+        const fields = this.participantHostFields(config.kind, config.hostId, options.hosts ?? []);
+        if ((synced.hostId ?? undefined) !== (fields.hostId ?? undefined)) {
+          // A model id only exists on the side it came from (glm-* vs first-party
+          // aliases), so moving the preset on or off a provider also takes the
+          // preset's model; otherwise the member would keep sending the old id
+          // to a backend that does not serve it.
+          synced = { ...synced, ...fields, model: config.model?.trim() || undefined };
+        } else if (synced.hostId && (synced.hostLabel !== fields.hostLabel || synced.hostVendor !== fields.hostVendor)) {
+          synced = { ...synced, ...fields };
+        }
       }
     }
     return synced;

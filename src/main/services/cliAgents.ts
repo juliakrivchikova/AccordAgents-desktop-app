@@ -2500,7 +2500,11 @@ export class CliAgentRunner {
     options: CliAgentRunOptions,
     codexExecutable: string
   ): WarmAgentEntry {
-    const child = spawnCommand(codexExecutable, ["app-server", "--listen", "stdio://"], {
+    // `-c` overrides are global codex options; the app-server honors them for
+    // every thread it hosts, which is how a member on an added provider reaches
+    // that provider's Responses endpoint.
+    const configArgs = (participant.codexConfigOverrides ?? []).flatMap((override) => ["-c", override]);
+    const child = spawnCommand(codexExecutable, ["app-server", ...configArgs, "--listen", "stdio://"], {
       cwd: repoPath,
       env: commandEnvironment(this.agentRunEnv(options)),
       stdio: ["pipe", "pipe", "pipe"]
@@ -5312,12 +5316,24 @@ export class CliAgentRunner {
       kind,
       extraReadableDirs: this.normalizedExtraReadableDirs(options.extraReadableDirs),
       agentEnvKey: options.agentEnvKey ?? "",
+      codexConfigOverrides: participant.codexConfigOverrides ?? [],
       contextKey: options.warm?.contextKey ?? ""
     });
   }
 
   private warmAgentScopeKey(warm: CliAgentWarmOptions): string {
     return `${warm.conversationId}:${warm.participantId}`;
+  }
+
+  /** Retire every warm process of one member, e.g. when the credential it was
+   *  started with is removed; otherwise it would linger until the idle timeout. */
+  async closeWarmAgents(conversationId: string, participantId: string, reason = "context-changed"): Promise<void> {
+    const scopeKey = this.warmAgentScopeKey({ conversationId, participantId, contextKey: "", idleTimeoutMs: 0 });
+    const entries = Array.from(this.warmAgents.values()).filter((entry) => entry.scopeKey === scopeKey);
+    for (const entry of entries) {
+      this.warmAgents.delete(entry.key);
+      await this.closeWarmAgent(entry, reason);
+    }
   }
 
   private async closeStaleWarmAgents(scopeKey: string, nextKey: string): Promise<void> {

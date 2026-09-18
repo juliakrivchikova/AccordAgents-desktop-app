@@ -27,7 +27,7 @@ export function ParticipantsSettingsScreen(props: {
       .map((group) => ({
         ...group,
         participants: group.participants.filter((participant) =>
-          participantMatchesQuery(participant, group.label, normalizedQuery)
+          participantMatchesQuery(participant, group.label, normalizedQuery, props.settings.cliProviderHosts)
         )
       }))
       .filter((group) => group.participants.length > 0);
@@ -95,7 +95,7 @@ export function ParticipantsSettingsScreen(props: {
                   <ChevronRight className="participants-role-chevron" size={17} aria-hidden />
                   <span className="participants-role-row-text">
                     <strong>{group.label}</strong>
-                    <small>{providerSummary(group.participants)}</small>
+                    <small>{providerSummary(group.participants, props.settings.cliProviderHosts)}</small>
                   </span>
                   <AvatarStack participants={group.participants} max={4} />
                   <span className="participants-role-count">{group.participants.length}</span>

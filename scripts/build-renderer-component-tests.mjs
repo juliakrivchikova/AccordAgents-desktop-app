@@ -10,6 +10,7 @@ await build({
   entryPoints: [
     "renderer/components/chat/chat-composer-mention-token.test.ts",
     "renderer/components/chat/chat-composer-plugin-token.test.ts",
+    "renderer/components/chat/chat-participant-drafts.test.ts",
     "renderer/components/artifacts/artifact-drafts.test.tsx",
     "renderer/components/artifacts/artifact-navigation.test.ts",
     "renderer/components/chat/chat-progress-rendering.test.tsx",

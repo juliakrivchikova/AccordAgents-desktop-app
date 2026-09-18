@@ -35,6 +35,10 @@ import {
   CHAT_RUN_LOCATION_OPTIONS,
   WORKFLOW_MANAGER_ROLE_ID,
   activeChatRoleConfigs,
+  chatParticipantHost,
+  chatProviderOptionId,
+  chatProviderOptionPatch,
+  chatProviderOptions,
   normalizeChatRunLocation,
   updateChatParticipantDraft
 } from "./chat-participant-drafts";
@@ -53,6 +57,8 @@ export function ChatParticipantDraftRow(props: {
   onRemove?: () => void;
 }): JSX.Element {
   const cliProviders = props.settings.providers.filter((provider) => isCliProviderKind(provider.kind));
+  const hosts = props.settings.cliProviderHosts ?? [];
+  const draftHost = chatParticipantHost(props.draft, hosts);
   const roleOptions = activeChatRoleConfigs(props.settings).map((role) => ({ value: role.id, label: role.label }));
   const avatarId = normalizedChatAvatarId(props.draft.kind, props.draft.avatarId, props.draft.handle);
   const avatarOptions = chatAvatarOptionsForKind(props.draft.kind);
@@ -94,18 +100,21 @@ export function ChatParticipantDraftRow(props: {
       </FormRow>
       <FormRow label="CLI">
         <AppSelect
-          value={props.draft.kind}
+          value={chatProviderOptionId(props.draft.kind, draftHost?.id)}
           placeholder="Select CLI"
           ariaLabel="Member CLI"
-          options={cliProviders.map((provider) => {
-            const health = props.agents.find((agent) => agent.kind === provider.kind);
+          options={chatProviderOptions(cliProviders.map((provider) => provider.kind).filter(isCliProviderKind), hosts).map((option) => {
+            const provider = cliProviders.find((item) => item.kind === option.kind);
+            const health = props.agents.find((agent) => agent.kind === option.kind);
+            const label = option.host ? option.label : provider?.label ?? option.label;
+            const missingKey = option.host ? !option.host.hasApiKey : false;
             return {
-              value: provider.kind,
-              label: `${provider.label}${health?.installed ? "" : " (missing)"}`,
+              value: option.id,
+              label: `${label}${health?.installed ? "" : " (missing)"}${missingKey ? " (no API key)" : ""}`,
               disabled: !health?.installed
             };
           })}
-          onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { kind: value as ChatProviderKind }))}
+          onValueChange={(value) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, chatProviderOptionPatch(value, props.draft, hosts)))}
         />
       </FormRow>
       {props.draft.kind === "codex-cli" && (
@@ -124,6 +133,7 @@ export function ChatParticipantDraftRow(props: {
       <FormRow label="Model">
         <ChatModelPicker
           kind={props.draft.kind}
+          host={draftHost}
           model={props.draft.model}
           onChange={(model) => props.onChange({ ...props.draft, model })}
         />
@@ -131,6 +141,7 @@ export function ChatParticipantDraftRow(props: {
       <FormRow label="Reasoning">
         <ChatReasoningEffortPicker
           kind={props.draft.kind}
+          host={draftHost}
           model={props.draft.model}
           reasoningEffort={props.draft.reasoningEffort}
           onChange={(reasoningEffort) => props.onChange(updateChatParticipantDraft(props.draft, props.settings, { reasoningEffort }))}
