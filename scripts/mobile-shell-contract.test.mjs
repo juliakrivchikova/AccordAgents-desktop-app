@@ -87,6 +87,12 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(shared, /isChatMessageHiddenFromTimeline/);
   assert.ok(html.indexOf('src="mobile-shared.js') < html.indexOf('src="mobile-app.js'), "the shared rules load before the app");
   assert.ok(worker.includes("./mobile-shared.js?v="), "service worker must precache the shared rules");
+  // Activity's rules: without them an installed phone opened offline or on a
+  // stale cache would show empty lists and a zero badge without any error.
+  await readFile(path.join(repoRoot, "dist/mobile/mobile-activity.js"), "utf8");
+  assert.ok(worker.includes("./mobile-activity.js?v=${ASSET_VERSION}"), "service worker must precache the Activity rules at the shell's version");
+  assert.ok(html.indexOf('src="mobile-activity.js') > 0 &&
+    html.indexOf('src="mobile-activity.js') < html.indexOf('src="mobile-app.js'), "the Activity rules load before the app");
   assert.doesNotMatch(app, /assets\/avatars\/(claude|codex)-(bunny|cat|dog|frog|hamster)\.png/, "the app names no avatar file itself; the catalog does");
   const { CHAT_AVATAR_CATALOG, chatAvatarAssetFileName } = await import(pathToFileURL(path.join(repoRoot, "dist/main/shared/chatAvatarCatalog.js")).href);
   for (const entry of CHAT_AVATAR_CATALOG) {
@@ -133,9 +139,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(html, /<meta name="viewport"[^>]*viewport-fit=cover/);
   const assetVersion = /const ASSET_VERSION = "([^"]+)"/.exec(worker)?.[1];
   assert.ok(assetVersion, "service worker must declare an asset version");
-  const htmlAssetVersions = [...html.matchAll(/(?:mobile-app\.css|jsqr\.js|mobile-shared\.js|mobile-app\.js)\?v=([^"']+)/g)]
+  const htmlAssetVersions = [...html.matchAll(/(?:mobile-app\.css|jsqr\.js|mobile-shared\.js|mobile-activity\.js|mobile-app\.js)\?v=([^"']+)/g)]
     .map((match) => match[1]);
-  assert.deepEqual(htmlAssetVersions, [assetVersion, assetVersion, assetVersion, assetVersion]);
+  assert.deepEqual(htmlAssetVersions, [assetVersion, assetVersion, assetVersion, assetVersion, assetVersion]);
   assert.match(html, /data-screen-label="Mobile control"/);
   assert.match(html, /id="chats-screen"/);
   assert.match(html, />Chats</);
@@ -455,7 +461,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /renderMessageContentIfChanged/);
   assert.doesNotMatch(app, /list\.textContent = ""/);
   assert.match(app, /const flushResult = await flushOutbox\(\);\n\s*await pollMailboxTimeline\(\)\.catch/);
-  assert.match(app, /requestTimelineViaRelay\(pairing, chat\.id\)[\s\S]+pollMailboxTimeline\(\)\.catch/);
+  // Opening a chat, from the list or from Activity, goes through one helper.
+  assert.match(app, /function openConversation\(conversationId, options\)[\s\S]+requestTimelineViaRelay\(pairing, conversationId\)[\s\S]+pollMailboxTimeline\(\)\.catch/);
+  assert.match(app, /row\.addEventListener\("click", function \(\) \{\s*(void )?openConversation\(chat\.id\)/);
   assert.match(app, /globalThis\.AccordAgentsMobile/);
 });
 

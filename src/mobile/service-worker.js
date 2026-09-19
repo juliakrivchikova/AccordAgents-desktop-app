@@ -1,4 +1,4 @@
-const ASSET_VERSION = "2026-09-18-pwa-parity-v1";
+const ASSET_VERSION = "2026-09-19-pwa-activity-v1";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
 const CACHE_NAME = `accordagents-mobile-shell-v70-${ASSET_VERSION}`;
@@ -18,6 +18,7 @@ const APP_SHELL = [
   "./mobile-machine-sealing.js?v=2026-09-07-pair-sealing-v1",
   `./mobile-machine-channel.js?v=${ASSET_VERSION}`,
   `./mobile-shared.js?v=${ASSET_VERSION}`,
+  `./mobile-activity.js?v=${ASSET_VERSION}`,
   "./manifest.webmanifest",
   "./assets/accordagents-mark.png"
 ];

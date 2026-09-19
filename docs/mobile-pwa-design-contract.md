@@ -66,3 +66,51 @@ chevron. Phone-only, because the phone is reopened many times a day: the fold is
 remembered across launches, and a folded header shows how many chats it holds
 and the unread dot when one of them has news. While a search is open the headers
 are plain labels and every match is shown.
+
+## Bottom bar, Activity and Settings (2026-09-19)
+
+Decided by the User on 2026-09-19: the phone gets a bottom bar, option B of the
+proposal — a floating capsule with Chats · Activity · Settings and search on its
+own round button beside it, as Slack does it. The bar shows only on those three
+home screens of a paired phone; inside a chat it is gone, and it steps aside
+while a choice opened from Activity is on screen and while the chat search is
+open. The Chats header no longer carries the search button; the bar's button
+opens the chat search, switching to Chats first when another tab is open.
+
+Activity is built on the phone from what the relay already delivered — the
+timeline rows every `mobile.timeline.events` batch stores and the cards riding
+with them (`src/mobile/mobile-activity.js`). Nothing new is asked of the desktop.
+Only chats in the desktop's chat list are shown; a batch for a chat the phone's
+list does not have yet asks for the list again. Its three lists follow the
+desktop's Activity:
+
+- Running — a member run still in progress, one row per run and member, with a
+  small round stop (44px to tap). A row that reached the phone well before a
+  chat list saying nothing runs in that chat is a run the phone never saw end,
+  and is left out.
+- Pending — a permission or a choice a member is waiting on. A permission is
+  answered in the row (Allow/Deny) and so shows every word of what is being
+  allowed, line breaks kept, with the machine it will run on; one tap answers
+  it and the other option goes dead. A choice shows its question and opens in
+  full: the message it belongs to, then the chat's own card laid out for
+  reading — options stacked at full width because they are whole sentences,
+  "Answer in your own words", and Cancel.
+- Finished — finished member messages from the last 7 days, one row per chat
+  and member, with a count badge when the row stands for more than one run
+  (accent while unseen, grey once seen). The message a waiting question belongs
+  to is listed under Pending only.
+
+Every row reads "<chat title> by @handle" on its first line (the handle in the
+plain weight), then the message; the whole row opens its chat, or the thread the
+update is in. A finished update counts as seen once its chat was opened on the
+phone after the update reached the phone — both times on the phone's own clock,
+never compared with a desktop stamp. The list tab is chosen once (Pending when
+something waits, else Running, else Finished) and then kept until the User
+changes it, so rows do not move under a finger; a tap that lands within a
+moment of the list being redrawn is ignored. The Activity tab's number is what
+waits for the User plus the finished updates not seen yet.
+
+Settings holds only what the phone can do about itself: the pairing, message
+alerts (offered while undecided, otherwise described — iOS does not let a web
+app switch its own alerts off, so there is no switch), and waking the cloud
+machine when the pairing carries the key for it.
