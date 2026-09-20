@@ -142,8 +142,7 @@ test("retrying a stale revision preserves the edit and note when its base identi
   const detail = publishedDetail("retry-artifact", "Retry", "original", false);
   const props: Parameters<typeof ArtifactDetailView>[0] = {
     detail, drafts: [], mode: "revise", busy: false, canEdit: true, canSign: false, alreadySigned: false,
-    reviseBase: 1, showDiff: false, renaming: false, renameValue: "", onRenameValueChange: noop,
-    onStartRename: noop, onCancelRename: noop, onSubmitRename: noop, onStartRevise: noop,
+    reviseBase: 1, showDiff: false, onStartRevise: noop,
     onSubmitRevise: (content, note) => { saved.push([content, note]); }, onCancelForm: noop, onSign: noop,
     onShowVersion: noop, onShowDiffChange: noop, onRetryDrafts: noop
   };

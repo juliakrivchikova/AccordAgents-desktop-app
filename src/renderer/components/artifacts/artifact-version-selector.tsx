@@ -19,11 +19,26 @@ export interface ArtifactSubtitleParts {
   suffix: string;
 }
 
+const VERSION_PREFIX = "version:";
+const DRAFT_PREFIX = "draft:";
+
+export function artifactVersionEntryValue(version: number): string {
+  return `${VERSION_PREFIX}${version}`;
+}
+
+export function artifactDraftEntryValue(draftId: string): string {
+  return `${DRAFT_PREFIX}${draftId}`;
+}
+
 function formatWhen(value: string): string {
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp)
     ? new Date(timestamp).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
     : value;
+}
+
+export function artifactDraftLabel(draft: ArtifactDraftView): string {
+  return `Draft by ${artifactMemberLabel(draft.author)}`;
 }
 
 function draftStateLabel(draft: ArtifactDraftView): string {
@@ -39,7 +54,7 @@ export function artifactPickerEntries(props: {
 }): { versions: ArtifactPickerEntry[]; drafts: ArtifactPickerEntry[] } {
   const required = props.requiredSigners ?? [];
   const versions = [...props.history].sort((left, right) => right.version - left.version).map((version) => ({
-    value: `version:${version.version}`,
+    value: artifactVersionEntryValue(version.version),
     title: `v${version.version}${version.version === props.headVersion ? " · Current" : ""}`,
     meta: `${artifactMemberLabel(version.author)} · ${formatWhen(version.createdAt)}`,
     note: version.note,
@@ -48,8 +63,8 @@ export function artifactPickerEntries(props: {
       : undefined
   }));
   const drafts = props.drafts.map((draft) => ({
-    value: `draft:${draft.id}`,
-    title: `Draft by ${artifactMemberLabel(draft.author)}`,
+    value: artifactDraftEntryValue(draft.id),
+    title: artifactDraftLabel(draft),
     meta: `${draftStateLabel(draft)} · ${formatWhen(draft.submittedAt ?? draft.updatedAt)}`
   }));
   return { versions, drafts };
@@ -60,12 +75,18 @@ export function selectArtifactPickerEntry(
   onShowVersion: (version: number) => void,
   onShowDraft: (draftId: string) => void
 ): void {
-  if (value.startsWith("version:")) {
-    onShowVersion(Number(value.slice("version:".length)));
+  if (value.startsWith(VERSION_PREFIX)) {
+    const version = Number(value.slice(VERSION_PREFIX.length));
+    if (Number.isFinite(version)) {
+      onShowVersion(version);
+    }
     return;
   }
-  if (value.startsWith("draft:")) {
-    onShowDraft(value.slice("draft:".length));
+  if (value.startsWith(DRAFT_PREFIX)) {
+    const draftId = value.slice(DRAFT_PREFIX.length);
+    if (draftId) {
+      onShowDraft(draftId);
+    }
   }
 }
 
@@ -80,10 +101,15 @@ export function artifactSubtitleParts(input: {
   updatedLabel: string;
 }): ArtifactSubtitleParts {
   const archived = input.archived ? "Archived · " : "";
-  const draftLabel = input.draft ? `Draft by ${artifactMemberLabel(input.draft.author)}` : "";
+  const draftLabel = input.draft ? artifactDraftLabel(input.draft) : "";
   if (input.lifecycle === "collecting_drafts") {
     const progress = `Collecting drafts ${input.submittedDraftCount}/${input.requiredDraftCount}`;
-    return { prefix: `${archived}${progress}${draftLabel ? " · " : ""}`, strong: draftLabel, suffix: "" };
+    return {
+      prefix: `${archived}${progress}${draftLabel ? " · " : ""}`,
+      strong: draftLabel,
+      // Without the state a withdrawn or superseded draft reads as the live one.
+      suffix: input.draft ? ` · ${draftStateLabel(input.draft)}` : ""
+    };
   }
   if (input.draft) {
     return { prefix: archived, strong: draftLabel, suffix: ` · ${draftStateLabel(input.draft)}` };
@@ -109,9 +135,10 @@ export function ArtifactVersionSelector(props: {
   onShowDraft: (draftId: string) => void;
 }): JSX.Element {
   const selectedEntry = props.selectedDraftId
-    ? `draft:${props.selectedDraftId}`
-    : props.selectedVersion !== undefined ? `version:${props.selectedVersion}` : "";
+    ? artifactDraftEntryValue(props.selectedDraftId)
+    : props.selectedVersion !== undefined ? artifactVersionEntryValue(props.selectedVersion) : "";
   const entries = artifactPickerEntries(props);
+  const isEmpty = entries.versions.length === 0 && entries.drafts.length === 0;
   const selectEntry = (value: string): void => selectArtifactPickerEntry(value, props.onShowVersion, props.onShowDraft);
 
   return (
@@ -124,6 +151,11 @@ export function ArtifactVersionSelector(props: {
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content className="artifact-menu artifact-version-menu" align="start" sideOffset={6} collisionPadding={12}>
+          {isEmpty && (
+            <DropdownMenu.Item className="artifact-menu-item" disabled>
+              <span className="artifact-menu-item-label">No versions or drafts yet</span>
+            </DropdownMenu.Item>
+          )}
           <DropdownMenu.RadioGroup value={selectedEntry} onValueChange={selectEntry}>
             {entries.versions.length > 0 && <DropdownMenu.Label className="artifact-menu-label">Versions</DropdownMenu.Label>}
             {entries.versions.map((entry) => <ArtifactPickerRow key={entry.value} entry={entry} />)}

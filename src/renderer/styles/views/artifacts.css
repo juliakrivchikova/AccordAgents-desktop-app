@@ -125,9 +125,6 @@
   margin-left: auto;
 }
 
-
-
-
 .artifact-approval {
   font-size: 11px;
   white-space: nowrap;
@@ -178,9 +175,6 @@
   color: var(--app-text);
   font-size: 12px;
 }
-
-
-
 
 .artifact-rename-row {
   display: flex;
@@ -254,13 +248,6 @@
 .artifact-diff-toggle > input:focus-visible + .artifact-diff-toggle-track {
   box-shadow: var(--focus-ring);
 }
-
-
-
-
-
-
-
 
 .artifact-primary-action,
 .artifact-secondary-action {
@@ -547,7 +534,6 @@
   margin: 0;
 }
 
-
 .artifact-hint {
   font-weight: 400;
   color: var(--app-muted);
@@ -641,12 +627,16 @@
   white-space: normal;
   color: var(--app-muted);
   font-family: var(--font-body);
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 600;
 }
 
 .aap-status .is-done {
   color: var(--app-success);
+}
+
+.aap-status .is-pending {
+  color: var(--app-muted);
 }
 
 .aap-perms {
@@ -1075,29 +1065,9 @@
   overflow-y: auto;
 }
 
-
-
-
 .artifact-draft-empty {
   padding: 12px 16px;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 .artifact-secondary-action.is-signed {
   border-color: var(--app-success-border);
@@ -1438,6 +1408,7 @@
 }
 
 .artifact-version-trigger {
+  min-height: 22px;
   display: inline-flex;
   max-width: 100%;
   align-items: center;
@@ -1468,11 +1439,18 @@
   flex: 0 0 auto;
 }
 
-.artifact-title-trigger:hover,
+.artifact-title-trigger:hover:not(:disabled),
 .artifact-title-trigger[data-state="open"],
-.artifact-version-trigger:hover,
+.artifact-version-trigger:hover:not(:disabled),
 .artifact-version-trigger[data-state="open"] {
   background: var(--app-surface-hover);
+}
+
+.artifact-title-trigger:disabled,
+.artifact-version-trigger:disabled {
+  background: transparent;
+  cursor: default;
+  opacity: 0.55;
 }
 
 /* Inset ring: the header clips overflow, so an outside outline would be cut off. */
@@ -1640,12 +1618,9 @@
   gap: 8px;
   padding: 8px 12px 8px 16px;
   border-bottom: 1px solid var(--app-border);
+  background: var(--app-warning-soft);
   color: var(--app-text);
   font-size: 12.5px;
-}
-
-.artifact-view-notice {
-  background: var(--app-warning-soft);
 }
 
 .artifact-view-notice > svg {
@@ -1674,6 +1649,16 @@
   text-underline-offset: 2px;
   cursor: pointer;
   white-space: nowrap;
+}
+
+.artifact-link-button:hover {
+  text-decoration-thickness: 2px;
+}
+
+.artifact-link-button:focus-visible {
+  outline: none;
+  border-radius: 4px;
+  box-shadow: var(--focus-ring);
 }
 
 .artifact-diff-caption {
@@ -1714,6 +1699,15 @@
   font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
+}
+
+.artifact-fab-segment button:hover:not(.is-selected) {
+  color: var(--app-text-strong);
+}
+
+.artifact-fab-segment button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .artifact-fab-segment button.is-selected {

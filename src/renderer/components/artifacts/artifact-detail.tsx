@@ -12,14 +12,6 @@ export interface ArtifactCompareState {
   diff?: string;
 }
 
-export function formatArtifactTimestamp(value: string): string {
-  const time = Date.parse(value);
-  if (!Number.isFinite(time)) {
-    return value;
-  }
-  return new Date(time).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-}
-
 export function formatArtifactRelativeTimestamp(value: string): string {
   const time = Date.parse(value);
   if (!Number.isFinite(time)) {
@@ -54,12 +46,6 @@ export function ArtifactDetailView(props: {
   reviseBase: number;
   compare?: ArtifactCompareState;
   showDiff: boolean;
-  renaming: boolean;
-  renameValue: string;
-  onRenameValueChange: (value: string) => void;
-  onStartRename: () => void;
-  onCancelRename: () => void;
-  onSubmitRename: () => void;
   onStartRevise: () => void;
   onSubmitRevise: (content: string, note: string | undefined) => void;
   onCancelForm: () => void;
@@ -75,6 +61,12 @@ export function ArtifactDetailView(props: {
   const headVersion = detail.summary.headVersion;
   const viewingOlder = !selectedDraft && props.mode !== "revise" && detail.version.version !== headVersion;
   const needsSignature = !selectedDraft && props.mode !== "revise" && props.canSign && !props.alreadySigned;
+  // A background publish can move the version on screen while a diff for the previous
+  // pair is still in `compare`. Caption, aria-label and body all read from `diffPair`, so
+  // they can never describe one pair while showing another; a mismatch reads as loading
+  // until the panel's recompute lands.
+  const staleDiff = props.compare !== undefined && props.compare.toVersion !== detail.version.version;
+  const diffPair = staleDiff ? undefined : props.compare;
 
   return (
     <div className="artifacts-panel-body artifact-detail" tabIndex={0} aria-label="Artifact details">
@@ -122,7 +114,7 @@ export function ArtifactDetailView(props: {
           {props.showDiff ? (
             <>
               <div className="artifact-diff-caption">
-                Changes from v{detail.version.version - 1} to v{detail.version.version} ·{" "}
+                {diffPair ? <>Changes from v{diffPair.fromVersion} to v{diffPair.toVersion}</> : <>Changes</>} ·{" "}
                 <button
                   type="button"
                   className="artifact-link-button"
@@ -132,19 +124,19 @@ export function ArtifactDetailView(props: {
                   Show content
                 </button>
               </div>
-              {props.compare?.diff !== undefined ? (
+              {diffPair?.diff !== undefined ? (
                 <pre
                   className="artifact-diff-pre"
                   data-testid="artifact-version-diff"
-                  aria-label={`Changes from v${detail.version.version - 1} to v${detail.version.version}`}
+                  aria-label={`Changes from v${diffPair.fromVersion} to v${diffPair.toVersion}`}
                 >
-                  {props.compare.diff.split("\n").map((line, index) => (
+                  {diffPair.diff.split("\n").map((line, index) => (
                     <span key={index} className={diffLineClass(line)}>{line || " "}{"\n"}</span>
                   ))}
                 </pre>
               ) : (
                 <div className="artifact-diff-loading" role="status">
-                  {props.busy ? "Loading diff…" : "Diff unavailable."}
+                  {props.busy || staleDiff ? "Loading diff…" : "Diff unavailable."}
                 </div>
               )}
             </>

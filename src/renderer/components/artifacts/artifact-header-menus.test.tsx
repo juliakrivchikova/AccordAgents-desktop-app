@@ -94,8 +94,7 @@ test("a pending signature is a shortcut next to edit, not an extra line", () => 
   let signed = 0;
   const props: Parameters<typeof ArtifactDetailView>[0] = {
     detail, drafts: [], mode: "view", busy: false, canEdit: true, canSign: true, alreadySigned: false, reviseBase: 3,
-    showDiff: false, renaming: false, renameValue: "", onRenameValueChange: noop, onStartRename: noop, onCancelRename: noop,
-    onSubmitRename: noop, onStartRevise: noop, onSubmitRevise: noop, onCancelForm: noop, onSign: () => { signed += 1; },
+    showDiff: false, onStartRevise: noop, onSubmitRevise: noop, onCancelForm: noop, onSign: () => { signed += 1; },
     onShowVersion: noop, onShowDiffChange: noop, onRetryDrafts: noop
   };
   const renderer = create(<TooltipProvider><ArtifactDetailView {...props} /></TooltipProvider>);

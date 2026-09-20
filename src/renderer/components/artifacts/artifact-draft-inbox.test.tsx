@@ -66,6 +66,7 @@ test("collecting artifact header shows draft progress instead of a version", () 
     requiredDraftCount: 2,
     updatedLabel: "Updated 3d ago"
   });
-  assert.equal(`${parts.prefix}${parts.strong}${parts.suffix}`, "Collecting drafts 2/2 · Draft by @drew");
+  // The state matters: a withdrawn or superseded draft must not read as the live one.
+  assert.equal(`${parts.prefix}${parts.strong}${parts.suffix}`, "Collecting drafts 2/2 · Draft by @drew · Submitted");
   assert.doesNotMatch(`${parts.prefix}${parts.strong}${parts.suffix}`, /v0/);
 });

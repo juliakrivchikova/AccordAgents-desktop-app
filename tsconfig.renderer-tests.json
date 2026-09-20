@@ -15,6 +15,7 @@
     "src/renderer/components/chat/chat-composer-plugin-token.test.ts",
     "src/renderer/components/chat/chat-participant-drafts.test.ts",
     "src/renderer/components/artifacts/artifact-drafts.test.tsx",
+    "src/renderer/components/artifacts/artifacts-panel-selection.test.tsx",
     "src/renderer/components/artifacts/artifact-navigation.test.ts",
     "src/renderer/components/artifacts/artifact-revise-preview.test.tsx",
     "src/renderer/components/artifacts/artifact-draft-inbox.test.tsx",

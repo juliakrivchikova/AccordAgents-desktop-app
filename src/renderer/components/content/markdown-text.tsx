@@ -187,7 +187,9 @@ MarkdownText.displayName = "MarkdownText";
 function renderMarkdownBlock(block: MarkdownBlock, index: number, recognizedCommand?: "goal"): ReactNode {
   if (block.type === "heading") {
     return (
-      <h4 key={index} className={`markdown-heading markdown-heading-${block.level}`}>
+      // Every level renders as h4 so the element never competes with the surrounding
+      // page structure; aria-level carries the real depth so heading navigation is not flat.
+      <h4 key={index} className={`markdown-heading markdown-heading-${block.level}`} aria-level={block.level + 3}>
         {renderInlineWithBreaks(block.text, `h-${index}`, recognizedCommand)}
       </h4>
     );

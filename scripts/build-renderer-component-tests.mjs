@@ -16,6 +16,7 @@ await build({
     "renderer/components/chat/chat-composer-plugin-token.test.ts",
     "renderer/components/chat/chat-participant-drafts.test.ts",
     "renderer/components/artifacts/artifact-drafts.test.tsx",
+    "renderer/components/artifacts/artifacts-panel-selection.test.tsx",
     "renderer/components/artifacts/artifact-navigation.test.ts",
     "renderer/components/artifacts/artifact-revise-preview.test.tsx",
     "renderer/components/artifacts/artifact-draft-inbox.test.tsx",

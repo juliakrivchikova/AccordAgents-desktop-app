@@ -23,7 +23,9 @@ export interface ArtifactActionsMenuProps {
   onArchivedChange: (archived: boolean) => void;
 }
 
-// Which actions the title menu offers; edit and copy stay on the content itself.
+// Which actions the title menu offers. Edit and copy stay on the content itself; Sign is
+// deliberately in both places — here for discoverability, and as a shortcut on the content
+// surface — so the two share one gate in the panel (see menuSignVersion).
 export function artifactMenuActions(props: Pick<ArtifactActionsMenuProps, "signVersion" | "canRename" | "canManage" | "archived">): ArtifactMenuAction[] {
   const actions: ArtifactMenuAction[] = [];
   if (props.signVersion !== undefined) {
@@ -50,7 +52,7 @@ export function ArtifactActionsMenu(props: ArtifactActionsMenuProps): JSX.Elemen
           type="button"
           className="artifact-title-trigger"
           data-testid="artifact-actions-menu"
-          data-artifact-access-trigger="true"
+          title={props.title}
         >
           <span>{props.title}</span>
           {props.approved && <ArtifactApprovedMark />}
@@ -94,7 +96,7 @@ export function ArtifactActionsMenu(props: ArtifactActionsMenuProps): JSX.Elemen
                 <Pencil aria-hidden /><span className="artifact-menu-item-label">Rename</span>
               </DropdownMenu.Item>
             ) : (
-              <DropdownMenu.Item key={action} className="artifact-menu-item" onSelect={props.onOpenAccess}>
+              <DropdownMenu.Item key={action} className="artifact-menu-item" disabled={props.busy} onSelect={props.onOpenAccess}>
                 <UsersRound aria-hidden /><span className="artifact-menu-item-label">Members &amp; access</span>
               </DropdownMenu.Item>
             )

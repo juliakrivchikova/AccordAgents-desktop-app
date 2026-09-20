@@ -1,7 +1,7 @@
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, FilePlus2, FileText, X } from "lucide-react";
 import { ARTIFACT_USER_MEMBER } from "../../../shared/types";
-import { artifactApprovalShortLabel, artifactMemberLabel } from "../../../shared/artifacts";
+import { artifactMemberLabel, artifactSummaryStatusLabel } from "../../../shared/artifacts";
 import type {
   ArtifactError,
   ArtifactDraftView,
@@ -39,6 +39,9 @@ export function ArtifactsPanel(props: {
   const [draftError, setDraftError] = useState<ArtifactError | undefined>(undefined);
   const [viewVersion, setViewVersion] = useState<number | undefined>(undefined);
   const [selectedDraftId, setSelectedDraftId] = useState<string | undefined>(undefined);
+  // Which artifact the loaded `drafts` list belongs to. The published-lifecycle list
+  // arrives one IPC round trip after `detail`, so an id alone cannot say "loaded".
+  const [draftsFor, setDraftsFor] = useState<string | undefined>(undefined);
   const [reviseBase, setReviseBase] = useState(1);
   const [reviseIdentity, setReviseIdentity] = useState<{ versionEventId: string; contentHash: string }>();
   const [busy, setBusy] = useState(false);
@@ -71,12 +74,17 @@ export function ArtifactsPanel(props: {
         onReadError: (nextError) => {
           setDetail(undefined);
           setDrafts([]);
+          setDraftsFor(undefined);
           setDraftError(undefined);
           setError(nextError);
         },
         onDetail: setDetail,
         onDrafts: (nextDrafts, nextError) => {
-          setDrafts(nextDrafts);
+          // A failed list arrives as an empty array. Keeping the drafts already on hand
+          // means the reader does not lose the draft they are reading to a transient IPC
+          // failure; the error banner reports it and Retry reloads the list.
+          setDrafts((current) => nextError ? current : nextDrafts);
+          setDraftsFor(artifactId);
           setDraftError(nextError);
         }
       }
@@ -129,6 +137,7 @@ export function ArtifactsPanel(props: {
     setRenaming(false);
     setAccessOpen(false);
     setDrafts([]);
+    setDraftsFor(undefined);
     setDraftError(undefined);
     clearTransient();
     if (props.selectedId) {
@@ -146,16 +155,25 @@ export function ArtifactsPanel(props: {
       void loadDetail(props.selectedId, viewVersion);
     }
   }, [selectedSummary, props.selectedId, viewVersion, loadDetail]);
-  // A picked draft that disappears (withdrawn, superseded) falls back to the version view.
+  // A picked draft whose id is gone from a trusted list falls back to the version view.
+  // Withdrawing or superseding a draft does NOT remove it: the server keeps the row
+  // (state becomes "withdrawn"/"superseded") and listDrafts returns every state, so the
+  // picker still offers them and this guard must not treat them as gone. It must also
+  // not fire on a list we cannot trust — a failed listArtifactDrafts reports an empty
+  // array alongside draftError, and the published list lands after `detail` does.
   useEffect(() => {
-    if (!selectedDraftId || !detail) {
+    if (!selectedDraftId || !detail || draftError) {
       return;
     }
-    const available = detail.lifecycle === "collecting_drafts" ? detail.drafts : drafts;
+    const collecting = detail.lifecycle === "collecting_drafts";
+    if (!collecting && draftsFor !== detail.summary.id) {
+      return;
+    }
+    const available = collecting ? detail.drafts : drafts;
     if (!available.some((draft) => draft.id === selectedDraftId)) {
       setSelectedDraftId(undefined);
     }
-  }, [detail, drafts, selectedDraftId]);
+  }, [detail, drafts, draftsFor, draftError, selectedDraftId]);
   useEffect(() => {
     if (!detail?.summary.archivedAt) {
       return;
@@ -312,6 +330,9 @@ export function ArtifactsPanel(props: {
   }
   function showDraft(draftId: string): void {
     setSelectedDraftId(draftId);
+    // Drop any older-version pin, so the refresh effect stops re-reading that version
+    // underneath the draft and dismissing the draft returns the reader to the head.
+    setViewVersion(undefined);
     setShowDiff(false);
     setCompare(undefined);
     compareGeneration.current += 1;
@@ -375,8 +396,12 @@ export function ArtifactsPanel(props: {
       ? detail.drafts.find((draft) => draft.id === selectedDraftId) ?? detail.drafts[0]
       : drafts.find((draft) => draft.id === selectedDraftId);
   const signedViewed = publishedDetail ? publishedDetail.version.signatures.some((signature) => signature.signer === me) : false;
-  const menuSignVersion = publishedDetail && !isArchived && mode !== "revise" && !selectedDraft && !signedViewed
-    && publishedDetail.summary.approval.requiredSigners.includes(me) ? publishedDetail.version.version : undefined;
+  // `!showDiff` keeps the menu item and the content-surface shortcut on the same gate:
+  // the shortcut only renders in the content view, and diffBusy can only be true while
+  // the Changes view is open, so this also removes the busy-state mismatch between them.
+  const menuSignVersion = publishedDetail && !isArchived && mode !== "revise" && !selectedDraft && !showDiff
+    && !signedViewed && publishedDetail.summary.approval.requiredSigners.includes(me)
+    ? publishedDetail.version.version : undefined;
   const subtitle = detail ? artifactSubtitleParts({
     lifecycle: detail.lifecycle,
     archived: isArchived,
@@ -387,10 +412,9 @@ export function ArtifactsPanel(props: {
     updatedLabel: `Updated ${formatArtifactRelativeTimestamp(detail.summary.updatedAt)}`
   }) : undefined;
   const menuMeta = detail ? [
+    detail.summary.name,
     `Owned by ${artifactMemberLabel(detail.summary.owner)}`,
-    detail.lifecycle === "collecting_drafts"
-      ? `Collecting drafts · ${detail.summary.submittedDraftCount}/${detail.summary.requiredDraftCount} submitted`
-      : `v${detail.summary.headVersion} · ${artifactApprovalShortLabel(detail.summary.approval)} · Updated ${formatArtifactRelativeTimestamp(detail.summary.updatedAt)}`
+    `${artifactSummaryStatusLabel(detail.summary)} · Updated ${formatArtifactRelativeTimestamp(detail.summary.updatedAt)}`
   ] : [];
   return (
     <div ref={panelResize.panelRef} className="artifacts-panel" data-resizing={panelResize.resizing ? "true" : undefined}
@@ -452,7 +476,7 @@ export function ArtifactsPanel(props: {
                   triggerRef={accessButtonRef}
                   onSign={() => void submitSign()}
                   onRename={() => { setRenameValue(detail.summary.name); setRenaming(true); }}
-                  onOpenAccess={() => { clearTransient(); setAccessOpen(true); }}
+                  onOpenAccess={() => { clearTransient(); setAccessOpen((open) => !open); }}
                   onArchivedChange={(archived) => void submitArchived(archived)}
                 />
               </h3>
@@ -588,12 +612,6 @@ export function ArtifactsPanel(props: {
           reviseBase={reviseBase}
           compare={compare}
           showDiff={showDiff}
-          renaming={renaming}
-          renameValue={renameValue}
-          onRenameValueChange={setRenameValue}
-          onStartRename={() => { setRenameValue(detail.summary.name); setRenaming(true); }}
-          onCancelRename={() => setRenaming(false)}
-          onSubmitRename={() => void submitRename()}
           onStartRevise={() => void startRevise()}
           onSubmitRevise={(content, note) => void submitRevise(content, note)}
           onCancelForm={() => { setMode("view"); clearTransient(); }}

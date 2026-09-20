@@ -38,8 +38,7 @@ test("revise preview renders the unsaved edit without leaving revise mode", () =
   let cancelled = 0;
   const props: Parameters<typeof ArtifactDetailView>[0] = {
     detail: publishedDetail("original"), drafts: [], mode: "revise", busy: false, canEdit: true, canSign: false,
-    alreadySigned: false, reviseBase: 1, showDiff: false, renaming: false, renameValue: "", onRenameValueChange: noop,
-    onStartRename: noop, onCancelRename: noop, onSubmitRename: noop, onStartRevise: noop,
+    alreadySigned: false, reviseBase: 1, showDiff: false, onStartRevise: noop,
     onSubmitRevise: (content, note) => { saved.push([content, note]); },
     onCancelForm: () => { cancelled += 1; }, onSign: noop, onShowVersion: noop, onShowDiffChange: noop, onRetryDrafts: noop
   };
