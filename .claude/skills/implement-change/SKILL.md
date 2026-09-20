@@ -1,6 +1,16 @@
 ---
 name: implement-change
-description: Carry ANY change the User asks for through implementation, tests, the gstack review, and real end-to-end QA in the running app or the installed PWA. Invoke this for every request that alters repository behavior or what the User sees, with no exception for size: a one-line CSS tweak, a copy change, a config value, a rename, a bug fix, a new feature. Triggers on implement, build, add, change, update, tweak, adjust, rename, remove, fix, "почини", "поправь", "сделай", "измени", "не работает", and on any follow-up correction to a change already made. If in doubt whether a request is big enough, it is: invoke it. Do not use only for pure questions, status checks, or reading code.
+description: >
+  Carry ANY change the User asks for through implementation, tests, the gstack
+  review, and real end-to-end QA in the running app or the installed PWA.
+  Invoke this for every request that alters repository behavior or what the
+  User sees, with no exception for size: a one-line CSS tweak, a copy change,
+  a config value, a rename, a bug fix, a new feature. Triggers on implement,
+  build, add, change, update, tweak, adjust, rename, remove, fix, "почини",
+  "поправь", "сделай", "измени", "не работает", and on any follow-up
+  correction to a change already made. If in doubt whether a request is big
+  enough, it is: invoke it. Do not use only for pure questions, status checks,
+  or reading code.
 ---
 
 # Implement Change
