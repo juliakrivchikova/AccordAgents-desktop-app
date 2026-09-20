@@ -363,15 +363,17 @@ export function ChatRoleEditorDialog(props: {
             )}
           </div>
 
-          {preview || readOnly ? (
-            <div className={`roles-preview-box ${readOnly ? "is-readonly" : ""}`} data-testid="settings-role-modal-preview-content">
+          {(preview || readOnly) && (
+            <div className={`roles-preview-box markdown-preview ${readOnly ? "is-readonly" : ""}`} data-testid="settings-role-modal-preview-content">
               {trimmedInstructions ? <MarkdownText content={trimmedInstructions} /> : <span>No instructions yet.</span>}
             </div>
-          ) : (
+          )}
+          {!readOnly && (
             <ResizableTextarea
               id="role-editor-instructions"
               className="roles-editor-textarea"
               data-testid="settings-role-modal-instructions"
+              hidden={preview}
               value={instructions}
               maxLength={CHAT_ROLE_INSTRUCTIONS_MAX_CHARS}
               rows={16}

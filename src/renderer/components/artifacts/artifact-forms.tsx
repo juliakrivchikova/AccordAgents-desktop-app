@@ -3,7 +3,7 @@ import { BadgeCheck, Eye, FileText, Pencil } from "lucide-react";
 
 import { artifactMemberLabel, normalizeArtifactMember } from "../../../shared/artifacts";
 import { ARTIFACT_USER_MEMBER } from "../../../shared/types";
-import type { ArtifactSummary } from "../../../shared/types";
+import type { ArtifactDraftView, ArtifactSummary } from "../../../shared/types";
 import { MarkdownText } from "../content/markdown-text";
 import { ResizableTextarea } from "../primitives";
 
@@ -49,21 +49,21 @@ function ArtifactMarkdownEditor(props: {
           </button>
         </span>
       </div>
-      {preview ? (
-        <div className="artifact-content-preview">
+      {preview && (
+        <div className="artifact-content-preview markdown-preview">
           {trimmedValue ? <MarkdownText content={trimmedValue} /> : <span>Nothing to preview yet.</span>}
         </div>
-      ) : (
-        <ResizableTextarea
-          id={props.id}
-          className="artifact-content-editor-textarea"
-          value={props.value}
-          rows={props.rows}
-          maxHeight={420}
-          placeholder={props.placeholder}
-          onChange={(event) => props.onChange(event.target.value)}
-        />
       )}
+      <ResizableTextarea
+        id={props.id}
+        className="artifact-content-editor-textarea"
+        hidden={preview}
+        value={props.value}
+        rows={props.rows}
+        maxHeight={420}
+        placeholder={props.placeholder}
+        onChange={(event) => props.onChange(event.target.value)}
+      />
     </div>
   );
 }
@@ -119,12 +119,51 @@ export function CreateArtifactForm(props: {
   );
 }
 
+interface ArtifactMemberStatus {
+  text: string;
+  done: boolean;
+}
+
+// Who has handed in a draft and who has signed the current version, per member.
+export function artifactMemberStatuses(
+  member: string,
+  summary: ArtifactSummary,
+  drafts: ArtifactDraftView[],
+  requiredDraftAuthors: string[]
+): ArtifactMemberStatus[] {
+  const statuses: ArtifactMemberStatus[] = [];
+  const own = drafts.filter((draft) => normalizeArtifactMember(draft.author) === member);
+  if (own.some((draft) => draft.state === "submitted")) {
+    statuses.push({ text: "Draft submitted", done: true });
+  } else if (own.some((draft) => draft.state === "editing")) {
+    statuses.push({ text: "Draft in progress", done: false });
+  } else if (own.some((draft) => draft.state === "withdrawn")) {
+    statuses.push({ text: "Draft withdrawn", done: false });
+  } else if (requiredDraftAuthors.map(normalizeArtifactMember).includes(member)) {
+    statuses.push({ text: "No draft yet", done: false });
+  }
+  if (summary.lifecycle === "published") {
+    if (summary.approval.signedCurrent.map(normalizeArtifactMember).includes(member)) {
+      statuses.push({ text: `Signed v${summary.headVersion}`, done: true });
+    } else if (summary.approval.requiredSigners.map(normalizeArtifactMember).includes(member)) {
+      statuses.push({ text: `Not signed v${summary.headVersion}`, done: false });
+    }
+  }
+  return statuses;
+}
+
 export function AccessArtifactForm(props: {
   summary: ArtifactSummary;
   members: string[];
+  drafts?: ArtifactDraftView[];
+  requiredDraftAuthors?: string[];
+  readOnly?: boolean;
   busy: boolean;
   onSubmit: (values: ArtifactAccessValues) => Promise<boolean>;
 }): JSX.Element {
+  const drafts = props.drafts ?? [];
+  const requiredDraftAuthors = props.requiredDraftAuthors ?? [];
+  const locked = props.busy || Boolean(props.readOnly);
   const [owner, setOwner] = useState(props.summary.owner);
   const [contributors, setContributors] = useState(props.summary.contributors);
   const [signerMembers, setSignerMembers] = useState(props.summary.approval.requiredSigners);
@@ -132,9 +171,16 @@ export function AccessArtifactForm(props: {
   const savedOwnerMember = props.summary.owner;
   const selectedOwnerMember = normalizeArtifactMember(owner) || savedOwnerMember;
   const canEditSigners = props.summary.lifecycle === "published";
-  const memberRows = [
+  const accessRows = [
     ...new Set([ARTIFACT_USER_MEMBER, savedOwnerMember, selectedOwnerMember, ...props.members, ...contributors, ...signerMembers].map(normalizeArtifactMember).filter(Boolean))
   ];
+  // Draft authors and signers who are no longer in the chat keep their status row,
+  // but the server only accepts current members, so their access can't be edited.
+  const formerRows = [
+    ...new Set([...props.summary.approval.signedCurrent, ...requiredDraftAuthors, ...drafts.map((draft) => draft.author)]
+      .map(normalizeArtifactMember).filter((member) => member && !accessRows.includes(member)))
+  ];
+  const memberRows = [...accessRows, ...formerRows];
   useEffect(() => {
     setOwner(props.summary.owner);
     setContributors(props.summary.contributors);
@@ -165,7 +211,7 @@ export function AccessArtifactForm(props: {
   }
 
   async function toggleContributor(member: string): Promise<void> {
-    if (props.busy || member === ARTIFACT_USER_MEMBER || member === savedOwnerMember) {
+    if (locked || member === ARTIFACT_USER_MEMBER || member === savedOwnerMember || formerRows.includes(member)) {
       return;
     }
     const previous = contributors;
@@ -180,7 +226,7 @@ export function AccessArtifactForm(props: {
   }
 
   async function toggleSigner(member: string): Promise<void> {
-    if (props.busy || !canEditSigners) {
+    if (locked || !canEditSigners) {
       return;
     }
     const previous = signerMembers;
@@ -201,11 +247,12 @@ export function AccessArtifactForm(props: {
     <div className="artifact-access-popover" role="dialog" aria-label="Manage artifact access">
       <div className="aap-head">
         <strong>Manage access</strong>
-        <span>Who can read or edit this artifact</span>
+        <span>{props.readOnly ? "Archived — restore it to change access" : "Who can read or edit this artifact"}</span>
       </div>
       <div className="aap-list">
         {memberRows.map((member) => {
           const isOwner = member === savedOwnerMember;
+          const isFormer = formerRows.includes(member);
           const isUser = member === ARTIFACT_USER_MEMBER;
           const canWrite = isUser || isOwner || contributors.includes(member);
           const tags = [
@@ -214,11 +261,22 @@ export function AccessArtifactForm(props: {
             contributors.includes(member) && !isOwner ? "Editor" : undefined,
             signerMembers.includes(member) ? "Signer" : undefined
           ].filter(Boolean);
+          const statuses = artifactMemberStatuses(member, props.summary, drafts, requiredDraftAuthors);
           return (
             <div className="aap-row" key={member}>
               <span className="aap-name">
                 {artifactMemberLabel(member)}
-                <span className="aap-tag">{tags.join(" · ") || "Viewer"}</span>
+                <span className="aap-tag">{isFormer ? "Not in this chat" : tags.join(" · ") || "Viewer"}</span>
+                {statuses.length > 0 && (
+                  <span className="aap-status" data-testid={`artifact-access-status-${member}`}>
+                    {statuses.map((status, index) => (
+                      <span key={status.text}>
+                        {index > 0 ? " · " : ""}
+                        <span className={status.done ? "is-done" : "is-pending"}>{status.text}</span>
+                      </span>
+                    ))}
+                  </span>
+                )}
               </span>
               <div className="aap-perms">
                 <button type="button" className="aap-perm on" aria-pressed="true" title="All chat members can read artifacts">
@@ -228,19 +286,19 @@ export function AccessArtifactForm(props: {
                   type="button"
                   className={`aap-perm${canWrite ? " on" : ""}`}
                   aria-pressed={canWrite}
-                  disabled={props.busy || isUser || isOwner}
+                  disabled={locked || isUser || isOwner || isFormer}
                   data-testid={`artifact-access-write-${member}`}
                   title={isUser ? "User always keeps write permission" : isOwner ? "Owner can always write" : undefined}
                   onClick={() => void toggleContributor(member)}
                 >
                   <Pencil size={13} aria-hidden /> Write
                 </button>
-                {canEditSigners && (
+                {canEditSigners && !isFormer && (
                   <button
                     type="button"
                     className={`aap-perm${signerMembers.includes(member) ? " on" : ""}`}
                     aria-pressed={signerMembers.includes(member)}
-                    disabled={props.busy}
+                    disabled={locked}
                     data-testid={`artifact-access-sign-${member}`}
                     onClick={() => void toggleSigner(member)}
                   >
@@ -257,11 +315,11 @@ export function AccessArtifactForm(props: {
           <span>Owner</span>
           <select
             value={selectedOwnerMember}
-            disabled={props.busy}
+            disabled={locked}
             data-testid="artifact-access-owner"
             onChange={(event) => setOwner(event.currentTarget.value)}
           >
-            {memberRows.map((member) => (
+            {accessRows.map((member) => (
               <option key={member} value={member}>{artifactMemberLabel(member)}</option>
             ))}
           </select>
@@ -270,21 +328,23 @@ export function AccessArtifactForm(props: {
           <span>Labels</span>
           <input
             value={labels}
-            disabled={props.busy}
+            disabled={locked}
             placeholder="plan, v1"
             data-testid="artifact-access-labels"
             onChange={(event) => setLabels(event.currentTarget.value)}
           />
         </label>
-        <button
-          type="button"
-          className="artifact-secondary-action"
-          disabled={props.busy}
-          data-testid="artifact-access-save-details"
-          onClick={() => void saveDetails()}
-        >
-          Save details
-        </button>
+        {!props.readOnly && (
+          <button
+            type="button"
+            className="artifact-secondary-action"
+            disabled={props.busy}
+            data-testid="artifact-access-save-details"
+            onClick={() => void saveDetails()}
+          >
+            Save details
+          </button>
+        )}
       </div>
     </div>
   );

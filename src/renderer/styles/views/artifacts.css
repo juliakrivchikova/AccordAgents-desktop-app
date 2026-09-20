@@ -113,8 +113,7 @@
   color: var(--app-text-strong);
 }
 
-.artifact-list-meta,
-.artifact-detail-meta {
+.artifact-list-meta {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -126,26 +125,8 @@
   margin-left: auto;
 }
 
-.artifact-version-chip {
-  padding: 1px 6px;
-  border-radius: 999px;
-  border: 1px solid var(--app-border);
-  background: var(--app-surface);
-  font-size: 11px;
-  color: var(--app-muted);
-  white-space: nowrap;
-}
 
-.artifact-draft-chip {
-  border-color: var(--app-border-strong);
-  background: var(--app-surface-muted);
-  color: var(--app-text-strong);
-}
 
-.artifact-draft-progress {
-  font-weight: 600;
-  color: var(--app-text-strong);
-}
 
 .artifact-approval {
   font-size: 11px;
@@ -198,27 +179,8 @@
   font-size: 12px;
 }
 
-.artifact-detail-head {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
 
-.artifact-name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
-  font-size: 15px;
-  font-weight: 650;
-  color: var(--app-text-strong);
-  overflow-wrap: anywhere;
-}
 
-.artifact-people {
-  font-size: 11.5px;
-  color: var(--app-muted);
-}
 
 .artifact-rename-row {
   display: flex;
@@ -293,59 +255,12 @@
   box-shadow: var(--focus-ring);
 }
 
-.artifact-version-selector {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
-  border: 1px solid var(--app-border-strong);
-  border-radius: 10px;
-  background: var(--app-surface-subtle);
-}
 
-.artifact-version-selector-label {
-  color: var(--app-text-strong);
-  font-size: 13px;
-  font-weight: 650;
-}
 
-.artifact-version-selector-control {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
 
-.artifact-version-selector-control select {
-  width: 100%;
-  height: 38px;
-  appearance: none;
-  padding: 0 38px 0 11px;
-  border: 1px solid var(--app-border);
-  border-radius: 8px;
-  background: var(--app-surface);
-  color: var(--app-text-strong);
-  cursor: pointer;
-  font-size: 12.5px;
-  font-weight: 600;
-}
 
-.artifact-version-selector-control select:hover {
-  border-color: var(--app-border-strong);
-  background: var(--app-surface-hover);
-}
 
-.artifact-version-selector-control select:focus-visible {
-  border-color: var(--app-primary);
-  box-shadow: var(--focus-ring);
-  outline: none;
-}
 
-.artifact-version-selector-control > svg {
-  position: absolute;
-  right: 11px;
-  color: var(--app-muted);
-  pointer-events: none;
-}
 
 .artifact-primary-action,
 .artifact-secondary-action {
@@ -382,20 +297,11 @@
   cursor: default;
 }
 
-.artifact-draft-author {
-  color: var(--app-muted);
-  font-size: 12px;
-}
-
-.artifact-draft-author strong {
-  color: var(--app-text-strong);
-  font-weight: 650;
-}
-
 .artifact-draft-unavailable {
   display: grid;
   min-height: 180px;
   flex: 1 1 auto;
+  margin: 12px 16px 16px;
   place-items: center;
   border: 1px solid var(--app-border);
   border-radius: 10px;
@@ -641,6 +547,7 @@
   margin: 0;
 }
 
+
 .artifact-hint {
   font-weight: 400;
   color: var(--app-muted);
@@ -728,6 +635,18 @@
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.aap-status {
+  white-space: normal;
+  color: var(--app-muted);
+  font-family: var(--font-body);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.aap-status .is-done {
+  color: var(--app-success);
 }
 
 .aap-perms {
@@ -1156,150 +1075,29 @@
   overflow-y: auto;
 }
 
-.artifact-detail-head {
-  gap: 9px;
-  padding: 12px 16px 13px;
+
+
+
+.artifact-draft-empty {
+  padding: 12px 16px;
 }
 
-.artifact-people-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  flex-wrap: wrap;
-}
 
-.artifact-people-label {
-  width: 52px;
-  flex: 0 0 52px;
-  color: var(--app-muted);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 16px;
-}
 
-.artifact-people-value,
-.artifact-signer {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-  color: var(--app-text-strong);
-  font-family: var(--font-body);
-  font-size: 12.5px;
-  font-weight: 500;
-  line-height: 17px;
-}
 
-.artifact-signer span {
-  color: var(--app-success);
-  font-family: var(--font-body);
-  font-size: 13px;
-  font-weight: 700;
-}
 
-.artifact-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--app-border);
-}
 
-.artifact-version-selector {
-  min-width: 0;
-  flex: 1 1 auto;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
 
-.artifact-version-selector-label {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-}
 
-.artifact-version-selector-control select {
-  height: 32px;
-  border-radius: 9px;
-  padding-left: 11px;
-  padding-right: 34px;
-  color: var(--app-text-strong);
-  font-family: var(--font-body);
-  font-size: 12.5px;
-  font-weight: 600;
-}
 
-.artifact-version-selector-control svg {
-  right: 11px;
-  width: 16px;
-  height: 16px;
-}
 
-.artifact-diff-segment {
-  display: inline-flex;
-  flex: 0 0 auto;
-  height: 32px;
-  overflow: hidden;
-  border: 1px solid var(--app-border);
-  border-radius: 10px;
-  background: var(--app-surface);
-}
 
-.artifact-edit-segment {
-  flex-basis: 161px;
-}
 
-.artifact-edit-segment button {
-  flex: 1 1 0;
-  justify-content: center;
-}
 
-.artifact-diff-segment button {
-  display: inline-flex;
-  height: 30px;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 0 13px;
-  border: 0;
-  background: transparent;
-  color: var(--app-muted);
-  font-size: 12.5px;
-  font-weight: 500;
-}
 
-.artifact-diff-segment button:first-child {
-  flex: 1 1 auto;
-}
 
-.artifact-diff-segment button:last-child {
-  flex: 1 1 auto;
-}
 
-.artifact-diff-segment button svg {
-  width: 14px;
-  height: 14px;
-}
 
-.artifact-diff-segment button + button {
-  border-left: 1px solid var(--app-border);
-}
-
-.artifact-diff-segment button:hover:not(:disabled) {
-  color: var(--app-text);
-}
-
-.artifact-diff-segment button.is-selected {
-  background: var(--app-surface-subtle);
-  color: var(--app-text-strong);
-  font-weight: 600;
-}
 
 .artifact-secondary-action.is-signed {
   border-color: var(--app-success-border);
@@ -1317,7 +1115,7 @@
 }
 
 .artifact-content-surface > .artifact-content-markdown {
-  padding: 15px 48px 18px 17px;
+  padding: 18px 48px 28px 22px;
   border: 0;
   border-radius: 0;
   background: var(--app-surface);
@@ -1378,14 +1176,13 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  margin-top: 24px;
-  border-left: 4px solid var(--app-success);
-  border-radius: 12px;
-  padding: 12px 16px 13px 13px;
-  background: color-mix(in srgb, var(--app-success) 10%, var(--app-surface));
+  margin-top: 28px;
+  border-radius: 10px;
+  padding: 11px 14px;
+  background: var(--app-success-soft);
   color: var(--app-text);
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: 13.5px;
+  line-height: 1.5;
 }
 
 .artifact-version-note svg {
@@ -1443,28 +1240,162 @@
   color: var(--app-text-strong);
 }
 
+/* Artifact document typography. Everything uses the app's body face, like the chat
+   timeline (15/1.6, --app-text); headings differ by size, weight and color only. */
 .artifact-content-markdown .markdown-text {
-  color: var(--app-text-strong);
-  font-size: 15px;
-  line-height: 1.55;
-}
-
-.artifact-content-markdown .markdown-text h1 {
+  gap: 0;
+  color: var(--app-text);
   font-family: var(--font-body);
   font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0;
+  line-height: 1.6;
 }
 
-.artifact-content-markdown .markdown-text h2 {
-  font-size: 15px;
+.artifact-content-markdown .markdown-text > * + * {
+  margin-top: 12px;
+}
+
+.artifact-revise-preview-empty {
+  color: var(--app-muted);
+}
+
+/* Keep the first block clear of the floating Revise / Copy buttons. */
+.artifact-content-surface .markdown-text > :first-child {
+  margin-right: 32px;
+}
+
+/* A third floating button (Sign) needs a little more room. */
+.artifact-content-surface.has-sign .markdown-text > :first-child {
+  margin-right: 64px;
+}
+
+.artifact-content-markdown .markdown-heading {
+  color: var(--app-text-strong);
+  font-family: var(--font-body);
+  font-weight: 650;
+}
+
+.artifact-content-markdown .markdown-heading-1 {
+  font-size: 22px;
   font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
 }
 
-.artifact-content-markdown .markdown-text code {
+.artifact-content-markdown .markdown-heading-2 {
+  font-size: 17.5px;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+.artifact-content-markdown .markdown-heading-3 {
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.artifact-content-markdown .markdown-text > .markdown-heading-1 + *,
+.artifact-content-markdown .markdown-text > .markdown-heading-2 + * {
+  margin-top: 8px;
+}
+
+.artifact-content-markdown .markdown-text > .markdown-heading-3 + * {
+  margin-top: 6px;
+}
+
+.artifact-content-markdown .markdown-text > .markdown-heading-1:not(:first-child) {
+  margin-top: 32px;
+}
+
+.artifact-content-markdown .markdown-text > .markdown-heading-2:not(:first-child) {
+  margin-top: 28px;
+}
+
+.artifact-content-markdown .markdown-text > .markdown-heading-3:not(:first-child) {
+  margin-top: 20px;
+}
+
+.artifact-content-markdown .markdown-text > .markdown-heading-1 + .markdown-heading-2,
+.artifact-content-markdown .markdown-text > .markdown-heading-1 + .markdown-heading-3,
+.artifact-content-markdown .markdown-text > .markdown-heading-2 + .markdown-heading-3 {
+  margin-top: 12px;
+}
+
+.artifact-content-markdown .markdown-text strong {
+  color: var(--app-text-strong);
+  font-weight: 650;
+}
+
+.artifact-content-markdown .markdown-list {
+  padding-left: 22px;
+}
+
+.artifact-content-markdown .markdown-list li::marker {
+  color: var(--app-muted-subtle);
+}
+
+.artifact-content-markdown ol.markdown-list li::marker {
+  color: var(--app-muted);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.artifact-content-markdown .markdown-text code,
+.artifact-content-markdown .markdown-text .file-link-inline-code {
+  padding: 1.5px 5px;
   border: 1px solid var(--app-border);
   border-radius: 6px;
   background: var(--app-surface-subtle);
+  font-size: 0.86em;
+}
+
+.artifact-content-markdown .markdown-text code {
+  color: var(--app-text-strong);
+}
+
+.artifact-content-markdown .markdown-code {
+  padding: 10px 12px;
+  border-color: var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text-strong);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.artifact-content-markdown .markdown-code code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: inherit;
+}
+
+/* Tables fit the panel; only genuinely wide tables scroll sideways. */
+.artifact-content-markdown .markdown-table-wrap {
+  width: auto;
+  border-color: var(--app-border);
+  border-radius: 10px;
+}
+
+.artifact-content-markdown .markdown-table {
+  min-width: 0;
+  color: var(--app-text);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+.artifact-content-markdown .markdown-table th,
+.artifact-content-markdown .markdown-table td {
+  padding: 9px 12px;
+  border-right: 0;
+  border-bottom-color: var(--app-border-subtle);
+}
+
+.artifact-content-markdown .markdown-table th {
+  padding-block: 8px;
+  border-bottom-color: var(--app-border);
+  background: var(--app-surface-subtle);
+  color: var(--app-text-strong);
+  font-size: 12.5px;
+  font-weight: 600;
 }
 
 .artifact-diff-pre {
@@ -1472,4 +1403,322 @@
   border: 0;
   border-radius: 0;
   background: var(--app-surface);
+}
+
+/* ------------------------------------------------------------------
+   Detail header: the title opens the actions menu, the line under it
+   picks the version or draft. Both menus render in a portal.
+   ------------------------------------------------------------------ */
+.artifact-title-trigger {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  margin-left: -6px;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text-strong);
+  font: inherit;
+  cursor: pointer;
+}
+
+.artifact-title-trigger > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-title-trigger > svg {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+}
+
+.artifact-version-trigger {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 3px;
+  margin-left: -5px;
+  padding: 0 4px 0 5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.artifact-version-trigger > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-version-trigger strong {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.artifact-version-trigger > svg {
+  flex: 0 0 auto;
+}
+
+.artifact-title-trigger:hover,
+.artifact-title-trigger[data-state="open"],
+.artifact-version-trigger:hover,
+.artifact-version-trigger[data-state="open"] {
+  background: var(--app-surface-hover);
+}
+
+/* Inset ring: the header clips overflow, so an outside outline would be cut off. */
+.artifact-title-trigger:focus-visible,
+.artifact-version-trigger:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--app-accent);
+}
+
+.artifact-menu {
+  z-index: var(--z-popover);
+  display: flex;
+  min-width: 240px;
+  max-width: min(340px, calc(100vw - 24px));
+  flex-direction: column;
+  padding: 5px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: var(--app-surface);
+  box-shadow:
+    0 8px 20px -6px color-mix(in srgb, var(--shadow-color) 14%, transparent),
+    0 24px 48px -12px color-mix(in srgb, var(--shadow-color) 18%, transparent);
+  color: var(--app-text-strong);
+  font-family: var(--font-body);
+}
+
+.artifact-menu-meta {
+  padding: 6px 10px 7px;
+  color: var(--app-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.artifact-menu-label {
+  padding: 6px 10px 3px;
+  color: var(--app-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.artifact-menu-separator {
+  height: 1px;
+  margin: 5px 6px;
+  background: var(--app-border);
+}
+
+.artifact-menu-item {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--app-text-strong);
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  user-select: none;
+}
+
+.artifact-menu-item > svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--app-text);
+}
+
+.artifact-menu-item[data-highlighted] {
+  background: var(--app-surface-hover);
+}
+
+.artifact-menu-item[data-disabled] {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.artifact-menu-item-label {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.artifact-menu-indicator {
+  display: inline-flex;
+  color: var(--app-text-strong);
+}
+
+.artifact-menu-indicator svg {
+  width: 15px;
+  height: 15px;
+}
+
+.artifact-version-menu {
+  width: 320px;
+  max-height: var(--radix-dropdown-menu-content-available-height, 420px);
+  overflow-y: auto;
+}
+
+.artifact-version-item {
+  align-items: flex-start;
+  padding: 8px 10px;
+}
+
+.artifact-menu-check {
+  display: inline-flex;
+  width: 15px;
+  flex: 0 0 auto;
+  padding-top: 2px;
+}
+
+.artifact-version-row {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.artifact-version-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.artifact-version-row-title > span:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-version-row-meta,
+.artifact-version-row-note {
+  overflow-wrap: anywhere;
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.artifact-version-signed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--app-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.artifact-version-signed.is-complete {
+  color: var(--app-success);
+}
+
+/* Contextual line under the header when an older version or a draft is on screen. */
+.artifact-view-notice {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 8px 16px;
+  border-bottom: 1px solid var(--app-border);
+  color: var(--app-text);
+  font-size: 12.5px;
+}
+
+.artifact-view-notice {
+  background: var(--app-warning-soft);
+}
+
+.artifact-view-notice > svg {
+  flex: 0 0 auto;
+  color: var(--app-warning);
+}
+
+.artifact-view-notice > span {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.artifact-view-notice strong {
+  color: var(--app-text-strong);
+  font-weight: 650;
+}
+
+.artifact-link-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-text-strong);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.artifact-diff-caption {
+  flex: 0 0 auto;
+  padding: 12px 22px 4px;
+  color: var(--app-muted);
+  font-size: 12.5px;
+}
+
+/* Revise: Preview / Edit sit with Cancel and Save in a row above the editor. */
+.artifact-edit-surface > .artifact-edit-fabs {
+  position: static;
+  justify-content: flex-end;
+  padding: 10px 12px 0;
+}
+
+.artifact-fab-segment {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 4px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--app-surface-hover);
+}
+
+.artifact-fab-segment button {
+  display: inline-flex;
+  height: 26px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-text);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.artifact-fab-segment button.is-selected {
+  background: var(--app-surface);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--shadow-color) 10%, transparent);
+  color: var(--app-text-strong);
+  font-weight: 600;
 }

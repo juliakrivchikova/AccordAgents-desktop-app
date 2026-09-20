@@ -186,7 +186,11 @@ MarkdownText.displayName = "MarkdownText";
 
 function renderMarkdownBlock(block: MarkdownBlock, index: number, recognizedCommand?: "goal"): ReactNode {
   if (block.type === "heading") {
-    return <h4 key={index}>{renderInlineWithBreaks(block.text, `h-${index}`, recognizedCommand)}</h4>;
+    return (
+      <h4 key={index} className={`markdown-heading markdown-heading-${block.level}`}>
+        {renderInlineWithBreaks(block.text, `h-${index}`, recognizedCommand)}
+      </h4>
+    );
   }
   if (block.type === "code") {
     return (

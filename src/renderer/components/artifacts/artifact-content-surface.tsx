@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, Copy, Info, Pencil } from "lucide-react";
+import { BadgeCheck, CheckCircle2, Copy, Info, Pencil } from "lucide-react";
 
 import { MarkdownText } from "../content/markdown-text";
 import { IconButton } from "../primitives/icon-button";
@@ -10,6 +10,8 @@ export function ArtifactContentSurface(props: {
   note?: string;
   onRevise?: () => void;
   reviseDisabled?: boolean;
+  signLabel?: string;
+  onSign?: () => void;
 }): JSX.Element {
   const [copied, setCopied] = useState(false);
   const resetRef = useRef<number | undefined>(undefined);
@@ -29,8 +31,21 @@ export function ArtifactContentSurface(props: {
   }
 
   return (
-    <div className="artifact-content-surface" data-testid={props.testId}>
+    <div className={`artifact-content-surface${props.onSign ? " has-sign" : ""}`} data-testid={props.testId}>
       <div className="artifact-content-fabs">
+        {props.onSign && (
+          <IconButton
+            className="artifact-content-action"
+            icon={BadgeCheck}
+            label={props.signLabel ?? "Sign"}
+            tooltip={props.signLabel ?? "Sign"}
+            size="xs"
+            variant="ghost"
+            disabled={props.reviseDisabled}
+            data-testid="artifact-sign-shortcut"
+            onClick={props.onSign}
+          />
+        )}
         {props.onRevise && (
           <IconButton
             className="artifact-content-action"

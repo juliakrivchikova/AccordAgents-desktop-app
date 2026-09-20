@@ -11,6 +11,7 @@ const ignoredExtensions = new Set([".avif", ".gif", ".ico", ".jpeg", ".jpg", ".p
 const runtimeCustomProperties = new Set([
   "--bar-height",
   "--chat-thread-width",
+  "--radix-dropdown-menu-content-available-height",
   "--radix-popover-content-available-height",
   "--radix-popover-trigger-width",
   "--segmented-tabs-count",

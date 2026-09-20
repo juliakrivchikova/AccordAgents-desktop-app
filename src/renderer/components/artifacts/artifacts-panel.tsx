@@ -1,6 +1,7 @@
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
-import { Archive, ArrowLeft, FilePlus2, FileText, Pencil, RotateCcw, UsersRound, X } from "lucide-react";
+import { ArrowLeft, FilePlus2, FileText, X } from "lucide-react";
 import { ARTIFACT_USER_MEMBER } from "../../../shared/types";
+import { artifactApprovalShortLabel, artifactMemberLabel } from "../../../shared/artifacts";
 import type {
   ArtifactError,
   ArtifactDraftView,
@@ -10,7 +11,8 @@ import type {
 } from "../../../shared/types";
 import { IconButton } from "../primitives";
 import { ArtifactDetailView, formatArtifactRelativeTimestamp, type ArtifactCompareState } from "./artifact-detail";
-import { ArtifactApprovedMark } from "./artifact-approval-badge";
+import { ArtifactActionsMenu } from "./artifact-actions-menu";
+import { ArtifactVersionSelector, artifactSubtitleParts } from "./artifact-version-selector";
 import { AccessArtifactForm, CreateArtifactForm } from "./artifact-forms";
 import type { ArtifactAccessValues } from "./artifact-forms";
 import { useArtifactsPanelResize } from "./use-artifacts-panel-resize";
@@ -36,6 +38,7 @@ export function ArtifactsPanel(props: {
   const [drafts, setDrafts] = useState<ArtifactDraftView[]>([]);
   const [draftError, setDraftError] = useState<ArtifactError | undefined>(undefined);
   const [viewVersion, setViewVersion] = useState<number | undefined>(undefined);
+  const [selectedDraftId, setSelectedDraftId] = useState<string | undefined>(undefined);
   const [reviseBase, setReviseBase] = useState(1);
   const [reviseIdentity, setReviseIdentity] = useState<{ versionEventId: string; contentHash: string }>();
   const [busy, setBusy] = useState(false);
@@ -118,6 +121,7 @@ export function ArtifactsPanel(props: {
   useEffect(() => {
     setMode("view");
     setViewVersion(undefined);
+    setSelectedDraftId(undefined);
     setShowDiff(false);
     setCompare(undefined);
     compareGeneration.current += 1;
@@ -142,6 +146,16 @@ export function ArtifactsPanel(props: {
       void loadDetail(props.selectedId, viewVersion);
     }
   }, [selectedSummary, props.selectedId, viewVersion, loadDetail]);
+  // A picked draft that disappears (withdrawn, superseded) falls back to the version view.
+  useEffect(() => {
+    if (!selectedDraftId || !detail) {
+      return;
+    }
+    const available = detail.lifecycle === "collecting_drafts" ? detail.drafts : drafts;
+    if (!available.some((draft) => draft.id === selectedDraftId)) {
+      setSelectedDraftId(undefined);
+    }
+  }, [detail, drafts, selectedDraftId]);
   useEffect(() => {
     if (!detail?.summary.archivedAt) {
       return;
@@ -210,6 +224,7 @@ export function ArtifactsPanel(props: {
     if (value) {
       setMode("view");
       setViewVersion(undefined);
+      setSelectedDraftId(undefined);
       setShowDiff(false);
       setCompare(undefined);
       compareGeneration.current += 1;
@@ -282,16 +297,101 @@ export function ArtifactsPanel(props: {
       void loadDetail(detail.summary.id, viewVersion);
     }
   }
+  function showVersion(version: number): void {
+    if (!detail) {
+      return;
+    }
+    const target = version === detail.summary.headVersion ? undefined : version;
+    setSelectedDraftId(undefined);
+    setViewVersion(target);
+    setShowDiff(false);
+    setCompare(undefined);
+    compareGeneration.current += 1;
+    setDiffBusy(false);
+    void loadDetail(detail.summary.id, target);
+  }
+  function showDraft(draftId: string): void {
+    setSelectedDraftId(draftId);
+    setShowDiff(false);
+    setCompare(undefined);
+    compareGeneration.current += 1;
+    setDiffBusy(false);
+  }
+  function changeShowDiff(nextShowDiff: boolean): void {
+    if (!detail || detail.lifecycle !== "published") {
+      return;
+    }
+    const generation = ++compareGeneration.current;
+    setShowDiff(nextShowDiff);
+    setCompare(undefined);
+    if (!nextShowDiff || detail.version.version <= 1) {
+      setDiffBusy(false);
+      return;
+    }
+    const fromVersion = detail.version.version - 1;
+    const toVersion = detail.version.version;
+    setDiffBusy(true);
+    void loadArtifactDiff({
+      bridge: window.consensus,
+      conversationId: props.conversationId,
+      artifactId: detail.summary.id,
+      fromVersion,
+      toVersion,
+      isCurrent: () => generation === compareGeneration.current
+    }).then((result) => {
+      if (generation !== compareGeneration.current || !result) {
+        return;
+      }
+      setDiffBusy(false);
+      if (!result.ok) {
+        setError(result.error);
+        setCompare({ fromVersion, toVersion });
+        return;
+      }
+      setCompare({ fromVersion, toVersion, diff: result.value.diff });
+    });
+  }
+  // A background refresh can bring a new head while Changes is open; recompute the diff for it.
+  const shownVersion = detail?.lifecycle === "published" ? detail.version.version : undefined;
+  useEffect(() => {
+    if (showDiff && compare && shownVersion !== undefined && compare.toVersion !== shownVersion) {
+      changeShowDiff(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showDiff, compare?.toVersion, shownVersion]);
   const me = ARTIFACT_USER_MEMBER;
   const isArchived = Boolean(detail?.summary.archivedAt);
   const canManageArtifact = detail ? me === ARTIFACT_USER_MEMBER || detail.summary.owner === me : false;
   const canEdit = detail && !isArchived ? me === ARTIFACT_USER_MEMBER || detail.summary.owner === me || detail.summary.contributors.includes(me) : false;
-  const canManageAccess = canManageArtifact && !isArchived;
   const detailTitle = detail?.summary.name ?? selectedSummary?.name ?? "Artifact";
   const activeArtifacts = props.artifacts.filter((artifact) => !artifact.archivedAt);
   const archivedArtifacts = props.artifacts.filter((artifact) => artifact.archivedAt);
   const visibleArtifacts = listStatus === "archived" ? archivedArtifacts : activeArtifacts;
   const isListMode = !props.selectedId && mode !== "create";
+  const publishedDetail = detail?.lifecycle === "published" ? detail : undefined;
+  const selectedDraft = !detail
+    ? undefined
+    : detail.lifecycle === "collecting_drafts"
+      ? detail.drafts.find((draft) => draft.id === selectedDraftId) ?? detail.drafts[0]
+      : drafts.find((draft) => draft.id === selectedDraftId);
+  const signedViewed = publishedDetail ? publishedDetail.version.signatures.some((signature) => signature.signer === me) : false;
+  const menuSignVersion = publishedDetail && !isArchived && mode !== "revise" && !selectedDraft && !signedViewed
+    && publishedDetail.summary.approval.requiredSigners.includes(me) ? publishedDetail.version.version : undefined;
+  const subtitle = detail ? artifactSubtitleParts({
+    lifecycle: detail.lifecycle,
+    archived: isArchived,
+    version: publishedDetail ? { version: publishedDetail.version.version, author: publishedDetail.version.author } : undefined,
+    draft: selectedDraft,
+    submittedDraftCount: detail.summary.submittedDraftCount,
+    requiredDraftCount: detail.summary.requiredDraftCount,
+    updatedLabel: `Updated ${formatArtifactRelativeTimestamp(detail.summary.updatedAt)}`
+  }) : undefined;
+  const menuMeta = detail ? [
+    `Owned by ${artifactMemberLabel(detail.summary.owner)}`,
+    detail.lifecycle === "collecting_drafts"
+      ? `Collecting drafts · ${detail.summary.submittedDraftCount}/${detail.summary.requiredDraftCount} submitted`
+      : `v${detail.summary.headVersion} · ${artifactApprovalShortLabel(detail.summary.approval)} · Updated ${formatArtifactRelativeTimestamp(detail.summary.updatedAt)}`
+  ] : [];
   return (
     <div ref={panelResize.panelRef} className="artifacts-panel" data-resizing={panelResize.resizing ? "true" : undefined}
       data-testid="artifacts-panel" style={{ width: `${panelResize.panelWidth}px` } as CSSProperties}>
@@ -334,27 +434,48 @@ export function ArtifactsPanel(props: {
               <button type="button" className="artifact-primary-action" disabled={busy || !renameValue.trim()} onClick={() => void submitRename()}>Save</button>
               <button type="button" className="artifact-secondary-action" onClick={() => setRenaming(false)}>Cancel</button>
             </div>
-          ) : (
+          ) : props.selectedId && mode !== "create" && detail && subtitle ? (
             <>
               <h3 className="artifacts-panel-title">
-                <span>{mode === "create" ? "New artifact" : props.selectedId ? detailTitle : "Artifacts"}</span>
-                {detail?.summary.approval.state === "approved" && <ArtifactApprovedMark />}
-                {props.selectedId && detail && canEdit && (
-                  <IconButton
-                    label="Rename artifact"
-                    icon={Pencil}
-                    size="xs"
-                    tooltip="Rename"
-                    onClick={() => { setRenameValue(detail.summary.name); setRenaming(true); }}
-                  />
-                )}
+                <ArtifactActionsMenu
+                  title={detail.summary.name}
+                  approved={detail.summary.approval.state === "approved"}
+                  meta={menuMeta}
+                  view={publishedDetail && mode !== "revise" && !selectedDraft && publishedDetail.version.version > 1
+                    ? { showDiff, fromVersion: publishedDetail.version.version - 1, onChange: changeShowDiff }
+                    : undefined}
+                  signVersion={menuSignVersion}
+                  archived={isArchived}
+                  canRename={Boolean(canEdit)}
+                  canManage={canManageArtifact}
+                  busy={busy}
+                  triggerRef={accessButtonRef}
+                  onSign={() => void submitSign()}
+                  onRename={() => { setRenameValue(detail.summary.name); setRenaming(true); }}
+                  onOpenAccess={() => { clearTransient(); setAccessOpen(true); }}
+                  onArchivedChange={(archived) => void submitArchived(archived)}
+                />
               </h3>
-              {props.selectedId && detail ? (
-                <span className="artifacts-panel-subtitle">
-                  {detail.summary.archivedAt ? "Archived" : "Current version"}: v{detail.lifecycle === "published" ? detail.version.version : detail.summary.headVersion} · Updated {formatArtifactRelativeTimestamp(detail.summary.updatedAt)}
-                </span>
-              ) : null}
+              <div className="artifacts-panel-subtitle">
+                <ArtifactVersionSelector
+                  key={detail.summary.id}
+                  label={<>{subtitle.prefix}{subtitle.strong ? <strong>{subtitle.strong}</strong> : null}{subtitle.suffix}</>}
+                  selectedVersion={selectedDraft ? undefined : publishedDetail?.version.version}
+                  headVersion={publishedDetail?.summary.headVersion}
+                  history={publishedDetail?.history ?? []}
+                  drafts={detail.lifecycle === "collecting_drafts" ? detail.drafts : drafts}
+                  selectedDraftId={selectedDraft?.id}
+                  requiredSigners={detail.summary.approval.requiredSigners}
+                  disabled={mode === "revise"}
+                  onShowVersion={showVersion}
+                  onShowDraft={showDraft}
+                />
+              </div>
             </>
+          ) : (
+            <h3 className="artifacts-panel-title">
+              <span>{mode === "create" ? "New artifact" : props.selectedId ? detailTitle : "Artifacts"}</span>
+            </h3>
           )}
         </div>
         {!props.selectedId && mode !== "create" && (
@@ -365,34 +486,15 @@ export function ArtifactsPanel(props: {
             onClick={() => { clearTransient(); setAccessOpen(false); setMode("create"); }}
           />
         )}
-        {props.selectedId && mode !== "create" && canManageAccess && (
-          <IconButton
-            ref={accessButtonRef}
-            label="Manage access"
-            icon={UsersRound}
-            tooltip="Manage access"
-            disabled={!detail || busy}
-            pressed={accessOpen}
-            aria-expanded={accessOpen}
-            data-artifact-access-trigger="true"
-            onClick={() => { clearTransient(); setAccessOpen((open) => !open); }}
-          />
-        )}
-        {props.selectedId && mode !== "create" && canManageArtifact && (
-          <IconButton
-            label={detail?.summary.archivedAt ? "Restore artifact" : "Archive artifact"}
-            icon={detail?.summary.archivedAt ? RotateCcw : Archive}
-            tooltip={detail?.summary.archivedAt ? "Restore" : "Archive"}
-            disabled={!detail || busy}
-            onClick={() => void submitArchived(!detail?.summary.archivedAt)}
-          />
-        )}
         <IconButton label="Close artifacts" icon={X} onClick={props.onClose} />
       </div>
       {accessOpen && detail ? (
         <AccessArtifactForm
           summary={detail.summary}
           members={props.members}
+          drafts={detail.lifecycle === "collecting_drafts" ? detail.drafts : drafts}
+          requiredDraftAuthors={detail.lifecycle === "collecting_drafts" ? detail.requiredDraftAuthors : []}
+          readOnly={isArchived}
           busy={busy}
           onSubmit={submitAccess}
         />
@@ -471,21 +573,12 @@ export function ArtifactsPanel(props: {
       ) : !detail ? (
         <div className="artifacts-panel-body artifacts-empty">Loading artifact…</div>
       ) : detail.lifecycle === "collecting_drafts" ? (
-        <ArtifactDraftInbox
-          detail={detail}
-          busy={busy}
-          canRename={canEdit}
-          renaming={renaming}
-          renameValue={renameValue}
-          onRenameValueChange={setRenameValue}
-          onStartRename={() => { setRenameValue(detail.summary.name); setRenaming(true); }}
-          onCancelRename={() => setRenaming(false)}
-          onSubmitRename={() => void submitRename()}
-        />
+        <ArtifactDraftInbox detail={detail} selectedDraftId={selectedDraft?.id} />
       ) : (
         <ArtifactDetailView
           detail={detail}
           drafts={drafts}
+          selectedDraftId={selectedDraftId}
           draftError={draftError}
           mode={isArchived ? "view" : mode}
           busy={busy || diffBusy}
@@ -505,46 +598,8 @@ export function ArtifactsPanel(props: {
           onSubmitRevise={(content, note) => void submitRevise(content, note)}
           onCancelForm={() => { setMode("view"); clearTransient(); }}
           onSign={() => void submitSign()}
-          onShowVersion={(version) => {
-            const target = version === detail.summary.headVersion ? undefined : version;
-            setViewVersion(target);
-            setShowDiff(false);
-            setCompare(undefined);
-            compareGeneration.current += 1;
-            setDiffBusy(false);
-            void loadDetail(detail.summary.id, target);
-          }}
-          onShowDiffChange={(nextShowDiff) => {
-            const generation = ++compareGeneration.current;
-            setShowDiff(nextShowDiff);
-            setCompare(undefined);
-            if (!nextShowDiff || detail.version.version <= 1) {
-              setDiffBusy(false);
-              return;
-            }
-            const fromVersion = detail.version.version - 1;
-            const toVersion = detail.version.version;
-            setDiffBusy(true);
-            void loadArtifactDiff({
-              bridge: window.consensus,
-              conversationId: props.conversationId,
-              artifactId: detail.summary.id,
-              fromVersion,
-              toVersion,
-              isCurrent: () => generation === compareGeneration.current
-            }).then((result) => {
-              if (generation !== compareGeneration.current || !result) {
-                return;
-              }
-              setDiffBusy(false);
-              if (!result.ok) {
-                setError(result.error);
-                setCompare({ fromVersion, toVersion });
-                return;
-              }
-              setCompare({ fromVersion, toVersion, diff: result.value.diff });
-            });
-          }}
+          onShowVersion={showVersion}
+          onShowDiffChange={changeShowDiff}
           onRetryDrafts={() => void loadDetail(detail.summary.id, viewVersion)}
         />
       )}

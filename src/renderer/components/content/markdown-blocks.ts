@@ -1,10 +1,12 @@
 export type MarkdownBlock =
   | { type: "paragraph"; lines: string[] }
-  | { type: "heading"; text: string }
+  | { type: "heading"; level: MarkdownHeadingLevel; text: string }
   | { type: "code"; content: string; language?: string }
   | { type: "ul"; items: string[]; indent: number }
   | { type: "ol"; items: string[]; start?: number; indent: number }
   | { type: "table"; headers: string[]; rows: string[][] };
+
+export type MarkdownHeadingLevel = 1 | 2 | 3;
 
 export function markdownBlocks(content: string): MarkdownBlock[] {
   const lines = content.replace(/\r\n/g, "\n").split("\n");
@@ -34,9 +36,9 @@ export function markdownBlocks(content: string): MarkdownBlock[] {
       continue;
     }
 
-    const heading = trimmed.match(/^#{1,3}\s+(.+)$/);
+    const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
     if (heading) {
-      blocks.push({ type: "heading", text: heading[1].trim() });
+      blocks.push({ type: "heading", level: heading[1].length as MarkdownHeadingLevel, text: heading[2].trim() });
       index += 1;
       continue;
     }
