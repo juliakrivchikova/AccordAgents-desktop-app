@@ -2,13 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## NON-NEGOTIABLE PRODUCT INVARIANT: DEDICATED CLI PARITY
+> **Read `docs/parity-requirements.md` first. It is the most important document in this project.**
+> It states the two parity requirements every decision here must satisfy, and it is the only place an exception to them may exist — approved personally by the User, never by an engineer, a review, or an accord. Anything in this file or elsewhere that conflicts with it is wrong.
 
-**WORKING WITH ONE SPECIFIC PARTICIPANT IN ACCORDAGENTS CHAT MUST FEEL LIKE WORKING WITH THAT AGENT THROUGH ITS REGULAR, DEDICATED CLI.**
+## NON-NEGOTIABLE PRODUCT INVARIANTS: PARITY
+
+**1. WORKING WITH ONE SPECIFIC PARTICIPANT IN ACCORDAGENTS CHAT MUST FEEL LIKE WORKING WITH THAT AGENT THROUGH ITS REGULAR, DEDICATED CLI.**
+
+**2. FOR THE USER THERE MUST BE NO DIFFERENCE BETWEEN A PARTICIPANT THAT RUNS LOCALLY AND ONE THAT RUNS IN THE CLOUD.** Same controls, same feedback, same capabilities, same consequences for the same action. Transport, provisioning, and authentication may differ; what the user does, sees, and gets must not.
+
+Both are stated by the User and may not be weakened by an engineering trade-off. **Any divergence from either requires the User's personal approval and must be recorded in `docs/parity-requirements.md`.** An unapproved divergence is a defect, not a design decision — that document also carries the register of known open ones.
 
 Before every product, architecture, implementation, UI, and commit decision, explicitly check that this invariant still holds. AccordAgents must mirror the current CLI behavior at the time a feature is implemented, including output rendering and streaming, permissions and approvals, sandboxing, model selection, sessions and resume behavior, compaction, goals, skills and rules, MCPs and tools, cancellation, errors, warnings, and user controls. The user should not need to learn different single-agent behavior merely because the agent is running inside AccordAgents.
 
 Treat the dedicated CLI as the source of truth. Do not invent app-specific semantics for a single participant when the CLI already defines them. If multi-participant coordination inherently requires a difference, keep the divergence as narrow as possible, make it visible to the user, document why it exists, and add verification for both the parity path and the divergence. CLI behavior can evolve; verify the current behavior when implementing or revisiting a feature rather than relying on an old assumption. Any unexplained mismatch is a product correctness bug.
+
+**Approved exception — code delivery from the cloud.** A participant running in the cloud hands over code changes the way a remote colleague does: it pushes a branch and opens a GitHub pull request. It does not write into the user's working tree, and there is deliberately no automatic write-back from the worker mirror. Credentials for that come from the user's Settings environment variables, which apply to cloud participants exactly as they do to local ones. Recorded in `docs/parity-requirements.md`.
+
+**AccordAgents does not manage git worktrees.** The app never creates, moves, or deletes a worktree — not locally, not on a cloud worker, not per participant, not per run. When a task needs isolation, the User asks the participant for it and the participant creates the worktree itself with ordinary git commands, exactly as it would in its dedicated CLI. Do not propose or build app-managed worktrees; do not let any app operation destroy a participant-created worktree or its uncommitted changes. Recorded in `docs/parity-requirements.md`.
 
 ## Commands
 
@@ -59,7 +70,7 @@ Services in `src/main/services`:
 - `settings.ts` — Reads/writes JSON settings under Electron `userData`. API keys are encrypted with Electron `safeStorage`; `hasApiKey` is the only key-related field exposed to the renderer. Owns `chatRoleConfigs` (instruction templates), `chatBehaviorRules` (reusable per-participant rule snippets), and `chatParticipantConfigs` (handle/role/CLI bindings) used by `ChatService`. See `docs/chat-roles-and-participants.md` before changing chat role presets, behavior rules, participant configs, or runtime session behavior.
 - `storage.ts` — Persists conversations to a SQLite DB at `userData/accordagents.sqlite3`. **Storage shells out to the `sqlite3` CLI** (`runCommand("sqlite3", ...)`); there is no native binding. The schema stores conversation summaries/payloads in `conversations` and paginated message rows in `conversation_messages`. On startup `clearInterruptedRuns` clears `metadata.running`, `metadata.runId`, and `metadata.activeRunIds` state and appends an interrupted-run warning when needed, so a crash mid-run leaves a recoverable record.
 - `git.ts` — Wraps `git` for repo inspection and the various `GitDiffMode` values. `pasted` mode bypasses git entirely.
-- `command.ts` — `runCommand` helper used by every service that spawns a subprocess. Honors `AbortSignal`, enforces `timeoutMs` with SIGTERM→SIGKILL escalation. CLI runs use `CLI_AGENT_RUN_TIMEOUT_MS = 15 * 60_000`; sqlite calls use 10s.
+- `command.ts` — `runCommand` helper used by every service that spawns a subprocess. Honors `AbortSignal`, enforces `timeoutMs` with SIGTERM→SIGKILL escalation. CLI runs use the configurable `cliAgentRunTimeoutMs` (`src/shared/cliAgentRunSettings.ts`): default 24h, min 1h, max 7d — an agent turn is not capped at minutes. sqlite calls use 10s.
 
 ### Renderer
 
@@ -79,6 +90,63 @@ Conversations are append-mostly. Chat conversations store timeline messages plus
 - Strict TS everywhere; keep types explicit at IPC, service, and shared boundaries. Add new shapes to `src/shared/types.ts` rather than redefining them on either side of the bridge.
 - Do not commit provider API keys, local repo paths, generated logs, `node_modules`, or `dist`. Treat saved conversations and `debug-logs/` as sensitive — they contain prompts, diffs, and raw model responses.
 
+## MANDATORY: a change is done only after end-to-end QA and review
+
+**When the User asks for a change, it is not done until it has been verified
+end to end through the real surface the User touches, and reviewed with the gstack
+`/review` skill.** Both, every time. Not only before a merge, and not only for
+a pull request — a commit straight to a branch, a deploy, or a report that it
+builds and the tests pass is an unfinished change without them. This holds for
+a one-line fix, for a change whose author reported passing tests, for a change
+you wrote yourself, and for every participant, local or in the cloud.
+
+Route every such request through the `implement-change` skill. There is no
+threshold below which it is skipped: a CSS tweak, a copy change, a config
+value and a rename all go through it, and so does the second and third attempt
+at the same defect. "It is one line", "it is only CSS", "I can see it is right
+by reading it" and "the User is waiting" are not reasons — the first three have
+each shipped broken work here, and the fourth is a trade the User gets to make,
+not one to make silently by skipping the step.
+
+End to end means the real thing: the running Electron app for desktop
+behavior, the installed PWA on the phone for phone behavior, against the real
+services involved. A unit test, a headless-browser measurement or a mocked
+event is supporting evidence, never the proof. When the real check is
+genuinely impossible, say so plainly and name what is missing — never
+substitute a weaker check and call it verified.
+
+That is not hypothetical. On 2026-08-31 a phone-app fix went through tests, a
+Chromium measurement and a deploy with neither step run; it shipped a second
+defect straight to the User's phone, and the User found it.
+
+Reading the author's summary and grepping the diff for the parts you decided
+were risky is not a review. That is exactly what was done to PR #17 on
+2026-08-21: the security surface was checked and passed, while the change
+quietly attached a full conversation snapshot to a payload that goes to SQLite
+as a command-line argument. On the User's real chat that argument is megabytes
+and the write fails; it failed 1696 times in one morning, on every message she
+sent, and nobody noticed until she said the app felt slow. The author's
+end-to-end verification was real but ran on a small conversation, so the size
+never showed.
+
+Two questions the review must answer out loud, because that defect would have
+been caught by either:
+
+- **How large does this get on the User's actual data?** This chat, thousands of
+  messages, is the case that matters — not a fixture.
+- **Where does this data end up?** A payload that grows is fine until something
+  downstream has a limit: an argument list, a request body, a column, a screen.
+
+## The phone app is deployed separately
+
+The PWA the phone runs is not served by the desktop app. It is a Cloudflare
+Pages site at `mobile.accordagents.com`, and a change reaches the phone only
+after `npm run build:mobile && npm run deploy:mobile`. Merging and restarting the
+desktop does nothing for the phone. The project's production branch is called
+`staging`, so deploying to `main` publishes a preview that the phone never sees.
+See `docs/deploying-the-phone-app.md`, including the `ASSET_VERSION` bump that
+busts the phone's cache.
+
 ## Skill routing
 
 When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
@@ -89,6 +157,8 @@ Key routing rules:
 - Architecture → invoke /plan-eng-review
 - Design system/plan review → invoke /design-consultation or /plan-design-review
 - Full review pipeline → invoke /autoplan
+- Fix a reported defect → invoke /fix-with-e2e-repro (reproduce end-to-end first, prove the fix with the same reproduction)
+- Make a main-process change go live → invoke /restart-the-app (build, restart through launchd, verify the process actually came back)
 - Bugs/errors → invoke /investigate
 - QA/testing site behavior → invoke /qa or /qa-only
 - Code review/diff check → invoke /review

@@ -218,13 +218,33 @@ decision. Continue only after the user chooses one final step.
 ### 3. Post The Plan Assignment For Drew And Taylor To Get Familiar
 
 Post the assignment for everyone to get familiar. Mention both drafters and quote the requirement and the User-locked
-acceptance criteria exactly as the User gave them:
+acceptance criteria exactly as the User gave them.
+
+The canonical text between `=== BEGIN ASSIGNMENT ===` and `=== END ASSIGNMENT ===` must describe the task for this
+stage, not merely repeat the eventual product outcome. It must explicitly say that Drew and Taylor are preparing an
+implementation-ready plan and that they must not change code, create an implementation worktree, merge, push, or
+release during this stage. Preserve the User's requirement verbatim under that manager-authored plan-only wrapper.
+Never start the canonical block with a bare instruction such as "Implement", "Fix", or "Build" when the current stage
+is planning.
+
+Before posting, validate all three conditions:
+
+1. The canonical block explicitly asks for an implementation-ready plan.
+2. The canonical block explicitly prohibits implementation and release actions during this stage.
+3. The User's requirement and locked acceptance criteria remain unchanged inside the wrapper.
+
+If any condition fails, correct the manager-authored wrapper before involving Drew or Taylor. Do not rely on the
+surrounding workflow text or the word `accord` to imply that this is planning only.
 
 ```text
 @drew-codex-engineer @taylor-claude-engineer This is the assignment you will need to resolve via an accord with Drew as facilitator; treat this message as the single source of truth for the assignment:
 
 === BEGIN ASSIGNMENT ===
-[user's stated feature/bug description and explicit references, without manager-added scope]
+Prepare an implementation-ready plan for the requirement below. This stage is planning only: do not change code,
+create an implementation worktree, merge, push, or release.
+
+Requirement and explicit references (User-locked; preserve verbatim):
+[user's stated feature/bug description and explicit references, without manager-added product scope]
 
 Confirmed acceptance criteria (User-locked), including affected existing-workflow regressions:
 [the confirmed acceptance-criteria list]
@@ -237,8 +257,12 @@ Stop after posting. The accord runs in the next step.
 
 ### 4. Ask Drew To Run The Plan Accord With Taylor
 
-Tell Drew to run the accord on the assignment above. Reference the get-familiar message so the accord's question stays
-verbatim:
+Before dispatching the accord, re-read the exact marker-delimited block from the get-familiar message. Proceed only if
+it passes the three plan-intent checks from Step 3. If it does not, supersede that message with a corrected
+get-familiar assignment and repeat the `Done` acknowledgements; never ask Drew to infer planning intent from context.
+
+Then tell Drew to run the accord on the assignment above. Reference the get-familiar message so the accord's question
+stays verbatim:
 
 ```text
 @drew-codex-engineer run an /accord with Taylor to resolve the assignment above [#msg:<id of the get-familiar message>]. Use only the text between === BEGIN ASSIGNMENT === and === END ASSIGNMENT === verbatim as the question — do not include the footer or any status line, and do not rephrase, summarize, or add scope.
