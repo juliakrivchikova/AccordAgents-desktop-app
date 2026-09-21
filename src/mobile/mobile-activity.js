@@ -72,6 +72,19 @@
     return entry.receivedAt || entry.createdAt;
   }
 
+  // Every name an update goes by. The same message reaches the phone by more
+  // than one path — a live terminal, the snapshot behind it, a machine's own
+  // delta, a page read — and not every copy names the run. A clear is
+  // matched against all of them, or the next copy under another name brings
+  // a cleared row straight back (the User, 2026-09-20).
+  function updateIdentities(entry) {
+    const identities = [];
+    if (entry.runId) identities.push("run:" + entry.runId);
+    const messageId = entry.messageId || entry.sourceId || entry.id;
+    if (messageId) identities.push("message:" + messageId);
+    return identities;
+  }
+
   function newestFirst(left, right) {
     return timeValue(right.at) - timeValue(left.at) || String(right.key).localeCompare(String(left.key));
   }
@@ -104,6 +117,17 @@
     const isRunKnownLive = typeof input.isRunKnownLive === "function" ? input.isRunKnownLive : function () { return false; };
     const isStopRequested = typeof input.isStopRequested === "function" ? input.isStopRequested : function () { return false; };
     const isPlaceholder = typeof input.isPlaceholder === "function" ? input.isPlaceholder : defaultIsPlaceholder;
+    // What a member's message reads as, the shell's own rule: the control
+    // blocks the chat turns into cards are not part of the text. Without it a
+    // row previews the raw `User choice:` protocol the User was never meant
+    // to read (the User, 2026-09-20).
+    const displayText = typeof input.displayText === "function" ? input.displayText : function (value) { return value; };
+    // Rows the User cleared on this phone, by row key and up to the moment she
+    // cleared them: a row stands for every update of that member in that chat,
+    // so clearing it hides what it collapsed and nothing newer — the desktop's
+    // own rule for its Clear (chatActivityItemPreferencesAfterClear).
+    const clearedIds = new Set(Array.isArray(input.clearedEntryIds) ? input.clearedEntryIds : []);
+    const preview = function (value) { return previewText(displayText(value)); };
     const hidden = new Set(Array.isArray(input.hiddenConversationIds) ? input.hiddenConversationIds : []);
     const chatsById = new Map();
     for (const chat of Array.isArray(input.chats) ? input.chats : []) {
@@ -171,7 +195,7 @@
           conversationId: entry.conversationId,
           chatTitle: titleFor(entry.conversationId),
           handle: handleOf(entry),
-          preview: placeholder ? "" : previewText(entry.content),
+          preview: placeholder ? "" : preview(entry.content),
           at: entry.createdAt,
           runId: entry.runId,
           threadRootId: entry.threadRootId,
@@ -235,11 +259,21 @@
       if (at <= 0 || at < cutoff) continue;
       const handle = handleOf(entry);
       const groupKey = entry.conversationId + "\u0000" + (handle ? "handle:" + handle.toLowerCase() : "entry:" + entry.id);
-      const group = groups.get(groupKey) || { newest: undefined, ids: new Set(), latestReceived: 0 };
+      const identities = updateIdentities(entry);
+      // One update per run, as the desktop counts them: the first name is the
+      // run's when there is one.
+      const updateId = identities[0];
+      // What the User cleared on this phone is those updates and nothing else:
+      // a row stands for several, and a run still in flight when she cleared
+      // must come back when it finishes. A time horizon cannot say that — a
+      // finished row is stamped when its run started.
+      if (identities.some(function (identity) { return clearedIds.has(identity); })) continue;
+      const group = groups.get(groupKey) || { newest: undefined, ids: new Set(), identities: new Set(), latestReceived: 0 };
+      for (const identity of identities) group.identities.add(identity);
       // One update per run, as the desktop counts them: a turn that posts a
       // note and then its answer is one thing that happened. The same message
       // stored under two keys (a page read and a live batch) is one too.
-      group.ids.add(entry.runId ? "run:" + entry.runId : "message:" + (entry.messageId || entry.sourceId || entry.id));
+      group.ids.add(updateId);
       group.latestReceived = Math.max(group.latestReceived, timeValue(receivedAt(entry)));
       if (!group.newest || at > timeValue(finishedAt(group.newest)) ||
         (at === timeValue(finishedAt(group.newest)) && String(entry.id) > String(group.newest.id))) {
@@ -266,6 +300,8 @@
         content: entry.content,
         at: finishedAt(entry),
         count: group.ids.size,
+        // What a clear of this row names: every identity of every update in it.
+        entryIds: Array.from(group.identities),
         read: read,
         messageId: entry.messageId || entry.sourceId,
         threadRootId: entry.threadRootId
@@ -275,7 +311,7 @@
     const shown = finished.slice(0, FINISHED_LIMIT);
     // Only the rows that are shown need their text trimmed.
     for (const row of shown) {
-      row.preview = previewText(row.content);
+      row.preview = preview(row.content);
       delete row.content;
     }
 

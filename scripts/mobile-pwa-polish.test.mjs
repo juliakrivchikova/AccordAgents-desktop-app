@@ -483,9 +483,9 @@ test("PWA polish: search, times, unread, members, earlier history, slash menu, r
       }));
     })`);
     assert.deepEqual(described, [
-      { conversationId: CHAT_B, body: "Beta bugs: reply ready" },
-      { conversationId: CHAT_C, body: "Gamma notes: approval needed" },
-      { conversationId: CHAT_A, body: "Alpha planning: reply ready" }
+      { conversationId: CHAT_B, body: "New message in Beta bugs" },
+      { conversationId: CHAT_C, body: "Approval needed in Gamma notes" },
+      { conversationId: CHAT_A, body: "New message in Alpha planning" }
     ], "each named chat gets its own line from the phone's own memory; an unknown chat gets nothing and message text never appears");
     // The page is showing Alpha right now. The worker counted it too — it
     // cannot know — so the page folds the count back at once: the icon says

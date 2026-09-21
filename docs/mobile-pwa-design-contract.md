@@ -71,11 +71,39 @@ are plain labels and every match is shown.
 
 Decided by the User on 2026-09-19: the phone gets a bottom bar, option B of the
 proposal — a floating capsule with Chats · Activity · Settings and search on its
-own round button beside it, as Slack does it. The bar shows only on those three
-home screens of a paired phone; inside a chat it is gone, and it steps aside
-while a choice opened from Activity is on screen and while the chat search is
-open. The Chats header no longer carries the search button; the bar's button
-opens the chat search, switching to Chats first when another tab is open.
+own round button beside it, as Slack does it. The bar shows on those three home
+screens of a paired phone, and it steps aside while a choice opened from
+Activity is on screen and while the chat search is open. The Chats header no
+longer carries the search button; the bar's button opens the chat search,
+switching to Chats first when another tab is open.
+
+**Inside a chat (2026-09-20).** The 2026-09-19 decision had the bar gone inside
+a chat. The User changed it the next day, pointing at Slack: in a chat the bar
+is there too, below the composer, and it leaves only while the keyboard is up —
+with the keyboard open there is no room for it and it would sit on top of it.
+So inside a chat the bar is in the column under the composer rather than
+floating over the timeline, the composer gives up its own bottom safe-area room
+to the bar, and the bar is hidden exactly while the composer holds focus (the
+same test the height tracker uses for the keyboard, so the two cannot disagree).
+A reader who was at the latest message stays there when the bar comes and goes.
+A tab tapped inside a chat leaves the chat for that screen, the way the back
+button does, and leaves the chat's dialogs closed behind it; so does the bar's
+search button, because it searches the chat list. The chat's own dialogs — a
+picture at full size, the members sheet — take the bar with them while they are
+open, as the opened choice does on Activity; the live-reply view does not,
+because it is a screen of the chat rather than a dialog.
+
+The Activity number keeps counting while a chat is open, because in there the
+bar is the only place the User is told that something is waiting. It is the
+number alone that is recomputed, never the lists, and it is recomputed from
+rows already read: a pass over a week of stored rows costs hundreds of
+milliseconds on a phone with a busy week behind it, and inside a chat that
+would be paid again every second or so while a member streams into it. What
+waits for the User is counted from the cards, which are read from storage
+anyway, so a question arriving for another chat is counted at once; what can
+lag behind until the chat is left is the count of finished updates. The number
+is the same one the home screens show, the open chat's own waiting cards
+included — it is one count of what waits, not a count of elsewhere.
 
 Activity is built on the phone from what the relay already delivered — the
 timeline rows every `mobile.timeline.events` batch stores and the cards riding
@@ -109,6 +137,53 @@ something waits, else Running, else Finished) and then kept until the User
 changes it, so rows do not move under a finger; a tap that lands within a
 moment of the list being redrawn is ignored. The Activity tab's number is what
 waits for the User plus the finished updates not seen yet.
+
+**What the phone can vouch for (2026-09-21).** The phone is a replica fed by
+several channels — the live socket, the mailbox, the pages it asks for, a
+machine's own channel — and for a while nothing reconciled that replica with
+the desktop. A card closed on the desktop stayed "waiting" on the phone for
+days (the User's screenshot of 2026-09-20), because the batch that closed it
+was lost, or was never written: a cancelled choice changes no message row, and
+a batch with cards and no rows was dropped before it reached the mailbox. Now:
+
+- The desktop's chat list carries, per chat, the cards still waiting there and
+  when the list was built. The phone drops a pending card it holds that the
+  list no longer names, unless the card is younger than the list (it may have
+  missed it) or was learned from a machine directly (the desktop cannot vouch
+  for it). Answered cards are kept: they are the record under their messages.
+- The page a chat is opened with carries the chat's cards, so opening a chat
+  reconciles it too. A batch of cards with no rows is written to the mailbox
+  like any other, and the desktop remembers cards as delivered only once the
+  mailbox has taken them.
+- After a phone's answer, whatever became of it, the desktop sends the chat's
+  cards as it holds them now — "still pending" included — so a card the
+  desktop could not act on is never answered on the phone for ever.
+- "Answer sent. Waiting for the machine to apply it." is a mark the phone keeps
+  across launches, named after the queue entry that carries the answer; while
+  that entry has not reached the desktop the card says "Answer saved on this
+  phone. Not delivered yet." instead. The mark goes when the desktop states the
+  card answered or withdraws it. A mark older than ten minutes with the card
+  still waiting has stopped meaning anything — the answer was lost on its way
+  or refused — so the card unlocks and says "Answer sent, but not applied yet.
+  You can answer again."; an answer the desktop refused five times unlocks at
+  once ("The desktop did not take this answer. You can answer again."). A
+  second answer replaces the first one still on its way rather than racing
+  it: the earlier queue entry is set aside, never sent.
+- On the desktop, an answer read from the mailbox that cannot be applied is
+  tried again on the following polls, five times, then given up — and the
+  chat's cards are sent again either way, so the phone hears the state the
+  desktop actually holds. A refused batch on the live tunnel is answered with
+  an empty ack rather than silence, so it cannot hold other chats' sends
+  behind the ack timeout.
+- The queue is offered to the desktop for every chat, on launch, on return to
+  the foreground and while the app is open — never for what a member's own
+  machine already holds. Clearing a finished row in Activity names the update
+  under every identity it goes by (its run and its message), so a later copy
+  of the same message from another path cannot bring it back.
+- The timeline store is read by chat, through an index: applying one delivered
+  batch used to scan the whole store per row (2.5 s for forty rows on a store
+  of eight thousand, measured in Chrome), which is why messages arrived in
+  lumps and the live text stood still; it is about 0.1 s now.
 
 Settings holds only what the phone can do about itself: the pairing, message
 alerts (offered while undecided, otherwise described — iOS does not let a web

@@ -169,6 +169,24 @@ const killStaleCdp = () => {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** A left swipe on a row: the finger travels far enough for the list to hand
+ *  the gesture over, and the row settles open. */
+async function swipeLeft(app, selector) {
+  const point = await app.touchStart(selector);
+  for (const dx of [-20, -50, -90, -110]) {
+    await app.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x: point.x + dx, y: point.y, radiusX: 1, radiusY: 1, force: 1 }]
+    });
+    await sleep(40);
+  }
+  await app.send("Input.dispatchTouchEvent", {
+    type: "touchEnd",
+    touchPoints: []
+  });
+  await sleep(300);
+}
+
 test("Activity lists what the relay delivered and acts on it from the bottom bar", async (t) => {
   await new Promise((r) => site.listen(SITE_PORT, "127.0.0.1", r));
   await new Promise((r) => mailboxServer.listen(MAILBOX_PORT, "127.0.0.1", r));
@@ -389,8 +407,130 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     // The row, not only its text, is the way in.
     await evaluate(`document.querySelector('#activity-list .act-row[data-activity-key="${drewRow.key}"] .act-avatar').click()`);
     await waitFor(`(() => document.getElementById("timeline-screen").classList.contains("is-active") &&
-      document.getElementById("home-dock").hidden &&
-      sessionStorage.getItem("accordagents.mobile.openThreadRootId.v1") === "m1" ? true : null)()`, "the thread to open without the bar");
+      !document.getElementById("home-dock").hidden &&
+      document.querySelector(".mobile-phone").dataset.dock === "chat" &&
+      sessionStorage.getItem("accordagents.mobile.openThreadRootId.v1") === "m1" ? true : null)()`, "the thread to open with the bar under it");
+
+    // The bar under a chat sits below the composer, not over it, and leaves
+    // while the keyboard is up.
+    const placed = await evaluate(`(() => {
+      const dock = document.getElementById("home-dock").getBoundingClientRect();
+      const composer = document.getElementById("composer-form").getBoundingClientRect();
+      return {
+        below: dock.top >= composer.bottom - 1,
+        height: Math.round(dock.height),
+        inside: dock.bottom <= window.innerHeight + 1
+      };
+    })()`);
+    assert.equal(placed.below, true, "the bar is under the composer, never on top of it");
+    assert.equal(placed.inside, true, "the whole bar is on screen, not pushed past the bottom");
+    assert.ok(placed.height > 40, `the bar has its height: ${placed.height}px`);
+    await evaluate(`document.getElementById("composer-input").focus()`);
+    await waitFor(`document.getElementById("home-dock").hidden ? true : null`, "the bar to leave while typing");
+    await evaluate(`document.getElementById("composer-input").blur()`);
+    await waitFor(`(() => !document.getElementById("home-dock").hidden &&
+      document.querySelector(".mobile-phone").dataset.dock === "chat" ? true : null)()`, "the bar to come back when the keyboard goes");
+
+    // A reader up in history is left there when the bar goes and comes back;
+    // only a reader who was at the latest message is kept at it.
+    const scrolledUp = await evaluate(`(() => {
+      const surface = document.querySelector("#timeline-screen .thread-surface");
+      if (!surface || surface.scrollHeight <= surface.clientHeight + 80) return null;
+      surface.scrollTop = 0;
+      return Math.round(surface.scrollTop);
+    })()`);
+    t.diagnostic(scrolledUp === null ? "thread too short to test scrolled-up reader here" : "reader parked at the top of the thread");
+    if (scrolledUp !== null) {
+      await evaluate(`document.getElementById("composer-input").focus()`);
+      await waitFor(`document.getElementById("home-dock").hidden ? true : null`, "the bar to leave with the reader up in history");
+      await evaluate(`document.getElementById("composer-input").blur()`);
+      await waitFor(`!document.getElementById("home-dock").hidden ? true : null`, "the bar to come back");
+      await sleep(400);
+      const stayed = await evaluate(`Math.round(document.querySelector("#timeline-screen .thread-surface").scrollTop)`);
+      assert.ok(stayed <= 2, `a reader up in history is not yanked to the latest message (scrollTop ${stayed})`);
+      await evaluate(`(() => {
+        const surface = document.querySelector("#timeline-screen .thread-surface");
+        surface.scrollTop = surface.scrollHeight;
+        return true;
+      })()`);
+    }
+
+    // Inside a chat the bar is the only place the User is told that something
+    // elsewhere is waiting, so its number has to keep counting in there: a
+    // question that arrives for another chat while this one is open is counted
+    // without leaving it, and the number is the same one the home screens show.
+    const badgeBefore = Number(await evaluate(`document.getElementById("activity-badge").textContent`));
+    const chatBeforeBadge = await evaluate(`document.getElementById("message-list").childElementCount + ":" +
+      document.getElementById("message-list").innerText.length`);
+    await postEnvelope({
+      type: "mobile.timeline.events",
+      conversationId: CHAT_CLOUD,
+      events: cloudEvents,
+      cards: [cloudPermission, {
+        id: "perm-chat-bar", kind: "permission", conversationId: CHAT_CLOUD, title: "Run a command",
+        summary: "Codex wants to run: npm run build:mobile", requesterLabel: "@morgan",
+        options: [{ id: "allow", label: "Allow" }, { id: "deny", label: "Deny" }],
+        allowsCustomAnswer: false, allowsCancel: false, status: "pending", createdAt: new Date().toISOString()
+      }]
+    });
+    const countedInChat = await waitFor(`(() => {
+      const badge = document.getElementById("activity-badge");
+      return document.getElementById("timeline-screen").classList.contains("is-active") &&
+        !badge.hidden && Number(badge.textContent) === ${badgeBefore} + 1 ? Number(badge.textContent) : null;
+    })()`, "the Activity number to count the new question while a chat is open");
+    const chatAfterBadge = await evaluate(`document.getElementById("message-list").childElementCount + ":" +
+      document.getElementById("message-list").innerText.length`);
+    assert.equal(chatAfterBadge, chatBeforeBadge, "the chat itself is not redrawn for another chat's question");
+
+    // A tab tapped from inside a chat leaves the chat for that screen.
+    await evaluate(`document.querySelector('[data-home-tab="settings"]').click()`);
+    await waitFor(`(() => document.getElementById("settings-screen").classList.contains("is-active") &&
+      !document.getElementById("timeline-screen").classList.contains("is-active") &&
+      !localStorage.getItem("accordagents.mobile.activeConversationId.v1") ? true : null)()`, "Settings from inside a chat");
+    const countedAtHome = Number(await evaluate(`document.getElementById("activity-badge").textContent`));
+    assert.equal(countedInChat, countedAtHome, "the number inside a chat is the one the home screens show, not a stale one");
+    assert.ok(countedInChat > 0, "the waiting questions are counted");
+    await evaluate(`document.querySelector('[data-home-tab="activity"]').click()`);
+    await waitFor(`document.getElementById("activity-screen").classList.contains("is-active") ? true : null`, "Activity again");
+    await sleep(TAP_SETTLE_MS);
+    await evaluate(`document.querySelector('#activity-list .act-row[data-activity-key="${drewRow.key}"] .act-avatar').click()`);
+    await waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") ? true : null`, "the chat again");
+
+    // The search button from a chat opened off the Chats list: the remembered
+    // tab is Chats already, so only the open chat can tell the app to leave it.
+    // Without that the box would open on a screen the reader cannot see.
+    await evaluate(`document.querySelector('[data-home-tab="chats"]').click()`);
+    await waitFor(`document.getElementById("chats-screen").classList.contains("is-active") ? true : null`, "Chats");
+    await sleep(TAP_SETTLE_MS);
+    await evaluate(`document.querySelector('#chat-list .mobile-chat-row').click()`);
+    await waitFor(`(() => document.getElementById("timeline-screen").classList.contains("is-active") &&
+      localStorage.getItem("accordagents.mobile.homeTab.v1") === "chats" ? true : null)()`, "a chat opened from the list");
+    await evaluate(`document.getElementById("chat-search-toggle").click()`);
+    await waitFor(`(() => document.getElementById("chats-screen").classList.contains("is-active") &&
+      !document.getElementById("chat-search").hidden &&
+      !localStorage.getItem("accordagents.mobile.activeConversationId.v1") ? true : null)()`,
+      "the chat search from a chat opened off the list");
+    await evaluate(`document.getElementById("chat-search-close").click()`);
+    await sleep(TAP_SETTLE_MS);
+    await evaluate(`document.querySelector('[data-home-tab="activity"]').click()`);
+    await waitFor(`document.getElementById("activity-screen").classList.contains("is-active") ? true : null`, "Activity before the second search pass");
+    await sleep(TAP_SETTLE_MS);
+    await evaluate(`document.querySelector('#activity-list .act-row[data-activity-key="${drewRow.key}"] .act-avatar').click()`);
+    await waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") ? true : null`, "the chat from Activity again");
+
+    // And from a chat opened off Activity, where the remembered tab is not
+    // Chats: it leaves the chat and switches tab in one go.
+    await evaluate(`document.getElementById("chat-search-toggle").click()`);
+    await waitFor(`(() => document.getElementById("chats-screen").classList.contains("is-active") &&
+      !document.getElementById("chat-search").hidden &&
+      !localStorage.getItem("accordagents.mobile.activeConversationId.v1") ? true : null)()`, "the chat search from inside a chat");
+    await evaluate(`document.getElementById("chat-search-close").click()`);
+    await sleep(TAP_SETTLE_MS);
+    await evaluate(`document.querySelector('[data-home-tab="activity"]').click()`);
+    await waitFor(`document.getElementById("activity-screen").classList.contains("is-active") ? true : null`, "Activity after the search");
+    await sleep(TAP_SETTLE_MS);
+    await evaluate(`document.querySelector('#activity-list .act-row[data-activity-key="${drewRow.key}"] .act-avatar').click()`);
+    await waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") ? true : null`, "the chat once more");
     await evaluate(`document.getElementById("back-to-chats").click()`);
     const afterBack = await waitFor(`(() => {
       const rows = ${listRows("finished")};
@@ -452,6 +592,101 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
       return morgan ? morgan : null;
     })()`, "the watched answer in Finished");
     assert.equal(watched.unread, false, "an answer watched as it finished is not news");
+
+    // Swipe left on a finished row and it can be cleared from this phone, the
+    // way the desktop clears a row from its own Activity (the User,
+    // 2026-09-20). The row stands for that member's updates in that chat up to
+    // now, so clearing takes those with it and nothing newer.
+    await sleep(TAP_SETTLE_MS);
+    const clearedKey = await evaluate(`(() => {
+      const row = [...document.querySelectorAll("#activity-list .act-row")].find((node) => node.innerText.includes("Region checked"));
+      return row ? row.dataset.activityKey : null;
+    })()`);
+    assert.ok(clearedKey, "the row to clear is on screen");
+    await swipeLeft(app, `#activity-list .act-swipe[data-activity-key="${clearedKey}"] .act-row`);
+    const clearVisible = await evaluate(`(() => {
+      const wrap = document.querySelector('#activity-list .act-swipe[data-activity-key="${clearedKey}"]');
+      const action = wrap && wrap.querySelector(".act-swipe-clear");
+      return wrap && wrap.dataset.swiped === "1" && action ? action.innerText.trim() : null;
+    })()`);
+    assert.equal(clearVisible, "Clear", "the swipe opens the row's Clear action");
+    assert.equal(await evaluate(`document.getElementById("activity-screen").classList.contains("is-active")`), true,
+      "the swipe did not open the chat behind the row");
+    assert.equal(await evaluate(`localStorage.getItem("accordagents.mobile.activeConversationId.v1")`), null,
+      "and no chat was opened by it");
+    // A batch landing between the swipe and the tap rebuilds the list; the
+    // action must still be there under the finger.
+    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_POLISH, events: polishEvents, cards: [permissionCard] });
+    await sleep(1200);
+    assert.equal(await evaluate(`(() => {
+      const wrap = document.querySelector('#activity-list .act-swipe[data-activity-key="${clearedKey}"]');
+      return wrap ? wrap.dataset.swiped : null;
+    })()`), "1", "a redraw does not close the open action");
+    await evaluate(`document.querySelector('#activity-list .act-swipe[data-activity-key="${clearedKey}"] .act-swipe-clear').click()`);
+    await waitFor(`(() => {
+      const rows = ${listRows("finished")};
+      return rows && !rows.some((row) => row.text.includes("Region checked")) ? true : null;
+    })()`, "the cleared row to go");
+    await reload();
+    await evaluate(`document.querySelector('[data-home-tab="activity"]').click()`);
+    await waitFor(`document.getElementById("activity-screen").classList.contains("is-active") ? true : null`, "Activity after the reload");
+    await evaluate(`document.querySelector('[data-activity-tab="finished"]').click()`);
+    await sleep(1500);
+    const stillCleared = await evaluate(`(() => {
+      const rows = ${listRows("finished")};
+      return rows ? rows.some((row) => row.text.includes("Region checked")) : null;
+    })()`);
+    assert.equal(stillCleared, false, "a cleared row stays cleared across a launch");
+    // A newer update from the same member in the same chat is not covered by
+    // what was cleared: the row comes back.
+    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_CLOUD, events: [{
+      id: "m-region-2", messageId: "m-region-2", role: "participant", participantLabel: "@morgan",
+      content: "Region moved: eu-central-1 now.", status: "done", runId: "run-morgan-3", createdAt: minutesAgo(0)
+    }] });
+    await waitFor(`(() => {
+      const rows = ${listRows("finished")};
+      return rows && rows.some((row) => row.text.includes("Region moved")) ? true : null;
+    })()`, "a newer update after a clear");
+
+    // Swipe left on a waiting choice and it can be cancelled from the list,
+    // the way the desktop's "Cancel pending card" does.
+    await postEnvelope({
+      type: "mobile.timeline.events",
+      conversationId: CHAT_POLISH,
+      events: polishEvents,
+      cards: [permissionCard, {
+        id: "choice-swipe", kind: "choice", conversationId: CHAT_POLISH, title: "Swipe target",
+        summary: "Cancel me from the list?", requesterLabel: "@taylor",
+        options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }],
+        allowsCustomAnswer: true, allowsCancel: true, status: "pending",
+        createdAt: minutesAgo(0), sourceMessageId: "m1"
+      }]
+    });
+    await evaluate(`document.querySelector('[data-activity-tab="pending"]').click()`);
+    await waitFor(`document.querySelector('#activity-list .act-row[data-card-id="choice-swipe"]') ? true : null`,
+      "the new waiting choice in Pending");
+    await sleep(TAP_SETTLE_MS);
+    const cancelKey = await evaluate(`(() => {
+      const row = document.querySelector('#activity-list .act-row[data-card-id="choice-swipe"]');
+      return row ? row.dataset.activityKey : null;
+    })()`);
+    assert.ok(cancelKey, "a waiting choice is on screen");
+    await swipeLeft(app, `#activity-list .act-swipe[data-activity-key="${cancelKey}"] .act-row`);
+    const cancelVisible = await evaluate(`(() => {
+      const action = document.querySelector('#activity-list .act-swipe[data-activity-key="${cancelKey}"] .act-swipe-cancel');
+      return action ? action.innerText.trim() : null;
+    })()`);
+    assert.equal(cancelVisible, "Cancel", "the swipe opens the row's Cancel action");
+    await sleep(TAP_SETTLE_MS);
+    await evaluate(`document.querySelector('#activity-list .act-swipe[data-activity-key="${cancelKey}"] .act-swipe-cancel').click()`);
+    const cancelled = await waitFor(`(async () => {
+      const db = await new Promise((resolve) => { const r = indexedDB.open("accordagents-mobile-control"); r.onsuccess = () => resolve(r.result); });
+      const rows = await new Promise((resolve) => { const all = db.transaction("events").objectStore("events").getAll(); all.onsuccess = () => resolve(all.result); });
+      db.close();
+      const row = rows.filter((entry) => entry.kind === "choice.answered").find((entry) => entry.payload && entry.payload.detail && entry.payload.detail.cancel);
+      return row ? row.payload.targetKey : null;
+    })()`, "the cancel in the phone's event log");
+    assert.match(cancelled, /^choice:/, "the cancel is recorded against the choice card");
 
     // The desktop withdraws the last card: Pending empties.
     await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_POLISH, events: polishEvents, cards: [] });

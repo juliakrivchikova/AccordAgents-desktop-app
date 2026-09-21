@@ -318,3 +318,78 @@ test("the tab's number is what waits for the User plus unseen finished updates",
   assert.equal(attentionCount(activity), 2);
   assert.equal(attentionCount(undefined), 0);
 });
+
+test("a cleared row hides the updates it stood for, and only those", () => {
+  const room = [{ id: "c1", title: "Chat one" }];
+  const entry = (id, runId, createdAt, content) => ({
+    conversationId: "c1", id, messageId: id, runId, role: "participant",
+    participantLabel: "@drew", content, status: "done", createdAt, receivedAt: createdAt
+  });
+  // Two updates from the same member in the same chat: one already finished,
+  // one whose run started earlier but only finished after the clear.
+  const before = [entry("m1", "run-1", "2026-09-20T12:10:00.000Z", "First answer")];
+  const activity = buildActivity({ now: Date.parse("2026-09-20T12:30:00.000Z"), entries: before, chats: room });
+  assert.equal(activity.finished.length, 1);
+  const cleared = activity.finished[0].entryIds;
+  assert.deepEqual(cleared, ["run:run-1", "message:m1"], "the row names what it collapsed, under every name it goes by");
+
+  const after = [
+    ...before,
+    entry("m2", "run-2", "2026-09-20T12:05:00.000Z", "Second answer, started earlier")
+  ];
+  const next = buildActivity({ now: Date.parse("2026-09-20T12:30:00.000Z"), entries: after, chats: room, clearedEntryIds: cleared });
+  assert.equal(next.finished.length, 1, "the run that finished after the clear is still news");
+  assert.match(next.finished[0].preview, /Second answer/);
+  assert.deepEqual(next.finished[0].entryIds, ["run:run-2", "message:m2"], "and the row now stands for that update alone");
+
+  const all = buildActivity({ now: Date.parse("2026-09-20T12:30:00.000Z"), entries: after, chats: room, clearedEntryIds: ["run:run-1", "run:run-2"] });
+  assert.equal(all.finished.length, 0, "clearing both leaves nothing");
+});
+
+test("a member's control block is not what a preview reads", () => {
+  const room = [{ id: "c1", title: "Chat one" }];
+  const entries = [{
+    conversationId: "c1", id: "m1", messageId: "m1", runId: "run-1", role: "participant",
+    participantLabel: "@drew", status: "done",
+    content: "Ready to deploy.\n\nUser choice:\nQ: Which one?\nO1: Staging",
+    createdAt: "2026-09-20T12:10:00.000Z", receivedAt: "2026-09-20T12:10:00.000Z"
+  }];
+  const plain = buildActivity({ now: Date.parse("2026-09-20T12:30:00.000Z"), entries, chats: room });
+  assert.match(plain.finished[0].preview, /User choice/, "without the rule the protocol is the preview");
+  const stripped = buildActivity({
+    now: Date.parse("2026-09-20T12:30:00.000Z"), entries, chats: room,
+    displayText: (content) => String(content).split("User choice:")[0].trim()
+  });
+  assert.equal(stripped.finished[0].preview, "Ready to deploy.", "with it, the message is");
+});
+
+test("a cleared update stays cleared when a later copy of it names the run differently", () => {
+  const room = [{ id: "c1", title: "Chat one" }];
+  const now = Date.parse("2026-09-20T12:30:00.000Z");
+  const first = [{
+    conversationId: "c1", id: "c1:m1", sourceId: "m1", messageId: "m1", runId: "run-1", role: "participant",
+    participantLabel: "@drew", content: "Deployed.", status: "done",
+    createdAt: "2026-09-20T12:10:00.000Z", receivedAt: "2026-09-20T12:10:00.000Z"
+  }];
+  const shown = buildActivity({ now, entries: first, chats: room });
+  assert.equal(shown.finished.length, 1);
+  const cleared = shown.finished[0].entryIds;
+
+  // The same message again from another path: a machine's delta carries no
+  // run id, a live terminal carried the run's id and no message id.
+  const withoutRun = [{ ...first[0], runId: undefined }];
+  assert.equal(buildActivity({ now, entries: withoutRun, chats: room, clearedEntryIds: cleared }).finished.length, 0,
+    "a copy without the run id is still the cleared update");
+  const withoutMessage = [{ ...first[0], messageId: undefined, sourceId: "run-1:@drew", id: "c1:run-1:@drew" }];
+  assert.equal(buildActivity({ now, entries: withoutMessage, chats: room, clearedEntryIds: cleared }).finished.length, 0,
+    "a copy under the run's own id is still the cleared update");
+  // Cleared by message id alone (an older clear), then the copy with a run id.
+  assert.equal(buildActivity({ now, entries: first, chats: room, clearedEntryIds: ["message:m1"] }).finished.length, 0,
+    "a clear by message id covers the copy that names the run");
+  // A different message from the same member is news.
+  const newer = [...first, { ...first[0], id: "c1:m2", sourceId: "m2", messageId: "m2", runId: "run-2", content: "And tested.",
+    createdAt: "2026-09-20T12:20:00.000Z", receivedAt: "2026-09-20T12:20:00.000Z" }];
+  const next = buildActivity({ now, entries: newer, chats: room, clearedEntryIds: cleared });
+  assert.equal(next.finished.length, 1);
+  assert.deepEqual(next.finished[0].entryIds, ["run:run-2", "message:m2"]);
+});

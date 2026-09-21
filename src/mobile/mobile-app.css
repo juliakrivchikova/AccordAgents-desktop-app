@@ -1562,6 +1562,34 @@ button.mobile-chat-group-title:active {
   }
 }
 
+/* --- Looking for new messages ---------------------------------------------- */
+
+.timeline-syncing {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--mut);
+  background: var(--bg1);
+  border-top: 1px solid var(--bd);
+}
+
+.timeline-syncing[hidden] {
+  display: none;
+}
+
+.timeline-syncing-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--bd);
+  border-top-color: var(--fg1);
+  animation: pull-refresh-spin 0.8s linear infinite;
+}
+
 /* --- Earlier messages ------------------------------------------------------ */
 
 .load-earlier {
@@ -1815,11 +1843,25 @@ button.mobile-chat-group-title:active {
   }
 }
 
+/* A question the User already answered, kept under its own message the way the
+   desktop keeps it: the card without its controls, and what was chosen. */
+.control-card-answered {
+  margin-top: 8px;
+  background: var(--s2);
+  box-shadow: none;
+}
+
+.control-card-answered .control-card-state {
+  color: var(--fg1);
+  font-weight: 600;
+}
+
 /* ---- Home: the floating bottom bar, Activity and Settings ----------------
    With no chat open, the phone shows Chats, Activity or Settings, switched by
    a floating bar with search on its own round button beside it. The bar
    floats over the lists, so each list keeps room at its end to scroll clear
-   of it. Inside a chat the bar is gone. */
+   of it. Inside a chat it is in the flow under the composer instead, and it
+   leaves while the keyboard is up. */
 .pb-dock {
   position: absolute;
   left: calc(16px + env(safe-area-inset-left));
@@ -1834,6 +1876,35 @@ button.mobile-chat-group-title:active {
   gap: 10px;
 }
 
+/* Inside a chat the bar is not floating over anything: it sits in the column
+   under the composer, as Slack does it (the User, 2026-09-20). In the flow it
+   needs no offset of its own — the composer ends where the bar begins — and
+   the safe area at the bottom is the bar's margin instead of the composer's. */
+.mobile-phone[data-dock="chat"] .pb-dock {
+  position: static;
+  flex-shrink: 0;
+  /* A definite width, not stretch: the auto side margins that centre the bar
+     on a wide screen override stretch, and the bar shrank to fit its labels —
+     248px instead of 361px, with 32px tap targets. */
+  width: 100%;
+  margin: 0 auto var(--dock-offset);
+  padding-left: calc(16px + env(safe-area-inset-left));
+  padding-right: calc(16px + env(safe-area-inset-right));
+}
+
+/* The composer's own bottom room is the base rule's 14px; the safe area below
+   it belongs to the bar now, as its margin. It also outranks the bar: when the
+   column is too short for both (landscape with a card and an attachments row),
+   the composer is the one that must stay whole, so the bar is what gets
+   covered rather than the other way round. */
+.mobile-phone[data-dock="chat"] .composer {
+  padding-bottom: 14px;
+  position: relative;
+  z-index: 6;
+}
+
+/* Last, so hiding always wins: these have the same specificity as the
+   placement rules above and would otherwise depend on what those declare. */
 .pb-dock[hidden],
 .mobile-phone[data-searching="1"] .pb-dock {
   display: none;
@@ -1920,6 +1991,58 @@ button.mobile-chat-group-title:active {
 .mobile-phone[data-dock="1"] .act-list,
 .mobile-phone[data-dock="1"] .set-list {
   padding-bottom: calc(var(--dock-offset) + 80px);
+}
+
+/* A row with one action behind it: swipe left and the row slides off it.
+   The action is a real button, so a screen reader reaches it without the
+   gesture (the User asked for the gesture, 2026-09-20). */
+.act-swipe {
+  position: relative;
+  overflow: hidden;
+}
+
+.act-swipe-actions {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+.act-swipe-action {
+  width: 88px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 0;
+  padding: 0;
+  background: var(--s2);
+  color: var(--fg);
+  font: 600 12px var(--sans);
+  cursor: pointer;
+}
+
+.act-swipe-cancel,
+.act-swipe-clear {
+  color: var(--danger);
+}
+
+/* The pressed state of a tappable row is 0,2,0 and would otherwise win over
+   this while the finger is on it, leaving the row the same colour as the
+   action behind it — the row would read as transparent mid-swipe. */
+.act-swipe .act-swipe-surface,
+.act-swipe .act-swipe-surface:active {
+  position: relative;
+  background: var(--surface);
+  transition: transform 160ms ease;
+  touch-action: pan-y;
+}
+
+.act-swipe[data-swiped="1"] .act-swipe-surface {
+  transform: translateX(-88px);
 }
 
 /* ---- Activity ---- */

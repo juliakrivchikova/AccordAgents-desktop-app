@@ -24,8 +24,8 @@
   "use strict";
 
   const DB_NAME = "accordagents-mobile-control";
-  // Raise this only together with a store added in upgradeControlDb.
-  const DB_VERSION = 5;
+  // Raise this only together with a store or an index added in upgradeControlDb.
+  const DB_VERSION = 6;
 
   const STORES = {
     outbox: "outbox",
@@ -37,8 +37,13 @@
     machineOutbox: "machineOutbox",
     machineBlobs: "machineBlobs"
   };
+  // The timeline's rows by chat. Every delivered batch is deduplicated inside
+  // one chat, and the read that did it used to scan the whole store per row:
+  // on a phone with a few weeks of chats that was seconds of main-thread work
+  // for one batch, arriving every few seconds while a member wrote.
+  const TIMELINE_CONVERSATION_INDEX = "conversationId";
 
-  function upgradeControlDb(db) {
+  function upgradeControlDb(db, transaction) {
     if (!db.objectStoreNames.contains(STORES.outbox)) {
       const store = db.createObjectStore(STORES.outbox, { keyPath: "eventId" });
       store.createIndex("status", "status", { unique: false });
@@ -47,6 +52,12 @@
     if (!db.objectStoreNames.contains(STORES.timeline)) {
       const store = db.createObjectStore(STORES.timeline, { keyPath: "id" });
       store.createIndex("createdAt", "createdAt", { unique: false });
+    }
+    // An index on a store that already exists is reached through the upgrade
+    // transaction; a store created just above is reached the same way.
+    const timeline = transaction ? transaction.objectStore(STORES.timeline) : undefined;
+    if (timeline && !timeline.indexNames.contains(TIMELINE_CONVERSATION_INDEX)) {
+      timeline.createIndex(TIMELINE_CONVERSATION_INDEX, "conversationId", { unique: false });
     }
     if (!db.objectStoreNames.contains(STORES.meta)) {
       db.createObjectStore(STORES.meta, { keyPath: "key" });
@@ -79,7 +90,7 @@
 
   function request(open) {
     return new Promise(function (resolve, reject) {
-      open.onupgradeneeded = function () { upgradeControlDb(open.result); };
+      open.onupgradeneeded = function () { upgradeControlDb(open.result, open.transaction); };
       open.onsuccess = function () { resolve(open.result); };
       open.onerror = function () { reject(open.error || new Error("IndexedDB open failed.")); };
       open.onblocked = function () {
@@ -133,6 +144,7 @@
     DB_NAME: DB_NAME,
     DB_VERSION: DB_VERSION,
     STORES: STORES,
+    TIMELINE_CONVERSATION_INDEX: TIMELINE_CONVERSATION_INDEX,
     upgradeControlDb: upgradeControlDb,
     hasStores: hasStores,
     openControlDb: openControlDb,

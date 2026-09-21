@@ -1,4 +1,4 @@
-const ASSET_VERSION = "2026-09-19-pwa-activity-v1";
+const ASSET_VERSION = "2026-09-21-pwa-looking-banner-v2";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
 const CACHE_NAME = `accordagents-mobile-shell-v70-${ASSET_VERSION}`;
@@ -12,6 +12,7 @@ const APP_SHELL = [
   // so offline the phone had a shell and no journal, no signing key and no way
   // to reach a machine. The worker imports the first of them itself.
   "./mobile-db.js",
+  `./mobile-db.js?v=${ASSET_VERSION}`,
   `./mobile-event-log.js?v=${ASSET_VERSION}`,
   `./mobile-machine-wake.js?v=${ASSET_VERSION}`,
   `./mobile-machine-command.js?v=${ASSET_VERSION}`,
@@ -24,6 +25,10 @@ const APP_SHELL = [
 ];
 const NOTIFICATION_TITLE = "AccordAgents";
 const NOTIFICATION_FALLBACK_BODY = "Open AccordAgents to sync updates.";
+// How long the notification may wait for the sync before it is shown anyway.
+// Shorter than anything iOS is known to allow, because the cost of being late
+// is the subscription itself.
+const NOTIFICATION_DEADLINE_MS = 4_000;
 const NOTIFICATION_ICON = "./assets/accordagents-mark.png";
 
 self.addEventListener("install", (event) => {
@@ -139,6 +144,12 @@ async function backgroundMailboxSync() {
     url.searchParams.set("mailboxId", access.mailboxId);
     url.searchParams.set("limit", "500");
     url.searchParams.set("afterArrival", String(Math.max(0, Number(access.cursor) || 0)));
+    // The worker is the reader that shows the notification, so it is the one
+    // whose cursor the relay may believe: the doorbell must not ring again for
+    // what this device has already stored. The cursor sent here is the one
+    // committed by the previous sync — an acknowledgement of what is on the
+    // device, not of what is on the way.
+    url.searchParams.set("reader", "phone");
     const response = await fetch(url.toString(), {
       headers: { accept: "application/json", authorization: "Bearer " + access.token },
       // Bound the background fetch: a stalled connection must not eat the push
@@ -192,7 +203,13 @@ async function backgroundMailboxSync() {
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
-    return { synced: true, stored: storedCount, cursor, arrivals };
+    // What the relay may be told once the notification is on screen: see
+    // acknowledgeStored. Never before it — the notification is the whole point
+    // of the wake-up, and iOS gives the handler little time.
+    const acknowledge = cursor > Math.max(0, Number(access.cursor) || 0)
+      ? { endpointUrl: access.endpointUrl, mailboxId: access.mailboxId, token: access.token, cursor: cursor }
+      : undefined;
+    return { synced: true, stored: storedCount, cursor, arrivals, acknowledge };
   } catch (error) {
     return { synced: false, reason: String(error && error.message || error) };
   } finally {
@@ -264,8 +281,12 @@ async function describeArrivals(arrivals) {
     if (!title) {
       continue;
     }
-    const what = entry.approval ? (entry.reply ? "approval needed, reply ready" : "approval needed") : "reply ready";
-    notifications.push({ conversationId, body: `${title}: ${what}` });
+    // Read on a lock screen, in one glance: what happened, and where. The
+    // name of whoever wrote it stays out — it lives inside the sealed payload
+    // this worker deliberately never opens. An approval outranks a reply: it
+    // is the one that is waiting on the User.
+    const body = entry.approval ? `Approval needed in ${title}` : `New message in ${title}`;
+    notifications.push({ conversationId, body });
   }
   return notifications;
 }
@@ -325,17 +346,50 @@ async function showArrivalNotifications(result) {
   }
 }
 
+/** Tells the relay what this device now holds, so its doorbell does not ring
+ *  again for it. Sent after the notification, never before: the wake-up exists
+ *  to show that notification, and an extra request in front of it spends the
+ *  handler's time. Best effort — losing it costs one extra ring, never a
+ *  missing one. */
+async function acknowledgeStored(result) {
+  const ack = result && result.acknowledge;
+  if (!ack) return;
+  try {
+    const url = new URL(ack.endpointUrl);
+    url.searchParams.set("mailboxId", ack.mailboxId);
+    url.searchParams.set("limit", "1");
+    url.searchParams.set("afterArrival", String(ack.cursor));
+    url.searchParams.set("reader", "phone");
+    await fetch(url.toString(), {
+      headers: { accept: "application/json", authorization: "Bearer " + ack.token },
+      signal: AbortSignal.timeout(5_000)
+    });
+  } catch {
+    // The next sync says it again.
+  }
+}
+
 self.addEventListener("push", (event) => {
   event.waitUntil((async () => {
     // Always show a notification, even if the background sync fails: a push
     // that does not surface a notification counts against the subscription on
     // iOS. The page catches up on open regardless.
     let result;
+    const sync = backgroundMailboxSync();
     try {
-      result = await backgroundMailboxSync();
+      // A sync that takes too long is the same thing to iOS as no sync at all:
+      // the handler is cut off with nothing shown, and that counts against the
+      // subscription. So the notification waits only as long as it can afford
+      // to; the sync itself keeps running under the same waitUntil and stores
+      // what it fetched regardless.
+      result = await Promise.race([
+        sync,
+        new Promise((resolve) => setTimeout(() => resolve(undefined), NOTIFICATION_DEADLINE_MS))
+      ]);
     } finally {
       await showArrivalNotifications(result);
     }
+    await acknowledgeStored(await sync.catch(() => undefined));
   })());
 });
 
@@ -374,14 +428,15 @@ self.addEventListener("notificationclick", (event) => {
       for (const client of clients) {
         if ("focus" in client) {
           const focused = await client.focus();
-          if (conversationId) {
-            // The page owns navigation; it is told which chat, nothing more.
-            (focused || client).postMessage({ type: "accord-open-conversation", conversationId });
-          }
+          // Activity, not the chat: there are many chats and a reply can sit
+          // in a thread, so the list of what just happened is the one place
+          // that always holds the thing the notification was about. The page
+          // owns navigation; it is told the tab, nothing more.
+          (focused || client).postMessage({ type: "accord-open-activity", conversationId });
           return focused;
         }
       }
-      return self.clients.openWindow(conversationId ? "./?open=" + encodeURIComponent(conversationId) : "./");
+      return self.clients.openWindow("./?tab=activity");
     })
   );
 });

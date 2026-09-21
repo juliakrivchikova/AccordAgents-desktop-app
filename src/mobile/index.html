@@ -8,7 +8,7 @@
     <title>AccordAgents</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="assets/accordagents-mark.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-09-19-pwa-activity-v1" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-09-21-pwa-looking-banner-v2" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -146,6 +146,13 @@
             </svg>
             Latest
           </button>
+          <!-- Waiting for messages must look different from having none: this
+               says which of the two it is. It sits at the bottom, where new
+               messages land and the User is already looking. -->
+          <div id="timeline-syncing" class="timeline-syncing" role="status" hidden>
+            <span class="timeline-syncing-spinner" aria-hidden="true"></span>
+            <span>Looking for new messages&hellip;</span>
+          </div>
           <form id="composer-form" class="composer">
             <div id="mention-menu" class="mobile-mention-menu" role="listbox" aria-label="Members" hidden></div>
             <!-- The "/" menu: commands, saved prompts and skills, as the desktop
@@ -171,8 +178,10 @@
             </div>
           </form>
         </section>
-        <!-- The bottom bar on the home screens: Chats, Activity and Settings,
-             and search on its own button beside it. Hidden inside a chat. -->
+        <!-- The bottom bar: Chats, Activity and Settings, with search on its
+             own button beside it. It floats over the home screens; inside a
+             chat it sits under the composer and leaves while the keyboard
+             is up. -->
         <div id="home-dock" class="pb-dock" hidden>
           <nav class="pb-bar" aria-label="Primary">
             <button type="button" class="pb-tab" data-home-tab="chats" data-active="true" aria-current="page">
@@ -208,8 +217,8 @@
       </main>
     </div>
     <!-- The database description both the page and the service worker load. -->
-    <script src="mobile-db.js" defer></script>
-    <script src="jsqr.js?v=2026-09-19-pwa-activity-v1" defer></script>
+    <script src="mobile-db.js?v=2026-09-21-pwa-looking-banner-v2" defer></script>
+    <script src="jsqr.js?v=2026-09-21-pwa-looking-banner-v2" defer></script>
     <script src="mobile-event-log.js?v=2026-09-07-event-log-v1" defer></script>
     <script src="mobile-machine-wake.js?v=2026-09-07-wake-v1" defer></script>
     <script src="mobile-machine-sealing.js?v=2026-09-07-pair-sealing-v1" defer></script>
@@ -217,8 +226,8 @@
     <script src="mobile-machine-channel.js?v=2026-09-07-machine-channel-v1" defer></script>
     <!-- Rules shared with the desktop verbatim (avatars, timeline visibility),
          bundled from src/shared by the mobile build. -->
-    <script src="mobile-shared.js?v=2026-09-19-pwa-activity-v1" defer></script>
-    <script src="mobile-activity.js?v=2026-09-19-pwa-activity-v1" defer></script>
-    <script src="mobile-app.js?v=2026-09-19-pwa-activity-v1" defer></script>
+    <script src="mobile-shared.js?v=2026-09-21-pwa-looking-banner-v2" defer></script>
+    <script src="mobile-activity.js?v=2026-09-21-pwa-looking-banner-v2" defer></script>
+    <script src="mobile-app.js?v=2026-09-21-pwa-looking-banner-v2" defer></script>
   </body>
 </html>

@@ -126,9 +126,41 @@ const permissionCard = {
   draftOverride: { capability: "read", path: "src/index.ts" }
 };
 
+// A member's message exactly as it arrives when it asks the User to choose:
+// the prose, then the `User choice:` block the desktop turns into the card
+// below it. The desktop hides that block from the bubble
+// (src/renderer/components/chat/chat-display-content.ts); the phone shows the
+// same message and must hide it too, or the User reads the question twice —
+// once as protocol text, once as the card.
 const message = {
   id: "m1", messageId: "m1", role: "participant", participantLabel: "@drew",
-  content: "Working on it.", status: "done", createdAt: new Date(Date.UTC(2026, 8, 7, 8, 59)).toISOString()
+  content: [
+    "Working on it.",
+    "",
+    "User choice:",
+    "T: Where to fix",
+    "Q: Which fix should I build?",
+    "O1: In the relay | needs a deploy",
+    "O2: On the phone | no deploy",
+    "R: O1",
+    "",
+    // Prose after the block: a rule that simply cuts everything from the block
+    // to the end of the message would eat this, and the User would never know
+    // what the member wrote.
+    "I will start as soon as you pick.",
+    "",
+    "```",
+    "User choice:",
+    "Q: this one is inside a fence and is not a control block",
+    "```",
+    "",
+    "User choice:",
+    "T: Second block",
+    "Q: And this one is real too?",
+    "O1: Yes",
+    "O2: No"
+  ].join("\n"),
+  status: "done", createdAt: new Date(Date.UTC(2026, 8, 7, 8, 59)).toISOString()
 };
 
 const killStaleCdp = () => {
@@ -203,6 +235,82 @@ test("a card published by the desktop is answered on the phone and survives a re
     assert.match(text, /Read src\/index\.ts/);
     assert.match(text, /cloud-box/);
     t.diagnostic(`card rendered: ${text.replace(/\n/g, " | ")}`);
+
+    // The question is asked once: the card. The protocol block that produced
+    // it is not chat text and never reaches the bubble.
+    const bubble = await evaluate(`(() => {
+      const node = document.querySelector("#message-list .message-content");
+      return node ? node.innerText : null;
+    })()`);
+    assert.ok(bubble, "the member's message is on the phone's timeline");
+    assert.match(bubble, /Working on it\./, "what the member wrote is still shown");
+    assert.match(bubble, /I will start as soon as you pick\./, "prose after the block survives");
+    assert.match(bubble, /inside a fence/, "a block inside a code fence is quoted text, not protocol");
+    assert.doesNotMatch(bubble, /^\s*T: Where to fix/m, "the first raw choice block is gone");
+    assert.doesNotMatch(bubble, /^\s*T: Second block/m, "the second one is gone too");
+    assert.doesNotMatch(bubble, /^\s*O1: In the relay/m, "no protocol option lines in the bubble");
+    assert.doesNotMatch(bubble, /^\s*Q: Which fix should I build\?/m, "no protocol question line in the bubble");
+
+    // The User's own words are never control text, whatever they start with.
+    await postEnvelope({
+      type: "mobile.timeline.events",
+      conversationId: CONVERSATION,
+      events: [{
+        id: "m2", messageId: "m2", role: "you",
+        content: "User choice: I would rather do it the other way.",
+        status: "done", createdAt: new Date(Date.UTC(2026, 8, 7, 9, 5)).toISOString()
+      }]
+    });
+    const ownWords = await (async () => {
+      for (let i = 0; i < 40; i += 1) {
+        const text = await evaluate(`(() => {
+          const rows = [...document.querySelectorAll('#message-list .message-row')];
+          const mine = rows.filter((row) => row.dataset.author !== "agent").map((row) => row.innerText).join(String.fromCharCode(10));
+          return mine.trim() ? mine : null;
+        })()`);
+        if (text && /other way/.test(text)) return text;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return null;
+    })();
+    assert.ok(ownWords, "the User's own message is shown as she wrote it");
+    assert.match(ownWords, /User choice: I would rather do it the other way\./,
+      "her words are not treated as a protocol block");
+
+    // The question the User answered keeps its place under the message, the
+    // way the desktop keeps it: the pinned strip carries only what still
+    // waits, so this is the only record of what was asked and chosen.
+    await postEnvelope({
+      type: "mobile.timeline.events",
+      conversationId: CONVERSATION,
+      events: [message],
+      cards: [permissionCard, {
+        id: "choice-answered", kind: "choice", conversationId: CONVERSATION,
+        title: "Where to fix", summary: "Which fix should I build?",
+        requesterLabel: "@drew",
+        options: [{ id: "relay", label: "In the relay" }, { id: "phone", label: "On the phone" }],
+        allowsCustomAnswer: true, allowsCancel: true,
+        status: "answered", outcome: "In the relay",
+        createdAt: new Date(Date.UTC(2026, 8, 7, 8, 59)).toISOString(),
+        sourceMessageId: "m1"
+      }]
+    });
+    const answered = await (async () => {
+      for (let i = 0; i < 40; i += 1) {
+        const text = await evaluate(`(() => {
+          const node = document.querySelector("#message-list .control-card-answered");
+          return node ? node.innerText : null;
+        })()`);
+        if (text) return text;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return null;
+    })();
+    assert.ok(answered, "the answered question is kept under its message");
+    assert.match(answered, /Which fix should I build\?/, "the question is still readable");
+    assert.match(answered, /In the relay/, "what was chosen is shown");
+    assert.equal(await evaluate(`document.querySelectorAll('#control-cards [data-card-id="choice-answered"]').length`), 0,
+      "an answered question does not pile up in the pinned strip");
 
     // The wake control is offered because this pairing carries a scoped key.
     assert.equal(await evaluate(`(() => {

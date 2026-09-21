@@ -85,6 +85,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(shared, /AccordMobileShared/);
   assert.match(shared, /resolveChatParticipantAvatar/);
   assert.match(shared, /isChatMessageHiddenFromTimeline/);
+  // The phone falls back to raw text when the bundle lacks this, which is the
+  // defect it was added for: the fallback must never be reached silently.
+  assert.match(shared, /stripChatControlBlocks/);
   assert.ok(html.indexOf('src="mobile-shared.js') < html.indexOf('src="mobile-app.js'), "the shared rules load before the app");
   assert.ok(worker.includes("./mobile-shared.js?v="), "service worker must precache the shared rules");
   // Activity's rules: without them an installed phone opened offline or on a
@@ -449,7 +452,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /RELAY_TIMELINE_IDLE_MS = 15 \* 60_000/);
   assert.match(app, /activeFlushOutboxPromise/);
   assert.match(app, /Tunnel reconnecting/);
-  assert.match(app, /renderMessageContentIfChanged\(content, entry\.content\)/);
+  // The author travels with the text: the control-block rule applies to a
+  // member's message and never to the User's own words.
+  assert.match(app, /renderMessageContentIfChanged\(content, entry\.content, entry\.author\)/);
   assert.match(app, /appendInlineMarkdown/);
   assert.doesNotMatch(app, /content\.textContent = entry\.content/);
   assert.match(app, /putTimelineEntryDeduped/);
@@ -460,7 +465,10 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /updateMessageRow\(item, entry\)/);
   assert.match(app, /renderMessageContentIfChanged/);
   assert.doesNotMatch(app, /list\.textContent = ""/);
-  assert.match(app, /const flushResult = await flushOutbox\(\);\n\s*await pollMailboxTimeline\(\)\.catch/);
+  // Opening the app takes the whole backlog behind one "Catching up" before it
+  // draws, rather than a page per poll: old messages crawling onto the screen
+  // one lump at a time is what the User saw instead.
+  assert.match(app, /const flushResult = await flushOutbox\(\);\n\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*await catchUpFromRelay\(\);/);
   // Opening a chat, from the list or from Activity, goes through one helper.
   assert.match(app, /function openConversation\(conversationId, options\)[\s\S]+requestTimelineViaRelay\(pairing, conversationId\)[\s\S]+pollMailboxTimeline\(\)\.catch/);
   assert.match(app, /row\.addEventListener\("click", function \(\) \{\s*(void )?openConversation\(chat\.id\)/);
