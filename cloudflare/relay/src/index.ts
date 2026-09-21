@@ -83,6 +83,19 @@ const MAILBOX_ARRIVAL_SEQ_KEY = "arrival-seq";
 const MAILBOX_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const MAILBOX_PUSH_SUBSCRIPTION_KEY = "push-subscription";
 const MAILBOX_PUSH_LAST_SENT_KEY = "push-last-sent";
+// How far the phone has read. The doorbell exists to tell it something it does
+// not have; a ring for envelopes it already fetched arrives as a notification
+// with nothing behind it, which is what the User saw twice per answer on
+// 2026-09-20. Only a reader that says it is the phone advances this — the
+// desktop reads the same box for the phone's own writes, and its progress says
+// nothing about what reached the phone.
+const MAILBOX_PUSH_READ_CURSOR_KEY = "push-read-cursor";
+// Where the last finished run landed in arrival order. The doorbell compares
+// the phone's acknowledgement against this, not against the newest envelope:
+// between the ring and the phone's answer the desktop keeps appending progress
+// for the next turn, and measuring against that rang a second time for
+// something that was never worth a notification.
+const MAILBOX_PUSH_FINISH_SEQ_KEY = "push-finish-seq";
 // W-C: a Durable Object has exactly one alarm, and the retention sweep already
 // owns it. Both users write their own due time into this map and the alarm is
 // armed to the earliest of them; alarm() fires every slot that is due, clears
@@ -478,6 +491,8 @@ export class SealedMailboxStore extends DurableObject<Env> {
       MAILBOX_ARRIVAL_SEQ_KEY,
       MAILBOX_PUSH_SUBSCRIPTION_KEY,
       MAILBOX_PUSH_LAST_SENT_KEY,
+      MAILBOX_PUSH_READ_CURSOR_KEY,
+      MAILBOX_PUSH_FINISH_SEQ_KEY,
       MAILBOX_SCHEDULE_KEY
     ]);
     // A revoked object must not keep an armed alarm: there is nothing left to
@@ -542,8 +557,19 @@ export class SealedMailboxStore extends DurableObject<Env> {
       // terminal snapshot — transient, batch-scoped request metadata, never a
       // stored envelope field. An unmarked append never rings.
       if (runFinished) {
+        await this.ctx.storage.put(MAILBOX_PUSH_FINISH_SEQ_KEY, arrivalSeq);
         const appended = incoming.filter((event) => appendedEventIds.includes(event.eventId));
-        this.ctx.waitUntil(this.maybeSendWakePush(appended).catch(() => undefined));
+        // The ring is awaited rather than left to waitUntil: in production the
+        // push fetch started there never resolved, never failed and never
+        // reached its own timeout — the work simply stopped once the append had
+        // answered, and the User got no notification at all. Holding the append
+        // for the push round trip costs the desktop a few hundred milliseconds;
+        // losing every notification costs more.
+        await this.maybeSendWakePush(appended).catch((error) => {
+          // A ring that fails must say so somewhere: silence here is what made
+          // a dead push path invisible for a whole day.
+          console.log("wake-push failed", String((error as Error)?.message || error));
+        });
       }
     }
     return json({
@@ -592,7 +618,7 @@ export class SealedMailboxStore extends DurableObject<Env> {
   private async maybeSendWakePush(appended: MailboxEvent[]): Promise<void> {
     const record = await this.ctx.storage.get<StoredPushSubscription>(MAILBOX_PUSH_SUBSCRIPTION_KEY);
     if (!record) {
-      return;
+        return;
     }
     if (record.suppressOriginId && appended.every((event) => event.originId === record.suppressOriginId)) {
       return;
@@ -617,6 +643,19 @@ export class SealedMailboxStore extends DurableObject<Env> {
     if (!record) {
       return;
     }
+    // Nothing here the phone has not already read. It answered an earlier ring
+    // and took the rest of the burst with it; ringing again would wake it to
+    // an empty box, and a push it cannot explain is a notification the User
+    // reads for nothing.
+    const maxArrivalSeq = (await this.ctx.storage.get<number>(MAILBOX_ARRIVAL_SEQ_KEY)) ?? 0;
+    const readCursor = (await this.ctx.storage.get<number>(MAILBOX_PUSH_READ_CURSOR_KEY)) ?? 0;
+    // What this ring is about: the last finished run. A mailbox that has never
+    // carried one falls back to the newest envelope, so a first ring is never
+    // swallowed by an unset marker.
+    const finishSeq = (await this.ctx.storage.get<number>(MAILBOX_PUSH_FINISH_SEQ_KEY)) ?? maxArrivalSeq;
+    if (readCursor >= finishSeq) {
+      return;
+    }
     const env = this.env as {
       ACCORD_VAPID_PUBLIC_KEY?: string;
       ACCORD_VAPID_PRIVATE_KEY_JWK?: string;
@@ -631,14 +670,38 @@ export class SealedMailboxStore extends DurableObject<Env> {
       env.ACCORD_VAPID_SUBJECT ?? "mailto:relay@accordagents.com",
       env.ACCORD_VAPID_PRIVATE_KEY_JWK
     );
-    const response = await fetch(record.endpoint, {
-      method: "POST",
-      headers: {
-        TTL: "300",
-        Urgency: "normal",
-        Authorization: `vapid t=${jwt}, k=${env.ACCORD_VAPID_PUBLIC_KEY}`
-      }
-    });
+    let response: Response;
+    try {
+      response = await fetch(record.endpoint, {
+        method: "POST",
+        headers: {
+          TTL: "300",
+          Urgency: "normal",
+          // A bodyless POST leaves the length unstated, and a push service is
+          // entitled to wait for a body that never comes — which is exactly
+          // what a ring that never answers looks like. Say the length out loud.
+          "content-length": "0",
+          Authorization: `vapid t=${jwt}, k=${env.ACCORD_VAPID_PUBLIC_KEY}`
+        },
+        body: new Uint8Array(0),
+        // A ring that never answers is worse than one that fails: it hangs
+        // inside waitUntil until the object goes idle and takes the whole
+        // notification with it, silently. Bound it and let the error surface.
+        signal: AbortSignal.timeout(5_000)
+      });
+    } catch (error) {
+      await this.ctx.storage.put("push-last-result", {
+        at: new Date().toISOString(),
+        failed: String((error as Error)?.name || "") + ": " + String((error as Error)?.message || error)
+      });
+      throw error;
+    }
+    await this.ctx.storage.put("push-last-result", { at: new Date().toISOString(), status: response.status });
+    // The one line that says the doorbell actually rang. Without it a dead
+    // push path looks exactly like a quiet one from outside, which is how a
+    // day was lost to guessing. No endpoint, no token, no JWT — a host and a
+    // status code.
+    console.log("wake-push", JSON.stringify({ host: new URL(record.endpoint).host, status: response.status }));
     if (response.status === 404 || response.status === 410) {
       await this.ctx.storage.delete(MAILBOX_PUSH_SUBSCRIPTION_KEY);
     }
@@ -686,6 +749,26 @@ export class SealedMailboxStore extends DurableObject<Env> {
     // detects that everything expired underneath it.
     const oldestArrivalSeq = swept.oldestArrivalSeq ?? maxArrivalSeq + 1;
     const events = selection.take();
+    // What the phone says it already holds, which is its own cursor and not
+    // what this response happens to carry: a page that never arrives — a
+    // background sync that times out, a write that fails — must still be rung
+    // for. The phone advances its cursor only after the page is stored, so the
+    // cursor it brings next time is its acknowledgement of everything below it.
+    //
+    // Only an unfiltered read over the whole box counts. A filtered or tail
+    // read hands over a slice, and taking its cursor for the whole would
+    // silence the doorbell for envelopes the phone never saw. The claim is
+    // clamped to what the box actually holds, so a stale or absurd cursor
+    // cannot mute anything that arrives later.
+    const phoneRead = url.searchParams.get("reader") === "phone" &&
+      cursorMode && !tail && !conversationId && !logScopeId && !originId;
+    if (phoneRead) {
+      const acknowledged = Math.min(Math.max(0, afterArrival as number), maxArrivalSeq);
+      const known = (await this.ctx.storage.get<number>(MAILBOX_PUSH_READ_CURSOR_KEY)) ?? 0;
+      if (acknowledged > known) {
+        await this.ctx.storage.put(MAILBOX_PUSH_READ_CURSOR_KEY, acknowledged);
+      }
+    }
     const lock = await this.ctx.storage.get<MailboxLock>(MAILBOX_LOCK_KEY);
     return json({
       events,
