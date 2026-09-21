@@ -3019,6 +3019,14 @@
       return;
     }
     strip.textContent = "";
+    // A picture waiting to be sent keeps the composer open, the same as text.
+    const form = document.getElementById("composer-form");
+    if (form) {
+      const input = document.getElementById("composer-input");
+      const open = pendingAttachments.length > 0 ||
+        (input && (document.activeElement === input || Boolean(input.value.trim())));
+      form.dataset.expanded = open ? "1" : "";
+    }
     if (pendingAttachments.length === 0) {
       strip.hidden = true;
       return;
@@ -7270,6 +7278,10 @@
         rowKey: "outbox\0" + entry.eventId,
         id: entry.eventId,
         conversationId: entry.conversationId,
+        // Shown in the thread it was written in, not in the chat behind it.
+        threadRootId: entry.payload && typeof entry.payload.threadRootId === "string"
+          ? entry.payload.threadRootId
+          : undefined,
         author: "you",
         content: entry.payload.content,
         // A picture just sent from this phone shows in its own pending row
@@ -8911,8 +8923,50 @@
         setTimeout(closeMentionMenu, 0);
         setTimeout(closeSlashMenu, 0);
       });
-      form.addEventListener("submit", async function (event) {
+      // One tap, one send. The form's submit event is not enough on the phone:
+      // the send button keeps the field focused so the keyboard does not shove
+      // the layout mid-tap, and a tap that changes nothing on screen can be
+      // dropped before it becomes a click -- which is how a tap came to only
+      // put the keyboard away, leaving the message sitting there (the User,
+      // 2026-09-21). The button therefore sends on pointerup as well, and this
+      // guard makes the two paths one send.
+      let sending = false;
+      const sendComposer = async function () {
+        if (sending) return;
+        sending = true;
+        try {
+          await submitComposer();
+        } finally {
+          sending = false;
+        }
+      };
+      // Slack's shape: one line until it is tapped, then the row of tools.
+      // Anything already written keeps it open, so a draft is never left
+      // without a way to send it.
+      const composerForm = document.getElementById("composer-form");
+      const updateComposerShape = function () {
+        if (!composerForm) return;
+        const open = document.activeElement === input ||
+          Boolean(input.value.trim()) ||
+          pendingAttachments.length > 0;
+        composerForm.dataset.expanded = open ? "1" : "";
+      };
+      input.addEventListener("focus", updateComposerShape);
+      input.addEventListener("blur", updateComposerShape);
+      input.addEventListener("input", updateComposerShape);
+      updateComposerShape();
+      const sendButton = document.getElementById("send-button");
+      if (sendButton) {
+        sendButton.addEventListener("pointerup", function (event) {
+          event.preventDefault();
+          void sendComposer();
+        });
+      }
+      form.addEventListener("submit", function (event) {
         event.preventDefault();
+        void sendComposer();
+      });
+      async function submitComposer() {
         const content = input.value.trim();
         const conversationId = selectedConversationId();
         // A picture on its own is a message.
@@ -8922,19 +8976,27 @@
         input.value = "";
         // The message is gone, so the keyboard has nothing left to do: it goes
         // down and gives the screen back, instead of sitting over the reply
-        // the User just asked for.
+        // the User just asked for. The composer goes back to one line with it.
         input.blur();
+        updateComposerShape();
         closeSlashMenu();
         const attachments = takePendingAttachments();
         const skillMentions = takeSkillMentions(content);
-        const carriesExtras = attachments.length > 0 || skillMentions.length > 0;
+        // A reply written with a thread open belongs to that thread. Without
+        // this the desktop had nothing to place it by and put it in the main
+        // timeline, where the User -- still looking at the thread -- could not
+        // see her own message at all (the User, 2026-09-21).
+        const threadRootId = openThreadRootId();
+        const carriesExtras = attachments.length > 0 || skillMentions.length > 0 || Boolean(threadRootId);
         await enqueueMessage({
           content,
           conversationId,
+          ...(threadRootId ? { threadRootId } : {}),
           ...(carriesExtras
             ? {
               payload: {
                 content,
+                ...(threadRootId ? { threadRootId } : {}),
                 ...(attachments.length > 0 ? { attachments } : {}),
                 ...(skillMentions.length > 0 ? { skillMentions } : {})
               }
@@ -8956,7 +9018,7 @@
           return 0;
         });
         await render(flushResult.status);
-      });
+      }
     }
     // Cached rows are visible before synchronization finishes. Their controls
     // and elapsed time must work throughout those network waits.

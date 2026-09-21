@@ -3196,6 +3196,28 @@ test("MobileRelayControlService answers the composer request from the catalog an
     }
     assert.equal(sent.length, 1);
     assert.equal(sent[0].skillMentions?.[0].skillId, "skill-1", "the picked skill reaches the chat service like the desktop composer's");
+
+    // A message written with a thread open belongs to that thread. Without the
+    // root the desktop placed it in the main timeline, where the User -- still
+    // looking at the thread she wrote in -- never saw her own message.
+    const threadAck = nextMessage(phone);
+    await phone.sendCiphertext({
+      logicalMessageId: "send-thread-1",
+      ciphertext: await sealMobileRelayPayload({
+        type: "mobile.outbox.events",
+        events: [{
+          eventId: "evt-thread-1",
+          conversationId: "conversation-1",
+          payload: { content: "inside the thread", threadRootId: "message-root-1" }
+        }]
+      }, key)
+    });
+    await threadAck;
+    for (let i = 0; i < 50 && sent.length === 1; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].chatThreadRootId, "message-root-1", "a reply written in a thread is sent to that thread");
   } finally {
     phone.close();
     desktop.close();

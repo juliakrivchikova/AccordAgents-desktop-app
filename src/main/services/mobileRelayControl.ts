@@ -190,6 +190,10 @@ export interface MobileMessageOutboxEvent extends MobileOutboxEventBase {
     /** Skills picked from the phone's "/" menu, the same records the desktop
      *  composer attaches. Sanitized again on the chat side. */
     skillMentions?: ChatSkillMention[];
+    /** The thread this was written in, when the phone had one open. The same
+     *  root the desktop composer sends, so a reply lands where it was typed
+     *  instead of in the chat behind it. */
+    threadRootId?: string;
   };
 }
 
@@ -1012,12 +1016,19 @@ export class MobileRelayControlService {
         }
         const imageAttachments = mobileUploadImages(item.event.payload.attachments);
         const skillMentions = mobileSkillMentions(item.event.payload.skillMentions);
+        const threadRootId = typeof item.event.payload.threadRootId === "string"
+          ? item.event.payload.threadRootId.trim()
+          : "";
         const result = await this.chat.sendMessage(
           {
             conversationId: item.event.conversationId,
             content: typeof item.event.payload.content === "string" ? item.event.payload.content : "",
             ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
             ...(skillMentions.length > 0 ? { skillMentions } : {}),
+            // The same field the desktop composer uses for a reply in a
+            // thread: the phone's message is placed by it, not by where the
+            // desktop happened to be looking.
+            ...(threadRootId ? { chatThreadRootId: threadRootId } : {}),
             runId: item.runId,
             mobileEventId: item.event.eventId
           },

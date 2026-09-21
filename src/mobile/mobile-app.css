@@ -1036,6 +1036,24 @@ button.mobile-chat-group-title:active {
   padding: 2px 6px 6px;
 }
 
+/* Until it is tapped the composer is one line and nothing else: the tools
+   belong to writing, and a chat is mostly read. They come back the moment the
+   field is focused or holds anything, so nothing typed can be left without a
+   way to send it. */
+.composer:not([data-expanded="1"]) .composer-toolbar {
+  display: none;
+}
+
+.composer:not([data-expanded="1"]) .composer-input-wrap {
+  border-radius: 21px;
+}
+
+.composer:not([data-expanded="1"]) .composer textarea,
+.composer:not([data-expanded="1"]) #composer-input {
+  min-height: 38px;
+  padding: 9px 14px;
+}
+
 /* 44px is the smallest target a finger hits reliably; the glyph inside is
    smaller, the tappable box is not. */
 .composer .composer-tool {

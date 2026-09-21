@@ -371,6 +371,7 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     });
     await waitFor(() => evaluate(`(() => document.getElementById("chat-title").textContent)()`), (text) => text === "Thread", "the thread opens");
     assert.deepEqual(await visibleBacks(), ["back-to-timeline"], "a thread shows one arrow, to the chat — not two");
+
     await evaluate(`(() => { document.getElementById("back-to-timeline").click(); return true; })()`);
     await waitFor(visibleBacks, (ids) => ids.length === 1 && ids[0] === "back-to-chats", "leaving the thread brings the list arrow back");
     assert.ok(await evaluate(`(() => document.getElementById("timeline-screen").classList.contains("is-active"))()`), "and stays in the chat");
@@ -408,6 +409,38 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     await waitFor(rowAvatars, (rows) => rows.length === 6, "the chat is back after the reload");
     assert.deepEqual(await systemRows(), ["The machine restarte"], "the desktop's internal trigger is gone; the phone's own machine note stays");
     assert.equal(await evaluate(`localStorage.getItem("accordagents.mobile.internalSystemRowsDropped.v1")`), "1", "the sweep runs once");
+
+    // --- a message written in a thread is sent to that thread ---------------
+    // Last, because it queues a message: without the thread it was written in
+    // the desktop put it in the main timeline, and the User -- still looking
+    // at the thread she wrote in -- could not see her own message at all.
+    await evaluate(`(() => { sessionStorage.setItem("accordagents.mobile.openThreadRootId.v1", "a-001"); return true; })()`);
+    await postEnvelope(CHAT_A, "mobile.timeline.events", {
+      type: "mobile.timeline.events", conversationId: CHAT_A,
+      events: [row("a-001-reply-2", 24, "participant", "@drew", "Still in the thread.", { threadRootId: "a-001" })]
+    });
+    await waitFor(() => evaluate(`(() => document.getElementById("chat-title").textContent)()`), (text) => text === "Thread", "the thread is open again");
+    await evaluate(`(() => {
+      const input = document.getElementById("composer-input");
+      input.value = "written inside the thread";
+      document.getElementById("composer-form").dispatchEvent(new Event("submit", { cancelable: true }));
+      return true;
+    })()`);
+    const queuedInThread = await waitFor(
+      () => evaluate(`(async () => {
+        const queued = await AccordAgentsMobile.listOutboxEntries();
+        const mine = queued.filter((entry) => (entry.payload && entry.payload.content) === "written inside the thread");
+        return mine.length > 0 ? JSON.stringify(mine[0].payload) : null;
+      })()`),
+      (value) => Boolean(value),
+      "the message written in the thread is queued"
+    );
+    assert.equal(JSON.parse(queuedInThread).threadRootId, "a-001", "a message written in a thread carries that thread");
+    await waitFor(
+      () => evaluate(`(() => document.getElementById("message-list").textContent.includes("written inside the thread"))()`),
+      (shown) => shown === true,
+      "and it is on screen in the thread it was written in"
+    );
   } finally {
     app?.close();
     control.close();

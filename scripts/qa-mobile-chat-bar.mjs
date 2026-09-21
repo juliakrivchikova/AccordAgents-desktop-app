@@ -188,6 +188,29 @@ const bannerStates = await evaluate(`(async () => {
 const banner = JSON.parse(bannerStates);
 check("a chat that is still looking says so", banner.during === false && banner.after === true && /Looking for new messages/.test(banner.text), JSON.stringify(banner));
 
+// Slack's composer shape: one line until it is tapped, tools once it is.
+const composerShape = await evaluate(`(async () => {
+  const form = document.getElementById("composer-form");
+  const input = document.getElementById("composer-input");
+  const tools = document.querySelector(".composer-toolbar");
+  input.blur();
+  input.value = "";
+  input.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 120));
+  const closed = { expanded: form.dataset.expanded || "", tools: tools.getClientRects().length > 0, height: Math.round(form.getBoundingClientRect().height) };
+  input.focus();
+  await new Promise((r) => setTimeout(r, 160));
+  const open = { expanded: form.dataset.expanded || "", tools: tools.getClientRects().length > 0, height: Math.round(form.getBoundingClientRect().height) };
+  input.blur();
+  return JSON.stringify({ closed, open });
+})()`);
+const shape = JSON.parse(composerShape);
+check(
+  "the composer is one line until it is tapped",
+  shape.closed.tools === false && shape.open.tools === true && shape.open.height > shape.closed.height,
+  JSON.stringify(shape)
+);
+
 out.closed = await geometry();
 out.barInChat = await bar();
 await shot("chat-light");
