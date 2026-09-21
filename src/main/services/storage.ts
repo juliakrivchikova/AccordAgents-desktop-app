@@ -67,6 +67,10 @@ function sqlString(value: string | undefined | null): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+/** How many still-pending choices the phone's chat list may carry across
+ *  the listed chats before the set is called incomplete. */
+const MAX_PENDING_CHOICE_ROWS = 500;
+
 function sqlStringList(values: string[]): string {
   return values.length > 0 ? `(${values.map((value) => sqlString(value)).join(", ")})` : "('')";
 }
@@ -532,6 +536,48 @@ export class StorageService {
         ...(chatParticipants ? { chatParticipants } : {})
       };
     });
+  }
+
+  /** The messages whose choice still waits for the User, in the given chats:
+   *  what the phone's chat list carries so a phone can drop a card the
+   *  desktop no longer waits on. One query over the listed chats' rows (their
+   *  payloads are scanned; a chat's history is never read through the CLI).
+   *  Past the cap the set is incomplete and says so, because the phone treats
+   *  what it is given as the whole. */
+  async listPendingChoiceMessages(conversationIds: string[]): Promise<{
+    rows: Array<{ conversationId: string; message: ChatMessage }>;
+    truncated: boolean;
+  }> {
+    await this.init();
+    const ids = [...new Set(conversationIds.filter((id) => typeof id === "string" && id.trim()))];
+    if (ids.length === 0) {
+      return { rows: [], truncated: false };
+    }
+    const found = await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
+      `
+        select conversation_id as conversationId, sequence, hex(payload_json) as payloadHex
+        from conversation_messages
+        where conversation_id in ${sqlStringList(ids)}
+          and json_valid(payload_json)
+          and json_extract(payload_json, '$.metadata.pendingChoice.status') = 'pending'
+        order by created_at desc
+        limit ${MAX_PENDING_CHOICE_ROWS + 1};
+      `
+    );
+    const truncated = found.length > MAX_PENDING_CHOICE_ROWS;
+    const rows: Array<{ conversationId: string; message: ChatMessage }> = [];
+    for (const row of found.slice(0, MAX_PENDING_CHOICE_ROWS)) {
+      try {
+        rows.push({
+          conversationId: row.conversationId,
+          message: parseHexJson<ChatMessage>(row.payloadHex, `pending choice message ${row.conversationId}:${row.sequence}`)
+        });
+      } catch (error) {
+        console.warn(`[StorageService] Skipping invalid pending choice message ${row.conversationId}:${row.sequence}: ${
+          error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return { rows, truncated };
   }
 
   async listChatActivity(request: ListChatActivityRequest = {}): Promise<ListChatActivityResult> {
