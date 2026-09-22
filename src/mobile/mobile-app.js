@@ -7842,16 +7842,26 @@
   }
 
   function appendThreadChip(item, entry) {
-    if (!entry.replyCount) {
+    // A thread can only be read on the phone if it can be started there too:
+    // until now one had to be begun from the desktop, and the phone could only
+    // join a conversation someone else had already opened (the User,
+    // 2026-09-22). A message with no replies yet offers to start one; the rest
+    // of the path -- open the thread, write in it, send it to it -- is the one
+    // that already works. Rows the phone cannot thread from, like its own
+    // still-queued message, do not offer it.
+    const threadRoot = entry.sourceId;
+    if (!entry.replyCount && (!threadRoot || entry.scaffolding || entry.status === "queued")) {
       return;
     }
     const chip = document.createElement("button");
     chip.type = "button";
-    chip.className = "thread-chip";
-    chip.dataset.threadRoot = entry.sourceId;
-    chip.textContent = entry.replyCount === 1 ? "1 reply" : entry.replyCount + " replies";
+    chip.className = entry.replyCount ? "thread-chip" : "thread-chip thread-chip-start";
+    chip.dataset.threadRoot = threadRoot;
+    chip.textContent = entry.replyCount
+      ? (entry.replyCount === 1 ? "1 reply" : entry.replyCount + " replies")
+      : "Reply in thread";
     chip.addEventListener("click", function () {
-      setOpenThreadRootId(entry.sourceId);
+      setOpenThreadRootId(threadRoot);
       void render();
     });
     item.append(chip);
@@ -8286,15 +8296,20 @@
       if (awayMs > FOREGROUND_RECONNECT_AFTER_MS) {
         dropRelaySocket("mobile foreground resync");
       }
+      // The box first, the socket after. Coming back from the background is
+      // exactly when the live channel is half-open: each request on it waits
+      // out a twenty-second ack timeout, and behind those the messages already
+      // sitting in the mailbox waited too -- the User came back to a chat that
+      // showed nothing until she left it and opened it again (2026-09-22).
+      // The mailbox is plain HTTPS and owes nothing to the socket.
+      await catchUpFromRelay();
+      await render("synced");
       try {
         await requestChatListViaRelay(pairing);
         const conversationId = selectedConversationId();
         if (conversationId) {
           await requestTimelineViaRelay(pairing, conversationId);
         }
-        // Coming back from the background is the other moment a backlog is
-        // waiting: same one wait, same single change on screen.
-        await catchUpFromRelay();
         await render("synced");
       } catch {
         await render("tunnel-reconnecting");

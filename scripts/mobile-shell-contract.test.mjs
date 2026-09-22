@@ -465,6 +465,11 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /updateMessageRow\(item, entry\)/);
   assert.match(app, /renderMessageContentIfChanged/);
   assert.doesNotMatch(app, /list\.textContent = ""/);
+  // Coming back from the background reads the mailbox before it asks anything
+  // of the socket: each socket request waits out a twenty-second ack timeout
+  // when the live channel is half-open, and messages already in the box must
+  // not wait behind that.
+  assert.match(app, /await catchUpFromRelay\(\);\n\s*await render\("synced"\);\n\s*try \{\n\s*await requestChatListViaRelay/);
   // Opening the app takes the whole backlog behind one "Catching up" before it
   // draws, rather than a page per poll: old messages crawling onto the screen
   // one lump at a time is what the User saw instead.

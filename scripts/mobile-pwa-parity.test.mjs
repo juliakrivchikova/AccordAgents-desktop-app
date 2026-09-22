@@ -410,6 +410,29 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     assert.deepEqual(await systemRows(), ["The machine restarte"], "the desktop's internal trigger is gone; the phone's own machine note stays");
     assert.equal(await evaluate(`localStorage.getItem("accordagents.mobile.internalSystemRowsDropped.v1")`), "1", "the sweep runs once");
 
+    // --- a thread can be started from the phone -----------------------------
+    // Reading a thread is no use if one can only be begun from the desktop.
+    await evaluate(`(() => { sessionStorage.removeItem("accordagents.mobile.openThreadRootId.v1"); return true; })()`);
+    await evaluate(`(() => { document.getElementById("back-to-timeline")?.click(); return true; })()`);
+    await waitFor(
+      () => evaluate(`(() => [...document.querySelectorAll("#message-list .thread-chip-start")].length)()`),
+      (count) => count > 0,
+      "a message with no replies offers to start a thread"
+    );
+    const startedRoot = await evaluate(`(() => {
+      const chip = document.querySelector("#message-list .thread-chip-start");
+      const root = chip.dataset.threadRoot;
+      chip.click();
+      return root;
+    })()`);
+    await waitFor(
+      () => evaluate(`(() => sessionStorage.getItem("accordagents.mobile.openThreadRootId.v1"))()`),
+      (root) => root === startedRoot,
+      "tapping it opens that message's thread"
+    );
+    await waitFor(() => evaluate(`(() => document.getElementById("chat-title").textContent)()`), (text) => text === "Thread", "and the screen says so");
+    await evaluate(`(() => { document.getElementById("back-to-timeline").click(); return true; })()`);
+
     // --- a message written in a thread is sent to that thread ---------------
     // Last, because it queues a message: without the thread it was written in
     // the desktop put it in the main timeline, and the User -- still looking

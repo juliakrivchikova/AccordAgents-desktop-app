@@ -686,6 +686,17 @@ button.mobile-chat-group-title:active {
   margin-left: 44px;
 }
 
+/* Starting a thread is an offer, not a fact: quieter than the chip that says
+   how many replies a message already has. */
+.thread-chip-start {
+  border-color: transparent;
+  background: transparent;
+  color: var(--mut);
+  padding-left: 0;
+  padding-right: 8px;
+  font-weight: 400;
+}
+
 .thread-back {
   display: none;
 }
