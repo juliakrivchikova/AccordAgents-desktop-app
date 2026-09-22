@@ -286,7 +286,7 @@ async function describeArrivals(arrivals) {
     // this worker deliberately never opens. An approval outranks a reply: it
     // is the one that is waiting on the User.
     const body = entry.approval ? `Approval needed in ${title}` : `New message in ${title}`;
-    notifications.push({ conversationId, body });
+    notifications.push({ conversationId, body, approval: entry.approval });
   }
   return notifications;
 }
@@ -320,10 +320,17 @@ async function applyBadge(count) {
   }
 }
 
-async function showArrivalNotifications(result) {
+/** Shows what arrived. With `namedOnly`, a sync that names no chat shows
+ *  nothing and answers false: the generic notice already on screen stands,
+ *  rather than being shown again and then closed — a push that ends with no
+ *  notification on screen is what iOS counts against the subscription. */
+async function showArrivalNotifications(result, namedOnly) {
   const arrivals = result && result.synced && Array.isArray(result.arrivals) ? result.arrivals : [];
   const notifications = await describeArrivals(arrivals).catch(() => []);
   if (notifications.length === 0) {
+    if (namedOnly) {
+      return false;
+    }
     await self.registration.showNotification(NOTIFICATION_TITLE, {
       body: NOTIFICATION_FALLBACK_BODY,
       icon: NOTIFICATION_ICON,
@@ -331,7 +338,7 @@ async function showArrivalNotifications(result) {
       tag: "accordagents-sync",
       data: { action: "sync" }
     });
-    return;
+    return false;
   }
   // One per chat, tagged by chat: a second reply in the same chat replaces
   // the first notification instead of stacking, and another chat's does not.
@@ -341,9 +348,12 @@ async function showArrivalNotifications(result) {
       icon: NOTIFICATION_ICON,
       badge: NOTIFICATION_ICON,
       tag: "accordagents-chat-" + notification.conversationId,
-      data: { action: "open", conversationId: notification.conversationId }
+      // An approval is answered on Activity's Pending list; a reply is read
+      // there among what finished. The tap lands on the right one.
+      data: { action: "open", conversationId: notification.conversationId, list: notification.approval ? "pending" : "finished" }
     });
   }
+  return true;
 }
 
 /** Tells the relay what this device now holds, so its doorbell does not ring
@@ -392,16 +402,20 @@ self.addEventListener("push", (event) => {
     const settled = await sync.catch(() => undefined);
     if (result === undefined && settled && settled.synced) {
       // The sync outran the deadline: the generic notice was shown for it,
-      // and it stayed while the named ones never came. They come now and the
-      // generic one goes, so the lock screen names the chat after all.
-      await showArrivalNotifications(settled);
-      try {
-        for (const shown of await self.registration.getNotifications({ tag: "accordagents-sync" })) {
-          shown.close();
+      // and it stayed while the named ones never came. When the late sync
+      // does name a chat they come now and the generic one goes, so the lock
+      // screen names the chat after all; when it names none (the page's own
+      // poll took the burst first), the generic one stands.
+      const named = await showArrivalNotifications(settled, true);
+      if (named) {
+        try {
+          for (const shown of await self.registration.getNotifications({ tag: "accordagents-sync" })) {
+            shown.close();
+          }
+        } catch {
+          // Two notifications for one arrival is the worse of the two
+          // outcomes only by a little.
         }
-      } catch {
-        // Two notifications for one arrival is the worse of the two outcomes
-        // only by a little.
       }
     }
     await acknowledgeStored(settled);
@@ -434,6 +448,11 @@ self.addEventListener("message", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
+  const data = event.notification.data || {};
+  // Which of Activity's lists holds what the notification was about: an
+  // approval waits on Pending, a reply is among what finished. Without this
+  // the tap landed on whichever list was last read.
+  const list = data.list === "pending" ? "pending" : data.list === "finished" ? "finished" : "";
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (clients) => {
       for (const client of clients) {
@@ -442,12 +461,12 @@ self.addEventListener("notificationclick", (event) => {
           // Activity, not the chat: there are many chats and a reply can sit
           // in a thread, so the list of what just happened is the one place
           // that always holds the thing the notification was about. The page
-          // owns navigation; it is told the tab, nothing more.
-          (focused || client).postMessage({ type: "accord-open-activity" });
+          // owns navigation; it is told the tab and the list, nothing more.
+          (focused || client).postMessage({ type: "accord-open-activity", ...(list ? { list } : {}) });
           return focused;
         }
       }
-      return self.clients.openWindow("./?tab=activity");
+      return self.clients.openWindow("./?tab=activity" + (list ? "&list=" + list : ""));
     })
   );
 });

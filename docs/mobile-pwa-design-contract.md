@@ -170,8 +170,10 @@ a batch with cards and no rows was dropped before it reached the mailbox. Now:
   second answer replaces the first one still on its way rather than racing
   it: the earlier queue entry is set aside, never sent. An answer the desktop
   or the mailbox has already taken is not lost, only waiting for the desktop
-  to be up: that card stays locked for a day, because a second answer given
-  meanwhile only raced the first, and the older one won on the desktop.
+  to be up: that card stays locked for an hour, because a second answer given
+  meanwhile only raced the first, and the older one won on the desktop. An
+  hour and not longer, because the desktop can take an answer and then give
+  it up (five failed applies) without the phone hearing of it.
 - The desktop answers a refused batch with an empty ack only when it refuses
   it for good (a chat outside the pairing's scope, a malformed event). A
   failure of its own — storage that did not answer — gets no ack, so the
@@ -184,10 +186,16 @@ a batch with cards and no rows was dropped before it reached the mailbox. Now:
   Stop dead a third of the time while a member streamed).
 - A message opens on its own screen on tap, except a system note: the desktop
   offers a thread on every message but those, and the phone offers exactly
-  what the desktop does. A reply written with a thread open is placed by that
-  thread on the desktop; a thread root the chat does not hold sends the
-  message to the chat itself, with a warning, rather than into a thread nobody
-  can open.
+  what the desktop does. The way back returns to the place the chat was being
+  read, as Slack's message screen does; the pill says whether anything new
+  waits below. A reply written with a thread open is placed by that thread on
+  the desktop, over the tunnel and over the mailbox alike; a thread root the
+  chat does not hold sends the message to the chat itself, with a warning,
+  rather than into a thread nobody can open.
+- A tapped notification lands on the Activity list it was about: Pending for
+  an approval, Finished for a reply. A batch that carries only cards does not
+  mark its chat unread: the refresh the desktop sends after the phone's own
+  answer said nothing new.
 - A launch that cannot reach the relay keeps the push subscription it has: the
   relay's key is fetched before the old subscription is given up, and a launch
   that could not register tries again on the next return to the foreground.

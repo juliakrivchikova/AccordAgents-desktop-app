@@ -793,8 +793,14 @@
         };
         // A transaction that fails still holds its connection open until it
         // is closed here; left to the garbage collector, that connection
-        // blocks the next version change the worker asks for.
+        // blocks the next version change the worker asks for. And the rows
+        // held for a chat were brought up to date as this write's requests
+        // succeeded, before the store took them: after an abort they name a
+        // row the store never got, and the next copy of it would be judged
+        // "already here" and never written. Dropped, so the next write reads
+        // the chat as it is.
         tx.onabort = function () {
+          dropCachedChatRows();
           reject(tx.error || new Error("Timeline transaction aborted."));
           db.close();
         };
@@ -4406,9 +4412,12 @@
     }
     let stored = 0;
     let changed = 0;
+    // Cards are drawn now, but a batch that carries only cards is not news
+    // the chat is marked unread for: the refresh the desktop sends after the
+    // phone's own answer, and a card it closes, put an unread dot and a
+    // number on the icon for a chat nothing was said in.
     if (Array.isArray(payload.cards) && storeControlCards(conversationId, payload.cards)) {
       stored += 1;
-      changed += 1;
     }
     for (const event of payload.events) {
       if (!event || typeof event !== "object") {
@@ -5485,6 +5494,9 @@
   let lastScrolledConversationId;
   let lastRenderedThreadRootId;
   let lastRowsFingerprint;
+  // The chat's reading position while one of its messages is open on its own
+  // screen; restored on the way back.
+  let mainListScrollTop;
 
   function openThreadRootId() {
     const value = sessionStorage.getItem(OPEN_THREAD_KEY);
@@ -5948,8 +5960,9 @@
     // unlocks the card. One the desktop or the mailbox has taken is not lost:
     // it is applied when the desktop is next up, and a second answer given
     // meanwhile only raced it — the older one won on the desktop and the
-    // User's later one was quietly discarded. That answer waits a day before
-    // the card unlocks, for the rare desktop that took it and then forgot.
+    // User's later one was quietly discarded. That answer waits an hour
+    // before the card unlocks, for the desktop that took it and then gave it
+    // up without saying so.
     const owed = !held || desktopOwesEntry(held);
     const unlockAfterMs = owed ? CONTROL_CARD_SENT_UNLOCK_MS : CONTROL_CARD_TAKEN_UNLOCK_MS;
     const stale = !Number.isFinite(at) || Date.now() - at > unlockAfterMs;
@@ -5997,7 +6010,10 @@
   // How long an answer may stay on its way before the card is offered again.
   const CONTROL_CARD_SENT_UNLOCK_MS = 10 * 60_000;
   // For an answer the desktop or the mailbox has taken: see cardSentState.
-  const CONTROL_CARD_TAKEN_UNLOCK_MS = 24 * 60 * 60_000;
+  // An hour, not a day: the desktop can take an answer and then give it up
+  // (five failed applies) without the phone hearing, and the card must not
+  // show dead buttons for a day over that.
+  const CONTROL_CARD_TAKEN_UNLOCK_MS = 60 * 60_000;
 
   function renderControlCards(conversationId) {
     const host = document.getElementById("control-cards");
@@ -7488,8 +7504,20 @@
     renderThreadHeader(openThread);
     renderThreadReplyAction(openThread, rows.length);
     renderLoadEarlier(activeId, openThread);
-    const openedConversation = lastScrolledConversationId !== activeId || openThread !== lastRenderedThreadRootId;
+    const previousThread = lastRenderedThreadRootId;
+    const sameChat = lastScrolledConversationId === activeId;
+    const openedConversation = !sameChat || openThread !== previousThread;
     lastRenderedThreadRootId = openThread;
+    // Where the chat was being read when a message was opened on its own
+    // screen, for the way back: Slack's message screen returns to the same
+    // place, and landing at the latest message instead lost the User the
+    // spot she was reading in a chat of thousands of rows.
+    if (sameChat && openThread && !previousThread) {
+      const surface = threadSurface();
+      mainListScrollTop = surface ? surface.scrollTop : undefined;
+    } else if (!sameChat) {
+      mainListScrollTop = undefined;
+    }
     const rowsFingerprint = rows.map(function (row) {
       return (row.rowKey || row.id) + "\u0000" + messageRowSignature(row);
     }).join("\u0001");
@@ -7505,6 +7533,17 @@
       return;
     }
     if (openedConversation) {
+      if (sameChat && !openThread && previousThread && typeof mainListScrollTop === "number") {
+        // Back from a message's own screen: the same place, and the pill says
+        // whether anything new waits below it.
+        const surface = threadSurface();
+        if (surface) {
+          surface.scrollTop = mainListScrollTop;
+          setJumpToLatestVisible(!isNearBottom(surface));
+        }
+        mainListScrollTop = undefined;
+        return;
+      }
       scrollToLatestWhenSettled("auto");
       return;
     }
@@ -8510,9 +8549,16 @@
   /** Where a tapped notification lands: the Activity tab, showing what just
    *  happened across every chat. A chat can be one of many and a reply can be
    *  inside a thread, so the list is the one place that always holds it. */
-  function openActivityFromNotification() {
+  function openActivityFromNotification(list) {
     leaveOpenChat();
     setHomeTab("activity");
+    // The list the notification was about: an approval waits on Pending, a
+    // reply is among what finished. Left to the list last read, a tap on
+    // "Approval needed" could land on Finished with the approval behind a
+    // tab switch.
+    if (list === "pending" || list === "finished") {
+      setActivityTab(list);
+    }
     void render("synced");
   }
 
@@ -8522,7 +8568,7 @@
     }
     navigator.serviceWorker.addEventListener("message", function (event) {
       if (event.data && event.data.type === "accord-open-activity") {
-        openActivityFromNotification();
+        openActivityFromNotification(event.data.list);
       }
       // A push counted while this page was open: fold it in now, so the chat
       // on screen is not left on the icon as unread until the next return.
@@ -8688,9 +8734,14 @@
     // Opened from a notification while the app was not running: the worker
     // cannot postMessage to a page that does not exist yet, so it says it in
     // the URL instead.
-    if (new URLSearchParams(location.search).get("tab") === "activity") {
+    const opening = new URLSearchParams(location.search);
+    if (opening.get("tab") === "activity") {
       leaveOpenChat();
       setHomeTab("activity");
+      const list = opening.get("list");
+      if (list === "pending" || list === "finished") {
+        setActivityTab(list);
+      }
       history.replaceState(undefined, "", location.pathname);
     }
     wireForegroundResync();
