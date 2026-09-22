@@ -686,15 +686,31 @@ button.mobile-chat-group-title:active {
   margin-left: 44px;
 }
 
-/* Starting a thread is an offer, not a fact: quieter than the chip that says
-   how many replies a message already has. */
-.thread-chip-start {
-  border-color: transparent;
+/* The offer to answer a message in a thread, on the screen that message opens
+   on -- not under every message in the chat. */
+.thread-reply-action {
+  flex-shrink: 0;
+  border-top: 1px solid var(--bd);
+  border-bottom: 1px solid var(--bd);
+  padding: 2px 10px;
+}
+
+.thread-reply-action[hidden] {
+  display: none;
+}
+
+.thread-reply-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 6px;
+  border: 0;
   background: transparent;
-  color: var(--mut);
-  padding-left: 0;
-  padding-right: 8px;
-  font-weight: 400;
+  color: var(--fg1);
+  font: 500 15px var(--sans);
+  text-align: left;
 }
 
 .thread-back {

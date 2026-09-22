@@ -5482,6 +5482,13 @@
   // chat, a chat goes back to the list. Both arrows side by side read as a
   // mistake, and the second one skipped a level.
   function renderThreadHeader(openThreadRoot) {
+    const composerInput = document.getElementById("composer-input");
+    if (composerInput) {
+      const placeholder = openThreadRoot ? "Add a reply..." : "Message the room...";
+      if (composerInput.placeholder !== placeholder) {
+        composerInput.placeholder = placeholder;
+      }
+    }
     const back = document.getElementById("back-to-timeline");
     const backToChats = document.getElementById("back-to-chats");
     const title = document.getElementById("chat-title");
@@ -5497,6 +5504,28 @@
     }
     if (openThreadRoot && title) {
       title.textContent = "Thread";
+    }
+  }
+
+  /** The offer to answer this message, on the screen the message opens on.
+   *  Shown for a thread that has not been answered yet: once there are
+   *  replies, the composer below is self-evident and the row is noise. */
+  function renderThreadReplyAction(openThreadRoot, rowCount) {
+    const node = document.getElementById("thread-reply-action");
+    if (!node) return;
+    // Decided from the rows this redraw is about to paint, not from the ones
+    // still on screen from the last one.
+    const show = Boolean(openThreadRoot) && rowCount <= 1;
+    if (node.hidden !== !show) {
+      node.hidden = !show;
+    }
+    if (show && !node.dataset.wired) {
+      node.dataset.wired = "1";
+      document.getElementById("thread-reply-button")?.addEventListener("click", function () {
+        const input = document.getElementById("composer-input");
+        if (!input) return;
+        input.focus();
+      });
     }
   }
 
@@ -7352,6 +7381,7 @@
     const grouped = groupRowsIntoThreads(rows, openThread);
     rows = grouped.rows;
     renderThreadHeader(openThread);
+    renderThreadReplyAction(openThread, rows.length);
     renderLoadEarlier(activeId, openThread);
     const openedConversation = lastScrolledConversationId !== activeId || openThread !== lastRenderedThreadRootId;
     lastRenderedThreadRootId = openThread;
@@ -7487,6 +7517,22 @@
         return;
       }
       if (row.dataset.streamable !== "1") {
+        // Slack's shape, which the User asked for: a message opens on its own
+        // screen, and the offer to answer it in a thread lives there rather
+        // than under every message in the chat.
+        // A tap meant for something inside the row -- a picture, a card, a
+        // button, a link -- is not a tap on the message.
+        const interactive = event.target && event.target.closest
+          ? event.target.closest("button, a, img, input, textarea, select, label, .control-card")
+          : undefined;
+        if (interactive) {
+          return;
+        }
+        const threadRoot = row.dataset.threadRoot;
+        if (threadRoot && !openThreadRootId()) {
+          setOpenThreadRootId(threadRoot);
+          void render();
+        }
         return;
       }
       const runId = row.dataset.streamRunId;
@@ -7729,6 +7775,14 @@
     item.dataset.rowSignature = messageRowSignature(entry);
     item.dataset.status = entry.status;
     item.dataset.author = entry.author;
+    // Which message this row is, for the screen a tap opens. Rows with nothing
+    // the desktop can thread from -- scaffolding, a message still queued on
+    // this phone -- carry none, so a tap on them does nothing.
+    if (entry.sourceId && !entry.scaffolding && entry.status !== "queued") {
+      item.dataset.threadRoot = entry.sourceId;
+    } else {
+      delete item.dataset.threadRoot;
+    }
     applyStreamableState(item, entry);
     if (entry.scaffolding) {
       item.dataset.scaffolding = "1";
@@ -7842,24 +7896,15 @@
   }
 
   function appendThreadChip(item, entry) {
-    // A thread can only be read on the phone if it can be started there too:
-    // until now one had to be begun from the desktop, and the phone could only
-    // join a conversation someone else had already opened (the User,
-    // 2026-09-22). A message with no replies yet offers to start one; the rest
-    // of the path -- open the thread, write in it, send it to it -- is the one
-    // that already works. Rows the phone cannot thread from, like its own
-    // still-queued message, do not offer it.
     const threadRoot = entry.sourceId;
-    if (!entry.replyCount && (!threadRoot || entry.scaffolding || entry.status === "queued")) {
+    if (!entry.replyCount) {
       return;
     }
     const chip = document.createElement("button");
     chip.type = "button";
-    chip.className = entry.replyCount ? "thread-chip" : "thread-chip thread-chip-start";
+    chip.className = "thread-chip";
     chip.dataset.threadRoot = threadRoot;
-    chip.textContent = entry.replyCount
-      ? (entry.replyCount === 1 ? "1 reply" : entry.replyCount + " replies")
-      : "Reply in thread";
+    chip.textContent = entry.replyCount === 1 ? "1 reply" : entry.replyCount + " replies";
     chip.addEventListener("click", function () {
       setOpenThreadRootId(threadRoot);
       void render();
@@ -7883,6 +7928,11 @@
     }
     item.dataset.rowSignature = messageRowSignature(entry);
     item.dataset.status = entry.status;
+    if (entry.sourceId && !entry.scaffolding && entry.status !== "queued") {
+      item.dataset.threadRoot = entry.sourceId;
+    } else {
+      delete item.dataset.threadRoot;
+    }
     // Rows are updated in place, so this has to be re-applied here too: a row
     // that finished while on screen must stop looking openable.
     applyStreamableState(item, entry);

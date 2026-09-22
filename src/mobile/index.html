@@ -8,7 +8,7 @@
     <title>AccordAgents</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="assets/accordagents-mark.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-09-22-pwa-start-a-thread-v1" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-09-22-pwa-message-screen-v1" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -146,6 +146,16 @@
             </svg>
             Latest
           </button>
+          <!-- A message opened on its own screen offers to answer it in a
+               thread, the way Slack's message screen does. -->
+          <div id="thread-reply-action" class="thread-reply-action" hidden>
+            <button id="thread-reply-button" class="thread-reply-button" type="button">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.4 8.4 0 0 1-3.8-.9L3 20.5l1.6-4.1A8.4 8.4 0 0 1 12 3.1a8.4 8.4 0 0 1 9 8.4z"></path>
+              </svg>
+              <span>Reply in thread</span>
+            </button>
+          </div>
           <!-- Waiting for messages must look different from having none: this
                says which of the two it is. It sits at the bottom, where new
                messages land and the User is already looking. -->
@@ -217,8 +227,8 @@
       </main>
     </div>
     <!-- The database description both the page and the service worker load. -->
-    <script src="mobile-db.js?v=2026-09-22-pwa-start-a-thread-v1" defer></script>
-    <script src="jsqr.js?v=2026-09-22-pwa-start-a-thread-v1" defer></script>
+    <script src="mobile-db.js?v=2026-09-22-pwa-message-screen-v1" defer></script>
+    <script src="jsqr.js?v=2026-09-22-pwa-message-screen-v1" defer></script>
     <script src="mobile-event-log.js?v=2026-09-07-event-log-v1" defer></script>
     <script src="mobile-machine-wake.js?v=2026-09-07-wake-v1" defer></script>
     <script src="mobile-machine-sealing.js?v=2026-09-07-pair-sealing-v1" defer></script>
@@ -226,8 +236,8 @@
     <script src="mobile-machine-channel.js?v=2026-09-07-machine-channel-v1" defer></script>
     <!-- Rules shared with the desktop verbatim (avatars, timeline visibility),
          bundled from src/shared by the mobile build. -->
-    <script src="mobile-shared.js?v=2026-09-22-pwa-start-a-thread-v1" defer></script>
-    <script src="mobile-activity.js?v=2026-09-22-pwa-start-a-thread-v1" defer></script>
-    <script src="mobile-app.js?v=2026-09-22-pwa-start-a-thread-v1" defer></script>
+    <script src="mobile-shared.js?v=2026-09-22-pwa-message-screen-v1" defer></script>
+    <script src="mobile-activity.js?v=2026-09-22-pwa-message-screen-v1" defer></script>
+    <script src="mobile-app.js?v=2026-09-22-pwa-message-screen-v1" defer></script>
   </body>
 </html>

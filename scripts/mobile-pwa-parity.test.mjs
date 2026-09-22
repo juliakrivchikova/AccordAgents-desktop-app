@@ -412,26 +412,56 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
 
     // --- a thread can be started from the phone -----------------------------
     // Reading a thread is no use if one can only be begun from the desktop.
+    // Slack's shape, which the User asked for: the message opens on its own
+    // screen and the offer to answer it lives there, not under every message.
     await evaluate(`(() => { sessionStorage.removeItem("accordagents.mobile.openThreadRootId.v1"); return true; })()`);
     await evaluate(`(() => { document.getElementById("back-to-timeline")?.click(); return true; })()`);
     await waitFor(
-      () => evaluate(`(() => [...document.querySelectorAll("#message-list .thread-chip-start")].length)()`),
+      () => evaluate(`(() => [...document.querySelectorAll("#message-list .message-row[data-thread-root]")].length)()`),
       (count) => count > 0,
-      "a message with no replies offers to start a thread"
+      "the chat has a message that can be opened"
     );
+    assert.equal(
+      await evaluate(`(() => document.getElementById("thread-reply-action").hidden)()`),
+      true,
+      "the offer is not in the chat itself"
+    );
+    // A message nobody has answered yet: the one the offer is for.
     const startedRoot = await evaluate(`(() => {
-      const chip = document.querySelector("#message-list .thread-chip-start");
-      const root = chip.dataset.threadRoot;
-      chip.click();
+      const rows = [...document.querySelectorAll("#message-list .message-row[data-thread-root]:not([data-streamable])")]
+        .filter((row) => !row.querySelector(".thread-chip"));
+      const row = rows[rows.length - 1];
+      const root = row.dataset.threadRoot;
+      row.click();
       return root;
     })()`);
     await waitFor(
       () => evaluate(`(() => sessionStorage.getItem("accordagents.mobile.openThreadRootId.v1"))()`),
       (root) => root === startedRoot,
-      "tapping it opens that message's thread"
+      "tapping a message opens it on its own screen"
     );
     await waitFor(() => evaluate(`(() => document.getElementById("chat-title").textContent)()`), (text) => text === "Thread", "and the screen says so");
-    await evaluate(`(() => { document.getElementById("back-to-timeline").click(); return true; })()`);
+    await waitFor(
+      () => evaluate(`(() => JSON.stringify({
+        hidden: document.getElementById("thread-reply-action").hidden,
+        rows: document.querySelectorAll("#message-list .message-row").length,
+        title: document.getElementById("chat-title").textContent
+      }))()`),
+      (state) => JSON.parse(state).hidden === false,
+      "the screen offers to answer it in a thread"
+    );
+    await evaluate(`(() => { document.getElementById("thread-reply-button").click(); return true; })()`);
+    assert.equal(
+      await evaluate(`(() => document.activeElement === document.getElementById("composer-input"))()`),
+      true,
+      "and the offer puts the cursor in the reply field"
+    );
+    assert.equal(
+      await evaluate(`(() => document.getElementById("composer-input").placeholder)()`),
+      "Add a reply...",
+      "which says it is a reply"
+    );
+    await evaluate(`(() => { document.getElementById("composer-input").blur(); document.getElementById("back-to-timeline").click(); return true; })()`);
 
     // --- a message written in a thread is sent to that thread ---------------
     // Last, because it queues a message: without the thread it was written in
