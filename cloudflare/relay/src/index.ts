@@ -96,6 +96,9 @@ const MAILBOX_PUSH_READ_CURSOR_KEY = "push-read-cursor";
 // for the next turn, and measuring against that rang a second time for
 // something that was never worth a notification.
 const MAILBOX_PUSH_FINISH_SEQ_KEY = "push-finish-seq";
+// What the last ring came to: a status code, or the failure. Diagnostic only,
+// and gone with the rest of the box when it is revoked.
+const MAILBOX_PUSH_LAST_RESULT_KEY = "push-last-result";
 // W-C: a Durable Object has exactly one alarm, and the retention sweep already
 // owns it. Both users write their own due time into this map and the alarm is
 // armed to the earliest of them; alarm() fires every slot that is due, clears
@@ -493,6 +496,7 @@ export class SealedMailboxStore extends DurableObject<Env> {
       MAILBOX_PUSH_LAST_SENT_KEY,
       MAILBOX_PUSH_READ_CURSOR_KEY,
       MAILBOX_PUSH_FINISH_SEQ_KEY,
+      MAILBOX_PUSH_LAST_RESULT_KEY,
       MAILBOX_SCHEDULE_KEY
     ]);
     // A revoked object must not keep an armed alarm: there is nothing left to
@@ -690,13 +694,13 @@ export class SealedMailboxStore extends DurableObject<Env> {
         signal: AbortSignal.timeout(5_000)
       });
     } catch (error) {
-      await this.ctx.storage.put("push-last-result", {
+      await this.ctx.storage.put(MAILBOX_PUSH_LAST_RESULT_KEY, {
         at: new Date().toISOString(),
         failed: String((error as Error)?.name || "") + ": " + String((error as Error)?.message || error)
       });
       throw error;
     }
-    await this.ctx.storage.put("push-last-result", { at: new Date().toISOString(), status: response.status });
+    await this.ctx.storage.put(MAILBOX_PUSH_LAST_RESULT_KEY, { at: new Date().toISOString(), status: response.status });
     // The one line that says the doorbell actually rang. Without it a dead
     // push path looks exactly like a quiet one from outside, which is how a
     // day was lost to guessing. No endpoint, no token, no JWT — a host and a
