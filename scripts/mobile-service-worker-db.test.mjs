@@ -174,6 +174,21 @@ test("a push-woken worker opens the database the page created and stores what it
   for (const store of ["meta", "sealedEnvelopes", "machineEvents", "machineOutbox", "machineBlobs"]) {
     assert.ok(pageVersion.stores.includes(store), `the page's database is missing ${store}`);
   }
+  // The timeline is read by chat, through an index: without it every
+  // delivered row cost a scan of the whole store (seconds per batch on a
+  // phone with weeks of chats), and a worker a build behind must find the
+  // index already there rather than force a version of its own.
+  const timelineIndexes = await evaluate(`(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(${JSON.stringify(DB_NAME)});
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const names = [...db.transaction("timeline").objectStore("timeline").indexNames];
+    db.close();
+    return names;
+  })()`);
+  assert.ok(timelineIndexes.includes("conversationId"), `the timeline store is indexed by chat: ${timelineIndexes.join(", ")}`);
 
   // The defect itself, stated: a context that asks for an older version cannot
   // open this database at all. That is what the shipped worker used to do.

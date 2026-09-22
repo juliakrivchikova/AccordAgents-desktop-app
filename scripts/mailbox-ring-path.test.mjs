@@ -212,3 +212,169 @@ test("W-C ring path: only a finished run rings, and a finish inside the window i
     await mf.dispose();
   }
 });
+
+// The User's defect, 2026-09-20: two notifications per finished answer, the
+// second one contentless ("Open AccordAgents to sync updates."). Her desktop
+// ends a turn in a burst of finish marks — 588 in a day, 480 of them within
+// 100ms of the one before — so the relay rang on the first and deferred a ring
+// for the rest. By the time the deferred one fired, the phone had answered the
+// first, fetched everything, and found an empty box.
+//
+// The doorbell now rings for what the phone does not have. What it has is what
+// it says it has: the cursor it brings on its next read, sent only after the
+// page is stored on the device. Not what a response carried — a page that
+// never arrives must still be rung for — and not what any other reader took.
+test("W-C ring path: the doorbell rings for what the phone does not have", async (t) => {
+  const rings = [];
+  const pushStatus = { value: 201 };
+  let mf;
+  try {
+    mf = await startWorker(rings, pushStatus);
+    await mf.ready;
+  } catch (error) {
+    assert.fail(`could not start the worker under Miniflare: ${error?.message || error}`);
+  }
+
+  const creds = credentials("read-cursor");
+  const call = (pathname, { method = "GET", body, query = {} } = {}) => {
+    const url = new URL(pathname, "https://relay.test");
+    url.searchParams.set("mailboxId", creds.mailboxId);
+    for (const [key, value] of Object.entries(query)) {
+      url.searchParams.set(key, String(value));
+    }
+    return mf.dispatchFetch(url.toString(), {
+      method,
+      headers: { "content-type": "application/json", authorization: `Bearer ${creds.token}` },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+  };
+  let seq = 0;
+  const finish = async (label) => {
+    seq += 1;
+    assert.equal((await call("/v1/mailbox/events", {
+      method: "POST",
+      body: { events: [sealedEvent({ eventId: `cursor-${label}`, originSeq: seq })], runFinished: true }
+    })).status, 200, `append ${label}`);
+  };
+  // An append that carries no terminal snapshot: progress for a turn still
+  // running. It is never marked, so it is never what a ring is about.
+  const progress = async (label) => {
+    seq += 1;
+    assert.equal((await call("/v1/mailbox/events", {
+      method: "POST",
+      body: { events: [sealedEvent({ eventId: `cursor-${label}`, originSeq: seq })] }
+    })).status, 200, `append ${label}`);
+  };
+  const waitForRings = async (count, ms = PUSH_INTERVAL_MS * 2 + 500) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline && rings.length < count) {
+      await delay(100);
+    }
+    return rings.length;
+  };
+  // What the phone's service worker does once a page is durably stored: it
+  // asks for what comes after the cursor it just committed.
+  const phoneAcknowledges = async (cursor, extra = {}) => {
+    const response = await call("/v1/mailbox/events", {
+      query: { reader: "phone", afterArrival: cursor, limit: 500, ...extra }
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+
+  try {
+    assert.equal((await call("/v1/mailbox/register", {
+      method: "POST",
+      body: { tokenHashBase64Url: creds.tokenHashBase64Url }
+    })).status, 200);
+    assert.equal((await call("/v1/mailbox/push-subscription", {
+      method: "POST",
+      body: {
+        subscription: { endpoint: `${PUSH_ORIGIN}${PUSH_PATH}`, keys: { p256dh: "p", auth: "a" } },
+        suppressOriginId: "device-phone"
+      }
+    })).status, 200);
+
+    // A finished turn as her desktop publishes it: the terminal batch, then
+    // the snapshot behind it, milliseconds apart.
+    await finish("finish-1");
+    assert.equal(await waitForRings(1, 2000), 1, "the answer rings once, straight away");
+    await finish("finish-2");
+
+    // The phone was woken, stored both envelopes and said so.
+    await phoneAcknowledges(2);
+    assert.equal(await waitForRings(2), 1, "nothing is rung twice for what the phone already has");
+
+    // A phone that FETCHED but stored nothing acknowledges nothing: its cursor
+    // is still behind, and the doorbell must ring. This is the background sync
+    // that times out on a large page, or whose write fails.
+    await finish("finish-3");
+    await phoneAcknowledges(2);
+    assert.equal(await waitForRings(2), 2, "a page the phone did not store is still rung for");
+    await phoneAcknowledges(3);
+
+    // The page the phone fetched but did not store, inside the debounce window
+    // where the ring is deferred: the response carried everything, the phone
+    // kept none of it, and the ring it is still owed must fire.
+    await finish("defer-a");
+    assert.equal(await waitForRings(3), 3, "the first of the pair rings straight away");
+    await finish("defer-b");
+    await phoneAcknowledges(3);
+    assert.equal(await waitForRings(4), 4, "a deferred ring survives a read that stored nothing");
+    await phoneAcknowledges(5);
+
+    // A desktop read — the same box, for the phone's own writes — says nothing
+    // about what reached the phone, even when it happens after the ring was
+    // armed.
+    await finish("finish-4");
+    assert.equal((await call("/v1/mailbox/events", { query: { afterArrival: 6, limit: 500 } })).status, 200);
+    assert.equal(await waitForRings(5), 5, "a desktop read does not silence the phone's doorbell");
+    await phoneAcknowledges(6);
+
+    // A filtered read hands over a slice of the box, so its cursor cannot
+    // stand for the whole of it.
+    await finish("finish-5");
+    await phoneAcknowledges(7, { conversationId: "conversation-ring" });
+    assert.equal(await waitForRings(6), 6, "a filtered read does not acknowledge the whole box");
+    await phoneAcknowledges(7);
+
+    // Nor does a tail read, which is not a cursor read at all.
+    await finish("finish-6");
+    assert.equal((await call("/v1/mailbox/events", { query: { reader: "phone", tail: "true", limit: 1 } })).status, 200);
+    assert.equal(await waitForRings(7), 7, "a tail read does not acknowledge the whole box");
+    await phoneAcknowledges(8);
+
+    // A cursor far beyond the box — a stale one after a renumber, or a
+    // mistake — is clamped to what the box holds, so it can silence nothing
+    // that arrives afterwards.
+    await phoneAcknowledges(1e15);
+    await finish("finish-7");
+    assert.equal(await waitForRings(8), 8, "an absurd cursor cannot mute the doorbell");
+    await phoneAcknowledges(9);
+
+    // The case the User met twice: the phone is woken, stores the finished
+    // turn and says so within seconds — and while it does, the desktop keeps
+    // appending the next turn's progress. Those envelopes are not a finished
+    // run, so the ring deferred behind them must not fire: measured against
+    // the newest envelope it did, and she got a second notification for
+    // nothing. A real finish after them still rings.
+    await finish("quiet-finish-a");
+    assert.equal(await waitForRings(9, 2000), 9, "the finished turn rings once");
+    // The second finish of the same turn lands inside the debounce window, so
+    // its ring is deferred. Before it fires the phone stores everything and
+    // says so — and the desktop, already working on the next turn, appends
+    // progress behind that acknowledgement.
+    await finish("quiet-finish-b");
+    await phoneAcknowledges(11);
+    await progress("quiet-progress-1");
+    await progress("quiet-progress-2");
+    assert.equal(await waitForRings(10), 9, "the deferred ring stays quiet: its finish is already on the phone");
+    // A genuinely new finished turn still rings, progress or no progress.
+    await finish("quiet-finish-c");
+    assert.equal(await waitForRings(10), 10, "the next finished turn still rings");
+    await phoneAcknowledges(15);
+    t.diagnostic(`rings at ${rings.map((ring) => ring.at - rings[0].at).join(", ")}ms`);
+  } finally {
+    await mf.dispose();
+  }
+});

@@ -789,7 +789,7 @@ test("MobileRelayControlService returns the device chat list over the sealed rel
     });
 
     const payload = await openMobileRelayPayload(await chatListMessage.then((message) => message.ciphertext), key);
-    assert.deepEqual(payload, {
+    assert.deepEqual(withoutGeneratedAt(payload), {
       type: "mobile.chat-list",
       chats: [{
         id: "conversation-1",
@@ -878,7 +878,7 @@ test("MobileRelayControlService scopes the person-invite chat list to one conver
     });
 
     const payload = await openMobileRelayPayload(await chatListMessage.then((message) => message.ciphertext), key);
-    assert.deepEqual(payload, {
+    assert.deepEqual(withoutGeneratedAt(payload), {
       type: "mobile.chat-list",
       chats: [{
         id: "conversation-1",
@@ -3196,6 +3196,28 @@ test("MobileRelayControlService answers the composer request from the catalog an
     }
     assert.equal(sent.length, 1);
     assert.equal(sent[0].skillMentions?.[0].skillId, "skill-1", "the picked skill reaches the chat service like the desktop composer's");
+
+    // A message written with a thread open belongs to that thread. Without the
+    // root the desktop placed it in the main timeline, where the User -- still
+    // looking at the thread she wrote in -- never saw her own message.
+    const threadAck = nextMessage(phone);
+    await phone.sendCiphertext({
+      logicalMessageId: "send-thread-1",
+      ciphertext: await sealMobileRelayPayload({
+        type: "mobile.outbox.events",
+        events: [{
+          eventId: "evt-thread-1",
+          conversationId: "conversation-1",
+          payload: { content: "inside the thread", threadRootId: "message-root-1" }
+        }]
+      }, key)
+    });
+    await threadAck;
+    for (let i = 0; i < 50 && sent.length === 1; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].chatThreadRootId, "message-root-1", "a reply written in a thread is sent to that thread");
   } finally {
     phone.close();
     desktop.close();
@@ -3549,4 +3571,343 @@ test("the phone can ask for a member's drawn avatar, and gets a reason instead o
     desktop.close();
     await relay.close();
   }
+});
+
+/** The chat list says when it was built; the rest of it is compared as is. */
+function withoutGeneratedAt(value: unknown): unknown {
+  const { generatedAt, ...rest } = value as { generatedAt?: unknown };
+  assert.equal(typeof generatedAt, "string", "the chat list says when it was built");
+  assert.ok(Number.isFinite(Date.parse(generatedAt as string)), "as a moment on the desktop's clock");
+  return rest;
+}
+
+test("cards are offered again after the durable sink failed to take them", async () => {
+  let attempts = 0;
+  const published: MobileTimelineEvents[] = [];
+  const service = new MobileRelayControlService({
+    relayUrl: "ws://127.0.0.1:1/v1/relay", rendezvousId: "rv-cards-retry", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: Buffer.from("c".repeat(32)).toString("base64url"), streamId: "cards-retry:phone"
+  }, sender([]), undefined, undefined, { async publishTimeline(timeline) {
+    attempts += 1;
+    if (attempts === 1) throw new Error("Mailbox unreachable");
+    published.push(timeline);
+  } });
+  const conversation: Conversation = {
+    id: "conversation-cards-retry", kind: "chat", title: "Cards", createdAt: "2026-09-20T10:00:00Z",
+    updatedAt: "2026-09-20T10:00:00Z", findings: [],
+    metadata: { pendingAppToolApprovals: [{
+      id: "approval-retry", status: "pending", summary: "Allow file editing?", createdAt: "2026-09-20T10:00:00Z"
+    }] },
+    messages: [{ id: "m1", role: "participant", participantLabel: "@drew", content: "Ready.", status: "done",
+      createdAt: "2026-09-20T09:59:00Z", metadata: { runId: "run-1" } }]
+  };
+  try {
+    service.pushConversationSnapshot(conversation);
+    await waitFor(() => attempts === 1);
+    assert.equal(published.length, 0, "the first publish failed");
+    // The same chat again, nothing changed on it: the cards the phone never
+    // got go with this batch rather than being remembered as delivered.
+    service.pushConversationSnapshot({ ...conversation, updatedAt: "2026-09-20T10:00:01Z" });
+    await waitFor(() => published.length === 1);
+    assert.equal(published[0].cards?.length, 1);
+    assert.equal(published[0].cards?.[0].id, "approval-retry");
+    // And once taken, an unchanged chat sends nothing more.
+    service.pushConversationSnapshot({ ...conversation, updatedAt: "2026-09-20T10:00:02Z" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(published.length, 1, "delivered cards are not sent again unchanged");
+  } finally { service.close(); }
+});
+
+test("a direct timeline request answers with the chat's cards", async () => {
+  const key = Buffer.from("t".repeat(32)).toString("base64url");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  const desktop = new MobileRelayControlService({
+    relayUrl: address.url, rendezvousId: "rv-timeline-cards", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: key, streamId: "timeline-cards:phone", reconnectDelayMs: 50
+  }, sender([]), {
+    async listChats() { return []; },
+    async listTimeline() { return []; },
+    async listTimelinePage() {
+      return { events: [{ id: "m1", role: "participant", participantLabel: "@drew", content: "Which one?", status: "done",
+        createdAt: "2026-09-20T10:00:00Z", runId: "run-1", messageId: "m1" }], hasMoreBefore: false, beforeMessageId: "m1" };
+    },
+    async listControlCards(conversationId) {
+      return [{ id: "choice-open", kind: "choice", conversationId, title: "Which one?", summary: "Which one?",
+        requesterLabel: "@drew", options: [{ id: "a", label: "A" }], allowsCustomAnswer: true, allowsCancel: true,
+        status: "pending", createdAt: "2026-09-20T10:00:00Z", sourceMessageId: "m1" }];
+    }
+  });
+  const phone = new RelayTunnelClient({
+    relayUrl: address.url, rendezvousId: "rv-timeline-cards", role: "phone", capability: "PAIRING-FINGERPRINT", streamId: "timeline-cards:phone"
+  });
+  try {
+    const answer = nextMessage(phone);
+    await desktop.connect();
+    await phone.connect();
+    await phone.sendCiphertext({
+      logicalMessageId: "timeline-request",
+      ciphertext: await sealMobileRelayPayload({ type: "mobile.timeline.request", conversationId: "conversation-open" }, key)
+    });
+    const payload = await openMobileRelayPayload((await answer).ciphertext, key) as MobileTimelineEvents;
+    assert.equal(payload.type, "mobile.timeline.events");
+    assert.equal(payload.events.length, 1);
+    assert.equal(payload.cards?.length, 1, "the page carries the chat's cards");
+    assert.equal(payload.cards?.[0].id, "choice-open");
+  } finally { phone.close(); desktop.close(); await relay.close(); }
+});
+
+test("a phone's answer is followed by the chat's cards as the desktop holds them, even unchanged", async () => {
+  const key = Buffer.from("d".repeat(32)).toString("base64url");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  const applied: string[] = [];
+  const published: MobileTimelineEvents[] = [];
+  const stillPending = [{ id: "approval-stale", kind: "permission" as const, conversationId: "conversation-1", title: "Use Bash",
+    summary: "Use Bash", requesterLabel: "@gera", options: [{ id: "allow", label: "Allow" }, { id: "deny", label: "Deny" }],
+    allowsCustomAnswer: false, allowsCancel: false, status: "pending" as const, createdAt: "2026-09-13T12:40:00Z" }];
+  const desktop = new MobileRelayControlService({
+    relayUrl: address.url, rendezvousId: "rv-decision-cards", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: key, conversationId: "conversation-1", streamId: "decision-cards:phone", reconnectDelayMs: 50
+  }, {
+    ...sender([]),
+    async applyMobileDecision(request) { applied.push(request.payload.operationId); }
+  }, {
+    async listChats() { return []; },
+    async listTimeline() { return []; },
+    async listControlCards() { return stillPending; }
+  }, undefined, { async publishTimeline(timeline) { published.push(timeline); } });
+  const phone = new RelayTunnelClient({
+    relayUrl: address.url, rendezvousId: "rv-decision-cards", role: "phone", capability: "PAIRING-FINGERPRINT", streamId: "decision-cards:phone"
+  });
+  try {
+    // The desktop already told this phone about the card once.
+    await desktop.connect();
+    await phone.connect();
+    const first = nextMessage(phone);
+    desktop.pushConversationSnapshot({
+      id: "conversation-1", kind: "chat", title: "Octopi", createdAt: "2026-09-13T12:00:00Z", updatedAt: "2026-09-13T12:40:00Z",
+      findings: [], messages: [], metadata: { pendingAppToolApprovals: [{ id: "approval-stale", status: "pending", summary: "Use Bash", createdAt: "2026-09-13T12:40:00Z" }] }
+    } as unknown as Conversation);
+    await first;
+    await waitFor(() => published.length === 1);
+    // The phone answers it. The desktop records the answer but the card is
+    // still pending here (the machine that owns it has not taken it).
+    const replies = nextMessages(phone, 2);
+    await phone.sendCiphertext({
+      logicalMessageId: "decision-1",
+      ciphertext: await sealMobileRelayPayload({ type: "mobile.outbox.events", events: [{
+        eventId: "decision-1", conversationId: "conversation-1", kind: "permission.decided",
+        payload: { operationId: "permission:approval-stale:allow", targetKey: "approval:approval-stale", stateId: "approved", detail: { approve: true } }
+      }] }, key)
+    });
+    const opened = await Promise.all((await replies).map((message) => openMobileRelayPayload(message.ciphertext, key)));
+    assert.deepEqual(applied, ["permission:approval-stale:allow"]);
+    const ack = opened.find((payload) => (payload as { type?: string }).type === "mobile.outbox.ack") as { eventIds: string[] };
+    assert.deepEqual(ack.eventIds, ["decision-1"]);
+    const cards = opened.find((payload) => (payload as { type?: string }).type === "mobile.timeline.events") as MobileTimelineEvents;
+    assert.deepEqual(cards.events, [], "a cards-only batch");
+    assert.equal(cards.cards?.[0].id, "approval-stale", "the cards as the desktop holds them now, unchanged or not");
+    await waitFor(() => published.length === 2);
+    assert.equal(published[1].cards?.[0].id, "approval-stale", "and the durable copy carries them too");
+  } finally { phone.close(); desktop.close(); await relay.close(); }
+});
+
+test("an answer the desktop keeps failing to take is given up after a few tries and never freezes the mailbox", async () => {
+  let attempts = 0;
+  const diagnostics: string[] = [];
+  const service = new MobileRelayControlService({
+    relayUrl: "ws://127.0.0.1:1/v1/relay", rendezvousId: "rv-decision-giveup", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: Buffer.from("g".repeat(32)).toString("base64url"), streamId: "decision-giveup:phone"
+  }, {
+    ...sender([]),
+    async applyMobileDecision() { attempts += 1; throw new Error("The approval was already closed."); }
+  });
+  service.onDecisionDiagnostic = (detail) => { diagnostics.push(`${detail.outcome}:${detail.attempts}`); };
+  const event = {
+    eventId: "decision-stale", conversationId: "conversation-1", kind: "permission.decided" as const,
+    payload: { operationId: "permission:closed:allow", targetKey: "approval:closed", stateId: "approved", detail: { approve: true } }
+  };
+  try {
+    for (let poll = 1; poll <= 4; poll += 1) {
+      const accepted = await service.acceptMobileOutboxEvents([event], `mailbox:${poll}`);
+      assert.deepEqual(accepted.eventIds, [], `attempt ${poll} is reported as not taken, without throwing`);
+    }
+    const last = await service.acceptMobileOutboxEvents([event], "mailbox:5");
+    assert.deepEqual(last.eventIds, ["decision-stale"], "the fifth attempt gives up and lets the page move on");
+    assert.equal(attempts, 5);
+    assert.deepEqual(diagnostics, ["failed:1", "failed:2", "failed:3", "failed:4", "given-up:5"]);
+    const again = await service.acceptMobileOutboxEvents([event], "mailbox:6");
+    assert.deepEqual(again.eventIds, ["decision-stale"], "a re-read of the same answer is not applied again");
+    assert.equal(attempts, 5);
+  } finally { service.close(); }
+});
+
+test("a message beside an answer the desktop cannot take is delivered once and acked; the answer is retried on later polls, then given up", async () => {
+  const sent: unknown[] = [];
+  let decisionAttempts = 0;
+  const diagnostics: string[] = [];
+  const service = new MobileRelayControlService({
+    relayUrl: "ws://127.0.0.1:1/v1/relay", rendezvousId: "rv-mixed-page", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: Buffer.from("x".repeat(32)).toString("base64url"), streamId: "mixed-page:phone"
+  }, { ...sender(sent), async applyMobileDecision() { decisionAttempts += 1; throw new Error("The approval was already closed."); } });
+  service.onDecisionDiagnostic = (detail) => { diagnostics.push(`${detail.outcome}:${detail.attempts}`); };
+  const decision = { eventId: "decision-mixed", conversationId: "conversation-1", kind: "permission.decided" as const,
+    payload: { operationId: "permission:closed:allow", targetKey: "approval:closed", stateId: "approved", detail: { approve: true } } };
+  const message = { eventId: "message-mixed", conversationId: "conversation-1", createdAt: "2026-09-20T10:00:00.000Z", payload: { content: "hello" } };
+  try {
+    const first = await service.acceptMobileOutboxEvents([decision, message], "mailbox:1");
+    assert.deepEqual(first.eventIds, ["message-mixed"], "the message is acked, the failing answer is not");
+    assert.equal(sent.length, 1, "the message went to sendMessage once");
+    // The page is consumed. The poller's retry tick is what offers the answer again.
+    for (let poll = 2; poll <= 4; poll += 1) {
+      const retried = await service.retryFailedDecisions(`mailbox:retry:${poll}`);
+      assert.deepEqual(retried.eventIds, [], `attempt ${poll} still withheld`);
+    }
+    const last = await service.retryFailedDecisions("mailbox:retry:5");
+    assert.deepEqual(last.eventIds, ["decision-mixed"], "the fifth attempt gives up and reports the answer as taken");
+    assert.deepEqual(await service.retryFailedDecisions("mailbox:retry:6"), { eventIds: [], runIds: [] }, "nothing is left to retry");
+    assert.equal(decisionAttempts, 5);
+    assert.equal(sent.length, 1, "the message is never sent a second time");
+    assert.deepEqual(diagnostics, ["failed:1", "failed:2", "failed:3", "failed:4", "given-up:5"]);
+  } finally { service.close(); }
+});
+
+test("a batch the desktop refuses outright is answered with an empty ack rather than silence", async () => {
+  const key = Buffer.from("n".repeat(32)).toString("base64url");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  const desktop = new MobileRelayControlService({
+    relayUrl: address.url, rendezvousId: "rv-nack", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: key, conversationId: "conversation-1", streamId: "nack:phone", reconnectDelayMs: 50
+  }, sender([]));
+  const phone = new RelayTunnelClient({
+    relayUrl: address.url, rendezvousId: "rv-nack", role: "phone", capability: "PAIRING-FINGERPRINT", streamId: "nack:phone"
+  });
+  try {
+    await desktop.connect();
+    await phone.connect();
+    const reply = nextMessage(phone);
+    await phone.sendCiphertext({
+      logicalMessageId: "outside-scope",
+      ciphertext: await sealMobileRelayPayload({ type: "mobile.outbox.events", events: [{
+        eventId: "outside-1", conversationId: "another-conversation", payload: { content: "hello" }
+      }] }, key)
+    });
+    const answered = await reply;
+    assert.equal(answered.logicalMessageId, "outside-scope:ack");
+    const ack = await openMobileRelayPayload(answered.ciphertext, key) as { type: string; eventIds: string[] };
+    assert.equal(ack.type, "mobile.outbox.ack");
+    assert.deepEqual(ack.eventIds, [], "nothing was taken, and the phone is told so at once");
+  } finally { phone.close(); desktop.close(); await relay.close(); }
+});
+
+test("a desktop whose own storage fails stays silent, so the phone keeps the event instead of counting a refusal", async () => {
+  const key = Buffer.from("q".repeat(32)).toString("base64url");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  // No fixed conversation: the scope is the catalog's to answer, as on the
+  // User's desktop, and here the catalog's storage is what fails.
+  const desktop = new MobileRelayControlService({
+    relayUrl: address.url, rendezvousId: "rv-storage-down", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: key, streamId: "storage-down:phone", reconnectDelayMs: 50
+  }, sender([]), {
+    async listChats() { return []; },
+    async listTimeline() { return []; },
+    // The read behind the scope check, failing the way the sqlite CLI does
+    // under load: a timeout, not a verdict on the chat.
+    isConversationAllowed() { throw new Error("sqlite3 timed out after 10000ms"); }
+  });
+  const phone = new RelayTunnelClient({
+    relayUrl: address.url, rendezvousId: "rv-storage-down", role: "phone", capability: "PAIRING-FINGERPRINT", streamId: "storage-down:phone"
+  });
+  try {
+    await desktop.connect();
+    await phone.connect();
+    let answered: { logicalMessageId: string } | undefined;
+    const off = phone.on("message", (message) => { answered = message; });
+    await phone.sendCiphertext({
+      logicalMessageId: "storage-down",
+      ciphertext: await sealMobileRelayPayload({ type: "mobile.outbox.events", events: [{
+        eventId: "kept-1", conversationId: "conversation-1", payload: { content: "hello" }
+      }] }, key)
+    });
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    off();
+    assert.equal(answered, undefined, "no ack at all: an empty one would be counted as a refusal, and five of those set the message aside for good");
+  } finally { phone.close(); desktop.close(); await relay.close(); }
+});
+
+test("cards remembered as delivered are forgotten again when the durable sink refuses the batch, and a second snapshot inside the publish window does not ring twice", async () => {
+  let publishes = 0;
+  let release: (() => void) | undefined;
+  const options: Array<{ runFinished?: boolean; notices?: string[] }> = [];
+  const service = new MobileRelayControlService({
+    relayUrl: "ws://127.0.0.1:1/v1/relay", rendezvousId: "rv-cards-window", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: Buffer.from("w".repeat(32)).toString("base64url"), streamId: "cards-window:phone"
+  }, sender([]), undefined, undefined, { async publishTimeline(_timeline, publishOptions) {
+    publishes += 1;
+    options.push(publishOptions ?? {});
+    if (publishes === 1) throw new Error("Mailbox unreachable");
+    // The second publish is held open, the way the relay now holds an append
+    // while it rings the phone.
+    await new Promise<void>((resolve) => { release = resolve; });
+  } });
+  const base: Conversation = {
+    id: "conversation-window", kind: "chat", title: "Window", createdAt: "2026-09-20T10:00:00Z",
+    updatedAt: "2026-09-20T10:00:00Z", findings: [], metadata: {},
+    messages: [{ id: "m1", role: "participant", participantLabel: "@drew", content: "Ready.", status: "done",
+      createdAt: "2026-09-20T09:59:00Z", metadata: { runId: "run-1" } }]
+  };
+  const withCard = (updatedAt: string): Conversation => ({ ...base, updatedAt, metadata: { pendingAppToolApprovals: [{
+    id: "approval-window", status: "pending", summary: "Allow it?", createdAt: "2026-09-20T10:00:00Z"
+  }] } });
+  try {
+    // First sighting: no card, delivered fine? No: the sink refuses it.
+    service.pushConversationSnapshot(base);
+    await waitFor(() => publishes === 1);
+    // The card appears; the batch is published (held) — and a second snapshot
+    // arrives while the first is still on its way.
+    service.pushConversationSnapshot(withCard("2026-09-20T10:00:01Z"));
+    await waitFor(() => publishes === 2);
+    service.pushConversationSnapshot({ ...withCard("2026-09-20T10:00:02Z"), messages: [...base.messages, {
+      id: "m2", role: "participant", participantLabel: "@drew", content: "Still here.", status: "done",
+      createdAt: "2026-09-20T10:00:02Z", metadata: { runId: "run-2" } }] });
+    await waitFor(() => publishes === 3);
+    release?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(options[1].notices?.includes("approval"), true, "the card's first batch rings for it");
+    assert.equal(options[2].notices?.includes("approval") ?? false, false, "the batch inside the window does not ring for the same card again");
+  } finally { service.close(); }
+});
+
+test("a retried answer whose chat has left the pairing's scope is given up without taking the others with it", async () => {
+  const attempts: string[] = [];
+  const diagnostics: string[] = [];
+  const allowed = new Set(["conversation-a", "conversation-b"]);
+  const service = new MobileRelayControlService({
+    relayUrl: "ws://127.0.0.1:1/v1/relay", rendezvousId: "rv-retry-scope", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: Buffer.from("s".repeat(32)).toString("base64url"), streamId: "retry-scope:phone"
+  }, {
+    ...sender([]),
+    async applyMobileDecision(request) { attempts.push(request.conversationId); throw new Error("Not yet."); }
+  }, {
+    async listChats() { return []; },
+    async listTimeline() { return []; },
+    isConversationAllowed(conversationId) { return allowed.has(conversationId); }
+  });
+  service.onDecisionDiagnostic = (detail) => { diagnostics.push(`${detail.conversationId}:${detail.outcome}`); };
+  const decision = (conversationId: string) => ({
+    eventId: `decision-${conversationId}`, conversationId, kind: "permission.decided" as const,
+    payload: { operationId: `permission:${conversationId}:allow`, targetKey: `approval:${conversationId}`, stateId: "approved", detail: { approve: true } }
+  });
+  try {
+    const first = await service.acceptMobileOutboxEvents([decision("conversation-a"), decision("conversation-b")], "mailbox:1");
+    assert.deepEqual(first.eventIds, [], "both answers are withheld and kept for the next poll");
+    allowed.delete("conversation-b");
+    const retried = await service.retryFailedDecisions("mailbox:retry");
+    assert.deepEqual(retried.eventIds, [], "the answer still in scope is retried and still withheld");
+    assert.deepEqual(attempts, ["conversation-a", "conversation-b", "conversation-a"], "the out-of-scope answer is not tried again; the other is");
+    assert.ok(diagnostics.includes("conversation-b:given-up"), `the refusal is said: ${diagnostics.join(", ")}`);
+  } finally { service.close(); }
 });

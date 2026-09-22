@@ -149,7 +149,7 @@ import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
 import { acquireMobileMailboxExecutionClaim } from "./services/mobileMailboxClaims";
-import { controlCardsFromConversation } from "../shared/mobileControlCards";
+import { controlCardFromApproval, controlCardFromChoiceMessage, controlCardsFromConversation, type MobileControlCard } from "../shared/mobileControlCards";
 import {
   deleteMailboxEvents,
   mailboxAccessForSealKey,
@@ -654,6 +654,13 @@ async function applyMobileDecision(request: {
       conversationId: request.conversationId, targetKey: request.payload.targetKey
     });
   }
+  // What became of it, every time: an answer that was recorded but had no
+  // effect here (a member on a machine, a request already closed) used to
+  // leave no trace at all.
+  void debugLogService.write("mobile.decision.applied", {
+    conversationId: request.conversationId, kind: request.kind, targetKey: request.payload.targetKey,
+    status: outcome.status, detail: outcome.detail ?? ""
+  });
 }
 
 async function chatActionEventExists(eventId: string): Promise<boolean> {
@@ -1145,6 +1152,12 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
   };
   control.onLiveDiagnostic = (detail) => {
     void debugLogService.write("mobile.live.frame", {
+      routingId: pairing.stableRoutingId,
+      ...detail
+    });
+  };
+  control.onDecisionDiagnostic = (detail) => {
+    void debugLogService.write("mobile.decision.delivery", {
       routingId: pairing.stableRoutingId,
       ...detail
     });
@@ -1641,7 +1654,12 @@ function mobileTimelineSinkForPairing(pairing: MobilePairingPackage): MobileTime
   return {
     async publishTimeline(timeline: MobileTimelineEvents, publishOptions?: { runFinished?: boolean; notices?: MobileNoticeKind[] }) {
       const conversationId = timeline.conversationId?.trim();
-      if (!conversationId || timeline.events.length === 0 || !pairing.outboxUrl) {
+      // A batch that carries only cards is news too: a choice cancelled or a
+      // permission answered on the desktop changes no message row, and this
+      // early return used to drop exactly that batch — so the phone never
+      // heard that the card had closed (the User's screenshot, 2026-09-20).
+      const carriesCards = Array.isArray(timeline.cards);
+      if (!conversationId || (timeline.events.length === 0 && !carriesCards) || !pairing.outboxUrl) {
         return;
       }
       const append = await chatEventLogService.appendLocalEvent({
@@ -1831,6 +1849,18 @@ async function pollMobileMailboxOutbox(
       ? catalog.isConversationAllowed(conversationId)
       : false
   });
+  // Answers an earlier page could not apply are tried again first: the page
+  // they came on is consumed, and nothing else would offer them.
+  try {
+    await control.retryFailedDecisions(`mailbox:retry:${Date.now()}`);
+  } catch (error) {
+    // A retry that fails is logged where the answers' own diagnostics go; it
+    // must never cost this poll its page.
+    await debugLogService.write("mobile.decision.retry-error", {
+      routingId: pairing.stableRoutingId,
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
   if (events.length > 0) {
     const accepted = await control.acceptMobileOutboxEvents(events, `mailbox:${Date.now()}`);
     const acceptedEventIds = new Set(accepted.eventIds);
@@ -2063,8 +2093,36 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
           : role.label
       ]));
       const machineNames = new Map((await settingsService.listMachines()).map((machine) => [machine.id, machine.name]));
+      const listed = visible.slice(0, 100);
+      // What waits for the User in each listed chat, so the phone can drop a
+      // pending card the desktop has closed. Pending approvals are in the
+      // metadata opened below; pending choices are one indexed query over
+      // the listed chats, never a chat's history.
+      const pendingChoicesByConversation = new Map<string, MobileControlCard[]>();
+      const pendingChoices = await storageService.listPendingChoiceMessages(listed.map((summary) => summary.id));
+      if (pendingChoices.truncated) {
+        // The phone then reconciles nothing from this list. Said here, or a
+        // desktop that quietly crossed the cap would look like the old defect.
+        void debugLogService.write("mobile.chat-list.pending-cards-truncated", { chats: listed.length });
+      }
+      for (const row of pendingChoices.rows) {
+        const card = controlCardFromChoiceMessage(row.conversationId, row.message);
+        if (!card || card.status !== "pending") continue;
+        const cards = pendingChoicesByConversation.get(row.conversationId) ?? [];
+        cards.push(card);
+        pendingChoicesByConversation.set(row.conversationId, cards);
+      }
+      // An incomplete set must not be offered as the whole: the phone would
+      // drop every card it does not name.
+      const pendingCardsFor = (conversationId: string, conversation: Conversation | undefined): MobileControlCard[] | undefined =>
+        pendingChoices.truncated ? undefined : [
+          ...((conversation?.metadata as { pendingAppToolApprovals?: import("../shared/types").ChatAppToolApproval[] } | undefined)?.pendingAppToolApprovals ?? [])
+            .filter((approval) => approval.status === "pending")
+            .map((approval) => controlCardFromApproval(conversationId, approval)),
+          ...(pendingChoicesByConversation.get(conversationId) ?? [])
+        ].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
       const items: MobileRelayChatListItem[] = [];
-      for (const summary of visible.slice(0, 100)) {
+      for (const summary of listed) {
         // The list needs each chat's members and its last line, not its
         // history. Reading whole conversations here pulled the newest hundred
         // chats' messages — tens of megabytes on the User's data — through the
@@ -2092,6 +2150,7 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
           participants: (summary.chatParticipants ?? [])
             .map((participant) => participant.handle.startsWith("@") ? participant.handle : `@${participant.handle}`)
             .slice(0, 4),
+          ...(pendingCardsFor(summary.id, conversation) ? { pendingCards: pendingCardsFor(summary.id, conversation) } : {}),
           members: members.map((participant) => ({
             id: participant.id,
             handle: participant.handle,
@@ -2142,9 +2201,28 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
     },
     async listControlCards(conversationId: string) {
       // Straight from the stored conversation, so a card cannot exist on the
-      // phone that does not exist on the machine that raised it.
-      const conversation = await storageService.getConversation(conversationId);
-      return conversation && conversation.kind === "chat" ? controlCardsFromConversation(conversation) : [];
+      // phone that does not exist on the machine that raised it — but never
+      // the whole chat through the sqlite CLI: on the User's largest chat that
+      // read was tens of megabytes of hex per phone open. What waits comes
+      // from the metadata and one indexed-by-chat query; the choices of the
+      // newest page come with it, and an answered choice outside the page
+      // stays on the phone from when its page was delivered.
+      const opened = await storageService.openConversation(conversationId, 80);
+      const conversation = opened?.conversation;
+      if (!conversation || conversation.kind !== "chat") {
+        return [];
+      }
+      const cards = controlCardsFromConversation(conversation);
+      const seen = new Set(cards.map((card) => card.id));
+      const pending = await storageService.listPendingChoiceMessages([conversationId]);
+      for (const row of pending.rows) {
+        const card = controlCardFromChoiceMessage(conversationId, row.message);
+        if (card && !seen.has(card.id)) {
+          seen.add(card.id);
+          cards.push(card);
+        }
+      }
+      return cards;
     },
     async listTimeline(conversationId: string) {
       const opened = await storageService.openConversation(conversationId, 80);

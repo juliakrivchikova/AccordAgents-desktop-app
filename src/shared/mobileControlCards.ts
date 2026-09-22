@@ -14,7 +14,7 @@
  * machine that raised it.
  */
 
-import type { ChatAppToolApproval, ChatChoiceOption, Conversation } from "./types";
+import type { ChatAppToolApproval, ChatChoiceOption, ChatMessage, Conversation } from "./types";
 
 export type MobileControlCardKind = "permission" | "choice";
 
@@ -46,56 +46,70 @@ export interface MobileControlCard {
 const ALLOW = { id: "allow", label: "Allow" };
 const DENY = { id: "deny", label: "Deny" };
 
+/** The card for one app-tool approval, in exactly the shape the desktop card
+ *  is built from. Pending ones only are shown; an answered approval has no
+ *  record the phone keeps. */
+export function controlCardFromApproval(conversationId: string, approval: ChatAppToolApproval): MobileControlCard {
+  return {
+    id: approval.id,
+    kind: "permission",
+    conversationId,
+    title: approval.summary || "Permission request",
+    summary: approval.summary || "",
+    requesterLabel: approval.requesterHandle ? `@${approval.requesterHandle}` : undefined,
+    machineName: (approval as { machineName?: string }).machineName,
+    options: [ALLOW, DENY],
+    allowsCustomAnswer: false,
+    allowsCancel: false,
+    status: "pending",
+    createdAt: approval.createdAt,
+    // The native decision id the desktop card carries back with its answer.
+    ...(typeof (approval as unknown as { codexDecisionId?: unknown }).codexDecisionId === "string"
+      ? { codexDecisionId: (approval as unknown as { codexDecisionId: string }).codexDecisionId }
+      : {}),
+    ...(approval.request ? { draftOverride: approval.request } : {})
+  };
+}
+
+/** The card for the choice a member asked in this message, answered or not;
+ *  undefined when the message asks nothing. */
+export function controlCardFromChoiceMessage(conversationId: string, message: ChatMessage): MobileControlCard | undefined {
+  const choice = message.metadata?.pendingChoice;
+  if (!choice) return undefined;
+  return {
+    id: choice.id,
+    kind: "choice",
+    conversationId,
+    title: choice.title || "Choice",
+    summary: choice.question || "",
+    requesterLabel: message.participantLabel,
+    options: choice.options ?? [],
+    allowsCustomAnswer: true,
+    allowsCancel: true,
+    status: choice.status === "pending" ? "pending" : "answered",
+    outcome: choice.status === "pending"
+      ? undefined
+      : choice.status === "cancelled"
+        ? "Cancelled"
+        : choice.options?.find((option) => option.id === choice.selectedOptionId)?.label
+          ?? choice.customAnswer
+          ?? "Answered",
+    createdAt: message.createdAt,
+    sourceMessageId: message.id
+  };
+}
+
 export function controlCardsFromConversation(conversation: Conversation): MobileControlCard[] {
   const cards: MobileControlCard[] = [];
   const approvals = (conversation.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[] } | undefined)
     ?.pendingAppToolApprovals ?? [];
   for (const approval of approvals) {
     if (approval.status !== "pending") continue;
-    cards.push({
-      id: approval.id,
-      kind: "permission",
-      conversationId: conversation.id,
-      title: approval.summary || "Permission request",
-      summary: approval.summary || "",
-      requesterLabel: approval.requesterHandle ? `@${approval.requesterHandle}` : undefined,
-      machineName: (approval as { machineName?: string }).machineName,
-      options: [ALLOW, DENY],
-      allowsCustomAnswer: false,
-      allowsCancel: false,
-      status: "pending",
-      createdAt: approval.createdAt,
-      // The native decision id the desktop card carries back with its answer.
-      ...(typeof (approval as unknown as { codexDecisionId?: unknown }).codexDecisionId === "string"
-        ? { codexDecisionId: (approval as unknown as { codexDecisionId: string }).codexDecisionId }
-        : {}),
-      ...(approval.request ? { draftOverride: approval.request } : {})
-    });
+    cards.push(controlCardFromApproval(conversation.id, approval));
   }
   for (const message of conversation.messages) {
-    const choice = message.metadata?.pendingChoice;
-    if (!choice) continue;
-    cards.push({
-      id: choice.id,
-      kind: "choice",
-      conversationId: conversation.id,
-      title: choice.title || "Choice",
-      summary: choice.question || "",
-      requesterLabel: message.participantLabel,
-      options: choice.options ?? [],
-      allowsCustomAnswer: true,
-      allowsCancel: true,
-      status: choice.status === "pending" ? "pending" : "answered",
-      outcome: choice.status === "pending"
-        ? undefined
-        : choice.status === "cancelled"
-          ? "Cancelled"
-          : choice.options?.find((option) => option.id === choice.selectedOptionId)?.label
-            ?? choice.customAnswer
-            ?? "Answered",
-      createdAt: message.createdAt,
-      sourceMessageId: message.id
-    });
+    const card = controlCardFromChoiceMessage(conversation.id, message);
+    if (card) cards.push(card);
   }
   return cards;
 }

@@ -27,6 +27,11 @@
   // Cards a member is waiting on, per chat, as the desktop last stated them.
   // Kept so closing the app does not lose a question that is still open.
   const CONTROL_CARDS_KEY = "accordagents.mobile.controlCards.v1";
+  // Cards answered from this phone whose answer the desktop has not yet
+  // stated as applied, with the queue entry that carries the answer. Kept
+  // across launches: a mark that lived only in memory made a reloaded app
+  // show the card as never answered (the User, 2026-09-20).
+  const CONTROL_CARD_SENT_KEY = "accordagents.mobile.controlCardSent.v1";
   // Chats with activity this phone has not looked at yet. The dot in the list
   // and the number on the app icon both read from here; the service worker
   // adds to its IndexedDB mirror when a push lands while the app is closed.
@@ -36,6 +41,17 @@
   // Where the history of each chat stops on this phone: whether the desktop
   // has messages before the oldest one shown, and which message to ask before.
   const TIMELINE_PAGES_KEY = "accordagents.mobile.timelinePages.v1";
+  // Which home tab the bottom bar shows (Chats, Activity, Settings), and which
+  // list Activity was left on. Coming back from a chat lands where you left.
+  const HOME_TAB_KEY = "accordagents.mobile.homeTab.v1";
+  const ACTIVITY_TAB_KEY = "accordagents.mobile.activityTab.v1";
+  // When each chat was last looked at on this phone. Activity reads a finished
+  // update as seen when the chat was opened after it arrived.
+  const VIEWED_AT_KEY = "accordagents.mobile.viewedAt.v1";
+  // When the desktop's chat list last reached this phone, on its own clock.
+  // Activity drops an "in progress" row that reached the phone well before a
+  // list saying nothing runs in that chat: a run the phone never saw end.
+  const CHAT_LIST_AT_KEY = "accordagents.mobile.chatListAt.v1";
   const TERMINAL_RUNS_MAX = 600;
   const DEFAULT_MANAGED_RELAY_URL = "wss://relay.accordagents.com/v1/relay";
   const RELAY_PROTOCOL = "accord-relay-v1";
@@ -47,7 +63,18 @@
   // arriving after a quiet stretch.
   const RELAY_TIMELINE_KEEPALIVE_MS = 60_000;
   const MAILBOX_TIMELINE_POLL_MS = 2_500;
+  // What one read of the box brings back, and how much of a backlog the
+  // catch-up after opening will work through before it draws what it has.
+  const MAILBOX_PAGE_SIZE = 500;
+  // How long one mailbox request may take before it counts as failed. The
+  // worker's background read allows ten seconds; the page can afford more.
+  const MAILBOX_FETCH_TIMEOUT_MS = 15_000;
+  const CATCH_UP_PAGE_BUDGET = 25;
+  const CATCH_UP_BUDGET_MS = 8_000;
   let activeFlushOutboxPromise;
+  // The status of every queue entry this phone has seen, by event id, so a
+  // card can say whether the answer it sent was handed over without a read.
+  const outboxStatusById = new Map();
   let activeRelaySocket;
   let activeRelaySocketKey;
   let activeRelaySocketPromise;
@@ -59,6 +86,28 @@
   let activeThinkingClockTimer;
   let activeSyncProgressClockTimer;
   let lastChatListRenderSignature = "";
+  let lastActivityRenderSignature = "";
+  let lastSettingsRenderSignature = "";
+  // The choice opened from Activity to be answered in full, by card id.
+  let openActivityCardId;
+  // The thread to land in when the chat Activity is opening is first drawn.
+  let pendingThreadOpen;
+  // Bumped by every write to the timeline store. The home screens redraw on
+  // every batch and poll; rereading a week of messages each time for the
+  // Activity badge would cost the phone far more than the list is worth.
+  let timelineGeneration = 0;
+  let recentTimelineCache;
+  let recentTimelineRead;
+  // The lists last built, and what they were built from.
+  let activityMemo;
+  // When the Activity list was last redrawn; taps right after it are ignored.
+  let lastActivityListRenderAt = 0;
+  let lastActivityRowOrder = "";
+  let chatListRefreshTimer;
+  let lastChatListRefreshAt = 0;
+  let activityRereadTimer;
+  const ACTIVITY_REREAD_MIN_MS = 1500;
+  let activityItemRenderToken = 0;
 
   function nowIso() {
     return new Date().toISOString();
@@ -347,12 +396,31 @@
       }
       const registration = await navigator.serviceWorker.ready;
       let subscription = await registration.pushManager.getSubscription();
-      if (!subscription) {
-        const vapidUrl = new URL("/v1/push/vapid", endpoint);
-        const vapidBody = await (await fetch(vapidUrl.toString())).json();
-        if (!vapidBody?.publicKey) {
-          return;
+      // The relay's key before anything is given up: a phone that cannot
+      // reach the relay just now (opened offline, on a poor connection) keeps
+      // the subscription it has rather than trading it for a replacement it
+      // cannot make — which left it with none until the next launch.
+      const vapidUrl = new URL("/v1/push/vapid", endpoint);
+      const vapidBody = await (await fetch(vapidUrl.toString())).json();
+      if (!vapidBody?.publicKey) {
+        return;
+      }
+      // A subscription can stop being delivered without ever being reported
+      // gone: the push service keeps accepting rings for it, the phone hears
+      // nothing, and from in here the two cases look identical. Nothing
+      // available to this page can tell them apart, so the first check of each
+      // launch replaces the subscription instead of trusting it. That is one
+      // extra round trip when the app opens, against notifications silently
+      // stopping until the User notices and says so.
+      if (subscription) {
+        try {
+          await subscription.unsubscribe();
+          subscription = undefined;
+        } catch {
+          // Keeping a subscription that might be dead beats having none.
         }
+      }
+      if (!subscription) {
         subscription = await registration.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: base64UrlToBytes(vapidBody.publicKey)
@@ -386,6 +454,33 @@
       }
     } catch {
       // Push is an enhancement; the poll path never depends on it.
+    }
+  }
+
+  // A push subscription can go dead while still looking alive: the push
+  // service keeps accepting rings for it and the phone never hears one. From
+  // inside the app the only cure is to drop the subscription and ask for a new
+  // one, so this is offered wherever alerts are already on.
+  let alertsReconnect = "";
+
+  async function reconnectMessageAlerts() {
+    const endpoint = outboxEndpoint();
+    const pairing = loadPairing();
+    if (!endpoint || !pairing?.relaySealKeyBase64) return "failed";
+    if (!navigator.serviceWorker || !("PushManager" in globalThis)) return "failed";
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      const existing = await registration.pushManager.getSubscription();
+      if (existing) {
+        // An endpoint the relay still holds must stop being rung: unsubscribe
+        // first, then register whatever the browser hands back next.
+        await existing.unsubscribe();
+      }
+      pushSubscriptionEnsured = false;
+      await ensurePushSubscription();
+      return pushSubscriptionEnsured && !pushEndpointRejected ? "ok" : "failed";
+    } catch {
+      return "failed";
     }
   }
 
@@ -637,13 +732,57 @@
     });
   }
 
+  function noteOutboxStatus(entry) {
+    if (entry && typeof entry.eventId === "string") {
+      outboxStatusById.set(entry.eventId, { status: entry.status, deliveredVia: entry.deliveredVia });
+    }
+  }
+
   function putOutboxEntry(entry) {
+    noteOutboxStatus(entry);
     return withOutbox("readwrite", function (store) {
       return requestToPromise(store.put(entry));
     });
   }
 
-  function withTimeline(mode, fn) {
+  // One chat's rows, as they stand in the store. Every delivered row is
+  // deduplicated against the chat it belongs to, and reading that chat back
+  // from the database for each of them is what a streaming member costs: a
+  // dozen full reads in seven seconds, each one hundreds of milliseconds on a
+  // real phone, which is why text arrived in lumps (the User, 2026-09-21).
+  // Only this page writes timeline rows -- the push-woken worker stores sealed
+  // envelopes and nothing else -- so the rows held here cannot go stale behind
+  // this context's back. Anything that writes without maintaining them drops
+  // them, which is enforced in withTimeline rather than left to each caller.
+  // A few chats at a time, not one: the chat on screen is read for drawing
+  // while another member streams into a different chat, and a single slot made
+  // those two evict each other on every delivered row.
+  const CHAT_ROWS_HELD_LIMIT = 4;
+  const chatRowsHeld = new Map();
+
+  function dropCachedChatRows() {
+    chatRowsHeld.clear();
+  }
+
+  function holdChatRows(conversationId, rows) {
+    if (typeof conversationId !== "string" || !conversationId) return rows;
+    chatRowsHeld.delete(conversationId);
+    chatRowsHeld.set(conversationId, rows);
+    while (chatRowsHeld.size > CHAT_ROWS_HELD_LIMIT) {
+      chatRowsHeld.delete(chatRowsHeld.keys().next().value);
+    }
+    return rows;
+  }
+
+  function withTimeline(mode, fn, options) {
+    // A write that does not keep the held rows in step drops them twice: when
+    // it is asked for, and again once it has landed. The first alone was not
+    // enough — a write created between the two moments read the chat afresh
+    // and held rows this one was about to delete.
+    const dropsHeldRows = mode === "readwrite" && !(options && options.maintainsChatRows);
+    if (dropsHeldRows) {
+      dropCachedChatRows();
+    }
     return openDb().then(function (db) {
       return new Promise(function (resolve, reject) {
         const tx = db.transaction([TIMELINE_STORE, META_STORE], mode);
@@ -652,7 +791,32 @@
         tx.onerror = function () {
           reject(tx.error || new Error("Timeline transaction failed."));
         };
+        // A transaction that fails still holds its connection open until it
+        // is closed here; left to the garbage collector, that connection
+        // blocks the next version change the worker asks for. And the rows
+        // held for a chat were brought up to date as this write's requests
+        // succeeded, before the store took them: after an abort they name a
+        // row the store never got, and the next copy of it would be judged
+        // "already here" and never written. Dropped, so the next write reads
+        // the chat as it is.
+        tx.onabort = function () {
+          dropCachedChatRows();
+          reject(tx.error || new Error("Timeline transaction aborted."));
+          db.close();
+        };
         tx.oncomplete = function () {
+          // Activity keeps what it read until the store changes. The write
+          // helpers resolve false or 0 when a replayed row changed nothing;
+          // anything else counts as a change. Registered on the value before
+          // it is handed back, so the count moves before the caller resumes.
+          if (mode === "readwrite") {
+            Promise.resolve(value).then(function (result) {
+              if (result !== false && result !== 0) timelineGeneration += 1;
+            }, function () { timelineGeneration += 1; });
+          }
+          if (dropsHeldRows) {
+            dropCachedChatRows();
+          }
           resolve(value);
           db.close();
         };
@@ -706,14 +870,83 @@
   // real row yet?" can run between the real row's own delete and its put, see
   // nothing, and store itself anyway. IndexedDB serialises readwrite
   // transactions on the store, so deciding here cannot interleave.
+  // The rows one chat holds, through the store's chat index when the database
+  // has it. Every rule below works inside one chat — the key it compares
+  // carries the chat id, and a phone message's own row is matched by chat as
+  // well — yet the read behind it used to scan the whole store for every
+  // delivered row. On a phone with weeks of chats that was seconds of main
+  // thread per batch, and a streaming member sends a batch every few seconds:
+  // the timeline fell behind and caught up in lumps, and the live text with
+  // it (the User, 2026-09-20).
+  /** The rows of one chat. The write path may take them from what this page
+   *  already holds -- it is the only writer, so they cannot be stale behind its
+   *  back -- while a read for drawing always goes to the store, because what is
+   *  on screen must not come from memory that a reload would not have. */
+  // The key of a row that never exists. A write asks the store for it before
+  // taking the rows held for a chat: the answer comes only once every write
+  // created before this one has landed, and each of those brought the held
+  // rows up to date as it landed. Taken any earlier — at the moment the write
+  // was created, as they were at first — the held rows could predate the
+  // write in front, and a run's end judged against them missed the live row
+  // it had come to end: "Thinking…" stayed above the answer it belonged to
+  // whenever the socket's last row and the mailbox's finished one landed
+  // together.
+  const HELD_ROWS_SYNC_KEY = "\u0000held-rows-sync";
+
+  function timelineRowsForConversation(store, conversationId, options) {
+    const mayHold = Boolean(options && options.mayHold) &&
+      typeof conversationId === "string" && Boolean(conversationId);
+    const remember = function (rows) {
+      return mayHold ? holdChatRows(conversationId, rows) : rows;
+    };
+    const readStore = function () {
+      const schema = globalThis.AccordMobileDb;
+      const indexName = schema && schema.TIMELINE_CONVERSATION_INDEX;
+      if (typeof conversationId === "string" && conversationId && indexName && store.indexNames.contains(indexName)) {
+        return requestToPromise(store.index(indexName).getAll(conversationId)).then(remember);
+      }
+      return requestToPromise(store.getAll()).then(function (rows) {
+        return typeof conversationId === "string" && conversationId
+          ? rows.filter(function (row) { return row && row.conversationId === conversationId; })
+          : rows;
+      }).then(remember);
+    };
+    if (!mayHold) {
+      return readStore();
+    }
+    return requestToPromise(store.get(HELD_ROWS_SYNC_KEY)).then(function () {
+      const held = chatRowsHeld.get(conversationId);
+      return held ? held : readStore();
+    });
+  }
+
+  /** Keeps the rows held for a chat in step with a write this function just
+   *  made, so the next delivered row does not have to read the chat back. */
+  function noteChatRowStored(entry) {
+    if (!entry) return;
+    const rows = chatRowsHeld.get(entry.conversationId);
+    if (!rows) return;
+    holdChatRows(entry.conversationId, rows.filter(function (row) {
+      return row && row.id !== entry.id;
+    }).concat([entry]));
+  }
+
+  function noteChatRowsRemoved(conversationId, ids) {
+    const rows = chatRowsHeld.get(conversationId);
+    if (!rows || ids.length === 0) return;
+    holdChatRows(conversationId, rows.filter(function (row) { return row && ids.indexOf(row.id) < 0; }));
+  }
+
   function putTimelineEntryDeduped(entry) {
     const key = timelineEntryDedupeKey(entry);
+    // The one write path that keeps the held rows in step instead of dropping
+    // them: it is the one a streaming member takes, over and over.
     return withTimeline("readwrite", function (store, meta) {
       // Same transaction as the timeline write: a concurrent deletion cannot
       // land between a separate check and this stale message's insertion.
       return requestToPromise(meta.get("conversation-deleted:" + entry.conversationId)).then(function (deleted) {
         if (deleted) return 0;
-        return requestToPromise(store.getAll()).then(function (entries) {
+        return timelineRowsForConversation(store, entry.conversationId, { mayHold: true }).then(function (entries) {
         const current = entries.find(function (existing) {
           return existing && existing.id === entry.id && existing.conversationId === entry.conversationId &&
             existing.role === "participant" && entry.role === "participant" && existing.runId === entry.runId;
@@ -743,10 +976,42 @@
         const stored = entries.find(function (existing) {
           return existing && existing.id === entry.id && existing.conversationId === entry.conversationId;
         });
-        if (stored && sameTimelineEntryContent(stored, entry)) {
+        // When this phone got the row in this state, and when it watched the
+        // run end, are this phone's knowledge; a later copy of the same row
+        // (the snapshot after the terminal, a page read under another id) does
+        // not carry them. Taken from the copy being replaced, and stamped only
+        // for a row that is new here or has just changed state.
+        const prior = stored || (key ? others.find(function (existing) {
+          return timelineEntryDedupeKey(existing) === key;
+        }) : undefined);
+        if (prior && prior.status === entry.status) {
+          entry = {
+            ...entry,
+            ...(prior.receivedAt && !entry.receivedAt ? { receivedAt: prior.receivedAt } : {}),
+            ...(prior.settledAt && !entry.settledAt ? { settledAt: prior.settledAt } : {})
+          };
+        } else if (!entry.receivedAt) {
+          entry = { ...entry, receivedAt: nowIso() };
+        }
+        // A later copy of a row this phone already holds can name less than
+        // the first one did: a machine's delta carries no run id, a page read
+        // no thread root. What was known stays known, or the row's identity
+        // in Activity flips and a cleared update comes back as news.
+        if (stored) {
+          entry = {
+            ...entry,
+            ...(stored.runId && !entry.runId ? { runId: stored.runId } : {}),
+            ...(stored.messageId && !entry.messageId ? { messageId: stored.messageId } : {}),
+            ...(stored.threadRootId && !entry.threadRootId ? { threadRootId: stored.threadRootId } : {}),
+            ...(stored.mobileEventId && !entry.mobileEventId ? { mobileEventId: stored.mobileEventId } : {})
+          };
+        }
+        if (stored && sameTimelineEntryContent(stored, entry) &&
+          (stored.settledAt || "") === (entry.settledAt || "") &&
+          (stored.receivedAt || "") === (entry.receivedAt || "")) {
           return false;
         }
-        const deletes = others.filter(function (existing) {
+        const removed = others.filter(function (existing) {
           if (key && timelineEntryDedupeKey(existing) === key) {
             return true;
           }
@@ -754,17 +1019,20 @@
             entry.role === "participant" &&
             isScaffoldingEntry(existing) &&
             sameMobileEvent(entry, existing);
-        }).map(function (existing) {
+        });
+        const deletes = removed.map(function (existing) {
           return requestToPromise(store.delete(existing.id));
         });
         return Promise.all(deletes).then(function () {
           return requestToPromise(store.put(entry));
         }).then(function () {
+          noteChatRowsRemoved(entry.conversationId, removed.map(function (existing) { return existing.id; }));
+          noteChatRowStored(entry);
           return true;
         });
         });
       });
-    });
+    }, { maintainsChatRows: true });
   }
 
   // NOTE: an age guard was tried here and reverted. Its intent was right — an
@@ -804,10 +1072,11 @@
           return false;
         }
         return requestToPromise(store.delete(entryId)).then(function () {
+          noteChatRowsRemoved(existing.conversationId, [entryId]);
           return true;
         });
       });
-    });
+    }, { maintainsChatRows: true });
   }
 
   function deletePendingTimelineEntriesForRun(conversationId, runId, mobileEventId, messageId, status) {
@@ -816,7 +1085,7 @@
     }
     const wholeMessageFailed = isPhoneMessageFailure(status, runId, mobileEventId);
     return withTimeline("readwrite", function (store) {
-      return requestToPromise(store.getAll()).then(function (entries) {
+      return timelineRowsForConversation(store, conversationId, { mayHold: true }).then(function (entries) {
         const deletes = entries.filter(function (entry) {
           if (!entry || entry.status !== "pending") {
             return false;
@@ -850,13 +1119,14 @@
           return (matchesMessage || matchesScaffolding || matchesAnonymousRunRow || matchesFailedPhoneMessage) &&
             entry.conversationId === conversationId;
         }).map(function (entry) {
-          return requestToPromise(store.delete(entry.id));
+          return { id: entry.id, done: requestToPromise(store.delete(entry.id)) };
         });
-        return Promise.all(deletes).then(function () {
+        return Promise.all(deletes.map(function (item) { return item.done; })).then(function () {
+          noteChatRowsRemoved(conversationId, deletes.map(function (item) { return item.id; }));
           return deletes.length;
         });
       });
-    });
+    }, { maintainsChatRows: true });
   }
 
   // A placeholder row ("@x is running..." / "Running...") is pure scaffolding:
@@ -880,7 +1150,7 @@
       return Promise.resolve(0);
     }
     return withTimeline("readwrite", function (store) {
-      return requestToPromise(store.getAll()).then(function (entries) {
+      return timelineRowsForConversation(store, conversationId, { mayHold: true }).then(function (entries) {
         const deletes = entries.filter(function (entry) {
           if (!entry || entry.status !== "pending" || !isPlaceholderTimelineContent(entry.content)) {
             return false;
@@ -891,13 +1161,14 @@
           const created = Date.parse(entry.createdAt || "");
           return Number.isFinite(created) && terminalTime - created > PLACEHOLDER_CORPSE_AGE_MS;
         }).map(function (entry) {
-          return requestToPromise(store.delete(entry.id));
+          return { id: entry.id, done: requestToPromise(store.delete(entry.id)) };
         });
-        return Promise.all(deletes).then(function () {
+        return Promise.all(deletes.map(function (item) { return item.done; })).then(function () {
+          noteChatRowsRemoved(conversationId, deletes.map(function (item) { return item.id; }));
           return deletes.length;
         });
       });
-    });
+    }, { maintainsChatRows: true });
   }
 
 
@@ -1222,6 +1493,9 @@
       if (!await tx.get(META_STORE, key)) await tx.put(META_STORE, { key, conversationId, deletedAt });
       await tx.removeWhere(TIMELINE_STORE, entry => entry.conversationId === conversationId);
     });
+    timelineGeneration += 1;
+    // Written past withTimeline, so the rows it holds are dropped here.
+    dropCachedChatRows();
     deletedMachineConversations.add(conversationId);
     saveChats(loadChats().filter(chat => chat.id !== conversationId));
     const cards = loadControlCards();
@@ -1351,7 +1625,7 @@
       return "applied";
     }
     if (body.type === "machine.choice.result") {
-      controlCardSent.delete(body.choiceId);
+      clearCardSent(body.choiceId);
       const card = controlCardsFor(conversationId).find(item => item.id === body.choiceId);
       if (card && body.choice) {
         const selected = (body.choice.options || []).find(option => option.id === body.choice.selectedOptionId);
@@ -1435,6 +1709,9 @@
     return {
       id: approval.id,
       kind: "permission",
+      // Learned from the machine itself, not from the desktop: the desktop's
+      // chat list cannot vouch for it and must not withdraw it.
+      source: "machine",
       conversationId: conversationId,
       title: approval.summary || "Permission request",
       summary: approval.summary || "",
@@ -1459,6 +1736,7 @@
     return {
       id: choice.id,
       kind: "choice",
+      source: "machine",
       conversationId: conversationId,
       title: choice.title || "Choice",
       summary: choice.question || "",
@@ -1742,7 +2020,7 @@
   function noteMachineApprovalResult(body) {
     if (!body || !body.approvalId) return;
     if (body.ok === false) {
-      controlCardSent.delete(body.approvalId);
+      clearCardSent(body.approvalId);
       controlCardErrors.set(body.approvalId, body.error || "The machine could not apply this answer.");
       return;
     }
@@ -1920,7 +2198,7 @@
 
   function listTimelineEntries(conversationId) {
     return withTimeline("readonly", function (store) {
-      return requestToPromise(store.getAll());
+      return timelineRowsForConversation(store, conversationId);
     }).then(function (entries) {
       return entries.filter(function (entry) {
         // Older rows without an owner stay on disk, but cannot be attributed
@@ -2046,6 +2324,7 @@
     return withOutbox("readonly", function (store) {
       return requestToPromise(store.getAll());
     }).then(function (entries) {
+      for (const entry of entries) noteOutboxStatus(entry);
       return entries.filter(function (entry) {
         return !conversationId || entry.conversationId === conversationId;
       }).sort(function (left, right) {
@@ -2161,6 +2440,39 @@
     });
     saveStoredStringArray(UNREAD_KEY, next);
     void syncUnreadWithWorker(next);
+  }
+
+  function loadViewedAt() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(VIEWED_AT_KEY) || "{}");
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /** Records that the chat was looked at now, on this phone's clock: Activity
+   *  compares it with when rows reached this phone, never with a desktop
+   *  stamp, so a desktop clock running ahead cannot mark news as seen. Every
+   *  render of the open chat lands here, so the answer the User just watched
+   *  finish is always behind the mark. */
+  function markConversationViewed(conversationId, newestReceivedAt) {
+    if (!conversationId) return;
+    const all = loadViewedAt();
+    const stored = Date.parse(all[conversationId] || "");
+    const newest = Date.parse(newestReceivedAt || "");
+    // A mark already past the newest row this phone holds for the chat says
+    // all it needs to; rewriting it on every redraw of a streaming chat made
+    // Activity rebuild its lists on each one.
+    if (Number.isFinite(stored) && (!Number.isFinite(newest) || stored >= newest)) return;
+    const next = nowIso();
+    if (Number.isFinite(stored) && stored >= Date.parse(next)) return;
+    all[conversationId] = next;
+    try {
+      localStorage.setItem(VIEWED_AT_KEY, JSON.stringify(all));
+    } catch {
+      // Losing this only makes an update look unseen a little longer.
+    }
   }
 
   // The number on the icon is the number of chats with something new, the
@@ -2754,6 +3066,14 @@
       return;
     }
     strip.textContent = "";
+    // A picture waiting to be sent keeps the composer open, the same as text.
+    const form = document.getElementById("composer-form");
+    if (form) {
+      const input = document.getElementById("composer-input");
+      const open = pendingAttachments.length > 0 ||
+        (input && (document.activeElement === input || Boolean(input.value.trim())));
+      form.dataset.expanded = open ? "1" : "";
+    }
     if (pendingAttachments.length === 0) {
       strip.hidden = true;
       return;
@@ -2819,7 +3139,7 @@
           acknowledgedBy: []
         }).then(function () {
           return tx.put(OUTBOX_STORE, entry);
-        }).then(function () { return entry; });
+        }).then(function () { noteOutboxStatus(entry); return entry; });
       });
     });
   }
@@ -2840,14 +3160,27 @@
     return !entry.kind || entry.kind === "message.created";
   }
 
+  // How many times the desktop may answer "not taken" before the entry is
+  // set aside for good: offered for ever, it would lock the card it carries.
+  const OUTBOX_REFUSAL_LIMIT = 5;
+
+  /** Whether a queue entry is still the desktop's to take: not acknowledged,
+   *  not replaced by a later answer to the same card, not refused for good,
+   *  and not handed to a member's own machine, which acknowledges its own. */
+  function desktopOwesEntry(entry) {
+    return Boolean(entry) && entry.status !== "acked" && entry.status !== "superseded" &&
+      entry.status !== "refused" && entry.deliveredVia !== "machine";
+  }
+
   /** Runs the User has asked to stop, from the tap onward. The queue entry is
    *  written asynchronously, and a render in that gap used to put the Stop
    *  control back as if nothing had been asked -- which is both a lie and a
    *  second Stop the User can send by accident. */
   const stopRequestedRunIds = new Set();
 
-  async function stopRunFromPhone(runId) {
-    const conversationId = selectedConversationId();
+  async function stopRunFromPhone(runId, forConversationId) {
+    // Activity stops a run in a chat that is not open, so it names the chat.
+    const conversationId = forConversationId || selectedConversationId();
     if (!conversationId || typeof runId !== "string" || !runId.trim()) {
       return;
     }
@@ -2972,15 +3305,14 @@
     if (!relayUrl || !relayCanSync(pairing)) {
       return { status: "waiting-for-desktop", sent: 0, pending: entries.filter((entry) => entry.status !== "acked").length };
     }
-    const pendingEntries = entries.filter(function (entry) {
-      return entry.status !== "acked";
-    });
+    const pendingEntries = entries.filter(desktopOwesEntry);
     if (pendingEntries.length === 0) {
       return { status: "synced", sent: 0, pending: 0 };
     }
     const socket = await getRelaySocket(relayUrl, pairing);
     ensureRelayTimelineCollector(socket, pairing);
     let sent = 0;
+    let refused = 0;
     for (const entry of pendingEntries) {
       const syncing = {
         ...entry,
@@ -3000,7 +3332,21 @@
       const openedAck = await openRelayPayload(ack.ciphertext, pairing.relaySealKeyBase64);
       const ackedEventIds = Array.isArray(openedAck?.eventIds) ? openedAck.eventIds : [openedAck?.eventId];
       if (!ackedEventIds.includes(entry.eventId)) {
-        throw new Error("Relay ack eventId mismatch.");
+        // The desktop answered and left this one out: it could not take it.
+        // Every chat's queue goes through here now, so one refused entry
+        // must not stand in front of the rest; it is kept, said to be
+        // waiting, and offered again later — a few times, then set aside,
+        // so the card it carries is not locked behind it for ever.
+        refused += 1;
+        const refusals = (Number(entry.refusals) || 0) + 1;
+        await putOutboxEntry({
+          ...syncing,
+          status: refusals >= OUTBOX_REFUSAL_LIMIT ? "refused" : "waiting-to-sync",
+          refusals: refusals,
+          updatedAt: nowIso(),
+          lastError: "The desktop did not take this."
+        });
+        continue;
       }
       await putOutboxEntry({
         ...syncing,
@@ -3014,7 +3360,7 @@
       });
       sent += 1;
     }
-    return { status: "synced", sent, pending: 0 };
+    return { status: "synced", sent, pending: refused };
   }
 
   async function getRelaySocket(relayUrl, pairing) {
@@ -3045,11 +3391,15 @@
         return getRelaySocket(relayUrl, pairing);
       }
       activeRelaySocket = socket;
+      liveRelayReconnectDelayMs = LIVE_RELAY_RECONNECT_MIN_MS;
       socket.addEventListener("close", function () {
         if (activeRelaySocket === socket) {
           activeRelaySocket = undefined;
           activeRelaySocketPromise = undefined;
           activeRelayTimelineCollectorSocket = undefined;
+          // The reply on screen stops moving the moment this socket is gone;
+          // dial again now rather than on the next keep-alive tick.
+          scheduleLiveRelayReconnect();
         }
       }, { once: true });
       return socket;
@@ -3302,6 +3652,27 @@
   // in-progress row showed nothing. While a conversation is open, hold the
   // socket and keep the timeline collector attached so live text arrives as it
   // is written. Idempotent: getRelaySocket reuses the open one.
+  // The live socket is what carries a member's text as it is written. When it
+  // drops — the relay seated a newer connection, the network blinked, the
+  // collector's idle close — the keep-alive was the only thing that dialled
+  // again, up to a minute later, and the reply on screen stood still until
+  // then: streaming that worked one time and not the next (the User,
+  // 2026-09-20). Dial again promptly, backing off while the relay stays away.
+  const LIVE_RELAY_RECONNECT_MIN_MS = 1_500;
+  const LIVE_RELAY_RECONNECT_MAX_MS = 30_000;
+  let liveRelayReconnectDelayMs = LIVE_RELAY_RECONNECT_MIN_MS;
+  let liveRelayReconnectTimer;
+
+  function scheduleLiveRelayReconnect() {
+    if (liveRelayReconnectTimer || !selectedConversationId() || document.hidden) return;
+    const delay = liveRelayReconnectDelayMs;
+    liveRelayReconnectDelayMs = Math.min(LIVE_RELAY_RECONNECT_MAX_MS, liveRelayReconnectDelayMs * 2);
+    liveRelayReconnectTimer = setTimeout(function () {
+      liveRelayReconnectTimer = undefined;
+      ensureLiveRelayForOpenConversation();
+    }, delay);
+  }
+
   function ensureLiveRelayForOpenConversation() {
     const pairing = loadPairing();
     const relayUrl = relayEndpoint();
@@ -3312,6 +3683,7 @@
       ensureRelayTimelineCollector(socket, pairing);
     }).catch(function (error) {
       recordRelayDebug({ event: "live-relay-failed", reason: String(error && error.message || error) });
+      scheduleLiveRelayReconnect();
     });
   }
 
@@ -3388,11 +3760,21 @@
     // other conversations' envelopes.
     const fetchPage = async function (afterArrival) {
       const url = new URL(request.url);
-      url.searchParams.set("limit", "500");
+      url.searchParams.set("limit", String(MAILBOX_PAGE_SIZE));
       url.searchParams.set("afterArrival", String(Math.max(0, afterArrival)));
+      // The cursor this page brings is the one it committed after storing the
+      // previous page — its acknowledgement of everything below it, the same
+      // one the worker sends — so the relay does not ring for what is already
+      // on the screen.
+      url.searchParams.set("reader", "phone");
       const response = await fetch(url.toString(), {
         method: "GET",
-        headers: Object.assign({ "accept": "application/json" }, request.headers)
+        headers: Object.assign({ "accept": "application/json" }, request.headers),
+        // A response that never comes must not hold the catch-up open for
+        // ever: while it ran, every poll stood aside and every return to the
+        // foreground waited on it, so one stalled connection was a phone that
+        // never synced again until it was relaunched.
+        signal: AbortSignal.timeout(MAILBOX_FETCH_TIMEOUT_MS)
       });
       noteMailboxResponse(response);
       if (response.status === 401) {
@@ -3413,6 +3795,27 @@
     // Anything a push-woken service worker stored while the app was closed is
     // ingested first, so the network poll continues from the shared cursor.
     let drained = await drainSealedEnvelopes(pairing);
+    // How much of the backlog one call takes. The periodic poll takes a page,
+    // because it is never far behind; the catch-up after the app opens takes
+    // as many as it needs, so a phone that was away for hours shows one wait
+    // and then everything, instead of a lump of old messages every few seconds
+    // (the User, 2026-09-21).
+    const pageBudget = Math.max(1, (options && options.pages) || 1);
+    const deadline = options && options.budgetMs ? Date.now() + options.budgetMs : 0;
+    let pagesRead = 0;
+    let total = 0;
+    let more = true;
+    while (more && pagesRead < pageBudget) {
+      const page = await ingestOnePage(drained);
+      drained = 0;
+      total += page.stored;
+      more = page.more;
+      pagesRead += 1;
+      if (deadline && Date.now() > deadline) break;
+    }
+    return total;
+
+    async function ingestOnePage(alreadyStored) {
     const cursorState = await loadMailboxCursor();
     let body = await fetchPage(cursorState.cursor);
     const epoch = typeof body?.epoch === "string" ? body.epoch : "";
@@ -3423,7 +3826,7 @@
       body = await fetchPage(0);
     }
     if (!Array.isArray(body?.events)) {
-      return drained;
+      return { stored: alreadyStored, more: false };
     }
     // Stale cursor: events expired beneath us, so there is a real gap the
     // mailbox can no longer fill. Fire exactly one timeline-request refill
@@ -3442,7 +3845,7 @@
         }
       }
     }
-    let stored = drained;
+    let stored = alreadyStored;
     let advanced = current.cursor;
     for (const envelope of body.events) {
       if (Number.isFinite(envelope?.arrivalSeq) && envelope.arrivalSeq > advanced) {
@@ -3462,7 +3865,98 @@
     if (advanced !== current.cursor || (epoch && epoch !== current.epoch)) {
       await saveMailboxCursor(epoch || current.epoch, advanced);
     }
-    return stored;
+    // A full page means the box very likely holds more behind it.
+    return { stored: stored, more: body.events.length >= MAILBOX_PAGE_SIZE && advanced > current.cursor };
+    }
+  }
+
+  // A queue entry the desktop did not take at the time is offered again while
+  // the phone is open, not only when the User next acts in that chat.
+  const OUTBOX_RETRY_MIN_MS = 30_000;
+  let lastOutboxRetryAt = 0;
+
+  function retryPendingOutbox() {
+    if (activeFlushOutboxPromise || Date.now() - lastOutboxRetryAt < OUTBOX_RETRY_MIN_MS) return Promise.resolve();
+    let pending = false;
+    for (const held of outboxStatusById.values()) {
+      if (desktopOwesEntry(held)) { pending = true; break; }
+    }
+    if (!pending) return Promise.resolve();
+    lastOutboxRetryAt = Date.now();
+    return flushOutbox().then(function (result) {
+      return result && result.sent > 0 ? render(result.status) : undefined;
+    }).catch(function () { return undefined; });
+  }
+
+  // One wait, then everything: while this runs the timeline says so and is not
+  // redrawn per page, so a backlog arrives as a single change rather than as
+  // old messages crawling in one lump at a time.
+  let catchingUp = false;
+
+  // "Nothing new" and "still looking" must not look the same. The banner waits
+  // a moment so an ordinary fast poll does not blink it, and stays up long
+  // enough to be read once it is there.
+  const SYNC_BANNER_DELAY_MS = 350;
+  const SYNC_BANNER_MIN_MS = 700;
+  let syncDepth = 0;
+  let syncBannerTimer;
+  let syncBannerHideTimer;
+  let syncBannerShownAt = 0;
+
+  function setSyncBanner(visible) {
+    const node = document.getElementById("timeline-syncing");
+    if (!node) return;
+    if (visible && node.hidden) {
+      syncBannerShownAt = Date.now();
+    }
+    node.hidden = !visible;
+  }
+
+  /** Runs a sync that could bring messages in, with the banner saying so. */
+  async function whileLookingForMessages(run) {
+    syncDepth += 1;
+    if (syncDepth === 1 && !syncBannerTimer) {
+      clearTimeout(syncBannerHideTimer);
+      syncBannerHideTimer = undefined;
+      syncBannerTimer = setTimeout(function () {
+        syncBannerTimer = undefined;
+        if (syncDepth > 0) setSyncBanner(true);
+      }, SYNC_BANNER_DELAY_MS);
+    }
+    try {
+      return await run();
+    } finally {
+      syncDepth = Math.max(0, syncDepth - 1);
+      if (syncDepth === 0) {
+        clearTimeout(syncBannerTimer);
+        syncBannerTimer = undefined;
+        const node = document.getElementById("timeline-syncing");
+        if (node && !node.hidden) {
+          const left = Math.max(0, SYNC_BANNER_MIN_MS - (Date.now() - syncBannerShownAt));
+          clearTimeout(syncBannerHideTimer);
+          syncBannerHideTimer = setTimeout(function () {
+            syncBannerHideTimer = undefined;
+            if (syncDepth === 0) setSyncBanner(false);
+          }, left);
+        }
+      }
+    }
+  }
+
+  async function catchUpFromRelay() {
+    if (catchingUp || !outboxEndpoint()) return 0;
+    catchingUp = true;
+    await render();
+    try {
+      return await whileLookingForMessages(function () {
+        return pollMailboxTimeline({ pages: CATCH_UP_PAGE_BUDGET, budgetMs: CATCH_UP_BUDGET_MS });
+      });
+    } catch {
+      return 0;
+    } finally {
+      catchingUp = false;
+      await render("synced");
+    }
   }
 
   function startMailboxTimelinePolling() {
@@ -3475,10 +3969,14 @@
     // replaces it here on next open).
     void ensurePushSubscription();
     activeMailboxTimelinePollTimer = setInterval(function () {
+      if (catchingUp) return;
+      void retryPendingOutbox();
       // Polling only wrote to storage; without this the timeline never
       // repainted, so arriving messages stayed invisible until the next
       // send or reload.
-      pollMailboxTimeline().then(function (stored) {
+      whileLookingForMessages(function () {
+        return pollMailboxTimeline();
+      }).then(function (stored) {
         return stored > 0 ? render("synced") : undefined;
       }).catch(function () {
         return undefined;
@@ -3504,9 +4002,86 @@
     }, RELAY_TIMELINE_KEEPALIVE_MS);
   }
 
+  // How long a pending card must have been on this phone before its absence
+  // from the desktop's list means it was answered or withdrawn. A card that
+  // reached the phone while the list was being built is not in it yet; both
+  // moments are this phone's own clock, so they compare whatever the desktop
+  // stamped the card with (a choice carries its run's start).
+  // Five minutes rather than two: the list is read from the desktop's
+  // database, and a card reaches the phone from the desktop's memory first —
+  // a save that lags behind must not read as the card being closed.
+  const PENDING_CARD_RECONCILE_GRACE_MS = 5 * 60_000;
+
+  /**
+   * The desktop's chat list says which cards still wait in every chat it
+   * lists. A pending card this phone holds that the desktop no longer lists
+   * was answered or withdrawn while this phone was not listening — the batch
+   * that said so was lost, or was never written because it carried nothing
+   * else — and it would otherwise wait here for ever: the User's screenshot
+   * of 2026-09-20 showed cards the desktop had closed days earlier.
+   *
+   * Answered cards are kept; they are the record under their messages, and
+   * the list says nothing about them. A card learned from a machine directly
+   * is kept too: the desktop cannot vouch for it.
+   */
+  function reconcilePendingControlCards(payload) {
+    // The stamp says the desktop knows this contract; the judgement below is
+    // on this phone's clock.
+    if (!Number.isFinite(Date.parse(typeof payload.generatedAt === "string" ? payload.generatedAt : ""))) return 0;
+    const now = Date.now();
+    let changed = 0;
+    for (const chat of payload.chats) {
+      if (!chat || typeof chat.id !== "string" || !Array.isArray(chat.pendingCards)) continue;
+      const listed = new Map();
+      for (const card of chat.pendingCards) {
+        if (card && typeof card.id === "string" && card.status === "pending") {
+          listed.set(card.id, { ...card, conversationId: chat.id });
+        }
+      }
+      const next = [];
+      const seen = new Set();
+      for (const card of controlCardsFor(chat.id)) {
+        if (!card || typeof card.id !== "string") continue;
+        seen.add(card.id);
+        if (card.status !== "pending" || card.source === "machine") {
+          // An answered card is never reopened by a list that was read before
+          // the answer: what this phone holds is the later fact.
+          next.push(card);
+          continue;
+        }
+        const fresh = listed.get(card.id);
+        if (fresh) {
+          next.push({ ...card, ...fresh });
+          continue;
+        }
+        const receivedAt = Date.parse(card.receivedAt || card.createdAt || "");
+        if (Number.isFinite(receivedAt) && receivedAt > now - PENDING_CARD_RECONCILE_GRACE_MS) {
+          // Too new to judge: the list may predate it. The next list decides.
+          next.push(card);
+        }
+        // Otherwise the desktop no longer waits on it, and neither does this phone.
+      }
+      for (const card of listed.values()) {
+        if (!seen.has(card.id)) next.push(card);
+      }
+      if (storeControlCards(chat.id, next)) changed += 1;
+    }
+    return changed;
+  }
+
   function handleRelayChatListPayload(payload) {
     if (payload?.type !== "mobile.chat-list" || !Array.isArray(payload.chats)) {
       return [];
+    }
+    // A card the list closed leaves the screen now, whether or not the
+    // caller redraws afterwards.
+    if (reconcilePendingControlCards(payload) > 0) void render();
+    // When the desktop last said which chats have a run going; Activity
+    // trusts a "still running" row only if it started after that.
+    try {
+      localStorage.setItem(CHAT_LIST_AT_KEY, nowIso());
+    } catch {
+      // Without it Activity simply shows what the chat shows.
     }
     return saveChats(payload.chats);
   }
@@ -3666,6 +4241,9 @@
     picture.src = src;
     picture.alt = alt || "Picture";
     viewer.hidden = false;
+    // The bar leaves and comes back with the viewer; a reader at the latest
+    // message stays there across both, as across the keyboard.
+    keepingReaderAtLatest(applyDock);
   }
 
   function closeImageViewer() {
@@ -3678,6 +4256,7 @@
     if (picture) {
       picture.removeAttribute("src");
     }
+    keepingReaderAtLatest(applyDock);
   }
 
   function wireImageViewer() {
@@ -3712,11 +4291,22 @@
     return node;
   }
 
+  // The cards of every synced chat in one string. Parsing it per row per
+  // redraw cost tens of milliseconds on a store with hundreds of answered
+  // choices, on every batch of a streaming run; the parse is kept until the
+  // string itself changes.
+  let controlCardsParseCache;
+
   function loadControlCards() {
     try {
       const raw = localStorage.getItem(CONTROL_CARDS_KEY);
-      const parsed = raw ? JSON.parse(raw) : {};
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      if (controlCardsParseCache && controlCardsParseCache.raw === raw) {
+        return controlCardsParseCache.parsed;
+      }
+      const decoded = raw ? JSON.parse(raw) : {};
+      const parsed = decoded && typeof decoded === "object" && !Array.isArray(decoded) ? decoded : {};
+      controlCardsParseCache = { raw: raw, parsed: parsed };
+      return parsed;
     } catch {
       return {};
     }
@@ -3724,12 +4314,23 @@
 
   function saveControlCards(byConversation) {
     try {
+      controlCardsParseCache = undefined;
       localStorage.setItem(CONTROL_CARDS_KEY, JSON.stringify(byConversation));
+      return true;
     } catch {
       // A full quota must not lose the timeline; the cards arrive again with
-      // the next batch.
+      // the next batch. Said so to the caller rather than counted as written.
+      return false;
     }
   }
+
+  // Answered cards a batch does not name are kept as the record under their
+  // messages; only this many per chat, newest first, so the store cannot grow
+  // with every choice ever answered.
+  // Per chat, and the record only matters for the chats still being read:
+  // a hundred each across every chat the phone has opened grew towards the
+  // few megabytes the browser allows, past which no new card is stored.
+  const CONTROL_CARDS_KEPT_ANSWERED_LIMIT = 30;
 
   function controlCardsFor(conversationId) {
     const stored = loadControlCards()[conversationId];
@@ -3741,19 +4342,51 @@
   function storeControlCards(conversationId, cards) {
     if (!conversationId || !Array.isArray(cards)) return false;
     const all = loadControlCards();
-    const before = JSON.stringify(all[conversationId] || []);
-    const after = JSON.stringify(cards);
+    const previous = Array.isArray(all[conversationId]) ? all[conversationId] : [];
+    const before = JSON.stringify(previous);
+    const previousById = new Map(previous.filter(function (card) { return card && card.id; })
+      .map(function (card) { return [card.id, card]; }));
+    // When each card reached this phone, on its own clock: what a later list
+    // is judged against. A card already held keeps the moment it first came.
+    const arrived = nowIso();
+    const stamped = cards.map(function (card) {
+      if (!card || !card.id) return card;
+      const held = previousById.get(card.id);
+      return { ...card, receivedAt: (held && held.receivedAt) || card.receivedAt || arrived };
+    });
+    // What the desktop sends is the whole of what still waits, so a pending
+    // card it leaves out is closed. An answered card it leaves out was only
+    // outside the page it read: it stays, as the record under its message.
+    // A card learned from a member's machine directly is kept as well: the
+    // desktop cannot vouch for it, and a batch that does not name it says
+    // only that the desktop has not seen it yet — the same rule the chat
+    // list's reconciliation follows.
+    const incoming = new Set(stamped.map(function (card) { return card && card.id; }));
+    const kept = previous.filter(function (card) {
+      return card && card.id && !incoming.has(card.id) && (card.status !== "pending" || card.source === "machine");
+    }).sort(function (left, right) {
+      return String(right.createdAt || "").localeCompare(String(left.createdAt || ""));
+    }).slice(0, CONTROL_CARDS_KEPT_ANSWERED_LIMIT);
+    const next = stamped.concat(kept);
+    const after = JSON.stringify(next);
     if (before === after) return false;
-    all[conversationId] = cards;
-    saveControlCards(all);
+    all[conversationId] = next;
+    if (!saveControlCards(all)) return false;
     // A card the desktop no longer lists has been answered or withdrawn, so the
     // "sent" mark for it goes too: the next card with that id is a new question.
-    const live = new Set(cards.map(function (card) { return card && card.id; }));
-    for (const id of Array.from(controlCardSent)) {
-      if (!live.has(id)) controlCardSent.delete(id);
+    // Only this chat's cards: the set says nothing about another chat's, and
+    // clearing theirs made an answer already sent there answerable again.
+    const live = new Set(next.map(function (card) { return card && card.id; }));
+    for (const card of previous) {
+      const id = card && card.id;
+      if (!id || live.has(id)) continue;
+      clearCardSent(id);
+      controlCardErrors.delete(id);
     }
-    for (const id of Array.from(controlCardErrors.keys())) {
-      if (!live.has(id)) controlCardErrors.delete(id);
+    // A card the desktop now states as answered is answered: the "sent" mark
+    // has done its work, whichever device the answer came from.
+    for (const card of next) {
+      if (card && card.id && card.status !== "pending") clearCardSent(card.id);
     }
     return true;
   }
@@ -3779,9 +4412,12 @@
     }
     let stored = 0;
     let changed = 0;
+    // Cards are drawn now, but a batch that carries only cards is not news
+    // the chat is marked unread for: the refresh the desktop sends after the
+    // phone's own answer, and a card it closes, put an unread dot and a
+    // number on the icon for a chat nothing was said in.
     if (Array.isArray(payload.cards) && storeControlCards(conversationId, payload.cards)) {
       stored += 1;
-      changed += 1;
     }
     for (const event of payload.events) {
       if (!event || typeof event !== "object") {
@@ -3810,8 +4446,14 @@
       // clear anything pending now, nor crowd the recent runs out of the
       // terminal bookkeeping, which is bounded.
       const historyPage = Boolean(options && options.historyPage) || Boolean(payload.page && payload.page.earlier === true);
+      // When this phone watched the run end on the live socket, it notes when:
+      // the message keeps the time the run started, and Activity lists an
+      // update by when it finished. A backlog drained later carries no such
+      // moment, so it keeps the desktop's stamp.
+      let settledAt;
       if (!historyPage && status !== "pending" && role === "participant" && (runId || mobileEventId || messageId)) {
-        await deletePendingTimelineEntriesForRun(conversationId, runId, mobileEventId, messageId, status);
+        const cleared = await deletePendingTimelineEntriesForRun(conversationId, runId, mobileEventId, messageId, status);
+        if (cleared > 0 && status === "done" && options && options.live) settledAt = nowIso();
         rememberTerminalRun(runId, mobileEventId, createdAt);
         await deleteStalePlaceholderTimelineEntries(conversationId, createdAt);
       }
@@ -3845,7 +4487,8 @@
         threadRootId: typeof event.threadRootId === "string" && event.threadRootId.trim()
           ? event.threadRootId
           : undefined,
-        mobileEventId
+        mobileEventId,
+        ...(settledAt ? { settledAt: settledAt } : {})
       });
       if (written) {
         changed += 1;
@@ -3858,6 +4501,9 @@
     const historyBatch = Boolean(options && options.historyPage) || Boolean(payload.page && payload.page.earlier === true);
     if (changed > 0 && !historyBatch && (conversationId !== selectedConversationId() || document.hidden)) {
       markConversationsUnread([conversationId]);
+    }
+    if (changed > 0 && !historyBatch) {
+      refreshChatListSoon(conversationId);
     }
     if (stored > 0 && !(options && options.deferRender)) {
       await render("synced");
@@ -3900,7 +4546,7 @@
         if (result.status === "complete") {
           buffer.delete(key);
           const payload = await openRelayPayload(result.ciphertext, pairing.relaySealKeyBase64);
-          const stored = await handleRelayTimelinePayload(payload, undefined, { deferRender: true });
+          const stored = await handleRelayTimelinePayload(payload, undefined, { deferRender: true, live: true });
           // Storing alone left the timeline stale: pushed messages did not
           // appear until the next send or reload.
           if (stored > 0) {
@@ -3927,9 +4573,22 @@
     });
   }
 
+  // One more pass, queued behind a flush in flight: that flush read the queue
+  // before the entry this call is about was written, so answering with it
+  // alone left a message sent during a slow flush waiting for the retry tick
+  // half a minute later. However many ask meanwhile, one pass follows.
+  let queuedFlushOutboxPromise;
+
   function flushOutbox(options) {
     if (activeFlushOutboxPromise) {
-      return activeFlushOutboxPromise;
+      if (!queuedFlushOutboxPromise) {
+        const again = function () {
+          queuedFlushOutboxPromise = undefined;
+          return flushOutbox(options);
+        };
+        queuedFlushOutboxPromise = activeFlushOutboxPromise.then(again, again);
+      }
+      return queuedFlushOutboxPromise;
     }
     activeFlushOutboxPromise = flushOutboxInternal(options).finally(function () {
       activeFlushOutboxPromise = undefined;
@@ -3940,7 +4599,12 @@
   async function flushOutboxInternal(options) {
     const pairing = loadPairing();
     const endpoint = outboxEndpoint(options && options.endpoint);
-    const entries = await listOutboxEntries(selectedConversationId());
+    // Every chat's queue, not only the open chat's: an answer given from
+    // Activity for a chat that was then never opened again sat here for days.
+    // What was handed to a member's machine directly is that machine's to
+    // acknowledge and must not go to the desktop as well — the same message
+    // down both paths is two runs of the member.
+    const entries = (await listOutboxEntries()).filter(desktopOwesEntry);
     if (relayCanSync(pairing)) {
       try {
         return await flushOutboxViaRelay(entries, pairing);
@@ -3961,9 +4625,7 @@
   }
 
   async function flushOutboxViaMailbox(entries, endpoint) {
-    const pendingEntries = entries.filter(function (entry) {
-      return entry.status !== "acked";
-    });
+    const pendingEntries = entries.filter(desktopOwesEntry);
     let sent = 0;
     const pairing = loadPairing();
     const request = await authorizedMailboxRequest(endpoint);
@@ -3985,7 +4647,8 @@
         const response = await fetch(request.url, {
           method: "POST",
           headers: Object.assign({ "content-type": "application/json" }, request.headers),
-          body: JSON.stringify({ events: [event] })
+          body: JSON.stringify({ events: [event] }),
+          signal: AbortSignal.timeout(MAILBOX_FETCH_TIMEOUT_MS)
         });
         noteMailboxResponse(response);
         if (response.status === 401) {
@@ -4030,6 +4693,12 @@
     }
     if (status === "syncing") {
       return "Syncing";
+    }
+    if (status === "refused") {
+      return "Not taken by the desktop";
+    }
+    if (status === "superseded") {
+      return "Replaced";
     }
     return "Waiting to sync";
   }
@@ -4465,8 +5134,41 @@
     appendPlainText(parent, source.slice(cursor));
   }
 
-  function renderMessageContentIfChanged(container, markdown) {
-    const source = String(markdown || "");
+  /** What a member's message shows. The desktop hides the control blocks it
+   *  turns into its own controls — the `User choice:` block that becomes the
+   *  card below the message — and the phone shows the same message, so it
+   *  applies the same rule, from the same shared module rather than a copy of
+   *  its own. */
+  function displayedMessageText(content, author) {
+    const text = typeof content === "string" ? content : "";
+    // The desktop applies this to a member's message only: what the User typed
+    // is her own words, even when a line of it happens to start "User choice:".
+    if (author !== undefined && author !== "agent") {
+      return text;
+    }
+    const shared = self.AccordMobileShared;
+    return shared && typeof shared.stripChatControlBlocks === "function"
+      ? shared.stripChatControlBlocks(text)
+      : text;
+  }
+
+  function renderMessageContentIfChanged(container, markdown, author) {
+    // Compared before the rule runs: reconciling every row on every redraw
+    // must not re-strip every message of a long chat to find nothing changed.
+    const raw = String(markdown || "");
+    if (container.dataset.markdownRaw === raw) {
+      return;
+    }
+    let source = displayedMessageText(raw, author);
+    // A message that is nothing but the block it asked its question with: the
+    // card carries the question, and an empty bubble with a timestamp says
+    // nothing about what happened. Only when a question was in fact asked —
+    // a message that was nothing but "Participant requests: none." asked
+    // nothing, and said so wrongly.
+    if (!source.trim() && /^\s*user choice\s*:/im.test(raw)) {
+      source = "Asked you a question.";
+    }
+    container.dataset.markdownRaw = raw;
     if (container.dataset.markdownSource === source) {
       return;
     }
@@ -4548,6 +5250,56 @@
     return chats.filter(function (chat) {
       return chatMatchesQuery(chat, query);
     });
+  }
+
+  /** Opens a chat, or one thread in it, and asks for its latest page. The
+   *  chat list and Activity both land here, so a chat opened from either is
+   *  fetched the same way. */
+  function openConversation(conversationId, options) {
+    const rootId = options && options.threadRootId ? options.threadRootId : undefined;
+    pendingThreadOpen = rootId ? { conversationId: conversationId, rootId: rootId } : undefined;
+    setOpenThreadRootId(rootId);
+    localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
+    // A new visit reads the chat again: rows held from an earlier visit are
+    // exactly what a late read must not be able to bring back.
+    dropCachedChatRows();
+    return render("synced").then(function () {
+      const pairing = loadPairing();
+      if (pairing && relayCanSync(pairing)) {
+        return requestTimelineViaRelay(pairing, conversationId).then(function () {
+          return render("synced");
+        }).catch(function () {
+          return render("tunnel-reconnecting");
+        }).then(function () {
+          return pollMailboxTimeline().catch(function () {
+            return 0;
+          });
+        }).then(function () {
+          return render("synced");
+        });
+      }
+      return pollMailboxTimeline().catch(function () {
+        return 0;
+      }).then(function () {
+        return render("synced");
+      });
+    });
+  }
+
+  /** The chat list's subtitle is the desktop's 84-character cut of the last
+   *  message with its line breaks already collapsed, so the line-based rule
+   *  cannot find the block inside it: what follows the marker on that one line
+   *  is protocol, and the User should read the sentence before it instead. Her
+   *  own messages and the app's are left exactly as they are, as the desktop
+   *  leaves them. */
+  function snippetDisplayText(chat) {
+    const snippet = typeof chat.snippet === "string" ? chat.snippet : "";
+    const who = typeof chat.who === "string" ? chat.who.trim().toLowerCase() : "";
+    if (who === "you:" || who === "system:") {
+      return snippet;
+    }
+    const cut = snippet.replace(/\s*user choice\s*:.*$/i, "").trim();
+    return cut || "Asked you a question";
   }
 
   function renderChatList() {
@@ -4673,28 +5425,7 @@
           row.dataset.unread = "1";
         }
         row.addEventListener("click", function () {
-          localStorage.setItem(ACTIVE_CONVERSATION_KEY, chat.id);
-          void render("synced").then(function () {
-            const pairing = loadPairing();
-            if (pairing && relayCanSync(pairing)) {
-              return requestTimelineViaRelay(pairing, chat.id).then(function () {
-                return render("synced");
-              }).catch(function () {
-                return render("tunnel-reconnecting");
-              }).then(function () {
-                return pollMailboxTimeline().catch(function () {
-                  return 0;
-                });
-              }).then(function () {
-                return render("synced");
-              });
-            }
-            return pollMailboxTimeline().catch(function () {
-              return 0;
-            }).then(function () {
-              return render("synced");
-            });
-          });
+          openConversation(chat.id);
         });
         const avatars = document.createElement("div");
         avatars.className = "mobile-chat-avatars";
@@ -4735,7 +5466,7 @@
           snippet.append(who);
         }
         const snippetText = document.createElement("span");
-        snippetText.textContent = chat.snippet;
+        snippetText.textContent = snippetDisplayText(chat);
         snippet.append(snippetText);
         copy.append(titleLine, snippet);
         const when = document.createElement("div");
@@ -4763,6 +5494,9 @@
   let lastScrolledConversationId;
   let lastRenderedThreadRootId;
   let lastRowsFingerprint;
+  // The chat's reading position while one of its messages is open on its own
+  // screen; restored on the way back.
+  let mainListScrollTop;
 
   function openThreadRootId() {
     const value = sessionStorage.getItem(OPEN_THREAD_KEY);
@@ -4834,6 +5568,13 @@
   // chat, a chat goes back to the list. Both arrows side by side read as a
   // mistake, and the second one skipped a level.
   function renderThreadHeader(openThreadRoot) {
+    const composerInput = document.getElementById("composer-input");
+    if (composerInput) {
+      const placeholder = openThreadRoot ? "Add a reply..." : "Message the room...";
+      if (composerInput.placeholder !== placeholder) {
+        composerInput.placeholder = placeholder;
+      }
+    }
     const back = document.getElementById("back-to-timeline");
     const backToChats = document.getElementById("back-to-chats");
     const title = document.getElementById("chat-title");
@@ -4852,6 +5593,28 @@
     }
   }
 
+  /** The offer to answer this message, on the screen the message opens on.
+   *  Shown for a thread that has not been answered yet: once there are
+   *  replies, the composer below is self-evident and the row is noise. */
+  function renderThreadReplyAction(openThreadRoot, rowCount) {
+    const node = document.getElementById("thread-reply-action");
+    if (!node) return;
+    // Decided from the rows this redraw is about to paint, not from the ones
+    // still on screen from the last one.
+    const show = Boolean(openThreadRoot) && rowCount <= 1;
+    if (node.hidden !== !show) {
+      node.hidden = !show;
+    }
+    if (show && !node.dataset.wired) {
+      node.dataset.wired = "1";
+      document.getElementById("thread-reply-button")?.addEventListener("click", function () {
+        const input = document.getElementById("composer-input");
+        if (!input) return;
+        input.focus();
+      });
+    }
+  }
+
   function threadSurface() {
     return document.querySelector("#timeline-screen .thread-surface");
   }
@@ -4861,6 +5624,18 @@
       return true;
     }
     return surface.scrollHeight - surface.scrollTop - surface.clientHeight <= bottomThresholdPx();
+  }
+
+  /** A change that makes the chat taller or shorter — the keyboard arriving,
+   *  the bar coming back — must not move a reader who was at the latest
+   *  message away from it, and must leave a reader up in history where they
+   *  are. Stated once so the places that resize cannot disagree. */
+  function keepingReaderAtLatest(change) {
+    const wasAtLatest = isNearBottom(threadSurface());
+    change();
+    if (wasAtLatest) {
+      scrollToLatestWhenSettled("auto");
+    }
   }
 
   function setJumpToLatestVisible(visible) {
@@ -5078,23 +5853,40 @@
   async function answerControlCard(card, answer) {
     const conversationId = card.conversationId || selectedConversationId();
     if (!conversationId) return;
-    const decision = await decisionEventForCard(card, answer);
+    // One answer per card. Hashing and the database come before the "sent"
+    // mark, so a second tap in that gap (Allow, then Deny beside it) would
+    // otherwise queue a second, contradicting decision.
+    if (controlCardAnswering.has(card.id) || isCardLocked(card.id)) return;
+    controlCardAnswering.add(card.id);
     try {
-      await enqueueDecision({ conversationId: conversationId, kind: decision.kind, payload: decision.payload });
+      await answerControlCardOnce(card, answer, conversationId);
+    } finally {
+      controlCardAnswering.delete(card.id);
+      // An answer that could not be saved leaves the options live again.
+      if (controlCardErrors.has(card.id) && !isCardLocked(card.id)) void render();
+    }
+  }
+
+  async function answerControlCardOnce(card, answer, conversationId) {
+    const decision = await decisionEventForCard(card, answer);
+    await supersedeQueuedAnswer(card.id);
+    let queued;
+    try {
+      queued = await enqueueDecision({ conversationId: conversationId, kind: decision.kind, payload: decision.payload });
     } catch (error) {
       controlCardErrors.set(card.id, "Could not save your answer on this phone. Try again.");
       await render("waiting-to-sync");
       return;
     }
     controlCardErrors.delete(card.id);
-    controlCardSent.add(card.id);
+    markCardSent(card.id, queued && queued.eventId);
     await render("waiting-to-sync");
     const flushResult = await flushOutbox();
     if (desktopDidNotTake(flushResult.status)) {
       await commandMachineAction(conversationId, decision).catch(function (error) {
         // Sent is not applied: if it could not even be handed over, the card
         // says so rather than showing an answer that went nowhere.
-        controlCardSent.delete(card.id);
+        clearCardSent(card.id);
         controlCardErrors.set(card.id, "Not delivered yet: " + String(error && error.message || error));
       });
     }
@@ -5115,8 +5907,113 @@
     }).then(persistOutboundEvent);
   }
 
-  const controlCardSent = new Set();
+  let controlCardSentCache;
+
+  function loadCardSentMarks() {
+    if (controlCardSentCache) return controlCardSentCache;
+    try {
+      const parsed = JSON.parse(localStorage.getItem(CONTROL_CARD_SENT_KEY) || "{}");
+      controlCardSentCache = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      controlCardSentCache = {};
+    }
+    return controlCardSentCache;
+  }
+
+  function saveCardSentMarks(marks) {
+    controlCardSentCache = marks;
+    setStoredValue(CONTROL_CARD_SENT_KEY, JSON.stringify(marks));
+  }
+
+  function isCardSent(cardId) {
+    return Boolean(cardId) && Object.prototype.hasOwnProperty.call(loadCardSentMarks(), cardId);
+  }
+
+  function markCardSent(cardId, eventId) {
+    const marks = { ...loadCardSentMarks() };
+    marks[cardId] = { at: nowIso(), ...(eventId ? { eventId: eventId } : {}) };
+    saveCardSentMarks(marks);
+  }
+
+  function clearCardSent(cardId) {
+    const marks = loadCardSentMarks();
+    if (!Object.prototype.hasOwnProperty.call(marks, cardId)) return;
+    const next = { ...marks };
+    delete next[cardId];
+    saveCardSentMarks(next);
+  }
+
+  /** What the card says about an answer given on this phone: handed over to
+   *  the desktop, or still only saved here. The queue entry the mark names
+   *  says which; an entry this phone has not read yet counts as handed over
+   *  rather than alarming the User over a cache miss. A mark this old with
+   *  the card still waiting has stopped meaning anything — the answer was
+   *  lost on its way or refused — so the card unlocks and says so, rather
+   *  than showing dead buttons for ever. */
+  function cardSentState(cardId) {
+    const mark = loadCardSentMarks()[cardId];
+    if (!mark) return undefined;
+    const held = mark.eventId ? outboxStatusById.get(mark.eventId) : undefined;
+    if (held && held.status === "refused") return { locked: false, text: CONTROL_CARD_REFUSED_TEXT };
+    const at = Date.parse(mark.at || "");
+    // An answer nobody has taken yet may be lost, and ten minutes of that
+    // unlocks the card. One the desktop or the mailbox has taken is not lost:
+    // it is applied when the desktop is next up, and a second answer given
+    // meanwhile only raced it — the older one won on the desktop and the
+    // User's later one was quietly discarded. That answer waits an hour
+    // before the card unlocks, for the desktop that took it and then gave it
+    // up without saying so.
+    const owed = !held || desktopOwesEntry(held);
+    const unlockAfterMs = owed ? CONTROL_CARD_SENT_UNLOCK_MS : CONTROL_CARD_TAKEN_UNLOCK_MS;
+    const stale = !Number.isFinite(at) || Date.now() - at > unlockAfterMs;
+    if (stale) return { locked: false, text: CONTROL_CARD_STALE_TEXT };
+    return { locked: true, text: held && held.status !== "acked" ? CONTROL_CARD_SAVED_TEXT : CONTROL_CARD_SENT_TEXT };
+  }
+
+  /** An earlier answer to the card still on its way is replaced, not raced:
+   *  both travelling would let the older one win on the desktop and record
+   *  the User's later one as superseded. The entry stays in the journal, so
+   *  the sequence this phone signs is unbroken; it is simply never offered. */
+  function supersedeQueuedAnswer(cardId) {
+    const mark = loadCardSentMarks()[cardId];
+    if (!mark || !mark.eventId) return Promise.resolve(false);
+    return withOutbox("readwrite", function (store) {
+      return requestToPromise(store.get(mark.eventId)).then(function (entry) {
+        if (!entry || !desktopOwesEntry(entry)) return false;
+        const replaced = { ...entry, status: "superseded", updatedAt: nowIso() };
+        noteOutboxStatus(replaced);
+        return requestToPromise(store.put(replaced)).then(function () { return true; });
+      });
+    }).catch(function () { return false; });
+  }
+
+  function cardSentText(cardId) {
+    const state = cardSentState(cardId);
+    return state ? state.text : "";
+  }
+
+  /** Whether the card's options are dead because an answer is on its way. */
+  function isCardLocked(cardId) {
+    const state = cardSentState(cardId);
+    return Boolean(state && state.locked);
+  }
+
   const controlCardErrors = new Map();
+  // Cards whose answer is being written right now, before it is "sent".
+  const controlCardAnswering = new Set();
+  // Deliberately not "answered": the phone knows it sent the answer, not that
+  // the provider was told. The card leaves when the desktop says so.
+  const CONTROL_CARD_SENT_TEXT = "Answer sent. Waiting for the machine to apply it.";
+  const CONTROL_CARD_SAVED_TEXT = "Answer saved on this phone. Not delivered yet.";
+  const CONTROL_CARD_STALE_TEXT = "Answer sent, but not applied yet. You can answer again.";
+  const CONTROL_CARD_REFUSED_TEXT = "The desktop did not take this answer. You can answer again.";
+  // How long an answer may stay on its way before the card is offered again.
+  const CONTROL_CARD_SENT_UNLOCK_MS = 10 * 60_000;
+  // For an answer the desktop or the mailbox has taken: see cardSentState.
+  // An hour, not a day: the desktop can take an answer and then give it up
+  // (five failed applies) without the phone hearing, and the card must not
+  // show dead buttons for a day over that.
+  const CONTROL_CARD_TAKEN_UNLOCK_MS = 60 * 60_000;
 
   function renderControlCards(conversationId) {
     const host = document.getElementById("control-cards");
@@ -5158,7 +6055,7 @@
       wrap.append(summary);
     }
 
-    const sent = controlCardSent.has(card.id);
+    const sent = isCardLocked(card.id) || controlCardAnswering.has(card.id);
     const options = document.createElement("div");
     options.className = "control-card-options";
     for (const option of Array.isArray(card.options) ? card.options : []) {
@@ -5195,6 +6092,10 @@
       input.placeholder = "Answer in your own words";
       input.setAttribute("aria-label", "Answer in your own words");
       input.disabled = sent;
+      // The keyboard this field raises takes the bar with it, as the
+      // composer's does, and gives it back the same way.
+      input.addEventListener("focus", function () { keepingReaderAtLatest(applyDock); });
+      input.addEventListener("blur", function () { keepingReaderAtLatest(applyDock); });
       const send = document.createElement("button");
       send.type = "button";
       send.className = "control-card-option";
@@ -5212,18 +6113,1103 @@
     const state = document.createElement("p");
     state.className = "control-card-state";
     const failure = controlCardErrors.get(card.id);
-    state.textContent = failure
-      ? failure
-      : sent
-        // Deliberately not "answered": the phone knows it sent the answer, not
-        // that the provider was told. The card leaves when the desktop says so.
-        ? "Answer sent. Waiting for the machine to apply it."
-        : "";
+    state.textContent = failure || cardSentText(card.id);
     state.hidden = !state.textContent;
     wrap.append(state);
     return wrap;
   }
 
+
+  // --- home: the bottom bar, Activity and Settings ---------------------------
+  //
+  // With no chat open the phone shows one of three home tabs, switched by the
+  // floating bar at the bottom: Chats, Activity and Settings. Activity lists
+  // what the relay already delivered (see mobile-activity.js), so it works the
+  // same whether the desktop is answering right now or not.
+
+  const HOME_TABS = ["chats", "activity", "settings"];
+  const ACTIVITY_TABS = ["running", "pending", "finished"];
+  const ACTIVITY_TAB_LABELS = { running: "Running", pending: "Pending", finished: "Finished" };
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  // A copy of the week's rows is kept until the store changes, and refreshed at
+  // least this often in case another window of the app wrote to it.
+  const ACTIVITY_CACHE_MAX_AGE_MS = 60_000;
+  // A tap that lands this soon after the list was redrawn may have been aimed
+  // at a row that has since moved; answering is too consequential to guess.
+  const ACTIVITY_TAP_GUARD_MS = 450;
+  // What the User cleared from Activity on this phone, by row key and the
+  // moment she cleared it. Local to the device, as the desktop's Clear is.
+  const ACTIVITY_CLEARED_KEY = "accordagents.mobile.activityCleared.v1";
+  // How far a row slides to show its action, and how far a finger must travel
+  // before the list stops treating the gesture as a scroll.
+  const SWIPE_ACTION_WIDTH = 88;
+  const SWIPE_START_PX = 12;
+  // A batch for a chat the stored list does not have asks for the list again,
+  // at most this often.
+  const CHAT_LIST_REFRESH_MIN_MS = 60_000;
+
+  function setStoredValue(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      // A full quota must not stop the bar from switching; the choice is just
+      // not remembered.
+    }
+  }
+
+  // The chat's own dialogs: while one is open the bar is not there to be
+  // tapped behind it.
+  const CHAT_DIALOG_IDS = ["image-viewer", "members-sheet"];
+
+  const SCREEN_IDS = {
+    chats: "chats-screen",
+    activity: "activity-screen",
+    settings: "settings-screen",
+    timeline: "timeline-screen"
+  };
+
+  // What the User picked this session wins over what storage holds, so a
+  // write refused by a full quota does not flip the bar straight back.
+  let currentHomeTab;
+  let currentActivityTab;
+
+  function homeTab() {
+    if (currentHomeTab) return currentHomeTab;
+    const stored = localStorage.getItem(HOME_TAB_KEY);
+    return HOME_TABS.indexOf(stored) >= 0 ? stored : "chats";
+  }
+
+  function setHomeTab(tab) {
+    if (HOME_TABS.indexOf(tab) < 0) return;
+    currentHomeTab = tab;
+    setStoredValue(HOME_TAB_KEY, tab);
+  }
+
+  function setActivityTab(tab) {
+    currentActivityTab = tab;
+    setStoredValue(ACTIVITY_TAB_KEY, tab);
+  }
+
+  /** Leaving the open chat, the one way the back button and the bar's tabs
+   *  both take: the thread is left first, then the chat, so a redraw in
+   *  between cannot land on a thread of a chat that is no longer open. */
+  function leaveOpenChat() {
+    if (!selectedConversationId()) return;
+    closeMembersSheet();
+    closeImageViewer();
+    setOpenThreadRootId(undefined);
+    localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
+    dropCachedChatRows();
+  }
+
+  /** One way to change home tab, from the bar and from search alike: an open
+   *  choice is left, the open chat is left (the bar is under the chat too, so
+   *  a tab can be tapped from inside one), the tab is remembered, and the
+   *  screen redrawn. */
+  function switchHomeTab(tab) {
+    closeActivityItem();
+    leaveOpenChat();
+    setHomeTab(tab);
+    showScreen(tab);
+    return render();
+  }
+
+  function storedActivityTab() {
+    if (currentActivityTab) return currentActivityTab;
+    const stored = localStorage.getItem(ACTIVITY_TAB_KEY);
+    return ACTIVITY_TABS.indexOf(stored) >= 0 ? stored : undefined;
+  }
+
+  /** Which home screen, or the open chat, is on screen. */
+  function showScreen(name) {
+    for (const key of Object.keys(SCREEN_IDS)) {
+      const screen = document.getElementById(SCREEN_IDS[key]);
+      if (screen) screen.classList.toggle("is-active", key === name);
+    }
+    // After the classes are on: applyDock reads the screen from them.
+    applyDock();
+    for (const tab of document.querySelectorAll("[data-home-tab]")) {
+      const active = tab.dataset.homeTab === name;
+      tab.dataset.active = active ? "true" : "false";
+      if (active) tab.setAttribute("aria-current", "page");
+      else tab.removeAttribute("aria-current");
+    }
+  }
+
+  /** Whether the keyboard is up: the composer holding focus is what the height
+   *  tracker already treats as the keyboard being open, so the bar and the
+   *  measuring cannot disagree about it. */
+  function composerHasFocus() {
+    const active = document.activeElement;
+    if (!active) return false;
+    if (active.id === "composer-input") return true;
+    // A card's own answer field raises the keyboard the same way the
+    // composer does, and the bar has no room beside it either.
+    return (active.tagName === "INPUT" || active.tagName === "TEXTAREA") &&
+      Boolean(active.closest && active.closest("#timeline-screen"));
+  }
+
+  /** What is on screen, read from the screens themselves rather than kept
+   *  beside them: the bar is decided outside a redraw too (the keyboard opens),
+   *  and a remembered copy could then answer for a screen that is not up. */
+  function screenOnShow() {
+    for (const key of Object.keys(SCREEN_IDS)) {
+      const screen = document.getElementById(SCREEN_IDS[key]);
+      if (screen && screen.classList.contains("is-active")) return key;
+    }
+    return "chats";
+  }
+
+  /** The bar's own state. It shows on the home screens of a paired phone and
+   *  under the chat's composer, as the User asked on 2026-09-20 (Slack's
+   *  behaviour). It steps aside for a choice opened from Activity, so nothing
+   *  behind it can be reached, and inside a chat while the keyboard is up,
+   *  where there is no room for it. Called on every screen change and on the
+   *  composer's focus and blur, which is when the keyboard comes and goes. */
+  function applyDock() {
+    const name = screenOnShow();
+    const paired = Boolean(loadPairing()) && !mailboxAuthRejected;
+    const home = name !== "timeline" && paired;
+    const inChat = name === "timeline" && paired;
+    // Anything that takes the screen for itself takes the bar with it: the
+    // choice opened from Activity, a picture at full size, and the members
+    // sheet — a dialog with a backdrop, and navigation left live outside a
+    // backdrop is a way around it. The live-reply view is a screen of the
+    // chat rather than a dialog, so the bar stays under that one.
+    const covered = (name === "activity" && Boolean(openActivityCardId)) ||
+      (inChat && CHAT_DIALOG_IDS.some(function (id) {
+        const node = document.getElementById(id);
+        return Boolean(node && !node.hidden);
+      }));
+    const typing = inChat && composerHasFocus();
+    const shown = (home || inChat) && !covered && !typing;
+    // Where the bar is, for the stylesheet: "1" floating over a home screen,
+    // "chat" in the column under the composer, "0" not on screen at all.
+    const placement = !shown ? "0" : home ? "1" : "chat";
+    const dock = document.getElementById("home-dock");
+    if (dock) dock.hidden = !shown;
+    const phone = document.querySelector(".mobile-phone");
+    if (phone) phone.dataset.dock = placement;
+  }
+
+  function lineIcon(paths, size) {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("width", String(size || 20));
+    svg.setAttribute("height", String(size || 20));
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    for (const d of paths) {
+      const path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", d);
+      svg.append(path);
+    }
+    return svg;
+  }
+
+  /** The members' rows from the Activity window on, read by their time index.
+   *  Only what Activity uses is kept, with the text cut to what a preview
+   *  needs: the copy stays in memory between redraws, and a week of answers in
+   *  full is megabytes. */
+  function listRecentTimelineEntries(sinceIso, keepChars) {
+    return withTimeline("readonly", function (store) {
+      return requestToPromise(store.index("createdAt").getAll(IDBKeyRange.lowerBound(sinceIso)));
+    }).then(function (rows) {
+      const kept = [];
+      for (const row of rows) {
+        if (!row || row.role !== "participant") continue;
+        kept.push({
+          id: row.id,
+          sourceId: row.sourceId,
+          messageId: row.messageId,
+          conversationId: row.conversationId,
+          role: row.role,
+          participantLabel: row.participantLabel,
+          status: row.status,
+          createdAt: row.createdAt,
+          receivedAt: row.receivedAt,
+          settledAt: row.settledAt,
+          runId: row.runId,
+          mobileEventId: row.mobileEventId,
+          threadRootId: row.threadRootId,
+          content: typeof row.content === "string" ? row.content.slice(0, keepChars) : ""
+        });
+      }
+      return kept;
+    });
+  }
+
+  /** Runs a stop was asked for that the desktop has not taken yet, from the
+   *  queue itself: after a reload the in-memory mark is gone, the request is not. */
+  function queuedStopRunIds() {
+    return listOutboxEntries(undefined).then(function (entries) {
+      return entries.filter(function (entry) {
+        return entry && entry.kind === "run.cancel.requested" && entry.payload && entry.payload.runId;
+      }).map(function (entry) {
+        return entry.payload.runId;
+      });
+    }).catch(function () {
+      return [];
+    });
+  }
+
+  function readRecentActivitySource(activityApi, now) {
+    if (recentTimelineRead) return recentTimelineRead;
+    const generation = timelineGeneration;
+    const since = new Date(now - activityApi.WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    recentTimelineRead = Promise.all([
+      listRecentTimelineEntries(since, activityApi.PREVIEW_SOURCE_LIMIT),
+      queuedStopRunIds()
+    ]).then(function (read) {
+      const source = { generation: generation, readAt: Date.now(), entries: read[0], queuedStops: read[1] };
+      // Renders overlap: an older read finishing late must not replace a newer one.
+      if (!recentTimelineCache || generation >= recentTimelineCache.generation) {
+        recentTimelineCache = source;
+      }
+      return recentTimelineCache;
+    }).catch(function () {
+      return recentTimelineCache || { generation: generation, readAt: 0, entries: [], queuedStops: [] };
+    }).finally(function () {
+      recentTimelineRead = undefined;
+    });
+    return recentTimelineRead;
+  }
+
+  function machineRunKnownLive(runId) {
+    const held = runId ? machineRunState.get(runId) : undefined;
+    return Boolean(held && (held.status === "running" || held.status === "requested"));
+  }
+
+  /** `cached` asks for the lists to be built from rows already read, never
+   *  from a fresh pass over the store. Inside a chat that is the only
+   *  acceptable cost: reading a week of rows takes hundreds of milliseconds on
+   *  a phone with a busy week behind it, and an agent streaming into the open
+   *  chat would pay it every second or so, on the main thread. What waits for
+   *  the User is counted from the cards, which are read from storage anyway;
+   *  what is stale in there is at most the count of finished updates, until
+   *  the chat is left. Nothing cached at all (a phone opened straight into a
+   *  chat from a notification) is read once. */
+  async function loadActivity(options) {
+    const activityApi = self.AccordMobileActivity;
+    if (!activityApi) return undefined;
+    const now = Date.now();
+    // Inside a chat the lists are not on screen — only the bar's number is —
+    // and a pass over a week of rows for it is what made streaming text arrive
+    // in lumps. Whoever asks while a chat is open gets what was last read,
+    // whether or not they remembered to say so.
+    const cached = Boolean(options && options.cached) || Boolean(selectedConversationId());
+    let source = recentTimelineCache;
+    if (source && source.generation === timelineGeneration && now - source.readAt < ACTIVITY_CACHE_MAX_AGE_MS) {
+      // Nothing written since the last read.
+    } else if (cached && source) {
+      // Whatever was last read stands; no new pass over the store.
+    } else if (cached) {
+      source = await readRecentActivitySource(activityApi, now);
+    } else if (source && now - source.readAt < ACTIVITY_REREAD_MIN_MS) {
+      // A run streaming into the store changes it every second or so; the
+      // lists catch up once the burst has had a moment, not on every write.
+      if (!activityRereadTimer) {
+        activityRereadTimer = setTimeout(function () {
+          activityRereadTimer = undefined;
+          if (!selectedConversationId()) void render();
+        }, ACTIVITY_REREAD_MIN_MS - (now - source.readAt));
+      }
+    } else {
+      source = await readRecentActivitySource(activityApi, now);
+    }
+    const stops = new Set(source.queuedStops.concat(Array.from(stopRequestedRunIds)));
+    // The same inputs give the same lists; a redraw for an unrelated reason
+    // (a poll, the clock) does not redo the work. Stored strings are compared
+    // as they are, not copied into a key: the chat list can be large.
+    const inputs = [
+      localStorage.getItem(CONTROL_CARDS_KEY),
+      localStorage.getItem(CHAT_LIST_KEY),
+      localStorage.getItem(UNREAD_KEY),
+      localStorage.getItem(VIEWED_AT_KEY),
+      localStorage.getItem(ACTIVITY_CLEARED_KEY),
+      localStorage.getItem(CHAT_LIST_AT_KEY),
+      JSON.stringify(Array.from(deletedMachineConversations)),
+      JSON.stringify(Array.from(stops)),
+      JSON.stringify(Array.from(machineRunState, function (pair) { return [pair[0], pair[1] && pair[1].status]; })),
+      String(Math.floor(now / 60_000))
+    ];
+    if (activityMemo && activityMemo.source === source && activityMemo.inputs.length === inputs.length &&
+      activityMemo.inputs.every(function (value, index) { return value === inputs[index]; })) {
+      return activityMemo.activity;
+    }
+    const activity = activityApi.buildActivity({
+      entries: source.entries,
+      cardsByConversation: loadControlCards(),
+      chats: loadChats(),
+      unreadConversationIds: loadUnreadConversationIds(),
+      viewedAt: loadViewedAt(),
+      isRunSettled: machineRunSettled,
+      isRunKnownLive: machineRunKnownLive,
+      isStopRequested: function (runId) { return stops.has(runId); },
+      isPlaceholder: isPlaceholderTimelineContent,
+      // Activity previews are member messages too: the block that becomes a
+      // card is not what the row should read.
+      displayText: function (content) { return displayedMessageText(content, "agent"); },
+      clearedEntryIds: loadClearedActivity(),
+      hiddenConversationIds: Array.from(deletedMachineConversations),
+      chatListAt: localStorage.getItem(CHAT_LIST_AT_KEY) || undefined,
+      now: now
+    });
+    activityMemo = { source: source, inputs: inputs, activity: activity };
+    return activity;
+  }
+
+  /** A batch for a chat the phone's list does not have yet (created on the
+   *  desktop while this app stayed open) asks for the list again, so the chat
+   *  and anything it is waiting on show up without a trip to the background. */
+  function refreshChatListSoon(conversationId) {
+    if (!conversationId || chatListRefreshTimer) return;
+    if (loadChats().some(function (chat) { return chat.id === conversationId; })) return;
+    const wait = Math.max(0, CHAT_LIST_REFRESH_MIN_MS - (Date.now() - lastChatListRefreshAt));
+    chatListRefreshTimer = setTimeout(function () {
+      chatListRefreshTimer = undefined;
+      lastChatListRefreshAt = Date.now();
+      const pairing = loadPairing();
+      if (!pairing || !relayCanSync(pairing)) return;
+      void requestChatListViaRelay(pairing).then(function () {
+        return render("synced");
+      }).catch(function () {
+        return undefined;
+      });
+    }, wait);
+  }
+
+  async function renderHome(tab, revision) {
+    const activity = await loadActivity();
+    if (revision !== renderRevision || selectedConversationId()) return;
+    renderActivityBadge(activity);
+    if (tab === "activity") {
+      renderActivity(activity);
+    } else if (tab === "settings") {
+      renderSettings();
+    }
+  }
+
+  /** The bar's Activity number on its own, for when the lists are not on
+   *  screen: inside a chat. Built from rows already read — see loadActivity —
+   *  so an open chat never pays for a pass over the store. */
+  async function refreshDockBadge(revision) {
+    const activity = await loadActivity({ cached: true });
+    // A newer redraw has taken over: its own number is the one to keep.
+    if (revision !== undefined && revision !== renderRevision) return;
+    if (!activity) return;
+    renderActivityBadge(activity);
+  }
+
+  function renderActivityBadge(activity) {
+    const badge = document.getElementById("activity-badge");
+    const tab = document.querySelector('[data-home-tab="activity"]');
+    const count = activity && self.AccordMobileActivity ? self.AccordMobileActivity.attentionCount(activity) : 0;
+    if (badge) {
+      badge.hidden = count === 0;
+      badge.textContent = count > 99 ? "99+" : String(count);
+    }
+    if (tab) tab.setAttribute("aria-label", count > 0 ? "Activity, " + count + " new" : "Activity");
+  }
+
+  function activityAvatarFor(conversationId, handle) {
+    return avatarForLabel(conversationMembers(conversationId), handle || "Agent");
+  }
+
+  function activityRowAvatar(conversationId, handle) {
+    const avatar = document.createElement("span");
+    avatar.className = "mobile-chat-avatar act-avatar";
+    paintAvatar(avatar, activityAvatarFor(conversationId, handle), conversationId);
+    return avatar;
+  }
+
+  /** The two lines every Activity row starts with: the chat, who (and where,
+   *  for a permission), when, and whether it is new; then what was said. */
+  function activityRowMain(row, stamp) {
+    const main = document.createElement("button");
+    main.type = "button";
+    main.className = "act-main";
+    const top = document.createElement("span");
+    top.className = "act-top";
+    const title = document.createElement("span");
+    title.className = "act-chat-title";
+    title.textContent = row.chatTitle;
+    // "by @drew · Office Mac": who asks, and where it would run. A machine is
+    // never named as the author.
+    const byText = row.handle
+      ? " by " + [row.handle, row.machineName].filter(Boolean).join(" · ")
+      : row.machineName ? " · " + row.machineName : "";
+    if (byText) {
+      const by = document.createElement("span");
+      by.className = "act-by";
+      by.textContent = byText;
+      title.append(by);
+    }
+    top.append(title);
+    for (const node of stamp) top.append(node);
+    const preview = document.createElement("span");
+    preview.className = "act-preview" + (row.kind === "permission" ? " act-preview-full" : "");
+    preview.textContent = row.preview || (row.kind === "run" ? "Thinking…" : "");
+    main.append(top, preview);
+    return main;
+  }
+
+  function activityTime(iso) {
+    const time = document.createElement("span");
+    time.className = "act-time";
+    time.textContent = relativeTime(iso);
+    return time;
+  }
+
+  /** The whole row is the way in, as a chat-list row is, not only its text. */
+  function makeRowOpen(element, open) {
+    element.dataset.tappable = "1";
+    element.addEventListener("click", open);
+  }
+
+  // What has been cleared, most recently cleared last, bounded: a phone does
+  // not keep a year of them, and the newest are the ones that must survive.
+  const ACTIVITY_CLEARED_LIMIT = 2000;
+
+  function loadClearedActivity() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(ACTIVITY_CLEARED_KEY) || "[]");
+      return Array.isArray(raw) ? raw.filter(function (id) { return typeof id === "string"; }) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Clearing a finished row hides the updates that row stands for, and only
+   *  those: the next answer from that member in that chat is a new update and
+   *  brings the row back. Named by update rather than by a moment in time,
+   *  because a finished row is stamped when its run started — a run already in
+   *  flight would otherwise be swallowed when it finished. */
+  function clearActivityRow(row) {
+    const ids = Array.isArray(row && row.entryIds) ? row.entryIds : [];
+    if (ids.length === 0) return;
+    const cleared = loadClearedActivity().filter(function (id) { return ids.indexOf(id) < 0; });
+    const next = cleared.concat(ids).slice(-ACTIVITY_CLEARED_LIMIT);
+    setStoredValue(ACTIVITY_CLEARED_KEY, JSON.stringify(next));
+    activityMemo = undefined;
+    void render();
+  }
+
+  /** One row is open at a time: a second swipe closes the first, and so does a
+   *  tap anywhere else. */
+  let openSwipeRow;
+  // Kept beside the node: the list is rebuilt from scratch, so the node goes
+  // and the row it stood for does not.
+  let openSwipeKey;
+
+  function closeOpenSwipe() {
+    if (openSwipeRow && openSwipeRow.isConnected) {
+      openSwipeRow.dataset.swiped = "0";
+    }
+    openSwipeRow = undefined;
+    openSwipeKey = undefined;
+  }
+
+  /** The Activity list is rebuilt whenever anything in it changes, including
+   *  once a minute for the clock. An open row is re-opened on the new node so
+   *  the action does not vanish between the swipe and the tap. */
+  function restoreOpenSwipe(list) {
+    if (!openSwipeKey || !list) return;
+    const wrap = list.querySelector('.act-swipe[data-activity-key="' + cssEscapeValue(openSwipeKey) + '"]');
+    if (!wrap) {
+      openSwipeRow = undefined;
+      openSwipeKey = undefined;
+      return;
+    }
+    wrap.dataset.swiped = "1";
+    openSwipeRow = wrap;
+  }
+
+  function cssEscapeValue(value) {
+    return String(value).replace(/["\\]/g, "\\$&");
+  }
+
+  /** The row slides left under the finger and stops at its action. Vertical
+   *  movement wins until the finger has travelled far enough sideways, so the
+   *  list still scrolls normally. */
+  function makeRowSwipeable(wrap, surface) {
+    let startX = 0;
+    let startY = 0;
+    let sliding = false;
+    let decided = false;
+    surface.addEventListener("touchstart", function (event) {
+      if (event.touches.length !== 1) return;
+      startX = event.touches[0].clientX;
+      startY = event.touches[0].clientY;
+      sliding = false;
+      decided = false;
+    }, { passive: true });
+    surface.addEventListener("touchmove", function (event) {
+      if (event.touches.length !== 1) return;
+      const dx = event.touches[0].clientX - startX;
+      const dy = event.touches[0].clientY - startY;
+      if (!decided) {
+        if (Math.abs(dy) > Math.abs(dx)) {
+          decided = true;
+          return;
+        }
+        if (Math.abs(dx) < SWIPE_START_PX) return;
+        decided = true;
+        sliding = true;
+        if (openSwipeRow && openSwipeRow !== wrap) closeOpenSwipe();
+      }
+      if (!sliding) return;
+      const offset = Math.max(-SWIPE_ACTION_WIDTH, Math.min(0, dx));
+      surface.style.transform = "translateX(" + offset + "px)";
+    }, { passive: true });
+    const settle = function (event) {
+      if (!sliding) return;
+      sliding = false;
+      surface.style.transform = "";
+      const dx = (event.changedTouches && event.changedTouches[0] ? event.changedTouches[0].clientX : startX) - startX;
+      const open = dx <= -SWIPE_ACTION_WIDTH / 2;
+      wrap.dataset.swiped = open ? "1" : "0";
+      openSwipeRow = open ? wrap : undefined;
+      openSwipeKey = open ? wrap.dataset.activityKey : undefined;
+    };
+    surface.addEventListener("touchend", settle);
+    surface.addEventListener("touchcancel", settle);
+  }
+
+  /** A row with an action behind it. The action is a real button — reachable
+   *  by a screen reader without the gesture — and the row itself keeps doing
+   *  what it did before. */
+  function rowWithSwipeAction(element, action) {
+    if (!action) return element;
+    const wrap = document.createElement("div");
+    wrap.className = "act-swipe";
+    wrap.dataset.swiped = "0";
+    if (element.dataset.activityKey) wrap.dataset.activityKey = element.dataset.activityKey;
+    const actions = document.createElement("div");
+    actions.className = "act-swipe-actions";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "act-swipe-action act-swipe-" + action.kind;
+    button.setAttribute("aria-label", action.label);
+    button.append(action.icon, (function () {
+      const label = document.createElement("span");
+      label.textContent = action.label;
+      return label;
+    })());
+    button.addEventListener("click", function (event) {
+      event.stopPropagation();
+      closeOpenSwipe();
+      action.run();
+    });
+    actions.append(button);
+    element.classList.add("act-swipe-surface");
+    // A tap on the row itself closes the action rather than opening the chat
+    // behind it: the row is showing something to be answered, not a link.
+    element.addEventListener("click", function (event) {
+      if (wrap.dataset.swiped !== "1") return;
+      event.stopPropagation();
+      event.preventDefault();
+      closeOpenSwipe();
+    }, true);
+    makeRowSwipeable(wrap, element);
+    wrap.append(actions, element);
+    return wrap;
+  }
+
+  function finishedActivityRow(row) {
+    const element = document.createElement("div");
+    element.className = "act-row" + (row.read ? "" : " is-unread");
+    element.dataset.activityKey = row.key;
+    const stamp = [activityTime(row.at)];
+    if (row.count > 1) {
+      const badge = document.createElement("span");
+      badge.className = "act-badge" + (row.read ? " act-badge-read" : "");
+      badge.textContent = String(row.count);
+      badge.setAttribute("aria-label", row.count + " updates");
+      stamp.push(badge);
+    } else if (!row.read) {
+      const dot = document.createElement("span");
+      dot.className = "act-dot";
+      dot.setAttribute("aria-label", "Unread");
+      stamp.push(dot);
+    }
+    const col = document.createElement("div");
+    col.className = "act-col";
+    col.append(activityRowMain(row, stamp));
+    element.append(activityRowAvatar(row.conversationId, row.handle), col);
+    makeRowOpen(element, function () {
+      void openConversation(row.conversationId, { threadRootId: row.threadRootId });
+    });
+    // Swipe left to clear it from this phone's Activity, the way the desktop's
+    // "Clear from activity" works there: local to the device (the User,
+    // 2026-09-20).
+    return rowWithSwipeAction(element, {
+      kind: "clear",
+      label: "Clear",
+      icon: lineIcon(["M18 6 6 18", "m6 6 12 12"], 20),
+      run: function () { clearActivityRow(row); }
+    });
+  }
+
+  function pendingActivityRow(row) {
+    const card = row.card;
+    const element = document.createElement("div");
+    element.className = "act-row is-unread";
+    element.dataset.activityKey = row.key;
+    element.dataset.cardId = card.id;
+    element.dataset.cardKind = card.kind;
+    const dot = document.createElement("span");
+    dot.className = "act-dot act-dot-pending";
+    dot.setAttribute("aria-label", "Waiting for you");
+    const col = document.createElement("div");
+    col.className = "act-col";
+    col.append(activityRowMain(row, [activityTime(row.at), dot]));
+    const sent = isCardLocked(card.id) || controlCardAnswering.has(card.id);
+    if (row.kind === "choice") {
+      // A choice is read and answered in full, so the row opens it.
+      const chevron = document.createElement("span");
+      chevron.className = "act-chevron";
+      chevron.append(lineIcon(["m9 18 6-6-6-6"], 20));
+      element.append(activityRowAvatar(row.conversationId, row.handle), col, chevron);
+      makeRowOpen(element, function () {
+        openActivityCardId = card.id;
+        showScreen("activity");
+        void render();
+      });
+    } else {
+      const actions = document.createElement("div");
+      actions.className = "act-actions";
+      // A tap that misses a pill by a few pixels stays on the list: it was
+      // meant for an answer, not for opening the chat behind the row.
+      actions.addEventListener("click", function (event) { event.stopPropagation(); });
+      const buttons = [];
+      for (const option of Array.isArray(card.options) ? card.options : []) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "act-pill" + (option.id === "allow" ? " act-pill-primary" : "");
+        button.dataset.optionId = option.id;
+        button.textContent = option.label || option.id;
+        button.disabled = sent;
+        button.addEventListener("click", function (event) {
+          event.stopPropagation();
+          // Rows can move when a card arrives or leaves; a tap right after a
+          // redraw may have been meant for another row.
+          if (Date.now() - lastActivityListRenderAt < ACTIVITY_TAP_GUARD_MS) return;
+          // One answer per card: the other option goes dead with the first tap.
+          for (const other of buttons) other.disabled = true;
+          void answerControlCard(card, { optionId: option.id });
+        });
+        buttons.push(button);
+        actions.append(button);
+      }
+      col.append(actions);
+      element.append(activityRowAvatar(row.conversationId, row.handle), col);
+      makeRowOpen(element, function () {
+        void openConversation(row.conversationId);
+      });
+    }
+    const failure = controlCardErrors.get(card.id);
+    if (failure || cardSentText(card.id)) {
+      const state = document.createElement("p");
+      state.className = "act-state";
+      // A tap is not the answer being applied; the row leaves when the
+      // desktop says the card is answered.
+      state.textContent = failure || cardSentText(card.id);
+      col.append(state);
+    }
+    // Swipe left to cancel, as the desktop's "Cancel pending card" does. Only
+    // where cancelling is the card's own answer: a permission is answered by
+    // Allow or Deny, and those are already in the row — a second control
+    // meaning Deny would be a trap.
+    if (!card.allowsCancel || sent) {
+      return element;
+    }
+    return rowWithSwipeAction(element, {
+      kind: "cancel",
+      label: "Cancel",
+      icon: lineIcon(["M18 6 6 18", "m6 6 12 12"], 20),
+      run: function () {
+        if (Date.now() - lastActivityListRenderAt < ACTIVITY_TAP_GUARD_MS) return;
+        void answerControlCard(card, { cancel: true });
+      }
+    });
+  }
+
+  function runningActivityRow(row) {
+    const element = document.createElement("div");
+    element.className = "act-row";
+    element.dataset.activityKey = row.key;
+    const elapsed = document.createElement("span");
+    // Ticked by the same clock as the chat's own running rows.
+    elapsed.className = "act-elapsed thinking-elapsed";
+    elapsed.dataset.startedAt = row.at || nowIso();
+    elapsed.textContent = formatElapsed(row.at);
+    const live = document.createElement("span");
+    live.className = "mobile-live-dot";
+    live.setAttribute("aria-label", "Running");
+    const col = document.createElement("div");
+    col.className = "act-col";
+    col.append(activityRowMain(row, [elapsed, live]));
+    element.append(activityRowAvatar(row.conversationId, row.handle), col);
+    if (row.cancellable) {
+      const stopping = row.stopping || stopRequestedRunIds.has(row.runId);
+      const stop = document.createElement("button");
+      stop.type = "button";
+      stop.className = "act-stop";
+      stop.dataset.runId = row.runId;
+      stop.disabled = stopping;
+      stop.setAttribute("aria-label", stopping ? "Stopping" : "Stop " + (row.handle || "this run"));
+      const ring = document.createElement("span");
+      ring.className = "act-stop-ring";
+      const square = document.createElement("span");
+      square.className = "act-stop-square";
+      ring.append(square);
+      stop.append(ring);
+      stop.addEventListener("click", function (event) {
+        event.stopPropagation();
+        if (stop.disabled || Date.now() - lastActivityListRenderAt < ACTIVITY_TAP_GUARD_MS) return;
+        stop.disabled = true;
+        stop.setAttribute("aria-label", "Stopping");
+        void stopRunFromPhone(row.runId, row.conversationId);
+      });
+      element.append(stop);
+    }
+    makeRowOpen(element, function () {
+      void openConversation(row.conversationId, { threadRootId: row.threadRootId });
+    });
+    return element;
+  }
+
+  function activityEmptyText(tab) {
+    if (tab === "running") return "Nothing is running right now.";
+    if (tab === "pending") return "Nothing is waiting for you.";
+    const days = self.AccordMobileActivity ? self.AccordMobileActivity.WINDOW_DAYS : 7;
+    return "No updates from members in the last " + days + " days.";
+  }
+
+  function renderActivityTabs(data, tab) {
+    const tabsHost = document.getElementById("activity-tabs");
+    if (!tabsHost) return;
+    const signature = JSON.stringify([tab, ACTIVITY_TABS.map(function (name) { return data[name].length; })]);
+    if (tabsHost.dataset.signature === signature) return;
+    tabsHost.dataset.signature = signature;
+    tabsHost.replaceChildren();
+    for (const name of ACTIVITY_TABS) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "act-tab";
+      button.dataset.activityTab = name;
+      button.dataset.active = name === tab ? "true" : "false";
+      if (name === tab) button.setAttribute("aria-current", "true");
+      const label = document.createElement("span");
+      label.textContent = ACTIVITY_TAB_LABELS[name];
+      const count = document.createElement("span");
+      count.className = "act-tab-count";
+      count.textContent = String(data[name].length);
+      button.append(label, count);
+      if (name === tab) {
+        const bar = document.createElement("span");
+        bar.className = "act-tab-bar";
+        button.append(bar);
+      }
+      button.addEventListener("click", function () {
+        setActivityTab(name);
+        const list = document.getElementById("activity-list");
+        if (list) list.scrollTop = 0;
+        void render();
+      });
+      tabsHost.append(button);
+    }
+  }
+
+  function renderActivity(activity) {
+    const list = document.getElementById("activity-list");
+    if (!list) return;
+    const data = activity || { running: [], pending: [], finished: [] };
+    const openCard = openActivityCardId
+      ? data.pending.find(function (row) { return row.card.id === openActivityCardId; })
+      : undefined;
+    if (openActivityCardId && !openCard) {
+      // Answered or withdrawn: there is nothing left to answer here.
+      closeActivityItem();
+      showScreen("activity");
+    }
+    void renderActivityItem(openCard);
+    let tab = storedActivityTab();
+    if (!tab) {
+      // Chosen once there is something to choose by, and then kept: a list
+      // that switched itself whenever a card came or went would move rows
+      // under a finger.
+      tab = data.pending.length > 0 ? "pending" : data.running.length > 0 ? "running" : "finished";
+      if (data.pending.length + data.running.length + data.finished.length > 0) setActivityTab(tab);
+    }
+    renderActivityTabs(data, tab);
+    // Only the list on screen decides whether it is drawn again.
+    const rows = data[tab];
+    const signature = JSON.stringify({
+      tab: tab,
+      minute: Math.floor(Date.now() / 60_000),
+      rows: rows.map(function (row) {
+        return [row.key, row.chatTitle, row.handle, row.machineName, row.preview, row.at, row.count, row.read,
+          row.cancellable, row.stopping, avatarSignature(activityAvatarFor(row.conversationId, row.handle)),
+          row.card ? [isCardLocked(row.card.id), cardSentText(row.card.id), controlCardAnswering.has(row.card.id), controlCardErrors.get(row.card.id) || ""] : 0,
+          row.runId ? stopRequestedRunIds.has(row.runId) : 0];
+      })
+    });
+    if (signature === lastActivityRenderSignature) return;
+    lastActivityRenderSignature = signature;
+    // The guard against a tap meant for a row that has just moved is armed
+    // only when rows did move. A redraw for the clock, a streaming preview or
+    // a card's state leaves every row where it was, and a tap on one of them
+    // is meant — armed on those too, a Stop or an Allow was dropped, with
+    // nothing on screen to say so, for half a second after every redraw.
+    const order = tab + "\n" + rows.map(function (row) { return row.key; }).join("\n");
+    if (order !== lastActivityRowOrder) {
+      lastActivityRowOrder = order;
+      lastActivityListRenderAt = Date.now();
+    }
+    list.replaceChildren();
+    list.dataset.activityTab = tab;
+    if (rows.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "mobile-empty act-empty";
+      empty.textContent = activityEmptyText(tab);
+      list.append(empty);
+      return;
+    }
+    for (const row of rows) {
+      list.append(tab === "running" ? runningActivityRow(row) : tab === "pending" ? pendingActivityRow(row) : finishedActivityRow(row));
+    }
+    restoreOpenSwipe(list);
+  }
+
+  function getTimelineEntry(entryId) {
+    return withTimeline("readonly", function (store) {
+      return requestToPromise(store.get(entryId));
+    });
+  }
+
+  /** The message a choice belongs to: stored under the chat's id and its own,
+   *  so it is read directly rather than by reading the whole store. */
+  async function findChoiceMessage(conversationId, sourceMessageId) {
+    if (!sourceMessageId) return undefined;
+    const direct = await getTimelineEntry(conversationId + ":" + sourceMessageId).catch(function () { return undefined; });
+    if (direct) return direct;
+    const entries = await listTimelineEntries(conversationId).catch(function () { return []; });
+    return entries.find(function (entry) {
+      return entry.messageId === sourceMessageId || entry.sourceId === sourceMessageId;
+    });
+  }
+
+  /** A choice opened from Activity: the message it belongs to and the whole
+   *  card, answered exactly as it is in the chat. */
+  async function renderActivityItem(row) {
+    const view = document.getElementById("activity-item");
+    const body = document.getElementById("activity-item-body");
+    if (!view || !body) return;
+    if (!row) {
+      activityItemRenderToken += 1;
+      if (!view.hidden) {
+        view.hidden = true;
+        body.replaceChildren();
+        delete body.dataset.signature;
+      }
+      return;
+    }
+    const card = row.card;
+    const titleNode = document.getElementById("activity-item-title");
+    const subNode = document.getElementById("activity-item-sub");
+    if (titleNode) titleNode.textContent = row.chatTitle;
+    if (subNode) subNode.textContent = "Waiting for you" + (row.handle ? " · asked by " + row.handle : "");
+    view.hidden = false;
+    view.dataset.conversationId = row.conversationId;
+    const signature = JSON.stringify([card, isCardLocked(card.id), cardSentText(card.id), controlCardAnswering.has(card.id), controlCardErrors.get(card.id) || ""]);
+    if (body.dataset.signature === signature) return;
+    body.dataset.signature = signature;
+    const token = ++activityItemRenderToken;
+    const source = await findChoiceMessage(row.conversationId, card.sourceMessageId);
+    // A later draw (the answer being sent, say) owns the view now.
+    if (token !== activityItemRenderToken || openActivityCardId !== card.id) return;
+    body.replaceChildren();
+    if (source && source.content) {
+      const message = document.createElement("div");
+      message.className = "act-item-message";
+      const head = document.createElement("div");
+      head.className = "act-item-message-head";
+      head.append(activityRowAvatar(row.conversationId, source.participantLabel || row.handle));
+      const who = document.createElement("span");
+      who.className = "message-handle";
+      who.textContent = source.participantLabel || row.handle || "";
+      const when = document.createElement("span");
+      when.className = "message-status";
+      when.textContent = formatClockTime(source.createdAt);
+      head.append(who, when);
+      const content = document.createElement("div");
+      content.className = "message-content markdown-text";
+      renderMessageContent(content, displayedMessageText(source.content));
+      message.append(head, content);
+      body.append(message);
+    }
+    body.append(controlCardElement(card));
+  }
+
+  function settingsGroup(title, rows) {
+    const section = document.createElement("section");
+    const heading = document.createElement("div");
+    heading.className = "set-group-title";
+    heading.textContent = title;
+    const group = document.createElement("div");
+    group.className = "set-group";
+    for (const row of rows) group.append(row);
+    section.append(heading, group);
+    return section;
+  }
+
+  function settingsRow(title, sub, control) {
+    const row = document.createElement("div");
+    row.className = "set-row";
+    const copy = document.createElement("div");
+    copy.className = "set-copy";
+    const strong = document.createElement("span");
+    strong.className = "set-title";
+    strong.textContent = title;
+    copy.append(strong);
+    if (sub) {
+      const small = document.createElement("span");
+      small.className = "set-sub";
+      small.textContent = sub;
+      copy.append(small);
+    }
+    row.append(copy);
+    if (control) row.append(control);
+    return row;
+  }
+
+  function settingsButton(label, onClick, disabled) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "set-button";
+    button.textContent = label;
+    button.disabled = Boolean(disabled);
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  /** What this phone can change about itself. Only what it can actually do:
+   *  iOS does not let a web app turn its own alerts off, so they are offered
+   *  while undecided and otherwise described, not drawn as a switch. */
+  function renderSettings() {
+    const list = document.getElementById("settings-list");
+    if (!list) return;
+    const permission = "Notification" in globalThis ? Notification.permission : "unsupported";
+    const pushable = Boolean(outboxEndpoint()) && "Notification" in globalThis && "PushManager" in globalThis;
+    const power = machinePowerHandoff();
+    const signature = JSON.stringify([permission, pushable, pushEndpointRejected, Boolean(power), machineWakeState, alertsReconnect]);
+    if (signature === lastSettingsRenderSignature) return;
+    lastSettingsRenderSignature = signature;
+    list.replaceChildren();
+
+    list.append(settingsGroup("This phone", [
+      settingsRow("Paired with your desktop", "Chats and replies come through the AccordAgents relay.")
+    ]));
+
+    let alertsSub;
+    let alertsControl;
+    if (pushEndpointRejected || !pushable || permission === "unsupported") {
+      alertsSub = "Not available in this browser. Messages still arrive when you open the app.";
+    } else if (permission === "granted") {
+      alertsSub = alertsReconnect === "working"
+        ? "Reconnecting this phone to alerts\u2026"
+        : alertsReconnect === "ok"
+          ? "On, and reconnected to this phone just now."
+          : alertsReconnect === "failed"
+            ? "On, but reconnecting did not go through. Try again in a moment."
+            : "On. You hear about replies and questions while the app is closed.";
+      alertsControl = settingsButton("Reconnect", function (event) {
+        const button = event.currentTarget;
+        button.disabled = true;
+        alertsReconnect = "working";
+        lastSettingsRenderSignature = "";
+        void render();
+        void reconnectMessageAlerts().then(function (result) {
+          alertsReconnect = result;
+          lastSettingsRenderSignature = "";
+          void render();
+        });
+      }, alertsReconnect === "working");
+    } else if (permission === "denied") {
+      alertsSub = "Off. Turn them on for AccordAgents in your phone's settings.";
+    } else {
+      alertsSub = "When a member replies or needs you.";
+      alertsControl = settingsButton("Turn on", function (event) {
+        const button = event.currentTarget;
+        button.disabled = true;
+        void enableMessageAlerts().finally(function () {
+          lastSettingsRenderSignature = "";
+          void render();
+        });
+      });
+    }
+    list.append(settingsGroup("Notifications", [settingsRow("Message alerts", alertsSub, alertsControl)]));
+
+    if (power) {
+      const waking = machineWakeState.status === "waking";
+      list.append(settingsGroup("Machines", [
+        settingsRow(
+          "Cloud machine",
+          machineWakeState.detail || "Asleep? Wake it to keep working.",
+          settingsButton(waking ? "Waking…" : "Wake", function () {
+            void wakeMachineFromPhone();
+          }, waking)
+        )
+      ]));
+    }
+  }
+
+  /** Leaves the opened choice at once, so its old content is not what shows
+   *  when Activity comes back. */
+  function closeActivityItem() {
+    openActivityCardId = undefined;
+    activityItemRenderToken += 1;
+    const view = document.getElementById("activity-item");
+    const body = document.getElementById("activity-item-body");
+    if (view) view.hidden = true;
+    if (body) {
+      body.replaceChildren();
+      delete body.dataset.signature;
+    }
+  }
+
+  function wireHomeDock() {
+    for (const tab of document.querySelectorAll("[data-home-tab]")) {
+      tab.addEventListener("click", function () {
+        const name = tab.dataset.homeTab;
+        if (name === homeTab() && name === "activity") {
+          // Tapping the tab you are on goes back to the top of its list.
+          const list = document.getElementById("activity-list");
+          if (list) list.scrollTop = 0;
+        }
+        void switchHomeTab(name);
+      });
+    }
+    const back = document.getElementById("activity-item-back");
+    back?.addEventListener("click", function () {
+      closeActivityItem();
+      showScreen("activity");
+      void render();
+    });
+    const open = document.getElementById("activity-item-open");
+    open?.addEventListener("click", function () {
+      const view = document.getElementById("activity-item");
+      const conversationId = view && view.dataset.conversationId;
+      closeActivityItem();
+      if (conversationId) void openConversation(conversationId);
+    });
+  }
 
   // --- waking the machine ----------------------------------------------------
 
@@ -5315,7 +7301,10 @@
       // chat's rows and stream controls in the same turn, including on a failed
       // read; they must never remain actionable under the new chat's identity.
       if (list.dataset.conversationId !== undefined) {
-        setOpenThreadRootId(undefined);
+        // A thread opened from Activity is the one place a chat is entered
+        // straight into a thread; everything else starts on the main list.
+        setOpenThreadRootId(pendingThreadOpen && pendingThreadOpen.conversationId === activeId ? pendingThreadOpen.rootId : undefined);
+        pendingThreadOpen = undefined;
         setOpenStreamRunId(undefined);
         renderStreamView([], connectionStatus);
       }
@@ -5328,8 +7317,7 @@
     }
     if (!loadPairing()) {
       renderUnpairedNotice();
-      chatsScreen.classList.add("is-active");
-      timelineScreen.classList.remove("is-active");
+      showScreen("chats");
       return;
     }
     if (mailboxAuthRejected) {
@@ -5338,8 +7326,7 @@
         "Scan the QR code or paste a fresh pairing link to reconnect.",
         "revoked"
       );
-      chatsScreen.classList.add("is-active");
-      timelineScreen.classList.remove("is-active");
+      showScreen("chats");
       return;
     }
     // W5: offer the doorbell once paired. iOS only grants Notification
@@ -5381,11 +7368,12 @@
     renderChatList();
     renderControlCards(activeId);
     renderMachineWake();
-    chatsScreen.classList.toggle("is-active", !activeId);
-    timelineScreen.classList.toggle("is-active", Boolean(activeId));
+    const openHomeTab = homeTab();
+    showScreen(activeId ? "timeline" : openHomeTab);
     if (!activeId) {
       // Reopening the same chat should land at the latest message again.
       lastScrolledConversationId = undefined;
+      await renderHome(openHomeTab, revision);
       return;
     }
     const activeChat = loadChats().find(function (chat) {
@@ -5405,6 +7393,18 @@
     // A mailbox update, navigation or another tab may have superseded this
     // read. Committing it would replace the current chat with the old snapshot.
     if (revision !== renderRevision || activeId !== selectedConversationId()) return;
+    if (!document.hidden) {
+      markConversationViewed(activeId, timelineEntries.reduce(function (newest, entry) {
+        const at = entry && (entry.receivedAt || entry.createdAt);
+        return typeof at === "string" && at > newest ? at : newest;
+      }, ""));
+    }
+    // The bar is under the chat too, so its Activity number must keep up in
+    // there: while a chat is open it is the only place the User is told that
+    // something elsewhere is waiting. Only the number, never the lists — and
+    // counted after this look at the chat is recorded, so what was just read
+    // is not still counted as news.
+    void refreshDockBadge(revision);
     const messageEntries = entries.filter(isMessageOutboxEntry);
     const requestedStopRunIds = new Set(entries.filter(function (entry) {
       return entry.kind === "run.cancel.requested";
@@ -5417,17 +7417,21 @@
     const visibleTimelineEntries = dedupeTimelineEntries(timelineEntries.filter(function (entry) {
       return !(entry.role === "you" && outboxContent.has(entry.content.trim()));
     }));
-    const pending = entries.filter(function (entry) {
-      return entry.status !== "acked";
-    }).length;
-    state.textContent = connectionStatus
-      ? connectionStatusText(connectionStatus)
-      : pending > 0 ? "Waiting to sync" : "Synced";
+    const pending = entries.filter(desktopOwesEntry).length;
+    state.textContent = catchingUp
+      ? "Catching up\u2026"
+      : connectionStatus
+        ? connectionStatusText(connectionStatus)
+        : pending > 0 ? "Waiting to sync" : "Synced";
     let rows = messageEntries.map(function (entry) {
       return {
         rowKey: "outbox\0" + entry.eventId,
         id: entry.eventId,
         conversationId: entry.conversationId,
+        // Shown in the thread it was written in, not in the chat behind it.
+        threadRootId: entry.payload && typeof entry.payload.threadRootId === "string"
+          ? entry.payload.threadRootId
+          : undefined,
         author: "you",
         content: entry.payload.content,
         // A picture just sent from this phone shows in its own pending row
@@ -5498,9 +7502,22 @@
     const grouped = groupRowsIntoThreads(rows, openThread);
     rows = grouped.rows;
     renderThreadHeader(openThread);
+    renderThreadReplyAction(openThread, rows.length);
     renderLoadEarlier(activeId, openThread);
-    const openedConversation = lastScrolledConversationId !== activeId || openThread !== lastRenderedThreadRootId;
+    const previousThread = lastRenderedThreadRootId;
+    const sameChat = lastScrolledConversationId === activeId;
+    const openedConversation = !sameChat || openThread !== previousThread;
     lastRenderedThreadRootId = openThread;
+    // Where the chat was being read when a message was opened on its own
+    // screen, for the way back: Slack's message screen returns to the same
+    // place, and landing at the latest message instead lost the User the
+    // spot she was reading in a chat of thousands of rows.
+    if (sameChat && openThread && !previousThread) {
+      const surface = threadSurface();
+      mainListScrollTop = surface ? surface.scrollTop : undefined;
+    } else if (!sameChat) {
+      mainListScrollTop = undefined;
+    }
     const rowsFingerprint = rows.map(function (row) {
       return (row.rowKey || row.id) + "\u0000" + messageRowSignature(row);
     }).join("\u0001");
@@ -5516,6 +7533,17 @@
       return;
     }
     if (openedConversation) {
+      if (sameChat && !openThread && previousThread && typeof mainListScrollTop === "number") {
+        // Back from a message's own screen: the same place, and the pill says
+        // whether anything new waits below it.
+        const surface = threadSurface();
+        if (surface) {
+          surface.scrollTop = mainListScrollTop;
+          setJumpToLatestVisible(!isNearBottom(surface));
+        }
+        mainListScrollTop = undefined;
+        return;
+      }
       scrollToLatestWhenSettled("auto");
       return;
     }
@@ -5582,7 +7610,7 @@
     state.textContent = row.status === "Running"
       ? (connectionStatus === "synced" || connectionStatus === undefined ? "Writing…" : "Writing… (reconnecting)")
       : row.status;
-    const text = isThinkingEntry(row) ? "" : (row.content || "");
+    const text = isThinkingEntry(row) ? "" : displayedMessageText(row.content, "agent");
     if (body.dataset.text !== text) {
       body.dataset.text = text;
       body.textContent = text || "Nothing written yet.";
@@ -5633,6 +7661,22 @@
         return;
       }
       if (row.dataset.streamable !== "1") {
+        // Slack's shape, which the User asked for: a message opens on its own
+        // screen, and the offer to answer it in a thread lives there rather
+        // than under every message in the chat.
+        // A tap meant for something inside the row -- a picture, a card, a
+        // button, a link -- is not a tap on the message.
+        const interactive = event.target && event.target.closest
+          ? event.target.closest("button, a, img, input, textarea, select, label, .control-card")
+          : undefined;
+        if (interactive) {
+          return;
+        }
+        const threadRoot = row.dataset.threadRoot;
+        if (threadRoot && !openThreadRootId()) {
+          setOpenThreadRootId(threadRoot);
+          void render();
+        }
         return;
       }
       const runId = row.dataset.streamRunId;
@@ -5698,6 +7742,9 @@
       identified: entry.identified,
       scaffolding: entry.scaffolding,
       content: entry.content,
+      answered: answeredCardsForMessage(entry).map(function (card) {
+        return card.id + ":" + (card.outcome || "");
+      }),
       attachments: Array.isArray(entry.attachments)
         ? entry.attachments.map(function (attachment) { return attachment.id; })
         : undefined,
@@ -5872,6 +7919,16 @@
     item.dataset.rowSignature = messageRowSignature(entry);
     item.dataset.status = entry.status;
     item.dataset.author = entry.author;
+    // Which message this row is, for the screen a tap opens. Rows with nothing
+    // the desktop can thread from -- scaffolding, a message still queued on
+    // this phone -- carry none, so a tap on them does nothing.
+    // Not a system note: the desktop offers a thread on every message but
+    // those, and the phone offers exactly what the desktop does.
+    if (entry.sourceId && !entry.scaffolding && entry.status !== "queued" && entry.author !== "system") {
+      item.dataset.threadRoot = entry.sourceId;
+    } else {
+      delete item.dataset.threadRoot;
+    }
     applyStreamableState(item, entry);
     if (entry.scaffolding) {
       item.dataset.scaffolding = "1";
@@ -5897,19 +7954,20 @@
       if (isThinkingEntry(entry)) {
         renderThinkingInto(content, entry);
       } else {
-        renderMessageContentIfChanged(content, entry.content);
+        renderMessageContentIfChanged(content, entry.content, entry.author);
       }
       meta.append(handle, status);
       syncMessageStopButton(meta, entry);
       copy.append(meta, content);
       renderAttachmentsInto(attachmentsNodeFor(copy), entry);
+      syncAnsweredCards(copy, entry);
       item.append(avatar, copy);
     } else {
       const bubble = document.createElement("div");
       bubble.className = "message-bubble";
       const content = document.createElement("div");
       content.className = "message-content";
-      renderMessageContentIfChanged(content, entry.content);
+      renderMessageContentIfChanged(content, entry.content, entry.author);
       const meta = document.createElement("div");
       meta.className = "message-status";
       meta.textContent = messageStatusLabel(entry);
@@ -5921,17 +7979,80 @@
     return item;
   }
 
+  /** The question the User already answered stays with its own message, the
+   *  way the desktop keeps the answered card under it. The pinned strip above
+   *  the composer carries only what is still waiting, so without this the
+   *  phone would hide the protocol block from the bubble and leave no trace of
+   *  what was asked or what was chosen (the User, 2026-09-20). */
+  function answeredCardsForMessage(entry) {
+    if (!entry || entry.author !== "agent") return [];
+    const conversationId = selectedConversationId();
+    if (!conversationId) return [];
+    const messageId = entry.messageId || entry.sourceId || entry.id;
+    if (!messageId) return [];
+    return controlCardsFor(conversationId).filter(function (card) {
+      return card && card.status !== "pending" && card.kind === "choice" && card.sourceMessageId === messageId;
+    });
+  }
+
+  function answeredCardElement(card) {
+    const wrap = document.createElement("article");
+    wrap.className = "control-card control-card-answered";
+    wrap.dataset.cardId = card.id;
+    wrap.dataset.cardKind = card.kind;
+    const head = document.createElement("div");
+    head.className = "control-card-head";
+    const title = document.createElement("span");
+    title.className = "control-card-title";
+    title.textContent = card.title || "Choice";
+    head.append(title);
+    if (card.requesterLabel) {
+      const who = document.createElement("span");
+      who.className = "control-card-who";
+      who.textContent = card.requesterLabel;
+      head.append(who);
+    }
+    wrap.append(head);
+    if (card.summary) {
+      const summary = document.createElement("p");
+      summary.className = "control-card-summary";
+      summary.textContent = card.summary;
+      wrap.append(summary);
+    }
+    const state = document.createElement("p");
+    state.className = "control-card-state";
+    state.textContent = card.outcome === "Cancelled" ? "Cancelled" : "Answered: " + (card.outcome || "");
+    wrap.append(state);
+    return wrap;
+  }
+
+  /** Idempotent: the same message redrawn keeps its node unless the answer
+   *  itself changed. */
+  function syncAnsweredCards(container, entry) {
+    const cards = answeredCardsForMessage(entry);
+    const signature = cards.map(function (card) { return card.id + ":" + (card.outcome || ""); }).join("|");
+    if (container.dataset.answeredCards === signature) return;
+    container.dataset.answeredCards = signature;
+    for (const node of container.querySelectorAll(".control-card-answered")) {
+      node.remove();
+    }
+    for (const card of cards) {
+      container.append(answeredCardElement(card));
+    }
+  }
+
   function appendThreadChip(item, entry) {
+    const threadRoot = entry.sourceId;
     if (!entry.replyCount) {
       return;
     }
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = "thread-chip";
-    chip.dataset.threadRoot = entry.sourceId;
+    chip.dataset.threadRoot = threadRoot;
     chip.textContent = entry.replyCount === 1 ? "1 reply" : entry.replyCount + " replies";
     chip.addEventListener("click", function () {
-      setOpenThreadRootId(entry.sourceId);
+      setOpenThreadRootId(threadRoot);
       void render();
     });
     item.append(chip);
@@ -5953,6 +8074,13 @@
     }
     item.dataset.rowSignature = messageRowSignature(entry);
     item.dataset.status = entry.status;
+    // Not a system note: the desktop offers a thread on every message but
+    // those, and the phone offers exactly what the desktop does.
+    if (entry.sourceId && !entry.scaffolding && entry.status !== "queued" && entry.author !== "system") {
+      item.dataset.threadRoot = entry.sourceId;
+    } else {
+      delete item.dataset.threadRoot;
+    }
     // Rows are updated in place, so this has to be re-applied here too: a row
     // that finished while on screen must stop looking openable.
     applyStreamableState(item, entry);
@@ -5972,8 +8100,10 @@
         return false;
       }
       syncMessageStopButton(meta, entry);
-      renderMessageContentIfChanged(content, entry.content);
+      renderMessageContentIfChanged(content, entry.content, entry.author);
       renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
+      // A question answered while its row is on screen keeps its card there.
+      syncAnsweredCards(content.parentElement || item, entry);
       return true;
     }
     const status = item.querySelector(".message-status");
@@ -5982,7 +8112,7 @@
       return false;
     }
     status.textContent = messageStatusLabel(entry);
-    renderMessageContentIfChanged(content, entry.content);
+    renderMessageContentIfChanged(content, entry.content, entry.author);
     renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
     return true;
   }
@@ -6074,6 +8204,7 @@
       return;
     }
     sheet.hidden = !membersSheetOpen;
+    keepingReaderAtLatest(applyDock);
     if (toggle) {
       toggle.setAttribute("aria-expanded", membersSheetOpen ? "true" : "false");
     }
@@ -6315,8 +8446,10 @@
       return;
     }
     try {
-      await requestTimelineViaRelay(pairing, conversationId);
-      await pollMailboxTimeline().catch(function () { return 0; });
+      await whileLookingForMessages(async function () {
+        await requestTimelineViaRelay(pairing, conversationId);
+        await pollMailboxTimeline().catch(function () { return 0; });
+      });
       await render("synced");
     } catch {
       await render("tunnel-reconnecting");
@@ -6361,6 +8494,14 @@
       if (awayMs > FOREGROUND_RECONNECT_AFTER_MS) {
         dropRelaySocket("mobile foreground resync");
       }
+      // The box first, the socket after. Coming back from the background is
+      // exactly when the live channel is half-open: each request on it waits
+      // out a twenty-second ack timeout, and behind those the messages already
+      // sitting in the mailbox waited too -- the User came back to a chat that
+      // showed nothing until she left it and opened it again (2026-09-22).
+      // The mailbox is plain HTTPS and owes nothing to the socket.
+      await catchUpFromRelay();
+      await render("synced");
       try {
         await requestChatListViaRelay(pairing);
         const conversationId = selectedConversationId();
@@ -6371,9 +8512,16 @@
       } catch {
         await render("tunnel-reconnecting");
       }
+      lastOutboxRetryAt = 0;
+      await retryPendingOutbox();
       await pollMailboxTimeline().catch(function () { return 0; });
       await render();
       ensureLiveRelayForOpenConversation();
+      // A launch that could not register for rings tries again here, on the
+      // connection the User has now, rather than on the next launch.
+      if (!pushSubscriptionEnsured) {
+        void ensurePushSubscription();
+      }
     })().finally(function () {
       foregroundResyncPromise = undefined;
     });
@@ -6398,16 +8546,20 @@
     });
   }
 
-  // A notification names the chat it is about; tapping it lands there.
-  function openConversationFromNotification(conversationId) {
-    if (typeof conversationId !== "string" || !conversationId.trim()) {
-      return;
+  /** Where a tapped notification lands: the Activity tab, showing what just
+   *  happened across every chat. A chat can be one of many and a reply can be
+   *  inside a thread, so the list is the one place that always holds it. */
+  function openActivityFromNotification(list) {
+    leaveOpenChat();
+    setHomeTab("activity");
+    // The list the notification was about: an approval waits on Pending, a
+    // reply is among what finished. Left to the list last read, a tap on
+    // "Approval needed" could land on Finished with the approval behind a
+    // tab switch.
+    if (list === "pending" || list === "finished") {
+      setActivityTab(list);
     }
-    setOpenThreadRootId(undefined);
-    localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
-    void render("synced").then(function () {
-      return refreshOpenTimeline();
-    });
+    void render("synced");
   }
 
   function wireWorkerMessages() {
@@ -6415,8 +8567,8 @@
       return;
     }
     navigator.serviceWorker.addEventListener("message", function (event) {
-      if (event.data && event.data.type === "accord-open-conversation") {
-        openConversationFromNotification(event.data.conversationId);
+      if (event.data && event.data.type === "accord-open-activity") {
+        openActivityFromNotification(event.data.list);
       }
       // A push counted while this page was open: fold it in now, so the chat
       // on screen is not left on the icon as unread until the next return.
@@ -6510,6 +8662,10 @@
     function setOpen(open) {
       box.hidden = !open;
       toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      // The bar steps aside while searching: with the keyboard up it would sit
+      // on top of the results.
+      const phone = document.querySelector(".mobile-phone");
+      if (phone) phone.dataset.searching = open ? "1" : "0";
       if (open) {
         input.focus();
       } else {
@@ -6518,7 +8674,17 @@
         renderChatList();
       }
     }
+    // The search button lives in the bottom bar, so it can be tapped from
+    // Activity, Settings, or from inside a chat: it searches the chat list, so
+    // it goes there first. An open chat has to be part of that test — the
+    // remembered tab inside a chat is usually Chats already, and then the box
+    // would open on a screen the reader cannot see.
     toggle.addEventListener("click", function () {
+      if (selectedConversationId() || homeTab() !== "chats") {
+        void switchHomeTab("chats");
+        setOpen(true);
+        return;
+      }
       setOpen(box.hidden);
     });
     close?.addEventListener("click", function () {
@@ -6561,9 +8727,23 @@
       }, { passive: true });
     }
     wireChatSearch();
+    wireHomeDock();
     wireMembersSheet();
     wireImageViewer();
     wireWorkerMessages();
+    // Opened from a notification while the app was not running: the worker
+    // cannot postMessage to a page that does not exist yet, so it says it in
+    // the URL instead.
+    const opening = new URLSearchParams(location.search);
+    if (opening.get("tab") === "activity") {
+      leaveOpenChat();
+      setHomeTab("activity");
+      const list = opening.get("list");
+      if (list === "pending" || list === "finished") {
+        setActivityTab(list);
+      }
+      history.replaceState(undefined, "", location.pathname);
+    }
     wireForegroundResync();
     document.getElementById("load-earlier")?.addEventListener("click", function () {
       void loadEarlierMessages();
@@ -6580,12 +8760,19 @@
     const back = document.getElementById("back-to-chats");
     if (back) {
       back.addEventListener("click", function () {
-        setOpenThreadRootId(undefined);
-        localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
+        leaveOpenChat();
         void render();
       });
     }
     if (form && input) {
+      // The bar under the composer leaves while the keyboard is up and comes
+      // back when it goes. Either way the chat grows or shrinks by the bar's
+      // height, so a reader who was at the latest message stays there.
+      function applyDockForKeyboard() {
+        keepingReaderAtLatest(applyDock);
+      }
+      input.addEventListener("focus", applyDockForKeyboard);
+      input.addEventListener("blur", applyDockForKeyboard);
       let mentionIndex = 0;
       const mentionMenu = document.getElementById("mention-menu");
       const mentionButton = document.getElementById("mention-button");
@@ -6965,8 +9152,47 @@
         setTimeout(closeMentionMenu, 0);
         setTimeout(closeSlashMenu, 0);
       });
-      form.addEventListener("submit", async function (event) {
+      // One tap, one send. The form's submit event is not enough on the phone:
+      // the send button keeps the field focused so the keyboard does not shove
+      // the layout mid-tap, and a tap that changes nothing on screen can be
+      // dropped before it becomes a click -- which is how a tap came to only
+      // put the keyboard away, leaving the message sitting there (the User,
+      // 2026-09-21). The button therefore sends on pointerup as well, and
+      // submitComposer makes the two paths one send: it empties the field and
+      // takes the pictures before its first wait, so the second path finds
+      // nothing. A flag held across the whole send did that too, and more: it
+      // also dropped the next message typed while the first was still going
+      // out over a slow connection, with nothing on screen to say so.
+      const sendComposer = function () {
+        return submitComposer();
+      };
+      // Slack's shape: one line until it is tapped, then the row of tools.
+      // Anything already written keeps it open, so a draft is never left
+      // without a way to send it.
+      const composerForm = document.getElementById("composer-form");
+      const updateComposerShape = function () {
+        if (!composerForm) return;
+        const open = document.activeElement === input ||
+          Boolean(input.value.trim()) ||
+          pendingAttachments.length > 0;
+        composerForm.dataset.expanded = open ? "1" : "";
+      };
+      input.addEventListener("focus", updateComposerShape);
+      input.addEventListener("blur", updateComposerShape);
+      input.addEventListener("input", updateComposerShape);
+      updateComposerShape();
+      const sendButton = document.getElementById("send-button");
+      if (sendButton) {
+        sendButton.addEventListener("pointerup", function (event) {
+          event.preventDefault();
+          void sendComposer();
+        });
+      }
+      form.addEventListener("submit", function (event) {
         event.preventDefault();
+        void sendComposer();
+      });
+      async function submitComposer() {
         const content = input.value.trim();
         const conversationId = selectedConversationId();
         // A picture on its own is a message.
@@ -6974,17 +9200,29 @@
           return;
         }
         input.value = "";
+        // The message is gone, so the keyboard has nothing left to do: it goes
+        // down and gives the screen back, instead of sitting over the reply
+        // the User just asked for. The composer goes back to one line with it.
+        input.blur();
+        updateComposerShape();
         closeSlashMenu();
         const attachments = takePendingAttachments();
         const skillMentions = takeSkillMentions(content);
-        const carriesExtras = attachments.length > 0 || skillMentions.length > 0;
+        // A reply written with a thread open belongs to that thread. Without
+        // this the desktop had nothing to place it by and put it in the main
+        // timeline, where the User -- still looking at the thread -- could not
+        // see her own message at all (the User, 2026-09-21).
+        const threadRootId = openThreadRootId();
+        const carriesExtras = attachments.length > 0 || skillMentions.length > 0 || Boolean(threadRootId);
         await enqueueMessage({
           content,
           conversationId,
+          ...(threadRootId ? { threadRootId } : {}),
           ...(carriesExtras
             ? {
               payload: {
                 content,
+                ...(threadRootId ? { threadRootId } : {}),
                 ...(attachments.length > 0 ? { attachments } : {}),
                 ...(skillMentions.length > 0 ? { skillMentions } : {})
               }
@@ -7006,7 +9244,7 @@
           return 0;
         });
         await render(flushResult.status);
-      });
+      }
     }
     // Cached rows are visible before synchronization finishes. Their controls
     // and elapsed time must work throughout those network waits.
@@ -7017,6 +9255,9 @@
     // would otherwise sit in the timeline forever: nothing ever asks the phone
     // to drop a row it once received.
     await dropStoredInternalSystemRows().catch(function () { return 0; });
+    // What the queue holds, so a card can say whether its answer went out and
+    // the periodic retry knows there is something to offer.
+    await listOutboxEntries().catch(function () { return []; });
     await render();
     // What a push-woken worker counted while the app was closed, folded in
     // before the lists paint again; the icon number follows.
@@ -7049,9 +9290,9 @@
       }
     }
     const flushResult = await flushOutbox();
-    await pollMailboxTimeline().catch(function () {
-      return 0;
-    });
+    // Everything the box has held since this phone was last open, taken in one
+    // go behind a single "Catching up" rather than page by page on screen.
+    await catchUpFromRelay();
     await render(flushResult.status);
     startMailboxTimelinePolling();
     ensureLiveRelayForOpenConversation();
@@ -7063,6 +9304,8 @@
     // POST, render — rather than a stand-in for it.
     enableMessageAlerts,
     ensurePushSubscription,
+    whileLookingForMessages,
+    reconnectMessageAlerts,
     ensureLiveRelayForOpenConversation,
     createOutboxEvent,
     enqueueMessage,
@@ -7073,6 +9316,11 @@
     flushOutboxViaRelay,
     handleRelayChatListPayload,
     handleRelayTimelinePayload,
+    reconcilePendingControlCards,
+    retryPendingOutbox,
+    isCardSent,
+    isCardLocked,
+    desktopOwesEntry,
     machineTimelineEvent,
     activeMentionQuery,
     mentionOptions,
@@ -7136,7 +9384,7 @@
     closeImageViewer,
     openMembersSheet,
     closeMembersSheet,
-    openConversationFromNotification
+    openActivityFromNotification
   };
 
   // iOS reports a height at first paint that is taller than what you can
@@ -7150,10 +9398,6 @@
     const viewport = typeof window !== "undefined" ? window.visualViewport : null;
     let lastHeight = 0;
     let lastWidth = 0;
-    function composerHasFocus() {
-      const active = document.activeElement;
-      return Boolean(active && active.id === "composer-input");
-    }
     function apply() {
       const width = window.innerWidth;
       // Never measure while the composer is focused: on iOS the keyboard is
@@ -7171,17 +9415,16 @@
       lastHeight = height;
       lastWidth = width;
       // A reader sitting at the latest message stays there across a rotation.
-      const wasAtLatest = isNearBottom(threadSurface());
-      document.documentElement.style.setProperty("--app-h", height + "px");
-      if (wasAtLatest) {
-        scrollToLatestWhenSettled("auto");
-      }
+      keepingReaderAtLatest(function () {
+        document.documentElement.style.setProperty("--app-h", height + "px");
+      });
     }
     // A single sample can land mid-animation — the keyboard sliding away, a
     // rotation still turning — and then stick, because nothing would come
     // along to correct it. Sample across the whole animation instead.
     function remeasure() {
       apply();
+      applyDock();
       [150, 350, 600, 900].forEach(function (delay) {
         setTimeout(apply, delay);
       });

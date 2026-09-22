@@ -85,8 +85,17 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(shared, /AccordMobileShared/);
   assert.match(shared, /resolveChatParticipantAvatar/);
   assert.match(shared, /isChatMessageHiddenFromTimeline/);
+  // The phone falls back to raw text when the bundle lacks this, which is the
+  // defect it was added for: the fallback must never be reached silently.
+  assert.match(shared, /stripChatControlBlocks/);
   assert.ok(html.indexOf('src="mobile-shared.js') < html.indexOf('src="mobile-app.js'), "the shared rules load before the app");
   assert.ok(worker.includes("./mobile-shared.js?v="), "service worker must precache the shared rules");
+  // Activity's rules: without them an installed phone opened offline or on a
+  // stale cache would show empty lists and a zero badge without any error.
+  await readFile(path.join(repoRoot, "dist/mobile/mobile-activity.js"), "utf8");
+  assert.ok(worker.includes("./mobile-activity.js?v=${ASSET_VERSION}"), "service worker must precache the Activity rules at the shell's version");
+  assert.ok(html.indexOf('src="mobile-activity.js') > 0 &&
+    html.indexOf('src="mobile-activity.js') < html.indexOf('src="mobile-app.js'), "the Activity rules load before the app");
   assert.doesNotMatch(app, /assets\/avatars\/(claude|codex)-(bunny|cat|dog|frog|hamster)\.png/, "the app names no avatar file itself; the catalog does");
   const { CHAT_AVATAR_CATALOG, chatAvatarAssetFileName } = await import(pathToFileURL(path.join(repoRoot, "dist/main/shared/chatAvatarCatalog.js")).href);
   for (const entry of CHAT_AVATAR_CATALOG) {
@@ -133,9 +142,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(html, /<meta name="viewport"[^>]*viewport-fit=cover/);
   const assetVersion = /const ASSET_VERSION = "([^"]+)"/.exec(worker)?.[1];
   assert.ok(assetVersion, "service worker must declare an asset version");
-  const htmlAssetVersions = [...html.matchAll(/(?:mobile-app\.css|jsqr\.js|mobile-shared\.js|mobile-app\.js)\?v=([^"']+)/g)]
+  const htmlAssetVersions = [...html.matchAll(/(?:mobile-app\.css|jsqr\.js|mobile-shared\.js|mobile-activity\.js|mobile-app\.js)\?v=([^"']+)/g)]
     .map((match) => match[1]);
-  assert.deepEqual(htmlAssetVersions, [assetVersion, assetVersion, assetVersion, assetVersion]);
+  assert.deepEqual(htmlAssetVersions, [assetVersion, assetVersion, assetVersion, assetVersion, assetVersion]);
   assert.match(html, /data-screen-label="Mobile control"/);
   assert.match(html, /id="chats-screen"/);
   assert.match(html, />Chats</);
@@ -443,7 +452,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /RELAY_TIMELINE_IDLE_MS = 15 \* 60_000/);
   assert.match(app, /activeFlushOutboxPromise/);
   assert.match(app, /Tunnel reconnecting/);
-  assert.match(app, /renderMessageContentIfChanged\(content, entry\.content\)/);
+  // The author travels with the text: the control-block rule applies to a
+  // member's message and never to the User's own words.
+  assert.match(app, /renderMessageContentIfChanged\(content, entry\.content, entry\.author\)/);
   assert.match(app, /appendInlineMarkdown/);
   assert.doesNotMatch(app, /content\.textContent = entry\.content/);
   assert.match(app, /putTimelineEntryDeduped/);
@@ -454,8 +465,18 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /updateMessageRow\(item, entry\)/);
   assert.match(app, /renderMessageContentIfChanged/);
   assert.doesNotMatch(app, /list\.textContent = ""/);
-  assert.match(app, /const flushResult = await flushOutbox\(\);\n\s*await pollMailboxTimeline\(\)\.catch/);
-  assert.match(app, /requestTimelineViaRelay\(pairing, chat\.id\)[\s\S]+pollMailboxTimeline\(\)\.catch/);
+  // Coming back from the background reads the mailbox before it asks anything
+  // of the socket: each socket request waits out a twenty-second ack timeout
+  // when the live channel is half-open, and messages already in the box must
+  // not wait behind that.
+  assert.match(app, /await catchUpFromRelay\(\);\n\s*await render\("synced"\);\n\s*try \{\n\s*await requestChatListViaRelay/);
+  // Opening the app takes the whole backlog behind one "Catching up" before it
+  // draws, rather than a page per poll: old messages crawling onto the screen
+  // one lump at a time is what the User saw instead.
+  assert.match(app, /const flushResult = await flushOutbox\(\);\n\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*await catchUpFromRelay\(\);/);
+  // Opening a chat, from the list or from Activity, goes through one helper.
+  assert.match(app, /function openConversation\(conversationId, options\)[\s\S]+requestTimelineViaRelay\(pairing, conversationId\)[\s\S]+pollMailboxTimeline\(\)\.catch/);
+  assert.match(app, /row\.addEventListener\("click", function \(\) \{\s*(void )?openConversation\(chat\.id\)/);
   assert.match(app, /globalThis\.AccordAgentsMobile/);
 });
 

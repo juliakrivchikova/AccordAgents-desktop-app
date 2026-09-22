@@ -94,6 +94,10 @@ export interface MobileRelayChatListItem {
   running: boolean;
   participants: string[];
   members?: MobileRelayChatMember[];
+  /** The cards still waiting for the User in this chat, as the desktop holds
+   *  them now. The phone drops a pending card it holds that is not here: the
+   *  batch that closed it can be lost, and nothing else would ever say so. */
+  pendingCards?: MobileControlCard[];
 }
 
 export interface MobileRelayChatMember {
@@ -186,6 +190,10 @@ export interface MobileMessageOutboxEvent extends MobileOutboxEventBase {
     /** Skills picked from the phone's "/" menu, the same records the desktop
      *  composer attaches. Sanitized again on the chat side. */
     skillMentions?: ChatSkillMention[];
+    /** The thread this was written in, when the phone had one open. The same
+     *  root the desktop composer sends, so a reply lands where it was typed
+     *  instead of in the chat behind it. */
+    threadRootId?: string;
   };
 }
 
@@ -296,6 +304,10 @@ export interface MobileTimelinePublishOptions {
    *  can say "reply ready" or "approval needed" for a named chat without ever
    *  opening a sealed payload. Set by the publisher from the batch it marked. */
   notices?: MobileNoticeKind[];
+  /** Send the cards whether or not this process remembers delivering them:
+   *  after a phone's answer the phone must hear the state the desktop holds
+   *  now, including "still pending" for an answer that could not be taken. */
+  forceCards?: boolean;
 }
 
 export type MobileNoticeKind = "reply" | "approval";
@@ -361,6 +373,9 @@ interface MobileAvatarResponse {
 interface MobileChatListResponse {
   type: "mobile.chat-list";
   chats: MobileRelayChatListItem[];
+  /** When the list was built, on the desktop's clock: a pending card the
+   *  phone holds that is younger than this may simply have missed the list. */
+  generatedAt?: string;
 }
 
 /** A phone on a hotel connection should not be handed ten megabytes through the
@@ -385,6 +400,11 @@ function base64DecodedBytes(value: string): number {
 
 /** Some answers from the phone could not be applied here; the rest of the batch
  *  went through. Carries the event ids to leave out of the ack. */
+/** A batch this desktop refuses for good — a chat outside the pairing's
+ *  scope. Only this is answered with an ack that names nothing; a failure of
+ *  the desktop's own (storage, a lock) is not an answer at all. */
+class MobileOutboxRefusedError extends Error {}
+
 class MobileDecisionDeliveryError extends Error {
   constructor(readonly eventIds: string[], detail: string) {
     super(`A card answer from the phone could not be applied: ${detail}`);
@@ -425,6 +445,24 @@ export class MobileRelayControlService {
     bytes: number;
     rendezvousId: string;
   }) => void;
+  /** Delivery diagnostics for a phone's answers: applied, failed and retried,
+   *  or given up. A failure here used to be silent, and a card the desktop
+   *  could not take was offered by the phone again and again. */
+  onDecisionDiagnostic?: (detail: {
+    conversationId: string;
+    eventId: string;
+    kind: string;
+    targetKey: string;
+    outcome: "applied" | "failed" | "given-up";
+    attempts: number;
+    message?: string;
+  }) => void;
+  private readonly decisionAttemptsByKey = new Map<string, number>();
+  /** Answers from the mailbox this desktop could not take yet. The page they
+   *  came on is consumed once it is read, so nothing else would ever offer
+   *  them again; they are tried again on the following polls, up to the
+   *  attempt cap, and only then given up. */
+  private readonly retryableDecisions = new Map<string, MobileDecisionOutboxEvent>();
   private readonly queuedProgressByRunId = new Map<string, ReviewProgress[]>();
   private readonly conversationIdByRunId = new Map<string, string>();
   private readonly runStartedAtByRunId = new Map<string, string>();
@@ -623,11 +661,63 @@ export class MobileRelayControlService {
     await this.sendAcceptedRunningBatches(logicalMessageId, accepted).catch(() => {
       // The phone may be offline; mailbox timeline publication remains best-effort.
     });
-    await this.deliverAcceptedOutboxEvents(logicalMessageId, accepted);
+    let acked = accepted;
+    try {
+      await this.deliverAcceptedOutboxEvents(logicalMessageId, accepted);
+    } catch (error) {
+      // An answer this desktop could not take is left out of what is reported
+      // accepted and kept for the next poll; the messages and cancellations
+      // of the same page went through and must not be read again. Throwing
+      // here made one stale answer freeze the mailbox cursor and re-apply
+      // that answer every poll, for ever.
+      if (!(error instanceof MobileDecisionDeliveryError)) {
+        throw error;
+      }
+      const failed = new Set(error.eventIds);
+      for (const item of accepted.outboxEvents) {
+        if (item.kind === "decision" && failed.has(item.event.eventId)) {
+          this.retryableDecisions.set(mobileEventScopeKey(item.event.conversationId, item.event.eventId), item.event);
+        }
+      }
+      acked = { ...accepted, eventIds: accepted.eventIds.filter((eventId) => !failed.has(eventId)) };
+    }
+    void this.refreshControlCardsAfterDecisions(accepted);
     return {
-      eventIds: accepted.eventIds,
+      eventIds: acked.eventIds,
       runIds: accepted.runIds
     };
+  }
+
+  /** Tries again the answers earlier polls could not take. Called by the
+   *  mailbox poller on every tick, page or no page. */
+  async retryFailedDecisions(logicalMessageId: string = "mailbox:retry"): Promise<MobileRelayAcceptedResult> {
+    if (this.retryableDecisions.size === 0 || !this.isActive()) {
+      return emptyAcceptedResult();
+    }
+    const events = [...this.retryableDecisions.values()];
+    this.retryableDecisions.clear();
+    const result = emptyAcceptedResult();
+    // One at a time: an answer whose chat has since left the pairing's scope
+    // is refused outright, and that refusal must not take the others with it.
+    for (const event of events) {
+      try {
+        const accepted = await this.acceptMobileOutboxEvents([event], logicalMessageId);
+        result.eventIds.push(...accepted.eventIds);
+        result.runIds.push(...accepted.runIds);
+      } catch (error) {
+        // Given up for good: the count is reported and then released, as the
+        // delivery path releases it, so a later answer under the same id does
+        // not start out with this one's attempts.
+        const key = mobileEventScopeKey(event.conversationId, event.eventId);
+        this.onDecisionDiagnostic?.({
+          conversationId: event.conversationId, eventId: event.eventId, kind: event.kind, targetKey: event.payload.targetKey,
+          outcome: "given-up", attempts: this.decisionAttemptsByKey.get(key) ?? 0,
+          message: error instanceof Error ? error.message : String(error)
+        });
+        this.decisionAttemptsByKey.delete(key);
+      }
+    }
+    return result;
   }
 
   private async handleMessage(message: RelayTunnelMessage): Promise<void> {
@@ -673,7 +763,36 @@ export class MobileRelayControlService {
       await this.sendMachineAccess(`${message.logicalMessageId}:machines`, this.lastPhoneDeviceId);
       return;
     }
-    const accepted = await this.prepareMobileOutboxRequest(assertMobileOutboxRequest(payload));
+    // Refused outright (a chat outside the pairing's scope, a malformed
+    // event): say so with an ack that names nothing, or the phone waits the
+    // whole ack timeout for an answer that never comes — and, now that it
+    // flushes every chat's queue in one pass, holds every other chat's
+    // sends behind it.
+    let request: MobileOutboxRequest;
+    try {
+      request = assertMobileOutboxRequest(payload);
+    } catch (error) {
+      await this.sendAck(message.logicalMessageId, emptyAcceptedResult()).catch(() => {
+        // The refusal itself is what is reported below.
+      });
+      throw error;
+    }
+    let accepted: MobileRelayAcceptedDetail;
+    try {
+      accepted = await this.prepareMobileOutboxRequest(request);
+    } catch (error) {
+      if (error instanceof MobileOutboxRefusedError) {
+        await this.sendAck(message.logicalMessageId, emptyAcceptedResult()).catch(() => {
+          // The refusal itself is what is reported below.
+        });
+      }
+      // Anything else — storage that did not answer, a lock held elsewhere —
+      // is this desktop's trouble, not a verdict on the event: no ack, so the
+      // phone keeps it and, after its wait, tries the mailbox as it always
+      // did. Answered with an empty ack, the phone counted a refusal, and
+      // five of those in a bad few minutes set a message aside for good.
+      throw error;
+    }
     // A card answered on the phone travels this path whenever the desktop is
     // up, because the phone prefers its live tunnel over the mailbox. Without
     // this the answer was accepted, acked, and then dropped: no durable
@@ -695,6 +814,10 @@ export class MobileRelayControlService {
     }
     await this.deliverAcceptedCancellationEvents(accepted);
     await this.sendAck(message.logicalMessageId, acked);
+    // Whatever became of the answers, the phone must now hear the cards as
+    // this desktop holds them — including "still pending" for an answer it
+    // could not take — or a stale card is answered on the phone for ever.
+    void this.refreshControlCardsAfterDecisions(accepted);
     this.markRunIdsAcked(accepted.runIds);
     await this.sendAcceptedRunningBatches(message.logicalMessageId, accepted).catch(() => {
       // The phone may have gone away after ack; durable sync remains the source of truth.
@@ -727,7 +850,7 @@ export class MobileRelayControlService {
     const runningBatches: MobileTimelineEvents[] = [];
     for (const event of request.events) {
       if (!(await this.isConversationAllowed(event.conversationId))) {
-        throw new Error("Mobile relay event conversationId is outside the paired scope.");
+        throw new MobileOutboxRefusedError("Mobile relay event conversationId is outside the paired scope.");
       }
       const mobileEventKey = mobileEventScopeKey(event.conversationId, event.eventId);
       const runId = isMobileRunCancelEvent(event) ? undefined : `mobile-${event.eventId || randomUUID()}`;
@@ -743,7 +866,8 @@ export class MobileRelayControlService {
         if (isMobileDecisionEvent(event)) {
           this.acceptedMobileEventKeys.add(mobileEventKey);
           outboxEvents.push({ kind: "decision", event });
-          eventIds.push(event.eventId);
+          // Already listed above with every other event: a second copy here
+          // put each answer into the ack twice.
           continue;
         }
         if (isMobileRunCancelEvent(event)) {
@@ -782,9 +906,54 @@ export class MobileRelayControlService {
     logicalMessageId: string,
     accepted: MobileRelayAcceptedDetail
   ): Promise<void> {
-    await this.deliverAcceptedDecisionEvents(accepted);
+    // The answers first, as on the live path, and their failure is reported
+    // after the rest of the batch has been delivered rather than in front of
+    // it: a stale answer must not strand the message beside it.
+    let decisionFailure: MobileDecisionDeliveryError | undefined;
+    try {
+      await this.deliverAcceptedDecisionEvents(accepted);
+    } catch (error) {
+      if (!(error instanceof MobileDecisionDeliveryError)) {
+        throw error;
+      }
+      decisionFailure = error;
+    }
     await this.deliverAcceptedCancellationEvents(accepted);
     await this.deliverAcceptedMessageEvents(logicalMessageId, accepted);
+    if (decisionFailure) {
+      throw decisionFailure;
+    }
+  }
+
+  /** How many times an answer the desktop cannot take is tried before it is
+   *  accepted as delivered anyway: the phone then hears the cards as they are
+   *  instead of offering the same answer for ever. */
+  private static readonly DECISION_MAX_ATTEMPTS = 5;
+
+  /** The cards of a chat, offered again whatever this process remembers
+   *  delivering, after the phone's answers for it were dealt with. */
+  private async refreshControlCardsAfterDecisions(accepted: MobileRelayAcceptedDetail): Promise<void> {
+    const conversationIds = new Set<string>();
+    for (const item of accepted.outboxEvents) {
+      if (item.kind === "decision") {
+        conversationIds.add(item.event.conversationId);
+      }
+    }
+    for (const conversationId of conversationIds) {
+      try {
+        const cards = await this.controlCardsFor(conversationId);
+        if (!cards) {
+          continue;
+        }
+        await this.sendTimelineBatch(
+          `cards:${conversationId}:${Date.now()}`,
+          { type: "mobile.timeline.events", conversationId, events: [], cards },
+          { forceCards: true }
+        );
+      } catch {
+        // Best effort: the phone's next chat list reconciles it.
+      }
+    }
   }
 
   /** A card answered on the phone. The desktop records it as the same chat
@@ -800,6 +969,13 @@ export class MobileRelayControlService {
       if (item.kind !== "decision") {
         continue;
       }
+      const key = mobileEventScopeKey(item.event.conversationId, item.event.eventId);
+      const diagnostic = {
+        conversationId: item.event.conversationId,
+        eventId: item.event.eventId,
+        kind: item.event.kind,
+        targetKey: item.event.payload.targetKey
+      };
       try {
         if (!this.chat.applyMobileDecision) {
           throw new Error("Answering a card from a phone is unavailable.");
@@ -809,8 +985,23 @@ export class MobileRelayControlService {
           kind: item.event.kind,
           payload: item.event.payload
         });
+        const attempts = (this.decisionAttemptsByKey.get(key) ?? 0) + 1;
+        this.decisionAttemptsByKey.delete(key);
+        this.onDecisionDiagnostic?.({ ...diagnostic, outcome: "applied", attempts });
       } catch (error) {
-        this.acceptedMobileEventKeys.delete(mobileEventScopeKey(item.event.conversationId, item.event.eventId));
+        const attempts = (this.decisionAttemptsByKey.get(key) ?? 0) + 1;
+        const message = error instanceof Error ? error.message : String(error);
+        if (attempts >= MobileRelayControlService.DECISION_MAX_ATTEMPTS) {
+          // Given up: the answer stays recorded as accepted so the phone stops
+          // offering it and the mailbox page moves on; the cards sent behind
+          // this batch tell the phone what the desktop actually holds.
+          this.decisionAttemptsByKey.delete(key);
+          this.onDecisionDiagnostic?.({ ...diagnostic, outcome: "given-up", attempts, message });
+          continue;
+        }
+        this.decisionAttemptsByKey.set(key, attempts);
+        this.onDecisionDiagnostic?.({ ...diagnostic, outcome: "failed", attempts, message });
+        this.acceptedMobileEventKeys.delete(key);
         failures.push({ eventId: item.event.eventId, error });
       }
     }
@@ -851,12 +1042,19 @@ export class MobileRelayControlService {
         }
         const imageAttachments = mobileUploadImages(item.event.payload.attachments);
         const skillMentions = mobileSkillMentions(item.event.payload.skillMentions);
+        const threadRootId = typeof item.event.payload.threadRootId === "string"
+          ? item.event.payload.threadRootId.trim()
+          : "";
         const result = await this.chat.sendMessage(
           {
             conversationId: item.event.conversationId,
             content: typeof item.event.payload.content === "string" ? item.event.payload.content : "",
             ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
             ...(skillMentions.length > 0 ? { skillMentions } : {}),
+            // The same field the desktop composer uses for a reply in a
+            // thread: the phone's message is placed by it, not by where the
+            // desktop happened to be looking.
+            ...(threadRootId ? { chatThreadRootId: threadRootId } : {}),
             runId: item.runId,
             mobileEventId: item.event.eventId
           },
@@ -924,12 +1122,16 @@ export class MobileRelayControlService {
     if (!this.isActive()) {
       return;
     }
+    // Stamped before the reads, so nothing the list carries can be older than
+    // it says: a card closed while the list was being built is still listed.
+    const generatedAt = new Date().toISOString();
     const chats = this.catalog ? await this.catalog.listChats() : [];
     const response: MobileChatListResponse = {
       type: "mobile.chat-list",
       chats: this.options.conversationId
         ? chats.filter((chat) => chat.id === this.options.conversationId)
-        : chats
+        : chats,
+      generatedAt
     };
     const ciphertext = await sealMobileRelayPayload(response, this.options.relaySealKeyBase64);
     await this.client.sendCiphertext({ logicalMessageId, ciphertext });
@@ -962,6 +1164,13 @@ export class MobileRelayControlService {
         conversationId,
         events: this.catalog ? await this.catalog.listTimeline(conversationId) : []
       };
+    }
+    // Opening a chat is the one moment the phone asks for it outright, so it
+    // gets the chat's cards with the page: a card the phone holds that the
+    // desktop closed while the phone was away is reconciled right here.
+    const cards = await this.controlCardsFor(conversationId);
+    if (cards) {
+      timeline.cards = cards;
     }
     const ciphertext = await sealMobileRelayPayload(timeline, this.options.relaySealKeyBase64);
     await this.client.sendCiphertext({ logicalMessageId, ciphertext });
@@ -1340,7 +1549,7 @@ export class MobileRelayControlService {
     const cardsKey = timeline.conversationId ?? "";
     const seenCardsBefore = this.lastControlCardsByConversation.has(cardsKey);
     const previousCards = this.lastControlCardsByConversation.get(cardsKey) ?? [];
-    const cardsChanged = cards !== undefined && !sameControlCards(previousCards, cards);
+    const cardsChanged = cards !== undefined && (options?.forceCards === true || !sameControlCards(previousCards, cards));
     // A card that was not pending before is a member starting to wait on the
     // User. That rings the phone the way a finished reply does, and says so.
     // Never on the first cards seen for a chat since the process started: like
@@ -1348,10 +1557,32 @@ export class MobileRelayControlService {
     const previouslyPending = new Set(previousCards.filter((card) => card.status === "pending").map((card) => card.id));
     const approvalStarted = seenCardsBefore && cardsChanged &&
       (cards ?? []).some((card) => card.status === "pending" && !previouslyPending.has(card.id));
-    if (cardsChanged || (cards !== undefined && !seenCardsBefore)) {
-      this.lastControlCardsByConversation.set(cardsKey, cards ?? []);
-    }
+    // Delivered cards are remembered the moment a batch carries them, so two
+    // snapshots seconds apart do not both announce the same card as new; and
+    // forgotten again if the durable sink refuses the batch, so one failed
+    // append is not the last time those cards are ever offered — that is how
+    // a card closed on the desktop stayed open on the phone for days (the
+    // User's screenshot, 2026-09-20). A newer batch that has since remembered
+    // its own cards is left alone.
+    const markCardsDelivered = (): void => {
+      if (cards !== undefined) {
+        this.lastControlCardsByConversation.set(cardsKey, cards);
+      }
+    };
+    const unmarkCardsDelivered = (): void => {
+      if (cards === undefined || this.lastControlCardsByConversation.get(cardsKey) !== cards) {
+        return;
+      }
+      // Back to what was known before this batch. A chat first seen on a
+      // refused batch is still a chat seen: a card new in its next batch is
+      // announced, as it would have been had the first batch gone through.
+      this.lastControlCardsByConversation.set(cardsKey, previousCards);
+    };
     if (events.length === 0 && !cardsChanged) {
+      // Nothing to send: what this chat's cards are is known from here on.
+      if (cards !== undefined && !seenCardsBefore) {
+        markCardsDelivered();
+      }
       if (options?.liveOnly === true) {
         this.onLiveDiagnostic?.({ kind: "empty-after-dedup", logicalMessageId, events: 0, bytes: 0, rendezvousId: this.options.rendezvousId });
       }
@@ -1362,6 +1593,7 @@ export class MobileRelayControlService {
       events,
       ...(cards ? { cards } : {})
     }, this.options.relaySealKeyBase64);
+    markCardsDelivered();
     if (this.timelineSink && options?.liveOnly !== true) {
       const newlyFinishedRunIds = options?.markTerminalParticipant === true
         ? events
@@ -1390,7 +1622,9 @@ export class MobileRelayControlService {
         events,
         ...(cards ? { cards } : {})
       }, { ...options, runFinished, ...(notices.length > 0 ? { notices } : {}) }).then(markDelivered).catch(() => {
-        // Relay delivery should not fail merely because durable timeline sync is temporarily unavailable.
+        // Relay delivery should not fail merely because durable timeline sync
+        // is temporarily unavailable; the cards go again with the next batch.
+        unmarkCardsDelivered();
       });
     }
     if (!this.connected) {

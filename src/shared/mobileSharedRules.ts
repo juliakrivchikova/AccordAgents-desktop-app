@@ -15,3 +15,7 @@ export {
 // conversation — needs the message list, which a machine's delta does not
 // carry; the desktop applies the whole rule before it projects for the phone.
 export { isChatMessageHiddenFromTimeline } from "./chatTimelineVisibility";
+// What a member's message shows and what is control text: the `User choice:`
+// block becomes a card, so the bubble must not print it as well. One rule for
+// the desktop bubble and the phone's.
+export { stripChatControlBlocks } from "./chatControlBlocks";

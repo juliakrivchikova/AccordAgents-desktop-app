@@ -144,13 +144,20 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
     // A completed IDB transaction may resolve the read's data later than
     // another render. Hold only one readonly timeline request; writes, the
     // database contents, and every later read retain their normal behavior.
+    // The timeline is read by chat through its index, and the whole store
+    // only when no chat is named; a held read has to catch either.
     const holdRead = () => evaluate(`(() => {
-      const original = IDBObjectStore.prototype.getAll;
+      const originals = { store: IDBObjectStore.prototype.getAll, index: IDBIndex.prototype.getAll };
+      const restore = () => {
+        IDBObjectStore.prototype.getAll = originals.store;
+        IDBIndex.prototype.getAll = originals.index;
+      };
       window.heldRead = { ready: false };
-      IDBObjectStore.prototype.getAll = function (...args) {
+      const hold = (original, storeOf) => function (...args) {
         const request = original.apply(this, args);
-        if (this.name !== "timeline" || this.transaction.mode !== "readonly") return request;
-        IDBObjectStore.prototype.getAll = original;
+        const store = storeOf(this);
+        if (store.name !== "timeline" || store.transaction.mode !== "readonly") return request;
+        restore();
         const held = window.heldRead;
         const proxy = { get result() { return request.result; }, get error() { return request.error; } };
         request.onsuccess = event => {
@@ -164,6 +171,8 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
         request.onerror = event => proxy.onerror?.(event);
         return proxy;
       };
+      IDBObjectStore.prototype.getAll = hold(originals.store, (target) => target);
+      IDBIndex.prototype.getAll = hold(originals.index, (target) => target.objectStore);
     })()`);
 
     await t.test("late reads cannot replace the newly selected chat", async () => {
