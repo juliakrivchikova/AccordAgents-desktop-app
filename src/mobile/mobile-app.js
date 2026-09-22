@@ -767,7 +767,12 @@
   }
 
   function withTimeline(mode, fn, options) {
-    if (mode === "readwrite" && !(options && options.maintainsChatRows)) {
+    // A write that does not keep the held rows in step drops them twice: when
+    // it is asked for, and again once it has landed. The first alone was not
+    // enough — a write created between the two moments read the chat afresh
+    // and held rows this one was about to delete.
+    const dropsHeldRows = mode === "readwrite" && !(options && options.maintainsChatRows);
+    if (dropsHeldRows) {
       dropCachedChatRows();
     }
     return openDb().then(function (db) {
@@ -787,6 +792,9 @@
             Promise.resolve(value).then(function (result) {
               if (result !== false && result !== 0) timelineGeneration += 1;
             }, function () { timelineGeneration += 1; });
+          }
+          if (dropsHeldRows) {
+            dropCachedChatRows();
           }
           resolve(value);
           db.close();
@@ -853,26 +861,42 @@
    *  already holds -- it is the only writer, so they cannot be stale behind its
    *  back -- while a read for drawing always goes to the store, because what is
    *  on screen must not come from memory that a reload would not have. */
+  // The key of a row that never exists. A write asks the store for it before
+  // taking the rows held for a chat: the answer comes only once every write
+  // created before this one has landed, and each of those brought the held
+  // rows up to date as it landed. Taken any earlier — at the moment the write
+  // was created, as they were at first — the held rows could predate the
+  // write in front, and a run's end judged against them missed the live row
+  // it had come to end: "Thinking…" stayed above the answer it belonged to
+  // whenever the socket's last row and the mailbox's finished one landed
+  // together.
+  const HELD_ROWS_SYNC_KEY = "\u0000held-rows-sync";
+
   function timelineRowsForConversation(store, conversationId, options) {
     const mayHold = Boolean(options && options.mayHold) &&
       typeof conversationId === "string" && Boolean(conversationId);
-    const held = mayHold ? chatRowsHeld.get(conversationId) : undefined;
-    if (held) {
-      return Promise.resolve(held);
-    }
     const remember = function (rows) {
       return mayHold ? holdChatRows(conversationId, rows) : rows;
     };
-    const schema = globalThis.AccordMobileDb;
-    const indexName = schema && schema.TIMELINE_CONVERSATION_INDEX;
-    if (typeof conversationId === "string" && conversationId && indexName && store.indexNames.contains(indexName)) {
-      return requestToPromise(store.index(indexName).getAll(conversationId)).then(remember);
+    const readStore = function () {
+      const schema = globalThis.AccordMobileDb;
+      const indexName = schema && schema.TIMELINE_CONVERSATION_INDEX;
+      if (typeof conversationId === "string" && conversationId && indexName && store.indexNames.contains(indexName)) {
+        return requestToPromise(store.index(indexName).getAll(conversationId)).then(remember);
+      }
+      return requestToPromise(store.getAll()).then(function (rows) {
+        return typeof conversationId === "string" && conversationId
+          ? rows.filter(function (row) { return row && row.conversationId === conversationId; })
+          : rows;
+      }).then(remember);
+    };
+    if (!mayHold) {
+      return readStore();
     }
-    return requestToPromise(store.getAll()).then(function (rows) {
-      return typeof conversationId === "string" && conversationId
-        ? rows.filter(function (row) { return row && row.conversationId === conversationId; })
-        : rows;
-    }).then(remember);
+    return requestToPromise(store.get(HELD_ROWS_SYNC_KEY)).then(function () {
+      const held = chatRowsHeld.get(conversationId);
+      return held ? held : readStore();
+    });
   }
 
   /** Keeps the rows held for a chat in step with a write this function just
@@ -1449,6 +1473,8 @@
       await tx.removeWhere(TIMELINE_STORE, entry => entry.conversationId === conversationId);
     });
     timelineGeneration += 1;
+    // Written past withTimeline, so the rows it holds are dropped here.
+    dropCachedChatRows();
     deletedMachineConversations.add(conversationId);
     saveChats(loadChats().filter(chat => chat.id !== conversationId));
     const cards = loadControlCards();
