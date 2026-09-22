@@ -210,6 +210,9 @@ check(
   shape.closed.tools === false && shape.open.tools === true && shape.open.height > shape.closed.height,
   JSON.stringify(shape)
 );
+// A blur no tap caused (the keyboard's own Done) gives the bar back within a
+// short bound rather than at once, so a tap that blurs lands first.
+await sleep(500);
 
 out.closed = await geometry();
 out.barInChat = await bar();

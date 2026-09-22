@@ -174,6 +174,17 @@ test("a launch that cannot reach the relay keeps the subscription it has", { tim
     assert.equal(await evaluate("window.__subscribed"), 1, "and the replacement is made");
     assert.equal(subscriptionPosts.length, 1, "and registered with the relay");
     assert.equal(subscriptionPosts[0]?.subscription?.endpoint, "https://push.example/new-1", "the registered one is the new subscription");
+
+    // Settings → Reconnect, tapped where the relay cannot be reached: it used
+    // to give the subscription up first and leave the phone with none.
+    relay.reachable = false;
+    assert.equal(await evaluate(`AccordAgentsMobile.reconnectMessageAlerts()`), "failed", "Reconnect says it could not reconnect");
+    assert.equal(await evaluate("window.__unsubscribed"), 1, "Reconnect offline keeps the subscription in hand");
+    assert.equal(subscriptionPosts.length, 1, "and posts nothing");
+    relay.reachable = true;
+    assert.equal(await evaluate(`AccordAgentsMobile.reconnectMessageAlerts()`), "ok", "Reconnect with the relay reachable succeeds");
+    assert.equal(await evaluate("window.__unsubscribed"), 2, "and replaces the subscription");
+    assert.equal(subscriptionPosts.length, 2, "and registers the new one");
     t.diagnostic(`posts: ${subscriptionPosts.length}`);
   } finally {
     app?.close();

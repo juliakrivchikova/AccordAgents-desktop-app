@@ -293,7 +293,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   for (const event of ["resize", "orientationchange", "pageshow"]) {
     assert.match(app, new RegExp(`window\\.addEventListener\\("${event}", remeasure\\)`));
   }
-  assert.match(app, /document\.addEventListener\("focusout", remeasure\)/);
+  // Focus leaving a field still re-measures, once the tap that moved it has
+  // landed: measured mid-tap, the layout moved under the finger.
+  assert.match(app, /document\.addEventListener\("focusout", function \(\) \{\n\s*afterTapLands\(remeasure\);/);
   assert.match(app, /visibilitychange/);
   // A height change that drops the reader out of the latest message would be a
   // silent regression: rotating would scroll them up into history.

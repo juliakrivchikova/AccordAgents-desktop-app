@@ -1,4 +1,4 @@
-const ASSET_VERSION = "2026-09-22-pwa-review-fixes-v1";
+const ASSET_VERSION = "2026-09-22-pwa-review-fixes-v2";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
 const CACHE_NAME = `accordagents-mobile-shell-v70-${ASSET_VERSION}`;

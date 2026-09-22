@@ -469,13 +469,9 @@
     if (!endpoint || !pairing?.relaySealKeyBase64) return "failed";
     if (!navigator.serviceWorker || !("PushManager" in globalThis)) return "failed";
     try {
-      const registration = await navigator.serviceWorker.ready;
-      const existing = await registration.pushManager.getSubscription();
-      if (existing) {
-        // An endpoint the relay still holds must stop being rung: unsubscribe
-        // first, then register whatever the browser hands back next.
-        await existing.unsubscribe();
-      }
+      // ensurePushSubscription replaces the subscription itself, and only once
+      // it has reached the relay: dropping it here first left a phone that
+      // tapped Reconnect without a connection with no subscription at all.
       pushSubscriptionEnsured = false;
       await ensurePushSubscription();
       return pushSubscriptionEnsured && !pushEndpointRejected ? "ok" : "failed";
@@ -6094,8 +6090,8 @@
       input.disabled = sent;
       // The keyboard this field raises takes the bar with it, as the
       // composer's does, and gives it back the same way.
-      input.addEventListener("focus", function () { keepingReaderAtLatest(applyDock); });
-      input.addEventListener("blur", function () { keepingReaderAtLatest(applyDock); });
+      input.addEventListener("focus", applyDockKeepingReader);
+      input.addEventListener("blur", applyDockAfterTap);
       const send = document.createElement("button");
       send.type = "button";
       send.className = "control-card-option";
@@ -6290,6 +6286,47 @@
     if (dock) dock.hidden = !shown;
     const phone = document.querySelector(".mobile-phone");
     if (phone) phone.dataset.dock = placement;
+  }
+
+  /** Layout that follows a field losing focus, run once the tap that took the
+   *  focus has landed. A tap on a button while the keyboard is up blurs the
+   *  field on the way down, and the release is hit-tested again: the bar coming
+   *  back under the composer, or the composer folding to one line, pulls the
+   *  button out from under the finger in between, and the tap only closes the
+   *  keyboard — a card's Send, Allow or Deny tapped once and not taken. The
+   *  work waits for the release, and runs behind the click that follows it;
+   *  a blur no tap caused (the keyboard's own Done) waits out a short bound. */
+  const AFTER_TAP_BOUND_MS = 350;
+  const afterTapWork = new Set();
+  let afterTapTimer = 0;
+  let afterTapWired = false;
+  function afterTapLands(work) {
+    afterTapWork.add(work);
+    if (!afterTapWired) {
+      afterTapWired = true;
+      for (const type of ["mouseup", "click"]) {
+        document.addEventListener(type, function () {
+          if (afterTapTimer) setTimeout(runAfterTapWork, 0);
+        }, true);
+      }
+    }
+    if (!afterTapTimer) afterTapTimer = setTimeout(runAfterTapWork, AFTER_TAP_BOUND_MS);
+  }
+
+  function runAfterTapWork() {
+    clearTimeout(afterTapTimer);
+    afterTapTimer = 0;
+    const queued = Array.from(afterTapWork);
+    afterTapWork.clear();
+    for (const run of queued) run();
+  }
+
+  function applyDockAfterTap() {
+    afterTapLands(applyDockKeepingReader);
+  }
+
+  function applyDockKeepingReader() {
+    keepingReaderAtLatest(applyDock);
   }
 
   function lineIcon(paths, size) {
@@ -8768,11 +8805,8 @@
       // The bar under the composer leaves while the keyboard is up and comes
       // back when it goes. Either way the chat grows or shrinks by the bar's
       // height, so a reader who was at the latest message stays there.
-      function applyDockForKeyboard() {
-        keepingReaderAtLatest(applyDock);
-      }
-      input.addEventListener("focus", applyDockForKeyboard);
-      input.addEventListener("blur", applyDockForKeyboard);
+      input.addEventListener("focus", applyDockKeepingReader);
+      input.addEventListener("blur", applyDockAfterTap);
       let mentionIndex = 0;
       const mentionMenu = document.getElementById("mention-menu");
       const mentionButton = document.getElementById("mention-button");
@@ -9178,7 +9212,9 @@
         composerForm.dataset.expanded = open ? "1" : "";
       };
       input.addEventListener("focus", updateComposerShape);
-      input.addEventListener("blur", updateComposerShape);
+      input.addEventListener("blur", function () {
+        afterTapLands(updateComposerShape);
+      });
       input.addEventListener("input", updateComposerShape);
       updateComposerShape();
       const sendButton = document.getElementById("send-button");
@@ -9443,7 +9479,12 @@
         remeasure();
       }
     });
-    document.addEventListener("focusout", remeasure);
+    // Not in the middle of the tap that moved the focus: the height taken
+    // with the keyboard still up and the bar coming back would both move the
+    // button under the finger before its release.
+    document.addEventListener("focusout", function () {
+      afterTapLands(remeasure);
+    });
   }
 
   if (typeof document !== "undefined") {

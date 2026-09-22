@@ -1619,7 +1619,7 @@ button.mobile-chat-group-title:active {
   padding: 8px 12px;
   font-size: 13px;
   color: var(--mut);
-  background: var(--bg1);
+  background: var(--s2);
   border-top: 1px solid var(--bd);
 }
 
@@ -1950,9 +1950,11 @@ button.mobile-chat-group-title:active {
 }
 
 /* Last, so hiding always wins: these have the same specificity as the
-   placement rules above and would otherwise depend on what those declare. */
+   placement rules above and would otherwise depend on what those declare.
+   Search only takes the bar off the home screens: a chat opened from the
+   results keeps its bar, and the composer above it keeps the safe area. */
 .pb-dock[hidden],
-.mobile-phone[data-searching="1"] .pb-dock {
+.mobile-phone[data-searching="1"][data-dock="1"] .pb-dock {
   display: none;
 }
 

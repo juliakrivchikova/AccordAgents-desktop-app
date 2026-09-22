@@ -91,8 +91,11 @@ async function startWorker(rings, pushStatus) {
     },
     // Every outbound fetch the worker makes lands here. The only one it makes
     // is the wake push, so this is the ring log.
-    outboundService(request) {
+    async outboundService(request) {
       rings.push({ at: Date.now(), url: request.url, authorization: request.headers.get("authorization") ?? "" });
+      if (pushStatus.delayMs) {
+        await delay(pushStatus.delayMs);
+      }
       return new Response("", { status: pushStatus.value });
     }
   });
@@ -374,6 +377,93 @@ test("W-C ring path: the doorbell rings for what the phone does not have", async
     assert.equal(await waitForRings(10), 10, "the next finished turn still rings");
     await phoneAcknowledges(15);
     t.diagnostic(`rings at ${rings.map((ring) => ring.at - rings[0].at).join(", ")}ms`);
+  } finally {
+    await mf.dispose();
+  }
+});
+
+// Review finding, 2026-09-22: the ring was awaited inside the append, so the
+// desktop's append — which it finishes before sending the live copy to an open
+// phone — waited for the push service every time a turn finished, and up to the
+// ring's 5s timeout when that service stalled. The append answers first now;
+// the ring goes out behind it, and a ring that fails leaves the next one alone.
+test("W-C ring path: a finished turn's append does not wait for the push service", async (t) => {
+  const rings = [];
+  const pushStatus = { value: 201, delayMs: 3000 };
+  let mf;
+  try {
+    mf = await startWorker(rings, pushStatus);
+    await mf.ready;
+  } catch (error) {
+    assert.fail(`could not start the worker under Miniflare: ${error?.message || error}`);
+  }
+
+  const creds = credentials("slow-push");
+  const call = (pathname, { method = "GET", body, query = {} } = {}) => {
+    const url = new URL(pathname, "https://relay.test");
+    url.searchParams.set("mailboxId", creds.mailboxId);
+    for (const [key, value] of Object.entries(query)) {
+      url.searchParams.set(key, String(value));
+    }
+    return mf.dispatchFetch(url.toString(), {
+      method,
+      headers: { "content-type": "application/json", authorization: `Bearer ${creds.token}` },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+  };
+  const waitForRings = async (count, ms) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline && rings.length < count) {
+      await delay(50);
+    }
+    return rings.length;
+  };
+
+  try {
+    assert.equal((await call("/v1/mailbox/register", {
+      method: "POST",
+      body: { tokenHashBase64Url: creds.tokenHashBase64Url }
+    })).status, 200);
+    assert.equal((await call("/v1/mailbox/push-subscription", {
+      method: "POST",
+      body: {
+        subscription: { endpoint: `${PUSH_ORIGIN}${PUSH_PATH}`, keys: { p256dh: "p", auth: "a" } },
+        suppressOriginId: "device-phone"
+      }
+    })).status, 200);
+
+    // The push service takes 3s to answer. The append must not.
+    const started = Date.now();
+    const response = await call("/v1/mailbox/events", {
+      method: "POST",
+      body: { events: [sealedEvent({ eventId: "slow-finish-1", originSeq: 1 })], runFinished: true }
+    });
+    const appendMs = Date.now() - started;
+    assert.equal(response.status, 200);
+    // Well under the push service's 3s, with room for a loaded machine.
+    assert.ok(appendMs < 1500, `the append answers before the push service does (took ${appendMs}ms)`);
+    assert.equal(await waitForRings(1, 2000), 1, "the ring still goes out");
+
+    // A push service that never answers: the ring is attempted, its 5s
+    // timeout rejects it inside the relay, and the next finished turn still
+    // rings.
+    await delay(pushStatus.delayMs + PUSH_INTERVAL_MS);
+    pushStatus.delayMs = 6000;
+    assert.equal((await call("/v1/mailbox/events", {
+      method: "POST",
+      body: { events: [sealedEvent({ eventId: "slow-finish-2", originSeq: 2 })], runFinished: true }
+    })).status, 200);
+    assert.equal(await waitForRings(2, 2000), 2, "the failing ring was attempted");
+    pushStatus.delayMs = 0;
+    await delay(5000 + PUSH_INTERVAL_MS);
+    assert.equal((await call("/v1/mailbox/events", {
+      method: "POST",
+      body: { events: [sealedEvent({ eventId: "slow-finish-3", originSeq: 3 })], runFinished: true }
+    })).status, 200);
+    assert.equal(await waitForRings(3, 2000), 3, "a failed ring does not stop the next one");
+    const listing = await (await call("/v1/mailbox/events", { query: { afterArrival: 0, limit: 500 } })).json();
+    assert.equal(listing.events.length, 3, "every finished turn was stored");
+    t.diagnostic(`append took ${appendMs}ms against a 3000ms push service`);
   } finally {
     await mf.dispose();
   }

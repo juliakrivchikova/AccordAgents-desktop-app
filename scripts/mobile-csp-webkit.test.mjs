@@ -24,7 +24,6 @@ const { loadMobileOriginHeaders, mobileOriginHeadersForPath } = require("./mobil
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const root = path.join(repoRoot, "dist/mobile");
-const PORT = 8181;
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -79,7 +78,10 @@ test("the shipped CSP boots the phone shell on a WebKit engine", async (t) => {
       res.writeHead(404).end("not found");
     }
   });
-  await new Promise((resolve) => site.listen(PORT, "127.0.0.1", resolve));
+  // Any free port: test:mobile-timeline runs several browser suites at once,
+  // and a fixed one here collided with the pairing-hygiene suite's.
+  await new Promise((resolve) => site.listen(0, "127.0.0.1", resolve));
+  const PORT = site.address().port;
 
   const browser = await webkit.launch();
   const context = await browser.newContext({ viewport: { width: 393, height: 852 } });

@@ -563,16 +563,17 @@ export class SealedMailboxStore extends DurableObject<Env> {
       if (runFinished) {
         await this.ctx.storage.put(MAILBOX_PUSH_FINISH_SEQ_KEY, arrivalSeq);
         const appended = incoming.filter((event) => appendedEventIds.includes(event.eventId));
-        // The ring is awaited rather than left to waitUntil: in production the
-        // push fetch started there never resolved, never failed and never
-        // reached its own timeout — the work simply stopped once the append had
-        // answered, and the User got no notification at all. Holding the append
-        // for the push round trip costs the desktop a few hundred milliseconds;
-        // losing every notification costs more.
+        // The ring goes out from the alarm, not from this request. Awaited
+        // here, it held the desktop's append for the push service's round
+        // trip — up to its 5s timeout — and the desktop sends the live copy to
+        // an open phone only after the append answers. Left to waitUntil, the
+        // fetch was seen never to finish once the append had answered. An
+        // alarm runs to completion on its own.
         await this.maybeSendWakePush(appended).catch((error) => {
-          // A ring that fails must say so somewhere: silence here is what made
-          // a dead push path invisible for a whole day.
-          console.log("wake-push failed", String((error as Error)?.message || error));
+          // A ring that cannot even be scheduled must say so somewhere:
+          // silence here is what made a dead push path invisible for a whole
+          // day. A ring that fails to send says so from the alarm.
+          console.log("wake-push not scheduled", String((error as Error)?.message || error));
         });
       }
     }
@@ -627,14 +628,9 @@ export class SealedMailboxStore extends DurableObject<Env> {
     if (record.suppressOriginId && appended.every((event) => event.originId === record.suppressOriginId)) {
       return;
     }
-    const now = Date.now();
     const lastSent = (await this.ctx.storage.get<number>(MAILBOX_PUSH_LAST_SENT_KEY)) ?? 0;
-    const minInterval = this.pushMinIntervalMs();
-    if (now - lastSent < minInterval) {
-      await this.armAlarmSlot("pushAt", lastSent + minInterval);
-      return;
-    }
-    await this.sendWakePush();
+    // Now, or once the debounce since the last ring has passed.
+    await this.armAlarmSlot("pushAt", Math.max(Date.now(), lastSent + this.pushMinIntervalMs()));
   }
 
   /** Sends the empty VAPID-authenticated wake push. Reads subscription and
@@ -688,9 +684,9 @@ export class SealedMailboxStore extends DurableObject<Env> {
           Authorization: `vapid t=${jwt}, k=${env.ACCORD_VAPID_PUBLIC_KEY}`
         },
         body: new Uint8Array(0),
-        // A ring that never answers is worse than one that fails: it hangs
-        // inside waitUntil until the object goes idle and takes the whole
-        // notification with it, silently. Bound it and let the error surface.
+        // A ring that never answers is worse than one that fails: it would
+        // hold the alarm open with nothing to show for it. Bound it and let
+        // the error surface.
         signal: AbortSignal.timeout(5_000)
       });
     } catch (error) {
@@ -927,9 +923,12 @@ export class SealedMailboxStore extends DurableObject<Env> {
       }
     }
     if (pushDue) {
-      // A deferred ring reads subscription state at fire time, not at the time
-      // it was scheduled: the phone may have unsubscribed in between.
-      await this.sendWakePush();
+      // A ring reads subscription state at fire time, not at the time it was
+      // scheduled: the phone may have unsubscribed in between. A failed ring
+      // is logged and not retried; throwing would skip the re-arm below.
+      await this.sendWakePush().catch((error) => {
+        console.log("wake-push failed", String((error as Error)?.message || error));
+      });
     }
     await this.rearmAlarm((await this.ctx.storage.get<MailboxAlarmSchedule>(MAILBOX_SCHEDULE_KEY)) ?? {});
   }
