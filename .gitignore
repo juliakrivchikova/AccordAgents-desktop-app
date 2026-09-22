@@ -40,3 +40,4 @@ artifacts/vectorization/
 security-check-summary.md
 traffic-raw.json
 traffic-summary.md
+.scratch/
