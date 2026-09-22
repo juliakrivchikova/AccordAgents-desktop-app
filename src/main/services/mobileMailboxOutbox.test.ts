@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import { collectMobileMailboxOutboxEvents } from "./mobileMailboxOutbox";
+import { collectMobileMailboxOutboxEvents, mailboxEnvelopeToMobileOutboxEvent } from "./mobileMailboxOutbox";
 
 test("collectMobileMailboxOutboxEvents skips stale route events without blocking current replay", async () => {
   const acceptedFulfilled: string[] = [];
@@ -397,3 +397,24 @@ function mailboxTimelineEvent(input: {
     createdAt: input.createdAt
   };
 }
+
+test("mailboxEnvelopeToMobileOutboxEvent keeps the thread a phone message was written in", () => {
+  // The phone falls back to the mailbox whenever the live tunnel fails it; a
+  // reply that lost its thread on the way landed in the main timeline while
+  // the phone kept showing it in the thread.
+  const threaded = mailboxEnvelopeToMobileOutboxEvent({
+    ...mailboxOutboxEvent({ eventId: "threaded-1", conversationId: "conversation-1", content: "In the thread." }),
+    payload: { content: "In the thread.", threadRootId: " root-1 " }
+  });
+  assert.deepEqual(threaded, {
+    eventId: "threaded-1",
+    conversationId: "conversation-1",
+    createdAt: "2026-08-13T00:00:00.000Z",
+    payload: { content: "In the thread.", threadRootId: "root-1" }
+  });
+  const plain = mailboxEnvelopeToMobileOutboxEvent({
+    ...mailboxOutboxEvent({ eventId: "plain-1", conversationId: "conversation-1", content: "In the chat." }),
+    payload: { content: "In the chat.", threadRootId: "   " }
+  });
+  assert.deepEqual(plain?.payload, { content: "In the chat." }, "a blank root is no root");
+});

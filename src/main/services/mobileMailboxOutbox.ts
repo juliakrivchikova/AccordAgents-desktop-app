@@ -240,10 +240,17 @@ export function mailboxEnvelopeToMobileOutboxEvent(value: unknown): MobileOutbox
   if (!content) {
     return undefined;
   }
+  // The thread the message was written in travels with it here as it does on
+  // the live tunnel: the phone falls back to the mailbox whenever the tunnel
+  // fails it, and a reply that lost its thread on the way landed in the main
+  // timeline while the phone kept showing it in the thread.
+  const threadRootId = typeof (payload as { threadRootId?: unknown }).threadRootId === "string"
+    ? (payload as { threadRootId: string }).threadRootId.trim()
+    : "";
   return {
     eventId,
     conversationId,
     ...(typeof envelope.createdAt === "string" ? { createdAt: envelope.createdAt } : {}),
-    payload: { content }
+    payload: { content, ...(threadRootId ? { threadRootId } : {}) }
   };
 }
