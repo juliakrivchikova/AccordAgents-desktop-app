@@ -3802,6 +3802,42 @@ test("a batch the desktop refuses outright is answered with an empty ack rather 
   } finally { phone.close(); desktop.close(); await relay.close(); }
 });
 
+test("a desktop whose own storage fails stays silent, so the phone keeps the event instead of counting a refusal", async () => {
+  const key = Buffer.from("q".repeat(32)).toString("base64url");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  // No fixed conversation: the scope is the catalog's to answer, as on the
+  // User's desktop, and here the catalog's storage is what fails.
+  const desktop = new MobileRelayControlService({
+    relayUrl: address.url, rendezvousId: "rv-storage-down", relayCapability: "PAIRING-FINGERPRINT",
+    relaySealKeyBase64: key, streamId: "storage-down:phone", reconnectDelayMs: 50
+  }, sender([]), {
+    async listChats() { return []; },
+    async listTimeline() { return []; },
+    // The read behind the scope check, failing the way the sqlite CLI does
+    // under load: a timeout, not a verdict on the chat.
+    isConversationAllowed() { throw new Error("sqlite3 timed out after 10000ms"); }
+  });
+  const phone = new RelayTunnelClient({
+    relayUrl: address.url, rendezvousId: "rv-storage-down", role: "phone", capability: "PAIRING-FINGERPRINT", streamId: "storage-down:phone"
+  });
+  try {
+    await desktop.connect();
+    await phone.connect();
+    let answered: { logicalMessageId: string } | undefined;
+    const off = phone.on("message", (message) => { answered = message; });
+    await phone.sendCiphertext({
+      logicalMessageId: "storage-down",
+      ciphertext: await sealMobileRelayPayload({ type: "mobile.outbox.events", events: [{
+        eventId: "kept-1", conversationId: "conversation-1", payload: { content: "hello" }
+      }] }, key)
+    });
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    off();
+    assert.equal(answered, undefined, "no ack at all: an empty one would be counted as a refusal, and five of those set the message aside for good");
+  } finally { phone.close(); desktop.close(); await relay.close(); }
+});
+
 test("cards remembered as delivered are forgotten again when the durable sink refuses the batch, and a second snapshot inside the publish window does not ring twice", async () => {
   let publishes = 0;
   let release: (() => void) | undefined;

@@ -400,6 +400,11 @@ function base64DecodedBytes(value: string): number {
 
 /** Some answers from the phone could not be applied here; the rest of the batch
  *  went through. Carries the event ids to leave out of the ack. */
+/** A batch this desktop refuses for good — a chat outside the pairing's
+ *  scope. Only this is answered with an ack that names nothing; a failure of
+ *  the desktop's own (storage, a lock) is not an answer at all. */
+class MobileOutboxRefusedError extends Error {}
+
 class MobileDecisionDeliveryError extends Error {
   constructor(readonly eventIds: string[], detail: string) {
     super(`A card answer from the phone could not be applied: ${detail}`);
@@ -700,11 +705,16 @@ export class MobileRelayControlService {
         result.eventIds.push(...accepted.eventIds);
         result.runIds.push(...accepted.runIds);
       } catch (error) {
+        // Given up for good: the count is reported and then released, as the
+        // delivery path releases it, so a later answer under the same id does
+        // not start out with this one's attempts.
+        const key = mobileEventScopeKey(event.conversationId, event.eventId);
         this.onDecisionDiagnostic?.({
           conversationId: event.conversationId, eventId: event.eventId, kind: event.kind, targetKey: event.payload.targetKey,
-          outcome: "given-up", attempts: this.decisionAttemptsByKey.get(mobileEventScopeKey(event.conversationId, event.eventId)) ?? 0,
+          outcome: "given-up", attempts: this.decisionAttemptsByKey.get(key) ?? 0,
           message: error instanceof Error ? error.message : String(error)
         });
+        this.decisionAttemptsByKey.delete(key);
       }
     }
     return result;
@@ -753,18 +763,34 @@ export class MobileRelayControlService {
       await this.sendMachineAccess(`${message.logicalMessageId}:machines`, this.lastPhoneDeviceId);
       return;
     }
-    let accepted: MobileRelayAcceptedDetail;
+    // Refused outright (a chat outside the pairing's scope, a malformed
+    // event): say so with an ack that names nothing, or the phone waits the
+    // whole ack timeout for an answer that never comes — and, now that it
+    // flushes every chat's queue in one pass, holds every other chat's
+    // sends behind it.
+    let request: MobileOutboxRequest;
     try {
-      accepted = await this.prepareMobileOutboxRequest(assertMobileOutboxRequest(payload));
+      request = assertMobileOutboxRequest(payload);
     } catch (error) {
-      // Refused outright (a chat outside the pairing's scope, a malformed
-      // event): say so with an ack that names nothing, or the phone waits the
-      // whole ack timeout for an answer that never comes — and, now that it
-      // flushes every chat's queue in one pass, holds every other chat's
-      // sends behind it.
       await this.sendAck(message.logicalMessageId, emptyAcceptedResult()).catch(() => {
         // The refusal itself is what is reported below.
       });
+      throw error;
+    }
+    let accepted: MobileRelayAcceptedDetail;
+    try {
+      accepted = await this.prepareMobileOutboxRequest(request);
+    } catch (error) {
+      if (error instanceof MobileOutboxRefusedError) {
+        await this.sendAck(message.logicalMessageId, emptyAcceptedResult()).catch(() => {
+          // The refusal itself is what is reported below.
+        });
+      }
+      // Anything else — storage that did not answer, a lock held elsewhere —
+      // is this desktop's trouble, not a verdict on the event: no ack, so the
+      // phone keeps it and, after its wait, tries the mailbox as it always
+      // did. Answered with an empty ack, the phone counted a refusal, and
+      // five of those in a bad few minutes set a message aside for good.
       throw error;
     }
     // A card answered on the phone travels this path whenever the desktop is
@@ -824,7 +850,7 @@ export class MobileRelayControlService {
     const runningBatches: MobileTimelineEvents[] = [];
     for (const event of request.events) {
       if (!(await this.isConversationAllowed(event.conversationId))) {
-        throw new Error("Mobile relay event conversationId is outside the paired scope.");
+        throw new MobileOutboxRefusedError("Mobile relay event conversationId is outside the paired scope.");
       }
       const mobileEventKey = mobileEventScopeKey(event.conversationId, event.eventId);
       const runId = isMobileRunCancelEvent(event) ? undefined : `mobile-${event.eventId || randomUUID()}`;

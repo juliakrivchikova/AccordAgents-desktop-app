@@ -4981,7 +4981,18 @@ export class ChatService {
       let dispatch: { targets: ChatParticipant[]; unknownHandles: string[] };
       let skillValidation: { skillMentions: ChatSkillMention[]; targets: ChatParticipant[]; blocks: string[] };
       let nativeGoal: ReturnType<typeof parseNativeGoalCommand> = { kind: "none" };
-      const chatThreadRootId = request.chatThreadRootId?.trim() || undefined;
+      const requestedThreadRootId = request.chatThreadRootId?.trim() || undefined;
+      // A thread root this chat does not hold — the phone can name a row the
+      // desktop never had, a machine's own note or a row since deleted —
+      // would file the message under a thread nobody can open. It goes to
+      // the chat itself instead, and the chat says so.
+      const chatThreadRootId = requestedThreadRootId &&
+        conversation.messages.some((message) => message.id === requestedThreadRootId)
+        ? requestedThreadRootId
+        : undefined;
+      if (requestedThreadRootId && !chatThreadRootId) {
+        warnings.push("The thread this message was written in is not in this chat, so it was posted to the chat itself.");
+      }
       const replyContext: ChatDispatchReplyContext = {
         parentMessageId: request.parentMessageId,
         threadId: request.threadId?.trim() || undefined,
