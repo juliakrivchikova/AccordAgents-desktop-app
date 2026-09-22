@@ -66,6 +66,9 @@
   // What one read of the box brings back, and how much of a backlog the
   // catch-up after opening will work through before it draws what it has.
   const MAILBOX_PAGE_SIZE = 500;
+  // How long one mailbox request may take before it counts as failed. The
+  // worker's background read allows ten seconds; the page can afford more.
+  const MAILBOX_FETCH_TIMEOUT_MS = 15_000;
   const CATCH_UP_PAGE_BUDGET = 25;
   const CATCH_UP_BUDGET_MS = 8_000;
   let activeFlushOutboxPromise;
@@ -392,6 +395,15 @@
       }
       const registration = await navigator.serviceWorker.ready;
       let subscription = await registration.pushManager.getSubscription();
+      // The relay's key before anything is given up: a phone that cannot
+      // reach the relay just now (opened offline, on a poor connection) keeps
+      // the subscription it has rather than trading it for a replacement it
+      // cannot make — which left it with none until the next launch.
+      const vapidUrl = new URL("/v1/push/vapid", endpoint);
+      const vapidBody = await (await fetch(vapidUrl.toString())).json();
+      if (!vapidBody?.publicKey) {
+        return;
+      }
       // A subscription can stop being delivered without ever being reported
       // gone: the push service keeps accepting rings for it, the phone hears
       // nothing, and from in here the two cases look identical. Nothing
@@ -408,11 +420,6 @@
         }
       }
       if (!subscription) {
-        const vapidUrl = new URL("/v1/push/vapid", endpoint);
-        const vapidBody = await (await fetch(vapidUrl.toString())).json();
-        if (!vapidBody?.publicKey) {
-          return;
-        }
         subscription = await registration.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: base64UrlToBytes(vapidBody.publicKey)
@@ -3748,7 +3755,12 @@
       url.searchParams.set("reader", "phone");
       const response = await fetch(url.toString(), {
         method: "GET",
-        headers: Object.assign({ "accept": "application/json" }, request.headers)
+        headers: Object.assign({ "accept": "application/json" }, request.headers),
+        // A response that never comes must not hold the catch-up open for
+        // ever: while it ran, every poll stood aside and every return to the
+        // foreground waited on it, so one stalled connection was a phone that
+        // never synced again until it was relaunched.
+        signal: AbortSignal.timeout(MAILBOX_FETCH_TIMEOUT_MS)
       });
       noteMailboxResponse(response);
       if (response.status === 401) {
@@ -3981,7 +3993,10 @@
   // reached the phone while the list was being built is not in it yet; both
   // moments are this phone's own clock, so they compare whatever the desktop
   // stamped the card with (a choice carries its run's start).
-  const PENDING_CARD_RECONCILE_GRACE_MS = 2 * 60_000;
+  // Five minutes rather than two: the list is read from the desktop's
+  // database, and a card reaches the phone from the desktop's memory first —
+  // a save that lags behind must not read as the card being closed.
+  const PENDING_CARD_RECONCILE_GRACE_MS = 5 * 60_000;
 
   /**
    * The desktop's chat list says which cards still wait in every chat it
@@ -4296,7 +4311,10 @@
   // Answered cards a batch does not name are kept as the record under their
   // messages; only this many per chat, newest first, so the store cannot grow
   // with every choice ever answered.
-  const CONTROL_CARDS_KEPT_ANSWERED_LIMIT = 100;
+  // Per chat, and the record only matters for the chats still being read:
+  // a hundred each across every chat the phone has opened grew towards the
+  // few megabytes the browser allows, past which no new card is stored.
+  const CONTROL_CARDS_KEPT_ANSWERED_LIMIT = 30;
 
   function controlCardsFor(conversationId) {
     const stored = loadControlCards()[conversationId];
@@ -4323,9 +4341,13 @@
     // What the desktop sends is the whole of what still waits, so a pending
     // card it leaves out is closed. An answered card it leaves out was only
     // outside the page it read: it stays, as the record under its message.
+    // A card learned from a member's machine directly is kept as well: the
+    // desktop cannot vouch for it, and a batch that does not name it says
+    // only that the desktop has not seen it yet — the same rule the chat
+    // list's reconciliation follows.
     const incoming = new Set(stamped.map(function (card) { return card && card.id; }));
     const kept = previous.filter(function (card) {
-      return card && card.id && !incoming.has(card.id) && card.status !== "pending";
+      return card && card.id && !incoming.has(card.id) && (card.status !== "pending" || card.source === "machine");
     }).sort(function (left, right) {
       return String(right.createdAt || "").localeCompare(String(left.createdAt || ""));
     }).slice(0, CONTROL_CARDS_KEPT_ANSWERED_LIMIT);
@@ -4532,9 +4554,22 @@
     });
   }
 
+  // One more pass, queued behind a flush in flight: that flush read the queue
+  // before the entry this call is about was written, so answering with it
+  // alone left a message sent during a slow flush waiting for the retry tick
+  // half a minute later. However many ask meanwhile, one pass follows.
+  let queuedFlushOutboxPromise;
+
   function flushOutbox(options) {
     if (activeFlushOutboxPromise) {
-      return activeFlushOutboxPromise;
+      if (!queuedFlushOutboxPromise) {
+        const again = function () {
+          queuedFlushOutboxPromise = undefined;
+          return flushOutbox(options);
+        };
+        queuedFlushOutboxPromise = activeFlushOutboxPromise.then(again, again);
+      }
+      return queuedFlushOutboxPromise;
     }
     activeFlushOutboxPromise = flushOutboxInternal(options).finally(function () {
       activeFlushOutboxPromise = undefined;
@@ -4593,7 +4628,8 @@
         const response = await fetch(request.url, {
           method: "POST",
           headers: Object.assign({ "content-type": "application/json" }, request.headers),
-          body: JSON.stringify({ events: [event] })
+          body: JSON.stringify({ events: [event] }),
+          signal: AbortSignal.timeout(MAILBOX_FETCH_TIMEOUT_MS)
         });
         noteMailboxResponse(response);
         if (response.status === 401) {
@@ -5896,7 +5932,15 @@
     const held = mark.eventId ? outboxStatusById.get(mark.eventId) : undefined;
     if (held && held.status === "refused") return { locked: false, text: CONTROL_CARD_REFUSED_TEXT };
     const at = Date.parse(mark.at || "");
-    const stale = !Number.isFinite(at) || Date.now() - at > CONTROL_CARD_SENT_UNLOCK_MS;
+    // An answer nobody has taken yet may be lost, and ten minutes of that
+    // unlocks the card. One the desktop or the mailbox has taken is not lost:
+    // it is applied when the desktop is next up, and a second answer given
+    // meanwhile only raced it — the older one won on the desktop and the
+    // User's later one was quietly discarded. That answer waits a day before
+    // the card unlocks, for the rare desktop that took it and then forgot.
+    const owed = !held || desktopOwesEntry(held);
+    const unlockAfterMs = owed ? CONTROL_CARD_SENT_UNLOCK_MS : CONTROL_CARD_TAKEN_UNLOCK_MS;
+    const stale = !Number.isFinite(at) || Date.now() - at > unlockAfterMs;
     if (stale) return { locked: false, text: CONTROL_CARD_STALE_TEXT };
     return { locked: true, text: held && held.status !== "acked" ? CONTROL_CARD_SAVED_TEXT : CONTROL_CARD_SENT_TEXT };
   }
@@ -5940,6 +5984,8 @@
   const CONTROL_CARD_REFUSED_TEXT = "The desktop did not take this answer. You can answer again.";
   // How long an answer may stay on its way before the card is offered again.
   const CONTROL_CARD_SENT_UNLOCK_MS = 10 * 60_000;
+  // For an answer the desktop or the mailbox has taken: see cardSentState.
+  const CONTROL_CARD_TAKEN_UNLOCK_MS = 24 * 60 * 60_000;
 
   function renderControlCards(conversationId) {
     const host = document.getElementById("control-cards");
@@ -8395,6 +8441,11 @@
       await pollMailboxTimeline().catch(function () { return 0; });
       await render();
       ensureLiveRelayForOpenConversation();
+      // A launch that could not register for rings tries again here, on the
+      // connection the User has now, rather than on the next launch.
+      if (!pushSubscriptionEnsured) {
+        void ensurePushSubscription();
+      }
     })().finally(function () {
       foregroundResyncPromise = undefined;
     });
@@ -9019,17 +9070,14 @@
       // the layout mid-tap, and a tap that changes nothing on screen can be
       // dropped before it becomes a click -- which is how a tap came to only
       // put the keyboard away, leaving the message sitting there (the User,
-      // 2026-09-21). The button therefore sends on pointerup as well, and this
-      // guard makes the two paths one send.
-      let sending = false;
-      const sendComposer = async function () {
-        if (sending) return;
-        sending = true;
-        try {
-          await submitComposer();
-        } finally {
-          sending = false;
-        }
+      // 2026-09-21). The button therefore sends on pointerup as well, and
+      // submitComposer makes the two paths one send: it empties the field and
+      // takes the pictures before its first wait, so the second path finds
+      // nothing. A flag held across the whole send did that too, and more: it
+      // also dropped the next message typed while the first was still going
+      // out over a slow connection, with nothing on screen to say so.
+      const sendComposer = function () {
+        return submitComposer();
       };
       // Slack's shape: one line until it is tapped, then the row of tools.
       // Anything already written keeps it open, so a draft is never left

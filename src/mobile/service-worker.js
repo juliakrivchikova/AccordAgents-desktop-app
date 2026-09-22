@@ -389,7 +389,22 @@ self.addEventListener("push", (event) => {
     } finally {
       await showArrivalNotifications(result);
     }
-    await acknowledgeStored(await sync.catch(() => undefined));
+    const settled = await sync.catch(() => undefined);
+    if (result === undefined && settled && settled.synced) {
+      // The sync outran the deadline: the generic notice was shown for it,
+      // and it stayed while the named ones never came. They come now and the
+      // generic one goes, so the lock screen names the chat after all.
+      await showArrivalNotifications(settled);
+      try {
+        for (const shown of await self.registration.getNotifications({ tag: "accordagents-sync" })) {
+          shown.close();
+        }
+      } catch {
+        // Two notifications for one arrival is the worse of the two outcomes
+        // only by a little.
+      }
+    }
+    await acknowledgeStored(settled);
   })());
 });
 
@@ -432,7 +447,7 @@ self.addEventListener("notificationclick", (event) => {
           // in a thread, so the list of what just happened is the one place
           // that always holds the thing the notification was about. The page
           // owns navigation; it is told the tab, nothing more.
-          (focused || client).postMessage({ type: "accord-open-activity", conversationId });
+          (focused || client).postMessage({ type: "accord-open-activity" });
           return focused;
         }
       }

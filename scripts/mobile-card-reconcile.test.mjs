@@ -56,10 +56,17 @@ const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/cs
 const originHeaders = loadMobileOriginHeaders(root);
 /** Every mailbox request the page made, for what it says about itself. */
 const seenMailboxUrls = [];
+/** While set, the box takes nothing: an answer stays this phone's to hand over. */
+let refuseAppends = false;
 const site = createServer(async (req, res) => {
   const url = req.url || "/";
   if (url.startsWith("/v1/mailbox/") || url.startsWith("/v1/push/")) {
     seenMailboxUrls.push(`${req.method} ${url}`);
+    if (refuseAppends && req.method === "POST" && url.startsWith("/v1/mailbox/events")) {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: false }));
+      return;
+    }
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const upstream = await fetch(`http://127.0.0.1:${MAILBOX_PORT}${url}`, {
@@ -269,8 +276,10 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     assert.ok(seenMailboxUrls.some((url) => url.startsWith("GET ") && url.includes("reader=phone") && url.includes("afterArrival=")),
       `the page's cursor reads name the phone as the reader: ${seenMailboxUrls.filter((url) => url.startsWith("GET ")).slice(0, 3).join(" | ")}`);
 
-    // An answer that has been on its way for too long with the card still
-    // waiting has stopped meaning anything: the card unlocks and says so.
+    // An answer the mailbox has taken is not lost, only waiting for the
+    // desktop: however long ago it was given, the card stays locked and says
+    // the answer was sent. Unlocked, a second answer only raced the first,
+    // and the older one won on the desktop.
     await evaluate(`(() => {
       const marks = JSON.parse(localStorage.getItem("accordagents.mobile.controlCardSent.v1") || "{}");
       marks["perm-bash"] = { ...marks["perm-bash"], at: new Date(Date.now() - 11 * 60000).toISOString() };
@@ -282,11 +291,13 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     rows = await waitFor(`(() => {
       const rows = ${pendingRows};
       const row = rows && rows.find((item) => item.card === "perm-bash");
-      return row && /You can answer again/.test(row.text) && row.disabled.every((dead) => !dead) ? rows : null;
-    })()`, "the stale answer to unlock the card");
-    assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardLocked("perm-bash")`), false);
-    // The earlier answer is still on its way (say the desktop never took it):
-    // answering again replaces it rather than racing it.
+      return row && /Answer sent/.test(row.text) && row.disabled.every(Boolean) ? rows : null;
+    })()`, "an answer the mailbox holds to keep the card locked");
+    assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardLocked("perm-bash")`), true);
+    // An answer nobody has taken (say the desktop never did) that has been on
+    // its way for too long has stopped meaning anything: the card unlocks and
+    // says so, and answering again replaces the earlier answer rather than
+    // racing it.
     const earlierEventId = await evaluate(`(async () => {
       const marks = JSON.parse(localStorage.getItem("accordagents.mobile.controlCardSent.v1") || "{}");
       const eventId = marks["perm-bash"] && marks["perm-bash"].eventId;
@@ -299,6 +310,18 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
       return eventId;
     })()`);
     assert.ok(earlierEventId, "the mark names the queue entry that carried the first answer");
+    // The box takes nothing for now, so the launch's flush cannot hand the
+    // answer over again behind the test's back.
+    refuseAppends = true;
+    await reload();
+    await openActivityPending();
+    rows = await waitFor(`(() => {
+      const rows = ${pendingRows};
+      const row = rows && rows.find((item) => item.card === "perm-bash");
+      return row && /You can answer again/.test(row.text) && row.disabled.every((dead) => !dead) ? rows : null;
+    })()`, "the stale answer to unlock the card");
+    assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardLocked("perm-bash")`), false);
+    refuseAppends = false;
     await evaluate(`document.querySelector('#activity-list .act-row[data-card-id="perm-bash"] .act-pill[data-option-id="deny"]').click()`);
     await waitFor(`(() => {
       const rows = ${pendingRows};
