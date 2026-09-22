@@ -168,7 +168,29 @@ a batch with cards and no rows was dropped before it reached the mailbox. Now:
   You can answer again."; an answer the desktop refused five times unlocks at
   once ("The desktop did not take this answer. You can answer again."). A
   second answer replaces the first one still on its way rather than racing
-  it: the earlier queue entry is set aside, never sent.
+  it: the earlier queue entry is set aside, never sent. An answer the desktop
+  or the mailbox has already taken is not lost, only waiting for the desktop
+  to be up: that card stays locked for a day, because a second answer given
+  meanwhile only raced the first, and the older one won on the desktop.
+- The desktop answers a refused batch with an empty ack only when it refuses
+  it for good (a chat outside the pairing's scope, a malformed event). A
+  failure of its own — storage that did not answer — gets no ack, so the
+  phone keeps the event and tries the mailbox; counted as refusals, five bad
+  minutes on the desktop set a message aside for good.
+- Sending twice in a row works: the second message is queued while the first
+  is still going out, and goes out right behind it. A tap on a row in
+  Activity is dropped only for half a second after rows have actually moved,
+  not after every redraw (the clock, a streaming preview kept every Allow and
+  Stop dead a third of the time while a member streamed).
+- A message opens on its own screen on tap, except a system note: the desktop
+  offers a thread on every message but those, and the phone offers exactly
+  what the desktop does. A reply written with a thread open is placed by that
+  thread on the desktop; a thread root the chat does not hold sends the
+  message to the chat itself, with a warning, rather than into a thread nobody
+  can open.
+- A launch that cannot reach the relay keeps the push subscription it has: the
+  relay's key is fetched before the old subscription is given up, and a launch
+  that could not register tries again on the next return to the foreground.
 - On the desktop, an answer read from the mailbox that cannot be applied is
   tried again on the following polls, five times, then given up — and the
   chat's cards are sent again either way, so the phone hears the state the

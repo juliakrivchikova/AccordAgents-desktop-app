@@ -1072,13 +1072,14 @@ button.mobile-chat-group-title:active {
 }
 
 .composer:not([data-expanded="1"]) .composer-input-wrap {
-  border-radius: 21px;
+  border-radius: 22px;
 }
 
-.composer:not([data-expanded="1"]) .composer textarea,
+/* Folded, the field is the only thing on the row to tap, so it keeps the
+   44px a finger hits reliably. */
 .composer:not([data-expanded="1"]) #composer-input {
-  min-height: 38px;
-  padding: 9px 14px;
+  min-height: 44px;
+  padding: 12px 14px;
 }
 
 /* 44px is the smallest target a finger hits reliably; the glyph inside is
@@ -2090,6 +2091,22 @@ button.mobile-chat-group-title:active {
   transform: translateX(-88px);
 }
 
+/* The press still shows on a row that can be opened: laid over the opaque
+   surface rather than replacing it, so the row never reads as transparent. */
+.act-swipe .act-swipe-surface[data-tappable="1"]:active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--press);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .act-swipe .act-swipe-surface {
+    transition: none;
+  }
+}
+
 /* ---- Activity ---- */
 #activity-screen {
   position: relative;
@@ -2487,9 +2504,9 @@ button.mobile-chat-group-title:active {
 
 .act-detail .control-card-option[data-option-id="cancel"] {
   align-self: flex-start;
-  min-height: 36px;
+  min-height: 44px;
   border-color: transparent;
-  padding: 0 4px;
+  padding: 0 12px;
   color: var(--acc);
   font-weight: 600;
 }
@@ -2579,7 +2596,15 @@ button.mobile-chat-group-title:active {
 }
 
 .act-pill:active,
-.set-button:active {
+.set-button:active,
+.act-swipe-action:active,
+.thread-reply-button:active,
+.act-detail .control-card-option:active {
+  background: var(--press);
+}
+
+/* A message opens on its own screen; the press says the row was hit. */
+.message-row[data-thread-root]:active {
   background: var(--press);
 }
 
@@ -2594,7 +2619,10 @@ button.mobile-chat-group-title:active {
 .act-pill:focus-visible,
 .set-button:focus-visible,
 .act-stop:focus-visible,
-.act-open-chat:focus-visible {
+.act-open-chat:focus-visible,
+.act-swipe-action:focus-visible,
+.thread-reply-button:focus-visible,
+.act-detail .control-card-option:focus-visible {
   outline: 2px solid var(--fg1);
   outline-offset: 1px;
 }

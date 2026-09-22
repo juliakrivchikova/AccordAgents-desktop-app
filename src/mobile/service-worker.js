@@ -1,4 +1,4 @@
-const ASSET_VERSION = "2026-09-22-pwa-message-screen-v1";
+const ASSET_VERSION = "2026-09-22-pwa-review-fixes-v1";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
 const CACHE_NAME = `accordagents-mobile-shell-v70-${ASSET_VERSION}`;
@@ -434,10 +434,6 @@ self.addEventListener("message", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const data = event.notification.data || {};
-  const conversationId = typeof data.conversationId === "string" && data.conversationId.trim()
-    ? data.conversationId.trim()
-    : "";
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (clients) => {
       for (const client of clients) {

@@ -91,7 +91,15 @@
   function request(open) {
     return new Promise(function (resolve, reject) {
       open.onupgradeneeded = function () { upgradeControlDb(open.result, open.transaction); };
-      open.onsuccess = function () { resolve(open.result); };
+      open.onsuccess = function () {
+        const db = open.result;
+        // The other context asking for a newer version must not wait on this
+        // connection: it is closed, and the next transaction opens afresh at
+        // whatever version is then on disk. Both contexts open a connection
+        // per transaction, so nothing long-lived is lost with it.
+        db.onversionchange = function () { db.close(); };
+        resolve(db);
+      };
       open.onerror = function () { reject(open.error || new Error("IndexedDB open failed.")); };
       open.onblocked = function () {
         reject(new Error("Another tab is holding this phone's database at an older version."));

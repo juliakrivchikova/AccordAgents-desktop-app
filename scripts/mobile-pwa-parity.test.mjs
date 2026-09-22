@@ -409,6 +409,13 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     await waitFor(rowAvatars, (rows) => rows.length === 6, "the chat is back after the reload");
     assert.deepEqual(await systemRows(), ["The machine restarte"], "the desktop's internal trigger is gone; the phone's own machine note stays");
     assert.equal(await evaluate(`localStorage.getItem("accordagents.mobile.internalSystemRowsDropped.v1")`), "1", "the sweep runs once");
+    // The desktop offers a thread on every message but a system note, and
+    // the phone offers exactly what the desktop does.
+    assert.equal(
+      await evaluate(`(() => document.querySelectorAll('#message-list .message-row[data-author="system"][data-thread-root]').length)()`),
+      0,
+      "a system note does not open on its own screen"
+    );
 
     // --- a thread can be started from the phone -----------------------------
     // Reading a thread is no use if one can only be begun from the desktop.

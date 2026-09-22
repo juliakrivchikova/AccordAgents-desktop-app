@@ -102,6 +102,7 @@
   let activityMemo;
   // When the Activity list was last redrawn; taps right after it are ignored.
   let lastActivityListRenderAt = 0;
+  let lastActivityRowOrder = "";
   let chatListRefreshTimer;
   let lastChatListRefreshAt = 0;
   let activityRereadTimer;
@@ -789,6 +790,13 @@
         let value;
         tx.onerror = function () {
           reject(tx.error || new Error("Timeline transaction failed."));
+        };
+        // A transaction that fails still holds its connection open until it
+        // is closed here; left to the garbage collector, that connection
+        // blocks the next version change the worker asks for.
+        tx.onabort = function () {
+          reject(tx.error || new Error("Timeline transaction aborted."));
+          db.close();
         };
         tx.oncomplete = function () {
           // Activity keeps what it read until the store changes. The write
@@ -4227,7 +4235,9 @@
     picture.src = src;
     picture.alt = alt || "Picture";
     viewer.hidden = false;
-    applyDock();
+    // The bar leaves and comes back with the viewer; a reader at the latest
+    // message stays there across both, as across the keyboard.
+    keepingReaderAtLatest(applyDock);
   }
 
   function closeImageViewer() {
@@ -4240,7 +4250,7 @@
     if (picture) {
       picture.removeAttribute("src");
     }
-    applyDock();
+    keepingReaderAtLatest(applyDock);
   }
 
   function wireImageViewer() {
@@ -5143,8 +5153,10 @@
     let source = displayedMessageText(raw, author);
     // A message that is nothing but the block it asked its question with: the
     // card carries the question, and an empty bubble with a timestamp says
-    // nothing about what happened.
-    if (!source.trim() && raw.trim()) {
+    // nothing about what happened. Only when a question was in fact asked —
+    // a message that was nothing but "Participant requests: none." asked
+    // nothing, and said so wrongly.
+    if (!source.trim() && /^\s*user choice\s*:/im.test(raw)) {
       source = "Asked you a question.";
     }
     container.dataset.markdownRaw = raw;
@@ -6064,6 +6076,10 @@
       input.placeholder = "Answer in your own words";
       input.setAttribute("aria-label", "Answer in your own words");
       input.disabled = sent;
+      // The keyboard this field raises takes the bar with it, as the
+      // composer's does, and gives it back the same way.
+      input.addEventListener("focus", function () { keepingReaderAtLatest(applyDock); });
+      input.addEventListener("blur", function () { keepingReaderAtLatest(applyDock); });
       const send = document.createElement("button");
       send.type = "button";
       send.className = "control-card-option";
@@ -6209,7 +6225,12 @@
    *  measuring cannot disagree about it. */
   function composerHasFocus() {
     const active = document.activeElement;
-    return Boolean(active && active.id === "composer-input");
+    if (!active) return false;
+    if (active.id === "composer-input") return true;
+    // A card's own answer field raises the keyboard the same way the
+    // composer does, and the bar has no room beside it either.
+    return (active.tagName === "INPUT" || active.tagName === "TEXTAREA") &&
+      Boolean(active.closest && active.closest("#timeline-screen"));
   }
 
   /** What is on screen, read from the screens themselves rather than kept
@@ -6746,6 +6767,9 @@
     } else {
       const actions = document.createElement("div");
       actions.className = "act-actions";
+      // A tap that misses a pill by a few pixels stays on the list: it was
+      // meant for an answer, not for opening the chat behind the row.
+      actions.addEventListener("click", function (event) { event.stopPropagation(); });
       const buttons = [];
       for (const option of Array.isArray(card.options) ? card.options : []) {
         const button = document.createElement("button");
@@ -6922,7 +6946,16 @@
     });
     if (signature === lastActivityRenderSignature) return;
     lastActivityRenderSignature = signature;
-    lastActivityListRenderAt = Date.now();
+    // The guard against a tap meant for a row that has just moved is armed
+    // only when rows did move. A redraw for the clock, a streaming preview or
+    // a card's state leaves every row where it was, and a tap on one of them
+    // is meant — armed on those too, a Stop or an Allow was dropped, with
+    // nothing on screen to say so, for half a second after every redraw.
+    const order = tab + "\n" + rows.map(function (row) { return row.key; }).join("\n");
+    if (order !== lastActivityRowOrder) {
+      lastActivityRowOrder = order;
+      lastActivityListRenderAt = Date.now();
+    }
     list.replaceChildren();
     list.dataset.activityTab = tab;
     if (rows.length === 0) {
@@ -7850,7 +7883,9 @@
     // Which message this row is, for the screen a tap opens. Rows with nothing
     // the desktop can thread from -- scaffolding, a message still queued on
     // this phone -- carry none, so a tap on them does nothing.
-    if (entry.sourceId && !entry.scaffolding && entry.status !== "queued") {
+    // Not a system note: the desktop offers a thread on every message but
+    // those, and the phone offers exactly what the desktop does.
+    if (entry.sourceId && !entry.scaffolding && entry.status !== "queued" && entry.author !== "system") {
       item.dataset.threadRoot = entry.sourceId;
     } else {
       delete item.dataset.threadRoot;
@@ -8000,7 +8035,9 @@
     }
     item.dataset.rowSignature = messageRowSignature(entry);
     item.dataset.status = entry.status;
-    if (entry.sourceId && !entry.scaffolding && entry.status !== "queued") {
+    // Not a system note: the desktop offers a thread on every message but
+    // those, and the phone offers exactly what the desktop does.
+    if (entry.sourceId && !entry.scaffolding && entry.status !== "queued" && entry.author !== "system") {
       item.dataset.threadRoot = entry.sourceId;
     } else {
       delete item.dataset.threadRoot;
@@ -8128,7 +8165,7 @@
       return;
     }
     sheet.hidden = !membersSheetOpen;
-    applyDock();
+    keepingReaderAtLatest(applyDock);
     if (toggle) {
       toggle.setAttribute("aria-expanded", membersSheetOpen ? "true" : "false");
     }
@@ -8470,7 +8507,6 @@
     });
   }
 
-  // A notification names the chat it is about; tapping it lands there.
   /** Where a tapped notification lands: the Activity tab, showing what just
    *  happened across every chat. A chat can be one of many and a reply can be
    *  inside a thread, so the list is the one place that always holds it. */

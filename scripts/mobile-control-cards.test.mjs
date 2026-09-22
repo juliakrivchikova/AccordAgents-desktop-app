@@ -397,6 +397,7 @@ test("a card published by the desktop is answered on the phone and survives a re
     chrome.kill("SIGKILL");
     site.close();
     mailboxServer.close();
-    await rm(profile, { recursive: true, force: true });
+    // Chrome is still letting go of its profile for a moment after the kill.
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
