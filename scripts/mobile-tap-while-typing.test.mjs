@@ -156,20 +156,99 @@ test("a tap above the composer while the keyboard is up lands the first time", {
   try {
     await attachWithRetry();
 
+    // --- a choice looks and answers like the desktop's ----------------------
+    // The User, 2026-09-22: the phone showed bare option pills, no
+    // descriptions and no recommendation. Now every option is a numbered row
+    // with its description, the recommended one is marked and picked, and
+    // Submit answers.
+    await seed([card("card-recommended", {
+      recommendedOptionId: "no",
+      options: [
+        { id: "yes", label: "Yes", description: "Ship it today." },
+        { id: "no", label: "No", description: "Wait for the review." }
+      ]
+    })]);
+    const laidOut = await evaluate(`(() => {
+      const rows = Array.from(document.querySelectorAll('#control-cards .control-card-choice'));
+      return {
+        rows: rows.map((row) => row.dataset.optionId + ":" + row.getAttribute("aria-checked")),
+        recommended: Array.from(document.querySelectorAll('#control-cards .control-card-recommended')).map((chip) => chip.closest(".control-card-choice").dataset.optionId),
+        descriptions: Array.from(document.querySelectorAll('#control-cards .control-card-choice-description')).map((node) => node.textContent),
+        submitEnabled: !document.querySelector('#control-cards .control-card-submit').disabled
+      };
+    })()`);
+    assert.deepEqual(laidOut.rows, ["yes:false", "no:true", "custom:false"], "the recommended option is picked up front");
+    assert.deepEqual(laidOut.recommended, ["no"], "and marked Recommended");
+    assert.deepEqual(laidOut.descriptions.slice(0, 2), ["Ship it today.", "Wait for the review."], "every option shows its description");
+    assert.equal(laidOut.submitEnabled, true, "the recommendation can be sent as it stands");
+    // A pick and a note being typed survive a redraw of the chat.
+    await evaluate(`(() => {
+      document.querySelector('#control-cards .control-card-choice[data-option-id="yes"]').click();
+      document.querySelector('#control-cards .control-card-add-note').click();
+      const field = document.querySelector('#control-cards .control-card-note textarea');
+      field.value = "after lunch";
+      field.dispatchEvent(new Event("input"));
+      window.__cardNode = document.querySelector('#control-cards .control-card');
+      document.dispatchEvent(new Event("visibilitychange"));
+      return true;
+    })()`);
+    await sleep(1500);
+    const survived = await evaluate(`(() => {
+      const node = document.querySelector('#control-cards .control-card');
+      const field = node.querySelector('.control-card-note textarea');
+      return { same: node === window.__cardNode, value: field.value, focused: document.activeElement === field,
+        picked: node.querySelector('.control-card-choice[aria-checked="true"]').dataset.optionId };
+    })()`);
+    assert.deepEqual(survived, { same: true, value: "after lunch", focused: true, picked: "yes" }, "the card is not drawn again under the typing");
+    // Picking alone answers nothing; Submit, tapped once with the keyboard up, does.
+    assert.equal(await evaluate(`AccordAgentsMobile.isCardLocked("card-recommended")`), false, "a pick is not an answer");
+    await tapAt(await center("#control-cards .control-card-submit"));
+    await waitFor(`AccordAgentsMobile.isCardLocked("card-recommended")`, "Submit to be taken on the first tap", 3_000);
+    const sentChoice = await evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.filter((entry) => entry.kind === "choice.answered").map((entry) => entry.payload.detail))`);
+    assert.deepEqual(sentChoice.map((detail) => [detail.selectedOptionId, detail.note]), [["yes", "after lunch"]], "the pick goes with its note");
+    await waitFor(dockShown, "the bar to come back once Submit has landed");
+
+    // A choice a machine raised is built on the phone: it carries the
+    // recommendation the same way, and only when it names one of the options.
+    const machineCards = await evaluate(`[
+      AccordAgentsMobile.machineChoiceCard("c", { id: "m1", createdAt: "2026-09-23T00:00:00.000Z", metadata: { pendingChoice: { id: "q1", title: "T", question: "Q", status: "pending", recommendedOptionId: "b", options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] } } }).recommendedOptionId,
+      AccordAgentsMobile.machineChoiceCard("c", { id: "m2", createdAt: "2026-09-23T00:00:00.000Z", metadata: { pendingChoice: { id: "q2", title: "T", question: "Q", status: "pending", recommendedOptionId: "gone", options: [{ id: "a", label: "A" }] } } }).recommendedOptionId ?? null
+    ]`);
+    assert.deepEqual(machineCards, ["b", null], "a machine's choice carries its recommendation as the desktop's does");
+
+    // --- Cancel on the card cancels the choice --------------------------------
+    await seed([card("card-cancel", { allowsCancel: true })]);
+    await tapAt(await center("#control-cards .control-card-cancel"));
+    await waitFor(`AccordAgentsMobile.isCardLocked("card-cancel")`, "Cancel to be taken on the first tap", 3_000);
+    const cancelled = await evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.filter((entry) => entry.kind === "choice.answered" && entry.payload.targetKey === "choice:card-cancel").map((entry) => entry.payload.detail.cancel))`);
+    assert.deepEqual(cancelled, [true], "the choice is answered as cancelled");
+
     // --- a card's own answer, sent with one tap -----------------------------
     await seed([card("card-custom")]);
+    const unpicked = await evaluate(`({
+      picked: document.querySelectorAll('#control-cards .control-card-choice[aria-checked="true"]').length,
+      submitDisabled: document.querySelector('#control-cards .control-card-submit').disabled
+    })`);
+    assert.deepEqual(unpicked, { picked: 0, submitDisabled: true }, "with no recommendation nothing is picked and Submit waits for a pick");
+    await evaluate(`document.querySelector('#control-cards .control-card-choice[data-option-id="custom"]').click()`);
+    const emptyAnswer = await evaluate(`({
+      submitDisabled: document.querySelector('#control-cards .control-card-submit').disabled,
+      hint: !document.querySelector('#control-cards .control-card-hint').hidden
+    })`);
+    assert.deepEqual(emptyAnswer, { submitDisabled: true, hint: true }, "an empty own answer cannot be sent, and the card says why");
     await evaluate(`(() => {
-      const input = document.querySelector('#control-cards .control-card-custom input');
-      input.focus();
-      input.value = "the third one";
+      const field = document.querySelector('#control-cards .control-card-answer textarea');
+      field.focus();
+      field.value = "the third one";
+      field.dispatchEvent(new Event("input"));
       return true;
     })()`);
     await waitFor(`document.getElementById("home-dock").hidden`, "the bar to leave while typing");
-    await tapAt(await center("#control-cards .control-card-custom .control-card-option"));
+    await tapAt(await center("#control-cards .control-card-submit"));
     await waitFor(`AccordAgentsMobile.isCardLocked("card-custom")`, "the answer to be taken on the first tap", 3_000);
     await waitFor(dockShown, "the bar to come back once the tap has landed");
 
-    // --- Allow/Deny beside a draft in the composer, with one tap ------------
+    // --- an option picked beside a draft in the composer, with one tap ------
     await seed([card("card-option", { allowsCustomAnswer: false })]);
     await evaluate(`(() => {
       const input = document.getElementById("composer-input");
@@ -179,8 +258,10 @@ test("a tap above the composer while the keyboard is up lands the first time", {
       return true;
     })()`);
     await waitFor(`document.getElementById("home-dock").hidden`, "the bar to leave while typing in the composer");
-    await tapAt(await center('#control-cards .control-card-option[data-option-id="yes"]'));
-    await waitFor(`AccordAgentsMobile.isCardLocked("card-option")`, "the option to be taken on the first tap", 3_000);
+    await tapAt(await center('#control-cards .control-card-choice[data-option-id="yes"]'));
+    await waitFor(`document.querySelector('#control-cards .control-card-choice[data-option-id="yes"]').getAttribute("aria-checked") === "true"`, "the option to be picked on the first tap", 3_000);
+    await tapAt(await center("#control-cards .control-card-submit"));
+    await waitFor(`AccordAgentsMobile.isCardLocked("card-option")`, "the answer to be sent", 3_000);
     assert.equal(await evaluate(`document.getElementById("composer-input").value`), "a draft", "the draft is left alone");
 
     // --- a chat opened from the search results keeps its bar ----------------
@@ -207,6 +288,32 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     assert.equal(placement.dock, "chat", "the bar sits in the chat's column");
     assert.ok(placement.dockTop >= placement.composerBottom - 1, `the bar is under the composer, not over it: ${JSON.stringify(placement)}`);
     t.diagnostic(JSON.stringify(placement));
+
+    // --- Send, tapped with a finger, puts the keyboard away for good --------
+    // The send folded the composer at once, which moved the text field under
+    // the finger before the tap's click: the click landed on the field, and
+    // on iOS that raises the keyboard again (the User, 2026-09-22).
+    await evaluate(`(() => {
+      window.__clicks = [];
+      document.addEventListener("click", (event) => window.__clicks.push(event.target.closest("#send-button") ? "send-button" : (event.target.id || event.target.tagName)), true);
+      const input = document.getElementById("composer-input");
+      input.focus();
+      input.value = "sent with a finger";
+      input.dispatchEvent(new Event("input"));
+      return true;
+    })()`);
+    await waitFor(`document.getElementById("composer-form").dataset.expanded === "1"`, "the composer to open for typing");
+    const sendPoint = await center("#send-button");
+    await app.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+    await app.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...sendPoint, radiusX: 1, radiusY: 1, force: 1 }] });
+    await sleep(50);
+    await app.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await app.send("Emulation.setTouchEmulationEnabled", { enabled: false, maxTouchPoints: 1 });
+    await waitFor(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.some((entry) => entry.payload && entry.payload.content === "sent with a finger"))`, "the message to be sent");
+    await waitFor(`window.__clicks.length > 0 && document.getElementById("composer-form").dataset.expanded === ""`, "the tap's click and the composer folding back to one line");
+    const afterSend = await evaluate(`({ clicks: window.__clicks, active: document.activeElement && (document.activeElement.id || document.activeElement.tagName) })`);
+    assert.deepEqual(afterSend.clicks, ["send-button"], `the tap's click lands on Send, not on the text field: ${JSON.stringify(afterSend)}`);
+    assert.notEqual(afterSend.active, "composer-input", "the text field is not focused again after the send");
   } finally {
     app?.close();
     chrome.kill("SIGKILL");

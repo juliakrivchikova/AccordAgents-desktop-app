@@ -346,6 +346,8 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     assert.match(item, /Review is green/, "the message the question belongs to is shown with it");
     assert.equal(await evaluate(`document.getElementById("home-dock").hidden`), true, "the bar steps aside for the opened choice");
     await evaluate(`document.querySelector('#activity-item [data-option-id="staging"]').click()`);
+    // Picking selects; Submit answers, as on the desktop.
+    await evaluate(`document.querySelector('#activity-item .control-card-submit').click()`);
     await waitFor(`(async () => {
       const db = await new Promise((resolve) => { const r = indexedDB.open("accordagents-mobile-control"); r.onsuccess = () => resolve(r.result); });
       const rows = await new Promise((resolve) => { const all = db.transaction("events").objectStore("events").getAll(); all.onsuccess = () => resolve(all.result); });

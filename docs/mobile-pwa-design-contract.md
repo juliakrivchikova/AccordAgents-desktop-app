@@ -120,9 +120,16 @@ desktop's Activity:
   answered in the row (Allow/Deny) and so shows every word of what is being
   allowed, line breaks kept, with the machine it will run on; one tap answers
   it and the other option goes dead. A choice shows its question and opens in
-  full: the message it belongs to, then the chat's own card laid out for
-  reading — options stacked at full width because they are whole sentences,
-  "Answer in your own words", and Cancel.
+  full: the message it belongs to, then the chat's own card.
+
+A choice card is laid out as the desktop's is, in the chat and on Activity
+alike (the User, 2026-09-22): every option a numbered row at full width with
+its description, the member's recommendation marked "Recommended" and picked
+up front, "Write your own answer" last. Picking only selects; Submit answers,
+so a tap made while scrolling cannot answer. A picked option can carry a note,
+folded behind "Add a note" for room. Cancel and Submit stay pinned at the foot
+of the card while a long choice scrolls, and a pick or a note being typed
+survives the chat being drawn again.
 - Finished — finished member messages from the last 7 days, one row per chat
   and member, with a count badge when the row stands for more than one run
   (accent while unseen, grey once seen). The message a waiting question belongs

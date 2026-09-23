@@ -1738,6 +1738,9 @@
       summary: choice.question || "",
       ...(message.participantLabel ? { requesterLabel: message.participantLabel } : {}),
       options: options,
+      ...(choice.recommendedOptionId && options.some(function (option) { return option.id === choice.recommendedOptionId; })
+        ? { recommendedOptionId: choice.recommendedOptionId }
+        : {}),
       allowsCustomAnswer: true,
       allowsCancel: true,
       status: choice.status === "pending" ? "pending" : "answered",
@@ -3063,12 +3066,12 @@
     }
     strip.textContent = "";
     // A picture waiting to be sent keeps the composer open, the same as text.
-    const form = document.getElementById("composer-form");
-    if (form) {
-      const input = document.getElementById("composer-input");
-      const open = pendingAttachments.length > 0 ||
-        (input && (document.activeElement === input || Boolean(input.value.trim())));
-      form.dataset.expanded = open ? "1" : "";
+    // Folding waits for the tap in progress: a send takes the pictures while
+    // the finger is still on Send.
+    if (pendingAttachments.length > 0) {
+      updateComposerShape();
+    } else {
+      afterTapLands(updateComposerShape);
     }
     if (pendingAttachments.length === 0) {
       strip.hidden = true;
@@ -4378,11 +4381,18 @@
       if (!id || live.has(id)) continue;
       clearCardSent(id);
       controlCardErrors.delete(id);
+      choiceDrafts.delete(id);
+      choiceViews.delete(id);
     }
     // A card the desktop now states as answered is answered: the "sent" mark
-    // has done its work, whichever device the answer came from.
+    // has done its work, whichever device the answer came from, and a pick
+    // not sent from here has nothing left to answer.
     for (const card of next) {
-      if (card && card.id && card.status !== "pending") clearCardSent(card.id);
+      if (card && card.id && card.status !== "pending") {
+        clearCardSent(card.id);
+        choiceDrafts.delete(card.id);
+        choiceViews.delete(card.id);
+      }
     }
     return true;
   }
@@ -6017,11 +6027,279 @@
     const cards = controlCardsFor(conversationId).filter(function (card) {
       return card && card.status === "pending";
     });
-    host.replaceChildren();
     host.hidden = cards.length === 0;
-    for (const card of cards) {
-      host.append(controlCardElement(card));
+    // Every render passes through here. A card that has not changed keeps its
+    // node, so a pick, a note being typed and the keyboard over it survive a
+    // reply arriving in the chat; only what changed is drawn again.
+    const held = new Map();
+    for (const node of Array.from(host.children)) held.set(node.dataset.cardId, node);
+    const next = cards.map(function (card) {
+      const signature = controlCardSignature(card);
+      const node = held.get(card.id);
+      if (node && node.dataset.signature === signature) return node;
+      const fresh = controlCardElement(card);
+      fresh.dataset.signature = signature;
+      return fresh;
+    });
+    const keep = new Set(next);
+    for (const node of Array.from(host.children)) {
+      if (!keep.has(node)) node.remove();
     }
+    let at = host.firstChild;
+    for (const node of next) {
+      if (node === at) {
+        at = at.nextSibling;
+        continue;
+      }
+      host.insertBefore(node, at);
+    }
+  }
+
+  /** What a card is drawn from, so an unchanged card is not drawn again. */
+  function controlCardSignature(card) {
+    return JSON.stringify([card.id, card.kind, card.status, card.title, card.summary, card.requesterLabel,
+      card.machineName, card.options, card.recommendedOptionId, card.allowsCustomAnswer, card.allowsCancel,
+      isCardLocked(card.id) || controlCardAnswering.has(card.id), controlCardErrors.get(card.id) || "",
+      cardSentText(card.id)]);
+  }
+
+  // What was picked on a choice and not sent yet, by card. Outside the card:
+  // the same card is drawn in the chat and on Activity, and drawn again when
+  // it changes, and a half-written answer must survive both.
+  const CHOICE_CUSTOM_ID = "custom";
+  const choiceDrafts = new Map();
+  // Every drawing of a choice now on screen, by card: a pick made in one (the
+  // chat, say) shows in the other (Activity) instead of leaving it showing a
+  // pick its Submit would not send.
+  const choiceViews = new Map();
+
+  function syncChoiceViews(cardId) {
+    const views = choiceViews.get(cardId);
+    if (!views) return;
+    for (const view of Array.from(views)) {
+      if (view.wrap.isConnected) view.update();
+      else views.delete(view);
+    }
+    if (views.size === 0) choiceViews.delete(cardId);
+  }
+
+  function choiceDraft(card) {
+    const options = Array.isArray(card.options) ? card.options : [];
+    // What the pick was made against. A member that changes its options or
+    // its recommendation asks a different question, and the pick starts over
+    // from the new recommendation, as the desktop card's does.
+    const asked = JSON.stringify([options.map(function (option) { return option.id; }), card.recommendedOptionId || ""]);
+    let draft = choiceDrafts.get(card.id);
+    if (!draft || draft.asked !== asked) {
+      const recommended = options.some(function (option) { return option.id === card.recommendedOptionId; })
+        ? card.recommendedOptionId : "";
+      draft = { asked: asked, selected: recommended, customAnswer: "", note: "", noteOpen: false };
+      choiceDrafts.set(card.id, draft);
+    }
+    return draft;
+  }
+
+  /** A choice laid out as the desktop lays it out: every option numbered, with
+   *  its description and the member's recommendation marked and picked up
+   *  front, "Write your own answer" last, then Cancel and Submit. Picking only
+   *  selects; Submit answers (the User, 2026-09-22), so a tap made while
+   *  scrolling cannot answer for her. */
+  function choiceCardBody(wrap, card, sent) {
+    const draft = choiceDraft(card);
+    const who = card.requesterLabel || "the member";
+    const list = document.createElement("div");
+    list.className = "control-card-choices";
+    list.setAttribute("role", "radiogroup");
+    list.setAttribute("aria-label", card.summary || card.title || "Choice");
+    const rows = [];
+    function choiceRow(id, marker, label, description, recommended) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "control-card-choice";
+      row.setAttribute("role", "radio");
+      row.dataset.optionId = id;
+      row.disabled = sent;
+      const num = document.createElement("span");
+      num.className = "control-card-choice-num";
+      num.setAttribute("aria-hidden", "true");
+      num.append(marker);
+      const body = document.createElement("span");
+      body.className = "control-card-choice-body";
+      const titleLine = document.createElement("span");
+      titleLine.className = "control-card-choice-title";
+      const strong = document.createElement("strong");
+      strong.textContent = label;
+      titleLine.append(strong);
+      if (recommended) {
+        const chip = document.createElement("small");
+        chip.className = "control-card-recommended";
+        chip.textContent = "Recommended";
+        titleLine.append(chip);
+      }
+      body.append(titleLine);
+      if (description) {
+        const text = document.createElement("span");
+        text.className = "control-card-choice-description";
+        text.textContent = description;
+        body.append(text);
+      }
+      row.append(num, body);
+      row.addEventListener("click", function () {
+        draft.selected = id;
+        changed();
+        if (id === CHOICE_CUSTOM_ID) focusCardField(answerField);
+      });
+      rows.push(row);
+      list.append(row);
+    }
+    (Array.isArray(card.options) ? card.options : []).forEach(function (option, index) {
+      choiceRow(option.id, String(index + 1) + ".", option.label || option.id, option.description,
+        option.id === card.recommendedOptionId);
+    });
+    if (card.allowsCustomAnswer) {
+      choiceRow(CHOICE_CUSTOM_ID, lineIcon(["M12 20h9", "M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"], 15),
+        "Write your own answer", "None of the suggestions fit: type your own direction for " + who + ".", false);
+    }
+    wrap.append(list);
+
+    function textPanel(className, label, hint, placeholder, rowsCount, value, onInput) {
+      const panel = document.createElement("label");
+      panel.className = "control-card-text " + className;
+      const caption = document.createElement("span");
+      caption.className = "control-card-text-caption";
+      const strong = document.createElement("strong");
+      strong.textContent = label;
+      const small = document.createElement("small");
+      small.textContent = hint;
+      caption.append(strong, small);
+      const field = document.createElement("textarea");
+      field.rows = rowsCount;
+      field.placeholder = placeholder;
+      field.value = value;
+      field.disabled = sent;
+      // The keyboard this field raises takes the bar with it, as the
+      // composer's does, and gives it back once a tap has landed.
+      field.addEventListener("focus", applyDockKeepingReader);
+      field.addEventListener("blur", applyDockAfterTap);
+      field.addEventListener("input", function () {
+        onInput(field.value);
+        changed();
+      });
+      panel.append(caption, field);
+      wrap.append(panel);
+      return { panel: panel, field: field };
+    }
+    const answer = textPanel("control-card-answer", "Your answer", "sent word for word to " + who,
+      "Your own direction for " + who, 3, draft.customAnswer, function (value) { draft.customAnswer = value; });
+    const answerField = answer.field;
+    // The note is folded behind a link: the phone has little room under a
+    // choice, and most answers carry none.
+    const addNote = document.createElement("button");
+    addNote.type = "button";
+    addNote.className = "control-card-add-note";
+    addNote.textContent = "Add a note";
+    addNote.disabled = sent;
+    wrap.append(addNote);
+    const note = textPanel("control-card-note", "Add a note", "optional, " + who + " sees it with your pick",
+      "Constraints, caveats or a question for " + who, 2, draft.note, function (value) { draft.note = value; });
+    addNote.addEventListener("click", function () {
+      draft.noteOpen = true;
+      changed();
+      focusCardField(note.field);
+    });
+
+    const actions = document.createElement("div");
+    actions.className = "control-card-actions";
+    const hint = document.createElement("span");
+    hint.className = "control-card-hint";
+    hint.textContent = "Type your answer to send it.";
+    actions.append(hint);
+    if (card.allowsCancel) {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "control-card-cancel";
+      cancel.dataset.optionId = "cancel";
+      cancel.textContent = "Cancel";
+      cancel.disabled = sent;
+      cancel.addEventListener("click", function () {
+        blurWithin(wrap);
+        void answerControlCard(card, { cancel: true }).then(function () {
+          if (isCardLocked(card.id)) choiceDrafts.delete(card.id);
+        });
+      });
+      actions.append(cancel);
+    }
+    const submit = document.createElement("button");
+    submit.type = "button";
+    submit.className = "control-card-submit";
+    submit.textContent = "Submit";
+    submit.addEventListener("click", function () {
+      const reply = choiceReply(card, draft);
+      if (!reply) return;
+      // Sent, so the keyboard has nothing left to do here, as after a message.
+      blurWithin(wrap);
+      void answerControlCard(card, reply).then(function () {
+        if (isCardLocked(card.id)) choiceDrafts.delete(card.id);
+      });
+    });
+    actions.append(submit);
+    wrap.append(actions);
+
+    function changed() {
+      syncChoiceViews(card.id);
+    }
+
+    function update() {
+      for (const row of rows) {
+        const on = row.dataset.optionId === draft.selected;
+        row.setAttribute("aria-checked", on ? "true" : "false");
+        row.classList.toggle("is-selected", on);
+      }
+      // Text typed in another drawing of this card, carried over here unless
+      // this field is the one being typed in.
+      for (const pair of [[answerField, draft.customAnswer], [note.field, draft.note]]) {
+        if (document.activeElement !== pair[0] && pair[0].value !== pair[1]) pair[0].value = pair[1];
+      }
+      const custom = draft.selected === CHOICE_CUSTOM_ID;
+      const noteShown = !custom && Boolean(draft.selected) && (Boolean(draft.noteOpen) || Boolean(draft.note.trim()));
+      answer.panel.hidden = !custom;
+      note.panel.hidden = !noteShown;
+      addNote.hidden = custom || !draft.selected || noteShown;
+      hint.hidden = sent || !custom || Boolean(draft.customAnswer.trim());
+      submit.disabled = sent || !choiceReply(card, draft);
+    }
+    update();
+    // A drawing replaced since (the card changed, the view closed) is dropped
+    // here, so the record stays as small as what is on screen.
+    const views = choiceViews.get(card.id) || new Set();
+    for (const view of Array.from(views)) {
+      if (!view.wrap.isConnected) views.delete(view);
+    }
+    views.add({ wrap: wrap, update: update });
+    choiceViews.set(card.id, views);
+  }
+
+  /** The answer a choice's draft makes, or undefined while it makes none. */
+  function choiceReply(card, draft) {
+    if (draft.selected === CHOICE_CUSTOM_ID) {
+      const text = draft.customAnswer.trim();
+      return text ? { customAnswer: text } : undefined;
+    }
+    const options = Array.isArray(card.options) ? card.options : [];
+    if (!options.some(function (option) { return option.id === draft.selected; })) return undefined;
+    const noteText = draft.note.trim();
+    return { optionId: draft.selected, ...(noteText ? { note: noteText } : {}) };
+  }
+
+  /** A card's field, focused and brought into view above Cancel and Submit. */
+  function focusCardField(field) {
+    field.focus({ preventScroll: true });
+    field.scrollIntoView({ block: "nearest" });
+  }
+
+  function blurWithin(node) {
+    const active = document.activeElement;
+    if (active && node.contains(active) && typeof active.blur === "function") active.blur();
   }
 
   function controlCardElement(card) {
@@ -6052,6 +6330,16 @@
     }
 
     const sent = isCardLocked(card.id) || controlCardAnswering.has(card.id);
+    if (card.kind === "choice") {
+      choiceCardBody(wrap, card, sent);
+      const state = document.createElement("p");
+      state.className = "control-card-state";
+      const failure = controlCardErrors.get(card.id);
+      state.textContent = failure || cardSentText(card.id);
+      state.hidden = !state.textContent;
+      wrap.append(state);
+      return wrap;
+    }
     const options = document.createElement("div");
     options.className = "control-card-options";
     for (const option of Array.isArray(card.options) ? card.options : []) {
@@ -6079,32 +6367,6 @@
       options.append(cancel);
     }
     wrap.append(options);
-
-    if (card.allowsCustomAnswer) {
-      const custom = document.createElement("div");
-      custom.className = "control-card-custom";
-      const input = document.createElement("input");
-      input.type = "text";
-      input.placeholder = "Answer in your own words";
-      input.setAttribute("aria-label", "Answer in your own words");
-      input.disabled = sent;
-      // The keyboard this field raises takes the bar with it, as the
-      // composer's does, and gives it back the same way.
-      input.addEventListener("focus", applyDockKeepingReader);
-      input.addEventListener("blur", applyDockAfterTap);
-      const send = document.createElement("button");
-      send.type = "button";
-      send.className = "control-card-option";
-      send.textContent = "Send";
-      send.disabled = sent;
-      send.addEventListener("click", function () {
-        const text = input.value.trim();
-        if (!text) return;
-        void answerControlCard(card, { customAnswer: text });
-      });
-      custom.append(input, send);
-      wrap.append(custom);
-    }
 
     const state = document.createElement("p");
     state.className = "control-card-state";
@@ -6319,6 +6581,23 @@
     const queued = Array.from(afterTapWork);
     afterTapWork.clear();
     for (const run of queued) run();
+  }
+
+  /** Slack's composer: one line until it is tapped, then the row of tools.
+   *  Anything written or attached keeps it open, so a draft is never left
+   *  without a way to send it. The one rule for the composer's shape; a fold
+   *  that follows a tap goes through afterTapLands, or the text field slides
+   *  under the finger still on Send and the tap's click lands on it — which
+   *  on iOS raised the keyboard again right after a send (the User,
+   *  2026-09-22). */
+  function updateComposerShape() {
+    const form = document.getElementById("composer-form");
+    const input = document.getElementById("composer-input");
+    if (!form || !input) return;
+    const open = document.activeElement === input ||
+      Boolean(input.value.trim()) ||
+      pendingAttachments.length > 0;
+    form.dataset.expanded = open ? "1" : "";
   }
 
   function applyDockAfterTap() {
@@ -9200,17 +9479,6 @@
       const sendComposer = function () {
         return submitComposer();
       };
-      // Slack's shape: one line until it is tapped, then the row of tools.
-      // Anything already written keeps it open, so a draft is never left
-      // without a way to send it.
-      const composerForm = document.getElementById("composer-form");
-      const updateComposerShape = function () {
-        if (!composerForm) return;
-        const open = document.activeElement === input ||
-          Boolean(input.value.trim()) ||
-          pendingAttachments.length > 0;
-        composerForm.dataset.expanded = open ? "1" : "";
-      };
       input.addEventListener("focus", updateComposerShape);
       input.addEventListener("blur", function () {
         afterTapLands(updateComposerShape);
@@ -9238,9 +9506,10 @@
         input.value = "";
         // The message is gone, so the keyboard has nothing left to do: it goes
         // down and gives the screen back, instead of sitting over the reply
-        // the User just asked for. The composer goes back to one line with it.
+        // the User just asked for. The composer goes back to one line with it
+        // once the tap on Send has landed.
         input.blur();
-        updateComposerShape();
+        afterTapLands(updateComposerShape);
         closeSlashMenu();
         const attachments = takePendingAttachments();
         const skillMentions = takeSkillMentions(content);
@@ -9358,6 +9627,7 @@
     isCardLocked,
     desktopOwesEntry,
     machineTimelineEvent,
+    machineChoiceCard,
     activeMentionQuery,
     mentionOptions,
     replaceActiveMention,

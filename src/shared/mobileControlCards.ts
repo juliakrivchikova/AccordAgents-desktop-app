@@ -29,6 +29,9 @@ export interface MobileControlCard {
   /** The machine whose member raised it, when it is not this one. */
   machineName?: string;
   options: ChatChoiceOption[];
+  /** The option the member recommends, marked and picked up front the way
+   *  the desktop card does. */
+  recommendedOptionId?: string;
   /** A choice may be answered in free text as well as by option. */
   allowsCustomAnswer: boolean;
   allowsCancel: boolean;
@@ -84,6 +87,9 @@ export function controlCardFromChoiceMessage(conversationId: string, message: Ch
     summary: choice.question || "",
     requesterLabel: message.participantLabel,
     options: choice.options ?? [],
+    ...(choice.recommendedOptionId && choice.options?.some((option) => option.id === choice.recommendedOptionId)
+      ? { recommendedOptionId: choice.recommendedOptionId }
+      : {}),
     allowsCustomAnswer: true,
     allowsCancel: true,
     status: choice.status === "pending" ? "pending" : "answered",

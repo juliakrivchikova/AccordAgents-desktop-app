@@ -1401,6 +1401,11 @@ button.mobile-chat-group-title:active {
   flex-direction: column;
   gap: 8px;
   padding: 8px 12px 0;
+  /* A choice with its descriptions, a note and the keyboard up must still
+     leave the chat and the composer on screen: past this it scrolls. */
+  max-height: calc(var(--app-h, 100dvh) * 0.55);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .control-cards[hidden] {
@@ -1408,10 +1413,10 @@ button.mobile-chat-group-title:active {
 }
 
 .control-card {
-  border: 1px solid var(--mobile-border, rgba(0, 0, 0, 0.12));
-  border-radius: 12px;
-  padding: 12px;
-  background: var(--mobile-surface, var(--surface));
+  border: 1px solid var(--bd);
+  border-radius: 16px;
+  padding: 14px;
+  background: var(--surface);
 }
 
 .control-card-head {
@@ -1457,27 +1462,222 @@ button.mobile-chat-group-title:active {
   opacity: 0.5;
 }
 
-.control-card-custom {
-  margin-top: 10px;
-  display: flex;
-  gap: 8px;
-}
-
-.control-card-custom input {
-  flex: 1;
-  min-width: 0;
-  border: 1px solid var(--mobile-border, rgba(0, 0, 0, 0.12));
-  border-radius: 10px;
-  padding: 8px 10px;
-  font: inherit;
-  background: transparent;
-  color: inherit;
-}
-
 .control-card-state {
   margin-top: 8px;
   font-size: 12px;
   opacity: 0.75;
+}
+
+/* --- A choice, laid out as the desktop lays it out ---------------------------
+   Numbered options at full width with their descriptions, the member's
+   recommendation marked and picked up front, "Write your own answer" last.
+   Picking selects; Submit answers. */
+
+.control-card-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.control-card-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 11px 14px;
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--fg1);
+  font: inherit;
+  text-align: left;
+}
+
+.control-card-choice.is-selected {
+  border-color: var(--acc);
+  background: var(--accs);
+  box-shadow: inset 0 0 0 1px var(--acc);
+}
+
+.control-card-choice[disabled]:not(.is-selected) {
+  opacity: 0.45;
+}
+
+.control-card-choice-num {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  min-width: 18px;
+  min-height: 20px;
+  color: var(--mut);
+  font: 600 14px var(--sans);
+}
+
+.control-card-choice.is-selected .control-card-choice-num {
+  color: var(--acc);
+}
+
+.control-card-choice-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  /* A path or a link in an option wraps instead of running out of the row. */
+  overflow-wrap: anywhere;
+}
+
+.control-card-choice-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font: 500 15px var(--sans);
+  line-height: 1.35;
+}
+
+.control-card-choice-title strong {
+  font-weight: 600;
+}
+
+/* Solid accent: the tint pair read below AA contrast at this size. */
+.control-card-recommended {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--acc);
+  color: var(--surface-fg);
+  font: 600 11.5px var(--sans);
+}
+
+.control-card-choice-description {
+  color: var(--fg);
+  font: 400 13.5px var(--sans);
+  line-height: 1.4;
+}
+
+.control-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.control-card-text[hidden] {
+  display: none;
+}
+
+.control-card-text-caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.control-card-text-caption strong {
+  color: var(--fg1);
+  font: 600 13px var(--sans);
+}
+
+.control-card-text-caption small {
+  color: var(--mut);
+  font: 400 12px var(--sans);
+}
+
+/* 16px: smaller type makes iOS zoom the page when the field is focused. */
+.control-card-text textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  background: var(--s2);
+  color: var(--fg1);
+  font: 400 16px var(--sans);
+  line-height: 1.4;
+  resize: none;
+  /* Scrolled to, it stops above Cancel and Submit rather than under them. */
+  scroll-margin-bottom: 76px;
+}
+
+/* Cancel and Submit stay in reach while a long choice scrolls under them. */
+.control-card-actions {
+  position: sticky;
+  bottom: -14px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 12px -14px -14px;
+  padding: 8px 14px 14px;
+  border-radius: 0 0 16px 16px;
+  background: var(--surface);
+}
+
+.control-card-add-note {
+  align-self: flex-start;
+  min-height: 44px;
+  margin-top: 4px;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--acc);
+  font: 600 14px var(--sans);
+}
+
+.control-card-add-note[hidden] {
+  display: none;
+}
+
+.control-card-hint {
+  margin-right: auto;
+  color: var(--mut);
+  font: 400 12px var(--sans);
+}
+
+.control-card-hint[hidden] {
+  display: none;
+}
+
+.control-card-cancel {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--mut);
+  font: 600 15px var(--sans);
+}
+
+.control-card-submit {
+  min-height: 44px;
+  padding: 0 22px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--fg1);
+  color: var(--surface-fg);
+  font: 600 15px var(--sans);
+}
+
+.control-card-submit[disabled],
+.control-card-cancel[disabled] {
+  opacity: 0.35;
+}
+
+.control-card-choice:active,
+.control-card-cancel:active {
+  background: var(--press);
+}
+
+.control-card-submit:active {
+  background: var(--fg);
+}
+
+.control-card-choice:focus-visible,
+.control-card-cancel:focus-visible,
+.control-card-submit:focus-visible {
+  outline: 2px solid var(--fg1);
+  outline-offset: 1px;
 }
 
 /* Waking a stopped machine, from the same place its members are used. */
@@ -2462,6 +2662,13 @@ button.mobile-chat-group-title:active {
   box-shadow: var(--pill-shadow);
 }
 
+.act-detail .control-card-actions {
+  bottom: -16px;
+  margin: 12px -16px -16px;
+  padding: 8px 16px 16px;
+  border-radius: 0 0 18px 18px;
+}
+
 .act-detail .control-card-head {
   flex-wrap: wrap;
   margin-bottom: 6px;
@@ -2511,26 +2718,6 @@ button.mobile-chat-group-title:active {
   padding: 0 12px;
   color: var(--acc);
   font-weight: 600;
-}
-
-.act-detail .control-card-custom input {
-  height: 46px;
-  padding: 0 14px;
-  border: 1px solid var(--bd);
-  border-radius: 14px;
-  background: var(--s2);
-  color: var(--fg1);
-  font: 400 15px var(--sans);
-}
-
-.act-detail .control-card-custom .control-card-option {
-  min-height: 46px;
-  border: 0;
-  border-radius: 14px;
-  background: var(--fg1);
-  color: var(--surface-fg);
-  font-weight: 600;
-  text-align: center;
 }
 
 /* ---- Settings ---- */
