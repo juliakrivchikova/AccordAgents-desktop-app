@@ -29,6 +29,7 @@ const { sealMachineRelayPayload } = require(path.join(repoRoot, "dist/main/main/
 const { MachineLinkService } = require(path.join(repoRoot, "dist/main/main/services/machineLink.js"));
 const { ChatService } = require(path.join(repoRoot, "dist/main/main/services/chat.js"));
 const { machineCommandId } = require(path.join(repoRoot, "dist/main/shared/machineLink.js"));
+const chatChanges = require(path.join(repoRoot, "dist/main/main/services/chatChanges.js"));
 const phone = require(path.join(repoRoot, "src/mobile/mobile-machine-command.js"));
 
 const CONVERSATION = "delete-chat";
@@ -81,14 +82,36 @@ async function machine(dir, controls = {}) {
       pairing, deviceId: identity.originId, appVersion: "delete-test",
       eventStorage: storage, eventLog, publicKeyDerBase64: identity.publicKeyDerBase64,
       outboxPath: path.join(dir, "outbox.json"), trustRosterPath: path.join(dir, "trust.json"),
-      createClient: () => stubClient(sent), createPeerClient: () => stubClient(sent)
+      createClient: () => stubClient(sent), createPeerClient: () => stubClient(sent),
+      // What ChatService does with a chat change: never for a deleted chat.
+      applyChatChanges: async (event, payload) => {
+        if (await storage.conversationTombstones().isDeleted(payload.conversationId)) return "applied";
+        const existing = await storage.getConversation(payload.conversationId);
+        const result = chatChanges.applyChatChanges(existing ?? undefined, payload, event.originId, {
+          acceptsConversationFields: () => true, acceptsMessageUpdate: () => true
+        });
+        if (result.status !== "applied") return "missing-conversation";
+        await storage.saveConversation(result.conversation);
+        return "applied";
+      }
     }
   );
   await host.start();
   await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: desktop.originId, appVersion: "t", machineId: "machine-one" });
 
-  /** The desktop's own signed durable event, through the real ingress. */
+  /** The desktop's own signed durable event, through the real ingress. A
+   *  chat's copy and later messages travel as the desktop's chat changes. */
   const deliver = async (body, options = {}) => {
+    if (body.type === "machine.conversation.sync" || body.type === "machine.conversation.delta") {
+      const id = body.type === "machine.conversation.sync" ? body.conversation.id : body.conversationId;
+      const changes = body.type === "machine.conversation.sync"
+        ? chatChanges.diffChatChanges(undefined, body.conversation, { emitsConversationFields: true, ownsMessage: () => true }).changes
+        : body.messages.map((message) => ({ type: "message.created", message }));
+      const { event } = await desktopLog.appendLocalEvent({ conversationId: id, logScopeId: chatChanges.chatChangesLogScope(id),
+        kind: chatChanges.CHAT_CHANGES_EVENT_KIND, payload: { version: 1, conversationId: id, updatedAt: new Date().toISOString(), changes } });
+      const packet = { protocol: "accord-device-events-v1", from: desktop.originId, to: identity.originId, type: "event", event };
+      return host.handleMessage(await sealMachineRelayPayload(packet, desktop, identity.publicKeyDerBase64, pairing.rendezvousId));
+    }
     const { event } = await desktopLog.appendLocalEvent({
       conversationId: body.type === "machine.conversation.sync" ? body.conversation.id : body.conversationId,
       logScopeId: `device:${pairing.rendezvousId}:${JSON.stringify([

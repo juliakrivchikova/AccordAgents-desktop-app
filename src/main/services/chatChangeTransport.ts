@@ -19,8 +19,8 @@ import type { StorageService } from "./storage";
  */
 export interface ChatChangeTransportOptions {
   role: "desktop" | "machine";
-  storage: Pick<StorageService, "deviceEventBlobs" | "chatEventAppendSql">;
-  log: Pick<ChatEventLogService, "withPreparedLocalEvent">;
+  storage: Pick<StorageService, "deviceEventBlobs" | "chatEventAppendSql" | "getChatEventSequenceBasis">;
+  log: Pick<ChatEventLogService, "withPreparedLocalEvent" | "getOrCreateDeviceIdentity">;
   /** Every device that should hold this device's chat changes. */
   recipients(): DeviceEventRecipient[];
   /** Called after an event committed, so the channels send it now. */
@@ -69,6 +69,12 @@ export function createChatChangeTransport(options: ChatChangeTransportOptions): 
   };
   return {
     hasRecipients: () => options.recipients().length > 0,
+    head: async (conversationId) => {
+      const { originId } = await options.log.getOrCreateDeviceIdentity();
+      const logScopeId = chatChangesLogScope(conversationId);
+      const basis = await options.storage.getChatEventSequenceBasis(originId, logScopeId);
+      return { originId, logScopeId, originSeq: basis.originSeq - 1 };
+    },
     diffPolicy: (conversation): ChatChangeDiffPolicy => ({
       emitsConversationFields: options.role === "desktop",
       ownsMessage: (message) => ownsMessage(conversation, message)

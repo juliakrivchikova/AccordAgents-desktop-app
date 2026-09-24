@@ -116,6 +116,12 @@ export interface MachineTurnRequestBody {
   /** Sealed before entering the immutable log: environment values must not
    * become plaintext chat history or blob fragments on either endpoint. */
   sealedSettings?: string;
+  /** The last chat change the desktop committed for this chat before the
+   *  request. The machine runs the turn only once it has applied that event,
+   *  so a member never answers a chat that has not fully arrived. */
+  chatHead?: { originId: string; logScopeId: string; originSeq: number };
+  /** Where the chat's project lives on each machine (the member's cwd). */
+  machineRepository?: { sourcePath: string; paths: Record<string, string> };
 }
 
 export interface MachineTurnCancelBody {

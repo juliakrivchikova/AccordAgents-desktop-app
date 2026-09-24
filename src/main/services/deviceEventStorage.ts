@@ -351,6 +351,16 @@ export class DeviceEventStorage {
     return rows[0];
   }
 
+  /** The last contiguous event of one origin and scope this device applied (0 when none). */
+  async appliedHead(originId: string, logScopeId: string): Promise<number> {
+    await this.database.init();
+    const rows = await this.database.query<{ originSeq: number }>(`
+      select origin_seq as originSeq from device_event_applied_heads
+      where origin_id = ${quote(originId)} and log_scope_id = ${quote(logScopeId)};
+    `);
+    return rows[0]?.originSeq ?? 0;
+  }
+
   async gaps(channelId: string, deviceId?: string): Promise<DeviceEventGap[]> {
     await this.database.init();
     return this.database.query<DeviceEventGap>(`

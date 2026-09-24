@@ -329,7 +329,6 @@ const chatService = new ChatService(storageService, settingsService, cliAgentRun
   for (const control of mobileRelayControls.values()) {
     control.pushConversationSnapshot(conversation);
   }
-  void machineLinkService?.replicateConversation(conversation).catch(() => undefined);
 }, userSkillsService, (progress) => emitReviewProgress(progress), chatEventMirrorService, (conversation, messages) => {
   // W-C: an interrupted run's recovered terminals are the only thing that will
   // ever tell a paired phone that run is over.
@@ -3391,6 +3390,7 @@ void app.whenReady().then(async () => {
       // A machine's own changes (its members' replies, messages typed into it
       // while this desktop was away) arrive as chat change events.
       applyChatChanges: (event, payload) => chatService.applyRemoteChatChanges(event, payload),
+      chatChangeHead: (conversationId) => chatService.chatChangeHead(conversationId),
       // Every device the User has trusted is named to each machine, in the
       // room that machine is met in. That is what lets a machine keep working
       // when this desktop is closed.

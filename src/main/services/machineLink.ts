@@ -80,6 +80,9 @@ export interface MachineLinkOptions {
   /** Folds a `chat.changes` event from a machine into this desktop's copy.
    *  "missing-conversation" holds the event until the chat arrives. */
   applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation">;
+  /** The last chat change this desktop committed for a chat, after its
+   *  queued saves: a turn request names it and the machine waits for it. */
+  chatChangeHead?: (conversationId: string) => Promise<{ originId: string; logScopeId: string; originSeq: number } | undefined>;
   now?: () => Date;
 }
 
@@ -116,11 +119,6 @@ interface MachineConnection {
   client: RelayTunnelClient;
   machineDeviceId?: string;
   settingsSynced: boolean;
-  /** Per conversation: the message ids and updatedAt values the machine holds. */
-  replicated: Map<string, Map<string, string>>;
-  /** Replication of one conversation is serialized so a snapshot push and a
-   *  turn dispatch cannot interleave their deltas. */
-  replication: Map<string, Promise<void>>;
   pendingTurns: Map<string, {
     resolve: (result: MachineTurnDispatchResult) => void;
     progress?: (progress: ReviewProgress) => void;
@@ -137,9 +135,6 @@ interface MachineConnection {
   pendingCancels: Map<string, string>;
   /** Serializes machine-record writes for this connection. */
   persist: Promise<void>;
-  /** Latest snapshot waiting for the running replication pass, per
-   *  conversation: many snapshots in flight collapse into one more pass. */
-  replicationQueued: Map<string, Conversation>;
   /** Approval decisions waiting for the machine's outcome. */
   pendingApprovals: Map<string, Set<{ resolve: () => void; reject: (error: Error) => void }>>;
   pendingChoices: Map<string, Set<{ resolve: () => void; reject: (error: Error) => void }>>;
@@ -212,8 +207,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private readonly runStartedListeners: Array<(event: { conversationId: string; runId: string }) => Promise<void> | void> = [];
   private readonly progressListeners: Array<(progress: ReviewProgress) => void> = [];
   private readonly participantRequestListeners: Array<(request: { machineId: string; conversationId: string; requestMessageId: string; depth: number; targetParticipantIds?: string[] }) => Promise<void> | void> = [];
-  private readonly deletionListeners: Array<(event: MachineConversationDeletedBody) => Promise<void>> = [];
   private readonly backDeltaListeners: Array<(delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void> = [];
+  private readonly deletionListeners: Array<(event: MachineConversationDeletedBody) => Promise<void>> = [];
   private conversationLoader?: (conversationId: string) => Promise<Conversation | undefined>;
   private readonly connections = new Map<string, MachineConnection>();
   private deletionRetry?: ReturnType<typeof setTimeout>;
@@ -253,6 +248,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return () => { const index = this.deletionListeners.indexOf(listener); if (index >= 0) this.deletionListeners.splice(index, 1); };
   }
 
+  /** Messages a machine owns that this desktop must store now: the result of
+   *  a choice answered here for a member on that machine. */
   onConversationBackDelta(listener: (delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void): () => void {
     this.backDeltaListeners.push(listener);
     return () => { const index = this.backDeltaListeners.indexOf(listener); if (index >= 0) this.backDeltaListeners.splice(index, 1); };
@@ -458,13 +455,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
       pairing,
       client,
       settingsSynced: false,
-      replicated: new Map(),
-      replication: new Map(),
       pendingTurns: new Map(),
       pendingCancels: new Map((record.pendingCancels ?? []).map((cancel) => [cancel.runId, cancel.conversationId])),
       pendingRuns: new Map((record.pendingRuns ?? []).map((run) => [run.runId, run.conversationId])),
       persist: Promise.resolve(),
-      replicationQueued: new Map(),
       pendingApprovals: new Map(),
       pendingChoices: new Map(),
       pendingTurnConversations: new Map(),
@@ -963,37 +957,15 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
   }
 
-  /** Replicates a conversation to the machines that host one of its
-   *  participants: a full copy the first time, message deltas afterwards. */
-  async replicateConversation(conversation: Conversation): Promise<void> {
-    const participants = (conversation.metadata as { participants?: Array<{ homeMachineId?: unknown }> }).participants ?? [];
-    const machineIds = new Set(
-      participants
-        .map((participant) => participant.homeMachineId)
-        .filter((id): id is string => typeof id === "string" && id.length > 0)
-    );
-    for (const machineId of machineIds) {
-      const connection = this.connections.get(machineId);
-      if (!connection?.eventChannel) {
-        continue;
-      }
-      await this.waitForIntroduction(connection);
-      await this.replicateTo(connection, conversation);
-    }
-  }
-
   /**
-   * Tells every machine that hosts a member of this chat that it is gone.
+   * Tells every enrolled machine that this chat is gone.
    *
    * Durable, not best-effort: a machine that is off learns when it comes back,
-   * and the event is retained until it acknowledges. The participants have to
-   * be read before the chat is deleted, because afterwards there is nothing
-   * left to read them from.
+   * and the event is retained until it acknowledges.
    */
   async deleteConversationOnMachines(conversation: Pick<Conversation, "id" | "metadata">): Promise<number> {
-    const participants = (conversation.metadata as { participants?: Array<{ homeMachineId?: unknown }> }).participants ?? [];
-    const machineIds = participants.map(participant => participant.homeMachineId)
-      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    // Every enrolled machine holds every chat, so every one of them is told.
+    const machineIds = [...this.connections.keys()];
     // Also safe for callers outside ChatService: no connection, disk failure,
     // or process restart may erase the identities before outbox persistence.
     await this.options.eventStorage.conversationTombstones().mark(conversation.id, this.now().toISOString(), machineIds);
@@ -1122,10 +1094,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
       if (request.signal?.aborted) {
         return interrupted;
       }
-      await this.replicateTo(connection, request.conversation);
-      // A copy queued meanwhile (a machine asked for the chat again, a restart
-      // cleared the inventory) must have left before the request follows it.
-      await this.settleReplication(connection, request.conversation.id);
+      // The chat itself reaches the machine as change events. The request
+      // names the last one this desktop committed, and the machine runs the
+      // turn only once it has applied it.
+      const chatHead = await this.options.chatChangeHead?.(request.conversation.id);
+      const machineRepository = await this.machineRepositoryFor(request.conversation);
       if (request.signal?.aborted) {
         return interrupted;
       }
@@ -1148,6 +1121,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
         runId: request.runId,
         pendingMessageId: request.pendingMessageId,
         ...(sealedSettings ? { sealedSettings } : {}),
+        ...(chatHead ? { chatHead } : {}),
+        ...(machineRepository ? { machineRepository } : {}),
         requestedAt: this.now().toISOString()
       }, () => {
         // Queueing and sealing are still preparation. This synchronous fence
@@ -1178,23 +1153,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
   }
 
-  private replicateTo(connection: MachineConnection, conversation: Conversation): Promise<void> {
-    // Snapshots arrive faster than a pass over a large chat takes; only the
-    // newest one matters, so a pass already queued just picks it up.
-    const queued = connection.replicationQueued;
-    const alreadyQueued = queued.has(conversation.id);
-    queued.set(conversation.id, conversation);
-    if (alreadyQueued) {
-      return connection.replication.get(conversation.id) ?? Promise.resolve();
-    }
-    const previous = connection.replication.get(conversation.id) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(() => {
-      const latest = queued.get(conversation.id) ?? conversation;
-      queued.delete(conversation.id);
-      return this.replicateNow(connection, latest);
-    });
-    connection.replication.set(conversation.id, next.then(() => undefined, () => undefined));
-    return next;
+  /** Where the chat's project lives on each machine that has a copy of it. */
+  private async machineRepositoryFor(conversation: Conversation): Promise<{ sourcePath: string; paths: Record<string, string> } | undefined> {
+    if (!conversation.repoPath || !this.options.repositoryPaths) return undefined;
+    const sourcePath = conversation.metadata.machineRepository?.sourcePath ?? conversation.repoPath;
+    const paths = await this.options.repositoryPaths(sourcePath);
+    return Object.keys(paths).length ? { sourcePath, paths } : undefined;
   }
 
   private waitForIntroduction(connection: MachineConnection, signal?: AbortSignal): Promise<void> {
@@ -1219,19 +1183,6 @@ export class MachineLinkService implements MachineTurnDispatcher {
     });
   }
 
-  private async settleReplication(connection: MachineConnection, conversationId: string): Promise<void> {
-    for (let round = 0; round < 8; round += 1) {
-      const chain = connection.replication.get(conversationId);
-      if (!chain) {
-        return;
-      }
-      await chain;
-      if (connection.replication.get(conversationId) === chain) {
-        return;
-      }
-    }
-  }
-
   /** Rule 2: stops waiting for a machine are part of its record, so a
    *  desktop restart does not forget them. */
   private persistCancels(connection: MachineConnection, required = false): Promise<void> {
@@ -1246,66 +1197,6 @@ export class MachineLinkService implements MachineTurnDispatcher {
       void this.debugLogs.write("machine-link.record.save-error", { machineId: record.id, message: errorMessage(error) });
     });
     return required ? write : connection.persist;
-  }
-
-  private async replicateNow(connection: MachineConnection, conversation: Conversation): Promise<void> {
-    if (conversation.repoPath && this.options.repositoryPaths) {
-      const sourcePath = conversation.metadata.machineRepository?.sourcePath ?? conversation.repoPath;
-      const paths = await this.options.repositoryPaths(sourcePath);
-      if (Object.keys(paths).length) {
-        conversation = { ...conversation, metadata: { ...conversation.metadata, machineRepository: { sourcePath, paths } } };
-      }
-    }
-    const known = connection.replicated.get(conversation.id);
-    if (!known) {
-      // A first copy travels as the conversation shell plus bounded message
-      // batches, so a chat of any size stays under the relay's logical
-      // message limit (the User's chats reach tens of megabytes as JSON).
-      await this.send(connection, { type: "machine.conversation.sync", conversation: { ...conversation, messages: [] } });
-      const sent = new Map<string, string>();
-      for (const batch of messageBatches(conversation.messages)) {
-        await this.send(connection, {
-          type: "machine.conversation.delta",
-          conversationId: conversation.id,
-          messages: batch,
-          updatedAt: conversation.updatedAt
-        });
-        for (const message of batch) {
-          sent.set(message.id, messageStamp(message));
-        }
-      }
-      // The machine compares its own rows against this copy only now, so a
-      // shell followed by batches never makes its stored rows look new.
-      await this.send(connection, { type: "machine.conversation.sync.done", conversationId: conversation.id });
-      connection.replicated.set(conversation.id, sent);
-      return;
-    }
-    const changed = conversation.messages.filter((message) => known.get(message.id) !== messageStamp(message));
-    const presentIds = new Set(conversation.messages.map((message) => message.id));
-    const removedMessageIds = [...known.keys()].filter((id) => !presentIds.has(id));
-    const batches = messageBatches(changed);
-    if (batches.length === 0) {
-      batches.push([]);
-    }
-    for (const [index, batch] of batches.entries()) {
-      const last = index === batches.length - 1;
-      const delta: MachineConversationDeltaBody = {
-        type: "machine.conversation.delta",
-        conversationId: conversation.id,
-        messages: batch,
-        // Metadata and removals travel once, with the final batch.
-        ...(last ? { metadata: conversation.metadata } : {}),
-        ...(last && removedMessageIds.length > 0 ? { removedMessageIds } : {}),
-        updatedAt: conversation.updatedAt
-      };
-      await this.send(connection, delta);
-      for (const message of batch) {
-        known.set(message.id, messageStamp(message));
-      }
-    }
-    for (const id of removedMessageIds) {
-      known.delete(id);
-    }
   }
 
   private async handleMessage(connection: MachineConnection, ciphertext: string): Promise<void> {
@@ -1356,23 +1247,15 @@ export class MachineLinkService implements MachineTurnDispatcher {
       case "machine.turn.finished":
         await this.finishTurn(connection, body);
         return;
-      case "machine.conversation.backdelta": {
-        // The machine already holds these; do not echo them back on the next delta.
-        const known = connection.replicated.get(body.conversationId);
-        if (known) {
-          for (const message of body.messages) {
-            known.set(message.id, messageStamp(message));
-          }
-        }
-        if (!this.backDeltaListeners.length) throw new Error("No chat owner is available to store the machine's messages.");
-        await Promise.all(this.backDeltaListeners.map((listener) => listener({ machineId: connection.record.id, conversationId: body.conversationId, messages: body.messages })));
+      case "machine.conversation.backdelta":
+      case "machine.conversation.resync":
+        // A machine runtime that has not been updated yet. Its messages reach
+        // this desktop as chat change events once it is; its finished turns
+        // still arrive with their results.
+        void this.debugLogs.write("machine-link.legacy-replication-ignored", { machineId: connection.record.id, type: body.type });
         return;
-      }
       case "machine.turn.unknown":
         await this.handleUnknownRun(connection, body);
-        return;
-      case "machine.conversation.resync":
-        await this.handleResync(connection, body.conversationId);
         return;
       case "machine.attachment.request":
         // Served off the inbound chain: reading a chat and sending a picture
@@ -1564,13 +1447,6 @@ export class MachineLinkService implements MachineTurnDispatcher {
       connection.helloRequestTimer = undefined;
     }
     connection.settingsSynced = false;
-    // The machine's inventory of what it holds lives in its process: after
-    // a restart (new instance id) every chat is copied afresh; after a mere
-    // reconnect nothing is, so a network blip does not re-send 40 MB.
-    const previousInstance = connection.record.lastHello?.instanceId;
-    if (!hello.instanceId || !previousInstance || hello.instanceId !== previousInstance) {
-      connection.replicated.clear();
-    }
     const { type: _type, ...rest } = hello;
     connection.record = {
       ...connection.record,
@@ -1658,10 +1534,6 @@ export class MachineLinkService implements MachineTurnDispatcher {
       // the machine kept the result, and the chat gets it exactly as a live
       // turn would (reply, stop, failure), stored before it is acknowledged.
       void this.debugLogs.write("machine-link.turn.finished-late", { machineId: connection.record.id, runId: body.runId, status: body.status, messages: body.messages.length });
-      const known = connection.replicated.get(body.conversationId);
-      for (const message of messages) {
-        known?.set(message.id, messageStamp(message));
-      }
       await this.emitLateTerminal({
         machineId: connection.record.id,
         machineName: connection.record.name,
@@ -1734,13 +1606,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
     dropRecords();
   }
 
-  /** The machine could not store a batch of the first copy: send the whole
-   *  copy again from the desktop's current state. */
   /** The bytes of a picture a machine asked for. Answered either way: a
    *  refusal tells the member the picture is unavailable, where silence would
-   *  leave it waiting out its turn. Only a machine that hosts a member of the
-   *  chat is served -- the same scope replication uses -- and ChatService
-   *  checks the attachment belongs to that chat. Sent in bounded parts (see
+   *  leave it waiting out its turn. Every enrolled machine holds every chat,
+   *  so any of them may ask; ChatService checks the attachment belongs to
+   *  that chat. Sent in bounded parts (see
    *  MACHINE_ATTACHMENT_PART_BYTES). */
   private async answerAttachmentRequest(connection: MachineConnection, body: MachineAttachmentRequestBody): Promise<void> {
     const reply = { type: "machine.attachment.result" as const, requestId: body.requestId,
@@ -1748,10 +1618,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     try {
       if (!this.options.readChatAttachment) throw new Error("This desktop cannot read chat pictures.");
       const conversation = await this.conversationLoader?.(body.conversationId);
-      const participants = conversation?.metadata.participants as import("../../shared/types").ChatParticipant[] | undefined;
-      if (!participants?.some((member) => member.homeMachineId === connection.record.id)) {
-        throw new Error("This chat has no member on this machine.");
-      }
+      if (!conversation || conversation.kind !== "chat") throw new Error("This chat is not on this desktop.");
       const read = await this.options.readChatAttachment({
         conversationId: body.conversationId, attachmentId: body.attachmentId
       });
@@ -1770,23 +1637,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
   }
 
-  private async handleResync(connection: MachineConnection, conversationId: string): Promise<void> {
-    void this.debugLogs.write("machine-link.resync", { machineId: connection.record.id, conversationId });
-    connection.replicated.delete(conversationId);
-    const conversation = await this.conversationLoader?.(conversationId);
-    if (!conversation) {
-      void this.debugLogs.write("machine-link.resync.unavailable", { machineId: connection.record.id, conversationId });
-      return;
-    }
-    await this.replicateTo(connection, conversation);
-  }
-
   private setMachinePeer(connection: MachineConnection, deviceId: string | undefined): void {
     const changed = connection.machineDeviceId !== deviceId;
     if (!deviceId) {
       connection.machineDeviceId = undefined;
       connection.settingsSynced = false;
-      connection.replicated.clear();
     } else if (!connection.machineDeviceId) {
       connection.machineDeviceId = deviceId;
       if (!connection.helloSeen && !connection.helloRequestTimer) {
@@ -1869,65 +1724,6 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private emitStatus(): void {
     this.emitter.emit("status", this.status());
   }
-}
-
-/** Content hash of everything a message carries, so edits of equal length
- *  are never mistaken for "unchanged". Message objects are shared between
- *  snapshots, so the hash is cached per object and recomputed only when the
- *  fields that change in place (content, status, metadata, attachments)
- *  differ from the cached ones: a pass over a 14 000-row chat compares
- *  strings instead of serializing and hashing every row again. */
-const stampCache = new WeakMap<ChatMessage, { content: string; status: string | undefined; metadata: unknown; metadataJson: string; attachments: unknown; stamp: string }>();
-
-export function messageStamp(message: ChatMessage): string {
-  const cached = stampCache.get(message);
-  const attachments = (message as { attachments?: unknown }).attachments;
-  if (cached && cached.content === message.content && cached.status === message.status && cached.attachments === attachments) {
-    if (cached.metadata === message.metadata) {
-      return cached.stamp;
-    }
-    const metadataJson = JSON.stringify(message.metadata ?? null);
-    if (metadataJson === cached.metadataJson) {
-      cached.metadata = message.metadata;
-      return cached.stamp;
-    }
-  }
-  const stamp = createHash("sha256").update(JSON.stringify(message)).digest("hex");
-  stampCache.set(message, {
-    content: message.content,
-    status: message.status,
-    metadata: message.metadata,
-    metadataJson: JSON.stringify(message.metadata ?? null),
-    attachments,
-    stamp
-  });
-  return stamp;
-}
-
-/** Bounded message batches: at most MAX_BATCH_MESSAGES messages and about
- *  MAX_BATCH_BYTES of JSON per relay logical message (the sealed form is
- *  larger; the relay limit is 10 MiB). */
-const MAX_BATCH_MESSAGES = 150;
-const MAX_BATCH_BYTES = 1_500_000;
-
-export function messageBatches(messages: ChatMessage[]): ChatMessage[][] {
-  const batches: ChatMessage[][] = [];
-  let current: ChatMessage[] = [];
-  let currentBytes = 0;
-  for (const message of messages) {
-    const bytes = Buffer.byteLength(JSON.stringify(message), "utf8");
-    if (current.length > 0 && (current.length >= MAX_BATCH_MESSAGES || currentBytes + bytes > MAX_BATCH_BYTES)) {
-      batches.push(current);
-      current = [];
-      currentBytes = 0;
-    }
-    current.push(message);
-    currentBytes += bytes;
-  }
-  if (current.length > 0) {
-    batches.push(current);
-  }
-  return batches;
 }
 
 function errorMessage(error: unknown): string {

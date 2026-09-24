@@ -781,6 +781,8 @@ function cloneJsonValue<T>(value: T): T {
 export interface ChatChangeTransport {
   /** False when no other device should receive this device's chat changes. */
   hasRecipients(): boolean;
+  /** The last change event this device committed for a chat (seq 0: none). */
+  head(conversationId: string): Promise<{ originId: string; logScopeId: string; originSeq: number }>;
   diffPolicy(conversation: Conversation): ChatChangeDiffPolicy;
   applyPolicy(conversation: Conversation | undefined): ChatChangeApplyPolicy;
   /** Mints the event and hands its SQL to `write`, which saves the chat in the
@@ -18300,6 +18302,44 @@ export class ChatService {
     }
   }
 
+  /** The chat change a machine must have applied before it runs a turn in
+   *  this chat: everything saved so far, including queued saves. */
+  async chatChangeHead(conversationId: string): Promise<{ originId: string; logScopeId: string; originSeq: number } | undefined> {
+    const transport = this.chatChangeTransport;
+    if (!transport) return undefined;
+    await this.waitForQueuedSave(conversationId);
+    return transport.head(conversationId);
+  }
+
+  /** Machine side: records where a chat's project lives here before a turn
+   *  runs in it. Device-local; never part of the chat's shared state. */
+  async applyMachineRepository(conversationId: string, repository: { sourcePath: string; paths: Record<string, string> } | undefined): Promise<void> {
+    if (!repository || !this.hostMachineId) return;
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") return;
+    await this.withChatMutation(conversation, async () => {
+      const before = this.stableJson({ repository: conversation.metadata.machineRepository ?? null, repoPath: conversation.repoPath ?? null });
+      conversation.metadata = { ...conversation.metadata, machineRepository: repository };
+      this.localizeRepoPath(conversation, repository.sourcePath);
+      if (this.stableJson({ repository: conversation.metadata.machineRepository ?? null, repoPath: conversation.repoPath ?? null }) === before) return;
+      await this.saveConversation(conversation, { emitChanges: false });
+    });
+  }
+
+  /** On a machine the stored path is this machine's copy of the project; the
+   *  desktop's path is kept as the project's identity. */
+  private localizeRepoPath(conversation: Conversation, desktopRepoPath: string | undefined): void {
+    if (!this.hostMachineId) return;
+    if (!desktopRepoPath) {
+      delete conversation.repoPath;
+      return;
+    }
+    const current = conversation.metadata.machineRepository as { sourcePath?: string; paths?: Record<string, string> } | undefined;
+    const paths = current?.sourcePath === desktopRepoPath && current.paths ? current.paths : {};
+    conversation.metadata = { ...conversation.metadata, machineRepository: { sourcePath: desktopRepoPath, paths } };
+    conversation.repoPath = paths[this.hostMachineId] ?? desktopRepoPath;
+  }
+
   /** Installs (or removes) the path a chat's changes take to other devices. */
   setChatChangeTransport(transport: ChatChangeTransport | undefined): void {
     this.chatChangeTransport = transport;
@@ -18346,6 +18386,7 @@ export class ChatService {
     if (!existing) {
       const result = applyChatChanges(undefined, payload, event.originId, transport.applyPolicy(undefined));
       if (result.status === "missing-conversation") return "missing-conversation";
+      this.localizeRepoPath(result.conversation, result.conversation.repoPath);
       await this.saveConversation(result.conversation, { emitChanges: false });
       this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
       return "applied";
@@ -18360,6 +18401,12 @@ export class ChatService {
       if (!result.changed) return;
       const wasArchived = existing.metadata.archived === true;
       existing.title = result.conversation.title;
+      const repoChanged = payload.changes.some((change) => change.type === "conversation.updated" && change.repoPath !== undefined);
+      if (this.hostMachineId) {
+        // The incoming path is the desktop's; this machine keeps its own copy.
+        if (repoChanged) this.localizeRepoPath(result.conversation, result.conversation.repoPath);
+        else if (existing.repoPath) result.conversation.repoPath = existing.repoPath;
+      }
       if (result.conversation.repoPath) existing.repoPath = result.conversation.repoPath;
       else delete existing.repoPath;
       existing.messages = result.conversation.messages;
