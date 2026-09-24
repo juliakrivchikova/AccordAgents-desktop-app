@@ -96,6 +96,7 @@ import { stableJson } from "../shared/stableJson";
 import { ArtifactService } from "./services/artifacts";
 import { ArtifactStore } from "./services/artifactStore";
 import { artifactEventWriter, artifactProjectionPort } from "./services/artifactReplication";
+import { createChatChangeTransport } from "./services/chatChangeTransport";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "./appToolWiring";
 import { ChatEventLogService } from "./services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "./services/chatEventMirror";
@@ -3387,6 +3388,9 @@ void app.whenReady().then(async () => {
       // A member on a machine reads the User's pictures from here: a chat's
       // text is replicated to that machine, its attachment files are not.
       readChatAttachment: (request) => chatService.readChatAttachment(request),
+      // A machine's own changes (its members' replies, messages typed into it
+      // while this desktop was away) arrive as chat change events.
+      applyChatChanges: (event, payload) => chatService.applyRemoteChatChanges(event, payload),
       // Every device the User has trusted is named to each machine, in the
       // room that machine is met in. That is what lets a machine keep working
       // when this desktop is closed.
@@ -3400,6 +3404,15 @@ void app.whenReady().then(async () => {
         fingerprint: room.fingerprint
       }))
     });
+    // Every chat goes to every enrolled machine, as one change event per save.
+    chatService.setChatChangeTransport(createChatChangeTransport({
+      role: "desktop",
+      storage: storageService,
+      log: chatEventLogService,
+      recipients: () => machineLinkService?.chatActionRecipients() ?? [],
+      onCommitted: () => machineLinkService?.nudgeEventChannels(),
+      machineOriginId: (machineId) => machineLinkService?.machineDeviceId(machineId)
+    }));
     machineLinkService.onStatus(() => {
       void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
     });

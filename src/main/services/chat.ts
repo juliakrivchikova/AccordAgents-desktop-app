@@ -6,6 +6,15 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
+import {
+  applyChatChanges,
+  chatChangeBaseline,
+  diffChatChanges,
+  type ChatChangeApplyPolicy,
+  type ChatChangeBaseline,
+  type ChatChangeDiffPolicy,
+  type ChatChangesPayload
+} from "./chatChanges";
 import type {
   AgentContextUsage,
   AgentHealth,
@@ -763,6 +772,25 @@ function cloneJsonValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+/**
+ * How a chat's changes leave this device: one signed `chat.changes` event per
+ * save, committed in the same transaction as the save. Installed by the
+ * desktop and by the machine runtime; absent in tests and when no other device
+ * is enrolled, in which case saves behave exactly as before.
+ */
+export interface ChatChangeTransport {
+  /** False when no other device should receive this device's chat changes. */
+  hasRecipients(): boolean;
+  diffPolicy(conversation: Conversation): ChatChangeDiffPolicy;
+  applyPolicy(conversation: Conversation | undefined): ChatChangeApplyPolicy;
+  /** Mints the event and hands its SQL to `write`, which saves the chat in the
+   *  same transaction. Returns the save token `write` produced. */
+  commit(
+    payload: ChatChangesPayload,
+    write: (also: { sql: string; onlyIfSql(condition: string): string }) => Promise<string>
+  ): Promise<{ token: string; committed: boolean; eventId: string }>;
+}
+
 export class ChatService {
   private readonly saveQueues = new Map<string, Promise<void>>();
   // Serialized message rows of the last snapshot emitted per conversation. The
@@ -845,6 +873,12 @@ export class ChatService {
   // token, refreshStoredChatState reads this instead of re-reading every
   // message row through the sqlite3 CLI.
   private readonly lastSavedSnapshots = new Map<string, { snapshot: Conversation; token: string }>();
+  // What the database held after this process's last save of a chat, reduced
+  // to what the change diff needs. Loaded from the database when absent (after
+  // a restart, an eviction or a failed save), never guessed.
+  private readonly chatChangeBaselines = new Map<string, ChatChangeBaseline | undefined>();
+  private static readonly CHAT_CHANGE_BASELINE_LIMIT = 256;
+  private chatChangeTransport?: ChatChangeTransport;
   // Tracked chats are bounded by count and by retained serialized bytes; chats
   // with a run in flight are evicted last, so a settings sweep over many chats
   // does not make the chat the user is working in pay for a full re-emission.
@@ -18206,7 +18240,7 @@ export class ChatService {
     };
   }
 
-  private async saveConversation(conversation: Conversation): Promise<void> {
+  private async saveConversation(conversation: Conversation, options: { emitChanges?: boolean } = {}): Promise<void> {
     if (this.deletedConversationIds.has(conversation.id)) {
       throw new Error("Chat was permanently deleted.");
     }
@@ -18219,18 +18253,128 @@ export class ChatService {
     // is in flight diffs against them, and so the saved snapshot is kept for
     // refreshStoredChatState (only tracked chats keep it).
     this.rememberSnapshotRows(conversation.id, built.rows);
-    await this.persistConversationSnapshot(built.snapshot, built.rows);
+    await this.persistConversationSnapshot(built.snapshot, built.rows, options);
     this.onConversationSnapshot?.(built.snapshot, built.update);
   }
 
-  private async persistConversationSnapshot(snapshot: Conversation, rows?: SnapshotMessageRow[]): Promise<void> {
-    if (!this.chatEventMirror?.isEnabled()) {
-      this.rememberLastSavedSnapshot(snapshot, await this.storage.saveConversation(snapshot, { rows }));
-      return;
+  private async persistConversationSnapshot(
+    snapshot: Conversation,
+    rows?: SnapshotMessageRow[],
+    options: { emitChanges?: boolean } = {}
+  ): Promise<void> {
+    const transport = this.chatChangeTransport;
+    const tracked = Boolean(transport) && snapshot.kind === "chat" && transport!.hasRecipients();
+    if (!tracked) this.chatChangeBaselines.delete(snapshot.id);
+    let payload: ChatChangesPayload | undefined;
+    if (tracked && options.emitChanges !== false) {
+      const diff = diffChatChanges(await this.chatChangeBaselineFor(snapshot.id), snapshot, transport!.diffPolicy(snapshot));
+      if (diff.suppressedMessageIds.length) {
+        void this.debugLogs.write("chat.changes.not-owner", { conversationId: snapshot.id, messageIds: diff.suppressedMessageIds.slice(0, 20) });
+      }
+      if (diff.changes.length) {
+        payload = { version: 1, conversationId: snapshot.id, updatedAt: snapshot.updatedAt, changes: diff.changes };
+      }
+    } else if (tracked && !this.chatChangeBaselines.has(snapshot.id)) {
+      // A save that must not emit (an incoming change being stored) still
+      // moves the baseline, so the next local save does not echo it back.
+      await this.chatChangeBaselineFor(snapshot.id);
     }
-    const previous = await this.storage.getConversation(snapshot.id);
-    this.rememberLastSavedSnapshot(snapshot, await this.storage.saveConversation(snapshot, { rows }));
-    await this.chatEventMirror.mirrorSavedConversation(previous, snapshot);
+    try {
+      const previous = this.chatEventMirror?.isEnabled() ? await this.storage.getConversation(snapshot.id) : undefined;
+      if (payload) {
+        const outcome = await transport!.commit(payload, (also) => this.storage.saveConversation(snapshot, { rows, alsoCommit: also }));
+        if (!outcome.committed) {
+          void this.debugLogs.write("chat.changes.not-committed", { conversationId: snapshot.id, eventId: outcome.eventId });
+        }
+        this.rememberLastSavedSnapshot(snapshot, outcome.token);
+      } else {
+        this.rememberLastSavedSnapshot(snapshot, await this.storage.saveConversation(snapshot, { rows }));
+      }
+      if (tracked) this.rememberChatChangeBaseline(snapshot.id, chatChangeBaseline(snapshot));
+      if (this.chatEventMirror?.isEnabled()) await this.chatEventMirror.mirrorSavedConversation(previous, snapshot);
+    } catch (error) {
+      // What the database holds after a failed save is unknown; the next save
+      // diffs against a fresh read instead.
+      this.chatChangeBaselines.delete(snapshot.id);
+      throw error;
+    }
+  }
+
+  /** Installs (or removes) the path a chat's changes take to other devices. */
+  setChatChangeTransport(transport: ChatChangeTransport | undefined): void {
+    this.chatChangeTransport = transport;
+    this.chatChangeBaselines.clear();
+  }
+
+  private async chatChangeBaselineFor(conversationId: string): Promise<ChatChangeBaseline | undefined> {
+    if (this.chatChangeBaselines.has(conversationId)) {
+      const baseline = this.chatChangeBaselines.get(conversationId);
+      this.rememberChatChangeBaseline(conversationId, baseline);
+      return baseline;
+    }
+    const stored = await this.storage.getConversation(conversationId);
+    const baseline = chatChangeBaseline(stored && stored.kind === "chat" ? stored : undefined);
+    this.rememberChatChangeBaseline(conversationId, baseline);
+    return baseline;
+  }
+
+  private rememberChatChangeBaseline(conversationId: string, baseline: ChatChangeBaseline | undefined): void {
+    this.chatChangeBaselines.delete(conversationId);
+    this.chatChangeBaselines.set(conversationId, baseline);
+    while (this.chatChangeBaselines.size > ChatService.CHAT_CHANGE_BASELINE_LIMIT) {
+      const oldest = this.chatChangeBaselines.keys().next().value;
+      if (oldest === undefined || oldest === conversationId) break;
+      this.chatChangeBaselines.delete(oldest);
+    }
+  }
+
+  /**
+   * Folds a `chat.changes` event from another device into this device's copy.
+   * The result is stored without being emitted again. "missing-conversation"
+   * means the event refers to a chat this device does not have yet; the caller
+   * holds it and asks for the chat.
+   */
+  async applyRemoteChatChanges(event: ChatEventEnvelope, payload: ChatChangesPayload): Promise<"applied" | "missing-conversation"> {
+    const transport = this.chatChangeTransport;
+    if (!transport) throw new Error("This device has no chat change transport.");
+    if (payload.conversationId !== event.conversationId) throw new Error("Chat change event names another chat.");
+    const conversationId = payload.conversationId;
+    if (this.deletedConversationIds.has(conversationId) || await this.storage.conversationTombstones?.().isDeleted(conversationId)) {
+      return "applied";
+    }
+    const existing = await this.storage.getConversation(conversationId);
+    if (!existing) {
+      const result = applyChatChanges(undefined, payload, event.originId, transport.applyPolicy(undefined));
+      if (result.status === "missing-conversation") return "missing-conversation";
+      await this.saveConversation(result.conversation, { emitChanges: false });
+      this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
+      return "applied";
+    }
+    if (existing.kind !== "chat") return "applied";
+    await this.withChatMutation(existing, async () => {
+      const result = applyChatChanges(existing, payload, event.originId, transport.applyPolicy(existing));
+      if (result.status !== "applied") return;
+      if (result.ignored.length) {
+        void this.debugLogs.write("chat.changes.ignored", { conversationId, originId: event.originId, eventId: event.eventId, ignored: result.ignored.slice(0, 20) });
+      }
+      if (!result.changed) return;
+      const wasArchived = existing.metadata.archived === true;
+      existing.title = result.conversation.title;
+      if (result.conversation.repoPath) existing.repoPath = result.conversation.repoPath;
+      else delete existing.repoPath;
+      existing.messages = result.conversation.messages;
+      existing.metadata = result.conversation.metadata;
+      existing.updatedAt = result.conversation.updatedAt;
+      const touched = new Set(payload.changes.flatMap((change) =>
+        change.type === "message.created" || change.type === "message.updated" ? [change.message.id] : []));
+      for (const message of existing.messages) {
+        if (message.role === "participant" && touched.has(message.id)) this.recordLastMessageByParticipant(existing, message);
+      }
+      if (!wasArchived && existing.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
+      await this.saveConversation(existing, { emitChanges: false });
+    });
+    this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
+    return "applied";
   }
 
   private clone(conversation: Conversation): Conversation {

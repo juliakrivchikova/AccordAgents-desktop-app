@@ -51,6 +51,7 @@ import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { isMachineDurableMessage } from "../../shared/machineLink";
 import { NativeProcessUnavailableError } from "./nativeProcess";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
 import { machineProgressEventId } from "../../shared/machineProgress";
 import { MachineProgressSender } from "./machineProgressSender";
 import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
@@ -100,6 +101,9 @@ export interface MachineHostOptions {
   /** Commit idle accounting before a completed native run stops being busy. */
   onNativeActivitySettled?: () => Promise<void>;
   idleStopWarning?: () => string | undefined;
+  /** Folds a `chat.changes` event into this machine's copy of the chat.
+   *  "missing-conversation" holds the event until the chat arrives. */
+  applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation">;
 }
 
 /** Conversation metadata the machine owns and never takes from the desktop:
@@ -748,6 +752,10 @@ export class MachineHostService {
     // before any application when the machine becomes available again.
     if (this.idleFenced || this.options.hostStopCommitted?.()) return "deferred";
     if (peer && stableJson(this.trust.peer(peer.deviceId) ?? null) !== stableJson(peer)) throw new Error("Machine controller authorization changed.");
+    if (event.kind === CHAT_CHANGES_EVENT_KIND) {
+      if (!this.options.applyChatChanges || !isChatChangesPayload(body)) throw new Error("Unexpected chat change event.");
+      return await this.options.applyChatChanges(event, body) === "applied" ? "applied" : "deferred";
+    }
     if (this.options.chatActions?.handles(event, body) && await this.isConversationDeleted(event.conversationId)) return "applied";
     if ((event.kind === "permission.decided" || event.kind === "choice.answered") && this.options.chatActions?.handles(event, body)) {
       // Delivery to a provider may wait; keep Stop and other chats moving.
@@ -1979,6 +1987,17 @@ export class MachineHostService {
     const peers = this.peers.recipients()
       .filter((peer) => peer.channelId === room && peer.deviceId !== issuer.deviceId);
     return [issuer, ...peers];
+  }
+
+  /** Where this machine's own chat changes go: the desktop that installed it.
+   *  Phones are not sent them; they read the chat from the desktop. */
+  chatChangeRecipients(): Array<{ deviceId: string; channelId: string }> {
+    return [{ deviceId: this.options.pairing.issuer.originId, channelId: this.options.pairing.rendezvousId }];
+  }
+
+  /** A chat save committed change events: send them now. */
+  nudgeEventChannel(): void {
+    this.eventChannel.nudge();
   }
 
   /** Recipients for artifact actions committed directly with their store write. */

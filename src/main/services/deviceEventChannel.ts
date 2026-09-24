@@ -4,6 +4,7 @@ import {
   type ChatActionDependency, type DeviceEventPacket
 } from "../../shared/deviceEventChannel";
 import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
+import { isChatChangesLogScope } from "./chatChanges";
 import { DEVICE_EVENT_INLINE_BYTES, isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { DeviceEventApplyOutcome, DeviceEventGap, DeviceEventReceipt } from "../../shared/deviceEventDelivery";
@@ -363,7 +364,13 @@ export class DeviceEventChannel {
   /** Chat actions share one log across every machine, so one decision is one
    *  event with many recipients rather than a separate copy per channel. */
   private inScope(logScopeId: string): boolean {
-    return logScopeId === CHAT_ACTION_LOG_SCOPE || logScopeId.startsWith(`device:${this.options.channelId}:`);
+    return logScopeId === CHAT_ACTION_LOG_SCOPE || isChatChangesLogScope(logScopeId) || logScopeId.startsWith(`device:${this.options.channelId}:`);
+  }
+
+  /** Sends whatever this device committed for the peer outside `publish`
+   *  (a chat save's change event) without waiting for the next retry tick. */
+  nudge(): void {
+    this.scheduleFlush();
   }
 
   private scope(conversationId: string, scope: string): string {

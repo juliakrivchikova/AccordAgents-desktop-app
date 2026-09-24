@@ -1415,7 +1415,13 @@ export class StorageService {
    *  that already serialized and hashed the messages for this exact snapshot
    *  passes them as `rows`; they are used only when they line up with the
    *  messages one to one, otherwise the messages are serialized here. */
-  async saveConversation(conversation: Conversation, options: { rows?: SavedMessageRow[] } = {}): Promise<string> {
+  async saveConversation(conversation: Conversation, options: {
+    rows?: SavedMessageRow[];
+    /** Statements that must commit in the same transaction as this save, or
+     *  not at all: the chat's outgoing change event. `onlyIfSql` receives the
+     *  condition the incremental write is gated on. */
+    alsoCommit?: { sql: string; onlyIfSql(condition: string): string };
+  } = {}): Promise<string> {
     await this.init();
     const rows: SavedMessageRow[] = rowsMatchMessages(options.rows, conversation.messages)
       ? options.rows
@@ -1439,7 +1445,7 @@ export class StorageService {
     let claimed = false;
     if (previous) {
       try {
-        claimed = await this.writeConversationIncrementally(conversation, rows, previous, nextToken);
+        claimed = await this.writeConversationIncrementally(conversation, rows, previous, nextToken, options.alsoCommit);
       } catch (error) {
         // A failed partial write leaves this process unable to say what the row
         // holds, so the cache is worthless and the next save must rewrite
@@ -1456,7 +1462,7 @@ export class StorageService {
       return nextToken;
     }
     this.savedMessageState.delete(conversation.id);
-    await this.writeConversationInFull(conversation, rows, nextToken);
+    await this.writeConversationInFull(conversation, rows, nextToken, options.alsoCommit?.sql);
     this.savedMessageState.set(conversation.id, {
       token: nextToken,
       rows: rows.map((row) => ({ id: row.id, hash: row.hash }))
@@ -1483,7 +1489,8 @@ export class StorageService {
   private async writeConversationInFull(
     conversation: Conversation,
     rows: SavedMessageRow[],
-    token: string
+    token: string,
+    alsoCommitSql = ""
   ): Promise<void> {
     const bodyPayload = JSON.stringify(conversationBody(conversation));
     // `payload_json` used to hold a second, complete copy of the conversation —
@@ -1525,6 +1532,7 @@ export class StorageService {
         where id = ${sqlString(conversation.id)};
       delete from conversation_messages where conversation_id = ${sqlString(conversation.id)};
       ${messageRows}
+      ${alsoCommitSql}
       commit;
     `);
   }
@@ -1535,7 +1543,8 @@ export class StorageService {
     conversation: Conversation,
     rows: SavedMessageRow[],
     previous: SavedMessageState,
-    token: string
+    token: string,
+    alsoCommit?: { sql: string; onlyIfSql(condition: string): string }
   ): Promise<boolean> {
     const bodyPayload = JSON.stringify(conversationBody(conversation));
     const payload = bodyPayload;
@@ -1591,6 +1600,7 @@ export class StorageService {
         payload_json = ${sqlString(payload)}
       where id = ${sqlString(conversation.id)} and save_token = ${sqlString(previous.token)};
       ${statements.join("\n")}
+      ${alsoCommit ? alsoCommit.onlyIfSql(owned) : ""}
       update conversations set save_token = ${sqlString(token)}
         where id = ${sqlString(conversation.id)} and save_token = ${sqlString(previous.token)};
       commit;

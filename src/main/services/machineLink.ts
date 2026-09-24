@@ -46,6 +46,7 @@ import { permissionDecisionAction, choiceDecisionAction, chatActionEventId } fro
 import type { ChatActionDependency } from "../../shared/deviceEventChannel";
 import type { MachineTrustRoster, TrustedPeerAccess } from "../../shared/machineTrust";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
 
 export interface MachineLinkOptions {
   repositoryPaths?: (sourcePath: string) => Promise<Record<string, string>>;
@@ -76,6 +77,9 @@ export interface MachineLinkOptions {
    *  member running on a machine reads one from. */
   readChatAttachment?: (request: { conversationId: string; attachmentId: string })
     => Promise<{ attachment: { mimeType?: string; filename?: string }; dataBase64: string }>;
+  /** Folds a `chat.changes` event from a machine into this desktop's copy.
+   *  "missing-conversation" holds the event until the chat arrives. */
+  applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation">;
   now?: () => Date;
 }
 
@@ -564,6 +568,18 @@ export class MachineLinkService implements MachineTurnDispatcher {
   /** Enrolled machines, including offline recipients, for one chat action. An
    *  event minted inside another transaction cannot go through `publish`, so
    *  its recipients are taken here and written with it. */
+  /** The device identity of an enrolled machine, once it has introduced itself. */
+  machineDeviceId(machineId: string): string | undefined {
+    const connection = this.connections.get(machineId);
+    return connection?.machineDeviceId ?? connection?.record.deviceId ?? undefined;
+  }
+
+  /** A chat save committed change events for the machines: send them now
+   *  rather than at each channel's next retry tick. */
+  nudgeEventChannels(): void {
+    for (const connection of this.connections.values()) connection.eventChannel?.nudge();
+  }
+
   chatActionRecipients(): Array<{ deviceId: string; channelId: string }> {
     const recipients: Array<{ deviceId: string; channelId: string }> = [];
     for (const connection of this.connections.values()) {
@@ -1465,6 +1481,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
           void this.debugLogs.write("machine-link.action.dependency-unavailable", { ...dependency, machineId: connection.record.id });
         },
         apply: async (event, body) => {
+          if (event.kind === CHAT_CHANGES_EVENT_KIND) {
+            if (!this.options.applyChatChanges || !isChatChangesPayload(body)) throw new Error("Unexpected chat change event.");
+            return await this.options.applyChatChanges(event, body) === "applied" ? "applied" : "deferred";
+          }
           // Chat actions from another machine are applied here, not rejected:
           // a signature made there has to become visible here, and a change
           // made on state this desktop has replaced has to be shown as

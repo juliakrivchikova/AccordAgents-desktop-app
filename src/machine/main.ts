@@ -24,6 +24,7 @@ import { AppSkillsService } from "../main/services/appSkills";
 import { ArtifactService } from "../main/services/artifacts";
 import { ArtifactStore } from "../main/services/artifactStore";
 import { artifactEventWriter, artifactProjectionPort } from "../main/services/artifactReplication";
+import { createChatChangeTransport } from "../main/services/chatChangeTransport";
 import { ChatEventLogService } from "../main/services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "../main/services/chatEventMirror";
 import { ChatService } from "../main/services/chat";
@@ -356,9 +357,22 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     },
     onDesktopMachineId: (machineId) => {
       chatService.setHostMachineId(machineId);
-    }
+    },
+    // Chats reach this machine as change events from the desktop.
+    applyChatChanges: (event, payload) => chatService.applyRemoteChatChanges(event, payload)
   });
   hostRef = host;
+  // This machine's own changes (its members' replies, messages typed into it
+  // while the desktop is away) go back to the desktop the same way.
+  chatService.setChatChangeTransport(createChatChangeTransport({
+    role: "machine",
+    storage: storageService,
+    log: chatEventLogService,
+    recipients: () => host.chatChangeRecipients(),
+    onCommitted: () => host.nudgeEventChannel(),
+    hostMachineId: () => host.enrolledMachineId(),
+    desktopOriginId: () => enrollment.issuer.originId
+  }));
   // A member here asking other members goes through the desktop: it owns the
   // roster and runs each target where that member lives.
   chatService.setParticipantRequestDelegate({
