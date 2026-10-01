@@ -22,6 +22,12 @@ import type { ChatMessage, ChatMessageReactions, ChatReactor, Conversation } fro
  */
 
 export const CHAT_CHANGES_EVENT_KIND = "chat.changes";
+/**
+ * A machine is sent chat changes only while its runtime folds this version,
+ * and nothing it was not sent is sent later: a save is diffed against what the
+ * database held, not against what each machine has. Raising this therefore
+ * needs every machine to get a new copy at the upgrade that brings it there.
+ */
 export const CHAT_CHANGES_VERSION = 1;
 
 export const CHAT_CHANGES_LOG_SCOPE_PREFIX = "chat-changes:";

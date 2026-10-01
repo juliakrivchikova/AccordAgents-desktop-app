@@ -227,7 +227,11 @@ plus one direct copy at setup (below).
   and "Remove" takes it out of the app, drops what was kept for it, and stops
   offering the other machines what it wrote (they no longer trust its
   signature). A machine that connects while the question is open is in use,
-  and the question is withdrawn.
+  and the question is withdrawn. Known limit: what the removed machine wrote
+  that another machine had not received yet stays missing on that machine
+  (seen in QA as an empty reply bubble there); the desktop's chat, the one
+  the User sees, has it. Closing it would make the desktop the writer of a
+  removed machine's members' messages.
 - **Retired.** `machine.conversation.sync`, `.delta` from the desktop,
   `.sync.done` and `.resync` are no longer sent; one that still arrives from an
   older peer is logged and ignored. A `.backdelta` from a runtime that has not

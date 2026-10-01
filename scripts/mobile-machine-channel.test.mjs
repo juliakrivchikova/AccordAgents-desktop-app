@@ -156,7 +156,12 @@ async function machineBox(options = {}) {
         if (next) replicated.push(...(next.messages ?? []));
       }
     },
-    { getConversation: async () => ({ id: CONVERSATION, kind: "chat", messages: [], metadata: { participants: [PARTICIPANT] } }) },
+    {
+      getConversation: async () => ({ id: CONVERSATION, kind: "chat", messages: [], metadata: { participants: [PARTICIPANT] } }),
+      // A machine that already holds the chat, including the message each
+      // command answers: these tests are about the command path.
+      conversationPresence: async () => ({ kind: "chat", hasMessage: true })
+    },
     { importMachineSettingsSnapshot: async () => undefined },
     { write: async (event, payload) => { if (process.env.MACHINE_CHANNEL_DEBUG) console.error(event, payload); } },
     {
@@ -185,7 +190,7 @@ async function machineBox(options = {}) {
   await host.start();
   await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: desktop.originId, appVersion: "t", machineId: "machine-one" });
   return {
-    host, runs, aborted, actions, results, replicated, outbound, pairing, identity, desktop, dir, hooks,
+    host, runs, aborted, actions, results, replicated, outbound, pairing, identity, desktop, dir, hooks, storage, eventLog,
     trust: async (peers) => {
       const body = { type: "machine.trust.roster", conversationId: `machine-trust:${pairing.rendezvousId}`,
         roster: { version: 1, issuerDeviceId: desktop.originId, updatedAt: new Date().toISOString(), peers } };
@@ -417,6 +422,36 @@ test("an ask made with no connection is held, and delivered when there is one", 
     offline = false;
     await device.channels.deliver("machine-one");
     assert.equal(await settle(() => box.runs.length === 1), true, "the ask is delivered once there is a connection");
+  } finally { await box.cleanup(); }
+});
+
+test("a machine's own chat change reaches the phone with the desktop away, from the first one the phone sees", async () => {
+  const identity = await phone.createIdentity();
+  const box = await machineBox();
+  try {
+    await box.trust([phonePeer(identity, box.pairing)]);
+    const device = await phoneOn(box, identity);
+    device.identityId = identity.deviceId;
+    deliverMachineTraffic(box, device);
+    const scope = "chat-changes:" + CONVERSATION;
+    const change = (id, content) => ({ version: 1, conversationId: CONVERSATION, updatedAt: new Date().toISOString(), changes: [
+      { type: "message.created", message: { id, role: "participant", participantId: PARTICIPANT.id, content, createdAt: new Date().toISOString(), status: "done" } }
+    ] });
+    // Two the desktop confirmed long ago, so the machine keeps them for no one.
+    for (const id of ["early-1", "early-2"]) {
+      await box.eventLog.appendLocalEvent({ conversationId: CONVERSATION, logScopeId: scope, kind: "chat.changes", payload: change(id, id),
+        recipients: [] });
+    }
+    // The one written while the desktop is away, shared with the phone in the room.
+    const { event } = await box.eventLog.appendLocalEvent({ conversationId: CONVERSATION, logScopeId: scope, kind: "chat.changes",
+      payload: change("reply-away", "answered with the desktop away"),
+      recipients: [{ deviceId: identity.deviceId, channelId: box.pairing.rendezvousId }] });
+    assert.equal(event.originSeq, 3);
+    box.host.nudgeEventChannel();
+    assert.equal(await settle(() => device.applied.some((item) => item.kind === "chat.changes" &&
+      item.payload.changes?.[0]?.message?.id === "reply-away")), true, "the phone applies it without waiting for the first two");
+    assert.equal(await settle(async () => Boolean((await box.storage.deviceEvents().listPending(box.pairing.rendezvousId, 0, identity.deviceId))
+      .every((row) => row.event.eventId !== event.eventId))), true, "and the machine has its acknowledgement");
   } finally { await box.cleanup(); }
 });
 
