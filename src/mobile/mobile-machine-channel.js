@@ -59,7 +59,10 @@
   }
 
   function inScope(logScopeId, rendezvousId) {
-    return logScopeId === "chat:actions" || String(logScopeId).indexOf("device:" + rendezvousId + ":") === 0;
+    // A machine's own chat changes (its members' replies) reach this phone
+    // while the desktop is away; the caller has checked the machine wrote them.
+    return logScopeId === "chat:actions" || String(logScopeId).indexOf("device:" + rendezvousId + ":") === 0 ||
+      /^chat-changes:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(String(logScopeId));
   }
 
   function createMachineChannels(options) {

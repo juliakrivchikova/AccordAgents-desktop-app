@@ -289,6 +289,13 @@
       return event;
     }
 
+    // A machine's chat changes are shown from the first one this phone sees.
+    // What the machine wrote before is in the chat the desktop shows, and it
+    // keeps no earlier ones for a phone, so waiting for them would wait forever.
+    function startsAtFirstSight(logScopeId) {
+      return String(logScopeId).indexOf("chat-changes:") === 0;
+    }
+
     // Applies an event from another device. A missing sequence is a gap to
     // repair, never a hole to skip.
     async function receive(event) {
@@ -298,22 +305,28 @@
       // acknowledged; it is refused so a forged event cannot release history.
       if (verify && !await verify(event)) return "unverified";
       let status = "applied";
-      const applied = appliedHeadOf(event.originId, event.logScopeId);
+      let applied = appliedHeadOf(event.originId, event.logScopeId);
+      let startedAt;
       await port.runAtomic([EVENTS, META], async function (tx) {
         const existing = await tx.get(EVENTS, event.eventId);
         if (existing) { status = "duplicate"; return; }
         // Already applied and dropped: repeating it must not put it back, or a
         // machine's re-offer after a reconnect would replay a finished turn.
         if (event.originSeq <= applied.seq) { status = "duplicate"; return; }
-        const held = await tx.getAll(EVENTS);
-        const highest = held
-          .filter(function (item) { return item.originId === event.originId && item.logScopeId === event.logScopeId; })
-          .reduce(function (max, item) { return Math.max(max, item.originSeq); }, applied.seq);
+        const held = (await tx.getAll(EVENTS))
+          .filter(function (item) { return item.originId === event.originId && item.logScopeId === event.logScopeId; });
+        if (applied.seq === 0 && !held.length && event.originSeq > 1 && startsAtFirstSight(event.logScopeId)) {
+          startedAt = { seq: event.originSeq - 1 };
+          await tx.put(META, { key: appliedKey(event.originId, event.logScopeId), head: startedAt });
+          applied = startedAt;
+        }
+        const highest = held.reduce(function (max, item) { return Math.max(max, item.originSeq); }, applied.seq);
         if (event.originSeq > highest + 1) status = "gap";
         await tx.put(EVENTS, event);
         clock.observe(event.logicalTs);
         await tx.put(META, { key: CLOCK_KEY, value: formatHlc(clock.current()) });
       });
+      if (startedAt) appliedHeads.set(appliedKey(event.originId, event.logScopeId), startedAt);
       return status;
     }
 

@@ -115,6 +115,27 @@ test("a missing sequence is reported as a gap to repair, not skipped", async () 
   assert.equal(await phone.receive(from(2)), "duplicate", "a repeat of a repaired event changes nothing");
 });
 
+test("a machine's chat changes are taken from the first one seen; a gap after it is still repaired", async () => {
+  const port = memoryPort();
+  const phone = log(port);
+  const from = (seq) => ({
+    eventId: "c" + seq, conversationId: "chat-1", logScopeId: "chat-changes:chat-1",
+    originId: "cloud-box", originSeq: seq, logicalTs: "hlc:1700000000000:00000" + seq + ":cloud-box",
+    kind: "chat.changes", payload: {}, createdAt: "2026-10-01T00:00:0" + seq + ".000Z"
+  });
+  // The desktop confirmed 1..4 long ago; the machine offers this phone what it still holds.
+  assert.equal(await phone.receive(from(5)), "applied");
+  assert.deepEqual(await phone.gaps(), []);
+  assert.deepEqual((await phone.inboundReady("cloud-box")).map((event) => event.originSeq), [5]);
+  assert.equal(await phone.receive(from(7)), "gap");
+  assert.deepEqual(await phone.gaps(), [{ originId: "cloud-box", logScopeId: "chat-changes:chat-1", fromSeq: 6, toSeq: 6 }]);
+  // The start survives a reload.
+  const reopened = log(port);
+  assert.equal(await reopened.receive(from(4)), "duplicate");
+  // Any other scope still waits for its first event.
+  assert.equal(await phone.receive({ ...from(3), eventId: "a3", logScopeId: "chat:actions", kind: "choice.answered" }), "gap");
+});
+
 test("the queue is emptied only for what every device acknowledged", async () => {
   const port = memoryPort();
   const phone = log(port);
