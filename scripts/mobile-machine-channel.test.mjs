@@ -22,7 +22,7 @@ const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const phone = require(path.join(repoRoot, "src/mobile/mobile-machine-command.js"));
 const { createMobileEventLog } = require(path.join(repoRoot, "src/mobile/mobile-event-log.js"));
-const { createMachineChannels } = require(path.join(repoRoot, "src/mobile/mobile-machine-channel.js"));
+const { createMachineChannels, newerMachineMessages } = require(path.join(repoRoot, "src/mobile/mobile-machine-channel.js"));
 const { MachineHostService } = require(path.join(repoRoot, "dist/main/main/services/machineHost.js"));
 const { StorageService } = require(path.join(repoRoot, "dist/main/main/services/storage.js"));
 const { ChatEventLogService } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
@@ -453,6 +453,23 @@ test("a machine's own chat change reaches the phone with the desktop away, from 
     assert.equal(await settle(async () => Boolean((await box.storage.deviceEvents().listPending(box.pairing.rendezvousId, 0, identity.deviceId))
       .every((row) => row.event.eventId !== event.eventId))), true, "and the machine has its acknowledgement");
   } finally { await box.cleanup(); }
+});
+
+test("a machine's older change never puts older text back over a newer one on the phone", () => {
+  const message = (id, content) => ({ id, role: "participant", content });
+  let kept;
+  // 6 arrives live before 5 (a late mailbox copy): 5's new message is shown, its older text for X is not.
+  ({ record: kept } = newerMachineMessages(undefined, 6, [message("X", "final")]));
+  let order = newerMachineMessages(kept, 5, [message("X", "partial"), message("Y", "only in 5")]);
+  assert.deepEqual(order.fresh.map((item) => item.id), ["Y"]);
+  kept = order.record;
+  // A resend of 6 after its acknowledgement was lost changes nothing.
+  assert.deepEqual(newerMachineMessages(kept, 6, [message("X", "final")]).fresh, []);
+  // Bounded: what falls out of the record leaves a floor below which nothing applies.
+  for (let seq = 7; seq < 20; seq += 1) ({ record: kept } = newerMachineMessages(kept, seq, [message("m" + seq, "x")], 5));
+  assert.equal(Object.keys(kept.seqs).length, 5);
+  assert.deepEqual(newerMachineMessages(kept, 6, [message("X", "older still")], 5).fresh, []);
+  assert.deepEqual(newerMachineMessages(kept, 30, [message("Z", "new")], 5).fresh.map((item) => item.id), ["Z"]);
 });
 
 test("an acknowledgement from the wrong key releases nothing", async () => {

@@ -529,9 +529,41 @@
     };
   }
 
+  /**
+   * Which messages of a machine's chat change are newer here than what this
+   * phone already shows. A machine's changes are shown as they arrive, so one
+   * can come after a newer one for the same message (a late mailbox copy, a
+   * resend after a lost acknowledgement); it must not put older text back.
+   *
+   * `record` is what was kept for this machine and chat: the change that last
+   * set each message, and below `floor`, changes too old to be told apart.
+   * Returns the messages to show and the record to keep once they are shown.
+   */
+  function newerMachineMessages(record, originSeq, messages, limit) {
+    const seqs = Object.assign({}, (record && record.seqs) || {});
+    const floor = (record && record.floor) || 0;
+    const fresh = messages.filter(function (message) {
+      const seen = seqs[message.id];
+      return typeof seen === "number" ? originSeq > seen : originSeq > floor;
+    });
+    for (const message of fresh) seqs[message.id] = originSeq;
+    let nextFloor = floor;
+    const ids = Object.keys(seqs);
+    const keep = limit || 500;
+    if (ids.length > keep) {
+      ids.sort(function (left, right) { return seqs[left] - seqs[right]; });
+      for (const id of ids.slice(0, ids.length - keep)) {
+        nextFloor = Math.max(nextFloor, seqs[id]);
+        delete seqs[id];
+      }
+    }
+    return { fresh: fresh, record: { seqs: seqs, floor: nextFloor } };
+  }
+
   return {
     createMachineChannels: createMachineChannels,
     deviceScope: deviceScope,
-    isDeviceEventPacket: isDeviceEventPacket
+    isDeviceEventPacket: isDeviceEventPacket,
+    newerMachineMessages: newerMachineMessages
   };
 });
