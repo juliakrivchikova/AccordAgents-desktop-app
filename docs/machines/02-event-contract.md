@@ -195,17 +195,23 @@ plus one direct copy at setup (below).
   change of that chat it was written after. Another machine that has not
   applied that one yet holds a change it would otherwise refuse (a member it
   does not know yet, a home that has just moved) until it has; a change that
-  applies anyway is not held. A change of a newer version than a device folds
-  waits there, unapplied, until that device is updated.
+  applies anyway is not held, and a held one is tried again only once more of
+  the desktop's changes have arrived (trying means reading the whole chat). A
+  change of a newer version than a device folds waits there, unapplied, until
+  that device is updated.
 - **Recipients.** The desktop addresses every enrolled machine, online or not,
   and keeps each change until that machine confirms it. One whose runtime
   cannot fold chat changes yet (its hello says so) is sent none of them, by
   the desktop or by another machine (the roster says which can), and gets
-  them all, in order, once it can: no machine is ever left with a gap. The
-  list is read from the stored machines before any chat is saved, so a save
-  made while machines are still connecting reaches them too, and a machine
-  stays on it through a disconnect until it is removed. A machine addresses
-  the desktop and every machine in its trust roster. The
+  them all, in order, once it can: no machine is ever left with a gap. Kept
+  changes are left out of what is sent at all, not read and skipped on each
+  pass, and those a setup copy already contains are confirmed once the
+  machine has imported it rather than sent after it. The list is read from
+  the stored machines before any chat is saved, so a save made while machines
+  are still connecting reaches them too, and a machine stays on it through a
+  disconnect until it is removed. A machine addresses the desktop and every
+  machine in its trust roster; the roster says which machines can read chat
+  changes, and is sent again when that changes (at setup, or in a hello). The
   desktop also forwards each change a machine wrote to every other machine,
   unchanged and signed by its author; a machine accepts such a forward only
   when the author is one of the owner's machines. A missing change can be
@@ -238,7 +244,8 @@ plus one direct copy at setup (below).
   10 days the User is asked about each machine inactive for 10 days or more,
   and "Remove" takes it out of the app, drops what was kept for it, and stops
   offering the other machines what it wrote (they no longer trust its
-  signature). A machine that connects while the question is open is in use,
+  signature). A removal the app stopped in the middle of is finished at the
+  next start. A machine that connects while the question is open is in use,
   and the question is withdrawn. Known limit: what the removed machine wrote
   that another machine had not received yet stays missing on that machine
   (seen in QA as an empty reply bubble there); the desktop's chat, the one
@@ -257,7 +264,9 @@ plus one direct copy at setup (below).
   behind it) until the chat arrives. The phone receives the machine's own
   chat changes (shared in the machine's room while the desktop has not
   confirmed them) to show its members' messages and choices, in the order
-  they arrive: what it missed went to the desktop, so no gap holds them.
+  they arrive: what it missed went to the desktop, so no gap holds them. A
+  change that arrives after a newer one for the same message (a late copy, a
+  resend) does not put the older text back.
 
 ## 5. Channel and repair
 
