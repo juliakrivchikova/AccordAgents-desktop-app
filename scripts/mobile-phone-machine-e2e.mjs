@@ -28,6 +28,7 @@ import { mkdtemp, writeFile, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
+import { chatPublisher } from "./machine-chat-publish.mjs";
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -305,7 +306,7 @@ async function main() {
     messages: [{ id: "seed-1", role: "user", content: "Setting up.", status: "done", createdAt: new Date().toISOString() }],
     findings: [], metadata: { participants: [participant] }
   };
-  await ownerLink.replicateConversation(conversation);
+  await chatPublisher({ storage: ownerStorage, log: ownerLog, link: ownerLink }).publish(conversation);
   await wait(1500);
 
   // The owner goes away completely. Everything below is the phone alone.

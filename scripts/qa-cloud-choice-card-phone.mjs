@@ -19,6 +19,7 @@ import { mkdtemp, writeFile, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
+import { chatPublisher } from "./machine-chat-publish.mjs";
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -215,7 +216,7 @@ async function main() {
   await ownerLink.start();
   assert.ok(await waitFor(() => ownerLink.isMachineConnected(MACHINE_ID), 90_000), "the desktop never reached the machine");
   assert.ok(await waitFor(() => Boolean(records[0].deviceId), 60_000), "the machine never introduced itself");
-  await ownerLink.replicateConversation(conversation);
+  await chatPublisher({ storage: ownerStorage, log: ownerLog, link: ownerLink }).publish(conversation, { seed: true });
   await ownerStorage.saveConversation(conversation);
   log("machine connected and holding the chat");
 

@@ -10,6 +10,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
+import { chatPublisher } from "./machine-chat-publish.mjs";
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -82,10 +83,13 @@ async function main() {
     exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: JSON.stringify({ chatRoleConfigs: [] }), agentEnvironment: [] })
   };
   const logs = [];
+  let chats;
   const link = new MachineLinkService(settings, { write: async (event, payload) => { logs.push({ event, payload }); } }, {
     eventStorage: desktopStorage, eventLog: desktopLog,
-    appVersion: "e2e", desktopDeviceId: desktopIdentity.originId, reconnectDelayMs: 50
+    appVersion: "e2e", desktopDeviceId: desktopIdentity.originId, reconnectDelayMs: 50,
+    chatChangeHead: (conversationId) => chats.head(conversationId)
   });
+  chats = chatPublisher({ storage: desktopStorage, log: desktopLog, link });
   const delegations = [];
   link.onParticipantRequest((request) => { delegations.push(request); });
   const backdeltas = [];
@@ -108,8 +112,8 @@ async function main() {
     messages: [{ id: "msg-1", role: "user", content: "hello", status: "done", createdAt: new Date().toISOString() }],
     findings: [], metadata: { participants: [participant] }
   };
-  await link.replicateConversation(conversation);
-  log("conversation replicated");
+  await chats.publish(conversation);
+  log("conversation published as chat change events");
 
   const turn = link.runTurn({
     conversation, participant, triggerMessage: conversation.messages[0],

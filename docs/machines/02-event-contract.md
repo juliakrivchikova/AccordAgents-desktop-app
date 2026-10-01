@@ -152,20 +152,77 @@ note or a content hash alone is not a substitute for the body. Receiving an
 artifact event refreshes the open desktop panel, including late signatures.
 
 This is not the complete event-contract cutover: PWA IndexedDB outbox,
-canonical chat-wide roster fan-out, general conflict projections and
-superseded-revision navigation, pressure UI and history/blob garbage collection
-remain. Draft-state events are refolded in total order; revision storage binds
+canonical chat-wide roster fan-out for artifacts (chat changes have it, see
+below), general conflict projections and superseded-revision navigation,
+pressure UI and history/blob garbage collection outside chat changes remain. Draft-state events are refolded in total order; revision storage binds
 signatures to immutable revision identities and content hashes.
 The retained history and blob fragments currently stay in local SQLite after
 ACK for origin repair. Replication inventory and partial-copy barriers also
 survive machine restart. No relay deployment is needed for these changes.
+
+### Chat change events: every chat on every machine, 2026-10-01
+
+Machines hold every chat of their owner, whether or not a member of that chat
+runs on them, so their members can search every chat of a project (the User's
+decision of 2026-09-22; it replaces "local-only conversations stay outside
+sync"). The only way a machine gets chat state is events through the relay,
+plus one direct copy at setup (below).
+
+- **One event per save.** Every chat save writes one signed `chat.changes`
+  event in the same SQLite transaction as the save (`chatChanges.ts`,
+  `chatChangeTransport.ts`): a crash loses both or neither. The log scope is
+  `chat-changes:<chatId>`, one sequence per author. The payload lists what that
+  save changed: `conversation.created` / `conversation.updated` (shared fields
+  only), `message.created` / `message.updated`, `message.reactions` (adds and
+  removes) and `message.removed`. The diff is taken against what the database
+  held before the save, so a restart never turns into "every message changed".
+  Saves of device-local state (run state, sessions, leases, queue positions,
+  local paths) produce no event; an applied incoming change is saved without
+  being sent again.
+- **Who may change what.** A message's content and status come only from its
+  author: the device it was typed on, or the member's home machine for that
+  member's replies. Reactions come from anyone and merge; a removal is a union.
+  A chat's shared fields (title, members, project, archived, app-tool grants)
+  come only from the desktop. Changes from anyone else are ignored and logged.
+- **Recipients.** The desktop addresses every enrolled machine, online or not.
+  A machine addresses the desktop and every machine in its trust roster. The
+  desktop also forwards each change a machine wrote to every other machine,
+  unchanged and signed by its author; a machine accepts such a forward only
+  when the author is one of the owner's machines. A missing change can be
+  served by any device that holds it, so an author that is off does not hold
+  the others back.
+- **Turns.** A turn request names the newest chat change the machine must have
+  applied first. The machine waits for it, and fails the turn honestly after
+  10 minutes instead of running on stale messages.
+- **First copy.** At setup, and at the first upgrade of a machine that never
+  had one, the desktop copies every chat over the setup SSH connection while
+  the machine's runtime is stopped: chats with their shared state, artifacts,
+  deletion records and pictures (`chatCopy.ts`). Order: the machine's identity
+  is read and recorded, so every later change is addressed to it; saves already
+  in flight are waited for; the copy's marks (the newest change per chat and
+  author) are read; then the chats are exported. The machine continues from the
+  marks; a change the copy already contains is confirmed when it arrives
+  without being applied again. Changes other machines wrote that the desktop
+  holds beyond the marks are shared with the new machine as events.
+- **Cleanup.** A chat change every recipient has confirmed (and this device
+  applied, if it came from elsewhere) is forgotten after a day; the newest
+  event of each chat and author stays, because the next one continues its
+  sequence. A machine that never confirms keeps its share waiting: once every
+  10 days the User is asked about each machine inactive for 10 days or more,
+  and "Remove" takes it out of the app and drops what was kept for it.
+- **Retired.** `machine.conversation.sync`, `.delta` from the desktop,
+  `.sync.done`, `.resync` and `.backdelta` are no longer sent; one that still
+  arrives from an older runtime is logged and ignored. A phone that talks to a
+  machine while the desktop is away still sends its message as a `.delta`, and
+  receives the machine's chat changes (shared in the machine's room) to show
+  its members' messages and choices.
 
 ## 5. Channel and repair
 
 - The relay room is extended from `desktop | phone` to addressed enrolled devices (any number), with per-connection generations and fan-out to all peers; the mailbox stays the delivery buffer with cursor reads; the relay assigns no order and applies no rules (the `arrivalSeq` is a cursor, never an ordering key).
 - Catch-up on reconnect: mailbox cursor read (`afterArrival`), then per-origin `afterSeq` reads for detected gaps, then `sync.resend.requested` to the origin when the mailbox no longer holds the range.
 - Resend reproduces the identical events (same `eventId`, `originSeq`, `logicalTs`), so merge order is identical however an event arrived.
-- Sealing, enrollment, revocation (`device.capability.revoked` with `effectiveAfterLogicalTs`), and tombstones stay as today. Local-only conversations never enter the network.
+- Sealing, enrollment, revocation (`device.capability.revoked` with `effectiveAfterLogicalTs`), and tombstones stay as today. Every chat goes to every enrolled machine (§4, chat change events).
 
 ## 6. Merge, supersede, receipts, signatures
 
@@ -176,7 +233,7 @@ survive machine restart. No relay deployment is needed for these changes.
 
 ## 7. What each machine stores
 
-- Its copy of every conversation it participates in (events + projections in SQLite), its outbox, its receipts, its executor generations and process-group records, its provider sessions.
+- Its copy of every chat of its owner, whether or not one of its members takes part (events + projections in SQLite), its outbox, its receipts, its executor generations and process-group records, its provider sessions.
 - A controller device (phone) stores its outbox and a display cache only.
 
 ## Relay tunnel client note (2026-09-06)
