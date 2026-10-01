@@ -97,6 +97,7 @@ import { ArtifactService } from "./services/artifacts";
 import { ArtifactStore } from "./services/artifactStore";
 import { artifactEventWriter, artifactProjectionPort } from "./services/artifactReplication";
 import { createChatChangeTransport } from "./services/chatChangeTransport";
+import { machineChatCopyProvider } from "./services/chatCopy";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "./appToolWiring";
 import { ChatEventLogService } from "./services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "./services/chatEventMirror";
@@ -461,6 +462,14 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
   payload: machineRuntimePayload,
   machineName: async (machineId) => (await settingsService.listMachines()).find((machine) => machine.id === machineId)?.name,
   prepareProfile: prepareMachineProfile,
+  chatCopy: machineChatCopyProvider({
+    storage: storageService,
+    desktopOriginId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+    adoptMachineIdentity: (machineId, identity) => requireMachineLink().adoptMachineIdentity(machineId, identity),
+    settleChatSaves: () => chatService.settleChatSaves(),
+    attachmentsDir: path.join(app.getPath("userData"), "chats"),
+    tempDir: app.getPath("temp")
+  }),
   // Minutes pass between the preflight and the drain; a member may have
   // started on the machine meanwhile. Asked afresh, and a stale answer is not
   // taken as idle.

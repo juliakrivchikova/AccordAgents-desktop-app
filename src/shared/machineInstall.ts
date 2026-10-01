@@ -47,6 +47,7 @@ export type MachineInstallPhase =
   | "dependencies"
   | "enroll"
   | "drain"
+  | "chats"
   | "activate"
   | "service"
   | "starting"
@@ -57,7 +58,7 @@ export type MachineInstallPhase =
 
 export const MACHINE_INSTALL_PHASE_ORDER: readonly MachineInstallPhase[] = [
   "preflight", "bundle", "transfer", "dependencies", "enroll",
-  "drain", "activate", "service", "starting", "verify", "ready"
+  "drain", "chats", "activate", "service", "starting", "verify", "ready"
 ];
 
 /** What is true on the machine after a failure. Every failure path names one
@@ -166,6 +167,9 @@ export interface MachineInstallRecord {
   installedAt?: string;
   /** Desktop project path to this machine's own checkout; never a write-back. */
   projects?: Record<string, string>;
+  /** When this machine last received the desktop's copy of every chat. After
+   *  that it stays current through chat change events alone. */
+  chatCopyAt?: string;
   lastOperation?: MachineInstallSnapshot;
 }
 
@@ -258,6 +262,7 @@ export function machineInstallPhaseLabel(phase: MachineInstallPhase): string {
     case "dependencies": return "Installing dependencies";
     case "enroll": return "Installing the enrollment";
     case "drain": return "Stopping the running version";
+    case "chats": return "Copying chats";
     case "activate": return "Switching version";
     case "service": return "Installing the service";
     case "starting": return "Starting the runtime";

@@ -361,6 +361,32 @@ export class DeviceEventStorage {
     return rows[0]?.originSeq ?? 0;
   }
 
+  /**
+   * Chat change events that a chat copy already contained.
+   *
+   * The copy moved this device's position in their log past them, so they can
+   * never be the next event and would wait unapplied for ever, holding the
+   * sender's outbox with them. They are recorded as applied without being
+   * applied again: an older change put over the copy could take a message back
+   * to an earlier text. Returns the receipts to acknowledge.
+   */
+  async settleCovered(channelId: string, deviceId: string | undefined, at: string): Promise<DeviceEventReceipt[]> {
+    await this.database.init();
+    const inbound = `i.channel_id = ${quote(channelId)} ${deviceId ? `and i.device_id = ${quote(deviceId)}` : ""}`;
+    const covered = `substr(e.log_scope_id, 1, 13) = 'chat-changes:' and e.origin_seq <= (
+      select h.origin_seq from device_event_applied_heads h where h.origin_id = e.origin_id and h.log_scope_id = e.log_scope_id)`;
+    return this.database.query<DeviceEventReceipt>(durable(`
+      begin immediate;
+      update device_event_inbox set applied_at = ${quote(at)}, outcome = 'applied' where event_id in (
+        select i.event_id from device_event_inbox i join chat_events e on e.event_id = i.event_id
+        where ${inbound} and i.applied_at is null and ${covered} limit ${DEVICE_EVENT_PAGE_COUNT});
+      select i.event_id as eventId, e.event_hash as eventHash, i.outcome, i.applied_at as appliedAt
+        from device_event_inbox i join chat_events e on e.event_id = i.event_id
+        where ${inbound} and i.applied_at = ${quote(at)} and ${covered};
+      commit;
+    `));
+  }
+
   async gaps(channelId: string, deviceId?: string): Promise<DeviceEventGap[]> {
     await this.database.init();
     return this.database.query<DeviceEventGap>(`

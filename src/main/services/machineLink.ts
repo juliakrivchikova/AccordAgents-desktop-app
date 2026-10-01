@@ -9,14 +9,13 @@
  * the finished participant messages.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   MACHINE_LINK_PROTOCOL,
   isMachineLinkEnvelope,
   MACHINE_ATTACHMENT_PART_BYTES,
   type MachineConversationDeletedBody,
-  type MachineConversationDeltaBody,
   type MachineHelloBody,
   type MachineLinkEnvelope,
   type MachineLinkMessage,
@@ -559,13 +558,27 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }));
   }
 
-  /** Enrolled machines, including offline recipients, for one chat action. An
-   *  event minted inside another transaction cannot go through `publish`, so
-   *  its recipients are taken here and written with it. */
   /** The device identity of an enrolled machine, once it has introduced itself. */
   machineDeviceId(machineId: string): string | undefined {
     const connection = this.connections.get(machineId);
     return connection?.machineDeviceId ?? connection?.record.deviceId ?? undefined;
+  }
+
+  /**
+   * Machine setup reads the identity of the runtime it installs before it
+   * copies the chats, and records it here: from then on every chat change is
+   * addressed to that machine, although it has not connected yet.
+   */
+  async adoptMachineIdentity(machineId: string, identity: { originId: string; publicKeyDerBase64: string }): Promise<void> {
+    const connection = this.connections.get(machineId);
+    if (!connection) throw new Error("This machine is not connected to the relay from this desktop.");
+    if (connection.record.deviceId && connection.record.deviceId !== identity.originId) {
+      throw new Error("The machine's enrolled device identity changed; its history cannot be accepted as the previous machine.");
+    }
+    if (connection.record.deviceId === identity.originId) return;
+    connection.record = { ...connection.record, deviceId: identity.originId };
+    await this.persistCancels(connection, true);
+    void this.debugLogs.write("machine-link.identity.adopted", { machineId, deviceId: identity.originId });
   }
 
   /** A chat save committed change events for the machines: send them now
@@ -574,6 +587,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
     for (const connection of this.connections.values()) connection.eventChannel?.nudge();
   }
 
+  /** Enrolled machines, including offline recipients, for one chat action. An
+   *  event minted inside another transaction cannot go through `publish`, so
+   *  its recipients are taken here and written with it. */
   chatActionRecipients(): Array<{ deviceId: string; channelId: string }> {
     const recipients: Array<{ deviceId: string; channelId: string }> = [];
     for (const connection of this.connections.values()) {

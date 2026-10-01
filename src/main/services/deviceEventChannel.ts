@@ -294,6 +294,12 @@ export class DeviceEventChannel {
     // was waiting for usually arrives in the same delivery, and waiting for the
     // next timer would make an answered dependency look like a stuck one.
     let appliedSinceHold = false;
+    // Events a chat copy already contained are confirmed, not applied again.
+    for (const receipt of await this.options.storage.deviceEvents().settleCovered(this.options.channelId, this.options.peerDeviceId, new Date().toISOString())) {
+      if (this.stopped) return;
+      remember(this.received, receipt.eventId, { hash: receipt.eventHash, receipt });
+      await this.sendControl(this.packet({ type: "ack", receipt }));
+    }
     while (!this.stopped) {
       const ready = await this.options.storage.deviceEvents().ready(this.options.channelId, this.options.peerDeviceId, [...held]);
       if (!ready.length) {

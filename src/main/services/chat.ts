@@ -881,6 +881,7 @@ export class ChatService {
   private readonly chatChangeBaselines = new Map<string, ChatChangeBaseline | undefined>();
   private static readonly CHAT_CHANGE_BASELINE_LIMIT = 256;
   private chatChangeTransport?: ChatChangeTransport;
+  private readonly chatSavesInFlight = new Set<Promise<void>>();
   // Tracked chats are bounded by count and by retained serialized bytes; chats
   // with a run in flight are evicted last, so a settings sweep over many chats
   // does not make the chat the user is working in pay for a full re-emission.
@@ -18259,7 +18260,29 @@ export class ChatService {
     this.onConversationSnapshot?.(built.snapshot, built.update);
   }
 
-  private async persistConversationSnapshot(
+  private persistConversationSnapshot(
+    snapshot: Conversation,
+    rows?: SnapshotMessageRow[],
+    options: { emitChanges?: boolean } = {}
+  ): Promise<void> {
+    const run = this.persistConversationSnapshotNow(snapshot, rows, options);
+    this.chatSavesInFlight.add(run);
+    const settled = (): void => { this.chatSavesInFlight.delete(run); };
+    run.then(settled, settled);
+    return run;
+  }
+
+  /**
+   * Resolves once every chat save that had started when it was called has
+   * finished. A machine's first chat copy reads its marks after this, so a
+   * save that chose its recipients before the machine was one of them cannot
+   * land after the copy was taken.
+   */
+  async settleChatSaves(): Promise<void> {
+    await Promise.allSettled([...this.chatSavesInFlight]);
+  }
+
+  private async persistConversationSnapshotNow(
     snapshot: Conversation,
     rows?: SnapshotMessageRow[],
     options: { emitChanges?: boolean } = {}

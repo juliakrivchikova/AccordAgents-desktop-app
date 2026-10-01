@@ -15,6 +15,8 @@ import {
   releaseName,
   versionFence,
   redactKeyLikeText,
+  type MachineChatCopyProvider,
+  type MachineChatCopyUpload,
   type MachineSshExecRequest
 } from "./machineInstaller";
 import {
@@ -109,6 +111,7 @@ interface Harness {
   syncedUp: string[];
   doctorCalls: Array<{ call: string; workerRoot?: string; options?: { requiredProviderKind?: string; profileHome?: string } }>;
   waitedVersion: () => string | undefined;
+  chatUploads: Array<Parameters<MachineChatCopyUpload>[0]>;
 }
 
 function harness(options: {
@@ -129,6 +132,8 @@ function harness(options: {
   recoveryOutput?: string;
   readRecovery?: () => Promise<string>;
   beforeDrain?: (record: MachineInstallRecord, operationId: string) => Promise<string | undefined>;
+  chatCopy?: MachineChatCopyProvider;
+  chatImportFailure?: string;
 } = {}): Harness {
   const calls: MachineSshExecRequest[] = [];
   const uploads: Array<{ remoteDir: string }> = [];
@@ -136,6 +141,7 @@ function harness(options: {
   const progress: MachineInstallSnapshot[] = [];
   const logged: Array<Record<string, unknown>> = [];
   const syncedUp: string[] = [];
+  const chatUploads: Harness["chatUploads"] = [];
   let activated = false;
   const doctorCalls: Harness["doctorCalls"] = [];
   let waitedForVersion: string | undefined;
@@ -165,10 +171,19 @@ function harness(options: {
     payload: { dir: bundleDir, source: "checkout" },
     machineName: async () => "cloud-box",
     beforeDrain: options.beforeDrain,
+    chatCopy: options.chatCopy,
+    uploadChatCopy: async (request) => { chatUploads.push(request); },
     now: () => new Date("2026-09-07T00:00:00.000Z"),
     logger: (event, payload) => logged.push({ event, ...payload }),
     sshExec: async (request) => {
       calls.push(request);
+      if (request.script.includes(" --device-identity ")) {
+        return `${JSON.stringify({ originId: "machine-origin", publicKeyDerBase64: "MACHINE-PUBLIC-KEY" })}\n`;
+      }
+      if (request.script.includes(" --import-chat-copy ")) {
+        if (options.chatImportFailure) throw new Error(options.chatImportFailure);
+        return `${JSON.stringify({ ok: true, conversations: 2, messages: 5, skippedDeleted: 0, marks: 1 })}\n`;
+      }
       if (request.script.endsWith(" recover")) return options.readRecovery ? options.readRecovery() : options.recoveryOutput ?? "";
       if (options.ownerFailure && request.script.includes("environment-owner.json")) {
         throw typeof options.ownerFailure === "string" ? new Error(options.ownerFailure) : options.ownerFailure;
@@ -203,7 +218,7 @@ function harness(options: {
       async syncDown() { throw new Error("syncDown must never run during a machine install."); }
     }
   });
-  return { service, calls, uploads, records, progress, logged, syncedUp, doctorCalls, waitedVersion: () => waitedForVersion };
+  return { service, calls, uploads, records, progress, logged, syncedUp, doctorCalls, waitedVersion: () => waitedForVersion, chatUploads };
 }
 
 test("Settings resolves an unfinished installation's isolated profile before provider checks", async () => {
@@ -963,4 +978,105 @@ test("Stop during project copy reaches the transfer and never publishes its stag
   assert.ok(cleanup);
   assert.equal(cleanup.signal, undefined, "cleanup must run even with an aborted request");
   assert.ok(h.calls.filter(call => call !== cleanup).every(call => call.signal === controller.signal));
+});
+
+function recordingChatCopy(): MachineChatCopyProvider & { exported: Array<{ machineId: string; originId: string }>; cleaned: number } {
+  const provider = {
+    exported: [] as Array<{ machineId: string; originId: string }>,
+    cleaned: 0,
+    async export(machineId: string, identity: { originId: string; publicKeyDerBase64: string }) {
+      provider.exported.push({ machineId, originId: identity.originId });
+      return {
+        dir: "/tmp/desktop-chat-copy",
+        attachmentsDir: "/desktop/userData/chats",
+        summary: { conversations: 2, messages: 5, bytes: 1024 },
+        async cleanup() { provider.cleaned += 1; }
+      };
+    }
+  };
+  return provider;
+}
+
+test("setup copies every chat while nothing runs, after the drain and before the switch, and records it", async () => {
+  const chatCopy = recordingChatCopy();
+  const h = harness({ chatCopy });
+  const phases: string[] = [];
+  const result = await h.service.install({ machineId: "m1", operationId: "op-chats", target: TARGET }, (snapshot) => phases.push(snapshot.phase));
+  assert.equal(result.snapshot.phase, "ready");
+  assert.deepEqual(phases, ["preflight", "bundle", "transfer", "dependencies", "enroll", "drain", "chats", "activate", "service", "starting", "verify", "ready"]);
+  // The machine's identity comes first, so the desktop addresses every later
+  // chat change to it before the copy is taken.
+  assert.deepEqual(chatCopy.exported, [{ machineId: "m1", originId: "machine-origin" }]);
+  const identityIndex = h.calls.findIndex((call) => call.script.includes(" --device-identity "));
+  const importIndex = h.calls.findIndex((call) => call.script.includes(" --import-chat-copy "));
+  const drainIndex = h.calls.findIndex((call) => call.script.includes("printf 'drained="));
+  const activateIndex = h.calls.findIndex((call) => call.script.includes("mv -Tf"));
+  assert.ok(drainIndex < identityIndex && identityIndex < importIndex && importIndex < activateIndex);
+  assert.ok(h.calls[importIndex].script.includes("--machine-id 'm1'"), "the machine learns which members' replies are its own");
+  assert.ok(h.calls[importIndex].script.includes("rm -rf "), "the copy is removed from the machine after the import");
+  assert.equal(h.chatUploads.length, 1);
+  assert.equal(h.chatUploads[0].copyDir, "/tmp/desktop-chat-copy");
+  assert.equal(h.chatUploads[0].attachmentsDir, "/desktop/userData/chats");
+  assert.equal(h.chatUploads[0].remoteChatsDir, `${LAYOUT.userDataDir}/chats`);
+  assert.ok(h.chatUploads[0].remoteCopyDir.startsWith(`${LAYOUT.installRoot}/chat-copy/`));
+  assert.equal(chatCopy.cleaned, 1, "the desktop's export is removed too");
+  assert.equal(result.record.chatCopyAt, "2026-09-07T00:00:00.000Z");
+  assert.equal(h.records.get("m1")?.chatCopyAt, "2026-09-07T00:00:00.000Z");
+});
+
+test("a machine that already has its copy is not copied again on upgrade", async () => {
+  const chatCopy = recordingChatCopy();
+  const h = harness({
+    chatCopy,
+    probe: probeOutput({
+      state: JSON.stringify({ version: "1.3.0", digest: "old" }),
+      "active-release": "1.3.0-old", enrollment: "present", "service-scope": "system", "service-state": "active"
+    }, ["1.3.0-old"])
+  });
+  h.records.set("m1", { machineId: "m1", target: TARGET, installRoot: LAYOUT.installRoot, userDataDir: LAYOUT.userDataDir,
+    serviceName: LAYOUT.serviceName, serviceScope: "system", installedVersion: "1.3.0", chatCopyAt: "2026-09-01T00:00:00.000Z" });
+  const result = await h.service.upgrade({ machineId: "m1", operationId: "op-up", target: TARGET });
+  assert.equal(result.snapshot.phase, "ready");
+  assert.deepEqual(chatCopy.exported, []);
+  assert.ok(!h.calls.some((call) => call.script.includes(" --import-chat-copy ")));
+  assert.equal(result.record.chatCopyAt, "2026-09-01T00:00:00.000Z", "the date of the copy the machine holds is kept");
+});
+
+test("the first upgrade of a machine without a copy makes one", async () => {
+  const chatCopy = recordingChatCopy();
+  const h = harness({
+    chatCopy,
+    probe: probeOutput({
+      state: JSON.stringify({ version: "1.3.0", digest: "old" }),
+      "active-release": "1.3.0-old", enrollment: "present", "service-scope": "system", "service-state": "active"
+    }, ["1.3.0-old"])
+  });
+  const result = await h.service.upgrade({ machineId: "m1", operationId: "op-first", target: TARGET });
+  assert.equal(result.snapshot.phase, "ready");
+  assert.equal(chatCopy.exported.length, 1);
+  assert.equal(result.record.chatCopyAt, "2026-09-07T00:00:00.000Z");
+});
+
+test("a failed chat copy replaces nothing and starts the old runtime again", async () => {
+  const chatCopy = recordingChatCopy();
+  const h = harness({
+    chatCopy,
+    chatImportFailure: "disk full",
+    probe: probeOutput({
+      state: JSON.stringify({ version: "1.3.0", digest: "old" }),
+      "active-release": "1.3.0-old", enrollment: "present", "service-scope": "system", "service-state": "active",
+      "runtime-pids": "4210"
+    }, ["1.3.0-old"])
+  });
+  const result = await h.service.upgrade({ machineId: "m1", operationId: "op-fail", target: TARGET });
+  assert.equal(result.snapshot.phase, "error");
+  assert.match(result.snapshot.error ?? "", /Copying the chats to the machine failed: disk full/);
+  assert.equal(result.snapshot.recovery?.kind, "old-runtime-still-installed");
+  assert.match(result.snapshot.recovery?.detail ?? "", /it was started again/);
+  assert.ok(!h.calls.some((call) => call.script.includes("mv -Tf")), "the release must not be switched");
+  const importIndex = h.calls.findIndex((call) => call.script.includes(" --import-chat-copy "));
+  assert.ok(h.calls.slice(importIndex + 1).some((call) => call.script.includes(" start 'accordagents-machine.service'")),
+    "the old runtime is started again");
+  assert.equal(chatCopy.cleaned, 1);
+  assert.equal(result.record.chatCopyAt, undefined, "a copy that did not land is not recorded");
 });
