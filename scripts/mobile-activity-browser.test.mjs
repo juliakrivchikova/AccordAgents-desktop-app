@@ -319,7 +319,7 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
       document.querySelector('[data-card-id="perm-deploy"] [data-option-id="deny"]').click();
       return true;
     })()`);
-    await waitFor(`document.querySelector('[data-card-id="perm-deploy"] .act-state')?.innerText || null`, "the sent state");
+    await waitFor(`document.querySelector('[data-card-id="perm-deploy"]')?.classList.contains("is-on-its-way") || null`, "the row to fade once answered");
     const decisions = await storedEvents("events", "permission.decided");
     assert.equal(decisions.length, 1, "one answer per card");
     assert.equal(decisions[0].conversationId, CHAT_POLISH);
@@ -332,7 +332,8 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     await waitFor(`document.querySelector('[data-card-id="perm-cloud"]') ? null : true`, "the other chat's permission withdrawn");
     assert.equal(await evaluate(`document.querySelector('[data-card-id="perm-deploy"] [data-option-id="allow"]').disabled`), true,
       "an answer already sent stays sent when another chat's cards change");
-    assert.match(await evaluate(`document.querySelector('[data-card-id="perm-deploy"] .act-state').innerText`), /Waiting for the machine to apply it/);
+    assert.deepEqual(await evaluate(`(() => { const row = document.querySelector('[data-card-id="perm-deploy"]'); return { onItsWay: row.classList.contains("is-on-its-way"), text: row.querySelector(".act-state") ? row.querySelector(".act-state").innerText : "" }; })()`),
+      { onItsWay: true, text: "" }, "the row fades while the answer is on its way, and says nothing more");
 
     // The choice opens in full, with the bar out of reach behind it, and is
     // answered there.
@@ -346,6 +347,22 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     assert.match(item, /Review is green/, "the message the question belongs to is shown with it");
     assert.equal(await evaluate(`document.getElementById("home-dock").hidden`), true, "the bar steps aside for the opened choice");
     await evaluate(`document.querySelector('#activity-item [data-option-id="staging"]').click()`);
+    // A field on the opened choice raises the keyboard as the chat's do, so
+    // the height is held while it is focused: iOS lifts the field itself, and
+    // shrinking the screen as well would lift it twice (review, 2026-09-24).
+    // The note is open under the pick; a tap focuses it.
+    await evaluate(`document.querySelector('#activity-item .control-card-note textarea').focus()`);
+    assert.equal(await evaluate(`Boolean(document.activeElement && document.activeElement.closest('#activity-item .control-card-note'))`), true,
+      "the note box is open under the pick");
+    const heldHeight = await evaluate(`document.documentElement.style.getPropertyValue("--app-h")`);
+    // Only the height changes, as when the keyboard comes up: a change of
+    // width is a rotation, which is measured either way.
+    const width = await evaluate("window.innerWidth");
+    await app.send("Emulation.setDeviceMetricsOverride", { width, height: 480, deviceScaleFactor: 1, mobile: false });
+    await sleep(1200);
+    const underKeyboard = await evaluate(`document.documentElement.style.getPropertyValue("--app-h")`);
+    await app.send("Emulation.clearDeviceMetricsOverride");
+    assert.equal(underKeyboard, heldHeight, "the keyboard coming up does not shrink the screen under the focused note");
     // Picking selects; Submit answers, as on the desktop.
     await evaluate(`document.querySelector('#activity-item .control-card-submit').click()`);
     await waitFor(`(async () => {

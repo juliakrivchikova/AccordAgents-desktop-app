@@ -169,6 +169,7 @@ import {
   resolveChatDeliveryTargets,
   resolveChatMentionTargets
 } from "../../shared/chatDeliveryPolicy";
+import { chatActionOperationId } from "./chatActionEmitter";
 import type { ChatEventMirrorService } from "./chatEventMirror";
 import { CliAgentRunner, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentRoleOptions } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
@@ -338,6 +339,8 @@ const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 20;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_EXECUTOR_LEASE_TTL_MS = 15 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
+/** How many refused answers a waiting choice keeps for the devices that sent them. */
+const CHAT_CHOICE_REFUSALS_KEPT = 5;
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
 const CHAT_ADMINISTRATOR_HANDLE = "assistant";
 // Built-in role used as a safety fallback when a participant's role is missing
@@ -5261,17 +5264,40 @@ export class ChatService {
         const note = request.note?.trim();
         const isCustomAnswer = selectedOptionId === CHAT_CUSTOM_CHOICE_OPTION_ID;
         const selectedOption = isCustomAnswer ? undefined : choice.options.find(option => option.id === selectedOptionId);
+        // A durable answer refused while its choice still waits is kept on the
+        // choice under the operation it was sent with: the phone that sent it
+        // otherwise showed it on its way for an hour (the User, 2026-10-01).
+        // Saved before the refusal is published, so a restart in between does
+        // not lose it; the last few are kept, so one refusal does not hide another.
+        const refuse = async (reason: string): Promise<never> => {
+          const operationId = execution ? chatActionOperationId(execution.decisionEventId) : undefined;
+          if (operationId && choice.status === "pending") {
+            const refusals = [...(choice.refusals ?? []).filter(item => item.operationId !== operationId),
+              { operationId, reason, at: new Date().toISOString() }].slice(-CHAT_CHOICE_REFUSALS_KEPT);
+            sourceMessage.metadata = { ...sourceMessage.metadata, pendingChoice: { ...choice, refusals } };
+            conversation.updatedAt = new Date().toISOString();
+            try {
+              await this.saveConversation(conversation);
+            } catch (error) {
+              // Not published as refused unless it is kept: the answer stays
+              // waiting and is tried again, as when a taken answer cannot be saved.
+              this.snapshotRowStates.delete(conversation.id);
+              throw new ChatChoicePersistenceError(error instanceof Error ? error.message : String(error));
+            }
+          }
+          throw new Error(reason);
+        };
         if (!request.cancel) {
-          if (isCustomAnswer && !customAnswer) throw new Error("Custom choice answer is required.");
-          if (!isCustomAnswer && !selectedOption) throw new Error("Selected option was not found.");
+          if (isCustomAnswer && !customAnswer) await refuse("Custom choice answer is required.");
+          if (!isCustomAnswer && !selectedOption) await refuse("Selected option was not found.");
         }
-        if (!sourceMessage.participantId) throw new Error("Choice request is not attached to a chat member.");
+        if (!sourceMessage.participantId) await refuse("Choice request is not attached to a chat member.");
         const requester = this.chatParticipants(conversation).find(participant => participant.id === sourceMessage.participantId);
-        if (!requester) throw new Error("Choice requester is no longer in this chat.");
+        if (!requester) return refuse("Choice requester is no longer in this chat.");
         if (execution && !this.ownsParticipant(requester)) {
           throw new Error("This choice is owned by another machine.");
         }
-        if (!request.cancel && conversation.metadata.archived === true) throw new Error("Unarchive the chat before starting a member.");
+        if (!request.cancel && conversation.metadata.archived === true) await refuse("Unarchive the chat before starting a member.");
         if (signal?.aborted) throw new Error("Choice response was cancelled before execution.");
         let userMessage: ChatMessage | undefined;
         if (resume) {
@@ -8610,7 +8636,25 @@ export class ChatService {
         ? currentChoice
         : storedChoice;
     }
-    return currentChoice;
+    // Both still waiting. What changes on a waiting choice is its refused
+    // answers, and a copy held by a longer flow (another member's turn) must
+    // not drop the ones recorded since it was read.
+    const refusals = this.mergeChoiceRefusals(storedChoice.refusals, currentChoice.refusals);
+    return refusals ? { ...currentChoice, refusals } : currentChoice;
+  }
+
+  private mergeChoiceRefusals(
+    stored: ChatPendingChoice["refusals"],
+    current: ChatPendingChoice["refusals"]
+  ): ChatPendingChoice["refusals"] {
+    if (!stored?.length) return current;
+    if (!current?.length) return stored;
+    const byOperation = new Map<string, NonNullable<ChatPendingChoice["refusals"]>[number]>();
+    for (const refusal of [...stored, ...current]) {
+      const known = byOperation.get(refusal.operationId);
+      if (!known || refusal.at >= known.at) byOperation.set(refusal.operationId, refusal);
+    }
+    return [...byOperation.values()].sort((left, right) => left.at.localeCompare(right.at)).slice(-CHAT_CHOICE_REFUSALS_KEPT);
   }
 
   private pendingChoiceStatusRank(status: ChatPendingChoice["status"]): number {

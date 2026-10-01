@@ -44,6 +44,11 @@ export function chatActionEventId(operationId: string): string {
   return `${CHAT_ACTION_EVENT_PREFIX}${operationId}`;
 }
 
+/** The operation a chat action event was recorded under; undefined for any other event. */
+export function chatActionOperationId(eventId: string): string | undefined {
+  return eventId.startsWith(CHAT_ACTION_EVENT_PREFIX) ? eventId.slice(CHAT_ACTION_EVENT_PREFIX.length) : undefined;
+}
+
 /** One receipt per target: the first effect on it is the one that happened. */
 export function chatActionReceiptEventId(targetKey: string): string {
   return `${CHAT_ACTION_EVENT_PREFIX}receipt:${targetKey}`;

@@ -122,14 +122,37 @@ desktop's Activity:
   it and the other option goes dead. A choice shows its question and opens in
   full: the message it belongs to, then the chat's own card.
 
+Cards a member is waiting on are in the chat itself and scroll with it, as on
+the desktop (the User, 2026-09-24: a strip of their own above the composer cut
+the cards off against the chat and read as a card going under the text). A
+choice stands under the message that asked it and nowhere else: in the thread
+when it was asked in a thread, further up when its message is further up in
+the history (the User, 2026-10-01: a question asked in a thread stood at the
+bottom of the main chat). Only what has no message, a permission, is the
+chat's last item. Activity lists every waiting card wherever it stands.
+
 A choice card is laid out as the desktop's is, in the chat and on Activity
 alike (the User, 2026-09-22): every option a numbered row at full width with
 its description, the member's recommendation marked "Recommended" and picked
-up front, "Write your own answer" last. Picking only selects; Submit answers,
-so a tap made while scrolling cannot answer. A picked option can carry a note,
-folded behind "Add a note" for room. Cancel and Submit stay pinned at the foot
-of the card while a long choice scrolls, and a pick or a note being typed
-survives the chat being drawn again.
+up front, "Write your own answer" last; picking it opens its box under it, for
+the finger to tap, as the note's is (never focused from script). Picking only selects; Submit answers,
+so a tap made while scrolling cannot answer. A picked option can carry a note:
+its box opens right under the picked option, moves with the pick with its text
+kept, and is tapped like the composer (the User, 2026-09-24: folded behind "Add
+a note" and focused from script, it came up behind the iPhone's keyboard, typed
+out of sight; under the whole list it started below the fold). Cancel and
+Submit end the card, after every option, and scroll with it (the User,
+2026-09-24: pinned to the foot of a long choice they lay on top of the options).
+A pick or a note being typed survives the chat being drawn again, and an answer
+sent keeps them until the card is answered or withdrawn. An answer on its way
+folds the card at once to what was answered ("Your answer: …") and fades it, or
+its Activity row, a little, and says nothing about how far it has got; once the
+desktop confirms it the card reads "Answered: …" at full strength. A failure, or
+that the answer can be given again, still opens the card and says so (the User,
+2026-09-24). A message sent from the phone and not yet delivered is faded the
+same way, with its time and no "Waiting to sync", and the header does not report
+sends on their way: it says "Synced", or "Not connected" from a send that could
+reach nothing until a send gets through.
 - Finished — finished member messages from the last 7 days, one row per chat
   and member, with a count badge when the row stands for more than one run
   (accent while unseen, grey once seen). The message a waiting question belongs
@@ -165,10 +188,10 @@ a batch with cards and no rows was dropped before it reached the mailbox. Now:
 - After a phone's answer, whatever became of it, the desktop sends the chat's
   cards as it holds them now — "still pending" included — so a card the
   desktop could not act on is never answered on the phone for ever.
-- "Answer sent. Waiting for the machine to apply it." is a mark the phone keeps
-  across launches, named after the queue entry that carries the answer; while
-  that entry has not reached the desktop the card says "Answer saved on this
-  phone. Not delivered yet." instead. The mark goes when the desktop states the
+- An answer sent is a mark the phone keeps across launches, named after the
+  queue entry that carries the answer; while it holds, the card is faded and
+  says nothing more (whether the entry has reached the desktop yet is not
+  spelled out, the User, 2026-09-24). The mark goes when the desktop states the
   card answered or withdraws it. A mark older than ten minutes with the card
   still waiting has stopped meaning anything — the answer was lost on its way
   or refused — so the card unlocks and says "Answer sent, but not applied yet.
@@ -181,6 +204,14 @@ a batch with cards and no rows was dropped before it reached the mailbox. Now:
   meanwhile only raced the first, and the older one won on the desktop. An
   hour and not longer, because the desktop can take an answer and then give
   it up (five failed applies) without the phone hearing of it.
+- A choice answer the desktop refuses (an option it does not have, a member no
+  longer in the chat, an archived chat) is kept on the choice, by the operation
+  it was sent under, while the choice still waits; the last few are kept. The
+  card the phone is sent names them, and the phone that sent one of them stops
+  waiting at once: the card opens again with the desktop's reason and what was
+  picked and typed (the User, 2026-10-01: an own answer refused this way stayed
+  "on its way" for an hour). An own answer goes out under the desktop's
+  own-answer option, `__custom__`.
 - The desktop answers a refused batch with an empty ack only when it refuses
   it for good (a chat outside the pairing's scope, a malformed event). A
   failure of its own — storage that did not answer — gets no ack, so the

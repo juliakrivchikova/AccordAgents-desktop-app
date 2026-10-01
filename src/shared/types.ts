@@ -881,6 +881,10 @@ export interface ChatPendingChoice {
   decisionEventId?: string;
   responseMessageId?: string;
   responseRunId?: string;
+  /** The last few answers this choice was given and refused, oldest first,
+   *  each by the operation it was sent under. Shown to the devices that sent
+   *  them only while the choice still waits. */
+  refusals?: Array<{ operationId: string; reason: string; at: string }>;
 }
 
 export type ChatRosterChangeOperationType = "add";

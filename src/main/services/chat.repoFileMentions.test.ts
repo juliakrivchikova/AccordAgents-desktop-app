@@ -698,6 +698,51 @@ test("respondToChoice returns after ingest and emits terminal error when request
   assert.equal(progress.some((item) => item.phase === "error" && item.message === "choice exploded"), true);
 });
 
+// A phone's own answer was refused as "Selected option was not found." and the
+// phone, told nothing, showed it on its way for an hour (the User, 2026-10-01).
+test("a durable choice answer is taken with the own-answer option and kept on the choice when refused", async () => {
+  const requester = chatParticipant();
+  const conversation = chatConversation([requester], "/repo");
+  const sourceMessage = participantMessage(requester, "choice-message", "Choose an option.");
+  sourceMessage.metadata = {
+    ...sourceMessage.metadata,
+    pendingChoice: { id: "choice-1", title: "Decision", question: "Proceed?", options: [{ id: "yes", label: "Yes" }], status: "pending" }
+  };
+  conversation.messages.push(sourceMessage);
+  const { service, storage } = testService({ conversations: [conversation] });
+  const serviceAny = service as any;
+  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  serviceAny.runParticipantTurnSerialized = async () => [participantMessage(requester, "choice-reply", "Choice handled.")];
+  const guard = (operationId: string) => ({ decisionEventId: `chat-action:${operationId}`, beforeApply: async () => undefined });
+  const answer = (patch: Record<string, unknown>, operationId?: string) => service.respondToChoice({
+    conversationId: conversation.id, sourceMessageId: sourceMessage.id, choiceId: "choice-1", ...patch
+  } as never, undefined, undefined, operationId ? guard(operationId) : undefined);
+  // A longer flow in the same chat holds a copy read before any refusal.
+  const stale = structuredClone(await storage.getConversation(conversation.id)) as Conversation;
+  const refusals = async () => (await storage.getConversation(conversation.id))?.messages
+    .find((message) => message.id === sourceMessage.id)?.metadata?.pendingChoice?.refusals?.map((item) => [item.operationId, item.reason]);
+
+  await assert.rejects(answer({ selectedOptionId: "nope" }, "choice:choice-1:nope"), /Selected option was not found\./);
+  await assert.rejects(answer({ selectedOptionId: "__custom__", customAnswer: " " }, "choice:choice-1:__custom__:empty"), /Custom choice answer is required\./);
+  await assert.rejects(answer({ selectedOptionId: "nope" }, "choice:choice-1:nope"), /Selected option was not found\./);
+  assert.deepEqual(await refusals(), [
+    ["choice:choice-1:__custom__:empty", "Custom choice answer is required."],
+    ["choice:choice-1:nope", "Selected option was not found."]
+  ], "each refused answer is kept once, by the operation it was sent under");
+  await assert.rejects(answer({ selectedOptionId: "nope-again" }), /Selected option was not found\./);
+  assert.equal((await refusals())?.length, 2, "an answer that was not a durable decision names no operation to keep");
+  await serviceAny.withChatMutation(stale, async () => {
+    stale.updatedAt = new Date().toISOString();
+    await serviceAny.saveConversation(stale);
+  });
+  assert.equal((await refusals())?.length, 2, "a flow holding an older copy of the waiting choice keeps the refusals recorded since");
+
+  await answer({ selectedOptionId: "__custom__", customAnswer: "the third one" }, "choice:choice-1:__custom__:abc");
+  const choice = (await storage.getConversation(conversation.id))?.messages.find((message) => message.id === sourceMessage.id)?.metadata?.pendingChoice;
+  assert.equal(choice?.status, "selected", "the phone's own answer is taken");
+  assert.equal(choice?.customAnswer, "the third one");
+});
+
 test("respondToChoice releases chat run queue while requester turn continues", async () => {
   const requester = chatParticipant();
   const conversation = chatConversation([requester], "/repo");

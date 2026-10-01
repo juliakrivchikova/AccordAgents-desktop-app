@@ -362,7 +362,7 @@ test("mobile shell builds static installable PWA assets", async () => {
   // bypassed: the direct put helper is gone.
   assert.doesNotMatch(app, /function putTimelineEntry\(/);
   assert.match(app, /function dedupeRenderRowsByKey/);
-  assert.match(app, /if \(!kept\.has\(child\)\) \{/);
+  assert.match(app, /if \(!kept\.has\(child\) && child\.id !== "control-cards"\) \{/);
   assert.doesNotMatch(app, /if \(!nextKeys\.has\(child\.dataset\.rowKey\)\)/);
   assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /width: 390px;/);
   assert.match(await readFile(path.join(repoRoot, "dist/mobile/mobile-app.css"), "utf8"), /height: 844px;/);

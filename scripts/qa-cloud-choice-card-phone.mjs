@@ -380,7 +380,7 @@ async function main() {
   log("card after the answer:", stillThere === null ? "(gone)" : stillThere.replace(/\n/g, " | "));
   log("desktop's choice status:",
     JSON.stringify(conversation.messages.find((m) => m.id === CHOICE_MESSAGE_ID)?.metadata?.pendingChoice));
-  assert.ok(cleared, "the answered card is still pinned above the composer on the phone");
+  assert.ok(cleared, "the answered card is still offered for answering on the phone");
   log("PASS: the card cleared on the phone");
 }
 

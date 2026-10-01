@@ -589,8 +589,8 @@ async function main() {
   })()`);
   await waitFor(async () => (await runCount()) > approvalRuns, 120_000, "the permission turn to reach the machine");
   const card = async () => evaluate(`(() => {
-    const host = document.getElementById("control-cards");
-    const first = host && host.querySelector(".control-card");
+    const host = document.getElementById("message-list");
+    const first = host && host.querySelector(".control-card:not(.control-card-answered)");
     if (!first) return "";
     return JSON.stringify({
       id: first.dataset.cardId, kind: first.dataset.cardKind,
@@ -609,30 +609,29 @@ async function main() {
     log("the member asked for permission on the phone:", shown.text);
     assert.ok(shown.options.length > 0, "a permission card with no options is a card the User cannot answer");
     const tapped = await evaluate(`(() => {
-      const host = document.getElementById("control-cards");
+      const host = document.getElementById("message-list");
       const allow = host.querySelector('[data-option-id="allow"]') || host.querySelector("[data-option-id]");
       if (!allow) return false;
       allow.click();
       return true;
     })()`);
     assert.ok(tapped, "the card offered nothing to tap");
-    // Sent is not applied. The card states that it has handed the answer over
-    // and is waiting, and never claims the member was told.
-    // Every state the card shows before the machine says it acted has to be an
-    // honest one. Waiting for the "sent" wording itself would be a race the
-    // machine can win, so this reads what the card says until the machine has
-    // spoken and holds each reading to that rule.
+    // Sent is not applied. Until the machine says it acted, the card is faded
+    // and claims nothing: no wording that the member was told (the User,
+    // 2026-09-24: how far the answer has got is not spelled out).
     let applied = false;
     for (let attempt = 0; attempt < 240 && !applied; attempt += 1) {
-      const state = await evaluate(`(() => {
-        const held = document.querySelector("#control-cards .control-card-state");
-        return held ? held.innerText : "";
+      const held = await evaluate(`(() => {
+        const card = document.querySelector("#message-list .control-card:not(.control-card-answered)");
+        if (!card) return null;
+        const state = card.querySelector(".control-card-state");
+        return { onItsWay: card.classList.contains("is-on-its-way"), text: state && !state.hidden ? state.innerText : "" };
       })()`);
       applied = (await machineLog(machineUserData, machineOutput)).includes("permission.decided");
-      if (!applied && state) {
-        assert.doesNotMatch(state, /applied|approved|answered/i,
-          `the card must not claim the member was told before the machine says so: ${state}`);
-        assert.match(state, /[Ss]ent|[Ww]aiting/, `an unconfirmed answer states that it is waiting: ${state}`);
+      if (!applied && held) {
+        assert.doesNotMatch(held.text, /applied|approved|answered/i,
+          `the card must not claim the member was told before the machine says so: ${held.text}`);
+        assert.ok(held.onItsWay || held.text, `an unconfirmed answer fades its card or says what failed: ${JSON.stringify(held)}`);
       }
       if (!applied) await wait(500);
     }
@@ -672,7 +671,7 @@ async function main() {
   let choiceCard = "";
   for (let attempt = 0; attempt < 240 && !choiceCard; attempt += 1) {
     choiceCard = await evaluate(`(() => {
-      const held = [...document.querySelectorAll("#control-cards .control-card")]
+      const held = [...document.querySelectorAll("#message-list .control-card:not(.control-card-answered)")]
         .find((item) => item.dataset.cardKind === "choice");
       if (!held) return "";
       return JSON.stringify({ id: held.dataset.cardId,
@@ -687,7 +686,7 @@ async function main() {
     log("the member asked a choice on the phone:", shown.text);
     assert.ok(shown.options.length >= 2, "a choice with no options is a question the User cannot answer");
     await evaluate(`(() => {
-      const held = [...document.querySelectorAll("#control-cards .control-card")]
+      const held = [...document.querySelectorAll("#message-list .control-card:not(.control-card-answered)")]
         .find((item) => item.dataset.cardKind === "choice");
       held.querySelector("[data-option-id]").click();
       return true;

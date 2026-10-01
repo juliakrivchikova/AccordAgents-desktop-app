@@ -726,6 +726,8 @@ button.mobile-chat-group-title:active {
 .jump-to-latest {
   position: absolute;
   left: 50%;
+  /* Only until the script places it: placeJumpToLatest sets bottom just above
+     the chat's own bottom edge before the button shows. */
   bottom: calc(78px + env(safe-area-inset-bottom));
   transform: translate(-50%, 0);
   display: inline-flex;
@@ -1394,25 +1396,28 @@ button.mobile-chat-group-title:active {
 
 
 /* Cards a member is waiting on: the phone shows the same question the desktop
-   does, and answering here has the same effect. Kept above the composer so it
-   cannot be missed, and never covering the last message. */
-.control-cards {
+   does, and answering here has the same effect. In the chat itself, scrolling
+   with it: a choice under the message that asked it, wherever that is, and what
+   has no message, a permission, as the chat's last item. A strip of their own
+   above the composer cut the cards off against the chat (the User, 2026-09-24). */
+.control-cards,
+.message-cards {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 8px 12px 0;
-  /* A choice with its descriptions, a note and the keyboard up must still
-     leave the chat and the composer on screen: past this it scrolls. */
-  max-height: calc(var(--app-h, 100dvh) * 0.55);
-  overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
-.control-cards[hidden] {
+.message-cards {
+  margin-top: 8px;
+}
+
+.control-cards[hidden],
+.message-cards[hidden] {
   display: none;
 }
 
 .control-card {
+  position: relative;
   border: 1px solid var(--bd);
   border-radius: 16px;
   padding: 14px;
@@ -1460,6 +1465,37 @@ button.mobile-chat-group-title:active {
 
 .control-card-option[disabled] {
   opacity: 0.5;
+}
+
+/* An answer on its way: the card or row fades a little, and says nothing more
+   (the User, 2026-09-24). One fade for the whole of it: the lines already
+   muted on their own, and an Activity row's dead pills, do not fade a second
+   time inside it. */
+.control-card.is-on-its-way,
+.act-row.is-on-its-way,
+.message-row.is-on-its-way .message-bubble {
+  opacity: 0.6;
+}
+
+.is-on-its-way .control-card-state,
+.is-on-its-way .control-card-who,
+.is-on-its-way .act-pill[disabled] {
+  opacity: 1;
+}
+
+/* Said to a screen reader, not shown. Held inside its card, so it scrolls with
+   the chat and adds nothing for the page to scroll to. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .control-card-state {
@@ -1563,6 +1599,16 @@ button.mobile-chat-group-title:active {
   margin-top: 12px;
 }
 
+/* Under the picked option, the list's own gap is the space above it; your own
+   answer opens under its row, the last, with the same space. */
+.control-card-choices > .control-card-note {
+  margin-top: 0;
+}
+
+.control-card-answer {
+  margin-top: 8px;
+}
+
 .control-card-text[hidden] {
   display: none;
 }
@@ -1596,37 +1642,17 @@ button.mobile-chat-group-title:active {
   font: 400 16px var(--sans);
   line-height: 1.4;
   resize: none;
-  /* Scrolled to, it stops above Cancel and Submit rather than under them. */
-  scroll-margin-bottom: 76px;
 }
 
-/* Cancel and Submit stay in reach while a long choice scrolls under them. */
+/* Cancel and Submit end the card and scroll with it. Pinned to the foot of a
+   long choice, they lay on top of the options scrolling under them (the User,
+   2026-09-24). */
 .control-card-actions {
-  position: sticky;
-  bottom: -14px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  margin: 12px -14px -14px;
-  padding: 8px 14px 14px;
-  border-radius: 0 0 16px 16px;
-  background: var(--surface);
-}
-
-.control-card-add-note {
-  align-self: flex-start;
-  min-height: 44px;
-  margin-top: 4px;
-  padding: 0 2px;
-  border: 0;
-  background: transparent;
-  color: var(--acc);
-  font: 600 14px var(--sans);
-}
-
-.control-card-add-note[hidden] {
-  display: none;
+  margin-top: 12px;
 }
 
 .control-card-hint {
@@ -2091,13 +2117,21 @@ button.mobile-chat-group-title:active {
 
 /* A question the User already answered, kept under its own message the way the
    desktop keeps it: the card without its controls, and what was chosen. */
-.control-card-answered {
+.control-card-answered,
+.control-card-folded {
   margin-top: 8px;
   background: var(--s2);
   box-shadow: none;
 }
 
-.control-card-answered .control-card-state {
+.message-cards > .control-card-folded,
+.control-cards > .control-card-folded,
+.act-detail > .control-card-folded {
+  margin-top: 0;
+}
+
+.control-card-answered .control-card-state,
+.control-card-folded .control-card-state {
   color: var(--fg1);
   font-weight: 600;
 }
@@ -2662,13 +2696,6 @@ button.mobile-chat-group-title:active {
   box-shadow: var(--pill-shadow);
 }
 
-.act-detail .control-card-actions {
-  bottom: -16px;
-  margin: 12px -16px -16px;
-  padding: 8px 16px 16px;
-  border-radius: 0 0 18px 18px;
-}
-
 .act-detail .control-card-head {
   flex-wrap: wrap;
   margin-bottom: 6px;
@@ -2792,8 +2819,9 @@ button.mobile-chat-group-title:active {
   background: var(--press);
 }
 
-/* A message opens on its own screen; the press says the row was hit. */
-.message-row[data-thread-root]:active {
+/* A message opens on its own screen; the press says the row was hit. Not a
+   press on a card in it: that answers the card and opens nothing. */
+.message-row[data-thread-root]:active:not(:has(.control-card:active)) {
   background: var(--press);
 }
 

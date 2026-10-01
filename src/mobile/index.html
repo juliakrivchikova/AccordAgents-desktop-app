@@ -8,7 +8,7 @@
     <title>AccordAgents</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="assets/accordagents-mark.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-09-23-pwa-choice-card-v2" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-10-01-pwa-cards-in-their-thread" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -87,7 +87,7 @@
                  role and where each of them runs. -->
             <button id="chat-members-toggle" class="mobile-title" type="button" aria-haspopup="dialog" aria-controls="members-sheet" aria-expanded="false">
               <span id="chat-title" class="mobile-title-name" role="heading" aria-level="1">AccordAgents</span>
-              <span id="connection-state" class="mobile-title-state">Waiting to sync</span>
+              <span id="connection-state" class="mobile-title-state"></span>
             </button>
             <span class="mobile-header-spacer" aria-hidden="true"></span>
           </header>
@@ -134,9 +134,6 @@
             </header>
             <div id="stream-body" class="stream-view-body mscroll"></div>
           </section>
-          <!-- Permissions and choices a member is waiting on. The same cards
-               the desktop shows, answered from here with the same effect. -->
-          <section id="control-cards" class="control-cards" aria-label="Waiting for you" hidden></section>
           <!-- Rule 3: the phone wakes its machine itself, with the scoped key
                handed over sealed at pairing. -->
           <section id="machine-wake" class="machine-wake" aria-label="Machine power" hidden></section>
@@ -227,8 +224,8 @@
       </main>
     </div>
     <!-- The database description both the page and the service worker load. -->
-    <script src="mobile-db.js?v=2026-09-23-pwa-choice-card-v2" defer></script>
-    <script src="jsqr.js?v=2026-09-23-pwa-choice-card-v2" defer></script>
+    <script src="mobile-db.js?v=2026-10-01-pwa-cards-in-their-thread" defer></script>
+    <script src="jsqr.js?v=2026-10-01-pwa-cards-in-their-thread" defer></script>
     <script src="mobile-event-log.js?v=2026-09-07-event-log-v1" defer></script>
     <script src="mobile-machine-wake.js?v=2026-09-07-wake-v1" defer></script>
     <script src="mobile-machine-sealing.js?v=2026-09-07-pair-sealing-v1" defer></script>
@@ -236,8 +233,8 @@
     <script src="mobile-machine-channel.js?v=2026-09-07-machine-channel-v1" defer></script>
     <!-- Rules shared with the desktop verbatim (avatars, timeline visibility),
          bundled from src/shared by the mobile build. -->
-    <script src="mobile-shared.js?v=2026-09-23-pwa-choice-card-v2" defer></script>
-    <script src="mobile-activity.js?v=2026-09-23-pwa-choice-card-v2" defer></script>
-    <script src="mobile-app.js?v=2026-09-23-pwa-choice-card-v2" defer></script>
+    <script src="mobile-shared.js?v=2026-10-01-pwa-cards-in-their-thread" defer></script>
+    <script src="mobile-activity.js?v=2026-10-01-pwa-cards-in-their-thread" defer></script>
+    <script src="mobile-app.js?v=2026-10-01-pwa-cards-in-their-thread" defer></script>
   </body>
 </html>

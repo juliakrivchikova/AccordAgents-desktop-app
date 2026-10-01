@@ -354,7 +354,7 @@ try {
 
   // A genuinely new message must still arrive and paint (regression guard for
   // the earlier "messages never appeared" fix).
-  const rowsBefore = await evaluate(`(() => document.getElementById("message-list").childElementCount)()`);
+  const rowsBefore = await evaluate(`(() => document.querySelectorAll("#message-list > .message-row").length)()`);
   await postEnvelope([{
     ...doneMessage(40),
     id: "m040", messageId: "m040",
@@ -368,7 +368,7 @@ try {
   let arrivalMs = -1;
   for (let t = 0; t < 24 && arrivalMs === -1; t += 1) {
     await new Promise((r) => setTimeout(r, 500));
-    rowsAfter = await evaluate(`(() => document.getElementById("message-list").childElementCount)()`);
+    rowsAfter = await evaluate(`(() => document.querySelectorAll("#message-list > .message-row").length)()`);
     if (rowsAfter > rowsBefore) {
       arrivalMs = (t + 1) * 500;
     }
@@ -396,7 +396,7 @@ try {
     !remainingIds.some((id) => ["jump-envelope-2", "jump-envelope-3", "jump-envelope-4"].includes(id)),
     `remaining: ${JSON.stringify(remainingIds)}`);
   await new Promise((r) => setTimeout(r, 3000));
-  const rowsAfterDelete = await evaluate(`(() => document.getElementById("message-list").childElementCount)()`);
+  const rowsAfterDelete = await evaluate(`(() => document.querySelectorAll("#message-list > .message-row").length)()`);
   check("deletion changes nothing on the phone", rowsAfterDelete === rowsAfter,
     `rows ${rowsAfter} -> ${rowsAfterDelete}`);
 

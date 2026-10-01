@@ -533,8 +533,10 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", async 
       return true;
     })()`);
 
+    // The header no longer starts at "Waiting to sync" to wait out: the
+    // socket itself says whether the relay is live.
     await until("the phone reaches a live relay", async () =>
-      await evaluate(`(() => (document.getElementById("connection-state")?.textContent || "").trim())()`) !== "Waiting to sync"
+      await evaluate(`AccordAgentsMobile.relaySocketLive()`)
     ).catch(() => undefined);
 
     // ---- S1: a plain phone-sent turn, no @mention. The exact shape of the

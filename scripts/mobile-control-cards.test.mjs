@@ -278,8 +278,7 @@ test("a card published by the desktop is answered on the phone and survives a re
       "her words are not treated as a protocol block");
 
     // The question the User answered keeps its place under the message, the
-    // way the desktop keeps it: the pinned strip carries only what still
-    // waits, so this is the only record of what was asked and chosen.
+    // way the desktop keeps it: the record of what was asked and chosen.
     await postEnvelope({
       type: "mobile.timeline.events",
       conversationId: CONVERSATION,
@@ -309,8 +308,8 @@ test("a card published by the desktop is answered on the phone and survives a re
     assert.ok(answered, "the answered question is kept under its message");
     assert.match(answered, /Which fix should I build\?/, "the question is still readable");
     assert.match(answered, /In the relay/, "what was chosen is shown");
-    assert.equal(await evaluate(`document.querySelectorAll('#control-cards [data-card-id="choice-answered"]').length`), 0,
-      "an answered question does not pile up in the pinned strip");
+    assert.equal(await evaluate(`document.querySelectorAll('#message-list .control-card:not(.control-card-answered)[data-card-id="choice-answered"]').length`), 0,
+      "an answered question is not offered for answering again");
 
     // The wake control is offered because this pairing carries a scoped key.
     assert.equal(await evaluate(`(() => {
@@ -345,7 +344,8 @@ test("a card published by the desktop is answered on the phone and survives a re
         decision: decision || null,
         queued: outbox.some((entry) => decision && entry.eventId === decision.eventId),
         cardState: document.querySelector('[data-card-id="card-qa-1"] .control-card-state')?.innerText || "",
-        allowDisabled: document.querySelector('[data-card-id="card-qa-1"] [data-option-id="allow"]')?.disabled === true
+        onItsWay: document.querySelector('[data-card-id="card-qa-1"]')?.classList.contains("is-on-its-way") === true,
+        allowOffered: (() => { const allow = document.querySelector('[data-card-id="card-qa-1"] [data-option-id="allow"]'); return Boolean(allow && !allow.disabled); })()
       };
     })()`);
     assert.ok(stored.decision, "the answer was not written to the phone's event log");
@@ -356,9 +356,11 @@ test("a card published by the desktop is answered on the phone and survives a re
     assert.equal(stored.decision.payload.detail.codexDecisionId, "native-decision-77",
       "the native decision id must travel back with the answer");
     assert.deepEqual(stored.decision.payload.detail.draftOverride, { capability: "read", path: "src/index.ts" });
-    assert.match(stored.cardState, /Waiting for the machine to apply it/,
-      "a tap is not the answer being applied");
-    assert.equal(stored.allowDisabled, true, "an answered card does not offer the action again");
+    // A tap is not the answer being applied: the card folds to what was
+    // answered and fades, and says nothing more (the User, 2026-09-24).
+    assert.equal(stored.onItsWay, true, "the card fades while its answer is on its way");
+    assert.equal(stored.cardState, "Your answer: Allow", "the card is folded to her answer, nothing about delivery");
+    assert.equal(stored.allowOffered, false, "an answered card does not offer the action again");
 
     // The desktop received it: the sealed answer is in the mailbox.
     const posted = await fetch(`http://127.0.0.1:${MAILBOX_PORT}/v1/mailbox/events?mailboxId=${MAILBOX_ID}&limit=50`, {

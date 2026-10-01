@@ -212,6 +212,7 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
       if (!document.getElementById("activity-screen").classList.contains("is-active") || list.dataset.activityTab !== "pending") return null;
       return [...list.querySelectorAll(".act-row")].map((row) => ({
         card: row.dataset.cardId || "", text: row.innerText.replace(/\\s+/g, " ").trim(),
+        onItsWay: row.classList.contains("is-on-its-way"),
         disabled: [...row.querySelectorAll("button.act-pill")].map((button) => button.disabled)
       }));
     })()`;
@@ -250,7 +251,7 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     rows = await waitFor(`(() => {
       const rows = ${pendingRows};
       const row = rows && rows.find((item) => item.card === "perm-bash");
-      return row && /Answer sent/.test(row.text) && row.disabled.every(Boolean) ? rows : null;
+      return row && row.onItsWay && row.disabled.every(Boolean) ? rows : null;
     })()`, "the permission row to say the answer was sent");
     let kinds = [];
     for (let i = 0; i < 40 && !kinds.some((kind) => kind.startsWith("permission.decided:")); i += 1) {
@@ -266,7 +267,7 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     await openActivityPending();
     rows = await waitFor(`(() => { const rows = ${pendingRows}; return rows && rows.length === 2 ? rows : null; })()`, "Pending after the launch");
     const permAfterLaunch = rows.find((row) => row.card === "perm-bash");
-    assert.match(permAfterLaunch.text, /Answer sent/, "the sent mark survived the launch");
+    assert.equal(permAfterLaunch.onItsWay, true, "the sent mark survived the launch");
     assert.ok(permAfterLaunch.disabled.every(Boolean), "and the options stay dead");
     assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardSent("perm-bash")`), true);
 
@@ -291,7 +292,7 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     rows = await waitFor(`(() => {
       const rows = ${pendingRows};
       const row = rows && rows.find((item) => item.card === "perm-bash");
-      return row && /Answer sent/.test(row.text) && row.disabled.every(Boolean) ? rows : null;
+      return row && row.onItsWay && row.disabled.every(Boolean) ? rows : null;
     })()`, "an answer the mailbox holds to keep the card locked");
     assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardLocked("perm-bash")`), true);
     // An answer nobody has taken (say the desktop never did) that has been on
@@ -318,7 +319,7 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     rows = await waitFor(`(() => {
       const rows = ${pendingRows};
       const row = rows && rows.find((item) => item.card === "perm-bash");
-      return row && /You can answer again/.test(row.text) && row.disabled.every((dead) => !dead) ? rows : null;
+      return row && /You can answer again/.test(row.text) && !row.onItsWay && row.disabled.every((dead) => !dead) ? rows : null;
     })()`, "the stale answer to unlock the card");
     assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardLocked("perm-bash")`), false);
     refuseAppends = false;
@@ -326,7 +327,7 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     await waitFor(`(() => {
       const rows = ${pendingRows};
       const row = rows && rows.find((item) => item.card === "perm-bash");
-      return row && /Answer sent/.test(row.text) && row.disabled.every(Boolean) ? true : null;
+      return row && row.onItsWay && row.disabled.every(Boolean) ? true : null;
     })()`, "the second answer to lock the card again");
     const superseded = await evaluate(`globalThis.AccordAgentsMobile.listOutboxEntries().then((entries) => entries.map((entry) => entry.eventId + "=" + entry.status))`);
     assert.ok(superseded.includes(earlierEventId + "=superseded"), `the earlier answer was set aside, not sent: ${superseded.join(", ")}`);
@@ -358,17 +359,17 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
       const rows = ${pendingRows};
       return rows && rows.length === 1 && rows[0].card === "perm-bash" ? rows : null;
     })()`, "the choice the desktop closed to leave Pending");
-    assert.match(rows[0].text, /Answer sent/);
+    assert.equal(rows[0].onItsWay, true);
     const storedA = await evaluate(`JSON.parse(localStorage.getItem("accordagents.mobile.controlCards.v1"))[${JSON.stringify(CHAT_A)}] || []`);
     assert.deepEqual(storedA.filter((card) => card.status === "pending"), [], "chat A holds no pending card any more");
 
-    // The chat itself agrees: its pinned strip is empty.
+    // The chat itself agrees: nothing waits in it, under the message or at its end.
     await evaluate(`localStorage.setItem("accordagents.mobile.activeConversationId.v1", ${JSON.stringify(CHAT_A)})`);
     await reload();
     await waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") ? true : null`, "chat A open");
     await sleep(1500);
-    assert.equal(await evaluate(`document.querySelectorAll('#control-cards [data-card-id="choice-stale"]').length`), 0,
-      "the closed choice is not pinned above the composer");
+    assert.equal(await evaluate(`document.querySelectorAll('#message-list .control-card:not(.control-card-answered)[data-card-id="choice-stale"]').length`), 0,
+      "the closed choice is not offered in the chat any more");
     await evaluate(`document.getElementById("back-to-chats").click()`);
     await waitFor(`!document.getElementById("timeline-screen").classList.contains("is-active") ? true : null`, "back home");
 

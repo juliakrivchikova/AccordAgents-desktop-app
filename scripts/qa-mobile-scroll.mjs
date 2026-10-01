@@ -187,7 +187,7 @@ try {
     const j = document.getElementById("jump-to-latest");
     if (!s) return { rows: 0, missing: true };
     return {
-      rows: document.getElementById("message-list").childElementCount,
+      rows: document.querySelectorAll("#message-list > .message-row").length,
       fromBottom: Math.round(s.scrollHeight - s.scrollTop - s.clientHeight),
       scrollTop: Math.round(s.scrollTop),
       scrollable: s.scrollHeight > s.clientHeight + 40,
@@ -269,7 +269,7 @@ try {
   ]);
   await new Promise((r) => setTimeout(r, 6000));
   const collapsed = await evaluate(`(() => ({
-    rows: document.getElementById("message-list").childElementCount,
+    rows: document.querySelectorAll("#message-list > .message-row").length,
     chip: document.querySelector(".thread-chip")?.textContent || null,
     backVisible: document.getElementById("back-to-timeline")?.classList.contains("is-visible") ?? null
   }))()`);
@@ -281,7 +281,7 @@ try {
   await evaluate(`(() => { document.querySelector(".thread-chip").click(); return true; })()`);
   await new Promise((r) => setTimeout(r, 1200));
   const opened2 = await evaluate(`(() => ({
-    rows: document.getElementById("message-list").childElementCount,
+    rows: document.querySelectorAll("#message-list > .message-row").length,
     backVisible: document.getElementById("back-to-timeline").classList.contains("is-visible"),
     title: document.getElementById("chat-title").textContent
   }))()`);
@@ -293,7 +293,7 @@ try {
   await evaluate(`(() => { document.getElementById("back-to-timeline").click(); return true; })()`);
   await new Promise((r) => setTimeout(r, 1200));
   const backOut = await evaluate(`(() => ({
-    rows: document.getElementById("message-list").childElementCount,
+    rows: document.querySelectorAll("#message-list > .message-row").length,
     backVisible: document.getElementById("back-to-timeline").classList.contains("is-visible")
   }))()`);
   check("back returns to the full timeline", backOut.rows === collapsed.rows && backOut.backVisible === false,

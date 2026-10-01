@@ -44,6 +44,9 @@ export interface MobileControlCard {
   draftOverride?: unknown;
   /** The message a choice belongs to; the answer names it. */
   sourceMessageId?: string;
+  /** Answers to a still pending choice that were refused, named by the
+   *  operation id each was sent under, so the phone that sent one stops waiting. */
+  refusedAnswers?: Array<{ operationId: string; reason: string }>;
 }
 
 const ALLOW = { id: "allow", label: "Allow" };
@@ -101,7 +104,10 @@ export function controlCardFromChoiceMessage(conversationId: string, message: Ch
           ?? choice.customAnswer
           ?? "Answered",
     createdAt: message.createdAt,
-    sourceMessageId: message.id
+    sourceMessageId: message.id,
+    ...(choice.status === "pending" && choice.refusals?.length
+      ? { refusedAnswers: choice.refusals.map((refusal) => ({ operationId: refusal.operationId, reason: refusal.reason })) }
+      : {})
   };
 }
 

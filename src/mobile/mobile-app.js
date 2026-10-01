@@ -520,6 +520,12 @@
     if (response.ok) {
       mailboxAuthRejected = false;
     }
+    // Any answer at all: the phone reaches the mailbox, and a header still
+    // saying otherwise is put right now, not at some later redraw.
+    if (outboxUnreachable) {
+      outboxUnreachable = false;
+      void render();
+    }
   }
 
   // The relay reports two different 401s: "mailbox_unregistered" means the
@@ -4367,10 +4373,14 @@
       return String(right.createdAt || "").localeCompare(String(left.createdAt || ""));
     }).slice(0, CONTROL_CARDS_KEPT_ANSWERED_LIMIT);
     const next = stamped.concat(kept);
+    // Before the sameness check: the same answer sent again is refused again
+    // under the card the phone already holds.
+    let refused = false;
+    for (const card of stamped) refused = noteRefusedAnswer(card) || refused;
     const after = JSON.stringify(next);
-    if (before === after) return false;
+    if (before === after) return refused;
     all[conversationId] = next;
-    if (!saveControlCards(all)) return false;
+    if (!saveControlCards(all)) return refused;
     // A card the desktop no longer lists has been answered or withdrawn, so the
     // "sent" mark for it goes too: the next card with that id is a new question.
     // Only this chat's cards: the set says nothing about another chat's, and
@@ -4596,11 +4606,21 @@
       }
       return queuedFlushOutboxPromise;
     }
-    activeFlushOutboxPromise = flushOutboxInternal(options).finally(function () {
+    activeFlushOutboxPromise = flushOutboxInternal(options).then(function (result) {
+      // A tunnel coming back proves nothing either way; anything else that
+      // came back reached something.
+      if (result && result.status === "unreachable") outboxUnreachable = true;
+      else if (result && result.status !== "tunnel-reconnecting") outboxUnreachable = false;
+      return result;
+    }).finally(function () {
       activeFlushOutboxPromise = undefined;
     });
     return activeFlushOutboxPromise;
   }
+
+  // The last send could not reach anything, and none has since: the header
+  // keeps saying so until one does, not only on the render right after it.
+  let outboxUnreachable = false;
 
   async function flushOutboxInternal(options) {
     const pairing = loadPairing();
@@ -4624,10 +4644,10 @@
       try {
         return await flushOutboxViaMailbox(entries, endpoint);
       } catch (error) {
-        return { status: "waiting-to-sync", sent: 0, pending: entries.filter((entry) => entry.status !== "acked").length, error: error instanceof Error ? error.message : String(error) };
+        return { status: "unreachable", sent: 0, pending: entries.filter((entry) => entry.status !== "acked").length, error: error instanceof Error ? error.message : String(error) };
       }
     }
-    return { status: "waiting-to-sync", sent: 0, pending: entries.filter((entry) => entry.status !== "acked").length };
+    return { status: "unreachable", sent: 0, pending: entries.filter((entry) => entry.status !== "acked").length };
   }
 
   async function flushOutboxViaMailbox(entries, endpoint) {
@@ -4643,6 +4663,9 @@
         updatedAt: nowIso()
       };
       await putOutboxEntry(syncing);
+      // The mailbox answered and would not take it: reachable, so not "Not
+      // connected". The entry stays on its way and is offered again.
+      let answered = false;
       try {
         const event = mailboxEventForAppend(syncing);
         // Hashes stay computed over the plaintext payload; sealing wraps only
@@ -4656,6 +4679,7 @@
           body: JSON.stringify({ events: [event] }),
           signal: AbortSignal.timeout(MAILBOX_FETCH_TIMEOUT_MS)
         });
+        answered = true;
         noteMailboxResponse(response);
         if (response.status === 401) {
           const failure = await mailboxAuthFailureState(response);
@@ -4687,7 +4711,7 @@
           updatedAt: nowIso(),
           lastError: error instanceof Error ? error.message : String(error)
         });
-        return { status: "waiting-to-sync", sent, pending: pendingEntries.length - sent };
+        return { status: answered ? "waiting-to-sync" : "unreachable", sent, pending: pendingEntries.length - sent };
       }
     }
     return { status: "synced", sent, pending: Math.max(0, pendingEntries.length - sent) };
@@ -4750,7 +4774,7 @@
     // What this phone cannot do at all outranks what it is waiting for: a
     // browser without Ed25519 will never reach a machine, and saying "waiting
     // to sync" forever would be a lie the User cannot act on.
-    if (machineUnavailableReason && (status === "waiting-to-sync" || status === "waiting-for-desktop" || status === "tunnel-reconnecting")) {
+    if (machineUnavailableReason && (status === "waiting-to-sync" || status === "unreachable" || status === "waiting-for-desktop" || status === "tunnel-reconnecting")) {
       return machineUnavailableReason;
     }
     if (status === "tunnel-reconnecting") {
@@ -4759,9 +4783,14 @@
     if (status === "waiting-for-desktop") {
       return "Waiting for desktop";
     }
-    if (status === "waiting-to-sync") {
-      return "Waiting to sync";
+    // Nothing the phone sends could get through: said, because nothing else
+    // would say it, and kept until something is reached. The last outcome
+    // decides, not the status a caller passes on after it went stale.
+    if (outboxUnreachable) {
+      return "Not connected";
     }
+    // A send still on its way is not the chat's state: its message or card
+    // fades instead (the User, 2026-09-24).
     return "Synced";
   }
 
@@ -5594,7 +5623,7 @@
     if (backToChats && backToChats.hidden !== shouldShow) {
       backToChats.hidden = shouldShow;
     }
-    if (openThreadRoot && title) {
+    if (openThreadRoot && title && title.textContent !== "Thread") {
       title.textContent = "Thread";
     }
   }
@@ -5647,8 +5676,22 @@
   function setJumpToLatestVisible(visible) {
     const button = document.getElementById("jump-to-latest");
     if (button) {
+      if (visible) placeJumpToLatest(button);
       button.classList.toggle("is-visible", Boolean(visible));
     }
+  }
+
+  /** Just above the chat's own bottom edge, wherever that is: the syncing
+   *  strip, the machine's wake control and the bar all push that edge up, and
+   *  a fixed offset from the bottom of the screen put the button on top of
+   *  what was under the chat (the User, 2026-09-24). */
+  function placeJumpToLatest(button) {
+    const surface = threadSurface();
+    const screen = document.getElementById("timeline-screen");
+    if (!surface || !screen) return;
+    const offset = Math.round(screen.getBoundingClientRect().bottom - surface.getBoundingClientRect().bottom) + 12;
+    const next = offset + "px";
+    if (button.style.bottom !== next) button.style.bottom = next;
   }
 
   function scrollToLatest(behavior) {
@@ -5864,10 +5907,20 @@
     // otherwise queue a second, contradicting decision.
     if (controlCardAnswering.has(card.id) || isCardLocked(card.id)) return;
     controlCardAnswering.add(card.id);
+    answeringOutcome.set(card.id, answerOutcomeText(card, answer));
+    // The reason an earlier answer was not taken goes with it: left, it kept
+    // this one from folding until the database was done.
+    controlCardErrors.delete(card.id);
+    foldDrawnCard(card);
     try {
       await answerControlCardOnce(card, answer, conversationId);
+    } catch (error) {
+      // Failed before it was saved here: the card opens again and says so.
+      recordRelayDebug({ event: "card-answer-failed", reason: String(error && error.message || error) });
+      if (!isCardLocked(card.id) && !controlCardErrors.has(card.id)) controlCardErrors.set(card.id, "Could not save your answer on this phone. Try again.");
     } finally {
       controlCardAnswering.delete(card.id);
+      answeringOutcome.delete(card.id);
       // An answer that could not be saved leaves the options live again.
       if (controlCardErrors.has(card.id) && !isCardLocked(card.id)) void render();
     }
@@ -5885,7 +5938,7 @@
       return;
     }
     controlCardErrors.delete(card.id);
-    markCardSent(card.id, queued && queued.eventId);
+    markCardSent(card.id, queued && queued.eventId, answerOutcomeText(card, answer), decision.payload.operationId);
     await render("waiting-to-sync");
     const flushResult = await flushOutbox();
     if (desktopDidNotTake(flushResult.status)) {
@@ -5902,7 +5955,7 @@
 
   /** The desktop did not take this: it is not there, or its tunnel is down. */
   function desktopDidNotTake(status) {
-    return status === "waiting-for-desktop" || status === "tunnel-reconnecting" || status === "waiting-to-sync";
+    return status === "waiting-for-desktop" || status === "tunnel-reconnecting" || status === "waiting-to-sync" || status === "unreachable";
   }
 
   function enqueueDecision(input) {
@@ -5935,10 +5988,58 @@
     return Boolean(cardId) && Object.prototype.hasOwnProperty.call(loadCardSentMarks(), cardId);
   }
 
-  function markCardSent(cardId, eventId) {
+  function markCardSent(cardId, eventId, outcome, operationId) {
     const marks = { ...loadCardSentMarks() };
-    marks[cardId] = { at: nowIso(), ...(eventId ? { eventId: eventId } : {}) };
+    // Only a label for the fold: an own answer of any length is already in
+    // the queue entry, and the marks share the few megabytes with the cards.
+    const label = typeof outcome === "string" && outcome.length > CONTROL_CARD_OUTCOME_LABEL_MAX
+      ? outcome.slice(0, CONTROL_CARD_OUTCOME_LABEL_MAX - 1) + "\u2026" : outcome;
+    marks[cardId] = { at: nowIso(), ...(eventId ? { eventId: eventId } : {}), ...(typeof label === "string" ? { outcome: label } : {}),
+      ...(operationId ? { operationId: operationId } : {}) };
     saveCardSentMarks(marks);
+  }
+
+  /** The desktop refused the answer this phone sent to a card: it waits no
+   *  more, and says why, as a member's machine already makes it. Only for the
+   *  answer the refusal names: a later one may still be on its way. True when
+   *  the card changed. */
+  function noteRefusedAnswer(card) {
+    const refusals = card && card.status === "pending" && Array.isArray(card.refusedAnswers) ? card.refusedAnswers : [];
+    const mark = refusals.length ? loadCardSentMarks()[card.id] : undefined;
+    const refused = mark && mark.operationId
+      ? refusals.find(function (item) { return item && item.operationId === mark.operationId; }) : undefined;
+    if (!refused) return false;
+    clearCardSent(card.id);
+    controlCardErrors.set(card.id, refused.reason || CONTROL_CARD_REFUSED_TEXT);
+    return true;
+  }
+
+  /** The card folds where it is drawn at the tap itself: the render that
+   *  follows waits on hashing and the database, which on a long chat is a
+   *  visible while. */
+  function foldDrawnCard(card) {
+    for (const node of Array.from(document.querySelectorAll(".control-card[data-card-id]"))) {
+      if (node.dataset.cardId !== card.id || node.classList.contains("control-card-answered")) continue;
+      const folded = controlCardElement(card);
+      folded.dataset.signature = controlCardSignature(card);
+      node.replaceWith(folded);
+    }
+  }
+
+  /** How an answer given on this phone reads once its card is folded away. */
+  function answerOutcomeText(card, answer) {
+    if (answer && answer.cancel) return "Cancelled";
+    if (answer && typeof answer.customAnswer === "string") return answer.customAnswer;
+    const options = Array.isArray(card.options) ? card.options : [];
+    const option = options.find(function (item) { return answer && item.id === answer.optionId; });
+    return option ? option.label || option.id : (answer && answer.optionId) || "";
+  }
+
+  /** The answer a card on its way folds to, while it is written and after. */
+  function cardOutcome(cardId) {
+    if (answeringOutcome.has(cardId)) return answeringOutcome.get(cardId);
+    const mark = loadCardSentMarks()[cardId];
+    return mark && typeof mark.outcome === "string" ? mark.outcome : undefined;
   }
 
   function clearCardSent(cardId) {
@@ -5949,13 +6050,14 @@
     saveCardSentMarks(next);
   }
 
-  /** What the card says about an answer given on this phone: handed over to
-   *  the desktop, or still only saved here. The queue entry the mark names
-   *  says which; an entry this phone has not read yet counts as handed over
-   *  rather than alarming the User over a cache miss. A mark this old with
-   *  the card still waiting has stopped meaning anything — the answer was
-   *  lost on its way or refused — so the card unlocks and says so, rather
-   *  than showing dead buttons for ever. */
+  /** Whether an answer given on this phone still holds its card, folded and
+   *  saying nothing more (the User, 2026-09-24), or has stopped meaning
+   *  anything and the card says it can be answered again. The queue entry the
+   *  mark names says how long it may hold; an entry this phone has not read
+   *  yet counts as handed over rather than alarming the User over a cache
+   *  miss. A mark this old with the card still waiting means the answer was
+   *  lost on its way or given up without a word, so the card unlocks rather
+   *  than showing an answer on its way for ever. */
   function cardSentState(cardId) {
     const mark = loadCardSentMarks()[cardId];
     if (!mark) return undefined;
@@ -5973,7 +6075,7 @@
     const unlockAfterMs = owed ? CONTROL_CARD_SENT_UNLOCK_MS : CONTROL_CARD_TAKEN_UNLOCK_MS;
     const stale = !Number.isFinite(at) || Date.now() - at > unlockAfterMs;
     if (stale) return { locked: false, text: CONTROL_CARD_STALE_TEXT };
-    return { locked: true, text: held && held.status !== "acked" ? CONTROL_CARD_SAVED_TEXT : CONTROL_CARD_SENT_TEXT };
+    return { locked: true, text: "" };
   }
 
   /** An earlier answer to the card still on its way is replaced, not raced:
@@ -6007,10 +6109,9 @@
   const controlCardErrors = new Map();
   // Cards whose answer is being written right now, before it is "sent".
   const controlCardAnswering = new Set();
-  // Deliberately not "answered": the phone knows it sent the answer, not that
-  // the provider was told. The card leaves when the desktop says so.
-  const CONTROL_CARD_SENT_TEXT = "Answer sent. Waiting for the machine to apply it.";
-  const CONTROL_CARD_SAVED_TEXT = "Answer saved on this phone. Not delivered yet.";
+  // What such a card was answered with, for the fold, until the mark has it.
+  const answeringOutcome = new Map();
+  const CONTROL_CARD_OUTCOME_LABEL_MAX = 200;
   const CONTROL_CARD_STALE_TEXT = "Answer sent, but not applied yet. You can answer again.";
   const CONTROL_CARD_REFUSED_TEXT = "The desktop did not take this answer. You can answer again.";
   // How long an answer may stay on its way before the card is offered again.
@@ -6021,13 +6122,48 @@
   // show dead buttons for a day over that.
   const CONTROL_CARD_TAKEN_UNLOCK_MS = 60 * 60_000;
 
-  function renderControlCards(conversationId) {
-    const host = document.getElementById("control-cards");
-    if (!host) return;
-    const cards = controlCardsFor(conversationId).filter(function (card) {
-      return card && card.status === "pending";
-    });
+  /** The cards a member is waiting on in this chat. */
+  function pendingControlCards(conversationId) {
+    return cardIndexFor(conversationId).pending;
+  }
+
+  /** The chat's own last item: what waits for the User and has no message of
+   *  its own, a permission. A choice stands only under its message. It
+   *  scrolls with the chat, as the desktop's does. A strip of its own above
+   *  the composer cut the cards off against the chat and read as a card going
+   *  under the text (the User, 2026-09-24). */
+  function renderTailCards(list, cards) {
+    let host = document.getElementById("control-cards");
+    if (!host && cards.length === 0) return;
+    if (!host) {
+      host = document.createElement("li");
+      host.id = "control-cards";
+      host.className = "control-cards";
+      host.setAttribute("aria-label", "Waiting for you");
+    }
+    if (host.parentElement !== list || list.lastElementChild !== host) list.append(host);
     host.hidden = cards.length === 0;
+    syncCardNodes(host, cards);
+  }
+
+  /** A choice under the message that asked it, as on the desktop. */
+  function syncPendingCards(container, entry) {
+    const cards = pendingCardsForMessage(entry);
+    let host = null;
+    for (const child of Array.from(container.children)) {
+      if (child.classList.contains("message-cards")) host = child;
+    }
+    if (!host && cards.length === 0) return;
+    if (!host) {
+      host = document.createElement("div");
+      host.className = "message-cards";
+      container.append(host);
+    }
+    host.hidden = cards.length === 0;
+    syncCardNodes(host, cards);
+  }
+
+  function syncCardNodes(host, cards) {
     // Every render passes through here. A card that has not changed keeps its
     // node, so a pick, a note being typed and the keyboard over it survive a
     // reply arriving in the chat; only what changed is drawn again.
@@ -6060,13 +6196,16 @@
     return JSON.stringify([card.id, card.kind, card.status, card.title, card.summary, card.requesterLabel,
       card.machineName, card.options, card.recommendedOptionId, card.allowsCustomAnswer, card.allowsCancel,
       isCardLocked(card.id) || controlCardAnswering.has(card.id), controlCardErrors.get(card.id) || "",
-      cardSentText(card.id)]);
+      cardSentText(card.id), cardOutcome(card.id) || ""]);
   }
 
   // What was picked on a choice and not sent yet, by card. Outside the card:
   // the same card is drawn in the chat and on Activity, and drawn again when
   // it changes, and a half-written answer must survive both.
   const CHOICE_CUSTOM_ID = "custom";
+  // What the desktop calls your own answer. Sent without it, an own answer was
+  // read as an option it does not have and refused (the User, 2026-10-01).
+  const CHOICE_CUSTOM_OPTION_ID = "__custom__";
   const choiceDrafts = new Map();
   // Every drawing of a choice now on screen, by card: a pick made in one (the
   // chat, say) shows in the other (Activity) instead of leaving it showing a
@@ -6093,7 +6232,7 @@
     if (!draft || draft.asked !== asked) {
       const recommended = options.some(function (option) { return option.id === card.recommendedOptionId; })
         ? card.recommendedOptionId : "";
-      draft = { asked: asked, selected: recommended, customAnswer: "", note: "", noteOpen: false };
+      draft = { asked: asked, selected: recommended, customAnswer: "", note: "" };
       choiceDrafts.set(card.id, draft);
     }
     return draft;
@@ -6144,10 +6283,14 @@
         body.append(text);
       }
       row.append(num, body);
+      // Picking only opens a field, the note's or your own answer's; the finger
+      // takes it, as it takes the composer. Focused from script, a field came
+      // up behind the iPhone's keyboard (the User, 2026-09-24).
       row.addEventListener("click", function () {
         draft.selected = id;
         changed();
-        if (id === CHOICE_CUSTOM_ID) focusCardField(answerField);
+        const opened = id === CHOICE_CUSTOM_ID ? answer.panel : note.panel;
+        if (!opened.hidden) revealInCardScroller(opened);
       });
       rows.push(row);
       list.append(row);
@@ -6192,21 +6335,12 @@
     const answer = textPanel("control-card-answer", "Your answer", "sent word for word to " + who,
       "Your own direction for " + who, 3, draft.customAnswer, function (value) { draft.customAnswer = value; });
     const answerField = answer.field;
-    // The note is folded behind a link: the phone has little room under a
-    // choice, and most answers carry none.
-    const addNote = document.createElement("button");
-    addNote.type = "button";
-    addNote.className = "control-card-add-note";
-    addNote.textContent = "Add a note";
-    addNote.disabled = sent;
-    wrap.append(addNote);
+    // The note is open under the picked option itself and taken by the finger,
+    // as the composer is. Folded behind a link that focused it from script, it
+    // came up behind the iPhone's keyboard, out of sight while typed; at the
+    // foot of a long list it started below the fold (the User, 2026-09-24).
     const note = textPanel("control-card-note", "Add a note", "optional, " + who + " sees it with your pick",
       "Constraints, caveats or a question for " + who, 2, draft.note, function (value) { draft.note = value; });
-    addNote.addEventListener("click", function () {
-      draft.noteOpen = true;
-      changed();
-      focusCardField(note.field);
-    });
 
     const actions = document.createElement("div");
     actions.className = "control-card-actions";
@@ -6223,8 +6357,13 @@
       cancel.disabled = sent;
       cancel.addEventListener("click", function () {
         blurWithin(wrap);
+        // A note typed before Cancel does not go with it, so it is not shown
+        // under the sent card as if it had. Only a Cancel that is taken: one
+        // tapped behind a Submit already on its way changes nothing.
+        if (controlCardAnswering.has(card.id) || isCardLocked(card.id)) return;
+        draft.cancelled = true;
         void answerControlCard(card, { cancel: true }).then(function () {
-          if (isCardLocked(card.id)) choiceDrafts.delete(card.id);
+          if (!isCardLocked(card.id)) draft.cancelled = false;
         });
       });
       actions.append(cancel);
@@ -6238,9 +6377,11 @@
       if (!reply) return;
       // Sent, so the keyboard has nothing left to do here, as after a message.
       blurWithin(wrap);
-      void answerControlCard(card, reply).then(function () {
-        if (isCardLocked(card.id)) choiceDrafts.delete(card.id);
-      });
+      if (!controlCardAnswering.has(card.id) && !isCardLocked(card.id)) draft.cancelled = false;
+      // The draft stays until the desktop answers or withdraws the card: an
+      // answer refused, or never taken, opens the card again with what was
+      // picked and typed, not the recommendation and an empty box.
+      void answerControlCard(card, reply);
     });
     actions.append(submit);
     wrap.append(actions);
@@ -6261,10 +6402,15 @@
         if (document.activeElement !== pair[0] && pair[0].value !== pair[1]) pair[0].value = pair[1];
       }
       const custom = draft.selected === CHOICE_CUSTOM_ID;
-      const noteShown = !custom && Boolean(draft.selected) && (Boolean(draft.noteOpen) || Boolean(draft.note.trim()));
+      // Once sent, only a note that went with the answer is left to show.
+      const noteShown = !custom && Boolean(draft.selected) &&
+        (!sent || (!draft.cancelled && Boolean(draft.note.trim())));
       answer.panel.hidden = !custom;
       note.panel.hidden = !noteShown;
-      addNote.hidden = custom || !draft.selected || noteShown;
+      // Moves with the pick, its text kept. Only when the pick changed: moving
+      // a field takes its focus away.
+      const pickedRow = rows.find(function (row) { return row.dataset.optionId === draft.selected; });
+      if (noteShown && pickedRow && pickedRow.nextElementSibling !== note.panel) pickedRow.after(note.panel);
       hint.hidden = sent || !custom || Boolean(draft.customAnswer.trim());
       submit.disabled = sent || !choiceReply(card, draft);
     }
@@ -6283,7 +6429,7 @@
   function choiceReply(card, draft) {
     if (draft.selected === CHOICE_CUSTOM_ID) {
       const text = draft.customAnswer.trim();
-      return text ? { customAnswer: text } : undefined;
+      return text ? { optionId: CHOICE_CUSTOM_OPTION_ID, customAnswer: text } : undefined;
     }
     const options = Array.isArray(card.options) ? card.options : [];
     if (!options.some(function (option) { return option.id === draft.selected; })) return undefined;
@@ -6291,10 +6437,18 @@
     return { optionId: draft.selected, ...(noteText ? { note: noteText } : {}) };
   }
 
-  /** A card's field, focused and brought into view above Cancel and Submit. */
-  function focusCardField(field) {
-    field.focus({ preventScroll: true });
-    field.scrollIntoView({ block: "nearest" });
+  /** A field a pick just opened, brought into sight in whatever scrolls the
+   *  card, the chat or Activity: without focus and without moving the page,
+   *  so the finger still takes it and iOS lifts a tapped field itself. Opened
+   *  under a row at the bottom edge, it was below the fold with nothing to say so. */
+  function revealInCardScroller(node) {
+    let scroller = node.parentElement;
+    while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /auto|scroll/.test(getComputedStyle(scroller).overflowY))) {
+      scroller = scroller.parentElement;
+    }
+    if (!scroller || scroller === document.body || scroller === document.documentElement) return;
+    const overflow = node.getBoundingClientRect().bottom - scroller.getBoundingClientRect().bottom + 8;
+    if (overflow > 0) scroller.scrollTop += overflow;
   }
 
   function blurWithin(node) {
@@ -6303,6 +6457,15 @@
   }
 
   function controlCardElement(card) {
+    // Answered here and on its way: folded at once to what was answered, and
+    // faded until the desktop says so (the User, 2026-09-24).
+    if (cardOnItsWay(card)) {
+      // Her answer, not yet the member's: "Answered" is what the desktop says
+      // once it has it. A mark from before answers were kept folds bare.
+      const node = compactCardElement(card, cardOutcome(card.id) || "", "control-card-folded is-on-its-way", "Your answer: ");
+      node.append(onItsWayNote());
+      return node;
+    }
     const wrap = document.createElement("article");
     wrap.className = "control-card";
     wrap.dataset.cardId = card.id;
@@ -6332,12 +6495,7 @@
     const sent = isCardLocked(card.id) || controlCardAnswering.has(card.id);
     if (card.kind === "choice") {
       choiceCardBody(wrap, card, sent);
-      const state = document.createElement("p");
-      state.className = "control-card-state";
-      const failure = controlCardErrors.get(card.id);
-      state.textContent = failure || cardSentText(card.id);
-      state.hidden = !state.textContent;
-      wrap.append(state);
+      appendCardState(wrap, card);
       return wrap;
     }
     const options = document.createElement("div");
@@ -6367,14 +6525,39 @@
       options.append(cancel);
     }
     wrap.append(options);
+    appendCardState(wrap, card);
+    return wrap;
+  }
 
+  /** What a card says under its options. An answer on its way only fades the
+   *  card: how far it has got is detail the User does not need (the User,
+   *  2026-09-24). What she can act on is still said: a failure, or that she
+   *  can answer again. */
+  function cardStateText(card) {
+    const failure = controlCardErrors.get(card.id);
+    if (failure) return failure;
+    const sentState = cardSentState(card.id);
+    return sentState && !sentState.locked ? sentState.text : "";
+  }
+
+  /** The fade, said to a screen reader: its controls are dead for a reason. */
+  function onItsWayNote() {
+    const note = document.createElement("span");
+    note.className = "sr-only";
+    note.textContent = "Your answer is on its way.";
+    return note;
+  }
+
+  function cardOnItsWay(card) {
+    return !controlCardErrors.has(card.id) && (isCardLocked(card.id) || controlCardAnswering.has(card.id));
+  }
+
+  function appendCardState(wrap, card) {
     const state = document.createElement("p");
     state.className = "control-card-state";
-    const failure = controlCardErrors.get(card.id);
-    state.textContent = failure || cardSentText(card.id);
+    state.textContent = cardStateText(card);
     state.hidden = !state.textContent;
     wrap.append(state);
-    return wrap;
   }
 
 
@@ -6502,9 +6685,11 @@
     if (!active) return false;
     if (active.id === "composer-input") return true;
     // A card's own answer field raises the keyboard the same way the
-    // composer does, and the bar has no room beside it either.
+    // composer does, and the bar has no room beside it either. So does one on
+    // a choice opened from Activity: iOS lifts it, and the height must hold
+    // there too or the screen shrinking would lift it a second time.
     return (active.tagName === "INPUT" || active.tagName === "TEXTAREA") &&
-      Boolean(active.closest && active.closest("#timeline-screen"));
+      Boolean(active.closest && active.closest("#timeline-screen, #activity-item"));
   }
 
   /** What is on screen, read from the screens themselves rather than kept
@@ -7128,13 +7313,15 @@
         void openConversation(row.conversationId);
       });
     }
-    const failure = controlCardErrors.get(card.id);
-    if (failure || cardSentText(card.id)) {
+    // A tap is not the answer being applied; the row leaves when the desktop
+    // says the card is answered, and until then it only fades.
+    element.classList.toggle("is-on-its-way", cardOnItsWay(card));
+    if (cardOnItsWay(card)) col.append(onItsWayNote());
+    const stateText = cardStateText(card);
+    if (stateText) {
       const state = document.createElement("p");
       state.className = "act-state";
-      // A tap is not the answer being applied; the row leaves when the
-      // desktop says the card is answered.
-      state.textContent = failure || cardSentText(card.id);
+      state.textContent = stateText;
       col.append(state);
     }
     // Swipe left to cancel, as the desktop's "Cancel pending card" does. Only
@@ -7682,7 +7869,6 @@
       }
     }
     renderChatList();
-    renderControlCards(activeId);
     renderMachineWake();
     const openHomeTab = homeTab();
     showScreen(activeId ? "timeline" : openHomeTab);
@@ -7695,9 +7881,17 @@
     const activeChat = loadChats().find(function (chat) {
       return chat.id === activeId;
     });
-    if (title) {
-      title.textContent = activeChat?.title || "AccordAgents";
+    // Inside a thread the heading says so from the first write: the chat's
+    // name set here and "Thread" set again after the reads below made the
+    // heading flip on every update while a member wrote into the thread (the
+    // User, 2026-09-24).
+    const heading = openThreadRootId() ? "Thread" : activeChat?.title || "AccordAgents";
+    if (title && title.textContent !== heading) {
+      title.textContent = heading;
     }
+    // The back arrows and the composer's placeholder go with the heading,
+    // not after the reads.
+    renderThreadHeader(openThreadRootId());
     // Looking at the chat is what reads it. A chat opened behind a locked
     // screen is not being looked at.
     if (!document.hidden) {
@@ -7733,12 +7927,9 @@
     const visibleTimelineEntries = dedupeTimelineEntries(timelineEntries.filter(function (entry) {
       return !(entry.role === "you" && outboxContent.has(entry.content.trim()));
     }));
-    const pending = entries.filter(desktopOwesEntry).length;
     state.textContent = catchingUp
       ? "Catching up\u2026"
-      : connectionStatus
-        ? connectionStatusText(connectionStatus)
-        : pending > 0 ? "Waiting to sync" : "Synced";
+      : connectionStatusText(connectionStatus);
     let rows = messageEntries.map(function (entry) {
       return {
         rowKey: "outbox\0" + entry.eventId,
@@ -7763,6 +7954,7 @@
           })
           : undefined,
         status: statusText(entry.status),
+        onItsWay: entry.status !== "acked" && entry.status !== "refused" && entry.status !== "superseded",
         createdAt: entry.createdAt
       };
     }).concat(visibleTimelineEntries.map(function (entry) {
@@ -7834,16 +8026,37 @@
     } else if (!sameChat) {
       mainListScrollTop = undefined;
     }
+    // A question stands under the message that asked it, as on the desktop:
+    // in the thread when it was asked in a thread, and in its place in the
+    // history when that is further up. Only what has no message, a
+    // permission, waits at the end of the chat (the User, 2026-10-01: a
+    // question asked in a thread stood at the bottom of the main chat).
+    renderCardIndex = Object.assign(buildCardIndex(activeId), { revision: revision });
+    const tailCards = pendingControlCards(activeId).filter(function (card) {
+      return card.kind !== "choice" || !card.sourceMessageId;
+    });
     const rowsFingerprint = rows.map(function (row) {
       return (row.rowKey || row.id) + "\u0000" + messageRowSignature(row);
-    }).join("\u0001");
+    }).concat(tailCards.map(controlCardSignature)).join("\u0001");
     const rowsChanged = rowsFingerprint !== lastRowsFingerprint;
     lastRowsFingerprint = rowsFingerprint;
     // Measured BEFORE the rows are mounted: appending content is itself what
     // moves the end away, so asking afterwards always answers "not at the
     // bottom" and the view would never follow anything.
+    // A card field being typed in stays where the finger left it while rows
+    // come and go above it. Chrome anchors the scroll itself; Safari on the
+    // iPhone does not, and the field slid under the keyboard mid-word.
+    const typedField = typingInChatCard() ? document.activeElement : null;
+    const typedTop = typedField ? typedField.getBoundingClientRect().top : 0;
     const wasAtBottom = isNearBottom(threadSurface());
     reconcileMessageRows(list, rows);
+    renderTailCards(list, tailCards);
+    if (typedField && typedField.isConnected && document.activeElement === typedField) {
+      const drift = typedField.getBoundingClientRect().top - typedTop;
+      const surface = threadSurface();
+      if (surface && Math.abs(drift) >= 1) surface.scrollTop += drift;
+    }
+    renderCardIndex = null;
     lastScrolledConversationId = activeId;
     if (!rowsChanged && !openedConversation) {
       return;
@@ -7861,6 +8074,12 @@
         return;
       }
       scrollToLatestWhenSettled("auto");
+      return;
+    }
+    // A card being typed in stays under the finger: following the end would
+    // scroll the field away mid-word, now that cards are in the chat.
+    if (typingInChatCard()) {
+      setJumpToLatestVisible(!isNearBottom(threadSurface()));
       return;
     }
     // Whoever is at the end is following the conversation, so the view follows
@@ -7970,6 +8189,11 @@
       if (!row) {
         return;
       }
+      // A card under a message is answered where it stands: a tap on it is
+      // never a tap on the row, live or not.
+      if (event.target.closest(".control-card")) {
+        return;
+      }
       // (f) A row that cannot be followed says why instead of opening a view
       // that would sit there empty.
       if (row.dataset.streamBlocked) {
@@ -8061,6 +8285,7 @@
       answered: answeredCardsForMessage(entry).map(function (card) {
         return card.id + ":" + (card.outcome || "");
       }),
+      pending: pendingCardsForMessage(entry).map(controlCardSignature),
       attachments: Array.isArray(entry.attachments)
         ? entry.attachments.map(function (attachment) { return attachment.id; })
         : undefined,
@@ -8145,6 +8370,11 @@
   }
 
   function messageStatusLabel(entry) {
+    // A message still on its way says nothing about it; it is faded instead
+    // (the User, 2026-09-24).
+    if (entry.onItsWay) {
+      return formatClockTime(entry.createdAt) || "";
+    }
     if (entry.status === "Done" || entry.status === "Sent") {
       return formatClockTime(entry.createdAt) || entry.status;
     }
@@ -8277,8 +8507,10 @@
       copy.append(meta, content);
       renderAttachmentsInto(attachmentsNodeFor(copy), entry);
       syncAnsweredCards(copy, entry);
+      syncPendingCards(copy, entry);
       item.append(avatar, copy);
     } else {
+      item.classList.toggle("is-on-its-way", Boolean(entry.onItsWay));
       const bubble = document.createElement("div");
       bubble.className = "message-bubble";
       const content = document.createElement("div");
@@ -8296,36 +8528,83 @@
   }
 
   /** The question the User already answered stays with its own message, the
-   *  way the desktop keeps the answered card under it. The pinned strip above
-   *  the composer carries only what is still waiting, so without this the
-   *  phone would hide the protocol block from the bubble and leave no trace of
-   *  what was asked or what was chosen (the User, 2026-09-20). */
+   *  way the desktop keeps the answered card under it; without this the phone
+   *  would hide the protocol block from the bubble and leave no trace of what
+   *  was asked or what was chosen (the User, 2026-09-20). */
   function answeredCardsForMessage(entry) {
-    if (!entry || entry.author !== "agent") return [];
+    return cardsForMessage(entry).filter(function (card) {
+      return card.status !== "pending" && card.kind === "choice";
+    });
+  }
+
+  // The chat's cards by the message they belong to, read once per render: a
+  // chat keeps every choice ever asked, and each row asks several times.
+  let renderCardIndex = null;
+
+  function cardIndexFor(conversationId) {
+    // Only the render that built it may use it: a render cut short cannot
+    // leave a stale index behind for the next one.
+    if (renderCardIndex && renderCardIndex.conversationId === conversationId &&
+      renderCardIndex.revision === renderRevision) return renderCardIndex;
+    return buildCardIndex(conversationId);
+  }
+
+  function typingInChatCard() {
+    const active = document.activeElement;
+    return Boolean(active && active.tagName === "TEXTAREA" && active.closest && active.closest("#message-list .control-card"));
+  }
+
+  function buildCardIndex(conversationId) {
+    const byMessage = new Map();
+    const pending = [];
+    for (const card of controlCardsFor(conversationId)) {
+      if (!card) continue;
+      if (card.status === "pending") pending.push(card);
+      if (!card.sourceMessageId) continue;
+      const list = byMessage.get(card.sourceMessageId);
+      if (list) list.push(card);
+      else byMessage.set(card.sourceMessageId, [card]);
+    }
+    return { conversationId: conversationId, byMessage: byMessage, pending: pending };
+  }
+
+  function cardsForMessage(entry) {
+    if (!entry || entry.author !== "agent" || entry.scaffolding) return [];
     const conversationId = selectedConversationId();
     if (!conversationId) return [];
     const messageId = entry.messageId || entry.sourceId || entry.id;
     if (!messageId) return [];
-    return controlCardsFor(conversationId).filter(function (card) {
-      return card && card.status !== "pending" && card.kind === "choice" && card.sourceMessageId === messageId;
+    return cardIndexFor(conversationId).byMessage.get(messageId) || [];
+  }
+
+  /** The choices still waiting under this message. */
+  function pendingCardsForMessage(entry) {
+    return cardsForMessage(entry).filter(function (card) {
+      return card.status === "pending" && card.kind === "choice";
     });
   }
 
   function answeredCardElement(card) {
+    return compactCardElement(card, card.outcome || "", "control-card-answered", "Answered: ");
+  }
+
+  /** A choice or permission that is done with, folded to what was answered. */
+  function compactCardElement(card, outcome, className, label) {
     const wrap = document.createElement("article");
-    wrap.className = "control-card control-card-answered";
+    wrap.className = "control-card " + className;
     wrap.dataset.cardId = card.id;
     wrap.dataset.cardKind = card.kind;
     const head = document.createElement("div");
     head.className = "control-card-head";
     const title = document.createElement("span");
     title.className = "control-card-title";
-    title.textContent = card.title || "Choice";
+    // Headed as the live card is, now that a permission folds as well.
+    title.textContent = card.title || (card.kind === "permission" ? "Permission request" : "Choice");
     head.append(title);
-    if (card.requesterLabel) {
+    if (card.requesterLabel || card.machineName) {
       const who = document.createElement("span");
       who.className = "control-card-who";
-      who.textContent = card.requesterLabel;
+      who.textContent = [card.requesterLabel, card.machineName].filter(Boolean).join(" · ");
       head.append(who);
     }
     wrap.append(head);
@@ -8337,7 +8616,8 @@
     }
     const state = document.createElement("p");
     state.className = "control-card-state";
-    state.textContent = card.outcome === "Cancelled" ? "Cancelled" : "Answered: " + (card.outcome || "");
+    state.textContent = outcome === "Cancelled" ? "Cancelled" : outcome ? label + outcome : "";
+    state.hidden = !state.textContent;
     wrap.append(state);
     return wrap;
   }
@@ -8420,6 +8700,7 @@
       renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
       // A question answered while its row is on screen keeps its card there.
       syncAnsweredCards(content.parentElement || item, entry);
+      syncPendingCards(content.parentElement || item, entry);
       return true;
     }
     const status = item.querySelector(".message-status");
@@ -8427,6 +8708,7 @@
     if (!status || !content) {
       return false;
     }
+    item.classList.toggle("is-on-its-way", Boolean(entry.onItsWay));
     status.textContent = messageStatusLabel(entry);
     renderMessageContentIfChanged(content, entry.content, entry.author);
     renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
@@ -8442,6 +8724,7 @@
   function reconcileMessageRows(list, rows) {
     const existing = new Map();
     for (const child of Array.from(list.children)) {
+      if (child.id === "control-cards") continue;
       const bucket = existing.get(child.dataset.rowKey);
       if (bucket) {
         bucket.push(child);
@@ -8449,12 +8732,23 @@
         existing.set(child.dataset.rowKey, [child]);
       }
     }
-    const kept = new Set();
+    // Which node each row takes, decided before anything moves. The nodes no
+    // row takes leave first: removed at the end instead, they made every row
+    // below them move, and a moved row takes the focus, and the keyboard, from
+    // a card being typed in under its message.
+    const claimed = rows.map(function (entry) {
+      const bucket = existing.get(entry.rowKey || entry.id);
+      return bucket && bucket.length > 0 ? bucket.shift() : undefined;
+    });
+    const kept = new Set(claimed.filter(Boolean));
+    for (const child of Array.from(list.children)) {
+      if (!kept.has(child) && child.id !== "control-cards") {
+        child.remove();
+      }
+    }
     let cursor = list.firstElementChild;
-    for (const entry of rows) {
-      const rowKey = entry.rowKey || entry.id;
-      const bucket = existing.get(rowKey);
-      let item = bucket && bucket.length > 0 ? bucket.shift() : undefined;
+    rows.forEach(function (entry, index) {
+      let item = claimed[index];
       if (!item || item.dataset.rowSignature !== messageRowSignature(entry)) {
         if (item && updateMessageRow(item, entry)) {
           // Keep the existing DOM node mounted so PWA updates do not flash.
@@ -8474,13 +8768,7 @@
         list.insertBefore(item, cursor);
       }
       cursor = item.nextElementSibling;
-      kept.add(item);
-    }
-    for (const child of Array.from(list.children)) {
-      if (!kept.has(child)) {
-        child.remove();
-      }
-    }
+    });
   }
 
   // --- members of the open chat ---------------------------------------------
@@ -9041,6 +9329,13 @@
       surface.addEventListener("scroll", function () {
         setJumpToLatestVisible(!isNearBottom(surface));
       }, { passive: true });
+      // The chat's bottom edge also moves with no scroll at all: a card
+      // arriving or growing, the keyboard, the bar coming and going.
+      if (jump && typeof ResizeObserver === "function") {
+        new ResizeObserver(function () {
+          if (jump.classList.contains("is-visible")) placeJumpToLatest(jump);
+        }).observe(surface);
+      }
     }
     wireChatSearch();
     wireHomeDock();
@@ -9681,6 +9976,7 @@
     adoptWorkerUnread,
     resyncAfterForeground,
     dropRelaySocket,
+    relaySocketLive,
     loadEarlierMessages,
     timelinePageFor,
     saveTimelinePage,
