@@ -180,8 +180,12 @@ interface StoredSettings {
   encryptedMachinePairings?: string;
   /** This host's power key is never part of participant settings replication. */
   encryptedMachinePower?: string;
-  /** Who holds a copy of this machine's scoped power key. Records only, never
-   *  the secret, and never sent to a machine: they name the User's devices. */
+  /** The power key `encryptedMachinePower` replaced ("none" when there was
+   *  none), so a handover the runtime did not come back from can put it back.
+   *  Consumed by that revert; absent, there is nothing to revert. */
+  encryptedMachinePowerPrevious?: string;
+  /** Who holds a copy of the phone's start key. Records only, never the
+   *  secret, and never sent to a machine: they name the User's devices. */
   machinePowerHandoffs?: MachinePowerHandoffRecord[];
   /** How each machine was installed from THIS desktop (SSH access, install
    *  root, service, installed version). Never travels to a machine: it carries
@@ -1791,6 +1795,9 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
   ...role
 }));
 
+/** `encryptedMachinePowerPrevious` when the key a save replaced was none. */
+const NO_MACHINE_POWER = "none";
+
 export class SettingsService {
   private readonly settingsPath: string;
   private readonly mobilePairedDevicesPath: string;
@@ -2860,6 +2867,8 @@ export class SettingsService {
       machineInstalls: this.normalizeMachineInstalls(settings.machineInstalls),
       encryptedMachinePower: typeof settings.encryptedMachinePower === "string" && settings.encryptedMachinePower.trim()
         ? settings.encryptedMachinePower : undefined,
+      encryptedMachinePowerPrevious: typeof settings.encryptedMachinePowerPrevious === "string" && settings.encryptedMachinePowerPrevious.trim()
+        ? settings.encryptedMachinePowerPrevious : undefined,
       machinePowerHandoffs: normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs).length
         ? normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs)
         : undefined,
@@ -3498,8 +3507,9 @@ export class SettingsService {
     return config;
   }
 
-  /** Scoped power-key handoffs (Rule 3). Records only; the key itself stays in
-   *  `encryptedMachinePower` and travels to a device inside its sealed pairing. */
+  /** Start-key handoffs to devices (Rule 3). Records only; the key itself is
+   *  the phone's start key in the AWS credentials, and reaches a device only
+   *  inside its pairing link. */
   async listMachinePowerHandoffs(): Promise<MachinePowerHandoffRecord[]> {
     const stored = await this.readStored();
     return (stored.machinePowerHandoffs ?? []).map((record) => ({ ...record }));
@@ -3510,11 +3520,26 @@ export class SettingsService {
     await this.writeStored({ ...stored, machinePowerHandoffs: records.length ? records.map((r) => ({ ...r })) : undefined }, true);
   }
 
+  /** Puts back the power key the last save replaced (none, if there was
+   *  none): the runtime did not come back after a handover, and the key it
+   *  ran with before is the one known to work. */
+  async revertMachinePower(): Promise<void> {
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Machine power settings could not be read; the existing file was left untouched.");
+    const previous = stored.encryptedMachinePowerPrevious;
+    if (!previous) return;
+    await this.writeStored({ ...stored, encryptedMachinePower: previous === NO_MACHINE_POWER ? undefined : previous, encryptedMachinePowerPrevious: undefined }, true);
+  }
+
   async saveMachinePower(config: AwsMachinePowerConfig): Promise<void> {
     assertAwsMachinePowerConfig(config);
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Machine power settings could not be read; the existing file was left untouched.");
-    await this.writeStored({ ...stored, encryptedMachinePower: this.sealJson(JSON.stringify(config)) }, true);
+    await this.writeStored({
+      ...stored,
+      encryptedMachinePower: this.sealJson(JSON.stringify(config)),
+      encryptedMachinePowerPrevious: stored.encryptedMachinePower ?? NO_MACHINE_POWER
+    }, true);
   }
 
   /** What a machine needs to run participants exactly like this desktop:
@@ -3541,6 +3566,7 @@ export class SettingsService {
       machineInstalls: _machineInstalls,
       encryptedMachinePairings: _pairings,
       encryptedMachinePower: _power,
+      encryptedMachinePowerPrevious: _previousPower,
       machinePowerHandoffs: _powerHandoffs,
       trustedDevices: _trustedDevices,
       machinePairingBindings: _machinePairingBindings,
@@ -3606,6 +3632,7 @@ export class SettingsService {
       machineInstalls: stored.machineInstalls,
       encryptedMachinePairings: stored.encryptedMachinePairings,
       encryptedMachinePower: stored.encryptedMachinePower,
+      encryptedMachinePowerPrevious: stored.encryptedMachinePowerPrevious,
       machinePowerHandoffs: stored.machinePowerHandoffs,
       trustedDevices: stored.trustedDevices,
       machinePairingBindings: stored.machinePairingBindings,

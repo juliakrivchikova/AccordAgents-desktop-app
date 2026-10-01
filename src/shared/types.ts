@@ -219,6 +219,24 @@ export interface AwsWorkerStatus {
   actualSpec?: AwsWorkerActualSpec;
   specMismatch?: AwsWorkerSpecMismatch;
   operation?: AwsWorkerOperationSnapshot;
+  /** Whether the machine on this instance stops it by itself after three
+   *  idle hours. Absent while nothing is connected. */
+  autoStop?: AwsWorkerAutoStop;
+}
+
+/**
+ * - `off`: this app has no stop key; the setup command has to be run again.
+ * - `pending`: the key is here but the machine has not taken it yet (it is
+ *   handed over the next time the machine is connected and idle, or when a
+ *   machine is first set up on the instance).
+ * - `on`: the machine accepted the key.
+ * - `failed`: the machine refused this key; `detail` says why.
+ */
+export interface AwsWorkerAutoStop {
+  state: "off" | "pending" | "on" | "failed";
+  detail?: string;
+  /** `failed` only: the machine still stops with the key it took before. */
+  previousKeyActive?: boolean;
 }
 
 export interface ConnectAwsWorkerRequest {

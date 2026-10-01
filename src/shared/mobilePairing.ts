@@ -44,11 +44,15 @@ export interface MobilePairingPackage {
   outboxUrl?: string;
   staticOriginUrl?: string;
   capabilities: MobilePairingCapability[];
-  /** Rule 3: the scoped key that lets this device wake a stopped AWS machine
-   *  by itself. It travels sealed with the pairing and nowhere else — the
-   *  relay never sees it, and there is no wake broker to ask. Absent when the
-   *  machine has no power configuration. */
+  /** Rule 3: the phone's start key, which lets this device start a stopped
+   *  AWS machine by itself. Only while the link is built: the key reaches the
+   *  phone in the link's fragment (`w=`) and nowhere else, never the relay,
+   *  and the package the desktop keeps holds only `powerHandoffId`. Absent
+   *  when the setup command has made no start key for the instance. */
   power?: MachinePowerHandoff;
+  /** Which start-key handoff this pairing carried, so revoking the pairing
+   *  revokes that record. The desktop keeps this, never the key itself. */
+  powerHandoffId?: string;
   fingerprint: string;
   createdAt: string;
   expiresAt: string;
@@ -195,9 +199,35 @@ export function mobilePairingPwaUrl(pairing: MobilePairingPackage, staticOriginU
   if (pairing.outboxUrl) {
     url.searchParams.set("outbox", pairing.outboxUrl);
   }
-  // Keep the sealing key in the URL fragment so it is never sent to the static origin.
-  url.hash = `k=${pairing.relaySealKeyBase64}`;
+  // Keep the sealing key, and the phone's start key, in the URL fragment so
+  // neither is ever sent to the static origin or through the relay.
+  url.hash = `k=${pairing.relaySealKeyBase64}${pairing.power ? `&w=${mobileWakeFragment(pairing.power)}` : ""}`;
   return url.toString();
+}
+
+/** What a phone needs to start its machine, and nothing more, as one short
+ *  fragment value, so the QR code stays easy to scan: the instance, its
+ *  region, the key id and the secret, each URI-encoded and joined by dots. */
+export function mobileWakeFragment(power: MachinePowerHandoff): string {
+  return [power.instanceId, power.region, power.credentials.accessKeyId, power.credentials.secretAccessKey]
+    .map(encodeURIComponent).join(".");
+}
+
+/** The pairing as the phone gets it, and as the desktop keeps it: the link
+ *  carries the start key; the package kept (in memory, on disk, in the
+ *  renderer) names only the handoff, never the secret. */
+export function mobilePairingWithStartKey(
+  minted: CreateMobilePairingResult,
+  power: MachinePowerHandoff | undefined
+): CreateMobilePairingResult {
+  const { power: _ignored, ...kept } = minted.package;
+  if (!power) return { ...minted, package: kept };
+  const staticOriginUrl = kept.staticOriginUrl;
+  return {
+    ...minted,
+    package: { ...kept, powerHandoffId: power.handoffId },
+    ...(minted.pwaUrl && staticOriginUrl ? { pwaUrl: mobilePairingPwaUrl({ ...kept, power }, staticOriginUrl) } : {})
+  };
 }
 
 export function parseMobilePairingPayload(payload: string, now: Date = new Date()): MobilePairingPackage {

@@ -40,7 +40,8 @@ import { MachineHostPowerRegistry } from "../main/services/machineHostPower";
 import { uptime } from "node:os";
 import { MachineMaintenance } from "../main/services/machineMaintenance";
 import { nativeHostIdentity } from "../main/services/nativeHostIdentity";
-import { assertAwsMachinePowerConfig } from "../shared/machinePower";
+import { assertAwsMachinePowerConfig, MACHINE_POWER_KEY_CHECK_MS, MACHINE_POWER_REFUSED_EXIT_CODE, MachinePowerRefusal, type AwsMachinePowerConfig } from "../shared/machinePower";
+import { AwsMachinePowerClient, verifyMachinePowerKey } from "../shared/awsMachinePowerClient";
 import { assertCurrentAwsMachine } from "../main/services/awsMachineIdentity";
 import { PluginService } from "../main/services/plugins";
 import { SettingsService } from "../main/services/settings";
@@ -52,6 +53,11 @@ interface MachineArgs {
   userDataDir?: string;
   machineName?: string;
   configurePower?: boolean;
+  /** Setup only: ask AWS whether the key on stdin works, writing nothing. */
+  checkPower?: boolean;
+  /** Setup only: put back the power key the last configure replaced (a
+   *  runtime that did not come back after the handover). */
+  revertPower?: boolean;
   maintenanceCommand?: string[];
 }
 
@@ -60,6 +66,8 @@ function parseArgs(argv: string[]): MachineArgs {
   let userDataDir = process.env.ACCORDAGENTS_USER_DATA_DIR?.trim() || undefined;
   let machineName = process.env.ACCORDAGENTS_MACHINE_NAME?.trim() || undefined;
   let configurePower = false;
+  let checkPower = false;
+  let revertPower = false;
   let maintenance = false;
   let maintenanceCommand: string[] | undefined;
   for (let index = 0; index < argv.length; index += 1) {
@@ -85,18 +93,23 @@ function parseArgs(argv: string[]): MachineArgs {
       machineName = next();
     } else if (arg === "--configure-power") {
       configurePower = true;
+    } else if (arg === "--check-power") {
+      checkPower = true;
+    } else if (arg === "--revert-power") {
+      revertPower = true;
     } else if (arg === "--help" || arg === "-h") {
-      console.log("Usage: accordagents-machine --enrollment <pairing.json> [--user-data <dir>] [--name <machine name>]\nSetup only: accordagents-machine --configure-power --user-data <dir> (bounded JSON on stdin; keys never in argv)");
+      console.log("Usage: accordagents-machine --enrollment <pairing.json> [--user-data <dir>] [--name <machine name>]\nSetup only: accordagents-machine --check-power (bounded JSON on stdin; asks AWS, writes nothing)\nSetup only: accordagents-machine --configure-power --user-data <dir> (bounded JSON on stdin; keys never in argv)\nSetup only: accordagents-machine --revert-power --user-data <dir> (puts back the key the last --configure-power replaced)");
       process.exit(0);
     }
   }
-  if (maintenance && (!maintenanceCommand?.length || !userDataDir || configurePower)) {
+  if ([configurePower, revertPower, checkPower].filter(Boolean).length > 1) throw new Error("--check-power, --configure-power and --revert-power cannot be combined.");
+  if (maintenance && (!maintenanceCommand?.length || !userDataDir || configurePower || revertPower || checkPower)) {
     throw new Error("Maintenance requires --user-data <dir> -- <command> [args] and cannot configure power at the same time.");
   }
-  if (!enrollmentPath && !configurePower && !maintenance) {
+  if (!enrollmentPath && !configurePower && !revertPower && !checkPower && !maintenance) {
     throw new Error("A machine enrollment file is required (--enrollment <pairing.json> or ACCORDAGENTS_MACHINE_ENROLLMENT).");
   }
-  return { enrollmentPath: path.resolve(enrollmentPath), userDataDir, machineName, configurePower, maintenanceCommand };
+  return { enrollmentPath: path.resolve(enrollmentPath), userDataDir, machineName, configurePower, checkPower, revertPower, maintenanceCommand };
 }
 
 async function runMachineMaintenance(args: MachineArgs): Promise<void> {
@@ -135,25 +148,58 @@ async function runMachineMaintenance(args: MachineArgs): Promise<void> {
   }
 }
 
-/** Installer-only key hand-off: the same host secret store seals it before
- * acknowledging success. Participant configuration cannot invoke this path. */
-async function configureMachinePower(args: MachineArgs): Promise<void> {
+const POWER_KEY_CHECK_RETRY_MS = 5_000;
+
+/** The power key the installer pipes in: bounded, valid, and for this very
+ * instance (IMDSv2). Anything wrong with it is a refusal, not a retry. */
+async function readPowerConfig(): Promise<AwsMachinePowerConfig> {
   if (process.platform !== "linux") throw new Error("AWS machine power is configured on its Linux host.");
   const chunks: Buffer[] = []; let bytes = 0;
   for await (const chunk of process.stdin) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
-    if (bytes > 16 * 1024) throw new Error("The machine power setup payload is too large.");
+    if (bytes > 16 * 1024) throw new MachinePowerRefusal("The machine power setup payload is too large.");
     chunks.push(buffer);
   }
   let config: unknown;
   try { config = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
-  catch { throw new Error("The machine power setup payload is invalid JSON."); }
-  assertAwsMachinePowerConfig(config);
+  catch { throw new MachinePowerRefusal("The machine power setup payload is invalid JSON."); }
+  try { assertAwsMachinePowerConfig(config); }
+  catch (error) { throw new MachinePowerRefusal(error instanceof Error ? error.message : String(error)); }
   await assertCurrentAwsMachine(config);
+  return config;
+}
+
+/** Installer-only, while the runtime still runs: asks AWS whether the key can
+ * read and, as a dry run, stop this instance. A key AWS or this instance
+ * refuses exits with MACHINE_POWER_REFUSED_EXIT_CODE; any other failure is
+ * temporary and the installer tries the key again later. Writes nothing. */
+async function checkMachinePower(): Promise<void> {
+  const client = new AwsMachinePowerClient(await readPowerConfig());
+  try {
+    await verifyMachinePowerKey(client, { deadlineMs: MACHINE_POWER_KEY_CHECK_MS, retryMs: POWER_KEY_CHECK_RETRY_MS });
+  } finally {
+    client.close();
+  }
+  console.log("Machine power key accepted.");
+}
+
+/** Installer-only key hand-off, with the runtime drained and the key already
+ * checked: the same host secret store seals it before acknowledging success.
+ * Participant configuration cannot invoke this path. */
+async function configureMachinePower(args: MachineArgs): Promise<void> {
+  const config = await readPowerConfig();
   setHostPlatform(createHeadlessPlatform({ userDataDir: args.userDataDir }));
   await new SettingsService().saveMachinePower(config);
   console.log("Machine power configured.");
+}
+
+/** Setup only, with the runtime drained: the runtime did not come back after
+ * a handover, so the key it ran with before (or none) is put back. */
+async function revertMachinePower(args: MachineArgs): Promise<void> {
+  setHostPlatform(createHeadlessPlatform({ userDataDir: args.userDataDir }));
+  await new SettingsService().revertMachinePower();
+  console.log("Machine power reverted.");
 }
 
 function readEnrollment(enrollmentPath: string): MobilePairingPackage {
@@ -442,7 +488,9 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
 if (require.main === module) {
   const args = parseArgs(process.argv.slice(2));
   (args.maintenanceCommand ? runMachineMaintenance(args).then(() => undefined) :
-    args.configurePower ? configureMachinePower(args).then(() => undefined) : startMachine(args))
+    args.configurePower ? configureMachinePower(args).then(() => undefined) :
+    args.checkPower ? checkMachinePower().then(() => undefined) :
+    args.revertPower ? revertMachinePower(args).then(() => undefined) : startMachine(args))
     .then((stop) => {
       if (!stop) return;
       let stopping = false;
@@ -459,6 +507,6 @@ if (require.main === module) {
     })
     .catch((error) => {
       console.error(error instanceof Error ? error.message : String(error));
-      process.exit(1);
+      process.exit(error instanceof MachinePowerRefusal ? MACHINE_POWER_REFUSED_EXIT_CODE : 1);
     });
 }

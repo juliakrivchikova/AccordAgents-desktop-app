@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MachineIdleScheduler, type MachineIdleState } from "./machineIdle";
-import { machinePowerPolicy } from "../../shared/machinePower";
+import { machinePowerPolicy, machineWakePolicy } from "../../shared/machinePower";
 
 function fixture() {
   let stored: MachineIdleState | undefined;
@@ -45,10 +45,20 @@ test("activity racing the final fence aborts preparation, and failed persistence
   idle.close();
 });
 
-test("phone power policy grants only instance state and app-tagged start/stop", () => {
+test("the machine's stop-key policy grants only in-region instance state and app-tagged start/stop", () => {
   const policy = machinePowerPolicy("us-east-1") as { Statement: Array<{ Action: string[]; Resource: string; Condition?: unknown }> };
-  assert.deepEqual(policy.Statement[0], { Sid: "ReadInstanceState", Effect: "Allow", Action: ["ec2:DescribeInstances"], Resource: "*" });
+  assert.deepEqual(policy.Statement[0], { Sid: "ReadInstanceState", Effect: "Allow", Action: ["ec2:DescribeInstances"], Resource: "*",
+    Condition: { StringEquals: { "aws:RequestedRegion": "us-east-1" } } }, "the key cannot list the rest of the account");
   assert.deepEqual(policy.Statement[1].Action, ["ec2:StartInstances", "ec2:StopInstances"]);
   assert.deepEqual(policy.Statement[1].Condition, { StringEquals: { "aws:RequestedRegion": "us-east-1", "ec2:ResourceTag/accordagents-worker": "1" } });
   assert.throws(() => machinePowerPolicy("bad/region"));
+});
+
+test("the phone's start-key policy can only start app-tagged instances in its region", () => {
+  assert.deepEqual(machineWakePolicy("us-east-1"), { Version: "2012-10-17", Statement: [
+    { Sid: "StartTaggedMachines", Effect: "Allow", Action: ["ec2:StartInstances"], Resource: "*",
+      Condition: { StringEquals: { "aws:RequestedRegion": "us-east-1", "ec2:ResourceTag/accordagents-worker": "1" } } }
+  ] });
+  assert.doesNotMatch(JSON.stringify(machineWakePolicy("us-east-1")), /Stop|Terminate|Describe|RunInstances/);
+  assert.throws(() => machineWakePolicy("not a region"), /Invalid AWS region/);
 });

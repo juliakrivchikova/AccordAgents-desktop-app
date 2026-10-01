@@ -291,7 +291,7 @@ async function scenarioAwsBoundary() {
   }, {
     identity: async () => identity, verifyAws: async () => { calls.push("verify"); }, uptimeMs: () => now,
     createHostRegistry: (options) => new MachineHostPowerRegistry({ ...options, dir: shared, isAlive: () => true }),
-    client: { close: () => undefined, stopAfterDrain: async () => { calls.push("stop"); return { instanceId: "i-0123456789abcdef0", state: "stopping" }; } }
+    client: { close: () => undefined, assertCanStop: async () => { calls.push("check"); }, stopAfterDrain: async () => { calls.push("stop"); return { instanceId: "i-0123456789abcdef0", state: "stopping" }; } }
   });
   try {
     await store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
@@ -308,7 +308,7 @@ async function scenarioAwsBoundary() {
     // The neighbour is still running and still polling; it is simply idle.
     neighbour.publish(false);
     await power.scheduler.check();
-    assert.deepEqual(calls, ["verify", "verify", "stop"], "AWS is verified before and at the stop, and stopped exactly once");
+    assert.deepEqual(calls, ["verify", "check", "verify", "stop"], "AWS is verified and the key dry-run checked before the fence, and stopped exactly once");
     neighbour.release();
   } finally {
     power.close();

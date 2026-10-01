@@ -113,3 +113,14 @@ export function useAwsWorkerStatus() {
 export function isAwsTransition(status: AwsWorkerStatus | null): boolean {
   return status?.state === "stopping" || status?.state === "pending";
 }
+
+/** The one-line instance state at the top of the AWS panel. */
+export function awsWorkerStateLabel(status: AwsWorkerStatus | null, unavailable: boolean): string {
+  return !status
+    ? unavailable ? "Status unavailable" : "Checking status…"
+    : !status.configured ? "Not connected"
+      : !status.state ? "Status unavailable"
+        : status.state === "running" ? "Running · billable"
+          : status.state === "pending" ? "Starting · billable"
+            : status.state[0].toUpperCase() + status.state.slice(1);
+}

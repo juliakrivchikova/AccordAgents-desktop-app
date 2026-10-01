@@ -1,10 +1,11 @@
 /**
- * Handing the scoped power key to a device, and taking it back.
+ * Handing the phone's start key to a device, and taking it back.
  *
  * Rule 3 of the signed resolution: the phone wakes a stopped AWS machine
- * itself, with a narrowly scoped key handed over sealed at pairing. The relay
- * never holds it. What the desktop keeps afterwards is a record of WHO holds a
- * copy — never a second copy of the secret.
+ * itself, with a key that can only start it, handed over in the pairing
+ * link's fragment. The relay never holds it. What the desktop keeps
+ * afterwards is a record of WHO holds a copy — never a second copy of the
+ * secret.
  *
  * One property has to be stated rather than hidden: every handoff of a machine
  * carries the SAME IAM access key, because minting a key per device needs an

@@ -3,6 +3,7 @@
 // and the instance-launch spec. No AWS SDK and no side effects live here so
 // this is fully unit-testable; awsWorkerLifecycle.ts drives the real EC2 calls.
 import { normalizeAwsRootVolumeSizeGb } from "../../shared/cloudRuns";
+import { machinePowerPolicy, machineWakePolicy } from "../../shared/machinePower";
 
 export const AWS_WORKER_TAG_KEY = "accordagents-worker";
 export const AWS_WORKER_TAG_VALUE = "1";
@@ -17,7 +18,26 @@ export interface AwsWorkerCredentials {
   accessKeyId: string;
   secretAccessKey: string;
   region: string;
+  /** The machine's own stop key (`machinePowerPolicy`): it can only read,
+   *  start and stop app-tagged instances in `region`. Minted by the same setup
+   *  command as the worker key, so there is one terminal step, not two. The
+   *  app never calls AWS with it; it is handed to the machine on the instance. */
+  power?: AwsMachinePowerKey;
+  /** The phone's key (`machineWakePolicy`): it can only start app-tagged
+   *  instances in `region`. Minted once and kept, so a phone is paired with it
+   *  once; it reaches a phone only inside the pairing link. */
+  wake?: AwsMachinePowerKey;
 }
+
+export interface AwsMachinePowerKey {
+  accessKeyId: string;
+  secretAccessKey: string;
+}
+
+/** The inline policy name on the stop-key user. */
+export const AWS_MACHINE_POWER_POLICY_NAME = "accordagents-machine-power";
+/** The inline policy name on the phone's start-key user. */
+export const AWS_MACHINE_WAKE_POLICY_NAME = "accordagents-machine-wake";
 
 // A minimal IAM policy scoped to one region and to instances carrying the
 // accordagents-worker tag. RunInstances is allowed in-region and must tag the
@@ -161,14 +181,25 @@ export function buildScopedWorkerPolicy(region: string): unknown {
 }
 
 // The copy-paste snippet shown in the app. The user runs it in a terminal that
-// already has AWS auth; it creates a dedicated IAM user with the scoped policy,
-// mints an access key, and prints the paste blob. It never touches anything
-// outside that one IAM user + policy, and the app never sees the user's own
-// credentials — only the scoped key they paste back.
+// already has AWS auth. It creates three dedicated IAM users, printed together
+// as one paste blob: the app's worker user with the scoped policy above, the
+// machine's stop-key user with `machinePowerPolicy` (read, start and stop
+// app-tagged instances in the region), and the phone's start-key user with
+// `machineWakePolicy` (read and start them), whose key is made only once. It
+// never touches anything outside those users and their policies, and the app
+// never sees the user's own credentials, only the scoped keys pasted back.
 export function buildBootstrapCommand(
   region: string,
   userSuffix: string,
-  options: { targetUserName?: string } = {}
+  options: {
+    targetUserName?: string;
+    keepWorkerKeyId?: string;
+    keepPowerKeyIds?: readonly string[];
+    keepWakeKeyId?: string;
+    /** False: make only the app's key, and leave the stop and start keys of an
+     *  instance in another region alone. */
+    machineKeys?: boolean;
+  } = {}
 ): string {
   const safeRegion = assertToken("region", region);
   const targetUserName = options.targetUserName ? assertWorkerUserName(options.targetUserName) : undefined;
@@ -178,8 +209,9 @@ export function buildBootstrapCommand(
     throw new Error("AWS worker policy exceeds the IAM customer-managed policy size limit.");
   }
   // Single-quote the policy for the shell; escape embedded quotes.
-  const policyLiteral = `'${policy.replace(/'/g, `'\\''`)}'`;
+  const policyLiteral = shellSingleQuote(policy);
   if (targetUserName) {
+    // An in-place permission update mints no key, so it never touches the stop key.
     return [
       "set -e",
       `REGION=${safeRegion}`,
@@ -187,12 +219,23 @@ export function buildBootstrapCommand(
       `POLICY=${policyLiteral}`,
       'if ! aws iam get-user --user-name "$USER" >/dev/null 2>&1; then printf "%s\\n" "Expected existing AccordAgents worker IAM user $USER was not found." >&2; exit 1; fi',
       'POLICY_ARN=$(aws iam list-policies --scope Local --query "Policies[?PolicyName==\x27$USER\x27].Arn | [0]" --output text)',
-      'if [ -z "$POLICY_ARN" ] || [ "$POLICY_ARN" = None ]; then POLICY_ARN=$(aws iam create-policy --policy-name "$USER" --policy-document "$POLICY" --query "Policy.Arn" --output text); else for VERSION_ID in $(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query "Versions[?IsDefaultVersion==\x60false\x60].VersionId" --output text); do aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION_ID"; done; aws iam create-policy-version --policy-arn "$POLICY_ARN" --policy-document "$POLICY" --set-as-default >/dev/null; fi',
+      'if [ -z "$POLICY_ARN" ] || [ "$POLICY_ARN" = None ]; then POLICY_ARN=$(aws iam create-policy --policy-name "$USER" --policy-document "$POLICY" --query "Policy.Arn" --output text); else for VERSION_ID in $(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query \x27Versions[?IsDefaultVersion==\x60false\x60].VersionId\x27 --output text); do aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION_ID"; done; aws iam create-policy-version --policy-arn "$POLICY_ARN" --policy-document "$POLICY" --set-as-default >/dev/null; fi',
       'aws iam attach-user-policy --user-name "$USER" --policy-arn "$POLICY_ARN"',
       'aws iam delete-user-policy --user-name "$USER" --policy-name accordagents-worker >/dev/null 2>&1 || true',
       'printf "\\nUpdated AccordAgents worker permissions for %s. Return to AccordAgents and select Try again.\\n" "$USER"'
     ].join("\n");
   }
+  const powerUserName = `accordagents-power-${assertToken("suffix", userSuffix)}`;
+  const wakeUserName = `accordagents-wake-${assertToken("suffix", userSuffix)}`;
+  if ([userName, powerUserName, wakeUserName].some((name) => name.length > 64)) throw new Error("An AWS IAM user name would exceed the IAM limit of 64 characters.");
+  // Only well-formed key ids reach the script; anything else keeps nothing.
+  const keepWorkerKeyId = options.keepWorkerKeyId && isAwsAccessKeyId(options.keepWorkerKeyId) ? options.keepWorkerKeyId : "";
+  const keepPowerKeyIds = [...new Set((options.keepPowerKeyIds ?? []).filter(isAwsAccessKeyId))].join(" ");
+  const keepWakeKeyId = options.keepWakeKeyId && isAwsAccessKeyId(options.keepWakeKeyId) ? options.keepWakeKeyId : "";
+  // A region the stop- and start-key policies cannot name still gets the app's key.
+  const machineKeys = options.machineKeys !== false;
+  const powerPolicy = machineKeys ? policyOrUndefined(() => machinePowerPolicy(safeRegion)) : undefined;
+  const wakePolicy = machineKeys ? policyOrUndefined(() => machineWakePolicy(safeRegion)) : undefined;
   return [
     "set -e",
     `REGION=${safeRegion}`,
@@ -200,31 +243,106 @@ export function buildBootstrapCommand(
     `POLICY=${policyLiteral}`,
     "FOUND_WORKERS=",
     `for R in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text); do for I in $(aws ec2 describe-instances --region \"$R\" --filters Name=tag:${AWS_WORKER_TAG_KEY},Values=${AWS_WORKER_TAG_VALUE} Name=instance-state-name,Values=pending,running,stopping,stopped,shutting-down --query 'Reservations[].Instances[].InstanceId' --output text); do FOUND_WORKERS=\"$FOUND_WORKERS $R $I\"; done; done`,
-    "set -- $FOUND_WORKERS",
+    // Split explicitly: the command is pasted into the user's own shell, and
+    // zsh (the macOS default) does not split an unquoted variable.
+    "set -- $(printf '%s\\n' \"$FOUND_WORKERS\")",
     "if [ $(( $# / 2 )) -gt 1 ]; then printf '%s\\n' 'Multiple tagged AccordAgents workers exist; resolve them before setup.' >&2; exit 1; fi",
     "if [ $# -eq 2 ]; then WORKER_REGION=$1; WORKER_ID=$2; ROOT_DEVICE=$(aws ec2 describe-instances --region \"$WORKER_REGION\" --instance-ids \"$WORKER_ID\" --query 'Reservations[0].Instances[0].RootDeviceName' --output text); ROOT_VOLUME=$(aws ec2 describe-instances --region \"$WORKER_REGION\" --instance-ids \"$WORKER_ID\" --query \"Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='$ROOT_DEVICE'].Ebs.VolumeId | [0]\" --output text); if [ -n \"$ROOT_VOLUME\" ] && [ \"$ROOT_VOLUME\" != None ]; then aws ec2 create-tags --region \"$WORKER_REGION\" --resources \"$ROOT_VOLUME\" --tags Key=accordagents-worker,Value=1; fi; for SG in $(aws ec2 describe-instances --region \"$WORKER_REGION\" --instance-ids \"$WORKER_ID\" --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' --output text); do SG_NAME=$(aws ec2 describe-security-groups --region \"$WORKER_REGION\" --group-ids \"$SG\" --query 'SecurityGroups[0].GroupName' --output text); case \"$SG_NAME\" in accordagents-worker-*-sg) aws ec2 create-tags --region \"$WORKER_REGION\" --resources \"$SG\" --tags Key=accordagents-worker,Value=1 ;; esac; done; fi",
     'if ! aws iam get-user --user-name "$USER" >/dev/null 2>&1; then aws iam create-user --user-name "$USER" >/dev/null; fi',
     'POLICY_ARN=$(aws iam list-policies --scope Local --query "Policies[?PolicyName==\x27$USER\x27].Arn | [0]" --output text)',
-    'if [ -z "$POLICY_ARN" ] || [ "$POLICY_ARN" = None ]; then POLICY_ARN=$(aws iam create-policy --policy-name "$USER" --policy-document "$POLICY" --query "Policy.Arn" --output text); else for VERSION_ID in $(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query "Versions[?IsDefaultVersion==\x60false\x60].VersionId" --output text); do aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION_ID"; done; aws iam create-policy-version --policy-arn "$POLICY_ARN" --policy-document "$POLICY" --set-as-default >/dev/null; fi',
+    'if [ -z "$POLICY_ARN" ] || [ "$POLICY_ARN" = None ]; then POLICY_ARN=$(aws iam create-policy --policy-name "$USER" --policy-document "$POLICY" --query "Policy.Arn" --output text); else for VERSION_ID in $(aws iam list-policy-versions --policy-arn "$POLICY_ARN" --query \x27Versions[?IsDefaultVersion==\x60false\x60].VersionId\x27 --output text); do aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION_ID"; done; aws iam create-policy-version --policy-arn "$POLICY_ARN" --policy-document "$POLICY" --set-as-default >/dev/null; fi',
     'aws iam attach-user-policy --user-name "$USER" --policy-arn "$POLICY_ARN"',
     'aws iam delete-user-policy --user-name "$USER" --policy-name accordagents-worker >/dev/null 2>&1 || true',
+    // The key the app uses now stays valid until the app has taken the new
+    // one: a result that is never pasted, or is refused, leaves the app
+    // working. At IAM's two-key limit the other key goes; a superseded key
+    // is removed by the next run.
+    `KEEP_WORKER_KEY=${keepWorkerKeyId}`,
     'EXISTING_KEYS=$(aws iam list-access-keys --user-name "$USER" --query \'sort_by(AccessKeyMetadata,&CreateDate)[].AccessKeyId\' --output text)',
-    'set -- $EXISTING_KEYS',
-    'if [ "$#" -ge 2 ]; then aws iam delete-access-key --user-name "$USER" --access-key-id "$1"; shift; fi',
+    "set -- $(printf '%s\\n' \"$EXISTING_KEYS\")",
+    'if [ "$#" -ge 2 ]; then DROP=$1; if [ "$DROP" = "$KEEP_WORKER_KEY" ]; then DROP=$2; fi; aws iam delete-access-key --user-name "$USER" --access-key-id "$DROP"; fi',
     'KEY=$(aws iam create-access-key --user-name "$USER" --output json)',
     'AKID=$(printf "%s" "$KEY" | python3 -c "import sys,json;print(json.load(sys.stdin)[\\"AccessKey\\"][\\"AccessKeyId\\"])")',
     'SAK=$(printf "%s" "$KEY" | python3 -c "import sys,json;print(json.load(sys.stdin)[\\"AccessKey\\"][\\"SecretAccessKey\\"])")',
-    'for OLD_AKID in "$@"; do aws iam delete-access-key --user-name "$USER" --access-key-id "$OLD_AKID"; done',
-    `BLOB=$(printf '{"accessKeyId":"%s","secretAccessKey":"%s","region":"%s"}' "$AKID" "$SAK" "$REGION" | base64 | tr -d '\\n')`,
+    // The machine's stop key, from the same run: a second user whose only
+    // rights are to read, start and stop app-tagged instances in this region.
+    // It never costs the connection: if this account refuses any step, the
+    // result is printed without it and the app keeps the stop key it has.
+    // Keys still in use (the one the machine holds, the one waiting to be
+    // handed over) are never deleted; with both IAM slots in use, no new key
+    // is made.
+    ...(powerPolicy ? [
+      `POWER_USER=${powerUserName}`,
+      `POWER_POLICY=${shellSingleQuote(powerPolicy)}`,
+      `KEEP_POWER_KEYS=${shellSingleQuote(keepPowerKeyIds)}`,
+      "mint_power_key() {",
+      '  aws iam get-user --user-name "$POWER_USER" >/dev/null 2>&1 || aws iam create-user --user-name "$POWER_USER" >/dev/null || return 1',
+      `  aws iam put-user-policy --user-name "$POWER_USER" --policy-name ${AWS_MACHINE_POWER_POLICY_NAME} --policy-document "$POWER_POLICY" || return 1`,
+      '  POWER_KEYS=$(aws iam list-access-keys --user-name "$POWER_USER" --query \'sort_by(AccessKeyMetadata,&CreateDate)[].AccessKeyId\' --output text) || return 1',
+      "  set -- $(printf '%s\\n' \"$POWER_KEYS\")",
+      '  if [ "$#" -ge 2 ]; then',
+      "    DROP=",
+      '    for CANDIDATE in "$@"; do case " $KEEP_POWER_KEYS " in *" $CANDIDATE "*) ;; *) DROP=$CANDIDATE; break ;; esac; done',
+      '    if [ -z "$DROP" ]; then printf "%s\\n" "Both automatic-stop keys are still in use, so no new one was made." >&2; return 1; fi',
+      '    aws iam delete-access-key --user-name "$POWER_USER" --access-key-id "$DROP" || return 1',
+      "  fi",
+      '  aws iam create-access-key --user-name "$POWER_USER" --output json',
+      "}",
+      "POWER_FIELDS=",
+      'if POWER_KEY=$(mint_power_key); then POWER_AKID=$(printf "%s" "$POWER_KEY" | python3 -c "import sys,json;print(json.load(sys.stdin)[\\"AccessKey\\"][\\"AccessKeyId\\"])") && POWER_SAK=$(printf "%s" "$POWER_KEY" | python3 -c "import sys,json;print(json.load(sys.stdin)[\\"AccessKey\\"][\\"SecretAccessKey\\"])") && POWER_FIELDS=$(printf \',"power":{"accessKeyId":"%s","secretAccessKey":"%s"}\' "$POWER_AKID" "$POWER_SAK"); fi'
+    ] : ["POWER_FIELDS="]),
+    'if [ -z "$POWER_FIELDS" ]; then printf "\\n%s\\n" "No new automatic-stop key was made, so automatic stop stays as it is. AccordAgents still connects with the result below." >&2; fi',
+    // The phone's start key, made once: while the key the app holds still
+    // exists, none is made and the app keeps it, so a phone paired with it
+    // never has to be paired again because this command ran.
+    ...(wakePolicy ? [
+      `WAKE_USER=${wakeUserName}`,
+      `WAKE_POLICY=${shellSingleQuote(wakePolicy)}`,
+      `KEEP_WAKE_KEY=${keepWakeKeyId}`,
+      "mint_wake_key() {",
+      '  aws iam get-user --user-name "$WAKE_USER" >/dev/null 2>&1 || aws iam create-user --user-name "$WAKE_USER" >/dev/null || return 1',
+      '  WAKE_KEYS=$(aws iam list-access-keys --user-name "$WAKE_USER" --query \'sort_by(AccessKeyMetadata,&CreateDate)[].AccessKeyId\' --output text) || return 1',
+      "  set -- $(printf '%s\\n' \"$WAKE_KEYS\")",
+      // The phones' key, and its policy, stay exactly as they are.
+      '  for CANDIDATE in "$@"; do if [ "$CANDIDATE" = "$KEEP_WAKE_KEY" ]; then return 2; fi; done',
+      `  aws iam put-user-policy --user-name "$WAKE_USER" --policy-name ${AWS_MACHINE_WAKE_POLICY_NAME} --policy-document "$WAKE_POLICY" || return 1`,
+      '  if [ "$#" -ge 2 ]; then aws iam delete-access-key --user-name "$WAKE_USER" --access-key-id "$1" || return 1; fi',
+      '  aws iam create-access-key --user-name "$WAKE_USER" --output json',
+      "}",
+      "WAKE_FIELDS=",
+      "WAKE_RC=0",
+      'WAKE_KEY=$(mint_wake_key) || WAKE_RC=$?',
+      'if [ "$WAKE_RC" -eq 0 ]; then WAKE_AKID=$(printf "%s" "$WAKE_KEY" | python3 -c "import sys,json;print(json.load(sys.stdin)[\\"AccessKey\\"][\\"AccessKeyId\\"])") && WAKE_SAK=$(printf "%s" "$WAKE_KEY" | python3 -c "import sys,json;print(json.load(sys.stdin)[\\"AccessKey\\"][\\"SecretAccessKey\\"])") && WAKE_FIELDS=$(printf \',"wake":{"accessKeyId":"%s","secretAccessKey":"%s"}\' "$WAKE_AKID" "$WAKE_SAK"); fi',
+      'if [ "$WAKE_RC" -eq 1 ]; then printf "\\n%s\\n" "The phone start key could not be made; the phone cannot start the machine yet. AccordAgents still connects with the result below." >&2; fi'
+    ] : ["WAKE_FIELDS="]),
+    `BLOB=$(printf '{"accessKeyId":"%s","secretAccessKey":"%s","region":"%s"%s%s}' "$AKID" "$SAK" "$REGION" "$POWER_FIELDS" "$WAKE_FIELDS" | base64 | tr -d '\\n')`,
     `printf '\\nPaste this into AccordAgents:\\n${AWS_WORKER_BLOB_PREFIX}%s\\n' "$BLOB"`
   ].join("\n");
+}
+
+function policyOrUndefined(build: () => unknown): string | undefined {
+  try {
+    return JSON.stringify(build());
+  } catch {
+    return undefined;
+  }
+}
+
+function isAwsAccessKeyId(value: string): boolean {
+  return /^AKIA[0-9A-Z]{12,}$/.test(value);
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 export function encodeWorkerBlob(credentials: AwsWorkerCredentials): string {
   const json = JSON.stringify({
     accessKeyId: credentials.accessKeyId,
     secretAccessKey: credentials.secretAccessKey,
-    region: credentials.region
+    region: credentials.region,
+    ...(credentials.power ? { power: { accessKeyId: credentials.power.accessKeyId, secretAccessKey: credentials.power.secretAccessKey } } : {}),
+    ...(credentials.wake ? { wake: { accessKeyId: credentials.wake.accessKeyId, secretAccessKey: credentials.wake.secretAccessKey } } : {})
   });
   return `${AWS_WORKER_BLOB_PREFIX}${Buffer.from(json, "utf8").toString("base64")}`;
 }
@@ -252,10 +370,25 @@ export function parseWorkerBlob(blob: string): AwsWorkerCredentials {
   if (!accessKeyId || !secretAccessKey || !region) {
     throw new Error("The pasted worker setup value is missing required fields.");
   }
-  if (!/^AKIA[0-9A-Z]{12,}$/.test(accessKeyId)) {
+  if (!isAwsAccessKeyId(accessKeyId)) {
     throw new Error("The pasted access key id does not look like an AWS access key.");
   }
-  return { accessKeyId, secretAccessKey, region };
+  // Older setup commands print no stop key; that is a valid connection
+  // without automatic stop. A stop key that is present but damaged is not.
+  const power = parsePowerKey((parsed as { power?: unknown }).power, "automatic-stop");
+  const wake = parsePowerKey((parsed as { wake?: unknown }).wake, "phone start");
+  return { accessKeyId, secretAccessKey, region, ...(power ? { power } : {}), ...(wake ? { wake } : {}) };
+}
+
+function parsePowerKey(value: unknown, label: string): AwsMachinePowerKey | undefined {
+  if (value === undefined) return undefined;
+  const key = (value && typeof value === "object" ? value : {}) as Partial<AwsMachinePowerKey>;
+  const accessKeyId = typeof key.accessKeyId === "string" ? key.accessKeyId.trim() : "";
+  const secretAccessKey = typeof key.secretAccessKey === "string" ? key.secretAccessKey.trim() : "";
+  if (!isAwsAccessKeyId(accessKeyId) || !secretAccessKey) {
+    throw new Error(`The pasted worker setup value has a damaged ${label} key. Copy the whole result again.`);
+  }
+  return { accessKeyId, secretAccessKey };
 }
 
 // cloud-init that installs the worker toolchain at first boot, so a freshly

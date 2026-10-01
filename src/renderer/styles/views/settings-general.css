@@ -1157,3 +1157,8 @@
   font-size: 12px;
   color: var(--app-muted);
 }
+
+/* A billing note the User has to act on: automatic stop refused or not working. */
+.settings-view .gen-aws-summary .gen-row-desc.is-warning {
+  color: var(--app-warning);
+}

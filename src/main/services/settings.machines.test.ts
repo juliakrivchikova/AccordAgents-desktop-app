@@ -41,6 +41,37 @@ test("a machine power key stays sealed and local through settings export/import 
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });
 
+test("a handover that did not work puts the previous machine power key back, and never travels or touches an unreadable file", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-power-revert-"));
+  const key = (id: string) => ({ version: 1 as const, instanceId: "i-0123456789abcdef0",
+    credentials: { accessKeyId: id, secretAccessKey: `secret-${id}`, region: "us-east-1" } });
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  try {
+    await make().revertMachinePower();
+    assert.equal(await make().getMachinePower(), undefined, "nothing to put back is not an error");
+    await make().saveMachinePower(key("AKIAFIRSTPOWERKEY001"));
+    await make().saveMachinePower(key("AKIASECONDPOWERKEY01"));
+    const raw = await readFile(path.join(dir, "settings.json"), "utf8");
+    assert.equal(raw.includes("secret-AKIAFIRSTPOWERKEY001"), false, "the previous key stays sealed too");
+    const snapshot = await make().exportMachineSettingsSnapshot();
+    const previous = JSON.parse(raw).encryptedMachinePowerPrevious as string;
+    assert.ok(previous.startsWith("sealed:"));
+    assert.equal(JSON.stringify(snapshot).includes(previous), false, "the previous key never travels");
+    await make().revertMachinePower();
+    assert.deepEqual(await make().getMachinePower(), key("AKIAFIRSTPOWERKEY001"));
+    await make().revertMachinePower();
+    assert.deepEqual(await make().getMachinePower(), key("AKIAFIRSTPOWERKEY001"), "a revert is used up: a second one changes nothing");
+    await rm(path.join(dir, "settings.json"));
+    await make().saveMachinePower(key("AKIAFIRSTPOWERKEY001"));
+    await make().revertMachinePower();
+    assert.equal(await make().getMachinePower(), undefined, "a first key ever is reverted to no key");
+    await writeFile(path.join(dir, "settings.json"), "damaged-settings");
+    await assert.rejects(make().revertMachinePower(), /left untouched/);
+    assert.equal(await readFile(path.join(dir, "settings.json"), "utf8"), "damaged-settings");
+  } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
+});
+
 test("machine run intents and held stops survive a fresh SettingsService reading the disk", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-settings-"));
   const file = path.join(dir, "settings.json");

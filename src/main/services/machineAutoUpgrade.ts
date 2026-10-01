@@ -1,6 +1,7 @@
 import {
   compareVersions,
   isMachineInstallTerminalPhase,
+  isAutoUpgradeOf,
   machineAutoUpgradeOperationPrefix,
   type MachineInstallRecord,
   type MachineInstallResult,
@@ -41,6 +42,16 @@ export interface MachineAutoUpgradeOptions {
   /** Whether this desktop has a runtime payload to install at all. */
   payloadReady: () => { ok: true } | { ok: false; message: string };
   upgrade: (request: MachineUpgradeRequest, onProgress: (snapshot: MachineInstallSnapshot) => void) => Promise<MachineInstallResult>;
+  /** The id of an AWS stop key this machine has not taken yet, if any. It is
+   *  handed over by the same idle-gated update (the runtime reads it when it
+   *  starts), once per key, even when the runtime is already current. */
+  powerDue?: (record: MachineInstallRecord) => Promise<string | undefined>;
+  /** How long after a temporary failure a stop key is tried again
+   *  (MACHINE_POWER_RETRY_MS), and how many temporary failures end the
+   *  automatic tries (MACHINE_POWER_MAX_ATTEMPTS); the installer's record
+   *  enforces both. */
+  powerRetryMs?: number;
+  powerMaxAttempts?: number;
   /** Holds the machine's turns for the duration; returns the release. */
   holdTurns?: (machineId: string, reason: string) => () => void;
   /** Progress for Settings → Machines; the installer's own snapshots are
@@ -51,8 +62,13 @@ export interface MachineAutoUpgradeOptions {
 }
 
 export class MachineAutoUpgradeService {
-  /** Machines this process already tried, whatever the outcome. */
+  /** Machines whose runtime version update this process already tried,
+   *  whatever the outcome. */
   private readonly attempted = new Set<string>();
+  /** `machineId:keyId` stop-key handovers this process already tried. */
+  private readonly attemptedPower = new Set<string>();
+  /** Stop-key retries waiting for their time, one per machine. */
+  private readonly retries = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly inFlight = new Set<string>();
   /** Machines told to wait for idle, so the notice is shown once. */
   private readonly waiting = new Set<string>();
@@ -91,30 +107,62 @@ export class MachineAutoUpgradeService {
 
   private async evaluateRecord(record: MachineInstallRecord): Promise<void> {
     const id = record.machineId;
-    if (this.attempted.has(id) || this.inFlight.has(id)) return;
+    if (this.inFlight.has(id)) return;
     // Never installed from here: there is no target to upgrade over.
     if (!record.installedVersion || !record.target?.host) return this.settle(id);
     const last = record.lastOperation;
     if (last && !isMachineInstallTerminalPhase(last.phase)) return; // a setup action is running
-    if (last && last.phase !== "ready" && last.operationId.startsWith(this.operationPrefix()) && last.recovery?.kind !== "machine-busy") {
-      // This desktop version already failed on this machine; the row shows
-      // why and the manual button is the way forward.
-      return this.settle(id);
-    }
+    // This desktop version already failed on this machine; the row shows why
+    // and the manual button is the way forward.
+    const versionFailed = Boolean(last && last.phase !== "ready" && isAutoUpgradeOf(last.operationId, this.options.desktopVersion)
+      && last.recovery?.kind !== "machine-busy");
     // The stored version is what this desktop last installed; only a machine
     // it says is behind is asked what it actually runs.
-    if (compareVersions(this.options.desktopVersion, record.installedVersion) <= 0) return this.settle(id);
+    const versionDue = !this.attempted.has(id) && !versionFailed
+      && compareVersions(this.options.desktopVersion, record.installedVersion) > 0;
+    // Handing over a key reinstalls this desktop's runtime, so it never goes
+    // to a machine this desktop knows runs a newer one.
+    const powerKey = compareVersions(this.options.desktopVersion, record.installedVersion) >= 0
+      ? await this.options.powerDue?.(record).catch(() => undefined)
+      : undefined;
+    // One attempt per key and per state of its record: a temporary failure the
+    // installer records makes a new state, which may be tried once it is due
+    // again; a run that changed nothing is not repeated on every hello.
+    const retryStamp = powerKey !== undefined && record.powerRetry?.keyId === powerKey ? record.powerRetry.failedAt : "";
+    const powerAttempt = powerKey === undefined ? undefined : `${id}:${powerKey}:${retryStamp}`;
+    const powerDue = powerAttempt !== undefined && !this.attemptedPower.has(powerAttempt);
+    if (!versionDue && !powerDue) {
+      // A key that failed for a temporary reason before this process (or by
+      // the button) waits for its time with nothing else to bring it back.
+      const retry = record.powerRetry;
+      if (retry && !this.retries.has(id) && (retry.attempts ?? 1) < (this.options.powerMaxAttempts ?? 3)) {
+        const dueAt = Date.parse(retry.failedAt) + (this.options.powerRetryMs ?? 60 * 60_000);
+        if (Number.isFinite(dueAt) && dueAt > Date.now()) this.scheduleRetry(id, dueAt - Date.now());
+      }
+      return this.settle(id);
+    }
     const activity = await this.options.machineActivity(id);
     if (!activity?.connected) return this.settle(id);
     const running = activity.appVersion ?? record.installedVersion;
-    if (compareVersions(this.options.desktopVersion, running) <= 0) return this.settle(id);
+    const versionOrder = compareVersions(this.options.desktopVersion, running);
+    const upgrade = versionDue && versionOrder > 0;
+    // Nor does a key re-run an update of this version that already failed here.
+    const power = powerDue && versionOrder >= 0 && !(versionOrder > 0 && versionFailed);
+    if (!upgrade && !power) {
+      // Asked once per key: a machine that cannot take it now is not probed again.
+      if (powerAttempt) this.attemptedPower.add(powerAttempt);
+      return this.settle(id);
+    }
     const name = (await this.options.machineName(id)) ?? id;
+    const purpose = upgrade ? `updating its runtime to ${this.options.desktopVersion}` : "setting up its automatic stop after three idle hours";
     const payload = this.options.payloadReady();
     if (!payload.ok) {
       if (!this.noticed.has(id)) {
         this.noticed.add(id);
         this.log("machines.auto-upgrade.no-payload", { machineId: id, running, desktop: this.options.desktopVersion, message: payload.message });
-        this.options.onProgress(this.notice(id, "error", `The runtime on ${name} cannot be updated from this desktop: ${payload.message}`, { error: payload.message }));
+        this.options.onProgress(this.notice(id, "error", upgrade
+          ? `The runtime on ${name} cannot be updated from this desktop: ${payload.message}`
+          : `Automatic stop cannot be set up on ${name} from this desktop: ${payload.message}`, { error: payload.message }));
       }
       return;
     }
@@ -122,10 +170,10 @@ export class MachineAutoUpgradeService {
       if (!this.waiting.has(id)) {
         this.waiting.add(id);
         this.log("machines.auto-upgrade.waiting", { machineId: id, running, desktop: this.options.desktopVersion, fresh: activity.fresh,
-          activeRunIds: activity.activeRunIds, dispatchedRunIds: activity.dispatchedRunIds });
+          power, activeRunIds: activity.activeRunIds, dispatchedRunIds: activity.dispatchedRunIds });
         this.options.onProgress(this.notice(id, "preflight", activity.fresh
-          ? `Waiting for ${name} to finish its current work before updating its runtime to ${this.options.desktopVersion}.`
-          : `Waiting for ${name} to report what it is doing before updating its runtime to ${this.options.desktopVersion}.`));
+          ? `Waiting for ${name} to finish its current work before ${purpose}.`
+          : `Waiting for ${name} to report what it is doing before ${purpose}.`));
       }
       return;
     }
@@ -140,10 +188,13 @@ export class MachineAutoUpgradeService {
       return;
     }
     this.waiting.delete(id);
-    this.attempted.add(id);
+    if (upgrade) this.attempted.add(id);
+    if (power && powerAttempt) this.attemptedPower.add(powerAttempt);
     this.inFlight.add(id);
-    this.log("machines.auto-upgrade.start", { machineId: id, running, desktop: this.options.desktopVersion });
-    const release = this.options.holdTurns?.(id, `updating the runtime to ${this.options.desktopVersion}; the turn starts when the update is done`);
+    this.log("machines.auto-upgrade.start", { machineId: id, running, desktop: this.options.desktopVersion, upgrade, power });
+    const release = this.options.holdTurns?.(id, upgrade
+      ? `updating the runtime to ${this.options.desktopVersion}; the turn starts when the update is done`
+      : "setting up automatic stop on the machine; the turn starts when that is done");
     try {
       const result = await this.options.upgrade({
         machineId: id,
@@ -162,7 +213,14 @@ export class MachineAutoUpgradeService {
         // the installer left its runtime alone: not a failure, try again when
         // it is idle.
         this.attempted.delete(id);
+        if (powerAttempt) this.attemptedPower.delete(powerAttempt);
         this.waiting.add(id);
+      } else if (power && powerKey && result.record.powerRetry?.keyId === powerKey && result.record.powerRetry.failedAt !== retryStamp
+        && (result.record.powerRetry.attempts ?? 1) < (this.options.powerMaxAttempts ?? 3)) {
+        // A temporary failure this run recorded: the record says when the key
+        // may be tried again, and powerDue reads it. Nothing else may come
+        // along at the right time, so come back then.
+        this.scheduleRetry(id);
       }
     } catch (error) {
       // The installer records its own failures on the machine; this is the
@@ -173,6 +231,14 @@ export class MachineAutoUpgradeService {
       this.inFlight.delete(id);
       await Promise.resolve(this.options.onChanged?.()).catch(() => undefined);
     }
+  }
+
+  /** One pending retry per machine, however many attempts ended. */
+  private scheduleRetry(id: string, delayMs = this.options.powerRetryMs ?? 60 * 60_000): void {
+    clearTimeout(this.retries.get(id));
+    const timer = setTimeout(() => { this.retries.delete(id); void this.evaluate(id); }, Math.max(0, delayMs));
+    timer.unref?.();
+    this.retries.set(id, timer);
   }
 
   /** Nothing to wait for on this machine any more. */

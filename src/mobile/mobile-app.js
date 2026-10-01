@@ -2766,9 +2766,34 @@
     return saved;
   }
 
+  /** The phone's own start key from the pairing link (`w=`): the instance,
+   *  its region and a key that can only start it. Kept only on this
+   *  device, in the same form the wake button reads. A damaged value is left
+   *  out rather than failing the pairing: the phone still controls the
+   *  desktop, it just cannot start the machine. */
+  function readWakeFromFragment(fragment) {
+    const value = fragment.get("w");
+    if (!value) return undefined;
+    try {
+      // instanceId.region.accessKeyId.secret, each URI-encoded.
+      const parts = value.split(".").map(decodeURIComponent);
+      if (parts.length !== 4) return undefined;
+      const [instanceId, region, accessKeyId, secretAccessKey] = parts;
+      if (!/^i-[a-f0-9]{8,17}$/.test(instanceId) || !/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region)
+        || !/^[A-Z0-9]{16,128}$/.test(accessKeyId) || !secretAccessKey) {
+        return undefined;
+      }
+      return { instanceId: instanceId, region: region,
+        credentials: { accessKeyId: accessKeyId, secretAccessKey: secretAccessKey, region: region } };
+    } catch {
+      return undefined;
+    }
+  }
+
   function readBootstrapFromLocation(locationValue) {
     const url = new URL(locationValue.href);
     const fragment = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
+    const wake = readWakeFromFragment(fragment);
     const compactKey = fragment.get("k") || fragment.get("relaySealKey");
     const compactRendezvousId = url.searchParams.get("rid") || url.searchParams.get("rendezvousId");
     const compactRoutingId = url.searchParams.get("route") || url.searchParams.get("routingId");
@@ -2784,6 +2809,7 @@
         rendezvousId: compactRendezvousId,
         relaySealKeyBase64: compactKey,
         fingerprint: compactFingerprint,
+        ...(wake ? { power: wake } : {}),
         pairedAt: nowIso()
       });
     }
@@ -2802,6 +2828,7 @@
         rendezvousId: pairing.rendezvousId || undefined,
         relaySealKeyBase64: pairing.relaySealKeyBase64 || undefined,
         fingerprint: pairing.fingerprint || undefined,
+        ...(wake ? { power: wake } : {}),
         pairedAt: nowIso()
       });
     }
@@ -2828,6 +2855,7 @@
       rendezvousId: rendezvousId || undefined,
       relaySealKeyBase64: relaySealKeyBase64 || undefined,
       fingerprint: fingerprint || undefined,
+      ...(wake ? { power: wake } : {}),
       pairedAt: nowIso()
     });
   }
@@ -7745,9 +7773,20 @@
     });
     const text = await response.text();
     if (!response.ok) {
-      throw new Error("AWS refused the request (" + response.status + ").");
+      throw new Error(machineWakeFailure(response.status, text));
     }
     return text;
+  }
+
+  /** AWS's own error code, in words the User can act on. */
+  function machineWakeFailure(status, text) {
+    const code = (/<Code>([^<]+)<\/Code>/.exec(String(text || "")) || [])[1] || "";
+    if (code === "IncorrectInstanceState") return "The machine is still stopping. Try again in a minute.";
+    if (code.indexOf("InvalidInstanceID") === 0) return "This machine no longer exists. Pair this phone again.";
+    if (code === "AuthFailure" || code === "UnauthorizedOperation" || code === "InvalidClientTokenId" || status === 401 || status === 403) {
+      return "AWS no longer accepts this phone's start key. Pair this phone again.";
+    }
+    return "AWS refused the request (" + (code || status) + ").";
   }
 
   async function wakeMachineFromPhone() {
@@ -9943,6 +9982,7 @@
     requestTimelineViaRelay,
     openRelayPayload,
     readBootstrapFromLocation,
+    machineWakeFailure,
     reassembleRelayCiphertext,
     sealRelayPayload,
     chunkRelayCiphertext,

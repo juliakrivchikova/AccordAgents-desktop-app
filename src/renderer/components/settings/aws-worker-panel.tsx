@@ -3,9 +3,10 @@ import { ChevronDown, Loader2, Server } from "lucide-react";
 import type { AwsWorkerOperationSnapshot, AwsWorkerSpec, AwsWorkerSpecResolution, CloudRunsSettings } from "../../../shared/types";
 import { writeClipboardText, type ClipboardWriteResult } from "../../../shared/clipboard";
 import { AwsWorkerConnectionForm } from "./aws-worker-connection-form";
+import { AwsWorkerAutoStopSetup, AwsWorkerBillingNote, autoStopAppliedMessage } from "./aws-worker-auto-stop";
 import { AwsWorkerSizeEditor } from "./aws-worker-size-editor";
 import { AwsCloudRunNextStep, AwsWorkerHistory, AwsWorkerTransition } from "./aws-worker-activity";
-import { isAwsTransition, useAwsWorkerStatus } from "./use-aws-worker-status";
+import { awsWorkerStateLabel, isAwsTransition, useAwsWorkerStatus } from "./use-aws-worker-status";
 import { CONFIRM_TEXT, ConfirmSharedAction, WorkerProgress } from "./aws-worker-panel-parts";
 import { AwsInstanceDiagnostics } from "./aws-instance-diagnostics";
 
@@ -34,7 +35,9 @@ export function AwsWorkerPanel(props: {
   const monitor = useAwsWorkerStatus();
   const { status } = monitor;
   const [region, setRegion] = useState(props.settings.awsRegion ?? "us-east-1");
-  const [command, setCommand] = useState("");
+  // Each form shows only its own command: the automatic-stop one always mints a key.
+  const [command, setCommand] = useState({ text: "", autoStop: false });
+  const [autoStopApply, setAutoStopApply] = useState(false);
   const [blob, setBlob] = useState("");
   const [operation, setOperation] = useState<AwsWorkerOperationSnapshot | null>(null);
   const [activeOperationId, setActiveOperationId] = useState<string>();
@@ -102,9 +105,11 @@ export function AwsWorkerPanel(props: {
   const start = async (
     resolution?: AwsWorkerSpecResolution,
     spec: AwsWorkerSpec = baseSpec,
-    intent: AttemptIntent = "setup"
+    intent: AttemptIntent = "setup",
+    autoStop = false
   ): Promise<void> => {
     if (!begin(intent)) return;
+    setAutoStopApply(autoStop);
     const continuation = operation && (operation.phase === "error" || operation.phase === "needs-decision") && (operation.intent ?? "setup") === intent
       ? operation
       : undefined;
@@ -126,7 +131,8 @@ export function AwsWorkerPanel(props: {
       if (!mounted.current) return;
       monitor.accept(result.status);
       setOperation(result.operation);
-      setFeedback({ message: result.operation.message, failed: result.operation.phase === "error" });
+      const failed = result.operation.phase === "error";
+      setFeedback({ message: autoStop && !failed ? autoStopAppliedMessage(result.status.autoStop) : result.operation.message, failed });
       if (result.status.configured) setBlob("");
       if (intent === "resize" && result.operation.phase === "ready") setEditing(false);
     } catch (cause) {
@@ -183,13 +189,15 @@ export function AwsWorkerPanel(props: {
       finish();
     }
   };
-  const loadCommand = async (): Promise<void> => {
+  /** `autoStop`: always the key-minting setup command, for the instance's own region. */
+  const loadCommand = async (options: { autoStop?: boolean; region?: string } = {}): Promise<void> => {
     if (!begin("command")) return;
-    const recoveryOperationId = currentOperation?.phase === "error" && currentOperation.remediation === "refresh-aws-authorization"
+    const recoveryOperationId = !options.autoStop && currentOperation?.phase === "error" && currentOperation.remediation === "refresh-aws-authorization"
       ? currentOperation.operationId
       : undefined;
     try {
-      setCommand(await window.consensus.getAwsWorkerBootstrapCommand(region.trim() || "us-east-1", recoveryOperationId));
+      const text = await window.consensus.getAwsWorkerBootstrapCommand((options.region ?? region).trim() || "us-east-1", recoveryOperationId);
+      setCommand({ text, autoStop: Boolean(options.autoStop) });
     } catch (cause) {
       fail(cause);
     } finally {
@@ -197,8 +205,8 @@ export function AwsWorkerPanel(props: {
     }
   };
   const copyCommand = async (): Promise<void> => {
-    if (!command) return;
-    setCopyFeedback(await writeClipboardText(command, value => navigator.clipboard.writeText(value)));
+    if (!command.text) return;
+    setCopyFeedback(await writeClipboardText(command.text, value => navigator.clipboard.writeText(value)));
   };
 
   const isRunning = status?.state === "running" || status?.state === "pending";
@@ -216,7 +224,8 @@ export function AwsWorkerPanel(props: {
   const stopInFlight = monitor.awaitingStop || status?.state === "stopping" || busy && action === "stop";
   const showStop = status?.state === "running" || stopInFlight;
   const stopLabel = busy && action === "stop" ? "Sending Stop…" : stopInFlight ? "Stopping…" : "Stop";
-  const workingLabel = action === "delete" ? "Deleting…" : action === "resize" ? "Applying size…" : action === "check" ? "Checking AWS access…" : "Starting…";
+  const workingLabel = action === "delete" ? "Deleting…" : action === "resize" ? "Applying size…" : action !== "check" ? "Starting…"
+    : autoStopApply ? "Turning on automatic stop…" : "Checking AWS access…";
   // One primary action, only when the user can act now; starting is always named as starting, a check reads only.
   const primary: { label: string; disabled: boolean; intent: AttemptIntent } | null =
     isAwsTransition(status) || monitor.awaitingStop ? null
@@ -233,30 +242,19 @@ export function AwsWorkerPanel(props: {
   const message = monitor.error ?? (action === "resize" && editing ? undefined : feedback?.message ?? currentOperation?.message);
   const hasError = Boolean(monitor.error || feedback?.failed || currentOperation?.phase === "error");
   const messagePrefix = action && feedback && !monitor.error
-    ? action === "stop" ? "Stop" : action === "delete" ? "Delete" : action === "check" ? "AWS access" : "Cloud setup"
+    ? action === "stop" ? "Stop" : action === "delete" ? "Delete" : action === "check" ? autoStopApply ? "Automatic stop" : "AWS access" : "Cloud setup"
     : undefined;
-  const stateLabel = !status
-    ? monitor.error ? "Status unavailable" : "Checking status…"
-    : !status.configured ? "Not connected"
-      : !status.state ? "Status unavailable"
-        : status.state === "running" ? "Running · billable"
-          : status.state === "pending" ? "Starting · billable"
-            : status.state[0].toUpperCase() + status.state.slice(1);
+  const stateLabel = awsWorkerStateLabel(status, Boolean(monitor.error));
 
+  const formProps = { operation: currentOperation, busy: locked, region, blob, copyFeedback, onRegionChange: setRegion, onBlobChange: setBlob, onCopyCommand: copyCommand };
   const connectionForm = (
-    <AwsWorkerConnectionForm
-      operation={currentOperation}
-      busy={locked}
-      region={region}
-      command={command}
-      blob={blob}
-      copyFeedback={copyFeedback}
-      onRegionChange={setRegion}
-      onBlobChange={setBlob}
-      onLoadCommand={loadCommand}
-      onCopyCommand={copyCommand}
-      onApply={() => start(undefined, baseSpec, retryIntent)}
-    />
+    <AwsWorkerConnectionForm {...formProps} command={command.autoStop ? "" : command.text}
+      onLoadCommand={() => loadCommand()} onApply={() => start(undefined, baseSpec, retryIntent)} />
+  );
+  const instanceRegion = status?.handle?.region ?? actual?.region ?? region;
+  const autoStopForm = (
+    <AwsWorkerConnectionForm {...formProps} autoStop region={instanceRegion} command={command.autoStop ? command.text : ""}
+      onLoadCommand={() => loadCommand({ autoStop: true, region: instanceRegion })} onApply={() => start(undefined, baseSpec, "check", true)} />
   );
 
   return (
@@ -294,7 +292,7 @@ export function AwsWorkerPanel(props: {
           <div className="gen-row-desc">New instance: {baseSpec.instanceType} · {baseSpec.rootVolumeSizeGb} GiB disk</div>
         ) : null}
         <AwsCloudRunNextStep status={status} />
-        {isRunning ? <div className="gen-row-desc" data-testid="aws-worker-billing-note">Billed until you stop it; it does not stop by itself.</div> : null}
+        <AwsWorkerBillingNote autoStop={status?.autoStop} running={isRunning} />
       </div>
       {isAwsTransition(status) || monitor.awaitingStop ? (
         <AwsWorkerTransition
@@ -321,6 +319,7 @@ export function AwsWorkerPanel(props: {
         </div>
       ) : null}
       {needsConnection ? connectionForm : null}
+      {configured && !authorizationFailure ? <AwsWorkerAutoStopSetup autoStop={status?.autoStop} running={isRunning} form={autoStopForm} /> : null}
       {showProgress && currentOperation && currentOperation.intent !== "check" ? <WorkerProgress operation={currentOperation} /> : null}
       {mismatch ? (
         <div className="gen-aws-decision" data-testid="aws-worker-spec-decision">

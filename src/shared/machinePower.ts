@@ -14,6 +14,26 @@ export interface AwsMachinePowerConfig {
 
 export const MACHINE_IDLE_STOP_MS = 3 * 60 * 60_000;
 
+/** How long the machine keeps asking AWS whether a handed-over key works
+ *  (a new IAM key takes a few seconds to be accepted), and how long the
+ *  installer waits for that answer: the second must outlast the first, or a
+ *  refusal arrives as a timeout and is never recorded. */
+export const MACHINE_POWER_KEY_CHECK_MS = 60_000;
+export const MACHINE_POWER_HANDOVER_TIMEOUT_MS = MACHINE_POWER_KEY_CHECK_MS + 60_000;
+
+/** The exit code `--configure-power` uses when the key itself is refused
+ *  (AWS or the instance said no). Any other failure is temporary. */
+export const MACHINE_POWER_REFUSED_EXIT_CODE = 3;
+
+/** How a machine reports that AWS no longer accepts its stop key; the
+ *  desktop reads it to offer setting automatic stop up again. */
+export const MACHINE_STOP_KEY_REFUSED = "AWS does not accept this machine's stop key";
+
+/** A definitive no to a power key: retrying the same key cannot succeed. */
+export class MachinePowerRefusal extends Error {
+  override name = "MachinePowerRefusal";
+}
+
 export function assertAwsMachinePowerConfig(value: unknown): asserts value is AwsMachinePowerConfig {
   const config = value as Partial<AwsMachinePowerConfig> | undefined;
   const credentials = config?.credentials;
@@ -25,15 +45,36 @@ export function assertAwsMachinePowerConfig(value: unknown): asserts value is Aw
   }
 }
 
-/** DescribeInstances has no resource-level/tag restriction. Only Start/Stop
- * can mutate resources, and only app-tagged instances in the selected region.
- * This key cannot create/terminate instances, change networking or issue SSH.
+/** DescribeInstances has no resource-level/tag restriction, so it is held to
+ * the selected region: the key lives on a machine where agents run. It can
+ * still list every instance in that region, which AWS offers no way to
+ * narrow. Only Start/Stop can mutate resources, and only app-tagged
+ * instances in that region. This key cannot create/terminate instances,
+ * change networking or issue SSH.
  * https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ExamplePolicies_EC2.html */
 export function machinePowerPolicy(region: string): unknown {
-  if (!/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region)) throw new Error("Invalid AWS region.");
+  assertAwsRegion(region);
   return { Version: "2012-10-17", Statement: [
-    { Sid: "ReadInstanceState", Effect: "Allow", Action: ["ec2:DescribeInstances"], Resource: "*" },
+    { Sid: "ReadInstanceState", Effect: "Allow", Action: ["ec2:DescribeInstances"], Resource: "*",
+      Condition: { StringEquals: { "aws:RequestedRegion": region } } },
     { Sid: "PowerTaggedMachines", Effect: "Allow", Action: ["ec2:StartInstances", "ec2:StopInstances"], Resource: "*",
       Condition: { StringEquals: { "aws:RequestedRegion": region, "ec2:ResourceTag/accordagents-worker": "1" } } }
   ] };
+}
+
+/** The phone's own key: it can start app-tagged instances in the region, and
+ * nothing else; the phone never reads instance state, so it gets no Describe.
+ * Stopping stays with the machine, the only party that can prove its work has
+ * drained. Minted once by the setup command and never replaced by it, so a
+ * phone is paired with it once. */
+export function machineWakePolicy(region: string): unknown {
+  assertAwsRegion(region);
+  return { Version: "2012-10-17", Statement: [
+    { Sid: "StartTaggedMachines", Effect: "Allow", Action: ["ec2:StartInstances"], Resource: "*",
+      Condition: { StringEquals: { "aws:RequestedRegion": region, "ec2:ResourceTag/accordagents-worker": "1" } } }
+  ] };
+}
+
+function assertAwsRegion(region: string): void {
+  if (!/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region)) throw new Error("Invalid AWS region.");
 }

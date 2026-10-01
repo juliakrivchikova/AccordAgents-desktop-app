@@ -388,6 +388,25 @@ export function machinePrepareDirectoriesScript(layout: MachineInstallLayout): s
   ].join("\n");
 }
 
+/** The machine's AWS stop key, always on stdin and never on a command line:
+ *  `check` asks AWS whether it works and writes nothing, so it runs while the
+ *  runtime still serves members; `configure` seals it into the machine's
+ *  settings and `revert` puts back the one it replaced, both only while the
+ *  runtime is drained, because the runtime reads the key when it starts and
+ *  writes the same settings file while it runs. `runtimeDir` is the release
+ *  to run it with; by default the current one. */
+export function machinePowerScript(
+  layout: MachineInstallLayout,
+  nodePath: string,
+  action: "check" | "configure" | "revert",
+  runtimeDir: string = layout.currentLink
+): string {
+  return [
+    PREAMBLE,
+    `exec ${shellQuotePosix(nodePath)} ${shellQuotePosix(`${runtimeDir}/accordagents-machine.cjs`)} --${action}-power --user-data ${shellQuotePosix(layout.userDataDir)}`
+  ].join("\n");
+}
+
 /** Writes a file from stdin, atomically, without it ever reaching a command
  *  line, a log, or a shell history. Used for the enrollment package. */
 export function writeFileFromStdinScript(targetPath: string, mode: string): string {

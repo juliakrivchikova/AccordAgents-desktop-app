@@ -14,7 +14,7 @@ function store(initial: MachinePowerHandoffRecord[] = [], power = config): Machi
   const state = { records: [...initial] };
   return {
     records: state.records,
-    async getMachinePower() { return power; },
+    async getDeviceStartKey() { return power; },
     async listMachinePowerHandoffs() { return state.records.map((record) => ({ ...record })); },
     async saveMachinePowerHandoffs(records) { state.records.length = 0; state.records.push(...records); }
   };
@@ -39,7 +39,7 @@ test("a device receives the scoped key, and the desktop keeps a record without i
 });
 
 test("a machine with no power configuration cannot be handed to a device", async () => {
-  const backing = { ...store(), async getMachinePower() { return undefined; } };
+  const backing = { ...store(), async getDeviceStartKey() { return undefined; } };
   await assert.rejects(service(backing).issue({ machineId: "m1", issuedTo: "phone-1" }), /no power configuration/);
   assert.deepEqual(backing.records, []);
 });
@@ -53,9 +53,9 @@ test("revoking says plainly that only rotating the key ends the device's access"
   const outcome = await api.revoke(first.handoffId, "device lost");
   assert.equal(outcome.keyRotationRequired, true);
   assert.equal(outcome.otherLiveHandoffs, 1);
-  assert.match(outcome.detail, /kept a copy of this machine's power key/);
-  assert.match(outcome.detail, /Rotate that access key in AWS/);
-  assert.match(outcome.detail, /1 other device will need a new handoff/);
+  assert.match(outcome.detail, /kept a copy of the phone's start key/);
+  assert.match(outcome.detail, /delete the access key of the AccordAgents wake user/);
+  assert.match(outcome.detail, /pair the 1 other device again/);
 
   assert.equal(await api.isLive(first.handoffId), false, "this desktop must not offer a revoked handoff again");
   assert.equal(backing.records.find((r) => r.handoffId === first.handoffId)?.revokeReason, "device lost");

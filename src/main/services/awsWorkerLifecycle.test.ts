@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { AWS_WORKER_ROOT_VOLUME_SIZE_GB_DEFAULT } from "../../shared/cloudRuns";
+import { machinePowerPolicy } from "../../shared/machinePower";
 import {
   AWS_WORKER_BLOB_PREFIX,
   AWS_WORKER_TAG_KEY,
@@ -26,6 +27,20 @@ test("worker blob round-trips and validates", () => {
   assert.ok(blob.startsWith(AWS_WORKER_BLOB_PREFIX));
   assert.deepEqual(parseWorkerBlob(blob), CREDS);
   assert.deepEqual(parseWorkerBlob(blob.slice(AWS_WORKER_BLOB_PREFIX.length)), CREDS);
+});
+
+test("the blob carries the machine's stop key; an older blob without one is still a valid connection", () => {
+  const withPower = { ...CREDS, power: { accessKeyId: "AKIAPOWER0000000001", secretAccessKey: "power-secret" } };
+  assert.deepEqual(parseWorkerBlob(encodeWorkerBlob(withPower)), withPower);
+  assert.equal(parseWorkerBlob(encodeWorkerBlob(CREDS)).power, undefined);
+  const damaged = `${AWS_WORKER_BLOB_PREFIX}${Buffer.from(JSON.stringify({ ...CREDS, power: { accessKeyId: "AKIAPOWER0000000001" } })).toString("base64")}`;
+  assert.throws(() => parseWorkerBlob(damaged), /damaged automatic-stop key/);
+  const notAKey = `${AWS_WORKER_BLOB_PREFIX}${Buffer.from(JSON.stringify({ ...CREDS, power: "yes" })).toString("base64")}`;
+  assert.throws(() => parseWorkerBlob(notAKey), /damaged automatic-stop key/);
+  const withWake = { ...withPower, wake: { accessKeyId: "AKIAWAKE00000000001", secretAccessKey: "wake-secret" } };
+  assert.deepEqual(parseWorkerBlob(encodeWorkerBlob(withWake)), withWake, "the phone's start key travels in the same result");
+  const damagedWake = `${AWS_WORKER_BLOB_PREFIX}${Buffer.from(JSON.stringify({ ...CREDS, wake: { secretAccessKey: "s" } })).toString("base64")}`;
+  assert.throws(() => parseWorkerBlob(damagedWake), /damaged phone start key/);
 });
 
 test("worker blob rejects malformed or incomplete input", () => {
@@ -67,7 +82,9 @@ test("bootstrap command creates a scoped user and prints a paste blob", () => {
   assert.match(command, /aws iam create-policy --policy-name "\$USER"/);
   assert.match(command, /aws iam create-policy-version/);
   assert.match(command, /aws iam attach-user-policy/);
-  assert.doesNotMatch(command, /aws iam put-user-policy/);
+  assert.doesNotMatch(command, /aws iam put-user-policy --user-name "\$USER"/, "the worker's policy is too large to be inline");
+  assert.match(command, /POWER_USER=accordagents-power-abc123/);
+  assert.match(command, /aws iam put-user-policy --user-name "\$POWER_USER" --policy-name accordagents-machine-power/);
   assert.match(command, /aws iam list-access-keys/);
   assert.match(command, /aws iam delete-access-key/);
   assert.match(command, /aws iam create-access-key/);
@@ -105,6 +122,30 @@ const command = args.slice(0, 2).join(" ");
 const valueAfter = (name) => args[args.indexOf(name) + 1];
 const save = () => fs.writeFileSync(statePath, JSON.stringify(state));
 if (command === "ec2 describe-regions") process.exit(0);
+const userName = args.includes("--user-name") ? valueAfter("--user-name") : "";
+if (userName.startsWith("accordagents-power-")) {
+  state.power = state.power ?? { exists: false, createUserCalls: 0, keys: [], nextKey: 1, policies: [] };
+  const power = state.power;
+  if (command === "iam get-user") process.exit(power.exists ? 0 : 254);
+  if (command === "iam create-user") { power.exists = true; power.createUserCalls += 1; save(); process.exit(0); }
+  if (command === "iam put-user-policy") {
+    power.policies.push({ name: valueAfter("--policy-name"), document: JSON.parse(valueAfter("--policy-document")) });
+    save();
+    process.exit(0);
+  }
+  if (command === "iam list-access-keys") { process.stdout.write(power.keys.join("\t")); process.exit(0); }
+  if (command === "iam delete-access-key") { power.keys = power.keys.filter((key) => key !== valueAfter("--access-key-id")); save(); process.exit(0); }
+  if (command === "iam create-access-key") {
+    if (power.keys.length >= 2) { process.stderr.write("LimitExceeded"); process.exit(254); }
+    const accessKeyId = "AKIAPWR" + String(power.nextKey++).padStart(13, "0");
+    power.keys.push(accessKeyId);
+    save();
+    process.stdout.write(JSON.stringify({ AccessKey: { AccessKeyId: accessKeyId, SecretAccessKey: "power-secret-" + accessKeyId } }));
+    process.exit(0);
+  }
+  process.stderr.write("Unexpected mock AWS command for the stop-key user: " + args.join(" "));
+  process.exit(2);
+}
 if (command === "iam get-user") {
   if (!state.userExists) process.exit(254);
   process.stdout.write("{}");
@@ -203,7 +244,7 @@ process.exit(2);
   try {
     writeFileSync(awsPath, mockAws, { mode: 0o755 });
     chmodSync(awsPath, 0o755);
-    const command = buildBootstrapCommand("us-east-1", "rerun");
+    let command = buildBootstrapCommand("us-east-1", "rerun");
     const run = () => spawnSync("bash", ["-c", command], {
       encoding: "utf8",
       env: {
@@ -216,6 +257,13 @@ process.exit(2);
     const first = run();
     assert.equal(first.status, 0, first.stderr);
     assert.match(first.stdout, new RegExp(AWS_WORKER_BLOB_PREFIX));
+    const pasted = (output: string) => parseWorkerBlob(output.trim().split("\n").pop() ?? "");
+    const firstBlob = pasted(first.stdout);
+    assert.deepEqual(firstBlob.power, { accessKeyId: "AKIAPWR0000000000001", secretAccessKey: "power-secret-AKIAPWR0000000000001" },
+      "one run prints both keys in one result");
+    const firstPower = (JSON.parse(readFileSync(statePath, "utf8")) as { power: { createUserCalls: number; keys: string[]; policies: Array<{ name: string; document: unknown }> } }).power;
+    assert.equal(firstPower.createUserCalls, 1);
+    assert.deepEqual(firstPower.policies, [{ name: "accordagents-machine-power", document: machinePowerPolicy("us-east-1") }]);
     const firstState = JSON.parse(readFileSync(statePath, "utf8")) as {
       userExists: boolean;
       keys: string[];
@@ -247,9 +295,16 @@ process.exit(2);
       ],
       nextPolicyVersion: 6
     }));
+    // The app still runs with the first key: it stays valid, the other goes.
+    command = buildBootstrapCommand("us-east-1", "rerun", { keepWorkerKeyId: firstState.keys[0] });
     const second = run();
     assert.equal(second.status, 0, second.stderr);
     assert.match(second.stdout, new RegExp(AWS_WORKER_BLOB_PREFIX));
+    const secondPower = (JSON.parse(readFileSync(statePath, "utf8")) as { power: { createUserCalls: number; keys: string[] } }).power;
+    assert.equal(secondPower.createUserCalls, 1, "the stop-key user is reused");
+    assert.deepEqual(secondPower.keys, ["AKIAPWR0000000000001", "AKIAPWR0000000000002"],
+      "the machine's current stop key stays valid until it is handed the new one");
+    assert.equal(pasted(second.stdout).power?.accessKeyId, "AKIAPWR0000000000002");
     const secondState = JSON.parse(readFileSync(statePath, "utf8")) as typeof firstState;
     assert.equal(secondState.createUserCalls, 1);
     assert.equal(secondState.policyUpdates, 2);
@@ -258,10 +313,133 @@ process.exit(2);
       { id: "v1", isDefault: false },
       { id: "v6", isDefault: true }
     ]);
-    assert.deepEqual(secondState.keys, ["AKIA0000000000000003"]);
+    assert.deepEqual(secondState.keys, [firstState.keys[0], "AKIA0000000000000003"],
+      "the key the app uses stays valid until the new one is pasted");
+    command = buildBootstrapCommand("us-east-1", "rerun");
+    const third = run();
+    assert.equal(third.status, 0, third.stderr);
+    const thirdPower = (JSON.parse(readFileSync(statePath, "utf8")) as { power: { keys: string[] } }).power;
+    assert.deepEqual(thirdPower.keys, ["AKIAPWR0000000000002", "AKIAPWR0000000000003"], "at the IAM quota the oldest key goes, never the previous one");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+const SHELLS = ["bash", ...(spawnSync("zsh", ["-c", "true"]).status === 0 ? ["zsh"] : [])];
+
+for (const shell of SHELLS) {
+  test(`the setup command keeps every key in use and never costs the connection (${shell})`, () => {
+    const directory = mkdtempSync(join(tmpdir(), "accordagents-aws-power-"));
+    const log = join(directory, "calls.log");
+    const state = join(directory, "keys.json");
+    // A minimal AWS with IAM's two-key limit; the stop-key side can be refused.
+    writeFileSync(join(directory, "aws"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.AWS_LOG, args.join(" ") + "\\n");
+const user = args.includes("--user-name") ? args[args.indexOf("--user-name") + 1] : "";
+const power = user.startsWith("accordagents-power-");
+const wake = user.startsWith("accordagents-wake-");
+const keys = JSON.parse(fs.readFileSync(process.env.AWS_KEYS, "utf8"));
+keys.wake = keys.wake || [];
+const save = () => fs.writeFileSync(process.env.AWS_KEYS, JSON.stringify(keys));
+const command = args.slice(0, 2).join(" ");
+if ((power || wake) && process.env.AWS_REFUSE_POWER === command) { process.stderr.write("AccessDenied"); process.exit(254); }
+if (command === "iam list-policies") { process.stdout.write("arn:aws:iam::1:policy/x"); process.exit(0); }
+if (command === "iam list-policy-versions") process.exit(0);
+if (command === "iam delete-user-policy") process.exit(254);
+const side = wake ? "wake" : power ? "power" : "worker";
+if (command === "iam list-access-keys") { process.stdout.write(keys[side].join("\\t")); process.exit(0); }
+if (command === "iam delete-access-key") {
+  const id = args[args.indexOf("--access-key-id") + 1];
+  keys[side] = keys[side].filter(k => k !== id);
+  save(); process.exit(0);
+}
+if (command === "iam create-access-key") {
+  const list = keys[side];
+  if (list.length >= 2) { process.stderr.write("LimitExceeded"); process.exit(254); }
+  const id = ({ wake: "AKIAWAKNEW", power: "AKIAPWRNEW", worker: "AKIAWRKNEW" })[side] + String(list.length).padStart(10, "0");
+  list.push(id);
+  save(); process.stdout.write(JSON.stringify({ AccessKey: { AccessKeyId: id, SecretAccessKey: "s-" + id } })); process.exit(0);
+}
+process.exit(0);
+`, { mode: 0o755 });
+    const run = (refuse: string, keys: { worker: string[]; power: string[]; wake?: string[] }, options: { keepWorkerKeyId?: string; keepPowerKeyIds?: string[]; keepWakeKeyId?: string } = {}) => {
+      writeFileSync(state, JSON.stringify(keys));
+      writeFileSync(log, "");
+      const result = spawnSync(shell, ["-c", buildBootstrapCommand("us-east-1", "dev", options)], {
+        encoding: "utf8", env: { ...process.env, PATH: `${directory}:${process.env.PATH ?? ""}`, AWS_LOG: log, AWS_KEYS: state, AWS_REFUSE_POWER: refuse }
+      });
+      const pasted = result.status === 0 ? parseWorkerBlob(result.stdout.trim().split("\n").pop() ?? "") : undefined;
+      return { result, pasted, keys: JSON.parse(readFileSync(state, "utf8")) as { worker: string[]; power: string[]; wake: string[] }, calls: readFileSync(log, "utf8").trim().split("\n") };
+    };
+    try {
+      const refused = run("iam put-user-policy", { worker: ["AKIAWORKEROLD0000001"], power: [] }, { keepWorkerKeyId: "AKIAWORKEROLD0000001" });
+      assert.equal(refused.result.status, 0, refused.result.stderr);
+      assert.equal(refused.pasted?.power, undefined, "the connection result is still printed");
+      assert.match(refused.result.stderr, /No new automatic-stop key was made/);
+      assert.deepEqual(refused.keys.worker, ["AKIAWORKEROLD0000001", "AKIAWRKNEW0000000001"],
+        "the app's current key stays valid until the printed one is pasted");
+      assert.ok(!refused.calls.some((call) => call.startsWith("iam delete-access-key")), "nothing in use is deleted");
+      assert.ok(refused.calls.some((call) => call.includes("--query Versions[?IsDefaultVersion==`false`].VersionId")),
+        "the old policy versions are listed, so a rerun never hits IAM's five-version limit");
+
+      const kept = run("", { worker: [], power: ["AKIAPWRHELD000000001", "AKIAPWRNEVERTAKEN001"] }, { keepPowerKeyIds: ["AKIAPWRHELD000000001"] });
+      assert.equal(kept.result.status, 0, kept.result.stderr);
+      assert.deepEqual(kept.keys.power, ["AKIAPWRHELD000000001", "AKIAPWRNEW0000000001"], "the key the machine runs with survives the rotation");
+      assert.equal(kept.pasted?.power?.accessKeyId, "AKIAPWRNEW0000000001");
+
+      const oldest = run("", { worker: [], power: ["AKIAPWROLDEST0000001", "AKIAPWRNEWER00000001"] });
+      assert.deepEqual(oldest.keys.power, ["AKIAPWRNEWER00000001", "AKIAPWRNEW0000000001"], "with nothing to keep the oldest goes");
+
+      const busy = run("", { worker: [], power: ["AKIAPWRHELD000000001", "AKIAPWRPENDING000001"] },
+        { keepPowerKeyIds: ["AKIAPWRHELD000000001", "AKIAPWRPENDING000001"] });
+      assert.equal(busy.result.status, 0, busy.result.stderr);
+      assert.equal(busy.pasted?.power, undefined);
+      assert.match(busy.result.stderr, /Both automatic-stop keys are still in use/);
+      assert.deepEqual(busy.keys.power, ["AKIAPWRHELD000000001", "AKIAPWRPENDING000001"], "neither key in use is deleted");
+
+      // The phone's start key is made once and then left alone.
+      const firstWake = run("", { worker: [], power: [], wake: [] });
+      assert.equal(firstWake.pasted?.wake?.accessKeyId, "AKIAWAKNEW0000000000");
+      assert.deepEqual(firstWake.keys.wake, ["AKIAWAKNEW0000000000"]);
+      const keptWake = run("", { worker: [], power: [], wake: ["AKIAWAKEHELD00000001"] }, { keepWakeKeyId: "AKIAWAKEHELD00000001" });
+      assert.equal(keptWake.result.status, 0, keptWake.result.stderr);
+      assert.equal(keptWake.pasted?.wake, undefined, "a rerun makes no new start key while the app's still exists");
+      assert.deepEqual(keptWake.keys.wake, ["AKIAWAKEHELD00000001"], "and never deletes the one phones hold");
+      assert.ok(!keptWake.calls.some((call) => call.startsWith("iam put-user-policy --user-name accordagents-wake-")),
+        "nor rewrites its policy");
+      assert.doesNotMatch(keptWake.result.stderr, /phone start key could not be made/);
+      const lostWake = run("", { worker: [], power: [], wake: ["AKIAWAKEOLD000000001", "AKIAWAKEOLD000000002"] });
+      assert.equal(lostWake.pasted?.wake?.accessKeyId, "AKIAWAKNEW0000000001", "an app without its start key gets a new one");
+      const refusedWake = run("iam put-user-policy", { worker: [], power: [], wake: [] });
+      assert.equal(refusedWake.result.status, 0, refusedWake.result.stderr);
+      assert.match(refusedWake.result.stderr, /phone start key could not be made/);
+
+      const stale = run("", { worker: ["AKIAWORKERLIVE000001", "AKIAWORKERSTALE00001"], power: [] }, { keepWorkerKeyId: "AKIAWORKERLIVE000001" });
+      assert.equal(stale.result.status, 0, stale.result.stderr);
+      assert.deepEqual(stale.keys.worker, ["AKIAWORKERLIVE000001", "AKIAWRKNEW0000000001"], "at the quota the superseded app key goes, never the live one");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test("the setup command only ever names well-formed keys and still connects where the stop key cannot be scoped", () => {
+  const command = buildBootstrapCommand("us-east-1", "dev", {
+    keepWorkerKeyId: "AKIA0000000000000001;touch /tmp/x",
+    keepPowerKeyIds: ["$(id)", "AKIAPWRHELD000000001\nrm", "akiapwrlower00000001"]
+  });
+  assert.match(command, /^KEEP_WORKER_KEY=$/m);
+  assert.match(command, /^KEEP_POWER_KEYS=''$/m);
+  assert.doesNotMatch(command, /touch \/tmp\/x|\$\(id\)|\nrm\n/);
+  const appOnly = buildBootstrapCommand("eu-west-1", "dev", { machineKeys: false });
+  assert.doesNotMatch(appOnly, /POWER_USER=|WAKE_USER=/, "a command for another instance's region leaves its keys alone");
+  assert.equal(spawnSync("bash", ["-n"], { input: appOnly, encoding: "utf8" }).status, 0);
+  const unscoped = buildBootstrapCommand("eusc-de-east-1", "dev");
+  assert.doesNotMatch(unscoped, /POWER_USER=/, "a region the stop-key policy cannot name gets no stop key");
+  assert.match(unscoped, /Paste this into AccordAgents/);
+  assert.equal(spawnSync("bash", ["-n"], { input: unscoped, encoding: "utf8" }).status, 0);
 });
 
 test("cloud-init and instance spec carry the toolchain and tag", () => {

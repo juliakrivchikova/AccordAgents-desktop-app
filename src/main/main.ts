@@ -102,8 +102,10 @@ import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "./service
 import { ChatService } from "./services/chat";
 import { MobilePairingService } from "./services/mobilePairing";
 import { MachineLinkService } from "./services/machineLink";
-import { MachineInstallerService } from "./services/machineInstaller";
+import { MachineInstallerService, machinePowerNeedsDelivery } from "./services/machineInstaller";
+import { MACHINE_POWER_MAX_ATTEMPTS, MACHINE_POWER_RETRY_MS } from "../shared/machineInstall";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
+import type { MachinePowerHandoff } from "../shared/machinePowerHandoff";
 import { ChatActionApplier } from "./services/chatActionApplier";
 import { ChatActionEmitter, permissionDecisionAction, choiceDecisionAction, chatActionEventId } from "./services/chatActionEmitter";
 import { MachineApprovalExecutor, machineApprovalResultId } from "./services/machineApprovalExecutor";
@@ -140,7 +142,7 @@ import {
   fulfilledMobileEventKeysFromMailboxEvents,
   mobileMailboxEventScopeKey
 } from "./services/mobileMailboxOutbox";
-import { mobilePairingRequestWithEndpointDefaults, type MobilePairingPackage } from "../shared/mobilePairing";
+import { mobilePairingRequestWithEndpointDefaults, mobilePairingWithStartKey, type MobilePairingPackage } from "../shared/mobilePairing";
 import type { ChatEventEnvelope } from "../shared/chatEvents";
 import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
 import { readActiveRunIds } from "../shared/chatRunState";
@@ -382,6 +384,7 @@ const cloudRunDoctorService: CloudRunDoctorService = new CloudRunDoctorService({
 });
 const cloudRunSetupSession = new CloudRunSetupSession();
 const cloudRunAwsService = new CloudRunAwsService(settingsService, {
+  appVersion: app.getVersion(),
   // The box is no longer asked over SSH whether a turn is running on it: the
   // machine on it reports its own work over the link, and an idle stop waits
   // while any of it is in flight.
@@ -485,8 +488,10 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
   // taken as idle.
   // Only for the automatic update: the button is the recovery path and must
   // still be able to replace a runtime that no longer answers.
-  beforeDrain: async (record, operationId) => {
-    if (!isMachineAutoUpgradeOperation(operationId)) return undefined;
+  beforeDrain: async (record, operationId, purpose) => {
+    // The Update button may replace a runtime that does not answer; a healthy
+    // one is never stopped mid-turn only to hand it a stop key.
+    if (!isMachineAutoUpgradeOperation(operationId) && purpose !== "key") return undefined;
     const activity = await machineLinkService?.machineActivity(record.machineId);
     if (!activity?.connected) return "The machine is not connected right now, so its runtime was not stopped.";
     if (!activity.fresh) return "The machine did not say what it is doing in time, so its runtime was not stopped.";
@@ -495,10 +500,16 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
     }
     return undefined;
   },
+  // A machine on this app's AWS instance gets the stop key the setup command
+  // minted, so it stops the instance itself after three idle hours.
+  machinePower: (machineId) => cloudRunAwsService.machinePowerFor(machineId),
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
   }
 });
+/** Re-checks machines for a runtime update or a stop key to hand over; set
+ *  once the machine link is up. */
+let evaluateMachineUpdates: (() => void) | undefined;
 const cloudRunPreparation = new CloudRunPreparationService({
   onProgress: snapshot => sendToMainWindow("machines:cloud-run-progress", snapshot),
   configuredInstanceId: async () => (await settingsService.getPublicSettings()).cloudRuns.awsHandle?.instanceId,
@@ -535,29 +546,33 @@ const cloudRunPreparation = new CloudRunPreparationService({
 });
 void machineInstallerService.recoverInterruptedOperation();
 // Rule 3: a device wakes a stopped AWS machine itself with a narrowly scoped
-// key handed to it sealed at pairing. Nothing else in the app may hand that
-// key out, and revoking a pairing goes through here so the User is told the
-// key still has to be rotated.
-const machinePowerHandoffService = new MachinePowerHandoffService(settingsService);
+// key handed to it at pairing, inside the pairing link and nowhere else. The
+// key is the phone's own start key from the setup command (it cannot stop or
+// delete anything), not the machine's stop key. Revoking a pairing goes
+// through here so the User is told what the device keeps.
+const machinePowerHandoffService = new MachinePowerHandoffService({
+  getDeviceStartKey: async () => (await cloudRunAwsService.deviceWakePower())?.config,
+  listMachinePowerHandoffs: () => settingsService.listMachinePowerHandoffs(),
+  saveMachinePowerHandoffs: (records) => settingsService.saveMachinePowerHandoffs(records)
+});
 
-/** The handoff a new phone pairing carries, or undefined when this desktop
- *  manages no AWS machine. A failure to mint one never blocks pairing: the
- *  phone still controls the desktop, it just cannot wake the machine. */
-async function machinePowerHandoffForPairing(pairing: MobilePairingPackage): Promise<MobilePairingPackage> {
-  if (pairing.purpose !== "phone-control") return pairing;
+/** The start-key handoff a new phone pairing carries, or undefined when the
+ *  setup command has made no start key. A failure to mint one never blocks
+ *  pairing: the phone still controls the desktop, it just cannot wake the
+ *  machine. */
+async function machinePowerHandoffForPairing(pairing: MobilePairingPackage): Promise<MachinePowerHandoff | undefined> {
+  if (pairing.purpose !== "phone-control") return undefined;
   try {
-    const machines = await settingsService.listMachines();
-    const machineId = machines.length === 1 ? machines[0].id : "";
-    const power = await machinePowerHandoffService.issue({
-      machineId: machineId || "aws-machine",
+    const wake = await cloudRunAwsService.deviceWakePower();
+    return await machinePowerHandoffService.issue({
+      machineId: wake?.machineId ?? "aws-machine",
       issuedTo: pairing.stableRoutingId
     });
-    return { ...pairing, power };
   } catch (error) {
     void debugLogService.write("machine.power.handoff.skipped", {
       reason: error instanceof Error ? error.message : String(error)
     });
-    return pairing;
+    return undefined;
   }
 }
 chatService.setCloudRunPreparation(async (selection, provider, progress) => {
@@ -1230,7 +1245,7 @@ async function revokeMachinePowerForPairing(
   pairing: MobilePairingPackage,
   reason: string
 ): Promise<{ required: boolean; detail?: string }> {
-  const handoffId = pairing.power?.handoffId;
+  const handoffId = pairing.powerHandoffId ?? pairing.power?.handoffId;
   if (!handoffId) return { required: false };
   try {
     const outcome = await machinePowerHandoffService.revoke(handoffId, reason);
@@ -1486,7 +1501,9 @@ async function persistMobilePairedDevices(): Promise<void> {
     const devices = [...mobilePairingsByKey.entries()]
       .filter(([key]) => mobileClaimedPairingKeys.has(key) && !mobileRevokedPairingKeys.has(key))
       .map(([key, pairing]) => {
-        const { relaySealKeyBase64, ...rest } = pairing;
+        // The phone's start key never goes to this file; only which handoff it was.
+        const { relaySealKeyBase64, power, ...rest } = pairing;
+        if (power && !rest.powerHandoffId) rest.powerHandoffId = power.handoffId;
         const secret = settingsService.encodeMobilePairingSecret(relaySealKeyBase64);
         const cursor = mobileMailboxCursors.get(key);
         return {
@@ -1522,7 +1539,9 @@ async function restoreMobilePairedDevices(): Promise<void> {
       if (!sealKey) {
         return false;
       }
-      const pairing = { ...JSON.parse(device.pairingJson), relaySealKeyBase64: sealKey } as MobilePairingPackage;
+      // A start key must never come back from this file, whatever wrote it.
+      const { power, ...stored } = JSON.parse(device.pairingJson) as MobilePairingPackage;
+      const pairing = { ...stored, ...(power && !stored.powerHandoffId ? { powerHandoffId: power.handoffId } : {}), relaySealKeyBase64: sealKey } as MobilePairingPackage;
       mobileClaimedPairingKeys.set(
         mobilePairingKey(pairing),
         typeof device.claimedAt === "string" && device.claimedAt ? device.claimedAt : new Date().toISOString()
@@ -2479,10 +2498,14 @@ function registerIpc(): void {
     cloudRunAwsService.bootstrapCommand(String(region ?? "").trim() || "us-east-1", recoveryOperationId));
   ipcMain.handle("cloud-runs:aws-connect", (_event, request: ConnectAwsWorkerRequest) =>
     cloudRunAwsService.connectWorker(request.blob, request.instanceType, request.rootVolumeSizeGb));
-  ipcMain.handle("cloud-runs:aws-start", (event, request: AwsWorkerStartRequest) =>
-    awsWorkerSetupService.start(request, (progress) => {
+  ipcMain.handle("cloud-runs:aws-start", async (event, request: AwsWorkerStartRequest) => {
+    const result = await awsWorkerSetupService.start(request, (progress) => {
       if (!event.sender.isDestroyed()) event.sender.send("cloud-runs:aws-progress", progress);
-    }));
+    });
+    // A pasted setup result may carry a new stop key for the machine.
+    if (request.blob?.trim()) evaluateMachineUpdates?.();
+    return result;
+  });
   ipcMain.handle("cloud-runs:aws-status", () => cloudRunAwsService.status());
   ipcMain.handle("cloud-runs:aws-stop", () => cloudRunAwsService.stopWorker());
   ipcMain.handle("cloud-runs:aws-delete", () => cloudRunAwsService.deleteWorker());
@@ -3022,8 +3045,10 @@ function registerIpc(): void {
     const minted = await mobilePairingService.createPairing(
       mobilePairingRequestWithEndpointDefaults(request, settings.mobileControl.defaults)
     );
-    // The scoped power key travels sealed with the pairing and nowhere else.
-    const result = { ...minted, package: await machinePowerHandoffForPairing(minted.package) };
+    // The phone's start key travels inside the pairing link and nowhere else:
+    // in the link's fragment, which never leaves the phone, never the relay.
+    // What this desktop keeps of the pairing names the handoff, not the key.
+    const result = mobilePairingWithStartKey(minted, await machinePowerHandoffForPairing(minted.package));
     // Lock the mailbox before the link leaves this machine: registration is
     // trust-on-first-use, and only this process knows the scope id until the
     // link is shown. A failure is surfaced on the result and retried both
@@ -3502,9 +3527,16 @@ void app.whenReady().then(async () => {
         // record remembers the one the last setup used. Ask AWS for the
         // running instance's address without waking anything.
         const machine = (await settingsService.listMachines()).find((item) => item.id === record.machineId);
-        if (!machine?.awsInstanceId) return record.target;
+        // A machine installed over an instance's pinned host key is on that
+        // instance too, even when its record does not name it.
+        const instanceId = machine?.awsInstanceId ?? /^accordagents-(i-[a-f0-9]+)$/.exec(record.target?.hostKeyAlias ?? "")?.[1];
+        if (!instanceId) return record.target;
         const worker = await cloudRunAwsService.workerForInspection().catch(() => undefined);
-        if (!worker?.host || worker.hostKeyAlias !== `accordagents-${machine.awsInstanceId}`) return undefined;
+        if (!worker?.host || worker.hostKeyAlias !== `accordagents-${instanceId}`) {
+          // Only a machine known to be on the app's instance waits for AWS to
+          // name its address; one matched by its host key keeps the saved one.
+          return machine?.awsInstanceId ? undefined : record.target;
+        }
         return { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias };
       },
       payloadReady: () => {
@@ -3512,6 +3544,13 @@ void app.whenReady().then(async () => {
         return payload.ok ? { ok: true } : { ok: false, message: payload.message };
       },
       upgrade: (request, onProgress) => machineInstallerService.upgrade(request, onProgress),
+      powerDue: async (record) => {
+        const power = await cloudRunAwsService.machinePowerFor(record.machineId);
+        return power && machinePowerNeedsDelivery(record, power) ? power.credentials.accessKeyId : undefined;
+      },
+      // A minute past the record's own retry window, so the key is due again.
+      powerRetryMs: MACHINE_POWER_RETRY_MS + 60_000,
+      powerMaxAttempts: MACHINE_POWER_MAX_ATTEMPTS,
       holdTurns: (machineId, reason) => link.holdTurns(machineId, reason),
       onProgress: (snapshot) => sendToMainWindow("machines:install-progress", snapshot),
       onChanged: async () => { sendToMainWindow("machines:updated", await machineListResult()); },
@@ -3520,6 +3559,7 @@ void app.whenReady().then(async () => {
     // A hello the desktop itself asked for (machineActivity) is not announced
     // here, so evaluating on every hello cannot feed itself.
     link.onHello((event) => { void autoUpgrade.evaluate(event.machineId); });
+    evaluateMachineUpdates = () => { void autoUpgrade.evaluate(); };
     chatService.onParticipantRunSettled(() => { if (autoUpgrade.hasWaiting()) void autoUpgrade.evaluate(); });
     // A turn started from the phone ends on the machine without an event this
     // desktop subscribes to; while a machine waits for idle, ask again.

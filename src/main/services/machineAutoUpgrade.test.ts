@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MachineAutoUpgradeService, type MachineAutoUpgradeOptions } from "./machineAutoUpgrade";
+import { isAutoUpgradeOf } from "../../shared/machineInstall";
 import { machineRuntimeStatus, type MachineInstallRecord, type MachineInstallSnapshot, type MachineUpgradeRequest } from "../../shared/machineInstall";
 import type { MachineActivity } from "./machineLink";
 
@@ -25,7 +26,11 @@ function snapshot(overrides: Partial<MachineInstallSnapshot> = {}): MachineInsta
   return { machineId: "m1", operationId: "op", kind: "upgrade", phase: "ready", message: "Updated.", updatedAt: "", completed: [], ...overrides };
 }
 
-function harness(overrides: Partial<MachineAutoUpgradeOptions> & { records?: MachineInstallRecord[]; activity?: () => MachineActivity | undefined; outcome?: () => MachineInstallSnapshot } = {}) {
+function harness(overrides: Partial<MachineAutoUpgradeOptions> & { records?: MachineInstallRecord[]; activity?: () => MachineActivity | undefined; outcome?: () => MachineInstallSnapshot;
+  /** The stop key the machine ends up holding, as the installer records it. */
+  taken?: () => string | undefined;
+  /** A temporary failure the installer records for a key. */
+  retry?: () => { keyId: string; attempts: number } | undefined } = {}) {
   const upgrades: MachineUpgradeRequest[] = [];
   const progress: MachineInstallSnapshot[] = [];
   const log: Array<{ event: string; payload: Record<string, unknown> }> = [];
@@ -45,7 +50,14 @@ function harness(overrides: Partial<MachineAutoUpgradeOptions> & { records?: Mac
       upgrades.push(request);
       onProgress(snapshot({ operationId: request.operationId, phase: "bundle", message: "Staging…", completed: ["preflight"] }));
       const final = (overrides.outcome ?? (() => snapshot({ operationId: request.operationId })))();
-      return { snapshot: final, record: { ...records[0], installedVersion: final.phase === "ready" ? "1.10.4-beta.11" : records[0].installedVersion, lastOperation: final } };
+      const keyId = overrides.taken?.();
+      const retry = overrides.retry?.();
+      const saved = { ...records[0], installedVersion: final.phase === "ready" ? "1.10.4-beta.11" : records[0].installedVersion, lastOperation: final,
+        ...(keyId ? { power: { keyId, configuredAt: "t" } } : {}),
+        ...(retry ? { powerRetry: { ...retry, message: "AWS could not be reached.", failedAt: `t${retry.attempts}` } } : {}) };
+      // The installer saves its record; the next evaluation reads it.
+      if (overrides.retry) records[0] = saved;
+      return { snapshot: final, record: saved };
     },
     onProgress: (item) => { progress.push(item); },
     onChanged: () => { changed += 1; },
@@ -276,4 +288,163 @@ test("the waiting notice is believed only while the machine is connected and beh
   assert.equal(machineRuntimeStatus({ install: record({ installedVersion: desktopVersion }), live: waiting, connected: true, runningVersion: desktopVersion, desktopVersion }), undefined, "updated meanwhile: quiet");
   const noPayload = snapshot({ operationId: "auto-upgrade-1.10.4-beta.11", phase: "error", message: "The runtime on Cloud run cannot be updated from this desktop: dist/machine is missing.", error: "dist/machine is missing." });
   assert.deepEqual(machineRuntimeStatus({ install: record(), live: noPayload, connected: true, runningVersion: "1.10.4-beta.10", desktopVersion }), { state: "failed", text: "dist/machine is missing." });
+});
+
+// ---- automatic stop key ----------------------------------------------------
+
+test("a current machine without the stop key gets it once it is idle, with its turns held", async () => {
+  let busy = true;
+  let due: string | undefined = "AKIAPOWERKEY000000001";
+  const h = harness({
+    records: [record({ installedVersion: "1.10.4-beta.11" })],
+    activity: () => activity({ appVersion: "1.10.4-beta.11", activeRunIds: busy ? ["run-1"] : [] }),
+    powerDue: async () => due,
+    taken: () => due
+  });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 0, "a busy machine is never restarted for its key");
+  assert.match(h.progress.at(-1)?.message ?? "", /finish its current work before setting up its automatic stop/);
+  busy = false;
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1);
+  assert.deepEqual(h.holds, ["m1:setting up automatic stop on the machine; the turn starts when that is done"]);
+  assert.equal(h.released(), 1);
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1, "the same key is handed over once per process");
+  due = "AKIAPOWERKEY000000002";
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 2, "a new key is handed over even after an earlier attempt");
+  due = undefined;
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 2);
+});
+
+test("a version upgrade already made in this process does not block a stop key pasted afterwards", async () => {
+  let due: string | undefined;
+  const h = harness({ powerDue: async () => due });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1, "the runtime update");
+  due = "AKIAPOWERKEY000000001";
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 2, "the key pasted after it");
+});
+
+test("a stop key is never a reason to put an older runtime on a machine", async () => {
+  const h = harness({
+    records: [record({ installedVersion: "1.10.4-beta.11" })],
+    activity: () => activity({ appVersion: "1.10.4-beta.12" }),
+    powerDue: async () => "AKIAPOWERKEY000000001"
+  });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 0);
+});
+
+test("a stop key whose lookup fails is not handed over and does not break the version check", async () => {
+  const h = harness({ powerDue: async () => { throw new Error("settings unreadable"); } });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1, "the runtime update still runs");
+});
+
+test("a key handover interrupted by a member's turn is tried again once the machine is idle", async () => {
+  let busyOnce = true;
+  const h = harness({
+    records: [record({ installedVersion: "1.10.4-beta.11" })],
+    activity: () => activity({ appVersion: "1.10.4-beta.11" }),
+    powerDue: async () => "AKIAPOWERKEY000000001",
+    outcome: () => {
+      if (!busyOnce) return snapshot();
+      busyOnce = false;
+      return snapshot({ phase: "needs-attention", recovery: { kind: "machine-busy", detail: "busy" } });
+    }
+  });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1);
+  assert.equal(h.service.hasWaiting(), true, "the machine is re-checked while it is busy");
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 2, "the key is handed over once the machine is idle");
+  assert.equal(h.released(), 2, "every hold is released");
+});
+
+test("a machine known to run a newer runtime is not probed for a stop key", async () => {
+  let probes = 0;
+  const h = harness({
+    records: [record({ installedVersion: "1.10.4-beta.12" })],
+    activity: () => { probes++; return activity({ appVersion: "1.10.4-beta.12" }); },
+    powerDue: async () => "AKIAPOWERKEY000000001"
+  });
+  await h.service.evaluate();
+  await h.service.evaluate();
+  assert.equal(probes, 0);
+  assert.equal(h.upgrades.length, 0);
+});
+
+test("a stop key does not re-run an update of this version that already failed on the machine", async () => {
+  const failed = snapshot({ operationId: "auto-upgrade-1.10.4-beta.11-1", phase: "needs-attention", recovery: { kind: "rolled-back", detail: "x" } });
+  let probes = 0;
+  const h = harness({
+    records: [record({ lastOperation: failed })],
+    activity: () => { probes++; return activity(); },
+    powerDue: async () => "AKIAPOWERKEY000000001"
+  });
+  await h.service.evaluate();
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 0);
+  assert.equal(probes, 1, "asked once for this key, not on every trigger");
+});
+
+test("a stop key that could not be handed over for a temporary reason is tried again later by itself, a few times at most", async () => {
+  let attempts = 0;
+  const h = harness({
+    records: [record({ installedVersion: "1.10.4-beta.11" })],
+    activity: () => activity({ appVersion: "1.10.4-beta.11" }),
+    powerDue: async () => "AKIAPOWERKEY000000001",
+    retry: () => ({ keyId: "AKIAPOWERKEY000000001", attempts: ++attempts }),
+    powerRetryMs: 5,
+    powerMaxAttempts: 3
+  });
+  await h.service.evaluate();
+  // Nothing but the retry timer evaluates the machine again.
+  for (let waited = 0; h.upgrades.length < 3 && waited < 2_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.upgrades.length, 3, "the key is handed over again once the retry time has come");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(h.upgrades.length, 3, "and the automatic tries stop at the limit");
+});
+
+test("a run that records nothing new about the key is not repeated on every hello", async () => {
+  const stale = { keyId: "AKIAPOWERKEY000000001", message: "AWS could not be reached.", failedAt: "2026-09-01T00:00:00.000Z", attempts: 1 };
+  const h = harness({
+    records: [record({ installedVersion: "1.10.4-beta.11", powerRetry: stale })],
+    activity: () => activity({ appVersion: "1.10.4-beta.11" }),
+    powerDue: async () => "AKIAPOWERKEY000000001",
+    outcome: () => snapshot({ phase: "error", message: "The doctor could not reach the machine." }),
+    powerRetryMs: 5
+  });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1);
+  await h.service.evaluate();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(h.upgrades.length, 1, "the same record state is attempted once, and no retry is scheduled for it");
+});
+
+test("only this exact version's automatic updates count as its own", () => {
+  assert.equal(isAutoUpgradeOf("auto-upgrade-1.11.1-1727000000000", "1.11.1"), true);
+  assert.equal(isAutoUpgradeOf("auto-upgrade-1.11.1-beta.6-1727000000000", "1.11.1"), false, "a beta of it is another version");
+  assert.equal(isAutoUpgradeOf("auto-upgrade-1.11.1-beta.6-1727000000000", "1.11.1-beta.6"), true);
+  assert.equal(isAutoUpgradeOf("op-button", "1.11.1"), false);
+});
+
+test("a key whose temporary failure was recorded before this process is tried again when its time comes", async () => {
+  const pending = { keyId: "AKIAPOWERKEY000000001", message: "AWS could not be reached.", failedAt: new Date(Date.now() - 50).toISOString(), attempts: 1 };
+  let due: string | undefined;
+  const h = harness({
+    records: [record({ installedVersion: "1.10.4-beta.11", powerRetry: pending })],
+    activity: () => activity({ appVersion: "1.10.4-beta.11" }),
+    powerDue: async () => due,
+    powerRetryMs: 80
+  });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 0, "not yet: inside its window");
+  due = "AKIAPOWERKEY000000001";
+  for (let waited = 0; h.upgrades.length < 1 && waited < 2_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.upgrades.length, 1, "nothing else would have come back to it");
 });

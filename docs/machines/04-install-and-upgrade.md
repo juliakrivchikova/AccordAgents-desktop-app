@@ -188,6 +188,89 @@ SSH access itself reuses what the desktop already has — the AWS worker key
 material or a configured host — through `cloudRunSshOptionArgs`, including
 connection multiplexing.
 
+### The automatic-stop key
+
+A machine on the app's AWS instance stops that instance itself after three
+idle hours, so the desktop does not have to be running. It needs its own AWS
+key for that, and the app cannot create IAM keys, so the one-time setup command
+creates it. The command makes three IAM users and prints their keys in one
+paste result: `accordagents-worker-<device>` for the app,
+`accordagents-power-<device>` for the machine, with only the inline policy
+`accordagents-machine-power` (`machinePowerPolicy`: describe instances in the
+region, start and stop app-tagged instances in the region), and the phone's
+start key (below).
+
+The command is pasted into the User's own shell, which on macOS is zsh, so it
+never relies on an unquoted variable being split into words. It never deletes
+a key that is still in use: the app's current key, the stop key the app has
+not handed over yet, and the stop key each of its machines on the instance
+runs with are passed in as keys to keep, and at IAM's two-key limit only a key
+outside that set is removed. A stop key a machine refused, and no machine
+holds, is not kept, so setting automatic stop up again can replace it. With
+both slots in use no new stop key is made, the result is printed without one,
+and the app keeps the stop key it has. If the account refuses any stop-key
+step, the app's key is still printed. The app's previous key stays valid until
+the next run of the command removes it.
+
+The key is handed over by the installer, never put on a command line:
+
+1. It goes only to a target whose pinned host key is the instance's own
+   (`accordagents-<instanceId>`).
+2. While the runtime still serves members, the installer runs
+   `accordagents-machine --check-power` from the release about to run, with
+   the key on stdin. The machine checks it is that instance (IMDSv2), then asks
+   AWS whether the key can read and, as a dry run, stop it. A new IAM key is
+   retried for up to a minute while IAM catches up. Nothing is written.
+3. A key AWS or the instance refuses exits with `MACHINE_POWER_REFUSED_EXIT_CODE`
+   (3). That refusal is recorded on the install record (`powerError`), and the
+   automatic update does not hand that key over again; the Update button does.
+   Any other failure (an unreachable AWS, a dropped connection, a busy host) is
+   temporary (`powerRetry`), and the automatic update tries the key again an
+   hour later. Either way a runtime that only needed the key is not stopped.
+4. After the drain, `--configure-power` seals the checked key into the
+   machine's settings; it takes a moment.
+5. The key counts as taken (`power` on the record) only once the runtime has
+   started with it and connected on the new release. If the runtime does not
+   come back, `--revert-power` puts back the key it had before (or none), the
+   runtime is started again either way, and the new key is tried again later
+   rather than marked refused, because the cause may as well be the relay or
+   the release.
+
+Automatic updates hand a new key over in the same idle-gated update that
+replaces the runtime, so a member's turn is never cut off for it. Pasting a new
+setup result re-checks machines right away. Settings → AWS shows whether the
+instance stops by itself: off, pending, on, or failed (the machine refused the
+key, or reports that AWS no longer accepts it).
+
+Agents run on the machine as the same OS user, so they can read the sealed key
+and the key that seals it. What they can do with it is what the policy allows:
+read every instance in the region, and start or stop app-tagged instances in
+the region.
+
+### The phone's start key
+
+A phone starts a stopped machine itself (Rule 3), with a third key from the
+same setup command: `accordagents-wake-<device>` with only the inline policy
+`accordagents-machine-wake` (`machineWakePolicy`: start app-tagged instances
+in the region). It cannot read, stop or delete anything. The command makes it
+only once: while the start key the app holds still exists in IAM, a rerun
+makes none, and the app keeps the one it has, so a phone is paired with it
+once. A permission update uses its own command, which touches no key.
+
+The key reaches a phone only inside the pairing link, in the URL fragment
+(`#k=…&w=<instance>.<region>.<key id>.<secret>`), which never leaves the
+phone: it is not sent to the static origin, and never through the relay. What
+the desktop keeps of a pairing names the handoff (`powerHandoffId`), never the
+key. The phone keeps it on the device and its Wake button signs the EC2
+request itself. A phone paired before this key existed has to be paired once
+more to get it.
+
+The key is never replaced on its own, so revoking a phone's pairing does not
+take the copy it holds. To end that: delete the access key of
+`accordagents-wake-<device>` in AWS IAM, run the setup command again (it makes
+a new start key because the app's no longer exists), paste the result, and pair
+the phones that should keep starting the machine again.
+
 ## The project mirror
 
 `bootstrapProjectMirror` puts a project on a machine **once**. After that the

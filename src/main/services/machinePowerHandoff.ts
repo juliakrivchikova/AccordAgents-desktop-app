@@ -1,7 +1,7 @@
 /**
- * Issues, lists and revokes the scoped power-key handoffs a device needs to
- * wake a stopped machine (Rule 3). The secret only ever leaves here inside the
- * sealed pairing package; what stays behind is a record of who holds a copy.
+ * Issues, lists and revokes the start-key handoffs a device needs to wake a
+ * stopped machine (Rule 3). The secret only ever leaves here inside a pairing
+ * link's fragment; what stays behind is a record of who holds a copy.
  */
 
 import { randomUUID } from "node:crypto";
@@ -14,7 +14,9 @@ import {
 } from "../../shared/machinePowerHandoff";
 
 export interface MachinePowerHandoffStore {
-  getMachinePower(): Promise<AwsMachinePowerConfig | undefined>;
+  /** The phone's start key for the app's instance (never the machine's
+   *  stop key), or undefined when the setup command has made none. */
+  getDeviceStartKey(): Promise<AwsMachinePowerConfig | undefined>;
   listMachinePowerHandoffs(): Promise<MachinePowerHandoffRecord[]>;
   saveMachinePowerHandoffs(records: MachinePowerHandoffRecord[]): Promise<void>;
 }
@@ -26,13 +28,13 @@ export class MachinePowerHandoffService {
     private readonly newId: () => string = randomUUID
   ) {}
 
-  /** The package a device is paired with. Called while minting the pairing, so
-   *  the key travels sealed with it and never separately. */
+  /** The handoff a device is paired with. Called while minting the pairing,
+   *  so the key travels in that pairing's link and never separately. */
   async issue(request: { machineId: string; issuedTo: string }): Promise<MachinePowerHandoff> {
     const machineId = request.machineId.trim();
     const issuedTo = request.issuedTo.trim();
     if (!machineId || !issuedTo) throw new Error("A power handoff needs the machine and the device it is for.");
-    const config = await this.store.getMachinePower();
+    const config = await this.store.getDeviceStartKey();
     if (!config) {
       throw new Error("This machine has no power configuration, so it cannot be woken by a device.");
     }
@@ -77,10 +79,11 @@ export class MachinePowerHandoffService {
       revokedAt: target.revokedAt ?? revokedAt,
       keyRotationRequired: true,
       otherLiveHandoffs: otherLive,
-      detail: `${target.issuedTo} kept a copy of this machine's power key, which every device shares. `
-        + "Rotate that access key in AWS to end its access"
+      detail: `${target.issuedTo} kept a copy of the phone's start key, which every paired phone shares; it can only start the machine. `
+        + "To end that, delete the access key of the AccordAgents wake user (accordagents-wake-…) in AWS IAM, run the setup command again "
+        + "and paste its result"
         + (otherLive > 0
-          ? `; ${otherLive} other device${otherLive === 1 ? "" : "s"} will need a new handoff afterwards.`
+          ? `; then pair the ${otherLive} other device${otherLive === 1 ? "" : "s"} again.`
           : ".")
     };
   }

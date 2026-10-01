@@ -18,7 +18,7 @@ test("a retained power stop survives runtime restart, never reopens admission an
   const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-power-"));
   const dbPath = path.join(dir, "state.sqlite3"); const nativePath = path.join(dir, "native.sqlite3");
   const store = new StorageService({ dbPath }).machinePower();
-  let stops = 0; let fenced = false; let failedAws = true;
+  let stops = 0; let fenced = false; let failedAws = true; let checks = 0;
   const host = { hasWorkForIdleStop: async () => false, recoverIdleFence: async () => Boolean(await store.stopFence(identity.boot)),
     retainIdleFence: () => { fenced = true; }, publishPowerStatus: async () => undefined, shutdown: async () => undefined,
     prepareIdleStop: async (request: any) => {
@@ -31,13 +31,15 @@ test("a retained power stop survives runtime restart, never reopens admission an
   const create = () => new MachineIdlePower({ config, store, host, runner, nativeProcessDbPath: nativePath, log: () => undefined }, {
     identity: async () => identity, verifyAws: async () => undefined, uptimeMs: () => MACHINE_IDLE_STOP_MS + 100,
     createHostRegistry: options => new MachineHostPowerRegistry({ ...options, dir: path.join(dir, "host-power"), profilePath: dir }),
-    client: { close: () => undefined, stopAfterDrain: async () => { stops++; if (failedAws) throw new Error("response lost"); return { instanceId: config.instanceId, state: "stopping" }; } }
+    client: { close: () => undefined, assertCanStop: async () => { checks++; },
+      stopAfterDrain: async () => { stops++; if (failedAws) throw new Error("response lost"); return { instanceId: config.instanceId, state: "stopping" }; } }
   });
   let power: MachineIdlePower | undefined;
   try {
     await store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
     power = create(); await power.start(); await (power as any).scheduler.check();
     assert.equal(stops, 1); assert.equal(fenced, true);
+    assert.equal(checks, 1, "the key is asked about, as a dry run, before any turn is fenced");
     assert.match(power.warning()!, /not confirmed/);
     assert.equal(await store.stopFence(identity.boot), "stop");
     power.close();
@@ -129,7 +131,8 @@ test("a deployment sharing this instance keeps it awake, and its own claim is pu
     identity: async () => identity, verifyAws: async () => undefined,
     uptimeMs: () => now,
     createHostRegistry: options => new MachineHostPowerRegistry({ ...options, dir: shared, isAlive: () => true }),
-    client: { close: () => undefined, stopAfterDrain: async () => { stops++; return { instanceId: config.instanceId, state: "stopping" }; } }
+    client: { close: () => undefined, assertCanStop: async () => undefined,
+      stopAfterDrain: async () => { stops++; return { instanceId: config.instanceId, state: "stopping" }; } }
   });
   try {
     await store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
@@ -163,4 +166,86 @@ test("a deployment sharing this instance keeps it awake, and its own claim is pu
     neighbour.release();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("a stop key AWS refuses keeps the machine awake instead of fencing its turns", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-refused-"));
+  const store = new StorageService({ dbPath: path.join(dir, "state.sqlite3") }).machinePower();
+  let prepared = 0; let stops = 0; let fenced = false; let checks = 0; let published = 0;
+  let accepted = false; let now = MACHINE_IDLE_STOP_MS + 100;
+  const host = { hasWorkForIdleStop: async () => false, recoverIdleFence: async () => Boolean(await store.stopFence(identity.boot)),
+    retainIdleFence: () => { fenced = true; }, publishPowerStatus: async () => { published++; }, shutdown: async () => undefined,
+    prepareIdleStop: async (request: { fenceNative(): unknown }) => { prepared++; request.fenceNative(); return async () => undefined; } };
+  const runner = { hasActiveNativeWork: () => false, shutdownWarmAgents: async () => undefined,
+    fenceIdleNativeAdmissions: () => { fenced = true; return () => { fenced = false; }; } };
+  const warnings: string[] = [];
+  // AWS appends a different encoded blob to every refusal.
+  const refusal = () => Object.assign(new Error(`You are not authorized to perform this operation. Encoded authorization failure message: ${Math.random()}`),
+    { name: "UnauthorizedOperation", $fault: "client" });
+  const power = new MachineIdlePower({ config, store, host, runner, nativeProcessDbPath: path.join(dir, "native.sqlite3"),
+    log: (event, payload) => { if (event === "machine.idle.status") warnings.push(String(payload.warning)); } }, {
+    identity: async () => identity, verifyAws: async () => undefined, uptimeMs: () => now,
+    createHostRegistry: options => new MachineHostPowerRegistry({ ...options, dir: path.join(dir, "host-power"), profilePath: dir }),
+    client: { close: () => undefined, assertCanStop: async () => { checks++; if (!accepted) throw refusal(); },
+      stopAfterDrain: async () => { stops++; return { instanceId: config.instanceId, state: "stopping" }; } }
+  });
+  try {
+    await store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
+    await power.start();
+    // The scheduler's own error path, which is what runs every 15 s.
+    const scheduler = (power as unknown as { scheduler: { check(): Promise<void>; options: { onError(error: unknown): void } } }).scheduler;
+    const onError = scheduler.options.onError;
+    await scheduler.check().catch(onError);
+    assert.equal(prepared, 0, "no turn is fenced for a stop AWS would refuse");
+    assert.equal(fenced, false);
+    assert.equal(stops, 0);
+    assert.equal(await store.stopFence(identity.boot), undefined, "nothing is retained across a restart");
+    assert.match(warnings.at(-1) ?? "", /^Automatic idle stop is suspended: AWS does not accept this machine's stop key, so it stays awake \(UnauthorizedOperation: You are not authorized to perform this operation\.\)\.$/);
+    const publishedAfterRefusal = published;
+
+    // The scheduler polls every 15 s; a refused key is not asked again soon.
+    now += 60_000;
+    await scheduler.check().catch(onError);
+    assert.equal(checks, 1, "a refused key is not asked about on every poll");
+    assert.equal(published, publishedAfterRefusal, "the same refusal does not announce itself again");
+
+    // After the back-off a refusal still reads the same, so nothing is resent.
+    now += 31 * 60_000;
+    await scheduler.check().catch(onError);
+    assert.equal(checks, 2);
+    assert.equal(published, publishedAfterRefusal, "a varying AWS message must not resend the machine's status");
+
+    now += 31 * 60_000;
+    accepted = true;
+    await scheduler.check().catch(onError);
+    assert.equal(checks, 3);
+    assert.equal(stops, 1, "once AWS accepts the key the idle stop proceeds");
+    assert.ok(warnings.indexOf("null") > warnings.findIndex((warning) => warning.includes("does not accept")),
+      "and the refusal is no longer reported once AWS accepts the key");
+  } finally { power.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("an AWS that cannot be reached is asked again on the next poll, not after the refusal back-off", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-unreachable-"));
+  const store = new StorageService({ dbPath: path.join(dir, "state.sqlite3") }).machinePower();
+  let checks = 0; let prepared = 0;
+  const host = { hasWorkForIdleStop: async () => false, recoverIdleFence: async () => Boolean(await store.stopFence(identity.boot)),
+    retainIdleFence: () => undefined, publishPowerStatus: async () => undefined, shutdown: async () => undefined,
+    prepareIdleStop: async () => { prepared++; return undefined; } };
+  const runner = { hasActiveNativeWork: () => false, shutdownWarmAgents: async () => undefined, fenceIdleNativeAdmissions: () => () => undefined };
+  const power = new MachineIdlePower({ config, store, host, runner, nativeProcessDbPath: path.join(dir, "native.sqlite3"), log: () => undefined }, {
+    identity: async () => identity, verifyAws: async () => undefined, uptimeMs: () => MACHINE_IDLE_STOP_MS + 100,
+    createHostRegistry: options => new MachineHostPowerRegistry({ ...options, dir: path.join(dir, "host-power"), profilePath: dir }),
+    client: { close: () => undefined, assertCanStop: async () => { checks++; throw Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }); },
+      stopAfterDrain: async () => ({ instanceId: config.instanceId, state: "stopping" }) }
+  });
+  try {
+    await store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
+    await power.start();
+    const scheduler = (power as unknown as { scheduler: { check(): Promise<void> } }).scheduler;
+    await scheduler.check().catch(() => undefined);
+    await scheduler.check().catch(() => undefined);
+    assert.equal(checks, 2, "a network failure says nothing about the key");
+    assert.equal(prepared, 0, "and no turn is fenced for it");
+  } finally { power.close(); await rm(dir, { recursive: true, force: true }); }
 });

@@ -1,4 +1,4 @@
-import type { AwsMachinePowerConfig } from "../../shared/machinePower";
+import { MachinePowerRefusal, type AwsMachinePowerConfig } from "../../shared/machinePower";
 
 /** The runtime may stop only the EC2 instance it actually runs on. IMDSv2
  * stays link-local, ignores redirects and sends no AWS key or relay data.
@@ -15,6 +15,6 @@ export async function assertCurrentAwsMachine(config: AwsMachinePowerConfig, req
   if (!response.ok) throw new Error("The AWS machine identity is unavailable; automatic stop is suspended.");
   const document = await response.json() as { instanceId?: unknown; region?: unknown };
   if (document.instanceId !== config.instanceId || document.region !== config.credentials.region) {
-    throw new Error("The power configuration names a different AWS machine; automatic stop is suspended.");
+    throw new MachinePowerRefusal("The power configuration names a different AWS machine; automatic stop is suspended.");
   }
 }

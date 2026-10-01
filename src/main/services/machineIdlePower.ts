@@ -1,17 +1,23 @@
 import { uptime } from "node:os";
-import { AwsMachinePowerClient } from "../../shared/awsMachinePowerClient";
+import { AwsMachinePowerClient, awsErrorText, isAwsPowerRefusal } from "../../shared/awsMachinePowerClient";
 import type { AwsMachinePowerConfig } from "../../shared/machinePower";
 import { assertCurrentAwsMachine } from "./awsMachineIdentity";
 import type { CliAgentRunner } from "./cliAgents";
 import type { MachineHostService } from "./machineHost";
 import { MachineIdleScheduler } from "./machineIdle";
 import { MachineHostPowerRegistry, type MachineHostPowerOptions } from "./machineHostPower";
-import { MACHINE_IDLE_STOP_MS } from "../../shared/machinePower";
+import { MACHINE_IDLE_STOP_MS, MACHINE_STOP_KEY_REFUSED } from "../../shared/machinePower";
 import { userDataPath } from "../platform";
 import type { MachinePowerStore } from "./machinePowerStore";
 import { nativeHostIdentity, verifiedNativeHostReboot, type NativeHostIdentity } from "./nativeHostIdentity";
 import { NativeProcessRegistry } from "./nativeProcessRegistry";
 import { MachineMaintenance } from "./machineMaintenance";
+
+type PowerClient = Pick<AwsMachinePowerClient, "stopAfterDrain" | "close" | "assertCanStop">;
+
+/** How long a stop key AWS refused is left alone before it is asked again.
+ *  The key only changes when the runtime restarts with a new one. */
+const REFUSED_KEY_RECHECK_MS = 30 * 60_000;
 
 /** Machine-owned power intent. A failed/uncertain AWS call keeps the local
  * fence across process restart; only a verified new host boot clears it.
@@ -23,11 +29,17 @@ export class MachineIdlePower {
   private stopping = false;
   private uncertainFence = false;
   private lastWarning?: string;
+  /** What makes the current warning stale: new work (a neighbour was busy
+   *  at the stop), or AWS accepting the stop key. Unset, a warning stays
+   *  until another replaces it. */
+  private warningResolvedBy?: "activity" | "key";
+  /** Host uptime until which a refused stop key is not asked about again. */
+  private keyRefusedUntilMs?: number;
   private hostIdentity?: NativeHostIdentity;
   /** Every deployment on this instance publishes what it is doing here.
    *  Idle is measured per profile; the instance is shared. */
   private hostPower?: MachineHostPowerRegistry;
-  private readonly client: Pick<AwsMachinePowerClient, "stopAfterDrain" | "close">;
+  private readonly client: PowerClient;
 
   constructor(private readonly options: {
     config: AwsMachinePowerConfig;
@@ -48,7 +60,7 @@ export class MachineIdlePower {
     verifyAws(config: AwsMachinePowerConfig): Promise<void>;
     uptimeMs(): number;
     createHostRegistry?(options: MachineHostPowerOptions): MachineHostPowerRegistry;
-    client?: Pick<AwsMachinePowerClient, "stopAfterDrain" | "close">;
+    client?: PowerClient;
   } = {
     identity: async () => process.platform === "linux" ? nativeHostIdentity() : undefined,
     verifyAws: assertCurrentAwsMachine, uptimeMs: () => uptime() * 1000
@@ -105,6 +117,7 @@ export class MachineIdlePower {
         return busy;
       },
       prepareStop: async since => {
+        if (this.keyRefusedUntilMs !== undefined && this.environment.uptimeMs() < this.keyRefusedUntilMs) return undefined;
         // The decision and the work that could invalidate it are one critical
         // section on this host. `beginStop` surveys every deployment's claim
         // and writes the intent inside the same lock an admission takes, so a
@@ -113,6 +126,21 @@ export class MachineIdlePower {
         let committed = false;
         try {
           await this.environment.verifyAws(this.options.config);
+          // A key AWS no longer accepts (rotated away, wrong region) would
+          // fence every turn behind a stop that can never happen. Ask first,
+          // as a dry run: a refusal leaves the machine awake with a warning
+          // that reads the same each time, and is not asked again for a while.
+          try {
+            await this.client.assertCanStop();
+          } catch (error) {
+            if (!isAwsPowerRefusal(error)) throw error;
+            this.keyRefusedUntilMs = this.environment.uptimeMs() + REFUSED_KEY_RECHECK_MS;
+            this.setWarning(`Automatic idle stop is suspended: ${MACHINE_STOP_KEY_REFUSED}, so it stays awake (${awsErrorText(error)}).`, "key");
+            return undefined;
+          }
+          this.keyRefusedUntilMs = undefined;
+          this.resolveWarning("key");
+          this.resolveWarning("activity");
           const drain = await this.options.host.prepareIdleStop({ bootId, uptimeMs: this.environment.uptimeMs(), idleSinceMs: since,
             fenceNative: () => this.options.runner.fenceIdleNativeAdmissions(), stopProviders: () => this.options.runner.shutdownWarmAgents(),
             commitHostStop: prepareLocal => this.hostPower!.commitStop(prepareLocal) });
@@ -153,7 +181,7 @@ export class MachineIdlePower {
   }
 
   noteActivity(): Promise<void> {
-    try { this.hostPower?.publish(true); }
+    try { this.hostPower?.publish(true); this.resolveWarning("activity"); }
     catch (error) { this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`); }
     return this.scheduler?.noteActivity() ?? Promise.resolve();
   }
@@ -202,7 +230,7 @@ export class MachineIdlePower {
     let reason: string | undefined;
     try { reason = this.hostPower.blockingReason(); }
     catch (error) { reason = `they cannot be read (${errorText(error)})`; }
-    this.setWarning(`The machine stays awake: ${reason ?? "another deployment on this machine worked recently."}`);
+    this.setWarning(`The machine stays awake: ${reason ?? "another deployment on this machine worked recently."}`, "activity");
     return false;
   }
 
@@ -262,10 +290,21 @@ export class MachineIdlePower {
     this.retry.unref();
   }
 
-  private setWarning(warning: string): void {
+  private setWarning(warning: string, resolvedBy?: "activity" | "key"): void {
+    this.warningResolvedBy = resolvedBy;
     if (this.lastWarning === warning) return;
     this.lastWarning = warning;
     this.options.log("machine.idle.status", { warning });
+    void this.options.host.publishPowerStatus().catch(() => undefined);
+  }
+
+  /** Drops a warning its own cause has resolved, so the desktop does not keep
+   *  showing a moment that has passed. */
+  private resolveWarning(cause: "activity" | "key"): void {
+    if (!this.lastWarning || this.warningResolvedBy !== cause) return;
+    this.lastWarning = undefined;
+    this.warningResolvedBy = undefined;
+    this.options.log("machine.idle.status", { warning: null });
     void this.options.host.publishPowerStatus().catch(() => undefined);
   }
 }

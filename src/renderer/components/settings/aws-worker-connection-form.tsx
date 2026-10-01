@@ -16,15 +16,26 @@ export function AwsWorkerConnectionForm(props: {
   /** Starts the instance with the pasted result: the first connection and the
    *  retry after a permission update are the same call. */
   onApply: () => Promise<void>;
+  /** Turning on automatic stop for an instance that is already connected. */
+  autoStop?: boolean;
 }): JSX.Element {
-  const recovery = props.operation?.remediation === "refresh-aws-authorization";
+  const recovery = !props.autoStop && props.operation?.remediation === "refresh-aws-authorization";
   const updatesExistingUser = recovery && Boolean(props.operation?.awsPrincipalUserName);
+  const variant = FORM_VARIANTS[props.autoStop ? "auto-stop" : recovery ? "recovery" : "connect"];
   return (
-    <div className="gen-aws-connection" data-testid={recovery ? "aws-worker-authorization-recovery" : "aws-worker-connect"}>
+    <div className="gen-aws-connection" data-testid={variant.testId}>
       <div className="gen-row gen-row-stack">
         <div className="gen-row-text">
-          <div className="gen-row-title">{recovery ? "AWS administrator update required" : "Connect AWS account"}</div>
-          {recovery ? (
+          {/* The automatic-stop toggle above already names the task. */}
+          {variant.title ? <div className="gen-row-title">{variant.title}</div> : null}
+          {props.autoStop ? (
+            <div className="gen-row-desc" data-testid="aws-worker-auto-stop-steps">
+              The machine stops the instance by itself after three hours without work, even when this app is closed. It needs its own key, which only the setup command can create.<br />
+              1. Select Show setup command, then Copy.<br />
+              2. Run it in Terminal using an AWS administrator account. It also replaces this app&apos;s AWS key.<br />
+              3. Paste its <code>accord-aws-v1:</code> result here, then select Turn on automatic stop.
+            </div>
+          ) : recovery ? (
             <div className="gen-row-desc" data-testid="aws-worker-authorization-steps">
               {updatesExistingUser ? (
                 <>
@@ -49,7 +60,8 @@ export function AwsWorkerConnectionForm(props: {
         <div className="gen-grid-form">
           <label className="gen-aws-field">
             <span>Region</span>
-            <input className="gen-input" aria-label="AWS region" value={props.region} disabled={props.busy} onChange={(event) => props.onRegionChange(event.target.value)} />
+            {/* The stop key only works in the instance's own region, so it is not a choice here. */}
+            <input className="gen-input" aria-label="AWS region" value={props.region} disabled={props.busy || props.autoStop} onChange={(event) => props.onRegionChange(event.target.value)} />
           </label>
           <button type="button" className="gen-pill" disabled={props.busy} onClick={() => void props.onLoadCommand()}>
             <span className="gen-pill-label">{updatesExistingUser ? "Show update command" : "Show setup command"}</span>
@@ -72,8 +84,8 @@ export function AwsWorkerConnectionForm(props: {
             <textarea className="gen-input gen-aws-paste" aria-label="AWS setup result" placeholder="accord-aws-v1:…" value={props.blob} disabled={props.busy} onChange={(event) => props.onBlobChange(event.target.value)} />
           </label>
           <div className="gen-actions">
-            <button type="button" className="gen-pill" data-testid={recovery ? "aws-worker-apply-authorization" : "aws-worker-connect-start"} disabled={props.busy || !props.blob.trim()} onClick={() => void props.onApply()}>
-              <span className="gen-pill-label">{recovery ? "Apply update and try again" : "Connect and start instance"}</span>
+            <button type="button" className="gen-pill" data-testid={variant.applyTestId} disabled={props.busy || !props.blob.trim()} onClick={() => void props.onApply()}>
+              <span className="gen-pill-label">{variant.applyLabel}</span>
             </button>
           </div>
         </div>
@@ -81,3 +93,9 @@ export function AwsWorkerConnectionForm(props: {
     </div>
   );
 }
+
+const FORM_VARIANTS = {
+  "auto-stop": { testId: "aws-worker-auto-stop-form", title: undefined, applyTestId: "aws-worker-auto-stop-apply", applyLabel: "Turn on automatic stop" },
+  recovery: { testId: "aws-worker-authorization-recovery", title: "AWS administrator update required", applyTestId: "aws-worker-apply-authorization", applyLabel: "Apply update and try again" },
+  connect: { testId: "aws-worker-connect", title: "Connect AWS account", applyTestId: "aws-worker-connect-start", applyLabel: "Connect and start instance" }
+} as const;

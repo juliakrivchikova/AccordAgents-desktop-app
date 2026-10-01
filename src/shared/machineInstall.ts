@@ -166,7 +166,34 @@ export interface MachineInstallRecord {
   installedAt?: string;
   /** Desktop project path to this machine's own checkout; never a write-back. */
   projects?: Record<string, string>;
+  /** The AWS stop key this machine last accepted (its access key id only),
+   *  so the desktop knows whether the machine can stop itself when idle. */
+  power?: MachinePowerDelivery;
+  /** The last stop key the machine refused, and why. Not retried
+   *  automatically until the key changes; a manual update retries it. */
+  powerError?: MachinePowerDeliveryError;
+  /** The last stop key that could not be handed over for a temporary reason
+   *  (unreachable AWS, dropped connection, a runtime that did not come back).
+   *  The automatic update tries it again an hour after `failedAt`, up to a
+   *  few `attempts`; after that only the Update button does. */
+  powerRetry?: MachinePowerDeliveryRetry;
   lastOperation?: MachineInstallSnapshot;
+}
+
+export interface MachinePowerDelivery {
+  keyId: string;
+  configuredAt: string;
+}
+
+export interface MachinePowerDeliveryError {
+  keyId: string;
+  message: string;
+  failedAt: string;
+}
+
+export interface MachinePowerDeliveryRetry extends MachinePowerDeliveryError {
+  /** Temporary failures of this key so far. */
+  attempts?: number;
 }
 
 export type MachineServiceScope = "system" | "user";
@@ -327,6 +354,21 @@ export function isMachineAutoUpgradeOperation(operationId: string): boolean {
   return operationId.startsWith("auto-upgrade-");
 }
 
+/** Whether an operation id is this desktop version's automatic update:
+ *  `auto-upgrade-<version>-<timestamp>`, where 1.11.1 is not 1.11.1-beta.6. */
+export function isAutoUpgradeOf(operationId: string, version: string): boolean {
+  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^auto-upgrade-${escaped}-\\d+$`).test(operationId);
+}
+
+/** How long after a temporary failure the automatic update tries a stop key
+ *  again: each attempt drains the machine, so not on every hello. */
+export const MACHINE_POWER_RETRY_MS = 60 * 60_000;
+/** Temporary failures after which the automatic update stops trying a key:
+ *  each attempt counts as work on the machine, so endless retries would keep
+ *  it from ever being idle. The Update button still tries it. */
+export const MACHINE_POWER_MAX_ATTEMPTS = 3;
+
 export interface MachineRuntimeStatus {
   state: "updating" | "failed" | "pending";
   text: string;
@@ -370,6 +412,11 @@ export function machineRuntimeStatus(input: {
   if (last && last.recovery?.kind === "machine-busy" && behind && desktopVersion) {
     // Not a failure: the update stepped back for a member's work and waits.
     return { state: "pending", text: `Runtime update to ${desktopVersion} waits for the machine to be idle; a member started work while the update was being staged.` };
+  }
+  if (last && last.recovery?.kind === "machine-busy" && !behind) {
+    // Not a failure either: a current runtime was left running because it was
+    // busy; only its automatic-stop key waits.
+    return { state: "pending", text: last.error ?? last.message };
   }
   if (last && (last.phase === "error" || last.phase === "needs-attention")) {
     return { state: "failed", text: `${last.kind === "upgrade" ? "Runtime update" : "Runtime setup"} failed: ${last.error ?? last.message}` };

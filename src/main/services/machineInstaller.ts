@@ -18,7 +18,7 @@
  * instead of forcing it, because the alternative is a duplicate executor.
  */
 
-import { compareVersions, isMachineInstallTerminalPhase } from "../../shared/machineInstall";
+import { compareVersions, isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, MACHINE_POWER_MAX_ATTEMPTS, MACHINE_POWER_RETRY_MS } from "../../shared/machineInstall";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
@@ -27,6 +27,7 @@ import { withMachineRsyncPath } from "./machineMaintenanceRsync";
 import fs from "node:fs";
 import path from "node:path";
 import type { CloudRunWorkerDoctorReport, CloudRunWorkerSettings, CloudRunWorkerSetupProgress } from "../../shared/types";
+import { MACHINE_POWER_HANDOVER_TIMEOUT_MS, MACHINE_POWER_REFUSED_EXIT_CODE, type AwsMachinePowerConfig } from "../../shared/machinePower";
 import type {
   MachineInstallKind,
   MachineInstallPhase,
@@ -52,6 +53,7 @@ import {
   DEFAULT_MACHINE_USER_DATA_SUFFIX,
   machineActivateReleaseScript,
   machineClaimEnvironmentScript,
+  machinePowerScript,
   machineDrainScript,
   machineInstallDependenciesScript,
   machineInstallLayout,
@@ -166,7 +168,12 @@ export interface MachineInstallerOptions {
    *  new release was being staged). The upgrade then ends with
    *  `needs-attention` / `machine-busy`, nothing replaced, and the staged
    *  files wait for the next attempt. */
-  beforeDrain?: (record: MachineInstallRecord, operationId: string) => Promise<string | undefined>;
+  beforeDrain?: (record: MachineInstallRecord, operationId: string, purpose: "update" | "key") => Promise<string | undefined>;
+  /** The AWS stop key for a machine that runs on this app's AWS instance, or
+   *  undefined when it does not (or no stop key has been set up). Handed to
+   *  the machine while its runtime is drained, so it can stop the instance
+   *  itself after three idle hours even when this desktop is not running. */
+  machinePower?: (machineId: string) => Promise<AwsMachinePowerConfig | undefined>;
   sshExec?: MachineSshExec;
   uploadBundle?: MachineBundleUpload;
   mirrorSync?: RemoteMirrorSyncRunner;
@@ -437,12 +444,21 @@ export class MachineInstallerService {
       return snapshot;
     };
 
+    // A stop key this run set out to hand over and has not yet settled: if the
+    // run fails, that is recorded too, so an automatic update does not try
+    // again on every hello.
+    let pendingPowerKey: string | undefined;
     const fail = async (
       phase: MachineInstallPhase,
       message: string,
       recovery: MachineInstallRecovery,
       retryable = true
     ): Promise<MachineInstallResult> => {
+      if (pendingPowerKey && recovery.kind !== "machine-busy") {
+        // The failure itself is the message; the key only waits for a retry.
+        record = this.powerNotTaken(record, pendingPowerKey, new Error(message));
+        pendingPowerKey = undefined;
+      }
       const terminal = phase === "needs-attention" ? "needs-attention" : "error";
       await emit(terminal, message, { error: message, retryable, recovery });
       return { snapshot, record };
@@ -450,6 +466,18 @@ export class MachineInstallerService {
 
     try {
       const worker = workerSettingsFor(request.target);
+      // Read once, before anything else: the key handed over below is the one
+      // this decision saw, and a run that fails anywhere records it, so an
+      // automatic update does not try it again on every hello. An automatic
+      // update hands a key over once, and after a temporary failure again an
+      // hour later, a few times at most; the button also retries a key the
+      // machine refused before. A fresh install always gets it.
+      const power = await this.machinePowerFor(record.machineId, request.target);
+      let deliverPower = power !== undefined && (kind === "install"
+        || (isMachineAutoUpgradeOperation(request.operationId)
+          ? machinePowerNeedsDelivery(record, power, this.now())
+          : record.power?.keyId !== power.credentials.accessKeyId));
+      if (power && deliverPower) pendingPowerKey = power.credentials.accessKeyId;
       // 1. Preflight. The doctor installs node/git/sqlite3, fixes the Codex
       //    sandbox setting, and performs the provider sign-in ON the machine.
       await emit("preflight", "Checking the machine…");
@@ -548,6 +576,8 @@ export class MachineInstallerService {
         expectVersion: location.expectVersion
       });
       stagedVersion = bundle.version;
+      const nodePath = probe.nodePath ?? "/usr/bin/node";
+      let powerConfigured = false;
       const fence = versionFence(kind, probe, bundle, request.allowDowngrade === true);
       if (fence) {
         return await fail("error", fence, {
@@ -556,40 +586,46 @@ export class MachineInstallerService {
           activeVersion: probe.installedVersion
         });
       }
-      if (probe.installedDigest === bundle.digest && probe.serviceState === "active" && kind === "upgrade") {
+      const release = releaseName(bundle);
+      const previousRelease = probe.activeRelease;
+      const alreadyRuns = probe.installedDigest === bundle.digest && probe.serviceState === "active" && kind === "upgrade";
+      if (alreadyRuns && !deliverPower) {
         await emit("ready", `Machine already runs ${bundle.version}.`, {
           installedVersion: bundle.version, previousVersion: probe.installedVersion
         });
         return { snapshot, record };
       }
-      const release = releaseName(bundle);
-      const previousRelease = probe.activeRelease;
+      // Only the stop key is new: the release that runs is the one to keep, so
+      // nothing is copied or rebuilt; the runtime is restarted to read the key.
+      const restageRelease = !(alreadyRuns && previousRelease === release);
 
       // 3. Stage the new release beside the running one. Nothing that runs is
       //    touched yet, so a failure here leaves the machine exactly as it was.
-      await exec({ target: request.target, script: machinePrepareDirectoriesScript(layout), timeoutMs: SHORT_TIMEOUT_MS });
-      await emit("transfer", `Copying runtime ${bundle.version} to the machine…`);
-      await this.uploadBundle({
-        target: request.target,
-        localDir: bundle.dir,
-        remoteDir: `${layout.releasesDir}/${release}`,
-        timeoutMs: TRANSFER_TIMEOUT_MS,
-        maintenance
-      });
-
-      await emit("dependencies", "Installing runtime dependencies on the machine…");
-      try {
-        await exec({
+      if (restageRelease) {
+        await exec({ target: request.target, script: machinePrepareDirectoriesScript(layout), timeoutMs: SHORT_TIMEOUT_MS });
+        await emit("transfer", `Copying runtime ${bundle.version} to the machine…`);
+        await this.uploadBundle({
           target: request.target,
-          script: machineInstallDependenciesScript(layout, release),
-          timeoutMs: DEPENDENCIES_TIMEOUT_MS
+          localDir: bundle.dir,
+          remoteDir: `${layout.releasesDir}/${release}`,
+          timeoutMs: TRANSFER_TIMEOUT_MS,
+          maintenance
         });
-      } catch (error) {
-        // The one native dependency (node-pty) is compiled on the machine, so
-        // this is where a box without build tools or without network fails.
-        throw new Error(
-          `Installing the runtime's dependencies on the machine failed. The machine needs network access and build tools (python3, make, a C++ compiler) to compile node-pty. ${errorMessage(error)}`
-        );
+
+        await emit("dependencies", "Installing runtime dependencies on the machine…");
+        try {
+          await exec({
+            target: request.target,
+            script: machineInstallDependenciesScript(layout, release),
+            timeoutMs: DEPENDENCIES_TIMEOUT_MS
+          });
+        } catch (error) {
+          // The one native dependency (node-pty) is compiled on the machine, so
+          // this is where a box without build tools or without network fails.
+          throw new Error(
+            `Installing the runtime's dependencies on the machine failed. The machine needs network access and build tools (python3, make, a C++ compiler) to compile node-pty. ${errorMessage(error)}`
+          );
+        }
       }
 
       // The staged release is on disk and complete. From here everything
@@ -603,6 +639,34 @@ export class MachineInstallerService {
         );
       }
       maintenance = maintenanceForStagedRelease(layout, release);
+
+      // The stop key is checked with AWS while the runtime still serves
+      // members (a new IAM key can take up to a minute to be accepted), with
+      // the release about to run. The drain below then only writes it.
+      if (power && deliverPower) {
+        await emit("enroll", "Checking the automatic-stop key with AWS…");
+        const keyId = power.credentials.accessKeyId;
+        try {
+          await exec({
+            target: request.target,
+            script: machinePowerScript(layout, nodePath, "check", `${layout.releasesDir}/${release}`),
+            input: JSON.stringify(power),
+            // Outlasts the machine's own check with AWS, so its answer arrives.
+            timeoutMs: MACHINE_POWER_HANDOVER_TIMEOUT_MS
+          });
+        } catch (error) {
+          record = this.powerNotTaken(record, keyId, error, warnings);
+          pendingPowerKey = undefined;
+          deliverPower = false;
+          if (alreadyRuns) {
+            // Only the key was due, and it is not handed over: nothing changes.
+            await emit("ready", `Machine already runs ${bundle.version}.`, {
+              installedVersion: bundle.version, previousVersion: probe.installedVersion
+            });
+            return { snapshot, record };
+          }
+        }
+      }
 
       // 4. Enrollment. Written from stdin; the relay key never reaches a
       //    command line or a log. An upgrade keeps the pairing that is there.
@@ -627,16 +691,20 @@ export class MachineInstallerService {
       // members. So the drain always runs. Skipping it on a stale reading
       // would flip the symlink under a live runtime, and the connect check
       // below would then see the OLD process answer and call the upgrade done.
-      const busyReason = await this.options.beforeDrain?.(record, request.operationId).catch(() => undefined);
+      // Only a stop key is due: a runtime that already runs this release is
+      // stopped for it only when idle, whoever asked.
+      const busyReason = await this.options.beforeDrain?.(record, request.operationId, alreadyRuns ? "key" : "update").catch(() => undefined);
       if (busyReason) {
         return await fail(
           "needs-attention",
           busyReason,
           {
             kind: "machine-busy",
-            detail: `Nothing was replaced: ${probe.installedVersion ?? "the installed version"} is still the one the machine runs, `
-              + `and the new files are staged in ${layout.releasesDir}/${release} without being used. `
-              + "The update is attempted again once the machine is idle.",
+            detail: alreadyRuns
+              ? "Nothing was changed: the machine keeps running. Its automatic-stop key is handed over once the machine is idle."
+              : `Nothing was replaced: ${probe.installedVersion ?? "the installed version"} is still the one the machine runs, `
+                + `and the new files are staged in ${layout.releasesDir}/${release} without being used. `
+                + "The update is attempted again once the machine is idle.",
             activeVersion: probe.installedVersion
           }
         );
@@ -698,7 +766,7 @@ export class MachineInstallerService {
         home: record.profileHome ?? probe.home,
         profileHome: record.profileHome,
         user: request.target.user ?? "ubuntu",
-        nodePath: probe.nodePath ?? "/usr/bin/node",
+        nodePath,
         path: probe.loginPath
       });
       const serviceOutput = await exec({
@@ -711,29 +779,89 @@ export class MachineInstallerService {
         warnings.push("The runtime will stop when the last session on the machine closes: lingering could not be enabled.");
       }
 
-      await emit("starting", "Starting the machine runtime…");
-      await exec({
-        target: request.target,
-        script: machineStartServiceScript(layout),
-        timeoutMs: SHORT_TIMEOUT_MS
-      });
+      // The runtime is drained, so nothing else writes its settings, and it
+      // reads the key when it starts below. AWS has already accepted the key;
+      // this only seals it on the machine. A failure does not fail the update:
+      // the machine runs as before and the key is handed over again later.
+      // The key counts as taken only once the runtime has started with it.
+      if (power && deliverPower) {
+        await emit("service", "Setting up automatic stop after three idle hours…");
+        try {
+          await exec({
+            target: request.target,
+            script: machinePowerScript(layout, nodePath, "configure"),
+            input: JSON.stringify(power),
+            timeoutMs: SHORT_TIMEOUT_MS
+          });
+          powerConfigured = true;
+          this.options.logger?.("machines.install.power-configured", { machineId: record.machineId, keyId: power.credentials.accessKeyId });
+        } catch (error) {
+          record = this.powerNotTaken(record, power.credentials.accessKeyId, error, warnings);
+          pendingPowerKey = undefined;
+        }
+      }
 
       // 7. The machine is installed when it says hello over the relay, not
-      //    when systemd says the unit started.
-      await emit("verify", "Waiting for the machine to connect…");
-      const connected = await this.options.waitForConnected(record.machineId, CONNECT_TIMEOUT_MS, bundle.version);
-      // A connection alone is not proof: a unit that failed to restart can
-      // leave an older process connected. Read back which release the machine
-      // actually runs before calling this done.
-      const after = connected
-        ? await this.probe(request.target, layout).catch(() => undefined)
-        : undefined;
-      const runningNewRelease = after === undefined
-        ? connected
-        : after.activeRelease === release && after.serviceState === "active";
-      if (!connected || !runningNewRelease) {
+      //    when systemd says the unit started. A connection alone is not
+      //    proof either: a unit that failed to restart can leave an older
+      //    process connected, so read back which release actually runs.
+      const startAndVerify = async (): Promise<boolean> => {
+        await exec({ target: request.target, script: machineStartServiceScript(layout), timeoutMs: SHORT_TIMEOUT_MS });
+        await emit("verify", "Waiting for the machine to connect…");
+        if (!await this.options.waitForConnected(record.machineId, CONNECT_TIMEOUT_MS, bundle.version)) return false;
+        const after = await this.probe(request.target, layout).catch(() => undefined);
+        return after === undefined || (after.activeRelease === release && after.serviceState === "active");
+      };
+      await emit("starting", "Starting the machine runtime…");
+      // With a new key sealed, a start that errors is a runtime that did not
+      // come back: the key's previous setting is put back below.
+      const started = powerConfigured ? await startAndVerify().catch(() => false) : await startAndVerify();
+      if (!started) {
         const serviceLog = await this.readServiceLog(request.target, layout);
-        if (kind === "upgrade" && previousRelease && previousRelease !== release) {
+        const rollsBack = kind === "upgrade" && Boolean(previousRelease) && previousRelease !== release;
+        // The runtime did not come back after taking a new key. The cause is
+        // as likely the relay or the release as the key (AWS accepted it), so
+        // the key it ran with before (or none) is put back, the runtime is
+        // started again either way, and the new key is tried again later
+        // rather than marked refused.
+        if (power && powerConfigured) {
+          const { drain, reverted } = await this.revertPower(record.machineId, request.target, layout, nodePath, maintenance);
+          const drained = drain?.drained === true;
+          const message = reverted
+            ? "The machine did not come back after taking the new stop key, so its previous setting was put back."
+            : "The machine did not come back after taking the new stop key, and putting its previous setting back failed.";
+          // Reverted, the machine has the key its record already names; not
+          // reverted, nothing is known about the key it has.
+          record = this.powerNotTaken({ ...record, ...(reverted ? {} : { power: undefined }) },
+            power.credentials.accessKeyId, new Error(message), warnings);
+          pendingPowerKey = undefined;
+          // Started again only over a proven drain: something of the old
+          // runtime still alive beside a new one would run a member twice.
+          if (drain && !drained) {
+            // Something of the runtime is still alive: starting another beside
+            // it would run a member twice, so it is left stopped, as the main
+            // drain does.
+            return await fail("needs-attention", "The machine's runtime did not stop after the stop key was handed over, so it was not started again.", {
+              kind: "manual-drain-required",
+              detail: [drain.detail, "Stop the processes listed below on the machine, then retry."].filter(Boolean).join(" "),
+              activeVersion: bundle.version,
+              blockingPids: [...drain.runtimePids, ...drain.supervisorPids, ...drain.providerPids]
+            });
+          }
+          if (drained && !rollsBack && await startAndVerify().catch(() => false)) {
+            // A revert that did not confirm may still have run, so nothing is
+            // claimed about the key: it is handed over again, which is harmless.
+            record = { ...record, installedVersion: bundle.version, installedDigest: bundle.digest, installedAt };
+            await emit("ready", reverted
+              ? `Machine is running ${bundle.version} with its previous automatic-stop setting.`
+              : `Machine is running ${bundle.version}.`, {
+              installedVersion: bundle.version,
+              previousVersion: probe.installedVersion
+            });
+            return { snapshot, record };
+          }
+        }
+        if (rollsBack && previousRelease) {
           const rolledBack = await this.rollback(request.target, layout, previousRelease, probe);
           return await fail("needs-attention", "The new runtime did not connect; the machine was put back on its previous version.", {
             kind: rolledBack ? "rolled-back" : "new-runtime-installed-not-started",
@@ -756,7 +884,10 @@ export class MachineInstallerService {
         ...record,
         installedVersion: bundle.version,
         installedDigest: bundle.digest,
-        installedAt
+        installedAt,
+        ...(power && powerConfigured
+          ? { power: { keyId: power.credentials.accessKeyId, configuredAt: this.now().toISOString() }, powerError: undefined, powerRetry: undefined }
+          : {})
       };
       await emit("ready", `Machine is running ${bundle.version}.`, {
         installedVersion: bundle.version,
@@ -819,6 +950,65 @@ export class MachineInstallerService {
     }
   }
 
+  /** The stop key for this machine, only when the SSH target is the instance
+   *  itself (its pinned host key): the secret never reaches a host that merely
+   *  answers at an address. The machine re-checks its identity on arrival. */
+  private async machinePowerFor(machineId: string, target: MachineSshTarget): Promise<AwsMachinePowerConfig | undefined> {
+    try {
+      const power = await this.options.machinePower?.(machineId);
+      if (power && target.hostKeyAlias !== `accordagents-${power.instanceId}`) {
+        this.options.logger?.("machines.install.power-skipped", { machineId, reason: "target-is-not-the-instance" });
+        return undefined;
+      }
+      return power;
+    } catch (error) {
+      // An unreadable key must not block an update; the machine keeps what it has.
+      this.options.logger?.("machines.install.power-unavailable", { machineId, message: errorMessage(error) });
+      return undefined;
+    }
+  }
+
+  /** Records why a stop key was not handed over. Only the machine's own
+   *  "this key is refused" (AWS or the instance said no) marks it refused,
+   *  which the automatic update does not retry; anything else (a dropped
+   *  connection, a timeout, an unreachable AWS, a busy host) is retried an
+   *  hour later. */
+  private powerNotTaken(record: MachineInstallRecord, keyId: string, error: unknown, warnings?: string[]): MachineInstallRecord {
+    const message = powerFailureMessage(error);
+    const refused = isMachineRefusal(error);
+    warnings?.push(`Automatic stop after three idle hours is not set up: ${message}`);
+    this.options.logger?.("machines.install.power-failed", { machineId: record.machineId, keyId, message, refused });
+    const failedAt = this.now().toISOString();
+    if (refused) return { ...record, powerError: { keyId, message, failedAt }, powerRetry: undefined };
+    const attempts = (record.powerRetry?.keyId === keyId ? record.powerRetry.attempts ?? 1 : 0) + 1;
+    return { ...record, powerRetry: { keyId, message, failedAt, attempts } };
+  }
+
+  /** Drains the runtime and puts back the stop key the handover replaced.
+   *  The caller starts it again. */
+  private async revertPower(
+    machineId: string,
+    target: MachineSshTarget,
+    layout: MachineInstallLayout,
+    nodePath: string,
+    maintenance: MachineMaintenanceTarget | undefined
+  ): Promise<{ drain?: ReturnType<typeof parseMachineDrainReport>; reverted: boolean }> {
+    let drain: ReturnType<typeof parseMachineDrainReport> | undefined;
+    try {
+      drain = parseMachineDrainReport(await this.sshExec({ target, script: machineDrainScript(layout), timeoutMs: DRAIN_TIMEOUT_MS, maintenance }));
+      if (!drain.drained) {
+        this.options.logger?.("machines.install.power-revert-failed", { machineId, message: "The runtime could not be drained." });
+        return { drain, reverted: false };
+      }
+      await this.sshExec({ target, script: machinePowerScript(layout, nodePath, "revert"), timeoutMs: SHORT_TIMEOUT_MS, maintenance });
+      this.options.logger?.("machines.install.power-reverted", { machineId });
+      return { drain, reverted: true };
+    } catch (error) {
+      this.options.logger?.("machines.install.power-revert-failed", { machineId, message: errorMessage(error) });
+      return { drain, reverted: false };
+    }
+  }
+
   private async recordFor(request: MachineInstallRequest): Promise<MachineInstallRecord> {
     const existing = await this.options.store.getMachineInstall(request.machineId);
     return {
@@ -833,6 +1023,9 @@ export class MachineInstallerService {
       installedDigest: existing?.installedDigest,
       installedAt: existing?.installedAt,
       projects: existing?.projects,
+      power: existing?.power,
+      powerError: existing?.powerError,
+      powerRetry: existing?.powerRetry,
       profileHome: existing?.profileHome,
       isolatedProfile: existing?.installRoot
         ? existing.isolatedProfile ?? Boolean(existing.profileHome) : request.isolatedProfile ?? false
@@ -935,6 +1128,38 @@ export class MachineInstallerService {
 }
 
 // ---- helpers --------------------------------------------------------------
+
+
+/** Whether the automatic update has to hand this stop key over: the machine
+ *  has not taken it, has not refused this very key, and did not fail to take
+ *  it within the last hour, nor MACHINE_POWER_MAX_ATTEMPTS times. A refused key is retried by the Update button,
+ *  never automatically, so a machine that cannot take it is not restarted
+ *  over and over. A new key (the setup command run again) is handed over
+ *  automatically. */
+export function machinePowerNeedsDelivery(
+  record: Pick<MachineInstallRecord, "power" | "powerError" | "powerRetry">,
+  power: AwsMachinePowerConfig | undefined,
+  now: Date = new Date()
+): boolean {
+  if (!power) return false;
+  const keyId = power.credentials.accessKeyId;
+  if (record.power?.keyId === keyId || record.powerError?.keyId === keyId) return false;
+  if (record.powerRetry?.keyId !== keyId) return true;
+  if ((record.powerRetry.attempts ?? 1) >= MACHINE_POWER_MAX_ATTEMPTS) return false;
+  return !(now.getTime() - Date.parse(record.powerRetry.failedAt) < MACHINE_POWER_RETRY_MS);
+}
+
+/** The machine answered that the key itself is refused, as opposed to a
+ *  dropped SSH connection, a timeout, an unreachable AWS or a busy host. */
+function isMachineRefusal(error: unknown): boolean {
+  return error instanceof CommandError && !error.result.timedOut && error.result.exitCode === MACHINE_POWER_REFUSED_EXIT_CODE;
+}
+
+/** The machine's own sentence, not the ssh wrapper around it. */
+function powerFailureMessage(error: unknown): string {
+  const stderr = error instanceof CommandError ? error.result.stderr.trim().split("\n").filter(Boolean).pop() : undefined;
+  return (stderr || errorMessage(error)).slice(0, 300);
+}
 
 
 function maintenanceFor(layout: { installRoot: string; userDataDir: string }): MachineMaintenanceTarget {

@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
   AwsWorkerActualSpec,
+  AwsWorkerAutoStop,
   AwsWorkerHandleInfo,
   AwsWorkerSpec,
   AwsWorkerSpecMismatch,
@@ -12,6 +13,9 @@ import type {
   CloudRunWorkerSettings
 } from "../../shared/types";
 import { awsRootVolumeSizeError, normalizeAwsInstanceType, normalizeAwsRootVolumeSizeGb } from "../../shared/cloudRuns";
+import { assertAwsMachinePowerConfig, MACHINE_STOP_KEY_REFUSED, type AwsMachinePowerConfig } from "../../shared/machinePower";
+import { isAutoUpgradeOf, isMachineInstallTerminalPhase, MACHINE_POWER_MAX_ATTEMPTS, type MachineInstallRecord } from "../../shared/machineInstall";
+import type { MachineRecord } from "../../shared/machineLink";
 import { buildBootstrapCommand, parseWorkerBlob } from "./awsWorkerProvisioning";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import { AwsWorkerLifecycle } from "./awsWorkerLifecycle";
@@ -47,6 +51,9 @@ const WORKER_ROOT = "~/.accordagents/remote-runs";
 const AWS_AUTHORIZATION_RETRY_DELAYS_MS = [250, 1_000, 2_500] as const;
 
 export interface CloudRunAwsServiceOptions {
+  /** This desktop's version: an automatic update of it that already failed
+   *  on a machine is not repeated by itself. */
+  appVersion?: string;
   createEc2Client?: (credentials: AwsWorkerCredentials) => Ec2Client;
   generateKeyMaterial?: typeof generateAwsWorkerKeyMaterial;
   deleteKeyMaterial?: typeof deleteGeneratedAwsWorkerKeyMaterial;
@@ -91,6 +98,7 @@ export class CloudRunAwsService {
   private readonly workerAccess: AwsWorkerAccess;
   private readonly privateKeyPathForKeyName: (keyName: string) => string;
   private readonly logger?: (event: string, payload: Record<string, unknown>) => void;
+  private readonly appVersion?: string;
   private readonly automaticStopOwnerId = randomUUID();
   private readonly activeRunIds = new Set<string>();
   private readonly wait: (delayMs: number) => Promise<void>;
@@ -102,6 +110,7 @@ export class CloudRunAwsService {
     private readonly settings: SettingsService,
     options: CloudRunAwsServiceOptions = {}
   ) {
+    this.appVersion = options.appVersion;
     this.logger = options.logger;
     this.createEc2Client = options.createEc2Client ?? createAwsEc2Client;
     this.generateKeyMaterial = options.generateKeyMaterial ?? generateAwsWorkerKeyMaterial;
@@ -161,7 +170,57 @@ export class CloudRunAwsService {
       }
       targetUserName = operation.awsPrincipalUserName;
     }
-    return buildBootstrapCommand(region, deviceId, { targetUserName });
+    if (targetUserName) return buildBootstrapCommand(region, deviceId, { targetUserName });
+    // The stop and start keys belong to the instance's region: a command for
+    // another region must not rewrite the policies of keys already in use.
+    const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
+    const otherRegion = Boolean(handle && handle.region !== region.trim());
+    return buildBootstrapCommand(region, deviceId, { ...await this.keysInUse(), ...(otherRegion ? { machineKeys: false } : {}) });
+  }
+
+  /** The keys a rerun of the setup command must leave valid: the app's own,
+   *  the stop key it has not handed over yet, and the stop key each machine
+   *  on its instance runs with. A read failure fails the command instead of
+   *  producing one that could delete a key still in use. */
+  private async keysInUse(): Promise<{ keepWorkerKeyId?: string; keepPowerKeyIds: string[]; keepWakeKeyId?: string }> {
+    const credentials = await this.settings.getAwsWorkerCredentials();
+    const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
+    const records = handle ? (await this.installsOnInstance(handle)).records : [];
+    const held = records.flatMap((record) => record.power ? [record.power.keyId] : []);
+    // A stop key a machine refused, and no machine holds, is not in use: the
+    // rerun that sets automatic stop up again may replace it.
+    const pending = credentials?.power?.accessKeyId;
+    const refused = pending !== undefined && !held.includes(pending) && records.some((record) => record.powerError?.keyId === pending);
+    return {
+      keepWorkerKeyId: credentials?.accessKeyId,
+      keepPowerKeyIds: [...(pending && !refused ? [pending] : []), ...held],
+      keepWakeKeyId: credentials?.wake?.accessKeyId
+    };
+  }
+
+  /** The phone's start key for this app's instance, as a paired phone uses it,
+   *  with the machine it wakes; undefined when the setup command has not made
+   *  one, or made it for another region. It only ever leaves this desktop
+   *  inside a pairing link. */
+  async deviceWakePower(): Promise<{ machineId?: string; config: AwsMachinePowerConfig } | undefined> {
+    const credentials = await this.settings.getAwsWorkerCredentials();
+    const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
+    if (!credentials?.wake || !handle) return undefined;
+    const config = powerConfigFor({ ...credentials, power: credentials.wake }, handle);
+    if (!config) return undefined;
+    const { machines } = await this.installsOnInstance(handle);
+    return { ...(machines.length === 1 ? { machineId: machines[0].id } : {}), config };
+  }
+
+  /** This app's machines on its instance, and their install records. A
+   *  machine counts when its record names the instance, or when it was
+   *  installed over the instance's own pinned host key. */
+  private async installsOnInstance(handle: AwsWorkerHandleInfo): Promise<{ machines: MachineRecord[]; records: MachineInstallRecord[] }> {
+    const [machines, installs] = await Promise.all([this.settings.listMachines(), this.settings.listMachineInstalls()]);
+    const pinned = new Set(installs.filter((record) => record.target?.hostKeyAlias === `accordagents-${handle.instanceId}`).map((record) => record.machineId));
+    const onInstance = machines.filter((machine) => machine.awsInstanceId === handle.instanceId || (!machine.awsInstanceId && pinned.has(machine.id)));
+    const ids = new Set(onInstance.map((machine) => machine.id));
+    return { machines: onInstance, records: installs.filter((record) => ids.has(record.machineId)) };
   }
 
   // Compatibility entry point for older renderer callers. The new UI calls
@@ -190,7 +249,7 @@ export class CloudRunAwsService {
       if (invalidSize) throw new Error(invalidSize);
     }
     const credentials = request.blob?.trim()
-      ? parseWorkerBlob(request.blob)
+      ? withRetainedKeys(parseWorkerBlob(request.blob), await this.settings.getAwsWorkerCredentials())
       : await this.settings.getAwsWorkerCredentials();
     if (!credentials) {
       throw new Error("Connect the AWS account before starting the worker.");
@@ -435,11 +494,70 @@ export class CloudRunAwsService {
   async status(): Promise<AwsWorkerStatus> {
     const context = await this.workerContext();
     if (!context.credentials || !context.handle) return { configured: false, operation: context.operation };
+    // A settings read that fails leaves the state unknown, never "on".
+    const autoStop = await this.autoStopFor(context.credentials, context.handle).catch(() => undefined);
     try {
-      return await this.describeWorker(context.credentials, context.handle, context.operation);
+      return { ...await this.describeWorker(context.credentials, context.handle, context.operation), ...(autoStop ? { autoStop } : {}) };
     } catch (error) {
-      return { configured: true, handle: context.handle, operation: context.operation, message: errorMessage(error) };
+      return { configured: true, handle: context.handle, operation: context.operation, message: errorMessage(error), ...(autoStop ? { autoStop } : {}) };
     }
+  }
+
+  /** The stop key for a machine that runs on this app's instance, or
+   *  undefined when the machine is elsewhere or no stop key was set up. The
+   *  key only ever covers the instance's own region. */
+  async machinePowerFor(machineId: string): Promise<AwsMachinePowerConfig | undefined> {
+    const [credentials, publicSettings] = await Promise.all([this.settings.getAwsWorkerCredentials(), this.settings.getPublicSettings()]);
+    const handle = publicSettings.cloudRuns.awsHandle;
+    if (!credentials?.power || !handle) return undefined;
+    const { machines } = await this.installsOnInstance(handle);
+    if (!machines.some((machine) => machine.id === machineId)) return undefined;
+    return powerConfigFor(credentials, handle);
+  }
+
+  private async autoStopFor(credentials: AwsWorkerCredentials, handle: AwsWorkerHandleInfo): Promise<AwsWorkerAutoStop> {
+    const power = powerConfigFor(credentials, handle);
+    if (!power) return { state: "off" };
+    const keyId = power.credentials.accessKeyId;
+    const { machines, records: all } = await this.installsOnInstance(handle);
+    const records = all.filter((record) => record.installedVersion);
+    if (!records.length) return { state: "pending", detail: "No machine runs on this instance yet." };
+    const warningOf = (machineId: string) => machines.find((machine) => machine.id === machineId)?.lastHello?.idleStopWarning;
+    const taken = records.find((record) => record.power?.keyId === keyId);
+    if (taken) {
+      // The machine's own report wins: "on" must not hide that it cannot
+      // stop, and a key AWS stopped accepting needs setting up again.
+      const warning = warningOf(taken.machineId);
+      if (warning?.includes(MACHINE_STOP_KEY_REFUSED)) return { state: "failed", detail: warning };
+      return warning ? { state: "on", detail: warning } : { state: "on" };
+    }
+    const refused = records.find((record) => record.powerError?.keyId === keyId);
+    if (refused?.powerError) {
+      // The previous key is a reassurance only while the machine does not
+      // report that it cannot stop with it either.
+      const stillStops = Boolean(refused.power) && !warningOf(refused.machineId);
+      return { state: "failed", detail: refused.powerError.message, ...(stillStops ? { previousKeyActive: true } : {}) };
+    }
+    // The key is handed over by an update that waits for idle; an automatic
+    // update of this desktop version that already failed on a machine still
+    // behind is not repeated by itself, so say what does it. A machine that
+    // was busy is tried again once idle, and needs nothing.
+    const appVersion = this.appVersion;
+    const stalled = appVersion ? records.find((record) => {
+      const last = record.lastOperation;
+      return last && last.phase !== "ready" && isMachineInstallTerminalPhase(last.phase) && last.recovery?.kind !== "machine-busy"
+        && isAutoUpgradeOf(last.operationId, appVersion) && record.installedVersion !== appVersion;
+    }) : undefined;
+    if (stalled) {
+      return { state: "pending", detail: "The last update of this machine did not finish. Select Update in Settings → Machines to hand the key over." };
+    }
+    const retrying = records.find((record) => record.powerRetry?.keyId === keyId);
+    if (retrying?.powerRetry) {
+      const exhausted = (retrying.powerRetry.attempts ?? 1) >= MACHINE_POWER_MAX_ATTEMPTS;
+      return { state: "pending", detail: `The last attempt to hand the key over did not finish: ${retrying.powerRetry.message} `
+        + (exhausted ? "Select Update in Settings → Machines to try again." : "It is tried again automatically.") };
+    }
+    return { state: "pending" };
   }
 
   /** The status read with AWS's refusal left intact: a caller that must tell a
@@ -447,15 +565,21 @@ export class CloudRunAwsService {
   async probeAccess(): Promise<AwsWorkerStatus> {
     const context = await this.workerContext();
     if (!context.credentials || !context.handle) return { configured: false, operation: context.operation };
-    return this.describeWorker(context.credentials, context.handle, context.operation);
+    const status = await this.describeWorker(context.credentials, context.handle, context.operation);
+    const autoStop = await this.autoStopFor(context.credentials, context.handle).catch(() => undefined);
+    return { ...status, ...(autoStop ? { autoStop } : {}) };
   }
 
   /** Replace the saved credentials with pasted ones once they prove, read-only,
    *  that they can see the existing instance. Nothing else is touched. */
   async adoptCredentials(blob: string): Promise<void> {
-    const credentials = parseWorkerBlob(blob);
+    const credentials = withRetainedKeys(parseWorkerBlob(blob), await this.settings.getAwsWorkerCredentials());
     const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
     if (!handle) throw new Error("Connect the AWS account before updating its credentials.");
+    // The stop key only covers the region the command was run for.
+    if (credentials.power && credentials.region !== handle.region) {
+      throw new Error(`The setup command was run for ${credentials.region}, but the instance is in ${handle.region}. The pasted result was not used; run the command again with region ${handle.region}.`);
+    }
     const info = await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId);
     if (!info || info.instanceId !== handle.instanceId) {
       throw new Error(`These credentials cannot see the existing instance ${handle.instanceId} in ${handle.region}. The saved credentials were kept.`);
@@ -859,6 +983,34 @@ function knownInstanceCapacity(instanceType: string): { vCpu?: number; memoryMiB
     "t3.xlarge": { vCpu: 4, memoryMiB: 16384 }
   };
   return known[instanceType] ?? {};
+}
+
+/** A pasted result without a stop key (the account refused to make one, or
+ *  both slots were in use) keeps the one the app has: it is still valid, and
+ *  the machine may run with it. The phone's start key is made only once, so a
+ *  later result never carries it and the app keeps the one phones hold. */
+function withRetainedKeys(pasted: AwsWorkerCredentials, saved: AwsWorkerCredentials | undefined): AwsWorkerCredentials {
+  if (!saved || saved.region !== pasted.region) return pasted;
+  return {
+    ...pasted,
+    ...(!pasted.power && saved.power ? { power: saved.power } : {}),
+    ...(!pasted.wake && saved.wake ? { wake: saved.wake } : {})
+  };
+}
+
+function powerConfigFor(credentials: AwsWorkerCredentials, handle: AwsWorkerHandleInfo): AwsMachinePowerConfig | undefined {
+  if (!credentials.power || handle.region !== credentials.region) return undefined;
+  const config: AwsMachinePowerConfig = {
+    version: 1,
+    instanceId: handle.instanceId,
+    credentials: { accessKeyId: credentials.power.accessKeyId, secretAccessKey: credentials.power.secretAccessKey, region: handle.region }
+  };
+  try {
+    assertAwsMachinePowerConfig(config);
+  } catch {
+    return undefined;
+  }
+  return config;
 }
 
 function multipleWorkerError(workers: AwsWorkerInstanceInfo[]): Error {

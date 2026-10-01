@@ -123,7 +123,7 @@ test("unknown fence writes recover in the same runtime after SQLite becomes read
         fenceIdleNativeAdmissions: () => { nativeFenced = true; return () => { nativeFenced = false; }; } } }, {
       identity: async () => identity, verifyAws: async () => {}, uptimeMs: () => MACHINE_IDLE_STOP_MS + 100,
       createHostRegistry: options => new MachineHostPowerRegistry({ ...options, dir: path.join(dir, "host"), profilePath: dir }),
-      client: { close: () => {}, stopAfterDrain: async () => { stops++; return { instanceId: config.instanceId, state: "stopping" }; } }
+      client: { close: () => {}, assertCanStop: async () => {}, stopAfterDrain: async () => { stops++; return { instanceId: config.instanceId, state: "stopping" }; } }
     });
     try {
       await store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });

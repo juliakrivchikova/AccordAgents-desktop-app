@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AppSettings, AwsWorkerHandleInfo, AwsWorkerOperationSnapshot } from "../../shared/types";
+import type { MachineInstallRecord } from "../../shared/machineInstall";
 import { CloudRunAwsService } from "./cloudRunAws";
 import type { CloudRunAwsServiceOptions } from "./cloudRunAws";
 import { resolveCurrentWorkerAddress } from "./cloudRunWorkers";
@@ -29,6 +30,16 @@ class FakeSettings {
   volumeExpansion: { instanceId: string; volumeId: string; targetSizeGb: number; updatedAt: string } | undefined;
   provisioningToken: string | undefined;
   operation: AwsWorkerOperationSnapshot | undefined;
+  machines: Array<{ id: string; awsInstanceId?: string; lastHello?: { idleStopWarning?: string } }> = [];
+  installs: MachineInstallRecord[] = [];
+
+  async listMachines(): Promise<Array<{ id: string; awsInstanceId?: string; lastHello?: { idleStopWarning?: string } }>> {
+    return this.machines;
+  }
+
+  async listMachineInstalls(): Promise<MachineInstallRecord[]> {
+    return this.installs;
+  }
 
   async getAwsWorkerCredentials(): Promise<AwsWorkerCredentials | undefined> {
     return this.credentials;
@@ -1044,4 +1055,164 @@ test("adoptCredentials saves pasted credentials only after they read the existin
   assert.equal(settings.credentials?.accessKeyId, NEW_CREDS.accessKeyId);
   assert.equal(settings.handle, OLD_HANDLE);
   assert.equal(accepting.runCount, 0);
+});
+
+// ---- automatic stop key ----------------------------------------------------
+
+const POWER_HANDLE: AwsWorkerHandleInfo = { ...OLD_HANDLE, instanceId: "i-0943b28f7231ab93c" };
+const POWER_KEY = { accessKeyId: "AKIAPOWERKEY000000001", secretAccessKey: "power-secret" };
+
+function powerSettings(): FakeSettings {
+  const settings = new FakeSettings();
+  settings.credentials = { ...OLD_CREDS, power: POWER_KEY };
+  settings.handle = POWER_HANDLE;
+  settings.machines = [{ id: "cloud", awsInstanceId: POWER_HANDLE.instanceId }, { id: "desk-box" }];
+  return settings;
+}
+
+function installFor(machineId: string, extra: Partial<MachineInstallRecord> = {}): MachineInstallRecord {
+  return { machineId, target: { host: "203.0.113.9", user: "ubuntu" }, installRoot: "/r", userDataDir: "/d", serviceName: "s",
+    serviceScope: "system", installedVersion: "1.11.1", ...extra };
+}
+
+test("only the machine on this app's instance gets the stop key, scoped to the instance's region", async () => {
+  const settings = powerSettings();
+  const service = serviceWith(settings, new Map());
+  assert.deepEqual(await service.machinePowerFor("cloud"), {
+    version: 1, instanceId: POWER_HANDLE.instanceId, credentials: { ...POWER_KEY, region: "us-east-1" }
+  });
+  assert.equal(await service.machinePowerFor("desk-box"), undefined, "a machine elsewhere never gets it");
+  assert.equal(await service.machinePowerFor("missing"), undefined);
+  settings.handle = { ...POWER_HANDLE, region: "eu-west-1" };
+  assert.equal(await service.machinePowerFor("cloud"), undefined, "a key for another region cannot stop this instance");
+  settings.handle = POWER_HANDLE;
+  settings.credentials = OLD_CREDS;
+  assert.equal(await service.machinePowerFor("cloud"), undefined, "an older setup without a stop key hands nothing over");
+});
+
+test("the status says whether the machine stops itself: off, being handed over, on, or refused", async () => {
+  const settings = powerSettings();
+  const client = new FakeEc2Client({ instanceId: POWER_HANDLE.instanceId, state: "running" });
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]));
+  assert.deepEqual((await service.status()).autoStop, { state: "pending", detail: "No machine runs on this instance yet." });
+  settings.installs = [installFor("cloud")];
+  assert.deepEqual((await service.status()).autoStop, { state: "pending" }, "the machine has not taken the key yet");
+  settings.installs = [installFor("cloud", { power: { keyId: "AKIAPOWERKEY000000000", configuredAt: "t" } })];
+  assert.deepEqual((await service.status()).autoStop, { state: "pending" }, "the machine holds an older key");
+  settings.installs = [installFor("cloud", { powerError: { keyId: POWER_KEY.accessKeyId, message: "names a different AWS machine", failedAt: "t" } })];
+  assert.deepEqual((await service.status()).autoStop, { state: "failed", detail: "names a different AWS machine" });
+  settings.installs = [installFor("cloud", { power: { keyId: "AKIAPOWERKEY000000000", configuredAt: "t" },
+    powerError: { keyId: POWER_KEY.accessKeyId, message: "AWS refused the automatic-stop key.", failedAt: "t" } })];
+  assert.deepEqual((await service.status()).autoStop, { state: "failed", detail: "AWS refused the automatic-stop key.", previousKeyActive: true },
+    "a refused new key does not hide that the machine still stops with its previous one");
+  const stalledOp = (operationId: string, extra: object = {}) => ({ machineId: "cloud", operationId, kind: "upgrade" as const,
+    phase: "needs-attention" as const, message: "The desktop closed while the machine was being set up.", updatedAt: "t", completed: [], ...extra });
+  settings.installs = [installFor("cloud", { installedVersion: "1.11.1-beta.2", lastOperation: stalledOp("auto-upgrade-1.11.1-beta.6-1") })];
+  const versioned = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), { appVersion: "1.11.1-beta.6" });
+  assert.deepEqual((await versioned.status()).autoStop, { state: "pending",
+    detail: "The last update of this machine did not finish. Select Update in Settings → Machines to hand the key over." },
+    "an automatic update of this version that failed is not repeated by itself, so the way forward is named");
+  settings.installs = [installFor("cloud", { installedVersion: "1.11.1-beta.2", lastOperation: stalledOp("auto-upgrade-1.11.1-beta.3-1") })];
+  assert.deepEqual((await versioned.status()).autoStop, { state: "pending" }, "an older version's failed update does not hold this one back");
+  settings.installs = [installFor("cloud", { installedVersion: "1.11.1-beta.2",
+    lastOperation: stalledOp("auto-upgrade-1.11.1-beta.6-2", { recovery: { kind: "machine-busy" } }) })];
+  assert.deepEqual((await versioned.status()).autoStop, { state: "pending" }, "a busy machine is tried again once idle");
+  settings.installs = [installFor("cloud", { installedVersion: "1.11.1-beta.2", lastOperation: stalledOp("auto-upgrade-1.11.1-beta.6-3"),
+    powerRetry: { keyId: POWER_KEY.accessKeyId, message: "The doctor could not reach the machine.", failedAt: "t", attempts: 1 } })];
+  assert.match((await versioned.status()).autoStop?.detail ?? "", /Select Update in Settings → Machines to hand the key over/,
+    "a key held back by this version's failed update is never promised an automatic retry");
+  settings.installs = [installFor("cloud", { power: { keyId: POWER_KEY.accessKeyId, configuredAt: "t" } })];
+  assert.deepEqual((await service.status()).autoStop, { state: "on" });
+  settings.machines[0] = { ...settings.machines[0], lastHello: { idleStopWarning: "Automatic idle stop is suspended: metadata unavailable" } } as never;
+  assert.deepEqual((await service.status()).autoStop, { state: "on", detail: "Automatic idle stop is suspended: metadata unavailable" },
+    "the machine's own report is not hidden behind on");
+  settings.machines[0] = { ...settings.machines[0], lastHello: { idleStopWarning:
+    "Automatic idle stop is suspended: AWS does not accept this machine's stop key, so it stays awake (AuthFailure: AWS was not able to validate the provided access credentials)." } } as never;
+  assert.equal((await service.status()).autoStop?.state, "failed", "a key AWS stopped accepting is offered to be set up again");
+  settings.machines[0] = { id: "cloud", awsInstanceId: POWER_HANDLE.instanceId };
+  assert.deepEqual((await service.probeAccess()).autoStop, { state: "on" }, "the read-only check reports it too");
+  settings.installs = [installFor("cloud", { powerRetry: { keyId: POWER_KEY.accessKeyId, message: "AWS could not be reached.", failedAt: "t" } })];
+  assert.deepEqual((await service.status()).autoStop, { state: "pending",
+    detail: "The last attempt to hand the key over did not finish: AWS could not be reached. It is tried again automatically." });
+  settings.installs = [installFor("cloud", { powerRetry: { keyId: POWER_KEY.accessKeyId, message: "AWS could not be reached.", failedAt: "t", attempts: 3 } })];
+  assert.match((await service.status()).autoStop?.detail ?? "", /Select Update in Settings → Machines to try again\.$/, "after the last automatic try the button is named");
+  settings.installs = [installFor("desk-box", { power: { keyId: POWER_KEY.accessKeyId, configuredAt: "t" } })];
+  assert.equal((await service.status()).autoStop?.state, "pending", "a machine elsewhere does not count");
+  settings.credentials = OLD_CREDS;
+  assert.deepEqual((await service.status()).autoStop, { state: "off" });
+});
+
+test("a pasted stop key is kept with the app's key; one for another region is refused and nothing is saved", async () => {
+  const settings = powerSettings();
+  settings.credentials = OLD_CREDS;
+  const client = new FakeEc2Client({ instanceId: POWER_HANDLE.instanceId, state: "running" });
+  const withPower = { ...NEW_CREDS, power: POWER_KEY };
+  const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, client], [`${NEW_CREDS.accessKeyId}:us-east-1`, client]]));
+  await assert.rejects(service.adoptCredentials(encodeWorkerBlob({ ...withPower, region: "eu-west-1" })), /run for eu-west-1, but the instance is in us-east-1/);
+  assert.equal(settings.credentials, OLD_CREDS);
+  await service.adoptCredentials(encodeWorkerBlob(withPower));
+  assert.deepEqual(settings.credentials, withPower);
+  assert.equal(client.runCount, 0, "turning on automatic stop creates nothing");
+  // A later result without a stop key (none could be made) keeps the one the
+  // app has: it is still valid, and the machine may be running with it.
+  const later = { ...NEW_CREDS, accessKeyId: "AKIANEWWORKER0000009" };
+  const laterService = serviceWith(settings, new Map([[later.accessKeyId, client], [`${later.accessKeyId}:us-east-1`, client]]));
+  const WAKE_KEY = { accessKeyId: "AKIAWAKEKEY000000001", secretAccessKey: "wake-secret" };
+  settings.credentials = { ...settings.credentials!, wake: WAKE_KEY };
+  await laterService.adoptCredentials(encodeWorkerBlob(later));
+  assert.deepEqual(settings.credentials, { ...later, power: POWER_KEY, wake: WAKE_KEY },
+    "a later result never carries the start key phones hold, so the app keeps it");
+  assert.equal((await laterService.status()).autoStop?.state, "pending", "automatic stop does not read as off");
+});
+
+test("the setup command keeps every key still in use: the app's, the one not handed over yet, and the machine's", async () => {
+  const settings = powerSettings();
+  settings.installs = [installFor("cloud", { power: { keyId: "AKIAPOWERKEY000000000", configuredAt: "t" } })];
+  const service = serviceWith(settings, new Map());
+  const command = await service.bootstrapCommand("us-east-1");
+  assert.match(command, new RegExp(`^KEEP_WORKER_KEY=${OLD_CREDS.accessKeyId}$`, "m"));
+  assert.match(command, new RegExp(`^KEEP_POWER_KEYS='${POWER_KEY.accessKeyId} AKIAPOWERKEY000000000'$`, "m"));
+  settings.installs = [installFor("desk-box", { power: { keyId: "AKIAPOWERKEY000000009", configuredAt: "t" } })];
+  assert.match(await service.bootstrapCommand("us-east-1"), new RegExp(`^KEEP_POWER_KEYS='${POWER_KEY.accessKeyId}'$`, "m"),
+    "only a machine on this instance counts");
+  settings.credentials = { ...settings.credentials!, wake: { accessKeyId: "AKIAWAKEKEY000000001", secretAccessKey: "wake-secret" } };
+  assert.match(await service.bootstrapCommand("us-east-1"), /^KEEP_WAKE_KEY=AKIAWAKEKEY000000001$/m, "the phone's start key is never made again");
+  // A stop key a machine refused, and no machine holds, may be replaced.
+  settings.installs = [installFor("cloud", { power: { keyId: "AKIAPOWERKEY000000000", configuredAt: "t" },
+    powerError: { keyId: POWER_KEY.accessKeyId, message: "refused", failedAt: "t" } })];
+  assert.match(await service.bootstrapCommand("us-east-1"), /^KEEP_POWER_KEYS='AKIAPOWERKEY000000000'$/m,
+    "setting automatic stop up again can make a new key");
+  // Not knowing which keys are in use is not "none in use".
+  settings.listMachineInstalls = async () => { throw new Error("settings unreadable"); };
+  await assert.rejects(service.bootstrapCommand("us-east-1"), /settings unreadable/);
+});
+
+test("the phone's start key is offered for this app's instance and its region only", async () => {
+  const settings = powerSettings();
+  const service = serviceWith(settings, new Map());
+  assert.equal(await service.deviceWakePower(), undefined, "an older setup without a start key hands nothing to a phone");
+  const wake = { accessKeyId: "AKIAWAKEKEY000000001", secretAccessKey: "wake-secret" };
+  settings.credentials = { ...settings.credentials!, wake };
+  assert.deepEqual(await service.deviceWakePower(), {
+    machineId: "cloud",
+    config: { version: 1, instanceId: POWER_HANDLE.instanceId, credentials: { ...wake, region: "us-east-1" } }
+  });
+  settings.handle = { ...POWER_HANDLE, region: "eu-west-1" };
+  assert.equal(await service.deviceWakePower(), undefined, "a key for another region cannot start this instance");
+});
+
+test("a machine installed over the instance's pinned host key counts as on the instance", async () => {
+  const settings = powerSettings();
+  settings.machines = [{ id: "pinned" }];
+  settings.installs = [installFor("pinned", { target: { host: "203.0.113.9", user: "ubuntu", hostKeyAlias: `accordagents-${POWER_HANDLE.instanceId}` } })];
+  const service = serviceWith(settings, new Map());
+  assert.equal((await service.machinePowerFor("pinned"))?.instanceId, POWER_HANDLE.instanceId);
+});
+
+test("a setup command for another region leaves the instance's stop and start keys alone", async () => {
+  const settings = powerSettings();
+  const service = serviceWith(settings, new Map());
+  const elsewhere = await service.bootstrapCommand("eu-west-1");
+  assert.doesNotMatch(elsewhere, /POWER_USER=|WAKE_USER=/);
+  assert.match(await service.bootstrapCommand("us-east-1"), /POWER_USER=/);
 });
