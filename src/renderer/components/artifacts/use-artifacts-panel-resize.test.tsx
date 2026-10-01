@@ -3,7 +3,7 @@ import test from "node:test";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { CHAT_MAIN_MIN_WIDTH } from "../../lib/chat-split-sizing";
+import { ARTIFACT_PANEL_DEFAULT_WIDTH, CHAT_MAIN_MIN_WIDTH } from "../../lib/chat-split-sizing";
 import { useArtifactsPanelResize } from "./use-artifacts-panel-resize";
 
 // A container whose width the test sets, with a ResizeObserver the test fires.
@@ -30,7 +30,8 @@ function Harness(): JSX.Element {
       if (node) node.getBoundingClientRect = () => ({ width: containerWidth }) as DOMRect;
     }}>
       <div ref={resize.panelRef} data-testid="panel" style={{ width: `${resize.panelWidth}px` }}>
-        <div role="separator" tabIndex={0} aria-valuemax={resize.limits.max} onKeyDown={resize.resizeWithKeyboard} />
+        <div role="separator" tabIndex={0} aria-valuemax={resize.limits.max} onKeyDown={resize.resizeWithKeyboard}
+          onDoubleClick={resize.resetWidth} />
       </div>
     </div>
   );
@@ -65,6 +66,15 @@ test("the artifact panel reaches the container minus the main minimum and gets i
     assert.equal(separator().getAttribute("aria-valuemax"), String(1948 - CHAT_MAIN_MIN_WIDTH));
     await resizeContainer(2268);
     assert.equal(panel().style.width, `${2268 - CHAT_MAIN_MIN_WIDTH}px`);
+
+    // A reset while squeezed asks for the default width, not for the squeezed one.
+    await resizeContainer(520);
+    await act(async () => {
+      separator().dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true }));
+    });
+    assert.equal(panel().style.width, "234px");
+    await resizeContainer(2268);
+    assert.equal(panel().style.width, `${ARTIFACT_PANEL_DEFAULT_WIDTH}px`);
   } finally {
     await act(async () => { root.unmount(); });
     host.remove();

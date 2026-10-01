@@ -123,6 +123,10 @@ export function useArtifactsPanelResize(): ArtifactsPanelResize {
     limits,
     startResize,
     resizeWithKeyboard,
-    resetWidth: () => updatePanelWidth(ARTIFACT_PANEL_DEFAULT_WIDTH)
+    resetWidth: () => {
+      // The default is the request; a squeezed panel shows less until room returns.
+      requestedWidthRef.current = ARTIFACT_PANEL_DEFAULT_WIDTH;
+      applyLimits(getLimits());
+    }
   };
 }
