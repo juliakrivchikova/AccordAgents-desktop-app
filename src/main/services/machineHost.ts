@@ -49,7 +49,7 @@ import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { isMachineDurableMessage } from "../../shared/machineLink";
 import { NativeProcessUnavailableError } from "./nativeProcess";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
+import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload, type ChatChangesPayload, isSafeChatId, CHAT_CHANGES_VERSION } from "./chatChanges";
 import { machineProgressEventId } from "../../shared/machineProgress";
 import { MachineProgressSender } from "./machineProgressSender";
 import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
@@ -312,7 +312,7 @@ export class MachineHostService {
 
   constructor(
     private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady" | "applyMachineRepository">>,
-    private readonly storage: Pick<StorageService, "getConversation"> & Partial<Pick<StorageService, "deleteConversation">>,
+    private readonly storage: Pick<StorageService, "getConversation"> & Partial<Pick<StorageService, "deleteConversation" | "conversationPresence">>,
     private readonly settings: Pick<SettingsService, "importMachineSettingsSnapshot">,
     private readonly debugLogs: Pick<DebugLogService, "write">,
     private readonly options: MachineHostOptions
@@ -443,6 +443,7 @@ export class MachineHostService {
         void this.debugLogs.write("machine-host.action.dependency-unavailable", { ...dependency });
       },
       apply: (event, body) => this.applyDeviceEvent(event, body, this.eventChannel),
+      peerHoldsEveryChat: true,
       // The desktop forwards what the owner's other machines wrote in chats,
       // unchanged: accepted when its author is one of them.
       forwardedOriginKey: (originId) => {
@@ -706,7 +707,8 @@ export class MachineHostService {
       instanceStartedAt: this.instanceStartedAt,
       ...(typeof this.instanceSequence === "number" ? { instanceSequence: this.instanceSequence } : {}),
       ...((this.outboxError || this.progressErrors.size) ? { outboxError: [this.outboxError, ...this.progressErrors.values()].filter(Boolean).join("; ") } : {}),
-      ...(this.options.idleStopWarning?.() ? { idleStopWarning: this.options.idleStopWarning() } : {})
+      ...(this.options.idleStopWarning?.() ? { idleStopWarning: this.options.idleStopWarning() } : {}),
+      chatChanges: CHAT_CHANGES_VERSION
     }, to);
   }
 
@@ -777,8 +779,8 @@ export class MachineHostService {
       return "deferred";
     } else if (envelope.body.type === "machine.turn.cancel") {
       await this.options.eventStorage.nativeCommands().cancel(envelope.body.runId, conversationId, event.eventId);
-      await this.handleBody(envelope.body, true, event);
-    } else await this.handleBody(envelope.body, true, event);
+      await this.handleBody(envelope.body, event);
+    } else await this.handleBody(envelope.body, event);
     return "applied";
   }
 
@@ -804,7 +806,8 @@ export class MachineHostService {
         // only from another machine acting for a member of its own.
         return role === "machine";
       case "machine.turn.request":
-        return !peer || !body.sealedSettings;
+        // Where the member works here is the enrolling desktop's to say.
+        return !peer || (!body.sealedSettings && !body.machineRepository);
       default:
         return true;
     }
@@ -842,7 +845,7 @@ export class MachineHostService {
         this.seenMessageIds.delete(first);
       }
     }
-    await this.handleBody(payload.body, false, undefined, from);
+    await this.handleBody(payload.body, undefined, from);
   }
 
   private async openHomeFrame(ciphertext: string): Promise<unknown> {
@@ -873,7 +876,7 @@ export class MachineHostService {
     }
   }
 
-  private async handleBody(body: MachineLinkMessage, durable = false, event?: ChatEventEnvelope, replyTo = event?.originId): Promise<void> {
+  private async handleBody(body: MachineLinkMessage, event?: ChatEventEnvelope, replyTo = event?.originId): Promise<void> {
     if (this.idleFenced && body.type === "machine.turn.query") return;
     // Old, ephemeral frames cannot bypass the idle fence either. Current
     // peers use the durable inbox and retain these actions until apply.
@@ -928,7 +931,12 @@ export class MachineHostService {
       }
       case "machine.conversation.deleted": {
         // The owner deleted the chat. Nothing here may keep running against
-        // it, and nothing that arrives later may write it back.
+        // it, and nothing that arrives later may write it back. The id names
+        // the chat's directory here, so it must be a plain token.
+        if (!isSafeChatId(body.conversationId)) {
+          void this.debugLogs.write("machine-host.conversation.unsafe-id-refused", { length: String(body.conversationId).length });
+          return;
+        }
         await this.deleteReplicatedConversation(body.conversationId, body.deletedAt);
         return;
       }
@@ -1167,11 +1175,14 @@ export class MachineHostService {
   /** Adds messages a phone delivered straight to this machine. They are
    *  this machine's own from here on: the save emits them to the desktop. */
   private async applyPhoneMessages(delta: MachineConversationDeltaBody): Promise<void> {
+    // A chat whose first change has not reached this machine yet: the phone's
+    // message is held (and tried again) rather than dropped.
+    if ((await this.chatPresence(delta.conversationId))?.kind !== "chat") {
+      void this.debugLogs.write("machine-host.phone-message.unknown-chat", { conversationId: delta.conversationId });
+      throw new Error("The chat has not reached this machine yet; the phone's message waits for it.");
+    }
     await this.chat.applyReplicatedConversation(delta.conversationId, (existing) => {
-      if (!existing) {
-        void this.debugLogs.write("machine-host.phone-message.unknown-chat", { conversationId: delta.conversationId });
-        return undefined;
-      }
+      if (!existing) return undefined;
       const known = new Set(existing.messages.map((message) => message.id));
       const added = delta.messages.filter((message) => message && typeof message.id === "string" && !known.has(message.id));
       if (!added.length) return undefined;
@@ -1185,12 +1196,19 @@ export class MachineHostService {
     this.chat.onReplicatedConversationReady?.(delta.conversationId);
   }
 
+  private async chatPresence(conversationId: string, messageId?: string): Promise<{ kind: string; hasMessage: boolean } | undefined> {
+    if (this.storage.conversationPresence) return this.storage.conversationPresence(conversationId, messageId);
+    const conversation = await this.storage.getConversation(conversationId);
+    return conversation && { kind: conversation.kind, hasMessage: !messageId || conversation.messages.some((message) => message.id === messageId) };
+  }
+
   /** True once this machine holds the chat state a turn request was made
-   *  against: the chat itself, and the desktop's last change event it names. */
+   *  against: the chat itself, and the desktop's last change event it names.
+   *  A phone names no change; the message its member answers is enough. */
   private async chatReadyFor(request: MachineTurnRequestBody): Promise<boolean> {
-    const conversation = await this.storage.getConversation(request.conversationId);
-    if (!conversation || conversation.kind !== "chat") return false;
-    if (!request.chatHead || request.chatHead.originSeq < 1) return true;
+    const presence = await this.chatPresence(request.conversationId, request.messageId);
+    if (presence?.kind !== "chat") return false;
+    if (!request.chatHead || request.chatHead.originSeq < 1) return presence.hasMessage;
     const applied = await this.options.eventStorage.deviceEvents().appliedHead(request.chatHead.originId, request.chatHead.logScopeId);
     return applied >= request.chatHead.originSeq;
   }
@@ -1314,7 +1332,7 @@ export class MachineHostService {
     }
     // Admission is durable before acknowledging the event. Execution is
     // independent of the receiver queue, so Stop can arrive during the turn.
-    await this.handleBody(request, true);
+    await this.handleBody(request);
   }
 
   private getRuntimeIdentity(): Promise<NativeRuntimeIdentity> {
@@ -1388,7 +1406,7 @@ export class MachineHostService {
         const body = await this.options.eventStorage.deviceEventBlobs().hydrate(event.payload) as MachineTurnRequestBody;
         if (body.type !== "machine.turn.request" || body.runId !== command.runId) throw new Error("The retained native command is corrupt.");
         if (!this.activeTurns.has(body.runId) && !this.commandTasks.has(body.runId) && !this.isQueuedRun(body.runId)) {
-          await this.handleBody(body, true);
+          await this.handleBody(body);
         }
       }
       if (commands.length < 100) break;

@@ -711,6 +711,19 @@ export class StorageService {
     return this.readWholeConversation(id);
   }
 
+  /** Whether a chat is stored here (and holds one message), without reading
+   *  a conversation that can be thousands of messages long. */
+  async conversationPresence(id: string, messageId?: string): Promise<{ kind: Conversation["kind"]; hasMessage: boolean } | undefined> {
+    await this.init();
+    const hasMessage = messageId
+      ? `exists(select 1 from conversation_messages where conversation_id = ${sqlString(id)} and message_id = ${sqlString(messageId)})`
+      : "0";
+    const [row] = await this.queryJson<{ kind: Conversation["kind"]; hasMessage: number }>(
+      `select kind, ${hasMessage} as hasMessage from conversations where id = ${sqlString(id)} limit 1;`
+    );
+    return row ? { kind: row.kind, hasMessage: Boolean(row.hasMessage) } : undefined;
+  }
+
   // The conversation is assembled from its body plus its message rows. The old
   // full `payload_json` copy is no longer written — it duplicated everything the
   // rows already hold, and rewriting it cost megabytes on every save — so it is

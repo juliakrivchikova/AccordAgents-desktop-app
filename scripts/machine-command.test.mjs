@@ -10,16 +10,16 @@ import { machineCommandId, machineCommandTerminalId } from "../dist/main/shared/
 import { sealMobileRelayPayload } from "../dist/main/main/services/mobileRelaySealing.js";
 import { NativeProcessRegistry } from "../dist/main/main/services/nativeProcessRegistry.js";
 
-test("durable admission survives a receiver restart before the copy is complete; replay never executes twice", async () => {
+test("durable admission survives a receiver restart before the chat arrived; replay never executes twice", async () => {
   const f = await fixture();
   try {
-    await f.send({ type: "machine.conversation.sync", conversation: f.conversation });
+    f.conversations.delete("chat"); // its change events have not reached the machine yet
     const event = await f.request("queued");
     assert.equal((await f.store.nativeCommands().forRun("queued")).phase, "queued");
     assert.ok(await f.store.deviceEvents().receipt(event.eventId), "the command is admitted durably before acknowledgement");
     assert.deepEqual(f.runs, []);
     await f.restart();
-    await f.send({ type: "machine.conversation.sync.done", conversationId: "chat" });
+    f.conversations.set("chat", f.conversation);
     await f.until(() => f.terminal("queued"));
     await f.deliver(event);
     assert.deepEqual(f.runs, ["queued"]);
@@ -43,11 +43,11 @@ test("a Stop arriving before its command is retained across restart and confirms
 test("queued commands recover in their signed logical order, not random command-id order", async () => {
   const f = await fixture();
   try {
-    await f.send({ type: "machine.conversation.sync", conversation: f.conversation });
+    f.conversations.delete("chat");
     await f.request("z-first");
     await f.request("a-second");
     await f.restart();
-    await f.send({ type: "machine.conversation.sync.done", conversationId: "chat" });
+    f.conversations.set("chat", f.conversation);
     await f.until(() => f.terminal("a-second"));
     assert.deepEqual(f.runs, ["z-first", "a-second"]);
   } finally { await f.close(); }
@@ -146,7 +146,7 @@ test("a cancellation for another chat is rejected before it can reach the native
 test("Stop and recovery preserve the first queued receipt through a full disk and later redelivery", async () => {
   const f = await fixture();
   try {
-    await f.send({ type: "machine.conversation.sync", conversation: f.conversation });
+    f.conversations.delete("chat"); // queued: its chat has not arrived
     const event = await f.request("queued-receipt");
     const body = event.payload;
     await f.sql("create trigger reject_result before insert on chat_events when new.kind = 'machine.turn.finished' begin select raise(abort, 'SQLITE_FULL'); end;");
@@ -202,7 +202,9 @@ async function fixture() {
   const pairing = { version: 1, purpose: "machine-host", issuer: identity, rendezvousId: "test-room", relayUrl: "ws://127.0.0.1:1/v1/relay", relaySealKeyBase64: Buffer.alloc(32, 17).toString("base64url"), fingerprint: "test", stableRoutingId: "test-route", capabilities: [] };
   const logs = [], runs = [], imports = [], conversations = new Map();
   const registryPath = path.join(directory, "native-processes.sqlite3");
-  const conversation = { id: "chat", kind: "chat", title: "test", messages: [], metadata: { participants: [{ id: "member", homeMachineId: "home" }] }, findings: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const conversation = { id: "chat", kind: "chat", title: "test", metadata: { participants: [{ id: "member", homeMachineId: "home" }] }, findings: [],
+    messages: [{ id: "message", role: "user", content: "Run", createdAt: new Date().toISOString(), status: "done" }],
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   conversations.set("chat", conversation);
   let host;
   const create = () => new MachineHostService({
@@ -220,7 +222,7 @@ async function fixture() {
   const make = async (body, { scope = "actions", eventId } = {}) => (await log.appendLocalEvent({ conversationId: "chat", logScopeId: `device:${pairing.rendezvousId}:${JSON.stringify(["chat", scope])}`, kind: body.type, payload: body, eventId })).event;
   const makeRequest = (runId, extra = {}) => make({ type: "machine.turn.request", conversationId: "chat", participantId: "member", participant: { id: "member", homeMachineId: "home" }, runId, pendingMessageId: `pending-${runId}`, messageId: "message", requestedAt: new Date().toISOString(), ...extra }, { eventId: machineCommandId(runId) });
   return {
-    store, source, log, registryPath, logs, runs, imports, pairing, conversation, get host() { return host; },
+    store, source, log, registryPath, logs, runs, imports, pairing, conversation, conversations, get host() { return host; },
     deliver, makeRequest,
     request: async (runId, extra) => { const event = await makeRequest(runId, extra); await deliver(event); return event; },
     send: async (body, options) => { const event = await make(body, options); await deliver(event); return event; },
