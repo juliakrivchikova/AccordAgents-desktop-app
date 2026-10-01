@@ -137,9 +137,12 @@ export class DeviceEventStorage {
 
   /** Include a cursor when draining: an offline first peer or a missing ACK must
    * not starve later events. A new retry pass starts without a cursor. */
-  async listPending(channelId: string, afterRowId = 0, deviceId?: string): Promise<Array<DeviceEventDelivery & { rowId: number }>> {
+  /** `excludeKinds`: events kept for the peer but not sent to it yet. They
+   *  are left out here rather than read and skipped on every pass. */
+  async listPending(channelId: string, afterRowId = 0, deviceId?: string, options: { excludeKinds?: readonly string[] } = {}): Promise<Array<DeviceEventDelivery & { rowId: number }>> {
     await this.database.init();
     requireCursor(afterRowId);
+    const excluded = (options.excludeKinds ?? []).filter((kind) => typeof kind === "string" && kind.length > 0);
     const rows = await this.database.query<{
       rowId: number; envelope: string; deviceId: string; channelId: string; deliveredAt: string | null;
     }>(`
@@ -149,6 +152,7 @@ export class DeviceEventStorage {
         from device_event_outbox o join chat_events e on e.event_id = o.event_id
         where o.channel_id = ${quote(channelId)} and o.acknowledged_at is null and o.rowid > ${afterRowId}
           ${deviceId ? `and o.device_id = ${quote(deviceId)}` : ""}
+          ${excluded.length ? `and e.kind not in (${excluded.map(quote).join(", ")})` : ""}
         order by o.rowid limit ${DEVICE_EVENT_PAGE_COUNT}
       ), page as (
         select *, sum(length(cast(envelope as blob))) over (order by rowId) as bytes,
@@ -556,6 +560,29 @@ export class DeviceEventStorage {
       delete from device_event_outbox where channel_id = ${quote(channelId)} and device_id = ${quote(deviceId)}
       returning event_id as eventId;`));
     return rows.length;
+  }
+
+  /**
+   * A machine imported a chat copy covering every chat change up to `marks`:
+   * the rows kept for it up to them are confirmed, not sent. Only chat change
+   * scopes; the chat-action log's mark says how far it was seen, not applied.
+   */
+  async confirmCopied(channelId: string, deviceId: string, marks: ReadonlyArray<{ originId: string; logScopeId: string; originSeq: number }>, at: string): Promise<number> {
+    await this.database.init();
+    const covered = marks.filter((mark) => isChatChangesLogScope(mark.logScopeId) && typeof mark.originId === "string"
+      && Number.isSafeInteger(mark.originSeq) && mark.originSeq > 0);
+    let confirmed = 0;
+    for (let index = 0; index < covered.length; index += 100) {
+      const chunk = covered.slice(index, index + 100);
+      const rows = await this.database.query<{ eventId: string }>(durable(`
+        update device_event_outbox set acknowledged_at = ${quote(at)}, outcome = 'applied'
+        where channel_id = ${quote(channelId)} and device_id = ${quote(deviceId)} and acknowledged_at is null
+          and event_id in (${chunk.map((mark) => `select event_id from chat_events where origin_id = ${quote(mark.originId)}
+            and log_scope_id = ${quote(mark.logScopeId)} and origin_seq <= ${Math.floor(mark.originSeq)}`).join(" union all ")})
+        returning event_id as eventId;`));
+      confirmed += rows.length;
+    }
+    return confirmed;
   }
 
   /**

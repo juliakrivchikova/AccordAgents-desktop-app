@@ -628,10 +628,26 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
     if (connection.record.deviceId === identity.originId && connection.record.chatChanges === true) return;
     // The runtime being installed folds chat changes and gets every chat in
-    // the copy that follows, so from here on it is a recipient.
+    // the copy that follows, so from here on it is sent them.
     connection.record = { ...connection.record, deviceId: identity.originId, chatChanges: true };
     await this.persistCancels(connection, true);
     void this.debugLogs.write("machine-link.identity.adopted", { machineId, deviceId: identity.originId });
+    // The other machines learn it from their rosters, or keep holding their
+    // own changes for it; its first hello finds nothing new to tell them.
+    await this.refreshTrustRosters().catch((error: unknown) => {
+      void this.debugLogs.write("machine-link.trust.refresh-error", { machineId, message: errorMessage(error) });
+    });
+  }
+
+  /** After a machine imported its chat copy: what was kept for it up to the
+   *  copy's marks (the desktop's changes and other machines') is confirmed
+   *  rather than sent once its runtime can read it. */
+  async confirmChatCopy(machineId: string, marks: Array<{ originId: string; logScopeId: string; originSeq: number }>): Promise<number> {
+    const record = this.machineRecord(machineId);
+    if (!record?.deviceId) return 0;
+    const confirmed = await this.options.eventStorage.deviceEvents().confirmCopied(record.pairingKey, record.deviceId, marks, this.now().toISOString());
+    void this.debugLogs.write("machine-link.copy.confirmed", { machineId, confirmed });
+    return confirmed;
   }
 
   /**
@@ -1478,7 +1494,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
           : [],
         peerHoldsEveryChat: true,
         // Kept for a runtime that cannot fold chat changes yet; sent once it can.
-        holdsBack: (event) => event.kind === CHAT_CHANGES_EVENT_KIND && connection.record.chatChanges !== true,
+        heldKinds: () => connection.record.chatChanges === true ? [] : [CHAT_CHANGES_EVENT_KIND],
         apply: async (event, body) => {
           if (event.kind === CHAT_CHANGES_EVENT_KIND) {
             if (!this.options.applyChatChanges || !isChatChangesPayload(body)) throw new Error("Unexpected chat change event.");

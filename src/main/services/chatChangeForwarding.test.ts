@@ -32,7 +32,7 @@ function channel(self: Device, peer: Device, room: string, sent: DeviceEventPack
   forwardTo?: (event: ChatEventEnvelope) => Array<{ deviceId: string; channelId: string }>;
   forwardedOriginKey?: (originId: string) => string | undefined;
   peerHoldsEveryChat?: boolean;
-  holdsBack?: (event: ChatEventEnvelope) => boolean;
+  heldKinds?: () => readonly string[];
 } = {}): DeviceEventChannel {
   return new DeviceEventChannel({
     storage: self.storage, eventLog: self.log, channelId: room,
@@ -42,7 +42,7 @@ function channel(self: Device, peer: Device, room: string, sent: DeviceEventPack
     ...(extra.forwardTo ? { forwardTo: extra.forwardTo } : {}),
     ...(extra.forwardedOriginKey ? { forwardedOriginKey: extra.forwardedOriginKey } : {}),
     ...(extra.peerHoldsEveryChat ? { peerHoldsEveryChat: true } : {}),
-    ...(extra.holdsBack ? { holdsBack: extra.holdsBack } : {}),
+    ...(extra.heldKinds ? { heldKinds: extra.heldKinds } : {}),
     onError: () => undefined
   });
 }
@@ -190,7 +190,7 @@ test("a change kept for a machine that cannot read it yet is not sent, and goes,
     const machineA = await device(directory, "machine-a");
     const sent: DeviceEventPacket[] = [];
     let capable = false;
-    const toA = channel(desktop, machineA, "room-a", sent, { holdsBack: (event) => event.kind === CHAT_CHANGES_EVENT_KIND && !capable });
+    const toA = channel(desktop, machineA, "room-a", sent, { heldKinds: () => (capable ? [] : [CHAT_CHANGES_EVENT_KIND]) });
     open.push(toA);
     for (const text of ["one", "two"]) {
       await desktop.log.appendLocalEvent({
@@ -211,4 +211,33 @@ test("a change kept for a machine that cannot read it yet is not sent, and goes,
     for (const item of open) item.close();
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
+});
+
+test("held kinds are left out of the pending rows themselves, and what an imported copy covers is confirmed, not sent", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-chat-held-"));
+  try {
+    const desktop = await device(directory, "desktop");
+    const machineA = await device(directory, "machine-a");
+    const appended: ChatEventEnvelope[] = [];
+    for (const text of ["one", "two", "three"]) {
+      appended.push((await desktop.log.appendLocalEvent({
+        conversationId: "chat-1", logScopeId: SCOPE, kind: CHAT_CHANGES_EVENT_KIND,
+        payload: { version: 1, conversationId: "chat-1", updatedAt: "2026-10-01T10:00:00.000Z", changes: [] },
+        recipients: [{ deviceId: machineA.originId, channelId: "room-a" }]
+      })).event);
+    }
+    await desktop.log.appendLocalEvent({ conversationId: "chat-1", logScopeId: "chat:actions", kind: "choice.answered", payload: { operationId: "op" },
+      recipients: [{ deviceId: machineA.originId, channelId: "room-a" }] });
+    const pending = (options?: { excludeKinds?: readonly string[] }) =>
+      desktop.storage.deviceEvents().listPending("room-a", 0, machineA.originId, options).then((rows) => rows.map((row) => row.event.kind));
+    assert.deepEqual(await pending({ excludeKinds: [CHAT_CHANGES_EVENT_KIND] }), ["choice.answered"]);
+    assert.equal((await pending()).length, 4);
+    const confirmed = await desktop.storage.deviceEvents().confirmCopied("room-a", machineA.originId,
+      [{ originId: desktop.originId, logScopeId: SCOPE, originSeq: appended[1].originSeq }, { originId: desktop.originId, logScopeId: "chat:actions", originSeq: 99 }],
+      "2026-10-01T10:05:00.000Z");
+    assert.equal(confirmed, 2, "the two the copy covers; never the chat-action log");
+    assert.deepEqual((await desktop.storage.deviceEvents().listPending("room-a", 0, machineA.originId)).map((row) => row.event.eventId).sort(),
+      [appended[2].eventId, (await desktop.storage.deviceEvents().listPending("room-a", 0, machineA.originId))
+        .find((row) => row.event.kind === "choice.answered")!.event.eventId].sort());
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });

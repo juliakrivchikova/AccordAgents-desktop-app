@@ -16,8 +16,8 @@ interface DeviceEventMailboxOptions {
   peerDeviceId: string;
   receive(packet: DeviceEventPacket): Promise<void>;
   authenticate?(packet: DeviceEventPacket): Promise<DeviceEventPacket>;
-  /** Kept for the peer but not sent yet; see DeviceEventChannelOptions. */
-  holdsBack?(event: ChatEventEnvelope): boolean;
+  /** Kinds kept for the peer but not sent yet; see DeviceEventChannelOptions. */
+  heldKinds?(): readonly string[];
   onError(error: Error): void;
   fetch?: typeof fetch;
 }
@@ -99,13 +99,13 @@ export class DeviceEventMailbox {
     let cursor = 0;
     const pendingIds = new Set<string>();
     while (!this.lifetime.signal.aborted) {
-      const page = await storage.deviceEvents().listPending(pairing.rendezvousId, cursor, peerDeviceId);
+      const page = await storage.deviceEvents().listPending(pairing.rendezvousId, cursor, peerDeviceId,
+        { excludeKinds: this.options.heldKinds?.() ?? [] });
       if (!page.length) break;
       const probes: Extract<DeviceEventPacket, { type: "probe" }>["events"] = [];
       for (const item of page) {
         pendingIds.add(item.event.eventId);
         cursor = item.rowId;
-        if (this.options.holdsBack?.(item.event)) continue;
         if (item.deliveredAt) {
           const last = this.lastProbed.get(item.event.eventId);
           if (last === undefined || performance.now() - last >= 300_000) {

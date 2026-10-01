@@ -309,3 +309,31 @@ test("the devices the owner trusts, and the ones removed, survive a restart", as
       /pair again/, "a device removed before the restart is still removed after it");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("a removed machine is remembered until what was kept for it has been dropped, and the question's rhythm survives a restart", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-removed-"));
+  const file = path.join(dir, "settings.json");
+  const instance = (): SettingsService => {
+    const service = new SettingsService();
+    (service as any).settingsPath = file;
+    return service;
+  };
+  try {
+    await instance().saveMachine({ id: "machine-1", name: "Gone", deviceId: "device-gone", pairingKey: "room-gone", createdAt: "2026-09-06T00:00:00.000Z" });
+    await instance().saveMachine({ id: "machine-2", name: "Never introduced", deviceId: "", pairingKey: "room-new", createdAt: "2026-09-06T00:00:00.000Z" });
+    await instance().removeMachine("machine-1");
+    await instance().removeMachine("machine-2");
+    // A fresh start still knows what is left to drop, and only for a machine that had an identity.
+    assert.deepEqual(await instance().listRemovedMachineOutboxes(), [{ pairingKey: "room-gone", deviceId: "device-gone" }]);
+    // So does the time the User was last asked about unused machines, through an unrelated save too.
+    await instance().saveMachineInactivityCheckAt("2026-10-01T12:00:00.000Z");
+    await instance().saveMachine({ id: "machine-3", name: "Other", deviceId: "device-3", pairingKey: "room-3", createdAt: "2026-09-06T00:00:00.000Z" });
+    assert.equal(await instance().getMachineInactivityCheckAt(), "2026-10-01T12:00:00.000Z");
+    assert.equal(JSON.stringify((await instance().exportMachineSettingsSnapshot()).settingsJson).includes("room-gone"), false,
+      "not part of what machines are sent");
+    await instance().clearRemovedMachineOutbox("device-gone");
+    assert.deepEqual(await instance().listRemovedMachineOutboxes(), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

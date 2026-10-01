@@ -195,6 +195,9 @@ interface StoredSettings {
   machineDeviceRevocations?: Record<string, string>;
   /** When this desktop last asked about machines that stopped being used. */
   machineInactivityCheckAt?: string;
+  /** Removed machines whose kept chat changes may not be dropped yet (the
+   *  app stopped in between); dropped at the next start. */
+  removedMachineOutboxes?: Array<{ pairingKey: string; deviceId: string }>;
 }
 
 
@@ -2531,6 +2534,21 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  /** Removed machines whose kept chat changes still have to be dropped. */
+  async listRemovedMachineOutboxes(): Promise<Array<{ pairingKey: string; deviceId: string }>> {
+    const entries = (await this.readStored()).removedMachineOutboxes;
+    return Array.isArray(entries)
+      ? entries.filter((entry) => typeof entry?.pairingKey === "string" && typeof entry?.deviceId === "string" && entry.deviceId.length > 0)
+      : [];
+  }
+
+  async clearRemovedMachineOutbox(deviceId: string): Promise<void> {
+    const stored = await this.readStored();
+    const entries = (stored.removedMachineOutboxes ?? []).filter((entry) => entry.deviceId !== deviceId);
+    stored.removedMachineOutboxes = entries.length ? entries : undefined;
+    await this.writeStored(stored);
+  }
+
   async getMachineInactivityCheckAt(): Promise<string | undefined> {
     return (await this.readStored()).machineInactivityCheckAt;
   }
@@ -2892,7 +2910,14 @@ export class SettingsService {
       revokedMachinePairingKeys: Array.isArray(settings.revokedMachinePairingKeys)
         ? [...new Set(settings.revokedMachinePairingKeys.filter(key => typeof key === "string" && key))] : undefined,
       machineDeviceRevocations: settings.machineDeviceRevocations && typeof settings.machineDeviceRevocations === "object"
-        ? { ...settings.machineDeviceRevocations } : undefined
+        ? { ...settings.machineDeviceRevocations } : undefined,
+      // Read back too: dropped here, the 10-day rhythm of the question about
+      // unused machines restarted with every launch.
+      machineInactivityCheckAt: typeof settings.machineInactivityCheckAt === "string" ? settings.machineInactivityCheckAt : undefined,
+      removedMachineOutboxes: Array.isArray(settings.removedMachineOutboxes)
+        ? settings.removedMachineOutboxes.filter((entry) => typeof entry?.pairingKey === "string" && typeof entry?.deviceId === "string" && entry.deviceId)
+          .map((entry) => ({ pairingKey: entry.pairingKey, deviceId: entry.deviceId }))
+        : undefined
     };
   }
 
@@ -3366,6 +3391,14 @@ export class SettingsService {
     const stored = await this.readStored();
     const removed = (stored.machines ?? []).find((machine) => machine.id === id);
     stored.machines = (stored.machines ?? []).filter((machine) => machine.id !== id);
+    // What was kept for it is dropped after this write; should the app stop in
+    // between, the next start finishes it.
+    if (removed?.deviceId) {
+      stored.removedMachineOutboxes = [
+        ...(stored.removedMachineOutboxes ?? []).filter((entry) => entry.deviceId !== removed.deviceId),
+        { pairingKey: removed.pairingKey, deviceId: removed.deviceId }
+      ].slice(-50);
+    }
     // A removed machine must not leave this desktop's way into it behind.
     const installs = (stored.machineInstalls ?? []).filter((record) => record.machineId !== id);
     stored.machineInstalls = installs.length ? installs : undefined;
@@ -3562,6 +3595,7 @@ export class SettingsService {
       revokedMachinePairingKeys: _revokedMachinePairingKeys,
       machineDeviceRevocations: _machineDeviceRevocations,
       machineInactivityCheckAt: _machineInactivityCheckAt,
+      removedMachineOutboxes: _removedMachineOutboxes,
       lastRepoPath: _lastRepoPath,
       ...shareable
     } = stored;
@@ -3627,6 +3661,8 @@ export class SettingsService {
       machinePairingBindings: stored.machinePairingBindings,
       revokedMachinePairingKeys: stored.revokedMachinePairingKeys,
       machineDeviceRevocations: stored.machineDeviceRevocations,
+      machineInactivityCheckAt: stored.machineInactivityCheckAt,
+      removedMachineOutboxes: stored.removedMachineOutboxes,
       lastRepoPath: stored.lastRepoPath
     };
     // One atomic settings write replaces both configuration and environment.

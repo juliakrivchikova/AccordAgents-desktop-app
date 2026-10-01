@@ -920,3 +920,39 @@ test("trust changes queue while a known machine is offline and outbox failures r
     link.close();
   }
 });
+
+test("a machine's capability recorded at its setup reaches the other machines' rosters", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { createChatEventDeviceIdentity } = await import("../dist/main/main/services/chatEventLog.js");
+  const upgraded = createChatEventDeviceIdentity(new Date().toISOString());
+  const pairingA = { ...machinePairing("ws://127.0.0.1:1/v1/relay"), rendezvousId: "rv-capability-a-" + Date.now() };
+  const pairingB = { ...machinePairing("ws://127.0.0.1:1/v1/relay"), rendezvousId: "rv-capability-b-" + Date.now() };
+  const createdAt = new Date().toISOString();
+  const records = [
+    { id: "cap-a", name: "A", deviceId: MACHINE_ID, pairingKey: pairingA.rendezvousId, chatChanges: true, createdAt,
+      lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } },
+    // B still runs a runtime from before chat changes; its upgrade is under way.
+    { id: "cap-b", name: "B", deviceId: upgraded.originId, pairingKey: pairingB.rendezvousId, createdAt,
+      lastHello: { publicKeyDerBase64: upgraded.publicKeyDerBase64 } }
+  ];
+  const link = new MachineLinkService({
+    listMachines: async () => records,
+    getMachinePairing: async (key) => (key === pairingA.rendezvousId ? pairingA : pairingB),
+    saveMachine: async (next) => { Object.assign(records.find((record) => record.id === next.id), next); return records; }
+  }, { write: async () => undefined }, {
+    ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 60_000, trustedDevices: async () => []
+  });
+  const rosters = async () => (await desktopEvents.eventStorage.deviceEvents().listPending(pairingA.rendezvousId))
+    .filter((row) => row.event.kind === "machine.trust.roster");
+  try {
+    await link.start();
+    const before = (await rosters()).length;
+    await link.adoptMachineIdentity("cap-b", { originId: upgraded.originId, publicKeyDerBase64: upgraded.publicKeyDerBase64 });
+    const rows = await rosters();
+    assert.ok(rows.length > before, "machine A is told at once");
+    const latest = await desktopEvents.eventStorage.deviceEventBlobs().hydrate(rows[rows.length - 1].event.payload);
+    assert.equal(latest.roster.peers.find((peer) => peer.deviceId === upgraded.originId)?.chatChanges, true);
+  } finally {
+    link.close();
+  }
+});

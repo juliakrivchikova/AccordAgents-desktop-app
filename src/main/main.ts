@@ -454,17 +454,15 @@ async function removeMachine(id: string): Promise<MachineListResult> {
   if (record?.deviceId) {
     const deviceId = record.deviceId;
     const forget = async (pass: string): Promise<void> => {
-      try {
-        await chatService.settleChatSaves();
-        const forgotten = await storageService.deviceEvents().forgetRecipient(record.pairingKey, deviceId);
-        const forwarded = await storageService.deviceEvents().forgetOrigin(deviceId);
-        void debugLogService.write("machine.remove.forgotten", { machineId: id, pass, events: forgotten, forwarded });
-      } catch (error) {
-        void debugLogService.write("machine.remove.forget-error", { machineId: id, pass, message: error instanceof Error ? error.message : String(error) });
-      }
+      await chatService.settleChatSaves();
+      await forgetRemovedMachineOutbox({ pairingKey: record.pairingKey, deviceId }, id, pass);
     };
-    await forget("now");
-    setTimeout(() => { void forget("later"); }, 10_000).unref?.();
+    // A failure here is logged; settings keeps the removal, so the next start
+    // drops what is left.
+    await forget("now").catch(() => undefined);
+    setTimeout(() => {
+      void forget("later").then(() => settingsService.clearRemovedMachineOutbox(deviceId)).catch(() => undefined);
+    }, 10_000).unref?.();
   }
   // The other machines drop it from their rosters, and what they kept for it.
   await machineLinkService?.refreshTrustRosters().catch((error: unknown) => {
@@ -473,6 +471,20 @@ async function removeMachine(id: string): Promise<MachineListResult> {
   const result = await machineListResult();
   sendToMainWindow("machines:updated", result);
   return result;
+}
+
+/** Drops what this desktop kept for a removed machine, and stops offering the
+ *  machines that remain what it wrote. Errors are logged; the next start tries
+ *  again from the record settings keeps of the removal. */
+async function forgetRemovedMachineOutbox(outbox: { pairingKey: string; deviceId: string }, machineId: string, pass: string): Promise<void> {
+  try {
+    const forgotten = await storageService.deviceEvents().forgetRecipient(outbox.pairingKey, outbox.deviceId);
+    const forwarded = await storageService.deviceEvents().forgetOrigin(outbox.deviceId);
+    void debugLogService.write("machine.remove.forgotten", { machineId, pass, events: forgotten, forwarded });
+  } catch (error) {
+    void debugLogService.write("machine.remove.forget-error", { machineId, pass, message: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
 }
 
 async function createMachine(request: CreateMachineRequest, awsInstanceId?: string): Promise<CreateMachineResult> {
@@ -538,6 +550,7 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
     adoptMachineIdentity: (machineId, identity) => requireMachineLink().adoptMachineIdentity(machineId, identity),
     settleChatSaves: () => chatService.settleChatSaves(),
     shareAfterCopy: (machineId, marks) => requireMachineLink().shareChatChangesAfterCopy(machineId, marks),
+    confirmCopied: (machineId, marks) => requireMachineLink().confirmChatCopy(machineId, marks),
     attachmentsDir: path.join(app.getPath("userData"), "chats"),
     tempDir: app.getPath("temp")
   }),
@@ -3470,11 +3483,28 @@ void app.whenReady().then(async () => {
     // Every chat goes to every enrolled machine, as one change event per save.
     // The machines are read before any chat is saved, so a save made while
     // they are still connecting is addressed to them too.
-    await machineLinkService.loadMachines().catch((error: unknown) => {
-      // The link reads them again when it starts; the transport is installed
-      // either way, so no save goes unrecorded.
-      void debugLogService.write("machine-link.load-error", { message: error instanceof Error ? error.message : String(error) });
-    });
+    // Until they are read, a save has no machine to go to and what it changed
+    // never reaches them; a passing failure to read is tried again first.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await machineLinkService.loadMachines();
+        break;
+      } catch (error) {
+        void debugLogService.write("machine-link.load-error", { attempt, message: error instanceof Error ? error.message : String(error) });
+        if (attempt >= 3) break;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    // A removal the app stopped in the middle of: drop what was kept for that
+    // machine now, unless the same machine has since been enrolled again.
+    const enrolledDevices = new Set((await settingsService.listMachines()).map((machine) => machine.deviceId).filter(Boolean));
+    for (const outbox of await settingsService.listRemovedMachineOutboxes()) {
+      if (!enrolledDevices.has(outbox.deviceId)) {
+        const done = await forgetRemovedMachineOutbox(outbox, "", "start").then(() => true, () => false);
+        if (!done) continue;
+      }
+      await settingsService.clearRemovedMachineOutbox(outbox.deviceId);
+    }
     chatService.setChatChangeTransport(createChatChangeTransport({
       role: "desktop",
       storage: storageService,

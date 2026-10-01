@@ -315,7 +315,7 @@ export class MachinePeerFabric {
       peerHoldsEveryChat: peer.role === "machine",
       // Another machine whose runtime cannot fold chat changes yet keeps them
       // queued here until the roster says it can.
-      holdsBack: (event) => peer.role === "machine" && peer.chatChanges !== true && event.kind === CHAT_CHANGES_EVENT_KIND,
+      heldKinds: () => peer.role === "machine" && peer.chatChanges !== true ? [CHAT_CHANGES_EVENT_KIND] : [],
       send,
       apply: (event, payload) => {
         if (this.connections.get(peer.deviceId)?.peer !== peer) throw new Error("Machine peer authorization changed.");

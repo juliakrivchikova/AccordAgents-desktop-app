@@ -135,6 +135,9 @@ export interface MachineChatCopyProvider {
     attachmentsDir?: string;
     summary: { conversations: number; messages: number; bytes: number };
     cleanup(): Promise<void>;
+    /** Called once the machine has imported the copy: what it covers need
+     *  not be sent to the machine as well. */
+    imported?(): Promise<void>;
   }>;
 }
 
@@ -749,6 +752,10 @@ export class MachineInstallerService {
             if (!imported.ok) throw new Error("The machine did not confirm the chat copy.");
             this.options.logger?.("machines.install.chat-copy", {
               machineId: record.machineId, exported: copy.summary, imported
+            });
+            await copy.imported?.().catch((error: unknown) => {
+              // Only a saving: what the copy covers is otherwise sent and confirmed unapplied.
+              this.options.logger?.("machines.install.chat-copy-confirm-error", { machineId: record.machineId, message: commandFailureDetail(error) });
             });
           } finally {
             await copy.cleanup().catch(() => undefined);
