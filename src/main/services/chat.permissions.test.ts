@@ -11749,6 +11749,7 @@ function testService(options: {
     chatCustomAvatars: [],
     roundLimitDefault: 1,
     betaUpdates: false,
+    crashReports: true,
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
     chatAutoWatchWakeLimit: options.settings?.chatAutoWatchWakeLimit
       ?? CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT,

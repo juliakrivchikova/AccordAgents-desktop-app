@@ -76,6 +76,7 @@ function settingsServiceWith(
     chatCustomAvatars: [],
     roundLimitDefault: stored.roundLimitDefault,
     betaUpdates: service.normalizeBetaUpdates(stored.betaUpdates),
+    crashReports: true,
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,
     chatAutoWatchWakeLimit: service.normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
     chatParticipantRequestMaxDepth: stored.chatParticipantRequestMaxDepth,

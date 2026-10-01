@@ -380,6 +380,7 @@ function settings(): AppSettings {
   return {
     roundLimitDefault: 2,
     betaUpdates: false,
+    crashReports: true,
     cliAgentRunTimeoutMs: 86_400_000,
     chatParticipantRequestMaxDepth: 2,
     chatParticipantRequestPromptMaxChars: 50_000,

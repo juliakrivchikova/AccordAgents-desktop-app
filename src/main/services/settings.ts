@@ -110,6 +110,7 @@ import {
 import { CLI_PROVIDER_SETUP, preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
 import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
+import { readCrashReportsChoice, writeCrashReportsChoice } from "./crashReportPreferences";
 
 type StoredProviderSettings = ProviderSettings & {
   encryptedApiKey?: string;
@@ -1811,6 +1812,7 @@ export class SettingsService {
     return {
       roundLimitDefault: stored.roundLimitDefault,
       betaUpdates: this.normalizeBetaUpdates(stored.betaUpdates),
+      crashReports: readCrashReportsChoice(userDataPath()),
       cliAgentRunTimeoutMs: this.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: this.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
       chatParticipantRequestPromptMaxChars: this.normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),
@@ -2556,6 +2558,13 @@ export class SettingsService {
     const stored = await this.readStored();
     stored.betaUpdates = this.normalizeBetaUpdates(enabled);
     await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
+  /** Kept in a marker file next to settings.json, not in it; see
+   *  CRASH_REPORTS_OFF_MARKER. */
+  async setCrashReports(enabled: boolean): Promise<AppSettings> {
+    writeCrashReportsChoice(userDataPath(), enabled);
     return this.getPublicSettings();
   }
 

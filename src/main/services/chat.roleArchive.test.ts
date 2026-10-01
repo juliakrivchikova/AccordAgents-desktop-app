@@ -30,6 +30,7 @@ function chatServiceWithRoles(roles: ChatRoleConfig[]) {
       return {
         roundLimitDefault: 1,
         betaUpdates: false,
+        crashReports: true,
         cliAgentRunTimeoutMs: 1,
         chatAutoWatchWakeLimit: CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT,
         chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,

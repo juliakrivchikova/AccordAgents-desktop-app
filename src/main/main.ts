@@ -165,6 +165,8 @@ import {
 import { AppSkillsService } from "./services/appSkills";
 import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
+import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, startCrashReporting, stopCrashReporting } from "./services/crashReporting";
+import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
 import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
 import { isMachineAutoUpgradeOperation } from "../shared/machineInstall";
@@ -215,6 +217,22 @@ if (userDataDirOverride) {
   app.setPath("userData", path.resolve(userDataDirOverride));
 }
 
+// Once the profile directory is final and before the app is ready: the SDK
+// registers the scheme the window reports through and starts the native
+// crash handler, and neither can happen later.
+const crashReportingStart = readCrashReportsEnabled(app.getPath("userData"))
+  ? startCrashReporting(loadOrCreateCrashReportInstallId(app.getPath("userData")))
+  : discardCrashReportDataAtLaunch();
+
+function discardCrashReportDataAtLaunch(): { active: false; error?: string } {
+  try {
+    discardCrashReportData(app.getPath("userData"));
+    return { active: false };
+  } catch (error) {
+    return { active: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 const gitService = new GitService();
 const settingsService = new SettingsService();
 const agentEnvironmentService = new AgentEnvironmentService(settingsService);
@@ -229,6 +247,7 @@ const chatSearchService = new ChatSearchService(storageService, debugLogService)
 const localFileOpenerService = new LocalFileOpenerService(storageService, settingsService);
 const providerRunner = new ProviderRunner();
 setCommandDebugLogger(debugLogService);
+void debugLogService.write("crash-reports.start", { ...crashReportingStart });
 
 function runtimeErrorDetails(error: unknown): { message: string; stack?: string } {
   if (error instanceof Error) {
@@ -858,6 +877,7 @@ function createWindow(): void {
     } : {}),
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
+      additionalArguments: crashReportingActive() ? [CRASH_REPORTS_ACTIVE_ARG] : [],
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -2397,6 +2417,14 @@ function registerIpc(): void {
   ipcMain.handle("settings:set-repo-file-open-preference", (_event, action: unknown) => localFileOpenerService.setOpenPreference(action));
   ipcMain.handle("settings:set-beta-updates", (_event, enabled: boolean) => {
     return settingsService.setBetaUpdates(enabled);
+  });
+  ipcMain.handle("settings:set-crash-reports", async (_event, enabled: unknown) => {
+    // Off stops first, so a failed write cannot leave reports running.
+    if (enabled === false) {
+      await stopCrashReporting(app.getPath("userData"));
+      void debugLogService.write("crash-reports.stopped", {});
+    }
+    return settingsService.setCrashReports(enabled !== false);
   });
   ipcMain.handle("settings:set-cli-agent-run-timeout", async (_event, timeoutMs: number) => {
     const next = await settingsService.setCliAgentRunTimeoutMs(timeoutMs);

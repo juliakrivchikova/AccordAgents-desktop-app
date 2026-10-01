@@ -101,6 +101,9 @@ import type {
   UserSkillSearchRequest
 } from "../shared/types";
 
+// Must match the argument main.ts passes to the window.
+const CRASH_REPORTS_ACTIVE_ARG = "--accordagents-crash-reports=on";
+
 const bridge: AppBridge = {
   getAppVersion: () => ipcRenderer.invoke("app:get-version"),
   openExternal: (url: string) => ipcRenderer.invoke("app:open-external", url),
@@ -109,6 +112,8 @@ const bridge: AppBridge = {
   openLocalFile: (request: OpenLocalFileRequest) => ipcRenderer.invoke("app:open-local-file", request),
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => ipcRenderer.invoke("settings:set-repo-file-open-preference", action),
   setBetaUpdates: (enabled: boolean) => ipcRenderer.invoke("settings:set-beta-updates", enabled),
+  setCrashReports: (enabled: boolean) => ipcRenderer.invoke("settings:set-crash-reports", enabled),
+  crashReportsActive: process.argv.includes(CRASH_REPORTS_ACTIVE_ARG),
   setCliAgentRunTimeoutMs: (timeoutMs: number) => ipcRenderer.invoke("settings:set-cli-agent-run-timeout", timeoutMs),
   setChatParticipantRequestMaxDepth: (maxDepth: number) =>
     ipcRenderer.invoke("settings:set-chat-participant-request-max-depth", maxDepth),

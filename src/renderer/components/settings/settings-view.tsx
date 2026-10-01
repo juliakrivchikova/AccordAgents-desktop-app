@@ -48,6 +48,7 @@ export function SettingsView(props: {
   deleteCliProviderHost: (id: string) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
+  setCrashReports: (enabled: boolean) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
   setChatParticipantRequestPromptMaxChars: (maxChars: number) => Promise<void>;
@@ -151,6 +152,7 @@ export function SettingsView(props: {
             assistantProviderKind={props.settings.assistantProviderKind}
             repoFileOpenAction={props.settings.repoFileOpenAction}
             betaUpdates={props.settings.betaUpdates}
+            crashReports={props.settings.crashReports}
             cliAgentRunTimeoutMs={props.settings.cliAgentRunTimeoutMs}
             chatParticipantRequestMaxDepth={props.settings.chatParticipantRequestMaxDepth}
             chatParticipantRequestPromptMaxChars={props.settings.chatParticipantRequestPromptMaxChars}
@@ -161,6 +163,7 @@ export function SettingsView(props: {
             setAssistantProviderKind={props.setAssistantProviderKind}
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}
             setBetaUpdates={props.setBetaUpdates}
+            setCrashReports={props.setCrashReports}
             setCliAgentRunTimeoutMs={props.setCliAgentRunTimeoutMs}
             setChatParticipantRequestMaxDepth={props.setChatParticipantRequestMaxDepth}
             setChatParticipantRequestPromptMaxChars={props.setChatParticipantRequestPromptMaxChars}
