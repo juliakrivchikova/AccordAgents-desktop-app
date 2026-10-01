@@ -102,7 +102,8 @@ The **outbox** persists every event before the first send (Electron: SQLite; PWA
 ### Implemented delivery foundation, 2026-09-06
 
 `DeviceEventChannel` now carries machine conversation copies, deltas, copy
-boundaries, back deltas, terminal outcomes and terminal acknowledgements. Their
+boundaries, back deltas (retired 2026-10-01 for chat change events, below),
+terminal outcomes and terminal acknowledgements. Their
 signed envelopes and recipient outbox rows commit together in local SQLite with
 the accepted clock floor before either live-room or sealed-mailbox transmission.
 An event keeps its identity and ordering on retry; the receiver stores ingress
@@ -157,8 +158,7 @@ below), general conflict projections and superseded-revision navigation,
 pressure UI and history/blob garbage collection outside chat changes remain. Draft-state events are refolded in total order; revision storage binds
 signatures to immutable revision identities and content hashes.
 The retained history and blob fragments currently stay in local SQLite after
-ACK for origin repair. Replication inventory and partial-copy barriers also
-survive machine restart. No relay deployment is needed for these changes.
+ACK for origin repair. No relay deployment is needed for these changes.
 
 ### Chat change events: every chat on every machine, 2026-10-01
 
@@ -181,11 +181,19 @@ plus one direct copy at setup (below).
   being sent again.
 - **Who may change what.** A message's content and status come only from its
   author: the device it was typed on, or the member's home machine for that
-  member's replies. Reactions come from anyone and merge; a removal is a union.
-  A chat's shared fields (title, members, project, archived, app-tool grants)
-  come only from the desktop. Changes from anyone else are ignored and logged.
-- **Recipients.** The desktop addresses every enrolled machine, online or not.
-  A machine addresses the desktop and every machine in its trust roster. The
+  member's replies. A member's message is added only by its home machine or by
+  the desktop that dispatches it; a message is removed only by the desktop or
+  by the device that may change it. Reactions come from anyone and merge; a
+  removal is a union. A chat's shared fields (title, members, project,
+  archived, app-tool grants) come only from the desktop, and so does a new
+  chat: every chat starts on the desktop. Changes from anyone else are ignored
+  and logged. A chat id from another device must be a plain token, because it
+  names a directory on every device.
+- **Recipients.** The desktop addresses every enrolled machine, online or not,
+  whose runtime folds chat changes (it says so in its hello, and setup records
+  it). The list is read from the stored machines before any chat is saved, so
+  a save made while machines are still connecting reaches them too. A machine
+  addresses the desktop and every machine in its trust roster. The
   desktop also forwards each change a machine wrote to every other machine,
   unchanged and signed by its author; a machine accepts such a forward only
   when the author is one of the owner's machines. A missing change can be
@@ -193,7 +201,10 @@ plus one direct copy at setup (below).
   the others back.
 - **Turns.** A turn request names the newest chat change the machine must have
   applied first. The machine waits for it, and fails the turn honestly after
-  10 minutes instead of running on stale messages.
+  10 minutes instead of running on stale messages. A phone's request names no
+  change; the machine waits for the message the turn answers. A machine whose
+  runtime cannot fold chat changes yet is sent no turn: the turn fails, saying
+  that the machine is updated the next time it is connected and idle.
 - **First copy.** At setup, and at the first upgrade of a machine that never
   had one, the desktop copies every chat over the setup SSH connection while
   the machine's runtime is stopped: chats with their shared state, artifacts,
@@ -203,19 +214,29 @@ plus one direct copy at setup (below).
   author) are read; then the chats are exported. The machine continues from the
   marks; a change the copy already contains is confirmed when it arrives
   without being applied again. Changes other machines wrote that the desktop
-  holds beyond the marks are shared with the new machine as events.
+  holds beyond the marks are shared with the new machine as events. The copy
+  says which device wrote each message, so a machine keeps what it wrote
+  itself (its members' replies, a phone's messages typed into it) and the
+  reactions its members made; a member that watches a chat from the machine
+  starts caught up rather than answering what was said before the copy.
 - **Cleanup.** A chat change every recipient has confirmed (and this device
   applied, if it came from elsewhere) is forgotten after a day; the newest
   event of each chat and author stays, because the next one continues its
   sequence. A machine that never confirms keeps its share waiting: once every
   10 days the User is asked about each machine inactive for 10 days or more,
-  and "Remove" takes it out of the app and drops what was kept for it.
+  and "Remove" takes it out of the app, drops what was kept for it, and stops
+  offering the other machines what it wrote (they no longer trust its
+  signature). A machine that connects while the question is open is in use,
+  and the question is withdrawn.
 - **Retired.** `machine.conversation.sync`, `.delta` from the desktop,
-  `.sync.done`, `.resync` and `.backdelta` are no longer sent; one that still
-  arrives from an older runtime is logged and ignored. A phone that talks to a
-  machine while the desktop is away still sends its message as a `.delta`, and
-  receives the machine's chat changes (shared in the machine's room) to show
-  its members' messages and choices.
+  `.sync.done` and `.resync` are no longer sent; one that still arrives from an
+  older peer is logged and ignored. A `.backdelta` from a runtime that has not
+  been updated (or one it queued before its update) is stored as before.
+- **Phone.** A phone that talks to a machine while the desktop is away still
+  sends its message as a `.delta`; a machine that does not hold that chat yet
+  keeps the message (and the turn behind it) until the chat arrives. The phone
+  receives the machine's own chat changes (shared in the machine's room) to
+  show its members' messages and choices, starting from the first one it sees.
 
 ## 5. Channel and repair
 
