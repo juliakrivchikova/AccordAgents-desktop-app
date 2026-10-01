@@ -16,6 +16,8 @@ interface DeviceEventMailboxOptions {
   peerDeviceId: string;
   receive(packet: DeviceEventPacket): Promise<void>;
   authenticate?(packet: DeviceEventPacket): Promise<DeviceEventPacket>;
+  /** Kept for the peer but not sent yet; see DeviceEventChannelOptions. */
+  holdsBack?(event: ChatEventEnvelope): boolean;
   onError(error: Error): void;
   fetch?: typeof fetch;
 }
@@ -103,6 +105,7 @@ export class DeviceEventMailbox {
       for (const item of page) {
         pendingIds.add(item.event.eventId);
         cursor = item.rowId;
+        if (this.options.holdsBack?.(item.event)) continue;
         if (item.deliveredAt) {
           const last = this.lastProbed.get(item.event.eventId);
           if (last === undefined || performance.now() - last >= 300_000) {

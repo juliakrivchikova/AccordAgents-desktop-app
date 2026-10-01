@@ -32,6 +32,7 @@ import type { RelayTunnelClient } from "./relayTunnelClient";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
 import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
 import type { StorageService } from "./storage";
+import { CHAT_CHANGES_EVENT_KIND } from "./chatChanges";
 
 export interface MachinePeerFabricOptions {
   selfDeviceId: string;
@@ -312,6 +313,9 @@ export class MachinePeerFabric {
       // Another machine holds every chat too; a phone or a second desktop
       // is served only what was addressed to it.
       peerHoldsEveryChat: peer.role === "machine",
+      // Another machine whose runtime cannot fold chat changes yet keeps them
+      // queued here until the roster says it can.
+      holdsBack: (event) => peer.role === "machine" && peer.chatChanges !== true && event.kind === CHAT_CHANGES_EVENT_KIND,
       send,
       apply: (event, payload) => {
         if (this.connections.get(peer.deviceId)?.peer !== peer) throw new Error("Machine peer authorization changed.");

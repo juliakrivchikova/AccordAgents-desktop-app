@@ -430,26 +430,42 @@ function machineInactivityQuestions(): MachineInactivityQuestion[] {
 async function removeMachine(id: string): Promise<MachineListResult> {
   const record = (await settingsService.listMachines()).find((machine) => machine.id === id);
   await machineLinkService?.disconnectMachine(id);
-  // Every device that was handed this machine's power key loses the handoff
-  // with the machine; the key itself still needs rotating, and the outcome
-  // is written to the debug log rather than lost.
-  for (const outcome of await machinePowerHandoffService.revokeForMachine(id, "machine-removed")) {
-    void debugLogService.write("machine.power.handoff.revoked", {
-      handoffId: outcome.handoffId, keyRotationRequired: outcome.keyRotationRequired, detail: outcome.detail
-    });
+  try {
+    // Every device that was handed this machine's power key loses the handoff
+    // with the machine; the key itself still needs rotating, and the outcome
+    // is written to the debug log rather than lost.
+    for (const outcome of await machinePowerHandoffService.revokeForMachine(id, "machine-removed")) {
+      void debugLogService.write("machine.power.handoff.revoked", {
+        handoffId: outcome.handoffId, keyRotationRequired: outcome.keyRotationRequired, detail: outcome.detail
+      });
+    }
+    await settingsService.removeMachine(id);
+  } catch (error) {
+    // Not removed: it stays a machine of this desktop, connected again, and
+    // nothing kept for it is dropped.
+    if (record) await machineLinkService?.connectMachine(record).catch(() => undefined);
+    throw error;
   }
+  await machineLinkService?.forgetMachine(id);
   // What was kept for it until it confirmed is no longer kept, and what it
-  // wrote is no longer offered to the machines that remain.
+  // wrote is no longer offered to the machines that remain. Saves that chose
+  // it as a recipient before it was forgotten are waited for, and a second
+  // pass catches a forward or a repair that was already under way.
   if (record?.deviceId) {
-    const forget = (operation: Promise<number>): Promise<number> => operation.catch((error: unknown) => {
-      void debugLogService.write("machine.remove.forget-error", { machineId: id, message: error instanceof Error ? error.message : String(error) });
-      return 0;
-    });
-    const forgotten = await forget(storageService.deviceEvents().forgetRecipient(record.pairingKey, record.deviceId));
-    const forwarded = await forget(storageService.deviceEvents().forgetOrigin(record.deviceId));
-    void debugLogService.write("machine.remove.forgotten", { machineId: id, events: forgotten, forwarded });
+    const deviceId = record.deviceId;
+    const forget = async (pass: string): Promise<void> => {
+      try {
+        await chatService.settleChatSaves();
+        const forgotten = await storageService.deviceEvents().forgetRecipient(record.pairingKey, deviceId);
+        const forwarded = await storageService.deviceEvents().forgetOrigin(deviceId);
+        void debugLogService.write("machine.remove.forgotten", { machineId: id, pass, events: forgotten, forwarded });
+      } catch (error) {
+        void debugLogService.write("machine.remove.forget-error", { machineId: id, pass, message: error instanceof Error ? error.message : String(error) });
+      }
+    };
+    await forget("now");
+    setTimeout(() => { void forget("later"); }, 10_000).unref?.();
   }
-  await settingsService.removeMachine(id);
   // The other machines drop it from their rosters, and what they kept for it.
   await machineLinkService?.refreshTrustRosters().catch((error: unknown) => {
     void debugLogService.write("machine.remove.roster-error", { machineId: id, message: error instanceof Error ? error.message : String(error) });
@@ -3454,7 +3470,11 @@ void app.whenReady().then(async () => {
     // Every chat goes to every enrolled machine, as one change event per save.
     // The machines are read before any chat is saved, so a save made while
     // they are still connecting is addressed to them too.
-    await machineLinkService.loadMachines();
+    await machineLinkService.loadMachines().catch((error: unknown) => {
+      // The link reads them again when it starts; the transport is installed
+      // either way, so no save goes unrecorded.
+      void debugLogService.write("machine-link.load-error", { message: error instanceof Error ? error.message : String(error) });
+    });
     chatService.setChatChangeTransport(createChatChangeTransport({
       role: "desktop",
       storage: storageService,
@@ -3488,8 +3508,14 @@ void app.whenReady().then(async () => {
     });
     machineLinkService.onConversationDeleted((event) => chatService.applyReplicatedConversationDeletion(event.conversationId, event.deletedAt));
     machineLinkService.onConversationBackDelta((delta) => {
-      // The machine keeps the result until the desktop has stored it.
-      return chatService.applyMachineBackDelta({ conversationId: delta.conversationId, messages: delta.messages })
+      // The machine keeps the result until the desktop has stored it. It may
+      // write only its own members' messages and what it created itself.
+      return chatService.applyMachineBackDelta({
+        conversationId: delta.conversationId,
+        messages: delta.messages,
+        machineId: delta.machineId,
+        machineOriginId: machineLinkService?.machineDeviceId(delta.machineId)
+      })
         .then((conversation) => {
           if (!conversation) throw new Error("The desktop chat is unavailable; machine messages remain unacknowledged.");
           delta.acknowledge?.();

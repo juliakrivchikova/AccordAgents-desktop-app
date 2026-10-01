@@ -32,6 +32,7 @@ function channel(self: Device, peer: Device, room: string, sent: DeviceEventPack
   forwardTo?: (event: ChatEventEnvelope) => Array<{ deviceId: string; channelId: string }>;
   forwardedOriginKey?: (originId: string) => string | undefined;
   peerHoldsEveryChat?: boolean;
+  holdsBack?: (event: ChatEventEnvelope) => boolean;
 } = {}): DeviceEventChannel {
   return new DeviceEventChannel({
     storage: self.storage, eventLog: self.log, channelId: room,
@@ -41,6 +42,7 @@ function channel(self: Device, peer: Device, room: string, sent: DeviceEventPack
     ...(extra.forwardTo ? { forwardTo: extra.forwardTo } : {}),
     ...(extra.forwardedOriginKey ? { forwardedOriginKey: extra.forwardedOriginKey } : {}),
     ...(extra.peerHoldsEveryChat ? { peerHoldsEveryChat: true } : {}),
+    ...(extra.holdsBack ? { holdsBack: extra.holdsBack } : {}),
     onError: () => undefined
   });
 }
@@ -178,4 +180,35 @@ test("after a copy, what other machines wrote beyond its marks is shared with th
     assert.equal(await desktop.storage.deviceEvents().shareChatChangesAfter(machineA.originId,
       [{ logScopeId: SCOPE, originSeq: changes[1].originSeq }], { deviceId: "device-new", channelId: "room-new" }), 0, "running it again adds nothing");
   } finally { await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+});
+
+test("a change kept for a machine that cannot read it yet is not sent, and goes, in order, once it can", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-chat-hold-"));
+  const open: DeviceEventChannel[] = [];
+  try {
+    const desktop = await device(directory, "desktop");
+    const machineA = await device(directory, "machine-a");
+    const sent: DeviceEventPacket[] = [];
+    let capable = false;
+    const toA = channel(desktop, machineA, "room-a", sent, { holdsBack: (event) => event.kind === CHAT_CHANGES_EVENT_KIND && !capable });
+    open.push(toA);
+    for (const text of ["one", "two"]) {
+      await desktop.log.appendLocalEvent({
+        conversationId: "chat-1", logScopeId: SCOPE, kind: CHAT_CHANGES_EVENT_KIND,
+        payload: { version: 1, conversationId: "chat-1", updatedAt: "2026-10-01T10:00:00.000Z", changes: [
+          { type: "message.created", message: { id: text, role: "user", content: text, createdAt: "2026-10-01T10:00:00.000Z", status: "done" } }
+        ] },
+        recipients: [{ deviceId: machineA.originId, channelId: "room-a" }]
+      });
+    }
+    await toA.flush();
+    assert.deepEqual(events(sent), [], "nothing goes to a runtime that cannot read it");
+    assert.equal((await desktop.storage.deviceEvents().listPending("room-a", 0, machineA.originId)).length, 2, "both are kept for it");
+    capable = true;
+    await toA.flush();
+    assert.deepEqual(events(sent).map((packet) => packet.type === "event" ? packet.event.originSeq : 0), [1, 2]);
+  } finally {
+    for (const item of open) item.close();
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 });

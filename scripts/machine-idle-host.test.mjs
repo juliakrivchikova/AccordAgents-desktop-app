@@ -90,7 +90,7 @@ test("idle fences the actual host admission path; retained results resend and la
     await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: sender.originId, machineId: "home", appVersion: "test" });
     assert.deepEqual(runs, ["active"], "the same-boot replacement leaves the late native command unapplied");
     assert.equal(activityCalls, 1);
-  } finally { scheduler?.close(); host?.close(); await rm(dir, { recursive: true, force: true }); }
+  } finally { scheduler?.close(); host?.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
 async function until(predicate) {
@@ -147,7 +147,7 @@ test("unknown fence writes recover in the same runtime after SQLite becomes read
       assert.equal(nativeFenced, didCommit); assert.equal(host.idleFenced, didCommit);
       assert.equal(stops, didCommit ? 1 : 0, "only a stored fence continues the stop; an absent one reopens queued work");
       if (!didCommit) assert.equal(power.hostPower.stopIntent(), undefined);
-    } finally { power.close(); await rm(dir, { recursive: true, force: true }); }
+    } finally { power.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
   }
 });
 
@@ -188,5 +188,5 @@ test("host stop loss leaves no local fence; failure after local commit keeps adm
     // Recovery must establish the shared fence before it may call AWS.
     assert.equal(await stopper.commitStop(), true);
     assert.equal((await neighbour.admit("late turn")).admitted, false);
-  } finally { await rm(dir, { recursive: true, force: true }); }
+  } finally { await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });

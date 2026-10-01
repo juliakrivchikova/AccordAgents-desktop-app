@@ -79,7 +79,7 @@ export interface MachineLinkOptions {
     => Promise<{ attachment: { mimeType?: string; filename?: string }; dataBase64: string }>;
   /** Folds a `chat.changes` event from a machine into this desktop's copy.
    *  "missing-conversation" holds the event until the chat arrives. */
-  applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation">;
+  applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation" | "waiting">;
   /** The last chat change this desktop committed for a chat, after its
    *  queued saves: a turn request names it and the machine waits for it. */
   chatChangeHead?: (conversationId: string) => Promise<{ originId: string; logScopeId: string; originSeq: number } | undefined>;
@@ -535,12 +535,14 @@ export class MachineLinkService implements MachineTurnDispatcher {
     });
   }
 
+  /** Closes a machine's connection. It stays enrolled, and a recipient of
+   *  every chat change, until `forgetMachine`. */
   async disconnectMachine(machineId: string): Promise<void> {
-    this.enrolled.delete(machineId);
     const connection = this.connections.get(machineId);
     if (!connection) {
       return;
     }
+    this.enrolled.set(machineId, connection.record);
     this.connections.delete(machineId);
     for (const pending of connection.pendingTurns.values()) {
       pending.resolve({ status: "failed", messages: [], warnings: [], error: "The machine was removed while the turn was running." });
@@ -549,6 +551,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
     connection.eventChannel?.close();
     connection.client.close();
     this.emitStatus();
+  }
+
+  /** The machine is no longer enrolled: removed from the app. */
+  async forgetMachine(machineId: string): Promise<void> {
+    await this.disconnectMachine(machineId);
+    this.enrolled.delete(machineId);
   }
 
   close(): void {
@@ -596,13 +604,14 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   /**
-   * Where this desktop's chat changes go: every enrolled machine whose runtime
-   * folds them, connected or not. A machine on an older runtime is left out;
-   * its first update copies every chat to it and then adds it here.
+   * Where this desktop's chat changes go: every enrolled machine, connected
+   * or not. A change is kept for each of them until it confirms; one whose
+   * runtime cannot fold changes yet is sent none (see `holdsBack`) and gets
+   * them all, in order, once it is updated, so it is never left with a gap.
    */
   chatChangeRecipients(): Array<{ deviceId: string; channelId: string }> {
     return this.machineRecords()
-      .filter((record) => Boolean(record.deviceId) && record.chatChanges === true)
+      .filter((record) => Boolean(record.deviceId))
       .map((record) => ({ deviceId: record.deviceId, channelId: record.pairingKey }));
   }
 
@@ -699,6 +708,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
           role: "machine",
           name: machine.name,
           machineId: machine.id,
+          ...(machine.chatChanges === true ? { chatChanges: true } : {}),
           relayUrl: pairing.relayUrl,
           rendezvousId: pairing.rendezvousId,
           outboxUrl: pairing.outboxUrl,
@@ -1108,9 +1118,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
     const machineId = request.participant.homeMachineId ?? "";
     const connection = this.connections.get(machineId);
     if (!connection) {
-      return { status: "failed", messages: [], warnings: [], error: `@${request.participant.handle} is hosted on a machine that is not enrolled on this desktop.` };
+      return { status: "failed", messages: [], warnings: [], sent: false, error: `@${request.participant.handle} is hosted on a machine that is not enrolled on this desktop.` };
     }
-    const interrupted: MachineTurnDispatchResult = { status: "interrupted", messages: [], warnings: [] };
+    // Every outcome decided before the request left says so (sent: false).
+    const interrupted: MachineTurnDispatchResult = { status: "interrupted", messages: [], warnings: [], sent: false };
     if (connection.turnHold) {
       void this.debugLogs.write("machine-link.turn.held", { machineId, runId: request.runId, reason: connection.turnHold.reason });
       await request.onMachineWaiting?.(connection.record.name, connection.turnHold.reason).catch(() => undefined);
@@ -1124,7 +1135,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       if (stopped) return interrupted;
     }
     if (!connection.eventChannel && !connection.machineDeviceId) {
-      return { status: "failed", messages: [], warnings: [], error: `@${request.participant.handle} is hosted on ${connection.record.name}, which is not connected.` };
+      return { status: "failed", messages: [], warnings: [], sent: false, error: `@${request.participant.handle} is hosted on ${connection.record.name}, which is not connected.` };
     }
     if (request.signal?.aborted) {
       return interrupted;
@@ -1135,7 +1146,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (connection.record.chatChanges !== true) {
       void this.debugLogs.write("machine-link.turn.runtime-outdated", { machineId, runId: request.runId, appVersion: connection.record.lastHello?.appVersion ?? "" });
       return {
-        status: "failed", messages: [], warnings: [],
+        status: "failed", messages: [], warnings: [], sent: false,
         error: `@${request.participant.handle} is hosted on ${connection.record.name}, which still runs an older version of AccordAgents that cannot receive this chat. This computer updates it the next time it is connected and idle; send the message again after that.`
       };
     }
@@ -1230,7 +1241,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       return await result;
     } catch (error) {
       if (request.signal?.aborted && !dispatchAttempted) return interrupted;
-      return { status: "failed", messages: [], warnings: [], error: errorMessage(error) };
+      return { status: "failed", messages: [], warnings: [], error: errorMessage(error), ...(dispatchAttempted ? {} : { sent: false }) };
     } finally {
       if (intentRecorded && !dispatchAttempted) {
         // No provider could have seen the command. A failed cleanup remains
@@ -1466,6 +1477,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
           ? this.chatChangeRecipients().filter((recipient) => recipient.deviceId !== deviceId)
           : [],
         peerHoldsEveryChat: true,
+        // Kept for a runtime that cannot fold chat changes yet; sent once it can.
+        holdsBack: (event) => event.kind === CHAT_CHANGES_EVENT_KIND && connection.record.chatChanges !== true,
         apply: async (event, body) => {
           if (event.kind === CHAT_CHANGES_EVENT_KIND) {
             if (!this.options.applyChatChanges || !isChatChangesPayload(body)) throw new Error("Unexpected chat change event.");
@@ -1536,9 +1549,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (connection.record.deviceId && connection.record.deviceId !== hello.deviceId) {
       throw new Error("The machine's enrolled device identity changed; its history cannot be accepted as the previous machine.");
     }
-    // The other machines learn this one's key from the roster; until then
-    // they refuse what it wrote when it reaches them through this desktop.
-    const keyLearned = connection.record.lastHello?.publicKeyDerBase64 !== hello.publicKeyDerBase64;
+    // The other machines learn this one's key, and whether it can fold chat
+    // changes, from the roster; until then they refuse what it wrote, or keep
+    // their changes for it.
+    const chatChanges = (hello.chatChanges ?? 0) >= CHAT_CHANGES_VERSION;
+    const rosterChanged = connection.record.lastHello?.publicKeyDerBase64 !== hello.publicKeyDerBase64
+      || (connection.record.chatChanges === true) !== chatChanges;
     await this.initializeEventChannel(connection, hello.deviceId, hello.publicKeyDerBase64);
     if (typeof hello.instanceSequence === "number") {
       connection.latestInstanceSequence = hello.instanceSequence;
@@ -1557,9 +1573,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
     connection.record = {
       ...connection.record,
       deviceId: hello.deviceId,
-      // What the running runtime folds decides whether chat changes are
-      // addressed to it; a runtime put back after a failed update does not.
-      chatChanges: (hello.chatChanges ?? 0) >= CHAT_CHANGES_VERSION,
+      // What the running runtime folds decides whether chat changes are sent
+      // to it; a runtime put back after a failed update gets none until it
+      // is updated again (they are kept for it meanwhile).
+      chatChanges,
       lastSeenAt: this.now().toISOString(),
       lastHello: rest,
       pendingCancels: [...connection.pendingCancels.entries()].map(([runId, conversationId]) => ({ runId, conversationId })),
@@ -1572,7 +1589,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       await this.send(connection, { type: "machine.settings.sync", snapshot });
       connection.settingsKey = machineSettingsKey(snapshot);
       await this.sendTrustRoster(connection);
-      if (keyLearned) {
+      if (rosterChanged) {
         for (const other of this.connections.values()) {
           if (other !== connection && other.eventChannel) await this.sendTrustRoster(other).catch(() => undefined);
         }

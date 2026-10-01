@@ -145,7 +145,7 @@ test("a command queued with the machine offline survives a desktop restart and e
   } finally { link.close(); host?.close(); await relay.close(); }
 });
 
-test("a machine still on a runtime that cannot receive chat changes is sent no turn and no chat change", async () => {
+test("a machine still on a runtime that cannot receive chat changes is sent no turn, and its chat changes are kept for it", async () => {
   const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
   const pairing = machinePairing("ws://unused/v1/relay");
   const capable = { id: "machine-new", name: "New box", deviceId: "device-new", pairingKey: "room-new", chatChanges: true, createdAt: new Date().toISOString() };
@@ -158,9 +158,10 @@ test("a machine still on a runtime that cannot receive chat changes is sent no t
     exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
   }, { write: async (event, payload) => logs.push({ event, payload }) }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID,
     createClient: () => ({ on() {}, connect: async () => undefined, close() {}, sendCiphertext: async () => [] }) });
-  // Before any machine connects, every enrolled one is known.
+  // Before any machine connects, every enrolled one is known, and is a
+  // recipient whatever its runtime: what it cannot read yet is kept for it.
   await link.loadMachines();
-  assert.deepEqual(link.chatChangeRecipients(), [{ deviceId: "device-new", channelId: "room-new" }]);
+  assert.deepEqual(link.chatChangeRecipients().map((recipient) => recipient.deviceId).sort(), ["device-new", MACHINE_ID].sort());
   assert.deepEqual(link.chatActionRecipients().map((recipient) => recipient.deviceId).sort(), ["device-new", MACHINE_ID].sort());
   await link.start();
   try {
@@ -170,6 +171,7 @@ test("a machine still on a runtime that cannot receive chat changes is sent no t
       createdAt: triggerMessage.createdAt, updatedAt: triggerMessage.createdAt };
     const result = await link.runTurn({ conversation, participant, triggerMessage, runId: "old-run", pendingMessageId: "old-reply" });
     assert.equal(result.status, "failed");
+    assert.equal(result.sent, false, "the desktop settles it");
     assert.match(result.error, /@bot is hosted on Old box, which still runs an older version of AccordAgents/);
     assert.equal(await desktopEvents.eventStorage.getChatEvent("machine-command:old-run"), undefined, "nothing was queued for it");
     assert.ok(logs.some((entry) => entry.event === "machine-link.turn.runtime-outdated"));

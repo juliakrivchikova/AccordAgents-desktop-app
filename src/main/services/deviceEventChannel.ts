@@ -48,6 +48,9 @@ interface DeviceEventChannelOptions {
    *  that enrolled this machine), so it may be served any chat change it
    *  asks for. Other peers are served only what was addressed to them. */
   peerHoldsEveryChat?: boolean;
+  /** Events kept for this peer but not sent to it yet (a runtime that cannot
+   *  read them): they stay queued, in order, and go once this says no. */
+  holdsBack?(event: ChatEventEnvelope): boolean;
   onError(error: Error): void;
 }
 
@@ -85,6 +88,7 @@ export class DeviceEventChannel {
       this.mailbox = new DeviceEventMailbox({
         storage: options.storage, pairing: options.pairing,
         localDeviceId: options.localDeviceId, peerDeviceId: options.peerDeviceId,
+        ...(options.holdsBack ? { holdsBack: options.holdsBack } : {}),
         authenticate: packet => this.authenticate(packet),
         receive: (packet) => this.receive(packet), onError: options.onError
       });
@@ -193,6 +197,7 @@ export class DeviceEventChannel {
         case "resend":
           for (const event of await this.options.storage.deviceEvents().repair(this.options.channelId, value.from, value.gap,
             { anyChatChange: this.options.peerHoldsEveryChat === true })) {
+            if (this.options.holdsBack?.(event)) continue;
             await this.sendEvent(event, value.requestId);
           }
           return;
@@ -279,13 +284,14 @@ export class DeviceEventChannel {
       if (!page.length) return;
       for (const entry of page) {
         if (this.stopped) return;
+        cursor = entry.rowId;
+        if (this.options.holdsBack?.(entry.event)) continue;
         const previous = this.lastSent.get(entry.event.eventId);
         const delay = previous ? Math.min(5_000 * 2 ** previous.attempts, 300_000) : 0;
         if (!previous || performance.now() - previous.at >= delay) {
           await this.sendEvent(entry.event);
           this.lastSent.set(entry.event.eventId, { at: performance.now(), attempts: Math.min((previous?.attempts ?? -1) + 1, 6) });
         }
-        cursor = entry.rowId;
       }
     }
   }
