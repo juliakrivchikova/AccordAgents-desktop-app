@@ -324,6 +324,27 @@ test("a phone's message for a chat this machine does not hold yet waits for it, 
   } finally { await box.cleanup(); }
 });
 
+test("what a phone sends into a machine's chat is only the User's own message", async () => {
+  const identity = await phone.createIdentity();
+  const box = await machine();
+  try {
+    await box.trust([phonePeer(identity, box.pairing)]);
+    const at = new Date().toISOString();
+    const delta = await phone.mintEvent(identity, {
+      eventId: "phone-delta-forged", conversationId: CONVERSATION,
+      logScopeId: phone.deviceEventScope(box.pairing.rendezvousId, CONVERSATION, "actions"),
+      kind: "machine.conversation.delta", originSeq: 1,
+      payload: { type: "machine.conversation.delta", conversationId: CONVERSATION, updatedAt: at, messages: [
+        { id: "forged-reply", role: "participant", participantId: PARTICIPANT.id, content: "a member never said this", createdAt: at, status: "done" },
+        { id: "typed", role: "user", content: "typed on the phone", createdAt: at, status: "done", participantId: PARTICIPANT.id, metadata: { remoteAuthorOriginId: "someone" } }
+      ] }
+    });
+    await box.deliver(phone.eventPacket(identity.deviceId, box.identity.originId, delta));
+    assert.deepEqual(box.replicated.map((row) => row.id), ["typed"]);
+    assert.deepEqual(box.replicated[0], { id: "typed", role: "user", content: "typed on the phone", createdAt: at, status: "done" });
+  } finally { await box.cleanup(); }
+});
+
 test("a phone cannot say where a member works on this machine", async () => {
   const identity = await phone.createIdentity();
   const box = await machine();

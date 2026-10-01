@@ -16,10 +16,13 @@ import type { StorageService } from "./storage";
  *   It accepts the chat's shared fields only from the desktop that installed it.
  * - Anyone may create a message; a message that arrived from elsewhere may be
  *   changed only by the device it came from, or by the member's home.
+ * - A member's turn that never left the desktop (stopped while preparing, or
+ *   refused before it was sent) is settled by the desktop: the home machine
+ *   only ever had its empty bubble.
  */
 export interface ChatChangeTransportOptions {
   role: "desktop" | "machine";
-  storage: Pick<StorageService, "deviceEventBlobs" | "chatEventAppendSql" | "getChatEventSequenceBasis">;
+  storage: Pick<StorageService, "deviceEventBlobs" | "chatEventAppendSql" | "getChatEventSequenceBasis" | "deviceEvents">;
   log: Pick<ChatEventLogService, "withPreparedLocalEvent" | "getOrCreateDeviceIdentity">;
   /** Every device that should hold this device's chat changes. */
   recipients(): DeviceEventRecipient[];
@@ -47,9 +50,15 @@ function remoteAuthor(message: ChatMessage): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/** A member's bubble whose turn the desktop never sent to the member's home. */
+function turnNeverSent(message: ChatMessage | undefined): boolean {
+  return message?.metadata?.machineTurnNotSent === true;
+}
+
 export function createChatChangeTransport(options: ChatChangeTransportOptions): ChatChangeTransport {
   const ownsMessage = (conversation: Conversation, message: ChatMessage): boolean => {
     if (message.role === "participant" && message.participantId) {
+      if (turnNeverSent(message)) return options.role === "desktop";
       const home = participantHome(conversation, message.participantId);
       if (options.role === "desktop") return !home;
       return Boolean(home) && home === options.hostMachineId?.();
@@ -58,6 +67,7 @@ export function createChatChangeTransport(options: ChatChangeTransportOptions): 
   };
   const expectedWriter = (conversation: Conversation, message: ChatMessage): string | undefined => {
     if (message.role === "participant" && message.participantId) {
+      if (turnNeverSent(message)) return options.role === "machine" ? options.desktopOriginId?.() : undefined;
       const home = participantHome(conversation, message.participantId);
       if (home) {
         if (options.role === "machine" && home === options.hostMachineId?.()) return undefined;
@@ -83,12 +93,16 @@ export function createChatChangeTransport(options: ChatChangeTransportOptions): 
       const fromDesktop = (originId: string): boolean => options.role === "machine" && originId === options.desktopOriginId?.();
       return {
         acceptsConversationFields: fromDesktop,
-        acceptsMessageUpdate: (existing, conversation, originId) => {
+        acceptsMessageUpdate: (existing, conversation, originId, incoming) => {
           const writer = expectedWriter(conversation, existing);
-          return Boolean(writer) && writer === originId;
+          if (writer && writer === originId) return true;
+          // The desktop settles a turn it never sent, whatever the bubble
+          // became here meanwhile (swept as interrupted, say).
+          return fromDesktop(originId) && turnNeverSent(incoming) && existing.role === "participant";
         },
         acceptsMessageCreate: (message, conversation, originId) => {
-          if (message.role !== "participant" || !message.participantId) return true;
+          if (message.role !== "participant") return true;
+          if (!message.participantId) return fromDesktop(originId);
           // A member's message comes from where it runs, or from the desktop
           // that dispatches it (the pending bubble of a member on a machine).
           if (fromDesktop(originId)) return true;
@@ -108,8 +122,22 @@ export function createChatChangeTransport(options: ChatChangeTransportOptions): 
         holdsUnknownChats: options.role === "machine"
       };
     },
+    dependencyMet: async (payload) => {
+      const after = payload.after;
+      if (!after || typeof after.originId !== "string" || !Number.isSafeInteger(after.originSeq) || after.originSeq < 1) return true;
+      const { originId } = await options.log.getOrCreateDeviceIdentity();
+      if (after.originId === originId) return true;
+      return await options.storage.deviceEvents().appliedHead(after.originId, chatChangesLogScope(payload.conversationId)) >= after.originSeq;
+    },
     commit: async (payload, write) => {
       const audience = options.recipients();
+      // A machine says how far it had the desktop's changes of this chat; see
+      // ChatChangesPayload.after.
+      const desktop = options.role === "machine" ? options.desktopOriginId?.() : undefined;
+      if (desktop) {
+        const head = await options.storage.deviceEvents().appliedHead(desktop, chatChangesLogScope(payload.conversationId));
+        if (head > 0) payload = { ...payload, after: { originId: desktop, originSeq: head } };
+      }
       const prepared = await options.storage.deviceEventBlobs().prepare(payload);
       const outcome = await options.log.withPreparedLocalEvent({
         conversationId: payload.conversationId,

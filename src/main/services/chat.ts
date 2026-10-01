@@ -6,7 +6,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
-import { applyChatChanges, CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges, type ChatChangeApplyPolicy, type ChatChangeBaseline, type ChatChangeDiffPolicy, type ChatChangesPayload, isSafeChatId } from "./chatChanges";
+import { applyChatChanges, applyHeldReactions, CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges, isSupportedChatChangesVersion, type ChatChangeApplyPolicy, type ChatChangeBaseline, type ChatChangeDiffPolicy, type ChatChangesPayload, isSafeChatId } from "./chatChanges";
 import type {
   AgentContextUsage,
   AgentHealth,
@@ -693,6 +693,9 @@ export interface MachineTurnDispatchResult {
   /** Called once the desktop has stored the result; the machine keeps it
    *  until then. */
   acknowledge?: () => void | Promise<void>;
+  /** False when the turn never left this desktop (refused, or stopped while
+   *  being prepared): the member's home only ever had its empty bubble. */
+  sent?: boolean;
 }
 
 /** Machine side. Hands one prepared member request to the desktop; the answers
@@ -783,6 +786,9 @@ export interface ChatChangeTransport {
     payload: ChatChangesPayload,
     write: (also: { sql: string; onlyIfSql(condition: string): string }) => Promise<string>
   ): Promise<{ token: string; committed: boolean; eventId: string }>;
+  /** Whether this device has applied what the author had when it wrote this
+   *  (ChatChangesPayload.after). Absent: always. */
+  dependencyMet?(payload: ChatChangesPayload): Promise<boolean>;
 }
 
 export class ChatService {
@@ -5909,6 +5915,11 @@ export class ChatService {
       }
     };
     let dispatchResult: MachineTurnDispatchResult | undefined;
+    // A turn that never left this desktop is settled here, everywhere: the
+    // member's home machine only ever had its empty bubble.
+    const markTurnNotSent = (): void => {
+      for (const bubble of bubbleObjects()) bubble.metadata = { ...bubble.metadata, machineTurnNotSent: true };
+    };
     // Set once the machine's result has been folded, stored and acknowledged:
     // a failure raised after that (the run failed on its machine) leaves the
     // bubble as folded and is never stored or acknowledged a second time.
@@ -6010,6 +6021,7 @@ export class ChatService {
       });
       clearStopPending();
       dispatchResult = result;
+      if (result.sent === false) markTurnNotSent();
       for (const warning of result.warnings) {
         if (!options.warnings.includes(warning)) {
           options.warnings.push(warning);
@@ -6041,6 +6053,7 @@ export class ChatService {
         throw error;
       }
       clearStopPending();
+      if (!dispatched) markTurnNotSent();
       if (!signal?.aborted) {
         pendingMessage.status = "error";
         pendingMessage.content = this.failedPrecreatedPendingMessageContent(participant, error);
@@ -6216,7 +6229,16 @@ export class ChatService {
   /** Machines transport, desktop side: messages created or changed by turns
    *  that started on a machine (a member resumed after an approval, a member
    *  request run there) land in this desktop's copy under their own ids. */
-  async applyMachineBackDelta(request: { conversationId: string; messages: ChatMessage[] }): Promise<Conversation | undefined> {
+  async applyMachineBackDelta(request: {
+    conversationId: string;
+    messages: ChatMessage[];
+    /** The machine that sent them, and its device identity. A machine writes
+     *  only its own members' messages and what it created itself; anything
+     *  else it sends is refused, not stored and then sent on as this
+     *  desktop's own. */
+    machineId?: string;
+    machineOriginId?: string;
+  }): Promise<Conversation | undefined> {
     if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return undefined;
     const conversation = await this.storage.getConversation(request.conversationId);
     if (!conversation || conversation.kind !== "chat") {
@@ -6224,11 +6246,38 @@ export class ChatService {
     }
     return this.withChatMutation(conversation, async () => {
       let changed = false;
-      for (const incoming of request.messages) {
-        if (!incoming || typeof incoming.id !== "string") {
+      const refused: string[] = [];
+      // Read as the chat change rules read it (chatChangeTransport).
+      const listed = Array.isArray(conversation.metadata.participants) ? conversation.metadata.participants as Array<{ id?: unknown; homeMachineId?: unknown }> : [];
+      const homeOf = (participantId: string | undefined): string | undefined => {
+        const home = participantId ? listed.find((participant) => participant?.id === participantId)?.homeMachineId : undefined;
+        return typeof home === "string" && home ? home : undefined;
+      };
+      const itsMember = (message: ChatMessage): boolean =>
+        message.role === "participant" && Boolean(message.participantId) && homeOf(message.participantId) === request.machineId;
+      const createdThere = (message: ChatMessage): boolean => Boolean(request.machineOriginId) &&
+        (message.metadata as Record<string, unknown> | undefined)?.remoteAuthorOriginId === request.machineOriginId;
+      for (const raw of request.messages) {
+        if (!raw || typeof raw.id !== "string") {
           continue;
         }
+        let incoming = raw;
         const index = conversation.messages.findIndex((message) => message.id === incoming.id);
+        if (request.machineId) {
+          const current = index >= 0 ? conversation.messages[index] : undefined;
+          const allowed = current
+            ? (itsMember(current) || createdThere(current)) && (incoming.role !== "participant" || itsMember(incoming))
+            : incoming.role === "participant" ? itsMember(incoming) : incoming.role === "user" || incoming.role === "system";
+          if (!allowed) {
+            refused.push(incoming.id);
+            continue;
+          }
+          // A message the machine created stays its own here: this desktop
+          // does not take it over as one of its own.
+          if (!current && incoming.role !== "participant" && request.machineOriginId) {
+            incoming = { ...incoming, metadata: { ...incoming.metadata, remoteAuthorOriginId: request.machineOriginId } as ChatMessage["metadata"] };
+          }
+        }
         if (index >= 0) {
           const current = conversation.messages[index];
           // Never let a machine's copy demote a message this desktop already finished.
@@ -6243,6 +6292,9 @@ export class ChatService {
           this.recordLastMessageByParticipant(conversation, incoming);
         }
         changed = true;
+      }
+      if (refused.length) {
+        void this.debugLogs.write("chat.machine-backdelta.refused", { conversationId: conversation.id, machineId: request.machineId, messageIds: refused.slice(0, 20) });
       }
       if (!changed) {
         return conversation;
@@ -8738,6 +8790,11 @@ export class ChatService {
       ...storedMetadata,
       ...currentMetadata
     };
+    // Reactions held for messages not here yet are only ever changed by
+    // applying a chat change, which saves them; a copy held in memory by a
+    // long-running flow is older.
+    if (storedMetadata.pendingChatReactions !== undefined) merged.pendingChatReactions = storedMetadata.pendingChatReactions;
+    else delete merged.pendingChatReactions;
     if (merged.autoTitle) {
       delete merged.autoTitleEligibility;
     }
@@ -17498,8 +17555,15 @@ export class ChatService {
     return this.buildAndEmitSnapshot(conversation).snapshot;
   }
 
+  private buildSnapshot(conversation: Conversation): ReturnType<typeof buildConversationSnapshot> {
+    // Reactions that arrived before their message, which has since come by a
+    // finished turn or a back delta rather than as a chat change.
+    if (conversation.kind === "chat") applyHeldReactions(conversation);
+    return buildConversationSnapshot(conversation, this.snapshotRowStates.get(conversation.id));
+  }
+
   private buildAndEmitSnapshot(conversation: Conversation): { snapshot: Conversation; rows: SnapshotMessageRow[] } {
-    const built = buildConversationSnapshot(conversation, this.snapshotRowStates.get(conversation.id));
+    const built = this.buildSnapshot(conversation);
     this.rememberSnapshotRows(conversation.id, built.rows);
     this.onConversationSnapshot?.(built.snapshot, built.update);
     return { snapshot: built.snapshot, rows: built.rows };
@@ -18238,7 +18302,7 @@ export class ChatService {
     if (pending) {
       await pending.catch(() => undefined);
     }
-    const built = buildConversationSnapshot(conversation, this.snapshotRowStates.get(conversation.id));
+    const built = this.buildSnapshot(conversation);
     // Rows are remembered before the save so a snapshot queued while this one
     // is in flight diffs against them, and so the saved snapshot is kept for
     // refreshStoredChatState (only tracked chats keep it).
@@ -18382,7 +18446,7 @@ export class ChatService {
    * means the event refers to a chat this device does not have yet; the caller
    * holds it and asks for the chat.
    */
-  async applyRemoteChatChanges(event: ChatEventEnvelope, payload: ChatChangesPayload): Promise<"applied" | "missing-conversation"> {
+  async applyRemoteChatChanges(event: ChatEventEnvelope, payload: ChatChangesPayload): Promise<"applied" | "missing-conversation" | "waiting"> {
     const transport = this.chatChangeTransport;
     if (!transport) throw new Error("This device has no chat change transport.");
     if (payload.conversationId !== event.conversationId) throw new Error("Chat change event names another chat.");
@@ -18390,6 +18454,12 @@ export class ChatService {
     if (this.deletedConversationIds.has(conversationId) || await this.storage.conversationTombstones?.().isDeleted(conversationId)) {
       return "applied";
     }
+    // Held, not skipped: a newer version's changes wait for this device's update.
+    if (!isSupportedChatChangesVersion(payload)) return "waiting";
+    // Written after desktop changes that have not reached this device yet. A
+    // change refused only for want of them (a member it names, that member's
+    // home) waits for them; one that applies anyway does not wait.
+    const dependencyMet = !transport.dependencyMet || await transport.dependencyMet(payload);
     const logIgnored = (ignored: string[]): void => {
       if (ignored.length) {
         void this.debugLogs.write("chat.changes.ignored", { conversationId, originId: event.originId, eventId: event.eventId, ignored: ignored.slice(0, 20) });
@@ -18399,6 +18469,7 @@ export class ChatService {
     if (!existing) {
       const result = applyChatChanges(undefined, payload, event.originId, transport.applyPolicy(undefined));
       if (result.status === "missing-conversation") return "missing-conversation";
+      if (!dependencyMet && result.ignored.length) return "waiting";
       logIgnored(result.ignored);
       if (result.status === "ignored") return "applied";
       this.localizeRepoPath(result.conversation, result.conversation.repoPath);
@@ -18407,9 +18478,14 @@ export class ChatService {
       return "applied";
     }
     if (existing.kind !== "chat") return "applied";
+    let waiting = false;
     await this.withChatMutation(existing, async () => {
       const result = applyChatChanges(existing, payload, event.originId, transport.applyPolicy(existing));
       if (result.status !== "applied") return;
+      if (!dependencyMet && result.ignored.length) {
+        waiting = true;
+        return;
+      }
       logIgnored(result.ignored);
       if (!result.changed) return;
       // A member that watches the chat here sees new user messages the way a
@@ -18436,6 +18512,7 @@ export class ChatService {
       if (!wasArchived && existing.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
       await this.saveConversation(existing, { emitChanges: false });
     });
+    if (waiting) return "waiting";
     this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
     return "applied";
   }

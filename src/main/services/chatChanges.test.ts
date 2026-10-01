@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChatMessage, Conversation } from "../../shared/types";
+import { createChatChangeTransport } from "./chatChangeTransport";
 import {
   applyChatChanges,
   chatChangeBaseline,
@@ -267,4 +268,25 @@ test("a reaction that arrives before its message is kept and applied when the me
   if (reply.status !== "applied") return;
   assert.deepEqual(reply.conversation.messages.find((message) => message.id === "r9")?.metadata?.reactions?.ok?.map((reactor) => reactor.actorId), ["user"]);
   assert.equal((reply.conversation.metadata as Record<string, unknown>).pendingChatReactions, undefined);
+});
+
+test("the transport's rules: no member message without a member, and the desktop settles a turn it never sent", () => {
+  const unused = {} as never;
+  const desktop = createChatChangeTransport({ role: "desktop", storage: unused, log: unused, recipients: () => [],
+    machineOriginId: (machineId) => (machineId === "machine-1" ? "machine" : undefined) });
+  const machine = createChatChangeTransport({ role: "machine", storage: unused, log: unused, recipients: () => [],
+    hostMachineId: () => "machine-1", desktopOriginId: () => "desktop" });
+  const stored = chat();
+  const anonymous: ChatMessage = { id: "x", role: "participant", content: "who wrote this?", createdAt: NOW, status: "done" };
+  assert.equal(desktop.applyPolicy(stored).acceptsMessageCreate(anonymous, stored, "machine"), false);
+  assert.equal(machine.applyPolicy(stored).acceptsMessageCreate(anonymous, stored, "desktop"), true, "only the desktop may");
+
+  const bubble: ChatMessage = { id: "b", role: "participant", participantId: "remote", content: "", createdAt: NOW, status: "pending" };
+  const settled: ChatMessage = { ...bubble, status: "error", content: "@drew stopped by user.", metadata: { machineTurnNotSent: true } };
+  assert.equal(machine.applyPolicy(stored).acceptsMessageUpdate(bubble, stored, "desktop", settled), true);
+  assert.equal(machine.applyPolicy(stored).acceptsMessageUpdate(bubble, stored, "desktop", { ...settled, metadata: {} }), false,
+    "a turn the machine runs stays the machine's");
+  assert.equal(desktop.diffPolicy(stored).ownsMessage(settled), true);
+  assert.equal(machine.diffPolicy(stored).ownsMessage(settled), false);
+  assert.equal(desktop.applyPolicy(stored).acceptsMessageUpdate(settled, stored, "machine", { ...settled, content: "Interrupted" }), false);
 });

@@ -23,10 +23,10 @@ import type { ChatMessage, ChatMessageReactions, ChatReactor, Conversation } fro
 
 export const CHAT_CHANGES_EVENT_KIND = "chat.changes";
 /**
- * A machine is sent chat changes only while its runtime folds this version,
- * and nothing it was not sent is sent later: a save is diffed against what the
- * database held, not against what each machine has. Raising this therefore
- * needs every machine to get a new copy at the upgrade that brings it there.
+ * Every enrolled machine is addressed every change; one whose runtime folds
+ * an older version is sent none of them (and no turn) until it is updated,
+ * and then gets them all in order. A payload of a newer version than a device
+ * folds waits there, unapplied, until that device is updated.
  */
 export const CHAT_CHANGES_VERSION = 1;
 
@@ -105,6 +105,10 @@ export interface ChatChangesPayload {
   conversationId: string;
   updatedAt: string;
   changes: ChatChange[];
+  /** Machines only: the desktop's newest change of this chat its author had
+   *  applied. A member or a home it names may come from that change, so
+   *  another machine judges this one only once it has applied it too. */
+  after?: { originId: string; originSeq: number };
 }
 
 /** What the database held for a chat, reduced to what a diff needs. */
@@ -131,8 +135,8 @@ export interface ChatChangeDiff {
 export interface ChatChangeApplyPolicy {
   /** May `originId` set the chat's shared fields, including creating it? */
   acceptsConversationFields(originId: string): boolean;
-  /** May `originId` change this message's content and status? */
-  acceptsMessageUpdate(existing: ChatMessage, conversation: Conversation, originId: string): boolean;
+  /** May `originId` change this message's content and status (to `incoming`)? */
+  acceptsMessageUpdate(existing: ChatMessage, conversation: Conversation, originId: string, incoming: ChatMessage): boolean;
   /** May `originId` add this message? A member's reply comes only from where
    *  that member runs (or the desktop that dispatches it). */
   acceptsMessageCreate(message: ChatMessage, conversation: Conversation, originId: string): boolean;
@@ -488,7 +492,7 @@ export function applyChatChanges(
           break;
         }
         const current = conversation.messages[index];
-        if (!policy.acceptsMessageUpdate(current, conversation, originId)) {
+        if (!policy.acceptsMessageUpdate(current, conversation, originId, change.message)) {
           ignored.push(`${change.type}:${change.message.id}`);
           break;
         }
@@ -583,6 +587,33 @@ export function isValidChange(value: unknown): value is ChatChange {
 
 /** A chat change event a device can fold: a safe chat id and a list of
  *  changes. Individual changes are checked when applied. */
+/** A payload written by a newer version waits, unapplied, until this device
+ *  is updated: skipping what it does not understand would lose it for good. */
+export function isSupportedChatChangesVersion(payload: Pick<ChatChangesPayload, "version">): boolean {
+  return payload.version <= CHAT_CHANGES_VERSION;
+}
+
+/**
+ * Applies reactions held for messages that have since arrived some other way
+ * than as a change (a finished turn, a back delta). Returns whether any was.
+ */
+export function applyHeldReactions(conversation: Conversation): boolean {
+  const pending = pendingReactions(conversation);
+  const ids = Object.keys(pending);
+  if (!ids.length) return false;
+  const indexes = new Map(conversation.messages.map((message, index) => [message.id, index]));
+  let changed = false;
+  for (const id of ids) {
+    const index = indexes.get(id);
+    if (index === undefined) continue;
+    conversation.messages[index] = applyReactions(conversation.messages[index], pending[id].added, pending[id].removed);
+    delete pending[id];
+    changed = true;
+  }
+  if (changed) setPendingReactions(conversation, pending);
+  return changed;
+}
+
 export function isChatChangesPayload(value: unknown): value is ChatChangesPayload {
   if (!isRecord(value)) return false;
   return typeof value.version === "number" && value.version >= 1 && isSafeChatId(value.conversationId) &&

@@ -101,7 +101,7 @@ export interface MachineHostOptions {
   idleStopWarning?: () => string | undefined;
   /** Folds a `chat.changes` event into this machine's copy of the chat.
    *  "missing-conversation" holds the event until the chat arrives. */
-  applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation">;
+  applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation" | "waiting">;
 }
 
 /** How soon a failed outbox write is tried again. */
@@ -1178,13 +1178,28 @@ export class MachineHostService {
     // A chat whose first change has not reached this machine yet: the phone's
     // message is held (and tried again) rather than dropped.
     if ((await this.chatPresence(delta.conversationId))?.kind !== "chat") {
-      void this.debugLogs.write("machine-host.phone-message.unknown-chat", { conversationId: delta.conversationId });
+      if (!this.phoneMessagesWaiting.has(delta.conversationId)) {
+        this.phoneMessagesWaiting.add(delta.conversationId);
+        void this.debugLogs.write("machine-host.phone-message.unknown-chat", { conversationId: delta.conversationId });
+      }
       throw new Error("The chat has not reached this machine yet; the phone's message waits for it.");
+    }
+    this.phoneMessagesWaiting.delete(delta.conversationId);
+    // What a phone types is the User's message, nothing else: this machine
+    // signs it as its own change, so a member's reply or a system line from
+    // a phone would reach every device with this machine's authority.
+    const typed = delta.messages.flatMap((message): ChatMessage[] =>
+      message && typeof message.id === "string" && message.id && message.role === "user" && typeof message.content === "string"
+        && typeof message.createdAt === "string"
+        ? [{ id: message.id, role: "user", content: message.content, createdAt: message.createdAt, status: "done" }]
+        : []);
+    if (typed.length < delta.messages.length) {
+      void this.debugLogs.write("machine-host.phone-message.refused", { conversationId: delta.conversationId, refused: delta.messages.length - typed.length });
     }
     await this.chat.applyReplicatedConversation(delta.conversationId, (existing) => {
       if (!existing) return undefined;
       const known = new Set(existing.messages.map((message) => message.id));
-      const added = delta.messages.filter((message) => message && typeof message.id === "string" && !known.has(message.id));
+      const added = typed.filter((message) => !known.has(message.id));
       if (!added.length) return undefined;
       const messages = [...existing.messages, ...added]
         .map((message, index) => ({ message, index }))
@@ -1195,6 +1210,9 @@ export class MachineHostService {
     });
     this.chat.onReplicatedConversationReady?.(delta.conversationId);
   }
+
+  /** Chats a phone's message is waiting for, so that is logged once. */
+  private readonly phoneMessagesWaiting = new Set<string>();
 
   private async chatPresence(conversationId: string, messageId?: string): Promise<{ kind: string; hasMessage: boolean } | undefined> {
     if (this.storage.conversationPresence) return this.storage.conversationPresence(conversationId, messageId);

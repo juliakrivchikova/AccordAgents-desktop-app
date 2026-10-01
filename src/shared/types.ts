@@ -1319,6 +1319,10 @@ export interface ChatMessageMetadata {
    *  kept apart from the content so delivered text is never overwritten. */
   stopPending?: { machineName: string; at: string };
   machinePending?: { machineName: string; at: string; reason?: string };
+  /** Machines transport: this member's turn never left the desktop (stopped
+   *  while preparing, or refused before it was sent), so the desktop, not the
+   *  member's home machine, settles the bubble. */
+  machineTurnNotSent?: boolean;
   cloudRunPreparation?: import("./cloudRunPreparation").CloudRunPreparationProgress;
   /** Machines transport: the result already folded into this bubble
    *  (identified by the machine's finishedAt), so a redelivery of the same
