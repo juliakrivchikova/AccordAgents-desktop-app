@@ -11,6 +11,8 @@ import { createChatChangeTransport } from "./chatChangeTransport";
 import { chatChangesLogScope, isChatChangesPayload, sharedConversationState, sharedMessage, type ChatChangesPayload } from "./chatChanges";
 import { exportChatCopy, importChatCopy, machineChatCopyProvider, mergeCopiedConversation, type CopiedConversation } from "./chatCopy";
 import { ChatEventLogService } from "./chatEventLog";
+import { ArtifactService } from "./artifacts";
+import { ArtifactStore } from "./artifactStore";
 import { StorageService } from "./storage";
 
 const NOW = "2026-10-01T09:00:00.000Z";
@@ -245,4 +247,53 @@ test("a save that started before the machine became a recipient is waited for be
     await waiting;
     assert.equal(settled, true);
   } finally { await cleanup(); }
+});
+
+test("artifacts go with the copy into a machine whose store refuses the old artifact tables", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-chat-copy-artifacts-"));
+  try {
+    const desktopDb = path.join(directory, "desktop.sqlite3");
+    const machineDb = path.join(directory, "machine.sqlite3");
+    const desktop = new StorageService({ dbPath: desktopDb });
+    await desktop.init();
+    const desktopStore = new ArtifactStore(desktopDb);
+    await desktopStore.init();
+    await desktop.saveConversation(chat("chat-1", [message("m1", "Hello", 1)]));
+    const artifacts = new ArtifactService({ store: desktopStore, getMembers: async () => ["user", "drew"] });
+    const created = await artifacts.create("drew", { conversationId: "chat-1", name: "Plan", content: "Version one" });
+    assert.equal(created.ok, true, created.ok ? undefined : created.error?.message);
+    const artifactId = created.ok ? created.value.summary.id : "";
+
+    const copyDir = path.join(directory, "copy");
+    await exportChatCopy(desktop, copyDir, { desktopOriginId: "desktop-origin" });
+
+    // A machine as setup leaves it: the current artifact store, which turns
+    // the pre-revision tables read-only, is initialized before the import.
+    const machine = new StorageService({ dbPath: machineDb });
+    await machine.init();
+    const machineStore = new ArtifactStore(machineDb);
+    await machineStore.init();
+    await importChatCopy(machine, copyDir, { hostMachineId: "machine-1", localOriginId: "machine-origin" });
+    assert.equal((await machineStore.getById(artifactId))?.name, "Plan");
+    assert.equal((await machineStore.getVersion(artifactId, 1))?.content, "Version one");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a message holding the Unicode line and paragraph separators survives the copy whole", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-chat-copy-separators-"));
+  try {
+    const desktop = new StorageService({ dbPath: path.join(directory, "desktop.sqlite3") });
+    const text = "first\u2028second\u2029third\r\nfourth\u0010fifth";
+    await desktop.saveConversation(chat("chat-1", [message("m1", text, 1)]));
+    await desktop.saveConversation(chat("chat-2", [message("n1", "Other", 2)]));
+    const copyDir = path.join(directory, "copy");
+    await exportChatCopy(desktop, copyDir, { desktopOriginId: "desktop-origin" });
+    const { readFile } = await import("node:fs/promises");
+    const raw = await readFile(path.join(copyDir, "conversations.jsonl"), "utf8");
+    assert.equal(raw.split("\n").filter(Boolean).length, 2, "one line per chat");
+    assert.equal(/[\u2028\u2029]/.test(raw), false, "no raw separator a line reader could split on");
+    const machine = new StorageService({ dbPath: path.join(directory, "machine.sqlite3") });
+    await importChatCopy(machine, copyDir, { hostMachineId: "machine-1", localOriginId: "machine-origin" });
+    assert.equal((await machine.getConversation("chat-1"))?.messages[0].content, text);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

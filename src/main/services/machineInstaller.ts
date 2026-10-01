@@ -759,7 +759,7 @@ export class MachineInstallerService {
           if (wasRunning) {
             await exec({ target: request.target, script: machineStartServiceScript(layout), timeoutMs: SHORT_TIMEOUT_MS }).catch(() => undefined);
           }
-          return await fail("error", `Copying the chats to the machine failed: ${errorMessage(error)}`, {
+          return await fail("error", `Copying the chats to the machine failed: ${commandFailureDetail(error)}`, {
             kind: "old-runtime-still-installed",
             detail: `Nothing was replaced: ${probe.installedVersion ?? "the installed version"} is still the one the machine runs`
               + `${wasRunning ? ", and it was started again" : ""}. The new files are staged in ${layout.releasesDir}/${release}. Retry when the cause is fixed.`,
@@ -1369,6 +1369,14 @@ export function redactKeyLikeText(value: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A remote command's own last words, when it said any: "ssh exited with
+ *  code 1" alone does not tell the User what went wrong on the machine. */
+function commandFailureDetail(error: unknown): string {
+  const stderr = error instanceof CommandError ? redactKeyLikeText(error.result.stderr).trim() : "";
+  const last = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-3).join(" ");
+  return last ? `${errorMessage(error)}: ${last.slice(0, 500)}` : errorMessage(error);
 }
 
 export { compareVersions };

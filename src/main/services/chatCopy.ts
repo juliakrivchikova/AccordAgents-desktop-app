@@ -1,7 +1,6 @@
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createInterface } from "node:readline";
 import { once } from "node:events";
 import type { ChatMessage, Conversation } from "../../shared/types";
 import {
@@ -58,6 +57,30 @@ export interface ChatCopyImportSummary {
   marks: number;
 }
 
+/**
+ * One chat per line. JSON already escapes every line break but two: U+2028 and
+ * U+2029 are legal inside a JSON string, and a reader that treats them as line
+ * ends (Node's readline does, from Node 24) would cut such a chat in half. They
+ * are escaped here, and the reader splits on "\n" alone.
+ */
+function jsonLine(value: unknown): string {
+  return JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+}
+
+async function* jsonLines(file: string): AsyncGenerator<string> {
+  let pending = "";
+  for await (const chunk of createReadStream(file, { encoding: "utf8" })) {
+    pending += chunk as string;
+    let end = pending.indexOf("\n");
+    while (end >= 0) {
+      yield pending.slice(0, end);
+      pending = pending.slice(end + 1);
+      end = pending.indexOf("\n");
+    }
+  }
+  if (pending) yield pending;
+}
+
 function removedIds(conversation: Pick<Conversation, "metadata">): string[] {
   const value = conversation.metadata?.removedChatMessageIds;
   return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
@@ -90,7 +113,7 @@ export async function exportChatCopy(
         messages: conversation.messages.map((message) => sharedMessage(message, { withReactions: true })),
         removed: removedIds(conversation)
       };
-      const line = `${JSON.stringify(copied)}\n`;
+      const line = `${jsonLine(copied)}\n`;
       bytes += Buffer.byteLength(line);
       if (!stream.write(line)) await once(stream, "drain");
       conversations += 1;
@@ -267,8 +290,7 @@ export async function importChatCopy(
   await storage.importChatCopyState(path.join(dir, CHAT_COPY_STATE_FILE));
   const tombstones = storage.conversationTombstones();
   const summary: ChatCopyImportSummary = { conversations: 0, skippedDeleted: 0, messages: 0, marks: 0 };
-  const lines = createInterface({ input: createReadStream(path.join(dir, CHAT_COPY_CONVERSATIONS_FILE), "utf8"), crlfDelay: Infinity });
-  for await (const line of lines) {
+  for await (const line of jsonLines(path.join(dir, CHAT_COPY_CONVERSATIONS_FILE))) {
     if (!line.trim()) continue;
     const copied = JSON.parse(line) as CopiedConversation;
     if (await tombstones.isDeleted(copied.id)) {

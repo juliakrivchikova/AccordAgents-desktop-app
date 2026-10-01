@@ -324,15 +324,15 @@ export interface ChatCopyMark {
 }
 
 /** Shared state a new machine gets with its chat copy: artifacts, and which
- *  chats were deleted. The artifact delivery outbox is device-local. */
+ *  chats were deleted. The artifact delivery outbox is device-local, and the
+ *  pre-revision tables (`artifact_versions`, `artifact_signatures`,
+ *  `artifact_version_sources`) are read-only history that a current store
+ *  refuses writes to; their content lives in the revision tables below. */
 const CHAT_COPY_STATE_TABLES = [
   "deleted_conversations",
   "artifact_conversation_tombstones",
   "artifacts",
-  "artifact_versions",
-  "artifact_signatures",
   "artifact_drafts",
-  "artifact_version_sources",
   "artifact_operations",
   "artifact_revisions",
   "artifact_state_events",
