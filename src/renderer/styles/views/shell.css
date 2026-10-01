@@ -219,6 +219,12 @@
   box-shadow: var(--shadow-md);
 }
 
+.app-notice-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 .app-notice-dismiss-all {
   align-self: flex-end;
   border: 0;

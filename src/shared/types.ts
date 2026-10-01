@@ -6,7 +6,9 @@ import type {
   MachineListResult,
   MachineTrustedDevicesResult,
   SaveTrustedDeviceRequest,
-  RemoveMachineRequest
+  RemoveMachineRequest,
+  MachineInactivityQuestion,
+  AnswerMachineInactivityRequest
 } from "./machineLink";
 import type {
   MachineInstallRecord,
@@ -2850,6 +2852,10 @@ export interface AppBridge {
   removeMachine(request: RemoveMachineRequest): Promise<MachineListResult>;
   machineEnrollment(request: MachineEnrollmentRequest): Promise<CreateMachineResult>;
   onMachinesUpdated(callback: (result: MachineListResult) => void): () => void;
+  /** Machines the User is asked about because they stopped being used. */
+  listMachineInactivityQuestions(): Promise<MachineInactivityQuestion[]>;
+  answerMachineInactivity(request: AnswerMachineInactivityRequest): Promise<MachineInactivityQuestion[]>;
+  onMachineInactivityQuestions(callback: (questions: MachineInactivityQuestion[]) => void): () => void;
   // Machines transport: installing and upgrading the runtime on a machine.
   // This is the only SSH path to a machine; messaging always uses the relay.
   probeMachineInstall(request: { machineId: string; target: MachineSshTarget }): Promise<MachineRuntimeProbe>;

@@ -7,7 +7,9 @@ import type {
   MachineListResult,
   MachineTrustedDevicesResult,
   SaveTrustedDeviceRequest,
-  RemoveMachineRequest
+  RemoveMachineRequest,
+  MachineInactivityQuestion,
+  AnswerMachineInactivityRequest
 } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
@@ -267,6 +269,14 @@ const bridge: AppBridge = {
     const listener = (_event: unknown, result: MachineListResult): void => callback(result);
     ipcRenderer.on("machines:updated", listener);
     return () => ipcRenderer.off("machines:updated", listener);
+  },
+  listMachineInactivityQuestions: (): Promise<MachineInactivityQuestion[]> => ipcRenderer.invoke("machines:inactivity-questions"),
+  answerMachineInactivity: (request: AnswerMachineInactivityRequest): Promise<MachineInactivityQuestion[]> =>
+    ipcRenderer.invoke("machines:inactivity-answer", request),
+  onMachineInactivityQuestions: (callback: (questions: MachineInactivityQuestion[]) => void) => {
+    const listener = (_event: unknown, questions: MachineInactivityQuestion[]): void => callback(questions);
+    ipcRenderer.on("machines:inactivity-questions", listener);
+    return () => ipcRenderer.off("machines:inactivity-questions", listener);
   },
   onArtifactsUpdated: (callback: (event: ArtifactsUpdatedEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: ArtifactsUpdatedEvent) => callback(payload);

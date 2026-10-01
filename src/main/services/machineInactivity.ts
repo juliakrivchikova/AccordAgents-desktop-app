@@ -95,14 +95,15 @@ export class MachineInactivityCheck {
         lastActiveAt: new Date(lastActive).toISOString()
       });
     }
+    // Asked about all at once; each answer is carried out as it comes.
     const removed: string[] = [];
-    for (const machine of inactive) {
+    await Promise.all(inactive.map(async (machine) => {
       const answer = await this.options.ask(machine);
       this.options.log("machines.inactivity.answered", { machineId: machine.id, inactiveDays: machine.inactiveDays, answer });
-      if (answer !== "remove") continue;
+      if (answer !== "remove") return;
       await this.options.remove(machine.id);
       removed.push(machine.id);
-    }
+    }));
     await this.options.saveLastCheckAt(new Date(now).toISOString());
     return { checked: true, asked: inactive.map((machine) => machine.id), removed };
   }

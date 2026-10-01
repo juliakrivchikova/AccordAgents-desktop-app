@@ -532,6 +532,20 @@ export interface RemoveMachineRequest {
   id: string;
 }
 
+/** A machine that has not been active for 10 days or more. While it is kept,
+ *  the desktop keeps every chat change for it, so the User is asked whether it
+ *  is still in use. */
+export interface MachineInactivityQuestion {
+  machineId: string;
+  name: string;
+  inactiveDays: number;
+}
+
+export interface AnswerMachineInactivityRequest {
+  machineId: string;
+  answer: "keep" | "remove";
+}
+
 /** An enrolled machine as the desktop stores it. The pairing package carries
  *  the relay room, the seal key, and the capability fingerprint. */
 export interface MachineRecord {

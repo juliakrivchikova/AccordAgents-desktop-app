@@ -112,7 +112,7 @@ import { MachineApprovalExecutor, machineApprovalResultId } from "./services/mac
 import { readPosixProcessTableAsync } from "./services/processTermination";
 import { createChatActionEffects } from "./services/chatActionEffects";
 import { MachineChoiceExecutor, machineChoiceResultId } from "./services/chatActionNativeClaims";
-import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
+import type { AnswerMachineInactivityRequest, CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineInactivityQuestion, MachineListResult, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
   MachineInstallRequest,
@@ -406,6 +406,12 @@ function machineRuntimePayload(): MachineRuntimePayloadLocation {
   }
   return { dir: path.join(app.getAppPath(), "dist", "machine"), source: "checkout", expectVersion: app.getVersion() };
 }
+/** Questions about machines that stopped being used, waiting for the User. */
+const machineInactivityAnswers = new Map<string, { question: MachineInactivityQuestion; resolve: (answer: "keep" | "remove") => void }>();
+function machineInactivityQuestions(): MachineInactivityQuestion[] {
+  return [...machineInactivityAnswers.values()].map((entry) => entry.question);
+}
+
 /** Removes a machine from this desktop: Settings > Remove, and the answer
  *  "no longer in use" to the inactive-machine question. The cloud instance
  *  itself is not deleted. */
@@ -2943,6 +2949,17 @@ function registerIpc(): void {
   ipcMain.handle("machines:create", async (_event, request: CreateMachineRequest): Promise<CreateMachineResult> => {
     return createMachine(request);
   });
+  ipcMain.handle("machines:inactivity-questions", (): MachineInactivityQuestion[] => machineInactivityQuestions());
+  ipcMain.handle("machines:inactivity-answer", (_event, request: AnswerMachineInactivityRequest): MachineInactivityQuestion[] => {
+    const id = typeof request?.machineId === "string" ? request.machineId : "";
+    const entry = machineInactivityAnswers.get(id);
+    if (entry && (request.answer === "keep" || request.answer === "remove")) {
+      machineInactivityAnswers.delete(id);
+      entry.resolve(request.answer);
+      sendToMainWindow("machines:inactivity-questions", machineInactivityQuestions());
+    }
+    return machineInactivityQuestions();
+  });
   ipcMain.handle("machines:remove", async (_event, request: RemoveMachineRequest): Promise<MachineListResult> => {
     const id = typeof request?.id === "string" ? request.id.trim() : "";
     if (!id) {
@@ -3565,7 +3582,8 @@ void app.whenReady().then(async () => {
       void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });
     });
     // While a machine stays away, this desktop keeps every chat change for it.
-    // Once every 10 days the User is asked about machines inactive that long.
+    // Once every 10 days the User is asked about machines inactive that long,
+    // in the window's notice stack; the answers come back over IPC.
     new MachineInactivityCheck({
       listMachines: () => settingsService.listMachines(),
       isConnected: (machineId) => link.isMachineConnected(machineId),
@@ -3574,20 +3592,13 @@ void app.whenReady().then(async () => {
         : undefined,
       lastCheckAt: () => settingsService.getMachineInactivityCheckAt(),
       saveLastCheckAt: (at) => settingsService.saveMachineInactivityCheckAt(at),
-      ask: async (machine) => {
-        const { response } = await dialog.showMessageBox({
-          type: "question",
-          buttons: ["Keep", "Remove"],
-          defaultId: 0,
-          cancelId: 0,
-          title: "Machine not used recently",
-          message: `Is ${machine.name} still in use?`,
-          detail: `It has not been active for ${machine.inactiveDays} days. While it is kept, this computer keeps every chat change `
-            + "for it until it comes back. Remove takes it out of AccordAgents; its cloud instance is not deleted, and using it "
-            + "again means connecting it anew. If you keep it, you are asked again in 10 days if it is still inactive."
+      ask: (machine) => new Promise((resolve) => {
+        machineInactivityAnswers.set(machine.id, {
+          question: { machineId: machine.id, name: machine.name, inactiveDays: machine.inactiveDays },
+          resolve
         });
-        return response === 1 ? "remove" : "keep";
-      },
+        sendToMainWindow("machines:inactivity-questions", machineInactivityQuestions());
+      }),
       remove: async (machineId) => { await removeMachine(machineId); },
       log: (event, payload) => { void debugLogService.write(event, payload); }
     }).start();

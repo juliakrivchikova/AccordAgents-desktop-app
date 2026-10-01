@@ -1,4 +1,6 @@
-import { X } from "lucide-react";
+import { Server, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { useMachineInactivityQuestions } from "./use-machine-inactivity";
 import { IconButton, Notice } from "../components/primitives";
 import { displayNoticeText, errorText } from "../components/review/review-conversation-data";
 import type { WarningNoticeEntry } from "./warnings";
@@ -17,6 +19,10 @@ export function AppNotices(props: {
   setWarnings: React.Dispatch<React.SetStateAction<string[]>>;
   setDismissedWarningKeysByScope: React.Dispatch<React.SetStateAction<DismissedWarningMap>>;
 }): JSX.Element | null {
+  // Machines that stopped being used: these wait for an answer, so they have
+  // no dismiss button and "Dismiss all" leaves them.
+  const { setError } = props;
+  const machineInactivity = useMachineInactivityQuestions(setError);
   function dismissWarnings(keys: string[]): void {
     const dismissed = keys.filter(Boolean);
     if (dismissed.length === 0) return;
@@ -37,7 +43,8 @@ export function AppNotices(props: {
     }
   }
 
-  if (!props.error && props.warnings.length === 0) {
+  const machineQuestions = machineInactivity.questions;
+  if (!props.error && props.warnings.length === 0 && machineQuestions.length === 0) {
     return null;
   }
 
@@ -69,6 +76,30 @@ export function AppNotices(props: {
           </Notice>
         </div>
       )}
+      {machineQuestions.map((question) => (
+        <div className="app-notice-card" key={`machine-inactive:${question.machineId}`} data-testid="machine-inactivity-question">
+          <Notice
+            tone="info"
+            icon={Server}
+            title={`Is ${question.name} still in use?`}
+          >
+            <p>
+              It has not been active for {question.inactiveDays} days. While it is kept, this computer keeps every chat
+              change for it until it comes back. Removing it takes it out of AccordAgents; a cloud instance is not deleted.
+            </p>
+            <div className="app-notice-actions">
+              <Button type="button" variant="outline" size="sm" data-testid="machine-inactivity-keep"
+                onClick={() => machineInactivity.answer(question.machineId, "keep")}>
+                Keep
+              </Button>
+              <Button type="button" variant="outline" size="sm" data-testid="machine-inactivity-remove"
+                onClick={() => machineInactivity.answer(question.machineId, "remove")}>
+                Remove
+              </Button>
+            </div>
+          </Notice>
+        </div>
+      ))}
       {props.warnings.map((warning) => (
         <div className="app-notice-card" key={warning.key}>
           <Notice
