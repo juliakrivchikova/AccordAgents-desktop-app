@@ -186,14 +186,26 @@ plus one direct copy at setup (below).
   by the device that may change it. Reactions come from anyone and merge; a
   removal is a union. A chat's shared fields (title, members, project,
   archived, app-tool grants) come only from the desktop, and so does a new
-  chat: every chat starts on the desktop. Changes from anyone else are ignored
-  and logged. A chat id from another device must be a plain token, because it
-  names a directory on every device.
+  chat: every chat starts on the desktop. A member's turn that never left the
+  desktop (refused, or stopped while being prepared) is settled by the
+  desktop; its home machine only ever had the empty bubble. Changes from
+  anyone else are ignored and logged. A chat id from another device must be a
+  plain token, because it names a directory on every device.
+- **Order between authors.** A change written on a machine names the desktop
+  change of that chat it was written after. Another machine that has not
+  applied that one yet holds a change it would otherwise refuse (a member it
+  does not know yet, a home that has just moved) until it has; a change that
+  applies anyway is not held. A change of a newer version than a device folds
+  waits there, unapplied, until that device is updated.
 - **Recipients.** The desktop addresses every enrolled machine, online or not,
-  whose runtime folds chat changes (it says so in its hello, and setup records
-  it). The list is read from the stored machines before any chat is saved, so
-  a save made while machines are still connecting reaches them too. A machine
-  addresses the desktop and every machine in its trust roster. The
+  and keeps each change until that machine confirms it. One whose runtime
+  cannot fold chat changes yet (its hello says so) is sent none of them, by
+  the desktop or by another machine (the roster says which can), and gets
+  them all, in order, once it can: no machine is ever left with a gap. The
+  list is read from the stored machines before any chat is saved, so a save
+  made while machines are still connecting reaches them too, and a machine
+  stays on it through a disconnect until it is removed. A machine addresses
+  the desktop and every machine in its trust roster. The
   desktop also forwards each change a machine wrote to every other machine,
   unchanged and signed by its author; a machine accepts such a forward only
   when the author is one of the owner's machines. A missing change can be
@@ -231,16 +243,21 @@ plus one direct copy at setup (below).
   that another machine had not received yet stays missing on that machine
   (seen in QA as an empty reply bubble there); the desktop's chat, the one
   the User sees, has it. Closing it would make the desktop the writer of a
-  removed machine's members' messages.
+  removed machine's members' messages. A machine whose runtime is never
+  updated keeps its share of every change on this desktop until it is updated
+  or removed.
 - **Retired.** `machine.conversation.sync`, `.delta` from the desktop,
   `.sync.done` and `.resync` are no longer sent; one that still arrives from an
   older peer is logged and ignored. A `.backdelta` from a runtime that has not
-  been updated (or one it queued before its update) is stored as before.
+  been updated (or one it queued before its update) is stored, limited to that
+  machine's own members' messages and what it created itself.
 - **Phone.** A phone that talks to a machine while the desktop is away still
-  sends its message as a `.delta`; a machine that does not hold that chat yet
-  keeps the message (and the turn behind it) until the chat arrives. The phone
-  receives the machine's own chat changes (shared in the machine's room) to
-  show its members' messages and choices, starting from the first one it sees.
+  sends its message as a `.delta`, which may carry only the User's own
+  message; a machine that does not hold that chat yet keeps it (and the turn
+  behind it) until the chat arrives. The phone receives the machine's own
+  chat changes (shared in the machine's room while the desktop has not
+  confirmed them) to show its members' messages and choices, in the order
+  they arrive: what it missed went to the desktop, so no gap holds them.
 
 ## 5. Channel and repair
 
