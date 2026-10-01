@@ -1800,6 +1800,8 @@ export class SettingsService {
   private storedWriteQueue: Promise<void> = Promise.resolve();
   private assistantProviderMutation: Promise<void> = Promise.resolve();
 
+  private readonly storedChangeListeners = new Set<() => void>();
+
   constructor(private readonly options: { profileHome?: string } = {}) {
     this.settingsPath = path.join(userDataPath(), "settings.json");
     this.mobilePairedDevicesPath = path.join(userDataPath(), "mobile-paired-devices.json");
@@ -2763,6 +2765,12 @@ export class SettingsService {
     }
   }
 
+  /** Called after every settings write that reached the disk. */
+  onStoredChange(listener: () => void): () => void {
+    this.storedChangeListeners.add(listener);
+    return () => { this.storedChangeListeners.delete(listener); };
+  }
+
   private async writeStored(settings: StoredSettings, durable = false): Promise<void> {
     const previous = this.storedState;
     this.storedState = settings;
@@ -2790,6 +2798,9 @@ export class SettingsService {
     catch (error) {
       if (durable && this.storedState === settings) this.storedState = previous;
       throw error;
+    }
+    for (const listener of this.storedChangeListeners) {
+      try { listener(); } catch { /* a listener's failure is not the write's */ }
     }
   }
 

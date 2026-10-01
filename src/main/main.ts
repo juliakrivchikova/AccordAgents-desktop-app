@@ -3423,6 +3423,20 @@ void app.whenReady().then(async () => {
       onCommitted: () => machineLinkService?.nudgeEventChannels(),
       machineOriginId: (machineId) => machineLinkService?.machineDeviceId(machineId)
     }));
+    // A saved setting (an environment value, a role, a rule, a prompt, a
+    // member preset) reaches the machines at once, not only on their next
+    // connection. Bursts of writes are sent once.
+    let machineSettingsSync: ReturnType<typeof setTimeout> | undefined;
+    settingsService.onStoredChange(() => {
+      if (machineSettingsSync) clearTimeout(machineSettingsSync);
+      machineSettingsSync = setTimeout(() => {
+        machineSettingsSync = undefined;
+        void machineLinkService?.syncSettings().catch((error) => {
+          void debugLogService.write("machine-link.settings.sync-error", { message: error instanceof Error ? error.message : String(error) });
+        });
+      }, 500);
+      machineSettingsSync.unref?.();
+    });
     machineLinkService.onStatus(() => {
       void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
     });

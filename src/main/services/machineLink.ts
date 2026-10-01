@@ -21,6 +21,7 @@ import {
   type MachineLinkMessage,
   type MachineLinkStatus,
   type MachineRecord,
+  type MachineSettingsSnapshot,
   type MachineTurnFinishedBody
 } from "../../shared/machineLink";
 import type { MachineAttachmentRequestBody } from "../../shared/machineLink";
@@ -118,6 +119,9 @@ interface MachineConnection {
   client: RelayTunnelClient;
   machineDeviceId?: string;
   settingsSynced: boolean;
+  /** What the settings last sent to this machine said, so a save that did not
+   *  change anything a machine uses sends nothing. */
+  settingsKey?: string;
   pendingTurns: Map<string, {
     resolve: (result: MachineTurnDispatchResult) => void;
     progress?: (progress: ReviewProgress) => void;
@@ -982,18 +986,22 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
   }
 
-  /** Pushes the current desktop settings to every connected machine (call
-   *  after settings change). */
+  /** Pushes the current desktop settings to every machine (called after a
+   *  settings save). A machine that already has them is sent nothing; one
+   *  that is offline gets them as a durable event, or on its next hello. */
   async syncSettings(): Promise<void> {
     const snapshot = await this.settings.exportMachineSettingsSnapshot();
+    const key = machineSettingsKey(snapshot);
     for (const connection of this.connections.values()) {
       if (this.options.desktopDeviceId !== connection.pairing.issuer.originId) continue;
       if (!connection.eventChannel) {
         connection.settingsSynced = false;
         continue;
       }
+      if (connection.settingsKey === key) continue;
       await this.send(connection, { type: "machine.settings.sync", snapshot });
       connection.settingsSynced = true;
+      connection.settingsKey = key;
     }
   }
 
@@ -1504,7 +1512,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
     await this.persistCancels(connection, true);
     if (this.options.desktopDeviceId === connection.pairing.issuer.originId) {
       await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion, machineId: connection.record.id });
-      await this.send(connection, { type: "machine.settings.sync", snapshot: await this.settings.exportMachineSettingsSnapshot() });
+      const snapshot = await this.settings.exportMachineSettingsSnapshot();
+      await this.send(connection, { type: "machine.settings.sync", snapshot });
+      connection.settingsKey = machineSettingsKey(snapshot);
       await this.sendTrustRoster(connection);
     }
     connection.settingsSynced = true;
@@ -1773,4 +1783,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** The part of a settings snapshot a machine uses; the export time is not. */
+function machineSettingsKey(snapshot: MachineSettingsSnapshot): string {
+  return JSON.stringify([snapshot.settingsJson, snapshot.agentEnvironment]);
 }
