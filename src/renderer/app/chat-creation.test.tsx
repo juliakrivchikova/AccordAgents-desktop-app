@@ -23,6 +23,7 @@ const conversation = (): Conversation => ({ id: "created", title: "hello", kind:
 async function harness() {
   const creation = deferred<StartReviewResult>();
   const sent = deferred<StartReviewResult>();
+  const opened = deferred<{ conversation: Conversation }>();
   const calls: string[] = [];
   let saved = conversation();
   let state!: AppState;
@@ -38,6 +39,7 @@ async function harness() {
     sendChatMessage: request => { calls.push(`send:${request.runId}`); return sent.promise; },
     cancelReview: async runId => { calls.push(`stop:${runId}`); },
     getConversation: async () => saved,
+    openConversation: () => opened.promise,
     getSettings: async () => state.settings,
     setChatArchived: async request => {
       assert.equal(request.onlyIfEmpty, true);
@@ -53,7 +55,7 @@ async function harness() {
     state = useAppState();
     navigation = useConversationActions(state);
     actions = useChatActions(state, navigation);
-    useAppEffects(state, async () => {}, async () => [], async () => {}, () => {});
+    useAppEffects(state, async () => {}, async () => [], async () => {});
     const view = useAppViewModel(state);
     // The coordinating creation path is real; ChatConversationView itself is
     // covered separately once the created conversation is selected.
@@ -75,7 +77,7 @@ async function harness() {
     state.setRepoPath("/project");
     state.setNewChatRepoFileMentions([{ path: "src/main.ts" }]);
   });
-  return { renderer, creation, sent, calls, state: () => state, actions: () => actions, navigation: () => navigation,
+  return { renderer, creation, sent, opened, calls, state: () => state, actions: () => actions, navigation: () => navigation,
     progress: (event: ReviewProgress) => progress(event), runId: () => createRunId,
     saved: (value: Conversation) => { saved = value; } };
 }
@@ -137,12 +139,51 @@ test("successful creation sends once, clears the draft, and a duplicate Start ca
   let pending!: Promise<boolean>;
   await act(async () => { pending = h.actions().startChat(); });
   await act(async () => { assert.equal(await h.actions().startChat(), false); });
+  // Activity opened while the chat was being created: Back lands on the new chat.
+  h.state().chatBeforeActivityRef.current = {};
   await act(async () => { h.creation.resolve({ conversation: conversation(), warnings: [] }); });
+  assert.deepEqual(h.state().chatBeforeActivityRef.current, { conversationId: "created" });
   await act(async () => { h.sent.resolve({ conversation: conversation(), warnings: [] }); assert.equal(await pending, true); });
   assert.deepEqual(h.calls, ["create", `send:${h.runId()}`]);
   assert.equal(h.state().conversation?.id, "created");
   assert.equal(h.state().question, "");
   assert.equal(h.state().busy, false);
   assert.equal(h.state().chatCreationRef.current, undefined);
+  await act(async () => { h.renderer.unmount(); });
+});
+
+test("Back from an Activity preview drops it, keeps the draft, and gives it a dot only for news it never showed", async () => {
+  const h = await harness();
+  const [before, after] = ["2026-09-13T00:00:00.000Z", "2026-09-13T00:00:05.000Z"];
+  // [last viewed, loaded as a preview at, dot]
+  const cases = [[before, undefined, true], [after, undefined, false], [undefined, before, true], [undefined, after, false], [undefined, undefined, false]] as const;
+  for (const [lastViewed, previewLoadedAt, dot] of cases) {
+    await act(async () => {
+      h.state().lastViewedAtRef.current = lastViewed ? { preview: lastViewed } : {};
+      h.state().previewLoadedAtRef.current = previewLoadedAt ? { preview: previewLoadedAt } : {};
+      h.state().setUnreadConversationIds(new Set());
+      h.state().setConversation({ ...conversation(), id: "preview", updatedAt: after });
+    });
+    await act(async () => { h.navigation().returnToNewChatDraft(); });
+    assert.equal(h.state().conversation, undefined);
+    assert.equal(h.state().question, "Draft must survive");
+    assert.equal(h.state().unreadConversationIds.has("preview"), dot, `viewed ${lastViewed}, previewed ${previewLoadedAt}`);
+  }
+  await act(async () => { h.renderer.unmount(); });
+});
+
+test("a preview still loading when Back is pressed never lands on screen or counts as viewed", async () => {
+  // jsdom has no animation frames; opening a chat waits for one.
+  globalThis.requestAnimationFrame ??= (callback) => setTimeout(() => callback(0), 0) as unknown as number;
+  const h = await harness();
+  let loading!: Promise<void>;
+  await act(async () => { loading = h.navigation().openConversation("late"); });
+  assert.equal(h.state().openingConversationId, "late");
+  await act(async () => { h.navigation().returnToNewChatDraft(); });
+  await act(async () => { h.opened.resolve({ conversation: { ...conversation(), id: "late" } }); await loading; });
+  assert.equal(h.state().conversation, undefined);
+  assert.equal(h.state().openingConversationId, undefined);
+  assert.equal(h.state().lastViewedAtRef.current.late, undefined);
+  assert.equal(h.state().question, "Draft must survive");
   await act(async () => { h.renderer.unmount(); });
 });

@@ -5,9 +5,9 @@
 
 .app-shell-root {
   position: relative;
-  grid-template-columns: var(--app-rail-width) var(--app-sidebar-width) minmax(0, 1fr);
-  grid-template-rows: 50px minmax(0, 1fr);
-  background: var(--app-rail-bg);
+  grid-template-columns: var(--app-sidebar-width) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  background: var(--app-sidebar-bg);
   transition: grid-template-columns 280ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -22,55 +22,14 @@
 }
 
 .app-shell-root[data-sidebar-collapsed="true"] {
-  grid-template-columns: var(--app-rail-width) 0 minmax(0, 1fr);
-}
-
-.app-shell-top-strip {
-  z-index: calc(var(--z-sidebar) + 2);
-  display: flex;
-  grid-column: 1 / -1;
-  grid-row: 1;
-  min-width: 0;
-  align-items: center;
-  justify-content: flex-end;
-  padding: 0 15px;
-  background: var(--app-rail-bg);
-  -webkit-app-region: drag;
-}
-
-.app-shell-top-strip-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  -webkit-app-region: no-drag;
-}
-
-.app-shell-top-strip .topbar-icon-button {
-  width: 30px;
-  height: 30px;
-  min-height: 30px;
-  color: var(--app-rail-fg);
-}
-
-.app-shell-top-strip .topbar-icon-button:hover {
-  background: var(--app-rail-hover) !important;
-  color: var(--app-rail-fg-active);
-}
-
-.app-shell-rail-slot {
-  grid-column: 1;
-  grid-row: 2;
-  min-width: 0;
-  overflow: hidden;
-  background: var(--app-rail-bg);
+  grid-template-columns: 0 minmax(0, 1fr);
 }
 
 .app-shell-sidebar-slot {
-  grid-column: 2;
-  grid-row: 2;
+  grid-column: 1;
+  grid-row: 1;
   min-width: 0;
   overflow: hidden;
-  border-radius: 12px 0 0 12px;
 }
 
 .app-shell-sidebar-slot > [data-shell="sidebar"] {
@@ -85,9 +44,9 @@
 .app-shell-sidebar-resizer {
   position: absolute;
   z-index: calc(var(--z-sidebar) + 1);
-  top: 50px;
+  top: 0;
   bottom: 0;
-  left: calc(var(--app-rail-width) + var(--app-sidebar-width) - 5px);
+  left: calc(var(--app-sidebar-width) - 5px);
   width: 10px;
   cursor: col-resize;
   touch-action: none;
@@ -95,14 +54,92 @@
 }
 
 [data-shell="workspace"] {
-  grid-column: 3;
-  grid-row: 2;
-  border-radius: 0 12px 12px 0;
+  grid-column: 2;
+  grid-row: 1;
+  border-left: 1px solid var(--app-shell-border);
   background: var(--app-workspace-bg);
 }
 
 .app-shell-root[data-sidebar-collapsed="true"] [data-shell="workspace"] {
-  border-radius: 12px;
+  border-left: 0;
+}
+
+/* The top row of each pane is also the window's title bar: one narrow band
+   level with the macOS traffic lights. On macOS the window has no system
+   title bar, so these rows drag the window; controls inside them do not. */
+.app-shell-root {
+  --app-titlebar-inset: 0px;
+}
+
+/* Traffic lights sit over the window's top-left corner. The sidebar's top row
+   always starts there; a workspace row starts there only while the sidebar
+   is out (collapsed, or replaced by Activity). */
+.app-shell-root[data-platform="mac"] {
+  --app-traffic-light-inset: 80px;
+}
+
+.app-shell-root[data-platform="mac"][data-sidebar-collapsed="true"] {
+  /* Rows already pad by the gutter; this tops them up to the lights' edge. */
+  --app-titlebar-inset: calc(var(--app-traffic-light-inset) - var(--app-gutter));
+}
+
+.app-shell-root[data-platform="mac"] [data-titlebar] {
+  -webkit-app-region: drag;
+}
+
+.app-shell-root[data-platform="mac"] [data-titlebar] :is(button, a, input, textarea, select, [role="button"], [role="tab"], [contenteditable="true"]) {
+  -webkit-app-region: no-drag;
+}
+
+/* Dialogs, their overlays and menus are portaled over everything: where they
+   cover a title row, a click there must reach them, not drag the window. */
+[data-slot="dialog-overlay"],
+[role="dialog"],
+[role="alertdialog"],
+[role="listbox"],
+[role="menu"],
+[data-radix-popper-content-wrapper],
+.aa-searchmodal-scrim,
+.app-notice-stack {
+  -webkit-app-region: no-drag;
+}
+
+/* Rows that are not at the top of the window never drag it: a chat's side
+   panels when the chat has no top row of its own (inside Activity while the
+   selected item's chat is still loading), and the sidebar while collapsed. */
+.app-shell-root[data-platform="mac"] .chat-view:not(.with-inline-topbar) [data-titlebar],
+.app-shell-root[data-platform="mac"][data-sidebar-collapsed="true"] .app-shell-sidebar-slot [data-titlebar] {
+  -webkit-app-region: no-drag;
+}
+
+/* Column resizers stay grabbable along their whole height, including the
+   part that crosses a title row. */
+.app-shell-sidebar-resizer,
+.artifacts-panel-resizer,
+.thread-resizer,
+.activity-list-resizer {
+  -webkit-app-region: no-drag;
+}
+
+.app-titlebar-row {
+  display: flex;
+  height: var(--app-header-height);
+  flex: 0 0 var(--app-header-height);
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px 0 16px;
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.app-shell-root[data-platform="mac"] .sidebar-brand-row {
+  padding-left: var(--app-traffic-light-inset);
+}
+
+[data-shell="topbar"] {
+  padding-left: calc(var(--app-gutter) + var(--app-titlebar-inset));
 }
 
 .app-shell-sidebar-resizer::before {
@@ -129,100 +166,72 @@
   background: var(--app-sidebar-bg);
 }
 
-.app-rail {
-  position: relative;
-  display: flex;
-  width: var(--app-rail-width);
-  height: 100%;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 15px 8px 12px;
-  background: var(--app-rail-bg);
+/* The Settings title row scrolls with the pane content, so it sticks to the
+   top to stay the window's title bar. With the sidebar collapsed on macOS it
+   keeps clear of the traffic lights; the column is centered (max 1280px,
+   24px padding), so only the part of the inset the margin leaves is needed. */
+.settings-view-head {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  background: var(--app-surface);
 }
 
-.app-rail-primary {
+.app-shell-root[data-platform="mac"][data-sidebar-collapsed="true"] .settings-view-head {
+  padding-left: max(0px, calc(var(--app-traffic-light-inset) - 24px - max(0px, (100vw - 1280px) / 2)));
+}
+
+/* Errors and warnings (app/app-notices.tsx): a stack in the bottom-right
+   corner that stays until dismissed. Over a chat it sits above the composers
+   (their height, measured: use-composer-notice-clearance.ts) so the draft and
+   Send stay reachable. */
+.app-notice-stack {
+  position: fixed;
+  /* Under popovers, menus and dialog overlays: a notice never covers a dialog
+     or closes it with a stray click. */
+  z-index: calc(var(--z-dropdown) + 5);
+  right: 16px;
+  bottom: calc(var(--chat-composer-clearance, 0px) + 16px);
   display: flex;
-  width: 100%;
+  width: min(380px, calc(100vw - 32px));
+  /* Never up into the title rows, which drag the window on macOS. */
+  max-height: min(60vh, 520px, calc(100vh - var(--chat-composer-clearance, 0px) - var(--app-header-height) - 32px));
   flex-direction: column;
   align-items: stretch;
-  gap: 4px;
-}
-
-.app-rail-button {
-  position: relative;
-  display: inline-flex;
-  width: 100%;
-  flex: 0 0 auto;
-  flex-direction: column;
-  align-items: center;
-  gap: 5px;
-  justify-content: center;
-  border: 0;
-  border-radius: 12px;
-  padding: 6px 0 5px;
-  color: var(--app-rail-fg);
-  background: transparent;
-  transition: color 120ms ease;
-}
-
-.app-rail > .app-rail-button {
-  margin-top: auto;
-}
-
-.app-rail-icon {
-  position: relative;
-  display: inline-flex;
-  width: 40px;
-  height: 40px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 12px;
-  background: transparent;
-  transition: background 120ms ease;
-}
-
-.app-rail-badge {
-  position: absolute;
-  top: 0;
-  right: -2px;
-  display: inline-flex;
-  min-width: 18px;
-  height: 18px;
-  align-items: center;
-  justify-content: center;
-  border: 2px solid var(--app-rail-bg);
-  border-radius: 999px;
-  padding: 0 5px;
-  color: var(--app-rail-badge-fg);
-  background: var(--app-rail-badge-bg);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
+  gap: 8px;
+  overflow-y: auto;
   pointer-events: none;
 }
 
-.app-rail-label {
-  color: inherit;
-  font-size: 11px;
+/* A composer's @-mention menu opens upward into the same corner. */
+.app-shell-root:has(.mention-menu) .app-notice-stack {
+  visibility: hidden;
+}
+
+.app-notice-stack > * {
+  pointer-events: auto;
+}
+
+.app-notice-card {
+  overflow-wrap: anywhere;
+  border-radius: var(--radius-lg, 10px);
+  background: var(--app-surface);
+  box-shadow: var(--shadow-md);
+}
+
+.app-notice-dismiss-all {
+  align-self: flex-end;
+  border: 0;
+  border-radius: 6px;
+  padding: 2px 8px;
+  color: var(--app-muted);
+  background: var(--app-surface);
+  font-size: 12px;
   font-weight: 600;
-  line-height: normal;
+  box-shadow: var(--shadow-xs);
+  cursor: pointer;
 }
 
-.app-rail-button:hover,
-.app-rail-button[data-active="true"] {
-  color: var(--app-rail-fg-active);
-}
-
-.app-rail-button:hover .app-rail-icon {
-  background: var(--app-rail-hover);
-}
-
-.app-rail-button[data-active="true"] .app-rail-icon {
-  background: var(--app-rail-active);
-}
-
-.app-rail-button:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
+.app-notice-dismiss-all:hover {
+  color: var(--app-text-strong);
 }

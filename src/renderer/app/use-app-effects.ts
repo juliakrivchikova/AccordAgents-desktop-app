@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { AgentDetectionRequest, Conversation } from "../../shared/types";
+import type { AgentDetectionRequest } from "../../shared/types";
 import {
   buildChatActivityItemsForConversationUpdate,
   mergeChatActivityItems,
@@ -34,8 +34,7 @@ export function useAppEffects(
   state: AppState,
   refreshAll: () => Promise<void>,
   refreshAgents: (request?: AgentDetectionRequest) => Promise<unknown>,
-  refreshActivity: () => Promise<void>,
-  markConversationViewed: (conversation: Conversation) => void
+  refreshActivity: () => Promise<void>
 ): void {
   const deletedConversationIds = useRef(new Set<string>());
 
@@ -179,7 +178,7 @@ export function useAppEffects(
         const canReplace = matchesCurrentSnapshot && (isActive || !update.messageDelta);
         // The loaded conversation counts as "being viewed" only while the chats view is
         // on screen. A chat left open behind the activity or settings views must not
-        // silently mark new finished runs as read, or the rail badge never appears.
+        // silently mark new finished runs as read, or the sidebar Activity badge never appears.
         // The activity view (including an open detail pane) never auto-reads items:
         // there, unread state clears only through the explicit "Mark read" action.
         const timelineVisible = conversationTimelineVisibleNow(state);
@@ -234,14 +233,6 @@ export function useAppEffects(
       });
     });
   }, [state.currentRunId]);
-
-  // Returning to the chats view puts the still-loaded conversation back on screen, so
-  // catch up on the viewed-marking that was suppressed while it was hidden.
-  useEffect(() => {
-    if (state.railView === "chats" && state.conversation) {
-      markConversationViewed(state.conversation);
-    }
-  }, [state.railView]);
 
   useEffect(() => {
     if (!state.conversation || !state.messagePage?.hasMoreBefore || state.conversation.messages.length < state.messagePage.totalMessages) {

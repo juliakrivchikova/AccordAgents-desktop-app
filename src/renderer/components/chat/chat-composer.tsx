@@ -1,7 +1,8 @@
 import React, { useLayoutEffect, useMemo, useRef } from "react";
 import { ArrowUp, ImagePlus, RefreshCw } from "lucide-react";
 
-import { ResizableTextarea } from "@/renderer/components/primitives";
+import { IconButton, ResizableTextarea } from "@/renderer/components/primitives";
+import { AccordMergeIcon } from "./accord-merge-icon";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type {
   ChatImageInput,
@@ -24,6 +25,7 @@ import {
   useChatComposerImages
 } from "./use-chat-composer-images";
 import { useChatComposerMentions } from "./use-chat-composer-mentions";
+import { useComposerNoticeClearance } from "./use-composer-notice-clearance";
 
 export interface ChatComposerProps {
   participants: ChatParticipant[];
@@ -57,6 +59,8 @@ export interface ChatComposerProps {
 }
 
 export function ChatComposer(props: ChatComposerProps): JSX.Element {
+  const rootRef = useRef<HTMLDivElement>(null);
+  useComposerNoticeClearance(rootRef);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -135,7 +139,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
   }
 
   return (
-    <div className={["chat-composer", props.className].filter(Boolean).join(" ")} data-testid={props.testId}>
+    <div ref={rootRef} className={["chat-composer", props.className].filter(Boolean).join(" ")} data-testid={props.testId}>
       {props.status && <div className="chat-composer-status">{props.status}</div>}
       <ChatComposerAttachmentChips
         pendingImages={images.pendingImages}
@@ -284,15 +288,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
                 void images.addImageFiles(files);
               }}
             />
-            <button
-              type="button"
-              className="composer-icon-button"
-              title="Attach image"
-              aria-label="Attach image"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <ImagePlus size={18} />
-            </button>
+            <IconButton label="Attach image" icon={ImagePlus} onClick={() => fileInputRef.current?.click()} />
             {activeRunCount > 0 && props.onStopAllRuns && (
               <ChatActiveRunPopover
                 activeRunCount={activeRunCount}
@@ -310,32 +306,13 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
               <Tooltip>
                 <TooltipTrigger asChild>
                   <span className="composer-accord-tooltip-trigger">
-                    <button
-                      type="button"
-                      className="composer-accord-button"
-                      aria-label="Start Accord"
+                    <IconButton
+                      label="Start Accord"
+                      icon={AccordMergeIcon}
                       disabled={Boolean(props.accordDisabledReason)}
                       data-testid="chat-accord-button"
                       onClick={props.onOpenAccord}
-                    >
-                      {/* Custom merge glyph so each branch can keep its own color. */}
-                      <svg
-                        className="composer-accord-icon"
-                        width={18}
-                        height={18}
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        strokeWidth={2.4}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden
-                      >
-                        <path d="m8 6 4-4 4 4" stroke="var(--app-accord-icon-top)" />
-                        <path d="M12 2v10.3" stroke="var(--app-accord-icon-top)" />
-                        <path d="M12 12.3a4 4 0 0 1-1.172 2.872L4 22" stroke="var(--app-accord-icon-left)" />
-                        <path d="m20 22-5-5" stroke="var(--app-accord-icon-right)" />
-                      </svg>
-                    </button>
+                    />
                   </span>
                 </TooltipTrigger>
                 <TooltipContent side="top">{accordTooltip}</TooltipContent>

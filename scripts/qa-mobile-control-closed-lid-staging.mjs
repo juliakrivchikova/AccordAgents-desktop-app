@@ -13,6 +13,9 @@ const require = createRequire(import.meta.url);
 const { attach, getJson } = require("./cdp.cjs");
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// The sidebar's Settings row opens Settings; once there, the chat sidebar is
+// replaced by the Settings navigation, so a retry clicks General instead.
+const SETTINGS_ENTRY_SELECTOR = "[data-testid='sidebar-settings'], [data-testid='settings-nav-general']";
 const desktopPort = Number(process.env.ELECTRON_CDP_PORT || 9223);
 const profileDir = process.env.QA_ELECTRON_USER_DATA_DIR || process.env.ACCORDAGENTS_USER_DATA_DIR;
 const electronBin = path.join(repoRoot, "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron");
@@ -347,11 +350,11 @@ async function setNewChatParticipantRemote(client, handle) {
 }
 
 async function openDevicePairingSection(client) {
-  await waitForSelectorPoll(client, "button[aria-label='Settings']", 20_000);
+  await waitForSelectorPoll(client, SETTINGS_ENTRY_SELECTOR, 20_000);
   for (let attempt = 0; attempt < 4; attempt += 1) {
     await settleInitialChatAssistant(client);
     await dismissChatChoiceIfOpen(client);
-    await clickSelector(client, "button[aria-label='Settings']");
+    await clickSelector(client, SETTINGS_ENTRY_SELECTOR);
     await clickOptionalSelector(client, "[data-testid='settings-nav-general']");
     if (await waitForOptionalSelector(client, "[data-device-pairing-action='generate']", 2_500)) {
       return;

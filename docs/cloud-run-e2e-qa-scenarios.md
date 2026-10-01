@@ -558,7 +558,7 @@ Pick a genuinely small, user-visible task with one regression criterion. The poi
 | X-14 | Readiness panel per platform | Every (platform × status) pair yields an actionable command with a Copy button where one exists. | SMALL-FIX |
 | X-15 | Unknown model id | The context indicator still renders via a family fallback instead of disappearing. | SMALL-FIX |
 | X-16 | Expanded command output stays open | Survives the streaming→finished transition. | CODE-OK |
-| X-17 | Activity badge matrix | running / finished / cancelled × read / unread × rail badge × detail pane, plus rapid switching: no flicker, no race, no stuck unread. | CODE-OK |
+| X-17 | Activity badge matrix | running / finished / cancelled × read / unread × sidebar Activity badge × detail pane, plus rapid switching: no flicker, no race, no stuck unread. | CODE-OK |
 | X-18 | Avatar contract | `test:avatar-contract` plus a CDP disc/radius sweep. Never add per-kind or per-context padding or disc overrides. | CODE-OK |
 | X-19 | Occluded-window open | Opening a conversation while the window is occluded still loads. | SMALL-FIX — user-facing, same root cause as harness rule E-03 |
 | X-20 | Warning sanitization | Raw CLI event JSON collapses to a one-line notice; no raw JSON in the timeline. | CODE-OK |

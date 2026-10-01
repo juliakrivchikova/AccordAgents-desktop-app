@@ -64,20 +64,6 @@
   background: var(--app-surface);
 }
 
-.icon-button:hover {
-  background: var(--app-surface-hover);
-}
-
-.icon-button.selected {
-  background: var(--app-primary);
-  color: var(--app-surface);
-}
-
-.icon-button {
-  background: var(--app-surface-subtle);
-  color: var(--app-text);
-}
-
 .toggle input:checked + span {
   background: var(--app-accent);
   color: var(--app-surface);

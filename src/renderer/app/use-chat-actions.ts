@@ -169,6 +169,11 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     state.setCurrentRunId(runId);
     state.setBusy(true);
     let createdConversationId: string | undefined;
+    // An Activity preview opened meanwhile is the User's later choice: the new
+    // chat must not replace it (Back from Activity lands on the new chat).
+    const openRequestAtStart = state.openConversationRequestRef.current;
+    const previewingElsewhere = (): boolean =>
+      state.railViewRef.current === "activity" && state.openConversationRequestRef.current !== openRequestAtStart;
     try {
       const result = await window.consensus.createChatConversation({
         runId,
@@ -180,8 +185,15 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       createdConversationId = result.conversation.id;
       creation.signal.throwIfAborted();
       state.chatCreationRef.current = undefined;
-      state.setConversation(result.conversation);
-      state.setWarnings(result.warnings);
+      if (!previewingElsewhere()) {
+        state.setConversation(result.conversation);
+        state.setWarnings(result.warnings);
+      }
+      // Opened Activity while this chat was being created: Back lands on it,
+      // not on an empty new-chat screen.
+      if (state.chatBeforeActivityRef.current && !state.chatBeforeActivityRef.current.conversationId) {
+        state.chatBeforeActivityRef.current = { conversationId: result.conversation.id };
+      }
       const sendResult = await window.consensus.sendChatMessage({
         conversationId: result.conversation.id,
         runId,
@@ -190,8 +202,10 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         skillMentions,
         imageAttachments
       });
-      state.setConversation(mergeProgressIntoConversation(sendResult.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
-      state.setWarnings([...result.warnings, ...sendResult.warnings]);
+      if (!previewingElsewhere()) {
+        state.setConversation(mergeProgressIntoConversation(sendResult.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
+        state.setWarnings([...result.warnings, ...sendResult.warnings]);
+      }
       await refreshPersistedProviderPreference();
       state.setQuestion("");
       state.setNewChatPendingImages((current) => {
@@ -214,9 +228,15 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
           conversationId, archived: true, onlyIfEmpty: true
         }).catch(() => window.consensus.getConversation(conversationId).catch(() => undefined));
         if (saved?.metadata.archived === true) {
-          state.setConversation(undefined);
+          if (!previewingElsewhere()) {
+            state.setConversation(undefined);
+          }
+          // Back from Activity returns to the restored draft, not the archived chat.
+          if (state.chatBeforeActivityRef.current?.conversationId === conversationId) {
+            state.chatBeforeActivityRef.current = {};
+          }
           state.setQuestion(draftMessage);
-        } else if (saved) {
+        } else if (saved && !previewingElsewhere()) {
           state.setConversation(saved);
         }
         await conversationActions.refreshConversations().catch(() => undefined);

@@ -1,14 +1,17 @@
-import { useState } from "react";
-import { ChevronDown, ChevronRight, Pencil, Plus, Search } from "lucide-react";
+import { type ReactNode, useState } from "react";
+import { Bell, ChevronDown, ChevronRight, Plus, Search, Settings, SquarePen } from "lucide-react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { HistoryLoadingState } from "@/renderer/components/loading-states";
-import { EmptyState } from "@/renderer/components/primitives";
+import { EmptyState, IconButton } from "@/renderer/components/primitives";
 import { cn } from "@/lib/utils";
-import { SidebarPanelIcon } from "./sidebar-panel-icon";
+import { SidebarToggleButton } from "./sidebar-toggle-button";
 import { DeleteConfirmationDialog } from "../settings/delete-confirmation-dialog";
 import type { ConversationSummary } from "../../../shared/types";
 import { SidebarSessionRow } from "./sidebar-session-row";
+import { SidebarNavItem, formatBadgeCount } from "./sidebar-nav-item";
+import { chatSearchShortcutAria, chatSearchShortcutLabel } from "../../app/chat-search-shortcut";
+import { isMacPlatform } from "../../lib/platform";
 
 const INITIAL_PROJECT_SESSION_LIMIT = 5;
 const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.png", import.meta.url).href;
@@ -27,10 +30,14 @@ export interface SidebarProps {
   archivedSessions?: ConversationSummary[];
   activeId?: string;
   pendingId?: string;
+  activityUnreadCount?: number;
   busy?: boolean;
   loading?: boolean;
   unreadIds?: ReadonlySet<string>;
+  macShortcuts?: boolean;
   onOpenSearch: () => void;
+  onOpenActivity: () => void;
+  onOpenSettings: () => void;
   onSelect: (id: string) => void;
   onNewSession: () => void;
   onNewProjectSession: (repoPath?: string) => void;
@@ -38,6 +45,8 @@ export interface SidebarProps {
   onUnarchive?: (id: string) => void;
   onDelete?: (id: string) => Promise<void>;
   onToggleSidebar?: () => void;
+  // Small window-level controls (theme, refresh) shown next to Settings.
+  footerActions?: ReactNode;
 }
 
 export const Sidebar = ({
@@ -45,17 +54,22 @@ export const Sidebar = ({
   archivedSessions = [],
   activeId,
   pendingId,
+  activityUnreadCount = 0,
   busy,
   loading,
   unreadIds,
+  macShortcuts = isMacPlatform(),
   onOpenSearch,
+  onOpenActivity,
+  onOpenSettings,
   onSelect,
   onNewSession,
   onNewProjectSession,
   onArchive,
   onUnarchive,
   onDelete,
-  onToggleSidebar
+  onToggleSidebar,
+  footerActions
 }: SidebarProps): JSX.Element => {
   const [collapsedProjectKeys, setCollapsedProjectKeys] = useState<Set<string>>(new Set());
   const [expandedProjectKeys, setExpandedProjectKeys] = useState<Set<string>>(new Set());
@@ -89,70 +103,55 @@ export const Sidebar = ({
       data-shell="sidebar"
       className="flex min-h-0 flex-col text-foreground"
     >
-      <div
-        data-shell="sidebar-brand"
-        className="flex h-[var(--app-header-height)] shrink-0 items-center justify-between gap-2 px-[var(--app-gutter)] text-sm font-semibold text-[var(--app-text-strong)]"
-      >
+      <div data-shell="sidebar-brand" data-titlebar className="app-titlebar-row sidebar-brand-row">
         <div className="flex min-w-0 items-center gap-2">
-          <img src={ACCORDAGENTS_MARK_URL} alt="" className="size-[22px] shrink-0 rounded-[6px]" aria-hidden="true" />
+          <img src={ACCORDAGENTS_MARK_URL} alt="" className="size-5 shrink-0 rounded-[5px]" aria-hidden="true" />
           <span className="min-w-0 truncate">AccordAgents</span>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <button
-            id="chat-search-trigger"
-            type="button"
-            onClick={onOpenSearch}
-            title="Search chats"
-            aria-label="Search chats"
-            aria-haspopup="dialog"
-            data-testid="chat-search-trigger"
-            className={cn(
-              "inline-flex size-[30px] shrink-0 items-center justify-center rounded-lg text-muted-foreground",
-              "transition-colors hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)]",
-              "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
-            )}
-          >
-            <Search size={17} aria-hidden />
-          </button>
-          {onToggleSidebar && (
-          <button
-            type="button"
-            onClick={onToggleSidebar}
-            title="Hide sidebar"
-            aria-label="Hide sidebar"
-            aria-controls="app-sidebar"
-            aria-expanded="true"
-            data-testid="sidebar-collapse-toggle"
-            className={cn(
-              "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground",
-              "transition-colors hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)]",
-              "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
-            )}
-          >
-            <SidebarPanelIcon />
-          </button>
-          )}
-        </div>
+        {onToggleSidebar && <SidebarToggleButton expanded onToggle={onToggleSidebar} />}
       </div>
 
-      <div className="px-[var(--app-gutter-tight)] pt-3 pb-2">
+      <div className="px-[var(--app-gutter-tight)] pt-2">
         <button
+          id="chat-search-trigger"
           type="button"
-          onClick={onNewSession}
-          disabled={busy}
-          data-testid="new-chat"
+          onClick={onOpenSearch}
+          aria-label="Search chats"
+          aria-haspopup="dialog"
+          aria-keyshortcuts={chatSearchShortcutAria(macShortcuts)}
+          data-testid="chat-search-trigger"
           className={cn(
-            "inline-flex h-8 w-full items-center justify-start gap-2 rounded-md",
-            "bg-transparent px-2.5 text-[13px] font-medium text-[var(--app-text-strong)]",
-            "transition-colors hover:bg-[var(--app-surface-hover)]",
-            "disabled:cursor-not-allowed disabled:opacity-50",
+            "flex h-8 w-full items-center gap-2 rounded-md border border-[var(--app-border)] bg-[var(--app-workspace-bg)] px-2.5",
+            "text-left text-[13px] text-muted-foreground transition-colors",
+            "hover:border-[var(--app-border-strong)] hover:text-[var(--app-text)]",
             "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
           )}
         >
-          <Pencil className="size-[15px] text-[var(--app-accent)]" aria-hidden />
-          <span>New chat</span>
+          <Search className="size-[15px] shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1 truncate">Search chats</span>
+          <kbd className="shrink-0 font-sans text-[11px] text-muted-foreground" data-testid="chat-search-shortcut">
+            {chatSearchShortcutLabel(macShortcuts)}
+          </kbd>
         </button>
       </div>
+
+      <nav className="flex flex-col gap-0.5 px-[var(--app-gutter-tight)] pt-2 pb-2" aria-label="Primary">
+        <SidebarNavItem
+          icon={SquarePen}
+          label="New chat"
+          onClick={onNewSession}
+          disabled={busy}
+          testId="new-chat"
+        />
+        <SidebarNavItem
+          icon={Bell}
+          label="Activity"
+          ariaLabel={activityUnreadCount > 0 ? `Activity, ${activityUnreadCount} unread` : undefined}
+          onClick={onOpenActivity}
+          testId="sidebar-activity"
+          badge={activityUnreadCount > 0 ? formatBadgeCount(activityUnreadCount) : undefined}
+        />
+      </nav>
 
       <div className="px-[var(--app-gutter-tight)] pb-1 pt-2 text-[11.5px] font-semibold tracking-[0.01em] text-muted-foreground">
         Projects
@@ -189,22 +188,15 @@ export const Sidebar = ({
                       {collapsed ? <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden /> : <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
                       <span className="min-w-0 truncate text-[11.5px] font-semibold tracking-[0.01em] text-muted-foreground">{group.label}</span>
                     </button>
-                    <button
-                      type="button"
+                    <IconButton
+                      size="xs"
+                      icon={Plus}
+                      label={`New chat in ${group.label}`}
                       onClick={() => onNewProjectSession(group.repoPath)}
                       disabled={busy}
-                      title={`New chat in ${group.label}`}
-                      aria-label={`New chat in ${group.label}`}
                       data-testid="project-new-session"
-                      className={cn(
-                        "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground",
-                        "opacity-0 transition-colors hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)] group-hover:opacity-100",
-                        "disabled:cursor-not-allowed disabled:opacity-30",
-                        "focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
-                      )}
-                    >
-                      <Plus className="size-3.5" aria-hidden />
-                    </button>
+                      className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 disabled:opacity-30"
+                    />
                   </div>
 
                   {!collapsed && (
@@ -295,6 +287,13 @@ export const Sidebar = ({
           )}
         </div>
       </ScrollArea>
+
+      <div className="flex shrink-0 items-center gap-1 border-t border-[var(--app-shell-border)] px-[var(--app-gutter-tight)] py-2">
+        <div className="min-w-0 flex-1">
+          <SidebarNavItem icon={Settings} label="Settings" onClick={onOpenSettings} testId="sidebar-settings" />
+        </div>
+        {footerActions}
+      </div>
 
       <DeleteConfirmationDialog
         open={Boolean(deleteTarget)}

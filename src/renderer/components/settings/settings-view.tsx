@@ -17,9 +17,8 @@ import type {
   RepoFileOpenAction,
   SaveAgentEnvironmentVariableRequest
 } from "../../../shared/types";
-import { Button } from "@/components/ui/button";
 import { IconButton } from "../primitives";
-import { SidebarPanelIcon } from "../shell/sidebar-panel-icon";
+import { SidebarToggleButton } from "../shell/sidebar-toggle-button";
 import { ParticipantsSettingsScreen } from "./participants-settings-screen";
 import { RolesSettingsSection } from "./roles-settings-section";
 import { GeneralSettingsSection } from "./general-settings-section";
@@ -83,24 +82,9 @@ export function SettingsView(props: {
   return (
     <section className={`settings-view ${sectionClass}`}>
       <div className={`settings-view-inner ${props.section === "participants" ? "settings-view-inner-participants" : ""}`}>
-        <div className="settings-view-head">
+        <div className="settings-view-head" data-titlebar>
           <div className="settings-view-head-lead">
-            {props.sidebarCollapsed && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                title="Show sidebar"
-                aria-label="Show sidebar"
-                aria-controls="app-sidebar"
-                aria-expanded="false"
-                data-testid="sidebar-expand-toggle"
-                onClick={props.onExpandSidebar}
-              >
-                <SidebarPanelIcon />
-                <span className="sr-only">Show sidebar</span>
-              </Button>
-            )}
+            {props.sidebarCollapsed && <SidebarToggleButton expanded={false} onToggle={props.onExpandSidebar} />}
             <h1>{title}</h1>
           </div>
           <div className="settings-view-head-actions">
@@ -110,7 +94,6 @@ export function SettingsView(props: {
               icon={X}
               label="Close settings"
               tooltip="Close settings"
-              variant="ghost"
               onClick={props.onClose}
             />
           </div>

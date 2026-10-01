@@ -17,6 +17,7 @@ import { LocalFileLinkContext, LocalFileOpenChooser } from "../content/local-fil
 import { MessageLinkContext } from "../content/markdown-text";
 import { MentionDirectoryContext } from "../content/participant-hover-card";
 import { RunStatusLine } from "../conversation/timeline-primitives";
+import { IconButton } from "../primitives";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatComposer } from "./chat-composer";
 import {
@@ -369,15 +370,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               virtualizer={viewport.chatVirtualizer}
             />
             {!viewport.isStuckToBottom && topLevelMessages.length > 0 && (
-              <button
-                type="button"
-                className="chat-jump-to-latest"
-                aria-label="Jump to latest"
-                title="Jump to latest"
-                onClick={viewport.scrollToChatBottom}
-              >
-                <ArrowDown size={19} aria-hidden />
-              </button>
+              <IconButton className="chat-jump-to-latest" floating label="Jump to latest" icon={ArrowDown} onClick={viewport.scrollToChatBottom} />
             )}
             <ChatComposer
               participants={participants}

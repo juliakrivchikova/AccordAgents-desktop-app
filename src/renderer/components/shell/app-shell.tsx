@@ -8,10 +8,9 @@ import {
   maxAppSidebarWidthForContainer,
   normalizeAppSidebarWidth
 } from "../../lib/sidebar-sizing";
+import { isMacPlatform } from "../../lib/platform";
 
 export interface AppShellProps {
-  topStrip: React.ReactNode;
-  rail: React.ReactNode;
   sidebar: React.ReactNode;
   topBar: React.ReactNode;
   children: React.ReactNode;
@@ -24,8 +23,6 @@ export interface AppShellProps {
 }
 
 export const AppShell = ({
-  topStrip,
-  rail,
   sidebar,
   topBar,
   children,
@@ -38,37 +35,33 @@ export const AppShell = ({
 }: AppShellProps): JSX.Element => {
   const rootRef = React.useRef<HTMLDivElement>(null);
   const cleanupResizeRef = React.useRef<(() => void) | null>(null);
+  const sidebarSlotRef = React.useRef<HTMLDivElement>(null);
   const previousSidebarHiddenRef = React.useRef(sidebarHidden);
   const [isResizingSidebar, setIsResizingSidebar] = React.useState(false);
-  const [rootMetrics, setRootMetrics] = React.useState<{ width: number; railWidth: number } | undefined>();
+  const [rootWidth, setRootWidth] = React.useState<number | undefined>();
   const normalizedSidebarWidth = normalizeAppSidebarWidth(sidebarWidth);
   const secondarySidebarCollapsed = sidebarCollapsed || sidebarHidden;
   const sidebarVisibilityChanged = previousSidebarHiddenRef.current !== sidebarHidden;
-  const effectiveSidebarMax = rootMetrics
-    ? maxAppSidebarWidthForContainer(rootMetrics.width - rootMetrics.railWidth, minWorkspaceWidth)
+  const effectiveSidebarMax = rootWidth !== undefined
+    ? maxAppSidebarWidthForContainer(rootWidth, minWorkspaceWidth)
     : MAX_APP_SIDEBAR_WIDTH;
-  const effectiveSidebarWidth = secondarySidebarCollapsed || !rootMetrics
+  const effectiveSidebarWidth = secondarySidebarCollapsed || rootWidth === undefined
     ? normalizedSidebarWidth
     : Math.min(normalizedSidebarWidth, effectiveSidebarMax);
 
   // Tear down any in-flight drag listeners if the shell unmounts mid-resize.
   React.useEffect(() => () => cleanupResizeRef.current?.(), []);
+  // A collapsed sidebar is out of the Tab order too, not only hidden from view.
+  React.useEffect(() => {
+    sidebarSlotRef.current?.toggleAttribute("inert", secondarySidebarCollapsed);
+  }, [secondarySidebarCollapsed]);
   React.useLayoutEffect(() => {
     const root = rootRef.current;
     if (!root) {
       return undefined;
     }
     const updateMetrics = (): void => {
-      const nextMetrics = {
-        width: root.getBoundingClientRect().width,
-        railWidth: appRailWidth(root)
-      };
-      setRootMetrics((current) => {
-        if (current?.width === nextMetrics.width && current.railWidth === nextMetrics.railWidth) {
-          return current;
-        }
-        return nextMetrics;
-      });
+      setRootWidth(root.getBoundingClientRect().width);
     };
     updateMetrics();
     const resizeObserver = new ResizeObserver(updateMetrics);
@@ -92,12 +85,11 @@ export const AppShell = ({
     event.currentTarget.setPointerCapture(event.pointerId);
     setIsResizingSidebar(true);
     const rect = root.getBoundingClientRect();
-    const railWidth = appRailWidth(root);
     const minWidth = MIN_APP_SIDEBAR_WIDTH;
-    const maxWidth = maxAppSidebarWidthForContainer(rect.width - railWidth, minWorkspaceWidth);
+    const maxWidth = maxAppSidebarWidthForContainer(rect.width, minWorkspaceWidth);
 
     const move = (moveEvent: PointerEvent): void => {
-      const nextWidth = Math.round(moveEvent.clientX - rect.left - railWidth);
+      const nextWidth = Math.round(moveEvent.clientX - rect.left);
       onSidebarWidthChange(Math.min(maxWidth, Math.max(minWidth, nextWidth)));
     };
     const stop = (): void => {
@@ -114,6 +106,9 @@ export const AppShell = ({
   return (
     <div
       data-shell="root"
+      // macOS draws the traffic lights over the top-left corner of the window,
+      // so title rows at the window's left edge leave room for them.
+      data-platform={isMacPlatform() ? "mac" : undefined}
       data-sidebar-collapsed={secondarySidebarCollapsed ? "true" : undefined}
       data-sidebar-hidden={sidebarHidden ? "true" : undefined}
       ref={rootRef}
@@ -125,15 +120,9 @@ export const AppShell = ({
         className
       )}
     >
-      <div data-shell="top-strip" className="app-shell-top-strip">
-        {topStrip}
-      </div>
-      <div data-shell="rail-slot" className="app-shell-rail-slot">
-        {rail}
-      </div>
       {/* The sidebar stays mounted while collapsed so the slot width can animate
           and its scroll/expansion state survives a hide/show. */}
-      <div data-shell="sidebar-slot" className="app-shell-sidebar-slot" aria-hidden={secondarySidebarCollapsed || undefined}>
+      <div ref={sidebarSlotRef} data-shell="sidebar-slot" className="app-shell-sidebar-slot" aria-hidden={secondarySidebarCollapsed || undefined}>
         {sidebar}
       </div>
       {!secondarySidebarCollapsed && (
@@ -158,9 +147,3 @@ export const AppShell = ({
     </div>
   );
 };
-
-function appRailWidth(root: HTMLElement): number {
-  const value = getComputedStyle(root).getPropertyValue("--app-rail-width");
-  const parsed = Number.parseFloat(value);
-  return Number.isFinite(parsed) ? parsed : 90;
-}

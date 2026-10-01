@@ -12,6 +12,7 @@ import type {
   SaveAgentEnvironmentVariableRequest
 } from "../../../shared/types";
 import { errorText } from "../review/review-conversation-data";
+import { IconButton } from "../primitives";
 
 export function EnvironmentSettingsSection(props: {
   getAgentEnvironment: () => Promise<AgentEnvironmentSnapshot>;
@@ -223,17 +224,13 @@ function ManualVariableList(props: {
             />
             <span />
           </label>
-          <Button
-            type="button"
-            size="icon-sm"
-            variant="ghost"
-            title={`Delete ${variable.key}`}
-            aria-label={`Delete ${variable.key}`}
+          <IconButton
+            tone="danger"
+            icon={Trash2}
+            label={`Delete ${variable.key}`}
             disabled={props.busyKey === variable.key}
             onClick={() => void props.onDelete(variable)}
-          >
-            <Trash2 size={15} aria-hidden />
-          </Button>
+          />
         </div>
       ))}
     </div>

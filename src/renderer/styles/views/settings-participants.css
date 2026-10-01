@@ -535,26 +535,6 @@
   font-size: 13.5px;
 }
 
-.participants-editor-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  flex: 0 0 auto;
-  padding: 0;
-  border: 1px solid var(--app-border);
-  border-radius: var(--radius-control);
-  background: var(--app-surface);
-  color: var(--app-muted);
-  cursor: pointer;
-}
-
-.participants-editor-close:hover {
-  border-color: var(--app-border-strong);
-  color: var(--app-text-strong);
-}
-
 .participants-editor-body {
   display: flex;
   flex-direction: column;

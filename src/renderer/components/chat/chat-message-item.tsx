@@ -51,9 +51,6 @@ import { WorkedRow } from "./chat-worked-row";
 import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
-const MESSAGE_ACTION_CLASS = "message-action size-[26px] min-h-[26px] rounded-[8px] border-0 bg-transparent shadow-none";
-const MESSAGE_ACTION_STOP_CLASS = `${MESSAGE_ACTION_CLASS} message-action-stop`;
-
 declare global {
   interface Window {
     __accordAgentsChatMessageRenderProbe?: (messageId: string, role: string, status?: string) => void;
@@ -261,8 +258,9 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           <div className="message-actions">
             {isStreaming && message.metadata?.runId && props.onStopRun && (
               <IconButton
-                className={MESSAGE_ACTION_STOP_CLASS}
+                className="message-action-stop"
                 size="xs"
+                tone="danger"
                 icon={X}
                 label="Stop response"
                 tooltip="Stop response"
@@ -271,7 +269,6 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             )}
             {hasProcessingTranscript && (
               <IconButton
-                className={MESSAGE_ACTION_CLASS}
                 size="xs"
                 icon={processingTranscriptOpen ? ChevronUp : ChevronDown}
                 label={processingTranscriptOpen ? "Hide full stream" : "Show full stream"}
@@ -281,7 +278,6 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               />
             )}
             <IconButton
-              className={MESSAGE_ACTION_CLASS}
               size="xs"
               icon={copied ? CheckCircle2 : Copy}
               label={copied ? "Copied" : "Copy message"}
@@ -293,7 +289,6 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               <Popover open={reactionPickerOpen} onOpenChange={setReactionPickerOpen}>
                 <PopoverTrigger asChild>
                   <IconButton
-                    className={MESSAGE_ACTION_CLASS}
                     size="xs"
                     icon={Smile}
                     label="Add reaction"
@@ -313,7 +308,6 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             )}
             {showThreadActions && (
               <IconButton
-                className={MESSAGE_ACTION_CLASS}
                 size="xs"
                 icon={Reply}
                 label="Reply in thread"

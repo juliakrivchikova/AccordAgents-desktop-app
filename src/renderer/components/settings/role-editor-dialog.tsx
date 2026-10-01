@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import type { ChatParticipantRequestPermission, ChatRoleConfig, ChatRoleConfigUpdate, ChatRoleParticipantDefaults } from "../../../shared/types";
-import { AppSelect, ResizableTextarea } from "../primitives";
+import { AppSelect, ResizableTextarea, IconButton } from "../primitives";
 import { displayChatRoleLabel } from "../chat/chat-role-labels";
 import { ChatParticipantSpecRow } from "../chat/chat-participant-config-panel";
 import { MarkdownText } from "../content/markdown-text";
@@ -205,9 +205,7 @@ export function ChatRoleEditorDialog(props: {
             </span>
             <RoleKindBadge builtIn={Boolean(role?.builtIn && props.editor?.type === "edit")} />
             <DialogClose asChild>
-              <button type="button" className="roles-editor-close" aria-label="Close role editor" data-testid="settings-role-modal-close">
-                <X size={15} aria-hidden />
-              </button>
+              <IconButton className="roles-editor-close" label="Close role editor" icon={X} data-testid="settings-role-modal-close" />
             </DialogClose>
           </div>
         </DialogHeader>

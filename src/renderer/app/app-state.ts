@@ -139,6 +139,12 @@ export interface AppState {
   startingChatRef: React.MutableRefObject<boolean>;
   chatCreationRef: React.MutableRefObject<AbortController | undefined>;
   railViewRef: React.MutableRefObject<RailView>;
+  // The chat on screen when Activity opened (no id: the new-chat screen), so
+  // Back returns there rather than to an Activity preview.
+  chatBeforeActivityRef: React.MutableRefObject<{ conversationId?: string } | undefined>;
+  // updatedAt of each chat when it loaded as an Activity preview: dropping it
+  // gives the sidebar dot only for news that came in after that.
+  previewLoadedAtRef: React.MutableRefObject<Record<string, string>>;
 }
 
 export function useAppState(): AppState {
@@ -207,6 +213,8 @@ export function useAppState(): AppState {
   // currentRunId changes) can read the current view state without stale closures.
   const railViewRef = useRef<RailView>(railView);
   railViewRef.current = railView;
+  const chatBeforeActivityRef = useRef<{ conversationId?: string }>();
+  const previewLoadedAtRef = useRef<Record<string, string>>({});
   const sidebarWidth = railView === "settings" ? settingsSidebarWidth : chatSidebarWidth;
   const setSidebarWidth = (width: number): void => {
     if (railView === "settings") {
@@ -242,6 +250,6 @@ export function useAppState(): AppState {
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
     setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,
     activityRefreshRequestRef, summaryRefreshRequestRef, agentRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
-    lastViewedAtRef, startingChatRef, chatCreationRef, railViewRef
+    lastViewedAtRef, startingChatRef, chatCreationRef, railViewRef, chatBeforeActivityRef, previewLoadedAtRef
   };
 }

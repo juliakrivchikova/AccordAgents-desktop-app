@@ -20,18 +20,10 @@
   box-shadow: var(--focus-ring);
 }
 
-.icon-button,
 .participant-pill {
   min-height: 34px;
   font-size: 13px;
   font-weight: 600;
-}
-
-.icon-button {
-  width: 34px;
-  height: 34px;
-  background: var(--app-surface-subtle);
-  color: var(--app-text);
 }
 
 .participant-pill {
@@ -44,7 +36,6 @@
   color: var(--app-muted);
 }
 
-.icon-button:hover,
 .participant-pill:hover {
   background: var(--app-surface-hover);
 }
@@ -912,24 +903,6 @@ img.chat-draft-plugin-token-icon {
 /* Mention popover section labels align with the option rows. */
 .mention-menu .chat-popover-section-title {
   padding: 4px 10px 2px;
-}
-
-/* Frameless top-bar icon buttons (theme / settings / refresh) — design handoff §3. */
-.topbar-icon-button {
-  border: 0 !important;
-  background: transparent !important;
-  box-shadow: none !important;
-  color: var(--app-muted);
-}
-
-.topbar-icon-button:hover {
-  background: var(--app-surface-hover) !important;
-  color: var(--app-text-strong);
-}
-
-.topbar-icon-button.is-active {
-  background: var(--app-accent-soft) !important;
-  color: var(--app-accent) !important;
 }
 
 /* Solid dark choice-card submit button — design handoff (.aa-perm-submit). */

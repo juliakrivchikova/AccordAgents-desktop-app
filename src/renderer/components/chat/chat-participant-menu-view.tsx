@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { ChevronLeft, ChevronRight, Plus, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { IconButton } from "../primitives";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type {
   ChatParticipant,
@@ -89,27 +90,12 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
-        <Button
-          variant="outline"
-          size="sm"
-          title="Members"
-          aria-label={participantCountLabel}
+        <IconButton
+          label={participantCountLabel}
+          icon={Users}
+          tooltip="Members"
           data-testid="chat-participants-trigger"
-          className="chat-participants-trigger h-8 min-w-0 gap-2 rounded-full pl-1 pr-2.5 text-xs"
-        >
-          {props.participants.length > 0 ? (
-            <span className="chat-roster-avatars" aria-hidden>
-              {props.participants.slice(0, 4).map((participant) => (
-                <span className="chat-roster-avatar" key={participant.handle}>
-                  {props.renderParticipantAvatar(participant)}
-                </span>
-              ))}
-            </span>
-          ) : (
-            <Users size={15} aria-hidden />
-          )}
-          <span className="tabular-nums">{props.participants.length}</span>
-        </Button>
+        />
       </PopoverTrigger>
       <PopoverContent
         align="end"
@@ -120,14 +106,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
         {view === "create" ? (
           <div className="chat-participant-create">
             <div className="chat-participant-create-head">
-              <button
-                type="button"
-                className="chat-participant-back"
-                onClick={() => setView("roster")}
-                aria-label="Back to members"
-              >
-                <ChevronLeft size={16} aria-hidden />
-              </button>
+              <IconButton size="xs" label="Back to members" icon={ChevronLeft} onClick={() => setView("roster")} />
               <span className="chat-popover-section-title">New member</span>
             </div>
             {props.addParticipantEditor}

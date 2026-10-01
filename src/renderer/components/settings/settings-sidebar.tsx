@@ -1,8 +1,9 @@
 import { ArrowLeft, Circle, FileText, KeyRound, ListChecks, Plug, SlidersHorizontal, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
-import { SidebarPanelIcon } from "../shell/sidebar-panel-icon";
+import { SidebarToggleButton } from "../shell/sidebar-toggle-button";
 import type { SettingsSection } from "./settings-view";
 
 const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.png", import.meta.url).href;
@@ -22,6 +23,7 @@ export function SettingsSidebar(props: {
   onSectionChange: (section: SettingsSection) => void;
   onBackToChats: () => void;
   onToggleSidebar?: () => void;
+  footerActions?: ReactNode;
 }): JSX.Element {
   return (
     <aside
@@ -29,35 +31,15 @@ export function SettingsSidebar(props: {
       data-shell="sidebar"
       className="flex min-h-0 flex-col text-foreground"
     >
-      <div
-        data-shell="sidebar-brand"
-        className="flex h-[var(--app-header-height)] shrink-0 items-center justify-between gap-2 px-[var(--app-gutter)] text-sm font-semibold text-[var(--app-text-strong)]"
-      >
+      <div data-shell="sidebar-brand" data-titlebar className="app-titlebar-row sidebar-brand-row">
         <div className="flex min-w-0 items-center gap-2">
-          <img src={ACCORDAGENTS_MARK_URL} alt="" className="size-[22px] shrink-0 rounded-[6px]" aria-hidden="true" />
+          <img src={ACCORDAGENTS_MARK_URL} alt="" className="size-5 shrink-0 rounded-[5px]" aria-hidden="true" />
           <span className="min-w-0 truncate">AccordAgents</span>
         </div>
-        {props.onToggleSidebar && (
-          <button
-            type="button"
-            onClick={props.onToggleSidebar}
-            title="Hide sidebar"
-            aria-label="Hide sidebar"
-            aria-controls="app-sidebar"
-            aria-expanded="true"
-            data-testid="sidebar-collapse-toggle"
-            className={cn(
-              "inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground",
-              "transition-colors hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)]",
-              "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
-            )}
-          >
-            <SidebarPanelIcon />
-          </button>
-        )}
+        {props.onToggleSidebar && <SidebarToggleButton expanded onToggle={props.onToggleSidebar} />}
       </div>
 
-      <div className="px-[var(--app-gutter-tight)] pt-3 pb-2">
+      <div className="px-[var(--app-gutter-tight)] pt-2 pb-2">
         <button
           type="button"
           onClick={props.onBackToChats}
@@ -105,6 +87,11 @@ export function SettingsSidebar(props: {
           })}
         </div>
       </nav>
+      {props.footerActions && (
+        <div className="flex shrink-0 items-center justify-end gap-1 border-t border-[var(--app-shell-border)] px-[var(--app-gutter-tight)] py-2">
+          {props.footerActions}
+        </div>
+      )}
     </aside>
   );
 }

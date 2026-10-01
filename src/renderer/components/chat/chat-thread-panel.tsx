@@ -76,13 +76,12 @@ export function ChatThreadPanel(props: {
   return (
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <section className="chat-thread-panel" aria-label="Chat thread" data-testid="chat-thread-panel">
-      <header className="thread-panel-head chat-thread-head">
+      <header className="thread-panel-head chat-thread-head" data-titlebar>
         <div>
           <h2>Thread</h2>
-          <span>{replyLabel}</span>
         </div>
         <div className="thread-panel-actions">
-          <IconButton size="sm" icon={X} label="Close thread" tooltip="Close thread" onClick={props.onClose} />
+          <IconButton icon={X} label="Close thread" tooltip="Close thread" onClick={props.onClose} />
         </div>
       </header>
       <div className="chat-thread-body">

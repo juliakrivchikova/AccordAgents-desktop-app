@@ -85,6 +85,7 @@ test("stale readiness refreshes before creating without a per-chat provider over
     selectedChatParticipantRuntimeOverrides: {},
     startingChatRef: { current: false },
     chatCreationRef: { current: undefined },
+    chatBeforeActivityRef: { current: undefined }, openConversationRequestRef: { current: 0 }, railViewRef: { current: "chats" },
     repoPath: "",
     setError: (value: string | undefined) => { error = value; },
     setWarnings: () => undefined,
@@ -184,6 +185,7 @@ test("New Chat runtime overrides are sent for edited Assistant and selected save
     },
     startingChatRef: { current: false },
     chatCreationRef: { current: undefined },
+    chatBeforeActivityRef: { current: undefined }, openConversationRequestRef: { current: 0 }, railViewRef: { current: "chats" },
     repoPath: "",
     setError: (value: string | undefined) => { error = value; },
     setWarnings: () => undefined,
@@ -248,6 +250,7 @@ test("stale New Chat readiness refresh failure fails closed and preserves the co
     newChatPluginMentions: [{ name: "fixture-plugin", displayName: "Fixture" }],
     startingChatRef: { current: false },
     chatCreationRef: { current: undefined },
+    chatBeforeActivityRef: { current: undefined }, openConversationRequestRef: { current: 0 }, railViewRef: { current: "chats" },
     setError: (value: string | undefined) => { error = value; },
     setWarnings: () => undefined
   } as unknown as AppState;

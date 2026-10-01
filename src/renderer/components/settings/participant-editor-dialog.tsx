@@ -28,6 +28,7 @@ import {
   initialDraft,
   type ParticipantEditorState
 } from "./participant-settings-utils";
+import { IconButton } from "../primitives";
 
 type ChatParticipantDraftPatch = Parameters<typeof updateChatParticipantDraft>[2];
 const AUTO_WATCH_GENERIC_DESCRIPTION = "Let this member watch new chat messages and decide whether to act.";
@@ -178,9 +179,7 @@ export function ParticipantEditorDialog(props: {
               <DialogDescription>{roleLabel || "Saved member preset"}</DialogDescription>
             </span>
             <DialogClose asChild>
-              <button type="button" className="participants-editor-close" aria-label="Close member editor">
-                <X size={15} aria-hidden />
-              </button>
+              <IconButton label="Close member editor" icon={X} />
             </DialogClose>
           </div>
         </DialogHeader>

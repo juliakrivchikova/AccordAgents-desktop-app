@@ -1,65 +1,69 @@
 import * as React from "react";
-import type { LucideIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
+// "xs" is the compact size for rows and toolbars (24px); "sm" and "md" are the
+// header and panel size (28px). Both names stay so existing call sites keep
+// their meaning of "small" versus "regular".
 export type IconButtonSize = "xs" | "sm" | "md";
-export type IconButtonVariant = "ghost" | "outline" | "secondary";
+export type IconButtonTone = "default" | "danger";
 
-const SIZE_TO_BUTTON_SIZE: Record<IconButtonSize, "icon-xs" | "icon-sm" | "icon"> = {
-  xs: "icon-xs",
-  sm: "icon",
-  md: "icon"
-};
-
-const SIZE_TO_ICON_CLASS: Record<IconButtonSize, string> = {
-  xs: "size-[15px]",
-  sm: "size-4",
-  md: "size-4"
-};
+export type IconButtonIcon = React.ComponentType<{
+  className?: string;
+  strokeWidth?: number | string;
+  "aria-hidden"?: boolean | "true" | "false";
+}>;
 
 export interface IconButtonProps
   extends Omit<React.ComponentProps<"button">, "children"> {
   label: string;
-  icon: LucideIcon;
+  icon: IconButtonIcon;
   iconClassName?: string;
   size?: IconButtonSize;
-  variant?: IconButtonVariant;
+  // Danger turns the icon red on hover; the shape never changes.
+  tone?: IconButtonTone;
+  // Floating buttons sit on top of content (a document, the timeline) and keep
+  // a surface so they stay readable; everything else is a bare icon.
+  floating?: boolean;
   tooltip?: React.ReactNode;
   pressed?: boolean;
 }
 
+// The one icon-only button of the app: no border and no tinted background at
+// rest, a grey surface on hover and while pressed or open.
 export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
   {
     label,
     icon: Icon,
     iconClassName,
     size = "sm",
-    variant = "ghost",
+    tone = "default",
+    floating = false,
     tooltip,
     pressed,
     className,
+    type = "button",
     ...rest
   },
   ref
 ) {
   const button = (
-    <Button
+    <button
       ref={ref}
-      type="button"
-      variant={variant}
-      size={SIZE_TO_BUTTON_SIZE[size]}
+      type={type}
+      data-slot="icon-button"
+      data-size={size === "xs" ? "xs" : "md"}
+      data-tone={tone === "danger" ? "danger" : undefined}
+      data-floating={floating ? "true" : undefined}
       aria-label={label}
       aria-pressed={pressed}
       title={tooltip ? undefined : label}
-      className={cn(className)}
+      className={cn("aa-icon-button", className)}
       {...rest}
     >
-      <Icon className={cn(SIZE_TO_ICON_CLASS[size], iconClassName)} strokeWidth={1.75} aria-hidden />
-      <span className="sr-only">{label}</span>
-    </Button>
+      <Icon className={iconClassName} strokeWidth={1.75} aria-hidden />
+    </button>
   );
 
   if (!tooltip) {

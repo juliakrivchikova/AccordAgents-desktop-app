@@ -1,6 +1,5 @@
 /* ui controls styles. Keep token-driven; migrate rules into components as views are extracted. */
 
-.icon-button,
 .participant-pill {
   display: inline-flex;
   align-items: center;
@@ -12,18 +11,6 @@
     background 120ms ease,
     color 120ms ease,
     border-color 120ms ease;
-}
-
-.icon-button {
-  width: 38px;
-  height: 38px;
-  background: var(--app-surface-hover);
-  color: var(--app-text-strong);
-}
-
-.icon-button.selected {
-  background: var(--app-text-strong);
-  color: var(--app-surface);
 }
 
 .content-area {

@@ -13,8 +13,9 @@ export interface TopBarProps {
 export const TopBar = ({ title, tabs, leading, actions, className }: TopBarProps): JSX.Element => (
   <header
     data-shell="topbar"
+    data-titlebar
     className={cn(
-      "flex h-[var(--app-header-height)] shrink-0 items-center justify-between gap-2 border-b border-[var(--app-shell-border)] bg-[var(--app-header-bg)] px-[var(--app-gutter)]",
+      "flex h-[var(--app-header-height)] shrink-0 items-center justify-between gap-2 border-b border-[var(--app-shell-border)] bg-[var(--app-header-bg)] pr-[10px]",
       className
     )}
   >

@@ -1,4 +1,4 @@
-import type { Ref } from "react";
+import type { ReactNode, Ref } from "react";
 import { Archive, BadgeCheck, Check, ChevronDown, FileDiff, FileText, Pencil, RotateCcw, UsersRound } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
 
@@ -8,8 +8,13 @@ export type ArtifactMenuAction = "sign" | "rename" | "access" | "archive" | "res
 
 export interface ArtifactActionsMenuProps {
   title: string;
+  // A short muted tag after the title when the screen shows something other
+  // than the current version: an older version, a draft, draft collection.
+  tag?: string;
   approved: boolean;
   meta: string[];
+  // The Version entry (ArtifactVersionSubmenu), placed under the meta lines.
+  versionMenu?: ReactNode;
   view?: { showDiff: boolean; fromVersion: number; onChange: (showDiff: boolean) => void };
   signVersion?: number;
   archived: boolean;
@@ -55,6 +60,7 @@ export function ArtifactActionsMenu(props: ArtifactActionsMenuProps): JSX.Elemen
           title={props.title}
         >
           <span>{props.title}</span>
+          {props.tag ? <span className="artifact-title-tag" data-testid="artifact-title-tag">{props.tag}</span> : null}
           {props.approved && <ArtifactApprovedMark />}
           <ChevronDown size={15} aria-hidden />
         </button>
@@ -64,6 +70,12 @@ export function ArtifactActionsMenu(props: ArtifactActionsMenuProps): JSX.Elemen
           <div className="artifact-menu-meta">
             {props.meta.map((line) => <div key={line}>{line}</div>)}
           </div>
+          {props.versionMenu && (
+            <>
+              <DropdownMenu.Separator className="artifact-menu-separator" />
+              {props.versionMenu}
+            </>
+          )}
           {props.view && (
             <>
               <DropdownMenu.Separator className="artifact-menu-separator" />

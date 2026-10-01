@@ -74,12 +74,12 @@ test("active-run stop is isolated from participant navigation", () => {
   ));
 
   const identity = renderer.root.findByProps({ className: "composer-active-run-row-main" });
-  const stop = renderer.root.findByProps({ className: "composer-active-run-row-stop" });
+  const stop = renderer.root.find((node) => node.type === "button" && node.props["data-testid"] === "composer-active-run-row-stop");
   stop.props.onClick({ defaultPrevented: false });
 
   assert.deepEqual(stoppedRunIds, [["run-1", "run-2"]]);
   assert.deepEqual(selectedParticipantIds, []);
-  assert.equal(identity.findAllByProps({ className: "composer-active-run-row-stop" }).length, 0);
+  assert.equal(identity.findAll((node) => node.props["data-testid"] === "composer-active-run-row-stop").length, 0);
   renderer.unmount();
 });
 

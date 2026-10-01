@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { writeClipboardText, type ClipboardWriteResult } from "../../shared/clipboard";
+import { IconButton } from "./primitives";
 
 export function CodexDeviceAuth(props: { authUrl: string; authCode?: string }): JSX.Element {
   // A new challenge must not inherit feedback from the previous code.
@@ -29,10 +30,8 @@ function DeviceAuthChallenge({ authUrl, authCode }: { authUrl: string; authCode?
       {authCode ? (
         <div className="provider-device-auth-code-row">
           <code data-testid="cloud-run-device-auth-code">{authCode}</code>
-          <button type="button" className="provider-device-auth-copy" aria-label="Copy sign-in code"
-            title={copyResult === "copied" ? "Copied" : "Copy sign-in code"} disabled={copying} onClick={() => void copy()}>
-            {copyResult === "copied" ? <Check size={18} aria-hidden /> : <Copy size={18} aria-hidden />}
-          </button>
+          <IconButton className="provider-device-auth-copy" label="Copy sign-in code" icon={copyResult === "copied" ? Check : Copy}
+            disabled={copying} onClick={() => void copy()} />
           {copyResult === "copied" ? <span role="status">Copied</span> : null}
         </div>
       ) : null}

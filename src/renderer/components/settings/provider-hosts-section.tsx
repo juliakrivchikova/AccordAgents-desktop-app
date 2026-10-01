@@ -14,7 +14,7 @@ import {
   cliProviderHostVendorsFor
 } from "../../../shared/cliProviderHosts";
 import { deriveAgentReadiness } from "../../../shared/cliReadiness";
-import { AppSelect, FormRow } from "../primitives";
+import { AppSelect, FormRow, IconButton } from "../primitives";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 
 const CLI_LABELS: Record<CliProviderHostCli, string> = { "claude-code": "Claude Code", "codex-cli": "Codex CLI" };
@@ -40,15 +40,12 @@ export function ProviderHostRows(props: {
               <div className="gen-cli-name">{host.label}</div>
               <div className="gen-cli-sub">{hostStatusLine(host, props.agents)}</div>
             </div>
-            <button
-              type="button"
-              className="gen-host-edit"
-              aria-label={`Edit ${host.label}`}
+            <IconButton
+              label={`Edit ${host.label}`}
+              icon={Pencil}
               data-testid={`provider-host-edit-${host.id}`}
               onClick={() => props.onEdit(host)}
-            >
-              <Pencil size={15} aria-hidden />
-            </button>
+            />
           </div>
         </Fragment>
       ))}
@@ -226,9 +223,7 @@ export function ProviderHostEditorDialog(props: {
                 </DialogDescription>
               </span>
               <DialogClose asChild>
-                <button type="button" className="participants-editor-close" aria-label="Close provider editor">
-                  <X size={15} aria-hidden />
-                </button>
+                <IconButton label="Close provider editor" icon={X} />
               </DialogClose>
             </div>
           </DialogHeader>

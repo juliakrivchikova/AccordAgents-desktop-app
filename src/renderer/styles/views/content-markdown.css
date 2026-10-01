@@ -53,12 +53,6 @@
   right: 10px;
 }
 
-.message-stop-button {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-}
-
 .message-meta {
   display: flex;
   align-items: center;
@@ -481,16 +475,6 @@
 
 .chat-mention-card-compact {
   margin-left: auto;
-  width: 26px;
-  height: 26px;
-  min-height: 26px;
-  border-radius: 7px;
-  color: var(--app-muted);
-}
-
-.chat-mention-card-compact:hover:not(:disabled) {
-  background: var(--app-surface-hover);
-  color: var(--app-text-strong);
 }
 
 .chat-mention-card-avatar {
@@ -550,29 +534,6 @@
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.chat-mention-card-copy {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border: 1px solid var(--app-border);
-  border-radius: 6px;
-  background: var(--app-surface);
-  color: var(--app-muted);
-  cursor: pointer;
-}
-
-.chat-mention-card-copy:hover:not(:disabled) {
-  background: var(--app-surface-hover);
-  color: var(--app-text-strong);
-}
-
-.chat-mention-card-copy:disabled {
-  cursor: default;
-  opacity: 0.5;
 }
 
 .message-focused .message-body {
@@ -778,11 +739,6 @@ ul.markdown-list {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.thread-panel-actions .icon-button {
-  width: 34px;
-  height: 34px;
 }
 
 .thread-panel-head span {

@@ -2,23 +2,21 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import type {
   ChatActivityItem,
-  ChatSearchMessageMatch,
   ChatSkillMention,
   Conversation,
   PluginCatalogItem,
   StartReviewResult
 } from "../shared/types";
-import { FileBox, RefreshCw, XCircle } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { ArrowLeft, ArrowRight, FileBox, RefreshCw, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
 import { AppLoadingState } from "./components/loading-states";
-import { AppRail, AppShell, Sidebar, SidebarPanelIcon, TopBar } from "./components/shell";
-import { ActivityView } from "./components/activity/activity-view";
-import { SettingsView, type SettingsSection } from "./components/settings/settings-view";
+import { AppShell, Sidebar, SidebarToggleButton, TopBar } from "./components/shell";
+import { ActivityConversationTitle, ActivityView } from "./components/activity/activity-view";
+import { SettingsView } from "./components/settings/settings-view";
 import { SettingsSidebar } from "./components/settings/settings-sidebar";
 import { ConversationPanel } from "./components/conversation/conversation-panel";
 import { ChatParticipantMenu } from "./components/chat/chat-participant-menu";
@@ -44,6 +42,8 @@ import { useSettingsActions } from "./app/use-settings-actions";
 import { useAppViewModel } from "./app/use-app-view-model";
 import { useCustomAvatarLibrary } from "./components/avatar/custom-avatars";
 import { useChatSearch } from "./app/use-chat-search";
+import { useChatSearchShortcut } from "./app/chat-search-shortcut";
+import { useAppNavigation } from "./app/use-app-navigation";
 import { AppNotices } from "./app/app-notices";
 import { pluginNewChatDraft, pluginNewChatMentions } from "./app/plugin-new-chat";
 import { clearActivityItem, markActivityItemRead } from "./app/activity-item-state";
@@ -57,6 +57,10 @@ function App(): JSX.Element {
   // member's own picture appear in the timeline and the roster after a restart.
   useCustomAvatarLibrary(state.settings.chatCustomAvatars);
   const [searchOpen, setSearchOpen] = React.useState(false);
+  // Not from Settings: a result would leave it and drop an unsaved edit.
+  useChatSearchShortcut(() => {
+    if (state.railView !== "settings") setSearchOpen(true);
+  });
   const conversationActions = useConversationActions(state);
   const chatSearch = useChatSearch(searchOpen);
   const chatActions = useChatActions(state, conversationActions);
@@ -67,8 +71,7 @@ function App(): JSX.Element {
     state,
     conversationActions.refreshAll,
     conversationActions.refreshAgents,
-    conversationActions.refreshActivity,
-    conversationActions.markConversationViewed
+    conversationActions.refreshActivity
   );
   const view = useAppViewModel(state);
   const artifacts = useArtifacts(state.conversation?.id);
@@ -84,14 +87,33 @@ function App(): JSX.Element {
     skillMentions: ChatSkillMention[];
   }>();
 
-  const openSettingsSection = (section: SettingsSection): void => {
-    conversationActions.clearChatMessageFocus();
-    state.setActiveSettingsSection(section);
-    state.setRailView("settings");
+  const navigation = useAppNavigation(state, conversationActions);
+  const { openSettingsSection } = navigation;
+  // A control that hides itself (a sidebar toggle, Activity, Settings, Back)
+  // hands focus to its counterpart, so the keyboard and VoiceOver keep their
+  // place. Only after a keyboard press: after a mouse click the moved focus
+  // would draw a focus ring nobody asked for.
+  const focusAfterSwitch = (testId: string): void => {
+    if (!(document.activeElement instanceof HTMLElement) || !document.activeElement.matches(":focus-visible")) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      const target = document.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
+      // A collapsed sidebar is inert; its expand toggle stands in for it.
+      (target && !target.closest("[inert]") ? target : document.querySelector<HTMLElement>('[data-testid="sidebar-expand-toggle"]'))?.focus();
+    });
+  };
+  const collapseSidebar = (): void => {
+    state.setSidebarCollapsed(true);
+    focusAfterSwitch("sidebar-expand-toggle");
+  };
+  const expandSidebar = (): void => {
     state.setSidebarCollapsed(false);
+    focusAfterSwitch("sidebar-collapse-toggle");
   };
   const closeSettings = (): void => {
-    state.setRailView("chats");
+    navigation.returnToChats();
+    focusAfterSwitch("sidebar-settings");
   };
   const tryPluginInNewChat = (plugin: PluginCatalogItem): void => {
     if (state.busy) {
@@ -101,7 +123,10 @@ function App(): JSX.Element {
     if (!draft.trim()) {
       return;
     }
-    void conversationActions.newChatSession().then(() => {
+    void conversationActions.newChatSession().then((started) => {
+      if (!started) {
+        return;
+      }
       state.setQuestion(draft);
       const mentions = pluginNewChatMentions(plugin, draft);
       state.setNewChatPluginMentions(mentions.pluginMentions);
@@ -193,21 +218,23 @@ function App(): JSX.Element {
         ? undefined
         : "New chat";
   const topBarLeading = state.railView === "chats" && state.sidebarCollapsed ? (
-    <Button
-      type="button"
-      variant="ghost"
-      size="icon-sm"
-      title="Show sidebar"
-      aria-label="Show sidebar"
-      aria-controls="app-sidebar"
-      aria-expanded="false"
-      data-testid="sidebar-expand-toggle"
-      onClick={() => state.setSidebarCollapsed(false)}
-    >
-      <SidebarPanelIcon />
-      <span className="sr-only">Show sidebar</span>
-    </Button>
+    <SidebarToggleButton expanded={false} onToggle={expandSidebar} />
   ) : undefined;
+  const windowActions = (
+    <>
+      <ModeToggle />
+      <IconButton
+        label="Refresh"
+        icon={RefreshCw}
+        onClick={() => void (async () => {
+          await conversationActions.refreshAll();
+          if (state.railView === "activity") {
+            await conversationActions.refreshActivity();
+          }
+        })()}
+      />
+    </>
+  );
   const accordEligibleParticipants = React.useMemo(
     () => view.activeChatParticipants.filter((participant) => !isChatAssistantParticipant(participant)),
     [view.activeChatParticipants]
@@ -237,8 +264,6 @@ function App(): JSX.Element {
             pressed={artifacts.panelOpen}
             onClick={() => (artifacts.panelOpen ? artifacts.closePanel() : artifacts.openPanel())}
             tooltip="Artifacts — durable shared documents (plans, QA cases, decisions) with versions and sign-off"
-            className={cn("topbar-icon-button", artifacts.panelOpen && "is-active")}
-            size="sm"
           />
           <ChatParticipantMenu
             participants={view.activeChatParticipants}
@@ -265,6 +290,28 @@ function App(): JSX.Element {
     </>
   );
   const chatUsesInlineTopBar = state.railView === "chats" && Boolean(view.activeChatConversation);
+  const openActivityItemInChat = (item: ChatActivityItem): void => {
+    state.setRailView("chats");
+    state.setSidebarCollapsed(false);
+    state.setSelectedActivityItem(undefined);
+    void conversationActions.openConversationAndFocusActivityItem(item, { timelineOnly: true });
+  };
+  // In Activity a previewed chat gets the same top row as in Chats, so a thread
+  // or artifacts panel beside it lines up with that row. Only once the
+  // selected item's own chat is loaded; until then the Activity pane keeps its
+  // header. The item is the refreshed one, so its target is current.
+  const selectedActivityId = state.selectedActivityItem?.id;
+  const activityPreviewItem = state.railView === "activity" && selectedActivityId && !state.openingConversationId
+    && view.activeChatConversation?.id === state.selectedActivityItem?.conversationId
+    ? state.activityItems.find((item) => item.id === selectedActivityId) ?? state.selectedActivityItem
+    : undefined;
+  const activityTopBar = activityPreviewItem && view.activeChatConversation ? (
+    <TopBar
+      className="pr-4 border-[var(--app-border-subtle)]"
+      title={<ActivityConversationTitle title={view.activeChatConversation.title} />}
+      actions={<IconButton label="Open in chat" icon={ArrowRight} onClick={() => openActivityItemInChat(activityPreviewItem)} />}
+    />
+  ) : undefined;
   const chatTopBar = <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} className={isNewChatScreen ? "new-chat-topbar" : undefined} />;
   const conversationPanel = view.hasResultContext ? (
     <ConversationPanel
@@ -278,7 +325,7 @@ function App(): JSX.Element {
       openingConversationDescription={openingConversationDescription}
       accordDisabledReason={accordDisabledReason}
       onOpenAccord={() => setAccordDialogOpen(true)}
-      topBar={chatUsesInlineTopBar ? chatTopBar : undefined}
+      topBar={chatUsesInlineTopBar ? chatTopBar : activityTopBar}
       artifacts={artifacts}
     />
   ) : undefined;
@@ -288,46 +335,8 @@ function App(): JSX.Element {
 
   return (
     <AppShell
-      topStrip={(
-        <div className="app-shell-top-strip-actions">
-          <ModeToggle />
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="topbar-icon-button"
-            title="Refresh"
-            aria-label="Refresh"
-            onClick={() => void (async () => {
-              await conversationActions.refreshAll();
-              if (state.railView === "activity") {
-                await conversationActions.refreshActivity();
-              }
-            })()}
-          >
-            <RefreshCw aria-hidden />
-            <span className="sr-only">Refresh</span>
-          </Button>
-        </div>
-      )}
-      rail={
-        <AppRail
-          activeView={state.railView}
-          activityUnreadCount={activityUnreadCount}
-          onSelect={(nextView) => {
-            if (nextView !== "activity") {
-              conversationActions.clearChatMessageFocus();
-            }
-            state.setRailView(nextView);
-            if (nextView !== "activity") {
-              state.setSelectedActivityItem(undefined);
-            }
-            if (nextView === "settings") {
-              state.setSidebarCollapsed(false);
-            }
-          }}
-        />
-      }
       sidebarCollapsed={state.sidebarCollapsed}
+      // Activity takes the sidebar's place, the way Settings does.
       sidebarHidden={state.railView === "activity"}
       sidebarWidth={state.sidebarWidth}
       onSidebarWidthChange={state.setSidebarWidth}
@@ -339,7 +348,8 @@ function App(): JSX.Element {
             section={state.activeSettingsSection}
             onSectionChange={state.setActiveSettingsSection}
             onBackToChats={closeSettings}
-            onToggleSidebar={() => state.setSidebarCollapsed(true)}
+            onToggleSidebar={collapseSidebar}
+            footerActions={windowActions}
           />
         ) : (
           <Sidebar
@@ -347,17 +357,27 @@ function App(): JSX.Element {
             archivedSessions={view.archivedSessions}
             activeId={state.conversation?.id}
             pendingId={state.openingConversationId}
+            activityUnreadCount={activityUnreadCount}
             busy={state.busy}
             loading={state.historyLoading}
             unreadIds={state.unreadConversationIds}
             onOpenSearch={() => setSearchOpen(true)}
-            onSelect={(id) => void conversationActions.openConversation(id)}
+            onOpenActivity={() => {
+              navigation.showView("activity");
+              focusAfterSwitch("activity-back-to-chats");
+            }}
+            onOpenSettings={() => {
+              navigation.showView("settings");
+              focusAfterSwitch("settings-back-to-chats");
+            }}
+            onSelect={navigation.openChat}
             onNewSession={() => void conversationActions.newChatSession()}
             onNewProjectSession={(projectRepoPath) => void conversationActions.newProjectSession(projectRepoPath)}
             onArchive={(id) => void chatActions.setChatArchived(id, true)}
             onUnarchive={(id) => void chatActions.setChatArchived(id, false)}
             onDelete={(id) => chatActions.deleteChatConversation(id)}
-            onToggleSidebar={() => state.setSidebarCollapsed(true)}
+            onToggleSidebar={collapseSidebar}
+            footerActions={windowActions}
           />
         )
       }
@@ -383,10 +403,8 @@ function App(): JSX.Element {
         onQueryChange={chatSearch.setQuery}
         onClear={chatSearch.clear}
         onLoadMore={chatSearch.loadMore}
-        onOpenConversation={(conversationId) => void conversationActions.openConversation(conversationId)}
-        onOpenMessage={(match: ChatSearchMessageMatch) =>
-          void conversationActions.openConversationAndFocusMessage(match)
-        }
+        onOpenConversation={navigation.openChat}
+        onOpenMessage={navigation.openChatMessage}
       />
 
       {view.activeChatConversation && (
@@ -430,16 +448,29 @@ function App(): JSX.Element {
           deleteAgentEnvironmentVariable={settingsActions.deleteAgentEnvironmentVariable}
           onTryPluginInChat={tryPluginInNewChat}
           sidebarCollapsed={state.sidebarCollapsed}
-          onExpandSidebar={() => state.setSidebarCollapsed(false)}
+          onExpandSidebar={expandSidebar}
           onClose={closeSettings}
         />
       ) : state.railView === "activity" ? (
         <ActivityView
+          leading={(
+            <IconButton
+              label="Back to chats"
+              icon={ArrowLeft}
+              data-testid="activity-back-to-chats"
+              onClick={() => {
+                navigation.leaveActivity();
+                focusAfterSwitch("sidebar-activity");
+              }}
+            />
+          )}
+          trailing={windowActions}
           items={state.activityItems}
           selectedItem={state.selectedActivityItem}
           loading={state.activityLoading}
           error={state.activityError}
           detailError={state.activityFocusError}
+          onDismissDetailError={() => state.setActivityFocusError(undefined)}
           detail={<div className="content-area result-layout activity-conversation-content">
             {conversationPanel ?? <AppLoadingState title="Loading chat" description={openingConversationDescription} />}
           </div>}
@@ -463,12 +494,8 @@ function App(): JSX.Element {
           onMarkRead={(item) => markActivityItemRead(state, item.id)}
           onCancelPending={(item) => void cancelPendingActivityItem(item)}
           onClear={(item) => clearActivityItem(state, item.id)}
-          onOpenInChat={(item) => {
-            state.setRailView("chats");
-            state.setSidebarCollapsed(false);
-            state.setSelectedActivityItem(undefined);
-            void conversationActions.openConversationAndFocusActivityItem(item, { timelineOnly: true });
-          }}
+          detailHasHeader={Boolean(activityTopBar && conversationPanel)}
+          onOpenInChat={openActivityItemInChat}
           onRetry={() => void conversationActions.refreshActivity()}
         />
       ) : state.initializing ? (

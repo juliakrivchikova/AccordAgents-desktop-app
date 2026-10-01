@@ -4,6 +4,7 @@ import type {
   ChatSkillMention,
   RepoFileMention
 } from "../../../shared/types";
+import { IconButton } from "../primitives";
 import { providerLabel } from "./chat-conversation-data";
 import { formatBytes } from "./chat-format";
 import type { PendingChatImage } from "./use-chat-composer-images";
@@ -54,9 +55,7 @@ export function ChatComposerAttachmentChips(props: {
                 <strong>{image.filename}</strong>
                 <span>{image.error ?? `${formatBytes(image.sizeBytes)}${image.status === "loading" ? " · reading" : ""}`}</span>
               </div>
-              <button type="button" aria-label={`Remove ${image.filename}`} onClick={() => props.removePendingImage(image.id)}>
-                <X size={14} />
-              </button>
+              <IconButton size="xs" icon={X} label={`Remove ${image.filename}`} onClick={() => props.removePendingImage(image.id)} />
             </div>
           ))}
         </div>

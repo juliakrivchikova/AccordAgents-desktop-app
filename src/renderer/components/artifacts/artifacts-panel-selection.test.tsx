@@ -203,9 +203,10 @@ function menuRow(match: (text: string) => boolean): HTMLElement | undefined {
 }
 
 async function openPicker(container: HTMLElement): Promise<void> {
-  const trigger = container.querySelector<HTMLButtonElement>('[data-testid="artifact-version-selector"]');
-  assert.ok(trigger, "the version picker trigger should be in the header");
-  await openMenu(trigger);
+  await openMenu(container.querySelector<HTMLButtonElement>('[data-testid="artifact-actions-menu"]') as HTMLButtonElement);
+  const version = document.querySelector<HTMLElement>('[data-testid="artifact-version-selector"]');
+  assert.ok(version, "the title menu should offer the Version entry");
+  await act(async () => { version.click(); });
 }
 
 async function pickDraft(container: HTMLElement): Promise<void> {

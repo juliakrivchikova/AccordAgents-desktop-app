@@ -11,6 +11,9 @@ const require = createRequire(import.meta.url);
 const { attach, getJson } = require("./cdp.cjs");
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// The sidebar's Settings row opens Settings; once there, the chat sidebar is
+// replaced by the Settings navigation, so a retry clicks General instead.
+const SETTINGS_ENTRY_SELECTOR = "[data-testid='sidebar-settings'], [data-testid='settings-nav-general']";
 const desktopPort = Number(process.env.ELECTRON_CDP_PORT || 9223);
 const defaultManagedRelayUrl = "wss://relay.accordagents.com/v1/relay";
 const expectedRelayUrl = process.env.ACCORDAGENTS_MOBILE_RELAY_URL || defaultManagedRelayUrl;
@@ -500,11 +503,11 @@ async function clickOptionalSelector(client, selector) {
 }
 
 async function openDevicePairingSection(client) {
-  await waitForSelectorPoll(client, "button[aria-label='Settings']", 20_000);
+  await waitForSelectorPoll(client, SETTINGS_ENTRY_SELECTOR, 20_000);
   await settleInitialChatAssistant(client);
   for (let attempt = 0; attempt < 5; attempt += 1) {
     await dismissChatChoiceIfOpen(client);
-    await clickSelector(client, "button[aria-label='Settings']");
+    await clickSelector(client, SETTINGS_ENTRY_SELECTOR);
     await clickOptionalSelector(client, "[data-testid='settings-nav-general']");
     if (await waitForOptionalSelector(client, "[data-device-pairing-action='generate']", 1_500)) {
       return;

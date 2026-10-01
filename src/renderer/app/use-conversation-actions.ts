@@ -40,8 +40,10 @@ export interface ConversationActions {
   inspectRepo: (path?: string, options?: { remember?: boolean }) => Promise<void>;
   rememberRepoPath: (path: string) => Promise<void>;
   cancelReview: () => Promise<void>;
-  newChatSession: () => Promise<void>;
+  // False when it did not take over the screen (busy, or a chat opened meanwhile).
+  newChatSession: () => Promise<boolean>;
   newProjectSession: (projectRepoPath?: string) => Promise<void>;
+  returnToNewChatDraft: () => void;
   updateSelectedChatParticipantConfigIds: React.Dispatch<React.SetStateAction<Set<string>>>;
 }
 
@@ -162,6 +164,7 @@ export function useConversationActions(state: AppState): ConversationActions {
 
   async function openConversationForSelection(id: string, options: { markViewed?: boolean } = {}): Promise<Conversation | undefined> {
     const markViewed = options.markViewed !== false;
+    const previous = state.conversation;
     const requestId = state.openConversationRequestRef.current + 1;
     state.openConversationRequestRef.current = requestId;
     state.setError(undefined);
@@ -191,7 +194,13 @@ export function useConversationActions(state: AppState): ConversationActions {
         state.setKind(next.kind);
         if (markViewed) {
           markConversationViewed(next);
+        } else {
+          state.previewLoadedAtRef.current[next.id] = next.updatedAt;
         }
+      }
+      // In Activity a preview replaces the chat behind it unseen.
+      if (previous && previous.id !== next?.id && state.railViewRef.current === "activity") {
+        markUnreadIfNews(previous);
       }
       state.setSelectedThreadId(nextPendingDecisions[0]?.id ?? nextPendingItem?.id);
       state.setFocusedThreadId(undefined);
@@ -545,32 +554,72 @@ export function useConversationActions(state: AppState): ConversationActions {
     }
   }
 
-  async function newChatSession(): Promise<void> {
-    if (state.busy) return;
+  async function newChatSession(): Promise<boolean> {
+    if (state.busy) return false;
+    const openRequestAtClick = state.openConversationRequestRef.current;
     await refreshSettingsForNewChat();
+    // A chat opened after New chat was clicked is the User's later choice.
+    if (state.openConversationRequestRef.current !== openRequestAtClick) return false;
     const nextRepoPath = preferredNewChatRepoPath();
     resetNewChatState();
     await applyNewChatRepoPath(nextRepoPath);
+    return true;
   }
 
   async function newProjectSession(projectRepoPath?: string): Promise<void> {
     if (state.busy) return;
+    const openRequestAtClick = state.openConversationRequestRef.current;
     await refreshSettingsForNewChat();
+    if (state.openConversationRequestRef.current !== openRequestAtClick) return;
     const nextRepoPath = normalizeProjectPath(projectRepoPath) ?? "";
     resetNewChatState();
     await applyNewChatRepoPath(nextRepoPath);
   }
 
-  function resetNewChatState(): void {
+  // Takes the conversation on screen, or one still loading, off screen.
+  function dropLoadedConversation(): void {
     clearChatMessageFocus();
+    // A chat still loading (for example the Activity detail) must not land on
+    // top of what replaces it once its load finishes.
+    state.openConversationRequestRef.current += 1;
+    state.setOpeningConversationId(undefined);
     state.setConversation(undefined);
     state.setMessagePage(undefined);
     state.setOlderMessagesLoading(false);
-    state.progressLogRef.current = [];
-    state.setProgressLog([]);
     state.setSelectedThreadId(undefined);
     state.setFocusedThreadId(undefined);
     state.setWarnings([]);
+    state.setKind("chat");
+  }
+
+  // Drops the chat on screen (an Activity preview) and leaves the new-chat
+  // draft (prompt, images, members, repo) untouched.
+  function returnToNewChatDraft(): void {
+    const dropped = state.conversation;
+    dropLoadedConversation();
+    state.setError(undefined);
+    if (dropped) {
+      markUnreadIfNews(dropped);
+    }
+  }
+
+  // Updates to a chat that is loaded but not on screen (an Activity preview, or
+  // the chat left behind Activity) mark nothing, so a chat taken off screen
+  // that way gets the sidebar's unread dot for news since it was last viewed
+  // or loaded as a preview.
+  function markUnreadIfNews(conversation: Conversation): void {
+    const seen = [state.lastViewedAtRef.current[conversation.id], state.previewLoadedAtRef.current[conversation.id]]
+      .filter((value): value is string => Boolean(value))
+      .map(conversationTimeValue);
+    if (seen.length > 0 && conversationTimeValue(conversation.updatedAt) > Math.max(...seen)) {
+      state.setUnreadConversationIds((current) => current.has(conversation.id) ? current : new Set(current).add(conversation.id));
+    }
+  }
+
+  function resetNewChatState(): void {
+    dropLoadedConversation();
+    state.progressLogRef.current = [];
+    state.setProgressLog([]);
     state.setDecisionAnswers({});
     state.setResolvedDecisionThreads({});
     state.setClarificationDrafts({});
@@ -580,7 +629,6 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setChatMessageDraft("");
     state.setChatAddParticipantDraft(defaultChatParticipantDraft(state.settings));
     state.setSelectedChatParticipantConfigIds(defaultSelectedChatParticipantConfigIds());
-    state.setKind("chat");
     state.setQuestion("");
     state.setNewChatPendingImages((current) => {
       revokePendingImageUrls(current);
@@ -633,7 +681,7 @@ export function useConversationActions(state: AppState): ConversationActions {
   return {
     refreshAll, refreshAgents, refreshActivity, refreshConversations, openConversation, openConversationAndFocusMessage, openConversationAndFocusActivityItem, markConversationViewed, clearChatMessageFocus, loadOlderConversationMessages,
     loadConversationMessagePageForMessage, jumpToParticipantLastMessage, selectRepo,
-    inspectRepo, rememberRepoPath, cancelReview, newChatSession, newProjectSession,
+    inspectRepo, rememberRepoPath, cancelReview, newChatSession, newProjectSession, returnToNewChatDraft,
     updateSelectedChatParticipantConfigIds: state.setSelectedChatParticipantConfigIds
   };
 

@@ -10,6 +10,7 @@ const ignoredDirectories = new Set([".git", "dist", "node_modules", "out", "sign
 const ignoredExtensions = new Set([".avif", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp", ".woff", ".woff2"]);
 const runtimeCustomProperties = new Set([
   "--bar-height",
+  "--chat-composer-clearance",
   "--chat-thread-width",
   "--radix-dropdown-menu-content-available-height",
   "--radix-popover-content-available-height",
