@@ -1,7 +1,11 @@
-export const CHAT_MAIN_MIN_WIDTH = 320;
+// The only cap on a side panel (thread or artifact) is the room the main
+// timeline needs. 400px is the narrowest width at which every timeline card
+// still lays out: below it the approval card's Input column collapses and its
+// JSON breaks letter by letter. Must match --chat-main-min-width in
+// chat-conversation.css.
+export const CHAT_MAIN_MIN_WIDTH = 400;
 export const CHAT_SIDE_PANEL_MIN_WIDTH = 300;
 export const CHAT_SIDE_PANEL_FLOOR_WIDTH = 220;
-export const CHAT_SIDE_PANEL_MAX_WIDTH = 760;
 export const CHAT_SPLIT_RESIZER_WIDTH = 1;
 export const CHAT_SPLIT_WORKSPACE_MIN_WIDTH = CHAT_MAIN_MIN_WIDTH + CHAT_SIDE_PANEL_MIN_WIDTH + CHAT_SPLIT_RESIZER_WIDTH;
 export const CHAT_THREAD_DEFAULT_WIDTH = 430;
@@ -22,7 +26,7 @@ export function chatSidePanelWidthLimits(
 ): ChatSidePanelWidthLimits {
   const reserveWidth = options.reserveWidth ?? 0;
   const preferredMin = options.minWidth ?? CHAT_SIDE_PANEL_MIN_WIDTH;
-  const preferredMax = options.maxWidth ?? CHAT_SIDE_PANEL_MAX_WIDTH;
+  const preferredMax = options.maxWidth ?? Number.POSITIVE_INFINITY;
   const availableAfterMain = Math.floor(containerWidth - CHAT_MAIN_MIN_WIDTH - reserveWidth);
   const available = availableAfterMain >= CHAT_SIDE_PANEL_FLOOR_WIDTH
     ? availableAfterMain

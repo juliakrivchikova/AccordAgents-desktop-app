@@ -10,7 +10,6 @@ import {
 
 import {
   ARTIFACT_PANEL_DEFAULT_WIDTH,
-  CHAT_SIDE_PANEL_MAX_WIDTH,
   CHAT_SIDE_PANEL_MIN_WIDTH,
   chatSidePanelWidthLimits,
   clampChatSidePanelWidth
@@ -41,10 +40,7 @@ export function useArtifactsPanelResize(): ArtifactsPanelResize {
 
   const getLimits = (): ResizeLimits => {
     const containerWidth = panelRef.current?.parentElement?.getBoundingClientRect().width ?? window.innerWidth;
-    return chatSidePanelWidthLimits(containerWidth, {
-      minWidth: CHAT_SIDE_PANEL_MIN_WIDTH,
-      maxWidth: CHAT_SIDE_PANEL_MAX_WIDTH
-    });
+    return chatSidePanelWidthLimits(containerWidth, { minWidth: CHAT_SIDE_PANEL_MIN_WIDTH });
   };
 
   const updatePanelWidth = (width: number): void => {
