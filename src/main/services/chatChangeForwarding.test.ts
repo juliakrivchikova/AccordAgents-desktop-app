@@ -8,6 +8,7 @@ import type { DeviceEventPacket } from "../../shared/deviceEventChannel";
 import { CHAT_CHANGES_EVENT_KIND, chatChangesLogScope } from "./chatChanges";
 import { ChatEventLogService } from "./chatEventLog";
 import { DeviceEventChannel } from "./deviceEventChannel";
+import { signDevicePacket } from "./devicePacketAuthentication";
 import { StorageService } from "./storage";
 
 const SCOPE = chatChangesLogScope("chat-1");
@@ -30,6 +31,7 @@ function channel(self: Device, peer: Device, room: string, sent: DeviceEventPack
   applied?: string[];
   forwardTo?: (event: ChatEventEnvelope) => Array<{ deviceId: string; channelId: string }>;
   forwardedOriginKey?: (originId: string) => string | undefined;
+  peerHoldsEveryChat?: boolean;
 } = {}): DeviceEventChannel {
   return new DeviceEventChannel({
     storage: self.storage, eventLog: self.log, channelId: room,
@@ -38,6 +40,7 @@ function channel(self: Device, peer: Device, room: string, sent: DeviceEventPack
     apply: async (event) => { extra.applied?.push(event.eventId); return "applied"; },
     ...(extra.forwardTo ? { forwardTo: extra.forwardTo } : {}),
     ...(extra.forwardedOriginKey ? { forwardedOriginKey: extra.forwardedOriginKey } : {}),
+    ...(extra.peerHoldsEveryChat ? { peerHoldsEveryChat: true } : {}),
     onError: () => undefined
   });
 }
@@ -75,7 +78,7 @@ test("a reply one machine wrote reaches another machine through the desktop, unc
     const desktopFromA = channel(desktop, machineA, "room-a", desktopToA, {
       forwardTo: (event) => event.originId === machineA.originId ? [{ deviceId: machineB.originId, channelId: "room-b" }] : []
     });
-    const desktopWithB = channel(desktop, machineB, "room-b", desktopToB);
+    const desktopWithB = channel(desktop, machineB, "room-b", desktopToB, { peerHoldsEveryChat: true });
     const bFromDesktop = channel(machineB, desktop, "room-b", fromB, {
       applied: appliedOnB,
       forwardedOriginKey: (originId) => originId === machineA.originId ? machineA.publicKeyDerBase64 : undefined
@@ -121,9 +124,29 @@ test("a reply one machine wrote reaches another machine through the desktop, unc
     await desktopWithB.receive(resend);
     for (const packet of desktopToB.splice(0)) await bFromDesktop.receive(packet);
     assert.deepEqual(appliedOnB, [first.eventId, second.eventId, third.eventId]);
+
+    // A phone is served only what was addressed to it, never another chat change.
+    const phone = await device(directory, "phone");
+    const toPhone: DeviceEventPacket[] = [];
+    const desktopWithPhone = channel(desktop, phone, "room-b", toPhone);
+    open.push(desktopWithPhone);
+    const { protocol: _protocol, from: _from, to: _to, ...resendBody } = resend;
+    await desktopWithPhone.receive(signDevicePacket({ ...resendBody, protocol: resend.protocol, from: phone.originId, to: desktop.originId },
+      await phone.log.getOrCreateDeviceIdentity()));
+    assert.deepEqual(toPhone.filter((packet) => packet.type === "event"), []);
+
+    // Machine A is removed: B refuses its signature from then on, so what A
+    // wrote is no longer offered to B.
+    const fourth = await machineChange(machineA, desktop, "room-a", "fourth");
+    await aToDesktop.flush();
+    for (const packet of events(fromA)) await desktopFromA.receive(packet);
+    const pendingForB = async () => (await desktop.storage.deviceEvents().listPending("room-b", 0, machineB.originId)).map((row) => row.event.eventId);
+    assert.ok((await pendingForB()).includes(fourth.eventId));
+    assert.ok(await desktop.storage.deviceEvents().forgetOrigin(machineA.originId) >= 1);
+    assert.deepEqual(await pendingForB(), []);
   } finally {
     for (const item of open) item.close();
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -154,5 +177,5 @@ test("after a copy, what other machines wrote beyond its marks is shared with th
     assert.deepEqual(rows.map((row) => row.event.eventId).sort(), [changes[2].eventId, other.event.eventId].sort());
     assert.equal(await desktop.storage.deviceEvents().shareChatChangesAfter(machineA.originId,
       [{ logScopeId: SCOPE, originSeq: changes[1].originSeq }], { deviceId: "device-new", channelId: "room-new" }), 0, "running it again adds nothing");
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });

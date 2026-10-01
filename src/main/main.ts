@@ -169,7 +169,7 @@ import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
-import { MachineInactivityCheck } from "./services/machineInactivity";
+import { MachineInactivityCheck, type MachineInactivityOutcome } from "./services/machineInactivity";
 import { isMachineAutoUpgradeOperation } from "../shared/machineInstall";
 import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
@@ -407,7 +407,19 @@ function machineRuntimePayload(): MachineRuntimePayloadLocation {
   return { dir: path.join(app.getAppPath(), "dist", "machine"), source: "checkout", expectVersion: app.getVersion() };
 }
 /** Questions about machines that stopped being used, waiting for the User. */
-const machineInactivityAnswers = new Map<string, { question: MachineInactivityQuestion; resolve: (answer: "keep" | "remove") => void }>();
+const machineInactivityAnswers = new Map<string, {
+  question: MachineInactivityQuestion;
+  resolve: (outcome: MachineInactivityOutcome) => void;
+  answering?: boolean;
+}>();
+/** A machine that connects again is in use: its open question goes away. */
+function withdrawMachineInactivityQuestion(machineId: string): void {
+  const entry = machineInactivityAnswers.get(machineId);
+  if (!entry || entry.answering) return;
+  machineInactivityAnswers.delete(machineId);
+  entry.resolve("active");
+  sendToMainWindow("machines:inactivity-questions", machineInactivityQuestions());
+}
 function machineInactivityQuestions(): MachineInactivityQuestion[] {
   return [...machineInactivityAnswers.values()].map((entry) => entry.question);
 }
@@ -426,13 +438,16 @@ async function removeMachine(id: string): Promise<MachineListResult> {
       handoffId: outcome.handoffId, keyRotationRequired: outcome.keyRotationRequired, detail: outcome.detail
     });
   }
-  // What was kept for it until it confirmed is no longer kept.
+  // What was kept for it until it confirmed is no longer kept, and what it
+  // wrote is no longer offered to the machines that remain.
   if (record?.deviceId) {
-    const forgotten = await storageService.deviceEvents().forgetRecipient(record.pairingKey, record.deviceId).catch((error: unknown) => {
+    const forget = (operation: Promise<number>): Promise<number> => operation.catch((error: unknown) => {
       void debugLogService.write("machine.remove.forget-error", { machineId: id, message: error instanceof Error ? error.message : String(error) });
       return 0;
     });
-    void debugLogService.write("machine.remove.forgotten", { machineId: id, events: forgotten });
+    const forgotten = await forget(storageService.deviceEvents().forgetRecipient(record.pairingKey, record.deviceId));
+    const forwarded = await forget(storageService.deviceEvents().forgetOrigin(record.deviceId));
+    void debugLogService.write("machine.remove.forgotten", { machineId: id, events: forgotten, forwarded });
   }
   await settingsService.removeMachine(id);
   // The other machines drop it from their rosters, and what they kept for it.
@@ -2950,10 +2965,18 @@ function registerIpc(): void {
     return createMachine(request);
   });
   ipcMain.handle("machines:inactivity-questions", (): MachineInactivityQuestion[] => machineInactivityQuestions());
-  ipcMain.handle("machines:inactivity-answer", (_event, request: AnswerMachineInactivityRequest): MachineInactivityQuestion[] => {
+  ipcMain.handle("machines:inactivity-answer", async (_event, request: AnswerMachineInactivityRequest): Promise<MachineInactivityQuestion[]> => {
     const id = typeof request?.machineId === "string" ? request.machineId : "";
     const entry = machineInactivityAnswers.get(id);
-    if (entry && (request.answer === "keep" || request.answer === "remove")) {
+    if (entry && !entry.answering && (request.answer === "keep" || request.answer === "remove")) {
+      // Removing is carried out before the question goes: when it fails, the
+      // window says so and the question stays to be answered again.
+      entry.answering = true;
+      try {
+        if (request.answer === "remove") await removeMachine(id);
+      } finally {
+        entry.answering = false;
+      }
       machineInactivityAnswers.delete(id);
       entry.resolve(request.answer);
       sendToMainWindow("machines:inactivity-questions", machineInactivityQuestions());
@@ -3395,30 +3418,6 @@ void app.whenReady().then(async () => {
     void debugLogService.write("mobile.pairing.revocation-restore-error",
       { message: error instanceof Error ? error.message : String(error) });
   });
-  void recoverLocalChoiceActions().catch(error => {
-    void debugLogService.write("chat.choice.recovery-pending", { message: error instanceof Error ? error.message : String(error) });
-  });
-  void recoverLocalApprovalActions().catch(error => {
-    void debugLogService.write("chat.approval.recovery-error", { message: error instanceof Error ? error.message : String(error) });
-  });
-  // A change committed here whose outgoing event did not survive would leave
-  // peers permanently unaware of it. Recovery is idempotent: the operation ids
-  // come from the immutable revision identity, so this is safe every start.
-  void (async () => {
-    try {
-      const summaries = await storageService.listConversations();
-      let recovered = 0;
-      for (const summary of summaries) {
-        if (summary.kind !== "chat") continue;
-        recovered += await artifactService.recoverActionEvents(summary.id);
-      }
-      if (recovered) await debugLogService.write("artifact.action.recovered-at-start", { recovered });
-    } catch (error) {
-      await debugLogService.write("artifact.action.recover-failed", {
-        message: error instanceof Error ? error.message : String(error)
-      });
-    }
-  })();
   try {
     const desktopIdentity = await chatEventLogService.getOrCreateDeviceIdentity();
     machineLinkService = new MachineLinkService(settingsService, debugLogService, {
@@ -3453,11 +3452,14 @@ void app.whenReady().then(async () => {
       }))
     });
     // Every chat goes to every enrolled machine, as one change event per save.
+    // The machines are read before any chat is saved, so a save made while
+    // they are still connecting is addressed to them too.
+    await machineLinkService.loadMachines();
     chatService.setChatChangeTransport(createChatChangeTransport({
       role: "desktop",
       storage: storageService,
       log: chatEventLogService,
-      recipients: () => machineLinkService?.chatActionRecipients() ?? [],
+      recipients: () => machineLinkService?.chatChangeRecipients() ?? [],
       onCommitted: () => machineLinkService?.nudgeEventChannels(),
       machineOriginId: (machineId) => machineLinkService?.machineDeviceId(machineId)
     }));
@@ -3599,12 +3601,37 @@ void app.whenReady().then(async () => {
         });
         sendToMainWindow("machines:inactivity-questions", machineInactivityQuestions());
       }),
-      remove: async (machineId) => { await removeMachine(machineId); },
       log: (event, payload) => { void debugLogService.write(event, payload); }
     }).start();
+    link.onHello((event) => withdrawMachineInactivityQuestion(event.machineId));
   } catch (error) {
     void debugLogService.write("machine-link.init.error", { message: error instanceof Error ? error.message : String(error) });
   }
+  // After the machines are known: what these save or re-emit is addressed to them.
+  void recoverLocalChoiceActions().catch(error => {
+    void debugLogService.write("chat.choice.recovery-pending", { message: error instanceof Error ? error.message : String(error) });
+  });
+  void recoverLocalApprovalActions().catch(error => {
+    void debugLogService.write("chat.approval.recovery-error", { message: error instanceof Error ? error.message : String(error) });
+  });
+  // A change committed here whose outgoing event did not survive would leave
+  // peers permanently unaware of it. Recovery is idempotent: the operation ids
+  // come from the immutable revision identity, so this is safe every start.
+  void (async () => {
+    try {
+      const summaries = await storageService.listConversations();
+      let recovered = 0;
+      for (const summary of summaries) {
+        if (summary.kind !== "chat") continue;
+        recovered += await artifactService.recoverActionEvents(summary.id);
+      }
+      if (recovered) await debugLogService.write("artifact.action.recovered-at-start", { recovered });
+    } catch (error) {
+      await debugLogService.write("artifact.action.recover-failed", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  })();
   // Deliberately not awaited: each paired phone reconnects through the relay
   // with its own connect timeout, and blocking here left the app with no
   // window at all while the relay was slow or unreachable.

@@ -46,7 +46,7 @@ import { permissionDecisionAction, choiceDecisionAction, chatActionEventId } fro
 import type { ChatActionDependency } from "../../shared/deviceEventChannel";
 import type { MachineTrustRoster, TrustedPeerAccess } from "../../shared/machineTrust";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import { CHAT_CHANGES_EVENT_KIND, isChatChangesLogScope, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
+import { CHAT_CHANGES_EVENT_KIND, CHAT_CHANGES_VERSION, isChatChangesLogScope, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
 
 export interface MachineLinkOptions {
   repositoryPaths?: (sourcePath: string) => Promise<Record<string, string>>;
@@ -214,6 +214,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private readonly deletionListeners: Array<(event: MachineConversationDeletedBody) => Promise<void>> = [];
   private conversationLoader?: (conversationId: string) => Promise<Conversation | undefined>;
   private readonly connections = new Map<string, MachineConnection>();
+  /** Every enrolled machine, read from settings before any connects: a chat
+   *  saved while the link is still starting (or for a machine whose
+   *  connection failed) must still be addressed to it. */
+  private readonly enrolled = new Map<string, MachineRecord>();
   private deletionRetry?: ReturnType<typeof setTimeout>;
   private deletionDelivery?: Promise<number>;
   private deletionDeliveryRequested = false;
@@ -419,9 +423,18 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
   }
 
+  /** Reads the enrolled machines, so chat changes are addressed to all of
+   *  them from the first save on. Called before any chat activity. */
+  async loadMachines(): Promise<void> {
+    for (const record of await this.settings.listMachines()) {
+      if (!this.connections.has(record.id)) this.enrolled.set(record.id, record);
+    }
+  }
+
   async start(): Promise<void> {
     this.closed = false;
     const machines = await this.settings.listMachines();
+    for (const record of machines) if (!this.connections.has(record.id)) this.enrolled.set(record.id, record);
     void this.debugLogs.write("machine-link.start", { machines: machines.length, desktopDeviceId: this.options.desktopDeviceId });
     for (const record of machines) {
       await this.connectMachine(record).catch((error) => {
@@ -437,6 +450,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       existing.record = record;
       return;
     }
+    this.enrolled.set(record.id, record);
     const pairing = await this.settings.getMachinePairing(record.pairingKey);
     if (!pairing) {
       throw new Error(`Machine ${record.name} has no pairing package.`);
@@ -522,6 +536,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   async disconnectMachine(machineId: string): Promise<void> {
+    this.enrolled.delete(machineId);
     const connection = this.connections.get(machineId);
     if (!connection) {
       return;
@@ -562,10 +577,33 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }));
   }
 
-  /** The device identity of an enrolled machine, once it has introduced itself. */
+  /** The device identity of an enrolled machine as its signed hello or its
+   *  setup proved it; never the id a relay presence frame claims. */
   machineDeviceId(machineId: string): string | undefined {
-    const connection = this.connections.get(machineId);
-    return connection?.machineDeviceId ?? connection?.record.deviceId ?? undefined;
+    return this.machineRecord(machineId)?.deviceId || undefined;
+  }
+
+  private machineRecord(machineId: string): MachineRecord | undefined {
+    return this.connections.get(machineId)?.record ?? this.enrolled.get(machineId);
+  }
+
+  private machineRecords(): MachineRecord[] {
+    const ids = new Set([...this.enrolled.keys(), ...this.connections.keys()]);
+    return [...ids].flatMap((id) => {
+      const record = this.machineRecord(id);
+      return record ? [record] : [];
+    });
+  }
+
+  /**
+   * Where this desktop's chat changes go: every enrolled machine whose runtime
+   * folds them, connected or not. A machine on an older runtime is left out;
+   * its first update copies every chat to it and then adds it here.
+   */
+  chatChangeRecipients(): Array<{ deviceId: string; channelId: string }> {
+    return this.machineRecords()
+      .filter((record) => Boolean(record.deviceId) && record.chatChanges === true)
+      .map((record) => ({ deviceId: record.deviceId, channelId: record.pairingKey }));
   }
 
   /**
@@ -579,8 +617,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (connection.record.deviceId && connection.record.deviceId !== identity.originId) {
       throw new Error("The machine's enrolled device identity changed; its history cannot be accepted as the previous machine.");
     }
-    if (connection.record.deviceId === identity.originId) return;
-    connection.record = { ...connection.record, deviceId: identity.originId };
+    if (connection.record.deviceId === identity.originId && connection.record.chatChanges === true) return;
+    // The runtime being installed folds chat changes and gets every chat in
+    // the copy that follows, so from here on it is a recipient.
+    connection.record = { ...connection.record, deviceId: identity.originId, chatChanges: true };
     await this.persistCancels(connection, true);
     void this.debugLogs.write("machine-link.identity.adopted", { machineId, deviceId: identity.originId });
   }
@@ -592,20 +632,18 @@ export class MachineLinkService implements MachineTurnDispatcher {
    * here when the marks were read, would otherwise reach it never.
    */
   async shareChatChangesAfterCopy(machineId: string, marks: Array<{ originId: string; logScopeId: string; originSeq: number }>): Promise<number> {
-    const target = this.connections.get(machineId);
-    const deviceId = target?.machineDeviceId ?? target?.record.deviceId;
-    if (!target || !deviceId) return 0;
+    const target = this.machineRecord(machineId);
+    if (!target?.deviceId) return 0;
     let shared = 0;
-    for (const connection of this.connections.values()) {
-      const origin = connection.machineDeviceId ?? connection.record.deviceId;
-      if (!origin || connection === target) continue;
+    for (const record of this.machineRecords()) {
+      if (!record.deviceId || record.id === machineId) continue;
       shared += await this.options.eventStorage.deviceEvents().shareChatChangesAfter(
-        origin,
-        marks.filter((mark) => mark.originId === origin),
-        { deviceId, channelId: target.record.pairingKey }
+        record.deviceId,
+        marks.filter((mark) => mark.originId === record.deviceId),
+        { deviceId: target.deviceId, channelId: target.pairingKey }
       );
     }
-    if (shared) target.eventChannel?.nudge();
+    if (shared) this.connections.get(machineId)?.eventChannel?.nudge();
     return shared;
   }
 
@@ -619,13 +657,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
    *  event minted inside another transaction cannot go through `publish`, so
    *  its recipients are taken here and written with it. */
   chatActionRecipients(): Array<{ deviceId: string; channelId: string }> {
-    const recipients: Array<{ deviceId: string; channelId: string }> = [];
-    for (const connection of this.connections.values()) {
-      const deviceId = connection.machineDeviceId ?? connection.record.deviceId;
-      if (!deviceId) continue;
-      recipients.push({ deviceId, channelId: connection.record.pairingKey });
-    }
-    return recipients;
+    return this.machineRecords()
+      .filter((record) => Boolean(record.deviceId))
+      .map((record) => ({ deviceId: record.deviceId, channelId: record.pairingKey }));
   }
 
   /**
@@ -1095,6 +1129,16 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (request.signal?.aborted) {
       return interrupted;
     }
+    // A runtime from before chat change events would run the turn on a copy
+    // of the chat it no longer receives. This desktop updates it once it is
+    // idle; until then the turn is not sent.
+    if (connection.record.chatChanges !== true) {
+      void this.debugLogs.write("machine-link.turn.runtime-outdated", { machineId, runId: request.runId, appVersion: connection.record.lastHello?.appVersion ?? "" });
+      return {
+        status: "failed", messages: [], warnings: [],
+        error: `@${request.participant.handle} is hosted on ${connection.record.name}, which still runs an older version of AccordAgents that cannot receive this chat. This computer updates it the next time it is connected and idle; send the message again after that.`
+      };
+    }
     // Stop can arrive at any point of the preparation; a cancelled turn is
     // never dispatched, and one already dispatched is cancelled on the machine.
     let dispatchAttempted = false;
@@ -1296,11 +1340,16 @@ export class MachineLinkService implements MachineTurnDispatcher {
         await this.finishTurn(connection, body);
         return;
       case "machine.conversation.backdelta":
+        // A machine runtime that has not been updated yet writes its members'
+        // messages this way, and an updated one may still deliver some it
+        // wrote before. Stored as before; nothing new is sent this way.
+        if (!this.backDeltaListeners.length) throw new Error("No chat owner is available to store the machine's messages.");
+        await Promise.all(this.backDeltaListeners.map((listener) => listener({ machineId: connection.record.id, conversationId: body.conversationId, messages: body.messages })));
+        return;
       case "machine.conversation.resync":
-        // A machine runtime that has not been updated yet. Its messages reach
-        // this desktop as chat change events once it is; its finished turns
-        // still arrive with their results.
-        void this.debugLogs.write("machine-link.legacy-replication-ignored", { machineId: connection.record.id, type: body.type });
+        // Asked by a runtime that has not been updated yet; chats reach it
+        // as change events once it is.
+        void this.debugLogs.write("machine-link.legacy-resync-ignored", { machineId: connection.record.id });
         return;
       case "machine.turn.unknown":
         await this.handleUnknownRun(connection, body);
@@ -1411,11 +1460,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
         onDependencyUnavailable: (dependency) => {
           void this.debugLogs.write("machine-link.action.dependency-unavailable", { ...dependency, machineId: connection.record.id });
         },
-        // Every chat is on every machine: a reply this machine wrote goes on,
-        // unchanged and signed by it, to every other machine.
-        forwardTo: (event) => isChatChangesLogScope(event.logScopeId) && event.originId === deviceId
-          ? this.chatActionRecipients().filter((recipient) => recipient.deviceId !== deviceId)
+        // Every chat is on every machine: a chat change this machine wrote
+        // goes on, unchanged and signed by it, to every other machine.
+        forwardTo: (event) => event.kind === CHAT_CHANGES_EVENT_KIND && isChatChangesLogScope(event.logScopeId) && event.originId === deviceId
+          ? this.chatChangeRecipients().filter((recipient) => recipient.deviceId !== deviceId)
           : [],
+        peerHoldsEveryChat: true,
         apply: async (event, body) => {
           if (event.kind === CHAT_CHANGES_EVENT_KIND) {
             if (!this.options.applyChatChanges || !isChatChangesPayload(body)) throw new Error("Unexpected chat change event.");
@@ -1486,6 +1536,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (connection.record.deviceId && connection.record.deviceId !== hello.deviceId) {
       throw new Error("The machine's enrolled device identity changed; its history cannot be accepted as the previous machine.");
     }
+    // The other machines learn this one's key from the roster; until then
+    // they refuse what it wrote when it reaches them through this desktop.
+    const keyLearned = connection.record.lastHello?.publicKeyDerBase64 !== hello.publicKeyDerBase64;
     await this.initializeEventChannel(connection, hello.deviceId, hello.publicKeyDerBase64);
     if (typeof hello.instanceSequence === "number") {
       connection.latestInstanceSequence = hello.instanceSequence;
@@ -1504,6 +1557,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
     connection.record = {
       ...connection.record,
       deviceId: hello.deviceId,
+      // What the running runtime folds decides whether chat changes are
+      // addressed to it; a runtime put back after a failed update does not.
+      chatChanges: (hello.chatChanges ?? 0) >= CHAT_CHANGES_VERSION,
       lastSeenAt: this.now().toISOString(),
       lastHello: rest,
       pendingCancels: [...connection.pendingCancels.entries()].map(([runId, conversationId]) => ({ runId, conversationId })),
@@ -1516,6 +1572,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
       await this.send(connection, { type: "machine.settings.sync", snapshot });
       connection.settingsKey = machineSettingsKey(snapshot);
       await this.sendTrustRoster(connection);
+      if (keyLearned) {
+        for (const other of this.connections.values()) {
+          if (other !== connection && other.eventChannel) await this.sendTrustRoster(other).catch(() => undefined);
+        }
+      }
     }
     connection.settingsSynced = true;
     connection.eventChannel?.start();

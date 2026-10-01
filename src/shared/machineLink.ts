@@ -64,6 +64,10 @@ export interface MachineHelloBody {
   /** Set when the machine cannot keep its outbox on disk: results are held
    *  in memory only and would not survive a restart of the runtime. */
   outboxError?: string;
+  /** The chat change version this runtime folds (1 and up). A runtime from
+   *  before chat change events leaves it out: it is sent no chat changes and
+   *  runs no turns until it is updated. */
+  chatChanges?: number;
 }
 
 export interface MachineHelloAckBody {
@@ -567,4 +571,8 @@ export interface MachineRecord {
    *  yet: kept across desktop restarts, so a restarted desktop asks the
    *  machine about them instead of leaving their bubbles pending forever. */
   pendingRuns?: Array<{ runId: string; conversationId: string }>;
+  /** The machine runs a runtime that folds chat change events: known from its
+   *  hello, or from setup, which installs such a runtime and copies every
+   *  chat to it. Until then it is sent no chat changes. */
+  chatChanges?: boolean;
 }

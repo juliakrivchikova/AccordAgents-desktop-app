@@ -9,6 +9,8 @@ import type { MachineRecord } from "../../shared/machineLink";
  * and about each one that has not been active for 10 days or more the User is
  * asked whether it is still in use. "No" removes it from the app; "yes" keeps
  * it, and it is asked about again at a later check if it is still inactive.
+ * A machine that connects again while the question is open is active, and
+ * the question is withdrawn.
  *
  * The time of the last check is stored, so neither a restart nor an app left
  * open for weeks changes that rhythm.
@@ -16,6 +18,8 @@ import type { MachineRecord } from "../../shared/machineLink";
 
 export const MACHINE_INACTIVITY_PERIOD_MS = 10 * 24 * 60 * 60_000;
 const DAY_MS = 24 * 60 * 60_000;
+
+export type MachineInactivityOutcome = "keep" | "remove" | "active";
 
 export interface InactiveMachine {
   id: string;
@@ -32,8 +36,10 @@ export interface MachineInactivityCheckOptions {
   lastAcknowledgedAt(machine: MachineRecord): Promise<string | undefined>;
   lastCheckAt(): Promise<string | undefined>;
   saveLastCheckAt(at: string): Promise<void>;
-  ask(machine: InactiveMachine): Promise<"keep" | "remove">;
-  remove(machineId: string): Promise<void>;
+  /** Resolves once the User's answer has been carried out ("remove" after
+   *  the machine was removed), or with "active" when the machine connected
+   *  again and the question was withdrawn. */
+  ask(machine: InactiveMachine): Promise<MachineInactivityOutcome>;
   log(event: string, payload: Record<string, unknown>): void;
   now?: () => number;
 }
@@ -98,11 +104,9 @@ export class MachineInactivityCheck {
     // Asked about all at once; each answer is carried out as it comes.
     const removed: string[] = [];
     await Promise.all(inactive.map(async (machine) => {
-      const answer = await this.options.ask(machine);
-      this.options.log("machines.inactivity.answered", { machineId: machine.id, inactiveDays: machine.inactiveDays, answer });
-      if (answer !== "remove") return;
-      await this.options.remove(machine.id);
-      removed.push(machine.id);
+      const outcome = await this.options.ask(machine);
+      this.options.log("machines.inactivity.answered", { machineId: machine.id, inactiveDays: machine.inactiveDays, outcome });
+      if (outcome === "remove") removed.push(machine.id);
     }));
     await this.options.saveLastCheckAt(new Date(now).toISOString());
     return { checked: true, asked: inactive.map((machine) => machine.id), removed };

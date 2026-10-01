@@ -2936,7 +2936,8 @@ export class SettingsService {
         ...(typeof record.lastSeenAt === "string" ? { lastSeenAt: record.lastSeenAt } : {}),
         pendingRuns: this.normalizeMachineRunRecords(record.pendingRuns),
         pendingCancels: this.normalizeMachineRunRecords(record.pendingCancels),
-        ...(record.lastHello && typeof record.lastHello === "object" ? { lastHello: record.lastHello } : {})
+        ...(record.lastHello && typeof record.lastHello === "object" ? { lastHello: record.lastHello } : {}),
+        ...(record.chatChanges === true ? { chatChanges: true } : {})
       }];
     });
     return machines.length > 0 ? machines : undefined;

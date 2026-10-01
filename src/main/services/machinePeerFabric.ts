@@ -309,6 +309,9 @@ export class MachinePeerFabric {
       peerDeviceId: peer.deviceId,
       peerPublicKeyDerBase64: peer.publicKeyDerBase64,
       isPeerConnected: () => this.options.isPeerConnected(peer.deviceId),
+      // Another machine holds every chat too; a phone or a second desktop
+      // is served only what was addressed to it.
+      peerHoldsEveryChat: peer.role === "machine",
       send,
       apply: (event, payload) => {
         if (this.connections.get(peer.deviceId)?.peer !== peer) throw new Error("Machine peer authorization changed.");

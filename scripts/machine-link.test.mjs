@@ -88,7 +88,7 @@ test("a command queued with the machine offline survives a desktop restart and e
   const relay = createReferenceRelayServer();
   const address = await relay.listen();
   const pairing = machinePairing(address.url);
-  const record = { id: "machine-offline", name: "Offline test", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId,
+  const record = { id: "machine-offline", name: "Offline test", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId, chatChanges: true,
     createdAt: new Date().toISOString(), lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } };
   let envValue = "synthetic-retained-secret";
   const settings = {
@@ -143,6 +143,37 @@ test("a command queued with the machine offline survives a desktop restart and e
     await waitFor(() => !record.pendingRuns.some(run => run.runId === "offline-command"), 5_000);
     assert.ok(!logs.some(entry => entry.event === "machine-link.turn.queried" && entry.payload.runId === "offline-command"));
   } finally { link.close(); host?.close(); await relay.close(); }
+});
+
+test("a machine still on a runtime that cannot receive chat changes is sent no turn and no chat change", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const pairing = machinePairing("ws://unused/v1/relay");
+  const capable = { id: "machine-new", name: "New box", deviceId: "device-new", pairingKey: "room-new", chatChanges: true, createdAt: new Date().toISOString() };
+  const outdated = { id: "machine-old", name: "Old box", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString(),
+    lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } };
+  const logs = [];
+  const link = new MachineLinkService({
+    listMachines: async () => [capable, outdated], getMachinePairing: async () => pairing,
+    saveMachine: async () => [capable, outdated],
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
+  }, { write: async (event, payload) => logs.push({ event, payload }) }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID,
+    createClient: () => ({ on() {}, connect: async () => undefined, close() {}, sendCiphertext: async () => [] }) });
+  // Before any machine connects, every enrolled one is known.
+  await link.loadMachines();
+  assert.deepEqual(link.chatChangeRecipients(), [{ deviceId: "device-new", channelId: "room-new" }]);
+  assert.deepEqual(link.chatActionRecipients().map((recipient) => recipient.deviceId).sort(), ["device-new", MACHINE_ID].sort());
+  await link.start();
+  try {
+    const participant = { id: "old-member", homeMachineId: outdated.id, handle: "bot", kind: "codex-cli" };
+    const triggerMessage = { id: "old-message", role: "user", content: "hello", createdAt: new Date().toISOString() };
+    const conversation = { id: "old-chat", kind: "chat", title: "old", messages: [triggerMessage], metadata: { participants: [participant] }, findings: [],
+      createdAt: triggerMessage.createdAt, updatedAt: triggerMessage.createdAt };
+    const result = await link.runTurn({ conversation, participant, triggerMessage, runId: "old-run", pendingMessageId: "old-reply" });
+    assert.equal(result.status, "failed");
+    assert.match(result.error, /@bot is hosted on Old box, which still runs an older version of AccordAgents/);
+    assert.equal(await desktopEvents.eventStorage.getChatEvent("machine-command:old-run"), undefined, "nothing was queued for it");
+    assert.ok(logs.some((entry) => entry.event === "machine-link.turn.runtime-outdated"));
+  } finally { link.close(); }
 });
 
 // Machines transport: desktop MachineLinkService <-> machine MachineHostService
@@ -275,7 +306,7 @@ test("machine link sends settings, chats as change events, runs a turn, streams 
       reconnectDelayMs: 50,
       applyChatChanges: async (event, payload) => {
         const result = chatChanges.applyChatChanges(machineStore.get(payload.conversationId), payload, event.originId,
-          { acceptsConversationFields: () => true, acceptsMessageUpdate: () => true });
+          { acceptsConversationFields: () => true, acceptsMessageUpdate: () => true, acceptsMessageCreate: () => true, acceptsMessageRemoval: () => true, holdsUnknownChats: true });
         if (result.status !== "applied") return "missing-conversation";
         if (failNextApplyContaining && result.conversation.messages.some((message) => message.id === failNextApplyContaining)) {
           failNextApplyContaining = undefined;
@@ -590,7 +621,7 @@ test("outgoing commands preserve order and Stop fences dispatch even when a writ
   const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
   const { openMachineRelayPayload } = await import("../dist/main/main/services/machineRelaySealing.js");
   const pairing = machinePairing("ws://unused/v1/relay");
-  const record = { id: "machine-fence", name: "Fence box", pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
+  const record = { id: "machine-fence", name: "Fence box", pairingKey: pairing.rendezvousId, chatChanges: true, createdAt: new Date().toISOString() };
   const writes = [];
   let onWrite = async () => undefined;
   let onSave = () => undefined;

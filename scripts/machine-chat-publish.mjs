@@ -14,12 +14,12 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const { createChatChangeTransport } = require(path.join(repoRoot, "dist/main/main/services/chatChangeTransport.js"));
-const { chatChangeBaseline, diffChatChanges } = require(path.join(repoRoot, "dist/main/main/services/chatChanges.js"));
+const { CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges } = require(path.join(repoRoot, "dist/main/main/services/chatChanges.js"));
 
 export function chatPublisher({ storage, log, link }) {
   const transport = createChatChangeTransport({
     role: "desktop", storage, log,
-    recipients: () => link.chatActionRecipients(),
+    recipients: () => link.chatChangeRecipients(),
     onCommitted: () => link.nudgeEventChannels()
   });
   const baselines = new Map();
@@ -29,7 +29,7 @@ export function chatPublisher({ storage, log, link }) {
       const policy = seed ? { emitsConversationFields: true, ownsMessage: () => true } : transport.diffPolicy(conversation);
       const { changes } = diffChatChanges(baselines.get(conversation.id), conversation, policy);
       if (!changes.length) return;
-      await transport.commit({ version: 1, conversationId: conversation.id, updatedAt: conversation.updatedAt, changes },
+      await transport.commit({ version: CHAT_CHANGES_VERSION, conversationId: conversation.id, updatedAt: conversation.updatedAt, changes },
         (also) => storage.saveConversation(conversation, { alsoCommit: also }));
       baselines.set(conversation.id, chatChangeBaseline(JSON.parse(JSON.stringify(conversation))));
     }

@@ -14,6 +14,8 @@ import {
 } from "../../shared/deviceEventDelivery";
 
 export const DEVICE_EVENT_SCHEMA_SQL = `
+  -- The copy-and-diff replication that used these is retired (chats travel as
+  -- chat change events). They stay for an older version opening this file.
   create table if not exists device_replica_copies (
     channel_id text not null,
     conversation_id text not null,
@@ -97,46 +99,6 @@ interface Database {
 
 export class DeviceEventStorage {
   constructor(private readonly database: Database) {}
-
-  async replicaState(channelId: string): Promise<Array<{ conversationId: string; syncing: boolean; messages: Map<string, string> }>> {
-    await this.database.init();
-    const copies = await this.database.query<{ conversationId: string; syncing: number }>(`
-      select conversation_id as conversationId, syncing from device_replica_copies where channel_id = ${quote(channelId)};
-    `);
-    const states = new Map(copies.map((copy) => [copy.conversationId, { ...copy, syncing: copy.syncing === 1, messages: new Map<string, string>() }]));
-    let cursor = 0;
-    for (;;) {
-      const rows = await this.database.query<{ rowId: number; conversationId: string; messageId: string; stamp: string }>(`
-        select rowid as rowId, conversation_id as conversationId, message_id as messageId, stamp
-        from device_replica_inventory where channel_id = ${quote(channelId)} and rowid > ${cursor} order by rowid limit 500;
-      `);
-      if (!rows.length) break;
-      for (const row of rows) {
-        const state = states.get(row.conversationId) ?? { conversationId: row.conversationId, syncing: false, messages: new Map<string, string>() };
-        state.messages.set(row.messageId, row.stamp);
-        states.set(row.conversationId, state);
-        cursor = row.rowId;
-      }
-    }
-    return [...states.values()];
-  }
-
-  /** A replica's inventory is domain state, not socket state. Persist only
-   * touched ids after the chat write, before acknowledging its event. */
-  async saveReplicaState(channelId: string, conversationId: string, changes: { stamps?: Map<string, string>; removedIds?: string[]; syncing?: boolean }): Promise<void> {
-    await this.database.init();
-    const predicate = `channel_id = ${quote(channelId)} and conversation_id = ${quote(conversationId)}`;
-    await this.database.execute(durable(`begin immediate;
-      ${changes.syncing === undefined ? "" : `insert into device_replica_copies(channel_id, conversation_id, syncing)
-        values (${quote(channelId)}, ${quote(conversationId)}, ${changes.syncing ? 1 : 0})
-        on conflict(channel_id, conversation_id) do update set syncing = excluded.syncing;`}
-      ${[...(changes.stamps ?? [])].map(([id, stamp]) => `insert into device_replica_inventory(channel_id, conversation_id, message_id, stamp)
-        values (${quote(channelId)}, ${quote(conversationId)}, ${quote(id)}, ${quote(stamp)})
-        on conflict(channel_id, conversation_id, message_id) do update set stamp = excluded.stamp;`).join("\n")}
-      ${(changes.removedIds ?? []).map((id) => `delete from device_replica_inventory where ${predicate} and message_id = ${quote(id)};`).join("\n")}
-      commit;
-    `));
-  }
 
   async hostMachineId(channelId: string): Promise<string | undefined> {
     await this.database.init();
@@ -596,6 +558,19 @@ export class DeviceEventStorage {
     return rows.length;
   }
 
+  /**
+   * Stops forwarding what a removed device wrote. The remaining machines drop
+   * it from their rosters and refuse its signature from then on, so a row
+   * that still offers one of its events to them would never be confirmed.
+   */
+  async forgetOrigin(originId: string): Promise<number> {
+    await this.database.init();
+    const rows = await this.database.query<{ eventId: string }>(durable(`
+      delete from device_event_outbox where event_id in (select event_id from chat_events where origin_id = ${quote(originId)})
+      returning event_id as eventId;`));
+    return rows.length;
+  }
+
   async pressure(channelId: string): Promise<{ events: number; bytes: number; recipients: number }> {
     await this.database.init();
     return (await this.database.query<{ events: number; bytes: number; recipients: number }>(`
@@ -619,17 +594,18 @@ export class DeviceEventStorage {
    * ever apply there. The rows it is served are recorded as deliveries, so
    * retention still waits for its acknowledgement.
    *
-   * Chat changes are the same: every chat goes to every machine, so a machine
-   * is a recipient of every chat change, including one that was written before
-   * it knew of that machine, and one written by another machine that this
-   * device holds (it is served unchanged, signed by its author).
+   * Chat changes are the same for a device that holds every chat (a machine,
+   * or the desktop that enrolled it): it is a recipient of every chat change,
+   * including one written before it was known, and one written by another
+   * machine that this device holds (served unchanged, signed by its author).
+   * Any other peer (a phone) is served only what was addressed to it.
    */
-  async repair(channelId: string, deviceId: string, gap: DeviceEventGap): Promise<ChatEventEnvelope[]> {
+  async repair(channelId: string, deviceId: string, gap: DeviceEventGap, options: { anyChatChange?: boolean } = {}): Promise<ChatEventEnvelope[]> {
     requireCursor(gap.fromSeq);
     requireCursor(gap.toSeq);
     if (gap.fromSeq < 1 || gap.toSeq < gap.fromSeq) throw new Error("Invalid device event repair range.");
     await this.database.init();
-    const broadcast = gap.logScopeId === CHAT_ACTION_LOG_SCOPE || isChatChangesLogScope(gap.logScopeId);
+    const broadcast = gap.logScopeId === CHAT_ACTION_LOG_SCOPE || (options.anyChatChange === true && isChatChangesLogScope(gap.logScopeId));
     const rows = await this.database.query<{ envelope: string }>(`
       with candidates as (
       select e.envelope_json as envelope, e.origin_seq from ${broadcast ? "chat_events e" : `device_event_outbox o join chat_events e on e.event_id = o.event_id`}

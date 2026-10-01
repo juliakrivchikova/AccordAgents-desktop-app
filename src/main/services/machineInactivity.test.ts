@@ -10,7 +10,7 @@ function machine(id: string, patch: Partial<MachineRecord> = {}): MachineRecord 
   return { id, name: `Machine ${id}`, deviceId: `device-${id}`, pairingKey: `room-${id}`, createdAt: new Date(NOW - 60 * DAY).toISOString(), ...patch };
 }
 
-function harness(options: { machines: MachineRecord[]; connected?: string[]; acks?: Record<string, string>; answers?: Record<string, "keep" | "remove">; lastCheckAt?: string }) {
+function harness(options: { machines: MachineRecord[]; connected?: string[]; acks?: Record<string, string>; answers?: Record<string, "keep" | "remove" | "active">; lastCheckAt?: string }) {
   const state = {
     now: NOW,
     lastCheckAt: options.lastCheckAt,
@@ -24,8 +24,12 @@ function harness(options: { machines: MachineRecord[]; connected?: string[]; ack
     lastAcknowledgedAt: async (record) => options.acks?.[record.id],
     lastCheckAt: async () => state.lastCheckAt,
     saveLastCheckAt: async (at) => { state.lastCheckAt = at; },
-    ask: async (record) => { state.asked.push(record); return options.answers?.[record.id] ?? "keep"; },
-    remove: async (id) => { state.removed.push(id); state.machines = state.machines.filter((item) => item.id !== id); },
+    ask: async (record) => {
+      state.asked.push(record);
+      const answer = options.answers?.[record.id] ?? "keep";
+      if (answer === "remove") { state.removed.push(record.id); state.machines = state.machines.filter((item) => item.id !== record.id); }
+      return answer;
+    },
     log: () => undefined,
     now: () => state.now
   });
@@ -72,4 +76,13 @@ test("a machine that came back is not asked about", async () => {
     connected: ["back"]
   });
   assert.deepEqual(await check.runIfDue(), { checked: true, asked: [], removed: [] });
+});
+
+test("a question withdrawn because the machine came back removes nothing", async () => {
+  const { check, state } = harness({
+    machines: [machine("back", { lastSeenAt: new Date(NOW - 20 * DAY).toISOString() })],
+    answers: { back: "active" }
+  });
+  assert.deepEqual(await check.runIfDue(), { checked: true, asked: ["back"], removed: [] });
+  assert.deepEqual(state.machines.map((item) => item.id), ["back"]);
 });

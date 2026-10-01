@@ -4,7 +4,7 @@ import {
   type ChatActionDependency, type DeviceEventPacket
 } from "../../shared/deviceEventChannel";
 import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
-import { isChatChangesLogScope } from "./chatChanges";
+import { CHAT_CHANGES_EVENT_KIND, isChatChangesLogScope } from "./chatChanges";
 import { DEVICE_EVENT_INLINE_BYTES, isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { DeviceEventApplyOutcome, DeviceEventGap, DeviceEventReceipt, DeviceEventRecipient } from "../../shared/deviceEventDelivery";
@@ -44,6 +44,10 @@ interface DeviceEventChannelOptions {
   /** Machine: the signing key of another of the owner's machines whose chat
    *  changes this peer may forward. Undefined refuses the forward. */
   forwardedOriginKey?(originId: string): string | undefined;
+  /** This peer is a device that holds every chat (a machine, or the desktop
+   *  that enrolled this machine), so it may be served any chat change it
+   *  asks for. Other peers are served only what was addressed to them. */
+  peerHoldsEveryChat?: boolean;
   onError(error: Error): void;
 }
 
@@ -147,7 +151,9 @@ export class DeviceEventChannel {
         case "event": {
           this.receivePending = true;
           const event = value.event;
-          const originKey = event ? this.originKey(event.originId, event.logScopeId, value.from) : undefined;
+          // Second-hand, only a chat change is accepted, never a command.
+          const originKey = event && (event.originId === value.from || event.kind === CHAT_CHANGES_EVENT_KIND)
+            ? this.originKey(event.originId, event.logScopeId, value.from) : undefined;
           if (!event || Buffer.byteLength(JSON.stringify(event), "utf8") > DEVICE_EVENT_INLINE_BYTES * 2 || !originKey ||
               !this.inScope(event.logScopeId) ||
               !verifySignedChatEvent(event, originKey)) {
@@ -185,7 +191,8 @@ export class DeviceEventChannel {
           return;
         }
         case "resend":
-          for (const event of await this.options.storage.deviceEvents().repair(this.options.channelId, value.from, value.gap)) {
+          for (const event of await this.options.storage.deviceEvents().repair(this.options.channelId, value.from, value.gap,
+            { anyChatChange: this.options.peerHoldsEveryChat === true })) {
             await this.sendEvent(event, value.requestId);
           }
           return;
@@ -207,11 +214,16 @@ export class DeviceEventChannel {
         case "probe":
           if (!Array.isArray(value.events) || value.events.length > 100) throw new Error("Invalid device event receipt probe.");
           for (const header of value.events) {
-            if (!header || typeof header.originId !== "string" || !this.originKey(header.originId, header.logScopeId, value.from) || typeof header.eventId !== "string" ||
+            if (!header || typeof header.originId !== "string" || typeof header.eventId !== "string" ||
                 typeof header.eventHash !== "string" || typeof header.logScopeId !== "string" ||
-                !this.inScope(header.logScopeId) || !Number.isSafeInteger(header.originSeq) || header.originSeq < 1) {
+                !Number.isSafeInteger(header.originSeq) || header.originSeq < 1) {
               throw new Error("Invalid device event receipt probe identity.");
             }
+            // An event this device would not accept (a scope it does not
+            // take, an author it does not know yet) is skipped: refusing the
+            // whole probe would stop the mailbox at it, and every packet
+            // behind it with it.
+            if (!this.originKey(header.originId, header.logScopeId, value.from) || !this.inScope(header.logScopeId)) continue;
             const receipt = await this.options.storage.deviceEvents().receipt(header.eventId);
             if (receipt) {
               if (receipt.eventHash !== header.eventHash) throw new Error("Conflicting device receipt probe.");
