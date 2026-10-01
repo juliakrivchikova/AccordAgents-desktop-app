@@ -34,6 +34,7 @@ import { normalizeInferredParticipantRequestThreads as normalizeInferredParticip
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import { sanitizeConversationWarnings } from "../../shared/warnings";
 import { formatHlcKey, logicalOrderKey, parseHlcKey, type HlcParts } from "../../shared/hlc";
+import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import type { DeviceEventAppendOptions } from "../../shared/deviceEventDelivery";
 import { DEVICE_EVENT_SCHEMA_SQL, DeviceEventStorage, deviceEventAppendSql } from "./deviceEventStorage";
 import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEventBlobStorage";
@@ -1643,10 +1644,20 @@ export class StorageService {
    * and the ones it applied from other devices. A chat copy made right after
    * this read covers at least these, so the receiving machine continues from
    * them instead of asking for history the relay no longer has.
+   *
+   * The chat-action log is marked too, per author: the copy carries its
+   * artifact actions, and the rest of it (choices, approvals, stops) is about
+   * runs elsewhere that a new machine has no use for.
    */
   async chatChangeMarks(localOriginId: string): Promise<ChatCopyMark[]> {
     await this.init();
     return this.queryJson<ChatCopyMark>(`
+      select originId, logScopeId, originSeq, eventHash from (
+        select e.origin_id as originId, e.log_scope_id as logScopeId, e.origin_seq as originSeq, e.event_hash as eventHash,
+          row_number() over (partition by e.origin_id order by e.origin_seq desc) as rn
+        from chat_events e where e.log_scope_id = ${sqlString(CHAT_ACTION_LOG_SCOPE)}
+      ) where rn = 1
+      union all
       select originId, logScopeId, originSeq, eventHash from (
         select e.origin_id as originId, e.log_scope_id as logScopeId, e.origin_seq as originSeq, e.event_hash as eventHash,
           row_number() over (partition by e.origin_id, e.log_scope_id order by e.origin_seq desc) as rn
@@ -1675,6 +1686,12 @@ export class StorageService {
       attach database ${sqlString(targetPath)} as copy;
       begin immediate;
       ${tables.map((table) => `create table copy.${table} as select * from main.${table};`).join("\n")}
+      create table copy.chat_events as select * from main.chat_events
+        where log_scope_id = ${sqlString(CHAT_ACTION_LOG_SCOPE)} and substr(kind, 1, 9) = 'artifact.';
+      create table copy.device_event_blobs as select * from main.device_event_blobs where blob_hash in (
+        select json_extract(payload_json, '$.blobHash') from copy.chat_events where json_extract(payload_json, '$.type') = 'device.event.blob');
+      create table copy.device_event_blob_fragments as select * from main.device_event_blob_fragments
+        where blob_hash in (select blob_hash from copy.device_event_blobs);
       commit;
       detach database copy;
     `);
@@ -1694,7 +1711,10 @@ export class StorageService {
     const localTables = new Set((await this.queryJson<{ name: string }>(
       "select name from sqlite_master where type = 'table';"
     )).map((row) => row.name));
-    for (const table of CHAT_COPY_STATE_TABLES) {
+    // The artifact actions behind that state come along as the events they
+    // are, unchanged: without them this device would announce the same
+    // history again as its own and every peer would refuse it as a conflict.
+    for (const table of [...CHAT_COPY_STATE_TABLES, "chat_events", "device_event_blobs", "device_event_blob_fragments"]) {
       if (!sourceTables.has(table) || !localTables.has(table)) continue;
       const sourceColumns = new Set((await this.queryJson<{ name: string }>(
         `attach database ${sqlString(sourcePath)} as copy; select name from pragma_table_info('${table}', 'copy'); detach database copy;`
@@ -1715,6 +1735,16 @@ export class StorageService {
         detach database copy;
       `);
     }
+    // Events minted here from now on are ordered after everything copied.
+    await this.getChatEventClock();
+    const latest = (await this.queryJson<{ logicalTs: string | null }>(
+      `select max(logical_ts) as logicalTs from chat_events where log_scope_id = ${sqlString(CHAT_ACTION_LOG_SCOPE)};`
+    ))[0]?.logicalTs;
+    const clock = latest ? parseHlcKey(latest) : undefined;
+    if (clock) {
+      await this.runSql(`update schema_meta set value = max(value, ${sqlString(formatHlcKey({ ...clock, originId: "clock" }))})
+        where key = ${sqlString(CHAT_EVENT_CLOCK_META_KEY)};`);
+    }
     return { tables: counts };
   }
 
@@ -1723,8 +1753,11 @@ export class StorageService {
    *  arrived are acknowledged without being applied again. */
   async applyChatCopyMarks(marks: ChatCopyMark[], at: string, localOriginId?: string): Promise<void> {
     await this.init();
+    // The chat-action log is folded rather than replayed in sequence, so its
+    // mark only says how far its history was already seen: later actions
+    // still apply one by one, and none of them is confirmed unapplied.
     const rows = marks.filter((mark) => mark.originId !== localOriginId && mark.originSeq > 0 &&
-      typeof mark.logScopeId === "string" && mark.logScopeId.startsWith("chat-changes:"));
+      typeof mark.logScopeId === "string" && (mark.logScopeId.startsWith("chat-changes:") || mark.logScopeId === CHAT_ACTION_LOG_SCOPE));
     const chunks: ChatCopyMark[][] = [];
     for (let index = 0; index < rows.length; index += 200) chunks.push(rows.slice(index, index + 200));
     for (const chunk of chunks) {
