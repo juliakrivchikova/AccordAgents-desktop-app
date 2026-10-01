@@ -108,3 +108,42 @@ export function createChatChangeTransport(options: ChatChangeTransportOptions): 
     }
   };
 }
+
+/**
+ * Forgets confirmed chat change events shortly after start and then once an
+ * hour, on the desktop and on machines alike. Returns a function that stops it.
+ */
+export function scheduleChatChangePruning(options: {
+  storage: Pick<StorageService, "deviceEvents">;
+  originId(): Promise<string>;
+  log(event: string, payload: Record<string, unknown>): void;
+  /** Events younger than this are kept whatever their state. */
+  graceMs?: number;
+  intervalMs?: number;
+  firstRunMs?: number;
+  now?: () => number;
+}): () => void {
+  const graceMs = options.graceMs ?? 24 * 60 * 60_000;
+  let running = false;
+  const run = async (): Promise<void> => {
+    if (running) return;
+    running = true;
+    try {
+      const cutoff = new Date((options.now?.() ?? Date.now()) - graceMs).toISOString();
+      const pruned = await options.storage.deviceEvents().pruneConfirmedChatChanges(await options.originId(), cutoff);
+      if (pruned.events || pruned.blobs) options.log("chat.changes.pruned", pruned);
+    } catch (error) {
+      options.log("chat.changes.prune-error", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      running = false;
+    }
+  };
+  const first = setTimeout(() => { void run(); }, options.firstRunMs ?? 5 * 60_000);
+  const timer = setInterval(() => { void run(); }, options.intervalMs ?? 60 * 60_000);
+  first.unref?.();
+  timer.unref?.();
+  return () => {
+    clearTimeout(first);
+    clearInterval(timer);
+  };
+}

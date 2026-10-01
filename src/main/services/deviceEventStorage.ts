@@ -413,6 +413,68 @@ export class DeviceEventStorage {
     return rows.length;
   }
 
+  /**
+   * Forgets chat change events every recipient has confirmed.
+   *
+   * A chat change only carries a chat's content from one device to another;
+   * once every device it was meant for has it, and this device applied it (if
+   * it came from elsewhere), it has no reader left. A device that needs those
+   * chats later gets them from a copy, not from old events.
+   *
+   * Kept: the newest event of each chat and author, because the next event
+   * continues its sequence; anything not yet confirmed or applied; and the
+   * last `graceMs` of events, for a copy being taken at this moment. A body
+   * stored separately goes with its event unless another kept event of that
+   * chat still points to the same bytes.
+   */
+  async pruneConfirmedChatChanges(localOriginId: string, cutoffIso: string, limit = 2_000): Promise<{ events: number; blobs: number }> {
+    await this.database.init();
+    const origins = new Set([localOriginId, ...(await this.database.query<{ originId: string }>(`
+      select distinct origin_id as originId from device_event_applied_heads
+      where log_scope_id >= 'chat-changes:' and log_scope_id < 'chat-changes;';
+    `)).map((row) => row.originId)]);
+    let events = 0;
+    let blobs = 0;
+    for (const originId of origins) {
+      if (events >= limit) break;
+      const rows = await this.database.query<{ events: number; blobs: number }>(durable(`
+        begin immediate;
+        create temp table if not exists chat_changes_pruned(event_id text primary key, log_scope_id text, blob_hash text);
+        delete from temp.chat_changes_pruned;
+        insert into temp.chat_changes_pruned(event_id, log_scope_id, blob_hash)
+          select e.event_id, e.log_scope_id,
+            case when json_extract(e.payload_json, '$.type') = 'device.event.blob' then json_extract(e.payload_json, '$.blobHash') end
+          from chat_events e
+          where e.origin_id = ${quote(originId)} and e.log_scope_id >= 'chat-changes:' and e.log_scope_id < 'chat-changes;'
+            and e.received_at < ${quote(cutoffIso)}
+            and e.origin_seq < (select max(n.origin_seq) from chat_events n where n.origin_id = e.origin_id and n.log_scope_id = e.log_scope_id)
+            and not exists (select 1 from device_event_outbox o where o.event_id = e.event_id and o.acknowledged_at is null)
+            and not exists (select 1 from device_event_inbox i where i.event_id = e.event_id and i.applied_at is null)
+          limit ${Math.max(1, Math.floor(limit - events))};
+        delete from device_event_outbox where event_id in (select event_id from temp.chat_changes_pruned);
+        delete from device_event_inbox where event_id in (select event_id from temp.chat_changes_pruned);
+        delete from chat_events where event_id in (select event_id from temp.chat_changes_pruned);
+        create temp table if not exists chat_changes_unreferenced(blob_hash text primary key);
+        delete from temp.chat_changes_unreferenced;
+        insert or ignore into temp.chat_changes_unreferenced(blob_hash)
+          select p.blob_hash from temp.chat_changes_pruned p
+          where p.blob_hash is not null and not exists (
+            select 1 from chat_events r
+            where r.origin_id = ${quote(originId)} and r.log_scope_id = p.log_scope_id
+              and json_extract(r.payload_json, '$.blobHash') = p.blob_hash);
+        delete from device_event_blob_fragments where blob_hash in (select blob_hash from temp.chat_changes_unreferenced);
+        delete from device_event_blobs where blob_hash in (select blob_hash from temp.chat_changes_unreferenced);
+        select (select count(*) from temp.chat_changes_pruned) as events, (select count(*) from temp.chat_changes_unreferenced) as blobs;
+        delete from temp.chat_changes_pruned;
+        delete from temp.chat_changes_unreferenced;
+        commit;
+      `));
+      events += rows[0]?.events ?? 0;
+      blobs += rows[0]?.blobs ?? 0;
+    }
+    return { events, blobs };
+  }
+
   async gaps(channelId: string, deviceId?: string): Promise<DeviceEventGap[]> {
     await this.database.init();
     return this.database.query<DeviceEventGap>(`
@@ -505,6 +567,15 @@ export class DeviceEventStorage {
       select count(*) as shared from device_event_outbox
       where channel_id = ${quote(channelId)} and device_id = ${quote(deviceId)} and acknowledged_at is null;
     `))[0]?.shared ?? 0;
+  }
+
+  /** When `deviceId` last confirmed something this device sent it. */
+  async lastAcknowledgedAt(channelId: string, deviceId: string): Promise<string | undefined> {
+    await this.database.init();
+    return (await this.database.query<{ at: string | null }>(`
+      select max(acknowledged_at) as at from device_event_outbox
+      where channel_id = ${quote(channelId)} and device_id = ${quote(deviceId)} and acknowledged_at is not null;
+    `))[0]?.at ?? undefined;
   }
 
   /**

@@ -24,7 +24,7 @@ import { AppSkillsService } from "../main/services/appSkills";
 import { ArtifactService } from "../main/services/artifacts";
 import { ArtifactStore } from "../main/services/artifactStore";
 import { artifactEventWriter, artifactProjectionPort } from "../main/services/artifactReplication";
-import { createChatChangeTransport } from "../main/services/chatChangeTransport";
+import { createChatChangeTransport, scheduleChatChangePruning } from "../main/services/chatChangeTransport";
 import { importChatCopy } from "../main/services/chatCopy";
 import { ChatEventLogService } from "../main/services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "../main/services/chatEventMirror";
@@ -427,6 +427,11 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     desktopOriginId: () => enrollment.issuer.originId,
     machineOriginId: (machineId) => host.machineOriginId(machineId)
   }));
+  const stopChatChangePruning = scheduleChatChangePruning({
+    storage: storageService,
+    originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+    log: (event, payload) => { void debugLogService.write(event, payload); }
+  });
   // A member here asking other members goes through the desktop: it owns the
   // roster and runs each target where that member lives.
   chatService.setParticipantRequestDelegate({
@@ -487,6 +492,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
 
   return async () => {
     presenceClosed = true;
+    stopChatChangePruning();
     if (presenceTimer) clearInterval(presenceTimer);
     await presenceRefresh;
     try { presence?.publish(true); } catch (error) {

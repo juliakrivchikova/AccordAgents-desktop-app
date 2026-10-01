@@ -193,6 +193,8 @@ interface StoredSettings {
   machinePairingBindings?: Record<string, string>;
   revokedMachinePairingKeys?: string[];
   machineDeviceRevocations?: Record<string, string>;
+  /** When this desktop last asked about machines that stopped being used. */
+  machineInactivityCheckAt?: string;
 }
 
 
@@ -2529,6 +2531,16 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  async getMachineInactivityCheckAt(): Promise<string | undefined> {
+    return (await this.readStored()).machineInactivityCheckAt;
+  }
+
+  async saveMachineInactivityCheckAt(at: string): Promise<void> {
+    const stored = await this.readStored();
+    stored.machineInactivityCheckAt = at;
+    await this.writeStored(stored);
+  }
+
   async updateLastRepoPath(repoPath: string): Promise<AppSettings> {
     const stored = await this.readStored();
     const normalized = repoPath.trim();
@@ -3548,6 +3560,7 @@ export class SettingsService {
       machinePairingBindings: _machinePairingBindings,
       revokedMachinePairingKeys: _revokedMachinePairingKeys,
       machineDeviceRevocations: _machineDeviceRevocations,
+      machineInactivityCheckAt: _machineInactivityCheckAt,
       lastRepoPath: _lastRepoPath,
       ...shareable
     } = stored;

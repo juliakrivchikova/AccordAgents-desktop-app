@@ -96,7 +96,7 @@ import { stableJson } from "../shared/stableJson";
 import { ArtifactService } from "./services/artifacts";
 import { ArtifactStore } from "./services/artifactStore";
 import { artifactEventWriter, artifactProjectionPort } from "./services/artifactReplication";
-import { createChatChangeTransport } from "./services/chatChangeTransport";
+import { createChatChangeTransport, scheduleChatChangePruning } from "./services/chatChangeTransport";
 import { machineChatCopyProvider } from "./services/chatCopy";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "./appToolWiring";
 import { ChatEventLogService } from "./services/chatEventLog";
@@ -169,6 +169,7 @@ import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
+import { MachineInactivityCheck } from "./services/machineInactivity";
 import { isMachineAutoUpgradeOperation } from "../shared/machineInstall";
 import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
@@ -405,6 +406,38 @@ function machineRuntimePayload(): MachineRuntimePayloadLocation {
   }
   return { dir: path.join(app.getAppPath(), "dist", "machine"), source: "checkout", expectVersion: app.getVersion() };
 }
+/** Removes a machine from this desktop: Settings > Remove, and the answer
+ *  "no longer in use" to the inactive-machine question. The cloud instance
+ *  itself is not deleted. */
+async function removeMachine(id: string): Promise<MachineListResult> {
+  const record = (await settingsService.listMachines()).find((machine) => machine.id === id);
+  await machineLinkService?.disconnectMachine(id);
+  // Every device that was handed this machine's power key loses the handoff
+  // with the machine; the key itself still needs rotating, and the outcome
+  // is written to the debug log rather than lost.
+  for (const outcome of await machinePowerHandoffService.revokeForMachine(id, "machine-removed")) {
+    void debugLogService.write("machine.power.handoff.revoked", {
+      handoffId: outcome.handoffId, keyRotationRequired: outcome.keyRotationRequired, detail: outcome.detail
+    });
+  }
+  // What was kept for it until it confirmed is no longer kept.
+  if (record?.deviceId) {
+    const forgotten = await storageService.deviceEvents().forgetRecipient(record.pairingKey, record.deviceId).catch((error: unknown) => {
+      void debugLogService.write("machine.remove.forget-error", { machineId: id, message: error instanceof Error ? error.message : String(error) });
+      return 0;
+    });
+    void debugLogService.write("machine.remove.forgotten", { machineId: id, events: forgotten });
+  }
+  await settingsService.removeMachine(id);
+  // The other machines drop it from their rosters, and what they kept for it.
+  await machineLinkService?.refreshTrustRosters().catch((error: unknown) => {
+    void debugLogService.write("machine.remove.roster-error", { machineId: id, message: error instanceof Error ? error.message : String(error) });
+  });
+  const result = await machineListResult();
+  sendToMainWindow("machines:updated", result);
+  return result;
+}
+
 async function createMachine(request: CreateMachineRequest, awsInstanceId?: string): Promise<CreateMachineResult> {
   const name = typeof request?.name === "string" ? request.name.trim() : "";
   if (!name) {
@@ -2915,19 +2948,7 @@ function registerIpc(): void {
     if (!id) {
       throw new Error("Machine id is required.");
     }
-    await machineLinkService?.disconnectMachine(id);
-    // Every device that was handed this machine's power key loses the handoff
-    // with the machine; the key itself still needs rotating, and the outcome
-    // is written to the debug log rather than lost.
-    for (const outcome of await machinePowerHandoffService.revokeForMachine(id, "machine-removed")) {
-      void debugLogService.write("machine.power.handoff.revoked", {
-        handoffId: outcome.handoffId, keyRotationRequired: outcome.keyRotationRequired, detail: outcome.detail
-      });
-    }
-    await settingsService.removeMachine(id);
-    const result = await machineListResult();
-    sendToMainWindow("machines:updated", result);
-    return result;
+    return removeMachine(id);
   });
   ipcMain.handle("machines:install-probe", async (_event, request: { machineId: string; target: MachineSshTarget }): Promise<MachineRuntimeProbe> => {
     return machineInstallerService.probe(assertMachineSshTarget(request?.target));
@@ -3423,6 +3444,12 @@ void app.whenReady().then(async () => {
       onCommitted: () => machineLinkService?.nudgeEventChannels(),
       machineOriginId: (machineId) => machineLinkService?.machineDeviceId(machineId)
     }));
+    // Chat change events every device has confirmed are forgotten.
+    scheduleChatChangePruning({
+      storage: storageService,
+      originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+      log: (event, payload) => { void debugLogService.write(event, payload); }
+    });
     // A saved setting (an environment value, a role, a rule, a prompt, a
     // member preset) reaches the machines at once, not only on their next
     // connection. Bursts of writes are sent once.
@@ -3537,6 +3564,33 @@ void app.whenReady().then(async () => {
     void machineLinkService.start().then(() => autoUpgrade.evaluate()).catch((error) => {
       void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });
     });
+    // While a machine stays away, this desktop keeps every chat change for it.
+    // Once every 10 days the User is asked about machines inactive that long.
+    new MachineInactivityCheck({
+      listMachines: () => settingsService.listMachines(),
+      isConnected: (machineId) => link.isMachineConnected(machineId),
+      lastAcknowledgedAt: async (machine) => machine.deviceId
+        ? storageService.deviceEvents().lastAcknowledgedAt(machine.pairingKey, machine.deviceId)
+        : undefined,
+      lastCheckAt: () => settingsService.getMachineInactivityCheckAt(),
+      saveLastCheckAt: (at) => settingsService.saveMachineInactivityCheckAt(at),
+      ask: async (machine) => {
+        const { response } = await dialog.showMessageBox({
+          type: "question",
+          buttons: ["Keep", "Remove"],
+          defaultId: 0,
+          cancelId: 0,
+          title: "Machine not used recently",
+          message: `Is ${machine.name} still in use?`,
+          detail: `It has not been active for ${machine.inactiveDays} days. While it is kept, this computer keeps every chat change `
+            + "for it until it comes back. Remove takes it out of AccordAgents; its cloud instance is not deleted, and using it "
+            + "again means connecting it anew. If you keep it, you are asked again in 10 days if it is still inactive."
+        });
+        return response === 1 ? "remove" : "keep";
+      },
+      remove: async (machineId) => { await removeMachine(machineId); },
+      log: (event, payload) => { void debugLogService.write(event, payload); }
+    }).start();
   } catch (error) {
     void debugLogService.write("machine-link.init.error", { message: error instanceof Error ? error.message : String(error) });
   }
