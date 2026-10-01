@@ -122,12 +122,12 @@ export function createChatChangeTransport(options: ChatChangeTransportOptions): 
         holdsUnknownChats: options.role === "machine"
       };
     },
-    dependencyMet: async (payload) => {
+    dependency: async (payload) => {
       const after = payload.after;
-      if (!after || typeof after.originId !== "string" || !Number.isSafeInteger(after.originSeq) || after.originSeq < 1) return true;
+      if (!after || typeof after.originId !== "string" || !Number.isSafeInteger(after.originSeq) || after.originSeq < 1) return undefined;
       const { originId } = await options.log.getOrCreateDeviceIdentity();
-      if (after.originId === originId) return true;
-      return await options.storage.deviceEvents().appliedHead(after.originId, chatChangesLogScope(payload.conversationId)) >= after.originSeq;
+      if (after.originId === originId) return undefined;
+      return { needed: after.originSeq, have: await options.storage.deviceEvents().appliedHead(after.originId, chatChangesLogScope(payload.conversationId)) };
     },
     commit: async (payload, write) => {
       const audience = options.recipients();

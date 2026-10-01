@@ -786,9 +786,9 @@ export interface ChatChangeTransport {
     payload: ChatChangesPayload,
     write: (also: { sql: string; onlyIfSql(condition: string): string }) => Promise<string>
   ): Promise<{ token: string; committed: boolean; eventId: string }>;
-  /** Whether this device has applied what the author had when it wrote this
-   *  (ChatChangesPayload.after). Absent: always. */
-  dependencyMet?(payload: ChatChangesPayload): Promise<boolean>;
+  /** How far this device has applied the changes the author had when it
+   *  wrote this (ChatChangesPayload.after). Undefined: nothing to wait for. */
+  dependency?(payload: ChatChangesPayload): Promise<{ needed: number; have: number } | undefined>;
 }
 
 export class ChatService {
@@ -877,6 +877,9 @@ export class ChatService {
   // to what the change diff needs. Loaded from the database when absent (after
   // a restart, an eviction or a failed save), never guessed.
   private readonly chatChangeBaselines = new Map<string, ChatChangeBaseline | undefined>();
+  /** Chat changes waiting for desktop changes they were written after: the
+   *  applied head seen when each was last tried (see applyRemoteChatChanges). */
+  private readonly waitingChatChanges = new Map<string, number>();
   private static readonly CHAT_CHANGE_BASELINE_LIMIT = 256;
   private chatChangeTransport?: ChatChangeTransport;
   private readonly chatSavesInFlight = new Set<Promise<void>>();
@@ -6272,11 +6275,14 @@ export class ChatService {
             refused.push(incoming.id);
             continue;
           }
-          // A message the machine created stays its own here: this desktop
-          // does not take it over as one of its own.
-          if (!current && incoming.role !== "participant" && request.machineOriginId) {
-            incoming = { ...incoming, metadata: { ...incoming.metadata, remoteAuthorOriginId: request.machineOriginId } as ChatMessage["metadata"] };
-          }
+          // Who created a message is this desktop's record, never the sender's
+          // claim. One the machine created stays its own here, through every
+          // later update: this desktop does not take it over as its own.
+          const { remoteAuthorOriginId: _claimed, ...metadata } = (incoming.metadata ?? {}) as Record<string, unknown>;
+          const author = current
+            ? (current.metadata as Record<string, unknown> | undefined)?.remoteAuthorOriginId
+            : incoming.role !== "participant" ? request.machineOriginId : undefined;
+          incoming = { ...incoming, metadata: { ...metadata, ...(typeof author === "string" && author ? { remoteAuthorOriginId: author } : {}) } as ChatMessage["metadata"] };
         }
         if (index >= 0) {
           const current = conversation.messages[index];
@@ -18458,8 +18464,22 @@ export class ChatService {
     if (!isSupportedChatChangesVersion(payload)) return "waiting";
     // Written after desktop changes that have not reached this device yet. A
     // change refused only for want of them (a member it names, that member's
-    // home) waits for them; one that applies anyway does not wait.
-    const dependencyMet = !transport.dependencyMet || await transport.dependencyMet(payload);
+    // home) waits for them; one that applies anyway does not wait. While it
+    // waits it is looked at again only once more of them have arrived: trying
+    // it means reading the whole chat.
+    const dependency = transport.dependency ? await transport.dependency(payload) : undefined;
+    const dependencyMet = !dependency || dependency.have >= dependency.needed;
+    if (dependency && !dependencyMet && this.waitingChatChanges.get(event.eventId) === dependency.have) return "waiting";
+    const wait = (): "waiting" => {
+      this.waitingChatChanges.delete(event.eventId);
+      this.waitingChatChanges.set(event.eventId, dependency?.have ?? 0);
+      while (this.waitingChatChanges.size > 1_000) {
+        const oldest = this.waitingChatChanges.keys().next().value;
+        if (oldest === undefined) break;
+        this.waitingChatChanges.delete(oldest);
+      }
+      return "waiting";
+    };
     const logIgnored = (ignored: string[]): void => {
       if (ignored.length) {
         void this.debugLogs.write("chat.changes.ignored", { conversationId, originId: event.originId, eventId: event.eventId, ignored: ignored.slice(0, 20) });
@@ -18469,7 +18489,8 @@ export class ChatService {
     if (!existing) {
       const result = applyChatChanges(undefined, payload, event.originId, transport.applyPolicy(undefined));
       if (result.status === "missing-conversation") return "missing-conversation";
-      if (!dependencyMet && result.ignored.length) return "waiting";
+      if (!dependencyMet && result.ignored.length) return wait();
+      this.waitingChatChanges.delete(event.eventId);
       logIgnored(result.ignored);
       if (result.status === "ignored") return "applied";
       this.localizeRepoPath(result.conversation, result.conversation.repoPath);
@@ -18512,7 +18533,8 @@ export class ChatService {
       if (!wasArchived && existing.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
       await this.saveConversation(existing, { emitChanges: false });
     });
-    if (waiting) return "waiting";
+    if (waiting) return wait();
+    this.waitingChatChanges.delete(event.eventId);
     this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
     return "applied";
   }

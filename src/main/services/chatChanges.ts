@@ -506,7 +506,17 @@ export function applyChatChanges(
           if (removedIds(conversation).has(change.messageId)) break;
           const pending = pendingReactions(conversation);
           const held = pending[change.messageId] ?? { added: [], removed: [] };
-          pending[change.messageId] = { added: [...held.added, ...change.added], removed: [...held.removed, ...change.removed] };
+          // Kept as where each reaction ended up, in the order they came: one
+          // added and then removed before the message arrives stays removed.
+          const same = (emoji: string, actorId: string) => (entry: { emoji: string; actorId?: string; reactor?: { actorId: string } }) =>
+            entry.emoji === emoji && (entry.actorId ?? entry.reactor?.actorId) === actorId;
+          let added = held.added.filter((entry) => !change.removed.some((removal) => same(removal.emoji, removal.actorId)(entry))
+            && !change.added.some((addition) => same(addition.emoji, addition.reactor.actorId)(entry)));
+          let removed = held.removed.filter((entry) => !change.added.some((addition) => same(addition.emoji, addition.reactor.actorId)(entry))
+            && !change.removed.some((removal) => same(removal.emoji, removal.actorId)(entry)));
+          added = [...added, ...change.added];
+          removed = [...removed, ...change.removed];
+          pending[change.messageId] = { added, removed };
           setPendingReactions(conversation, pending);
           changed = true;
           break;
