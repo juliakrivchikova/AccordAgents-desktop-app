@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { ArrowDown } from "lucide-react";
 
@@ -48,6 +48,7 @@ import { useStableChatMessageActions } from "./use-stable-chat-message-actions";
 import {
   CHAT_SIDE_PANEL_MIN_WIDTH,
   CHAT_THREAD_DEFAULT_WIDTH,
+  chatMainMinWidth,
   chatSidePanelWidthLimits,
   clampChatSidePanelWidth
 } from "../../lib/chat-split-sizing";
@@ -102,6 +103,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const [selectedThreadRootId, setSelectedThreadRootId] = useState<string | undefined>();
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [threadWidth, setThreadWidth] = useState(CHAT_THREAD_DEFAULT_WIDTH);
+  // The width the User dragged to; shown clamped, so it returns with the room.
+  const requestedThreadWidthRef = useRef(CHAT_THREAD_DEFAULT_WIDTH);
   const [isResizingThread, setIsResizingThread] = useState(false);
   const approvalSubmission = useSubmittingIdSet();
   const choiceSubmission = useSubmittingIdSet();
@@ -238,12 +241,13 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     const rect = view.getBoundingClientRect();
     const limits = chatSidePanelWidthLimits(rect.width, {
       reserveWidth: 1,
-      minWidth: CHAT_SIDE_PANEL_MIN_WIDTH
+      minWidth: CHAT_SIDE_PANEL_MIN_WIDTH,
+      mainMinWidth: chatMainMinWidth(view)
     });
 
     const move = (moveEvent: PointerEvent): void => {
-      const nextWidth = Math.round(rect.right - moveEvent.clientX);
-      setThreadWidth(clampChatSidePanelWidth(nextWidth, limits));
+      requestedThreadWidthRef.current = clampChatSidePanelWidth(Math.round(rect.right - moveEvent.clientX), limits);
+      setThreadWidth(requestedThreadWidthRef.current);
     };
     const stop = (): void => {
       setIsResizingThread(false);
@@ -262,9 +266,10 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     const clampCurrentWidth = (): void => {
       const limits = chatSidePanelWidthLimits(view.getBoundingClientRect().width, {
         reserveWidth: 1,
-        minWidth: CHAT_SIDE_PANEL_MIN_WIDTH
+        minWidth: CHAT_SIDE_PANEL_MIN_WIDTH,
+        mainMinWidth: chatMainMinWidth(view)
       });
-      setThreadWidth((current) => clampChatSidePanelWidth(current, limits));
+      setThreadWidth(clampChatSidePanelWidth(requestedThreadWidthRef.current, limits));
     };
     clampCurrentWidth();
     const resizeObserver = new ResizeObserver(clampCurrentWidth);

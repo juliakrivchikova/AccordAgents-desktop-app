@@ -18,6 +18,7 @@ await build({
     "renderer/lib/chat-split-sizing.test.ts",
     "renderer/components/artifacts/artifact-drafts.test.tsx",
     "renderer/components/artifacts/artifacts-panel-selection.test.tsx",
+    "renderer/components/artifacts/use-artifacts-panel-resize.test.tsx",
     "renderer/components/artifacts/artifact-navigation.test.ts",
     "renderer/components/artifacts/artifact-revise-preview.test.tsx",
     "renderer/components/artifacts/artifact-draft-inbox.test.tsx",

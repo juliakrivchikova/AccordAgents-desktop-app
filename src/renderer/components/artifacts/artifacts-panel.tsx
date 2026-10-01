@@ -57,7 +57,7 @@ export function ArtifactsPanel(props: {
   const accessButtonRef = useRef<HTMLButtonElement>(null);
   const loadGeneration = useRef(0);
   const compareGeneration = useRef(0);
-  const resizeLimits = panelResize.getLimits();
+  const resizeLimits = panelResize.limits;
   const clearTransient = useCallback(() => {
     setError(undefined);
     setStaleCurrent(undefined);

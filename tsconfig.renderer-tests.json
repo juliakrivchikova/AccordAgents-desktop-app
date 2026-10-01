@@ -17,6 +17,7 @@
     "src/renderer/lib/chat-split-sizing.test.ts",
     "src/renderer/components/artifacts/artifact-drafts.test.tsx",
     "src/renderer/components/artifacts/artifacts-panel-selection.test.tsx",
+    "src/renderer/components/artifacts/use-artifacts-panel-resize.test.tsx",
     "src/renderer/components/artifacts/artifact-navigation.test.ts",
     "src/renderer/components/artifacts/artifact-revise-preview.test.tsx",
     "src/renderer/components/artifacts/artifact-draft-inbox.test.tsx",

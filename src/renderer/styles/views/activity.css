@@ -447,6 +447,12 @@
   height: 100%;
 }
 
+/* The timeline here has 12px more left padding (40 vs 28), so the main column
+   needs 12px more to give its cards the same room as in a chat. */
+.activity-detail-body .chat-view {
+  --chat-main-min-width: 412px;
+}
+
 .activity-detail-body .chat-timeline {
   padding-top: 30px;
   padding-left: 40px;
