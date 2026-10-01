@@ -13,7 +13,7 @@ import {
   normalizeChatSavedPromptTrigger
 } from "../../../shared/chatSavedPrompts";
 import type { AppSettings, ChatSavedPromptConfig, ChatSavedPromptConfigUpdate } from "../../../shared/types";
-import { ResizableTextarea } from "../primitives";
+import { ResizableTextarea, IconButton } from "../primitives";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 
 export function SavedPromptsSettingsSection(props: {
@@ -204,9 +204,7 @@ function SavedPromptEditorDialog(props: {
                 <DialogDescription>{prompt ? `v${prompt.version} saved prompt` : "Reusable composer prompt"}</DialogDescription>
               </span>
               <DialogClose asChild>
-                <button type="button" className="rules-editor-close" aria-label="Close prompt editor">
-                  <X size={16} aria-hidden />
-                </button>
+                <IconButton label="Close prompt editor" icon={X} />
               </DialogClose>
             </div>
           </DialogHeader>

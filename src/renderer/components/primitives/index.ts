@@ -5,7 +5,7 @@ export { SeverityBadge } from "./severity-badge";
 export type { SeverityBadgeProps } from "./severity-badge";
 
 export { IconButton } from "./icon-button";
-export type { IconButtonProps, IconButtonSize, IconButtonVariant } from "./icon-button";
+export type { IconButtonIcon, IconButtonProps, IconButtonSize, IconButtonTone } from "./icon-button";
 
 export { EmptyState } from "./empty-state";
 

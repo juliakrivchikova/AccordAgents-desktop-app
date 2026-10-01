@@ -32,7 +32,7 @@
   border-bottom: 1px solid var(--app-border-subtle, var(--app-border));
 }
 
-.aa-searchmodal-field svg {
+.aa-searchmodal-field > svg {
   color: var(--app-muted);
   flex: 0 0 auto;
 }
@@ -81,20 +81,6 @@
 
 .aa-searchmodal-body .aa-sr-chat {
   font-size: 13px;
-}
-
-.aa-search-clear {
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  padding: 0 2px;
-  font-size: 15px;
-  line-height: 1;
-  color: var(--app-muted);
-}
-
-.aa-search-clear:hover {
-  color: var(--app-text-strong);
 }
 
 .aa-sr-summary {

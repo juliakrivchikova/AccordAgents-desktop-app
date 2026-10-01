@@ -21,6 +21,7 @@ import { readyProviderKinds } from "../../../shared/cliReadiness";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { chatCliProviderLabel } from "../chat/chat-participant-drafts";
 import { rememberCustomAvatar } from "./custom-avatars";
+import { IconButton } from "../primitives";
 
 interface StudioMessage {
   id: string;
@@ -220,9 +221,7 @@ export function AvatarStudioDialog(props: {
               </DialogDescription>
             </span>
             <DialogClose asChild>
-              <button type="button" className="avatar-studio-close" aria-label="Close avatar studio">
-                <X size={15} aria-hidden />
-              </button>
+              <IconButton label="Close avatar studio" icon={X} />
             </DialogClose>
           </div>
         </DialogHeader>

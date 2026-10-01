@@ -3,7 +3,7 @@ import { useState } from "react";
 import type React from "react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { IconButton } from "../primitives";
 import type { ChatParticipant } from "../../../shared/types";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-roster-status";
@@ -49,19 +49,15 @@ export function ChatActiveRunRow(props: ChatActiveRunParticipantRow & {
         <span className="composer-active-run-row-main">{identity}</span>
       )}
       {props.onStopParticipantRuns && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              className="composer-active-run-row-stop"
-              aria-label={`Stop ${participantName} ${participantRunLabel}`}
-              onClick={() => props.onStopParticipantRuns?.(props.runIds)}
-            >
-              <X size={13} aria-hidden />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="top">Stop {participantName}</TooltipContent>
-        </Tooltip>
+        <IconButton
+          size="xs"
+          tone="danger"
+          icon={X}
+          label={`Stop ${participantName} ${participantRunLabel}`}
+          tooltip={`Stop ${participantName}`}
+          data-testid="composer-active-run-row-stop"
+          onClick={() => props.onStopParticipantRuns?.(props.runIds)}
+        />
       )}
     </div>
   );
@@ -92,19 +88,15 @@ export function ChatActiveRunPopover(props: {
             <span>{activeRunLabel}</span>
           </button>
         </PopoverTrigger>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              className="composer-active-run-stop"
-              aria-label={`Stop ${activeRunLabel}`}
-              onClick={props.onStopAllRuns}
-            >
-              <X size={13} aria-hidden />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="top">Stop running members</TooltipContent>
-        </Tooltip>
+        <IconButton
+          size="xs"
+          tone="danger"
+          icon={X}
+          label={`Stop ${activeRunLabel}`}
+          tooltip="Stop running members"
+          data-testid="composer-active-run-stop"
+          onClick={props.onStopAllRuns}
+        />
       </div>
       <PopoverContent
         align="start"

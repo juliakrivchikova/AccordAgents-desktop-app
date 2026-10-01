@@ -31,7 +31,10 @@ await build({
     "renderer/components/settings/aws-worker-panel-actions.test.tsx",
     "renderer/components/settings/aws-instance-diagnostics.test.tsx",
     "renderer/components/search/chat-search-escape.test.tsx",
-    "renderer/components/shell/chat-search.test.tsx"
+    "renderer/components/shell/chat-search.test.tsx",
+    "renderer/components/shell/sidebar-nav.test.tsx",
+    "renderer/app/use-app-navigation.test.ts",
+    "renderer/app/app-notices.test.tsx"
   ].map((entry) => path.join(sourceRoot, entry)),
   alias: { "@": sourceRoot },
   outbase: sourceRoot,

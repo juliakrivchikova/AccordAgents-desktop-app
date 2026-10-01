@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { BadgeCheck, Check, ChevronDown } from "lucide-react";
+import { BadgeCheck, Check, ChevronRight, History } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
 
 import type { ArtifactDraftView, ArtifactVersionMeta } from "../../../shared/types";
@@ -90,7 +90,7 @@ export function selectArtifactPickerEntry(
   }
 }
 
-// The header line under the title, which is also the picker's trigger.
+// The version line: shown in the title menu's Version entry.
 export function artifactSubtitleParts(input: {
   lifecycle: "published" | "collecting_drafts";
   archived: boolean;
@@ -122,7 +122,10 @@ export function artifactSubtitleParts(input: {
   };
 }
 
-export function ArtifactVersionSelector(props: {
+// The "Version" entry of the artifact's title menu: every version and draft,
+// with the one on screen checked. The line it shows is the old header
+// subtitle ("v2 by @drew · Updated 5d ago").
+export function ArtifactVersionSubmenu(props: {
   label: ReactNode;
   selectedVersion?: number;
   headVersion?: number;
@@ -142,15 +145,17 @@ export function ArtifactVersionSelector(props: {
   const selectEntry = (value: string): void => selectArtifactPickerEntry(value, props.onShowVersion, props.onShowDraft);
 
   return (
-    <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild disabled={props.disabled}>
-        <button type="button" className="artifact-version-trigger" data-testid="artifact-version-selector" title="Choose version or draft">
-          <span>{props.label}</span>
-          <ChevronDown size={13} aria-hidden />
-        </button>
-      </DropdownMenu.Trigger>
+    <DropdownMenu.Sub>
+      <DropdownMenu.SubTrigger className="artifact-menu-item artifact-version-subtrigger" disabled={props.disabled} data-testid="artifact-version-selector">
+        <History aria-hidden />
+        <span className="artifact-menu-item-label">
+          <span>Version</span>
+          <span className="artifact-version-subtrigger-meta">{props.label}</span>
+        </span>
+        <ChevronRight className="artifact-menu-chevron" aria-hidden />
+      </DropdownMenu.SubTrigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content className="artifact-menu artifact-version-menu" align="start" sideOffset={6} collisionPadding={12}>
+        <DropdownMenu.SubContent className="artifact-menu artifact-version-menu" sideOffset={6} collisionPadding={12}>
           {isEmpty && (
             <DropdownMenu.Item className="artifact-menu-item" disabled>
               <span className="artifact-menu-item-label">No versions or drafts yet</span>
@@ -163,9 +168,9 @@ export function ArtifactVersionSelector(props: {
             {entries.drafts.length > 0 && <DropdownMenu.Label className="artifact-menu-label">Drafts</DropdownMenu.Label>}
             {entries.drafts.map((entry) => <ArtifactPickerRow key={entry.value} entry={entry} />)}
           </DropdownMenu.RadioGroup>
-        </DropdownMenu.Content>
+        </DropdownMenu.SubContent>
       </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+    </DropdownMenu.Sub>
   );
 }
 

@@ -34,6 +34,7 @@ import type {
   GitRepoInfo,
   RepoFileMention
 } from "../../../shared/types";
+import { IconButton } from "../primitives";
 import {
   type AddableSavedParticipantConfig,
   type ChatParticipantRuntimeOverride,
@@ -479,15 +480,7 @@ export function NewChatScreen(props: {
               void images.addImageFiles(files);
             }}
           />
-          <button
-            type="button"
-            className="new-chat-icon-button"
-            title="Attach image"
-            aria-label="Attach image"
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <ImagePlus size={18} aria-hidden />
-          </button>
+          <IconButton label="Attach image" icon={ImagePlus} onClick={() => fileInputRef.current?.click()} />
           <FolderPicker
             repoPath={props.repoPath}
             settings={props.settings}

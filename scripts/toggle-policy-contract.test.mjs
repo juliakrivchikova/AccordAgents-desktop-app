@@ -17,6 +17,7 @@ const approvalCss = read("src/renderer/styles/views/chat-conversation.css");
 const providerAuthCss = read("src/renderer/styles/views/provider-device-auth.css");
 const appCss = read("src/renderer/styles/app.css");
 const codexDeviceAuth = read("src/renderer/components/codex-device-auth.tsx");
+const iconButtonCss = read("src/renderer/styles/views/icon-button.css");
 
 test("the machine instance panel offers nothing the deleted worker used to need", () => {
   // The per-turn worker is gone, and with it the toggle that switched it on,
@@ -78,10 +79,13 @@ test("approval toggles derive disabled visuals from the native input and fieldse
 
 test("copy focus and manual toggle accessibility contracts remain explicit", () => {
   assert.match(appCss, /@import "\.\/views\/provider-device-auth\.css"/);
-  assert.match(codexDeviceAuth, /className="provider-device-auth-copy" aria-label="Copy sign-in code"/);
+  // The copy control is the shared icon button: an explicit label, and the
+  // shared keyboard focus ring.
+  assert.match(codexDeviceAuth, /className="provider-device-auth-copy" label="Copy sign-in code"/);
   assert.match(
-    providerAuthCss,
-    /\.provider-device-auth-copy:focus-visible\s*(?:,[^{}]+)?\{[^}]*outline:\s*2px solid var\(--app-accent\)/s
+    iconButtonCss,
+    /button\.aa-icon-button:focus-visible\s*\{[^}]*box-shadow:\s*var\(--focus-ring\)/s
   );
+  assert.match(appCss, /@import "\.\/views\/icon-button\.css"/);
   assert.match(environmentSettings, /aria-label=\{`Enable \$\{variable\.key\}`\}/);
 });

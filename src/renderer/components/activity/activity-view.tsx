@@ -1,4 +1,4 @@
-import { ArrowRight, CheckCheck, CircleX, Eraser, MessageSquare, RefreshCw } from "lucide-react";
+import { ArrowRight, CheckCheck, CircleX, Eraser, MessageSquare, RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { ChatActivityItem, ChatActivityParticipantSummary } from "../../../shared/types";
@@ -7,7 +7,7 @@ import { Avatar } from "../avatar/avatar";
 import { avatarForChatParticipant } from "../chat/chat-avatars";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { Button } from "@/components/ui/button";
-import { Notice } from "../primitives";
+import { IconButton, Notice } from "../primitives";
 import {
   persistActivityListWidth,
   readInitialActivityListWidth
@@ -20,10 +20,8 @@ import {
   MIN_STORED_ACTIVITY_LIST_WIDTH
 } from "../../lib/sidebar-width-storage";
 import { chatActivityShowsGenericCancel } from "../chat/chat-codex-approval-presentation";
+import { MIN_ACTIVITY_DETAIL_WIDTH, MIN_ACTIVITY_LIST_WIDTH, NARROW_ACTIVITY_LIST_MAX_WIDTH } from "../../lib/activity-sizing";
 
-const MIN_ACTIVITY_LIST_WIDTH = 320;
-const NARROW_ACTIVITY_LIST_MAX_WIDTH = 340;
-const MIN_ACTIVITY_DETAIL_WIDTH = 360;
 type ActivityStatusTab = "running" | "pending" | "rest";
 
 const ACTIVITY_STATUS_TABS: { id: ActivityStatusTab; label: string }[] = [
@@ -38,7 +36,14 @@ export interface ActivityViewProps {
   loading: boolean;
   error?: string;
   detailError?: string;
+  onDismissDetailError?: () => void;
   detail: React.ReactNode;
+  // The detail brings its own top row (a previewed chat), so the pane's is not drawn.
+  detailHasHeader?: boolean;
+  leading?: React.ReactNode;
+  // Window-level controls (theme, refresh): Activity replaces the sidebar
+  // that normally carries them.
+  trailing?: React.ReactNode;
   onSelect: (item: ChatActivityItem) => void;
   onMarkRead: (item: ChatActivityItem) => void;
   onCancelPending: (item: ChatActivityItem) => void;
@@ -47,13 +52,28 @@ export interface ActivityViewProps {
   onRetry: () => void;
 }
 
+// The selected item's chat title, in the pane's own header or in the chat's
+// top row once that chat is loaded (App.tsx); both must look the same.
+export function ActivityConversationTitle({ title }: { title: string }): JSX.Element {
+  return (
+    <h2 className="activity-conversation-title">
+      <MessageSquare aria-hidden size={17} strokeWidth={1.75} />
+      <span>{title}</span>
+    </h2>
+  );
+}
+
 export function ActivityView({
   items,
   selectedItem: selectedItemProp,
   loading,
   error,
   detailError,
+  onDismissDetailError,
+  detailHasHeader = false,
   detail,
+  leading,
+  trailing,
   onSelect,
   onMarkRead,
   onCancelPending,
@@ -142,7 +162,11 @@ export function ActivityView({
     >
       <aside id="activity-list-pane" className="activity-list-pane">
         <div className="activity-list-header">
-          <h1>Activity</h1>
+          <div className="activity-list-title" data-titlebar>
+            {leading}
+            <h1>Activity</h1>
+            {trailing && <div className="activity-list-title-actions">{trailing}</div>}
+          </div>
           <div className="activity-status-tabs" role="tablist" aria-label="Activity status">
             {ACTIVITY_STATUS_TABS.map((tab) => {
               const active = tab.id === activeTab;
@@ -214,26 +238,22 @@ export function ActivityView({
         onDoubleClick={() => updateListWidth(DEFAULT_NAVIGATION_PANE_WIDTH)}
       />
       <div className="activity-detail-pane">
-        <div className="activity-detail-header">
-          <MessageSquare className="activity-detail-header-icon" aria-hidden="true" size={17} strokeWidth={1.75} />
-          <h2>{selectedItem?.conversationTitle ?? "Select an item"}</h2>
-          {selectedItem && (
-            <Button
-              className="activity-open-chat"
-              variant="ghost"
-              size="icon-sm"
-              title="Open in chat"
-              aria-label="Open in chat"
-              onClick={() => onOpenInChat(selectedItem)}
-            >
-              <ArrowRight aria-hidden />
-            </Button>
-          )}
-        </div>
+        {!(selectedItem && detailHasHeader) && (
+          <div className="activity-detail-header" data-titlebar>
+            <ActivityConversationTitle title={selectedItem?.conversationTitle ?? "Select an item"} />
+            {selectedItem && <IconButton label="Open in chat" icon={ArrowRight} onClick={() => onOpenInChat(selectedItem)} />}
+          </div>
+        )}
         <div className="activity-detail-body">
           {detailError && (
-            <div className="mx-3 mt-2" role="alert">
-              <Notice tone="error">{detailError}</Notice>
+            // Under the chat's own top row when the detail brings one.
+            <div className={selectedItem && detailHasHeader ? "activity-detail-error-overlay" : "mx-3 mt-2"} role="alert">
+              <Notice
+                tone="error"
+                action={onDismissDetailError && <IconButton label="Dismiss" icon={X} size="xs" onClick={onDismissDetailError} />}
+              >
+                {detailError}
+              </Notice>
             </div>
           )}
           {selectedItem ? detail : (
@@ -317,43 +337,13 @@ function ActivityRow({
       </button>
       <span className="activity-row-actions">
         {item.status === "recent" && !item.read ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            className="activity-row-action"
-            title="Mark read"
-            aria-label="Mark read"
-            onClick={onMarkRead}
-          >
-            <CheckCheck aria-hidden />
-          </Button>
+          <IconButton label="Mark read" icon={CheckCheck} onClick={onMarkRead} />
         ) : null}
         {canCancelPending ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            className="activity-row-action"
-            title="Cancel pending card"
-            aria-label="Cancel pending card"
-            onClick={onCancelPending}
-          >
-            <CircleX aria-hidden />
-          </Button>
+          <IconButton label="Cancel pending card" icon={CircleX} tone="danger" onClick={onCancelPending} />
         ) : null}
         {item.status !== "pending" ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            className="activity-row-action"
-            title="Clear from activity"
-            aria-label="Clear from activity"
-            onClick={onClear}
-          >
-            <Eraser aria-hidden />
-          </Button>
+          <IconButton label="Clear from activity" icon={Eraser} onClick={onClear} />
         ) : null}
       </span>
     </div>

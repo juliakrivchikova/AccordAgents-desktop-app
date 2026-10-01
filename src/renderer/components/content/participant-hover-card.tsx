@@ -136,16 +136,13 @@ export function ParticipantHoverCard(props: {
       <div className="chat-mention-card-row session">
         <span>Session</span>
         <code title={sessionId}>{sessionId ?? "Not started yet"}</code>
-        <button
-          type="button"
-          className="chat-mention-card-copy"
+        <IconButton
+          size="xs"
+          icon={copied ? CheckCircle2 : Copy}
+          label={copied ? "Copied session ID" : "Copy session ID"}
           disabled={!sessionId}
-          title={copied ? "Copied session ID" : "Copy session ID"}
-          aria-label={copied ? "Copied session ID" : "Copy session ID"}
           onClick={(event) => void copySession(event)}
-        >
-          {copied ? <CheckCircle2 size={13} /> : <Copy size={13} />}
-        </button>
+        />
       </div>
     </>
   );

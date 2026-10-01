@@ -6,7 +6,7 @@ import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, Di
 import { Input } from "@/components/ui/input";
 import type { AppSettings, ChatBehaviorRuleConfig, ChatBehaviorRuleConfigUpdate, ChatParticipantConfig } from "../../../shared/types";
 import { CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS, CHAT_BEHAVIOR_RULE_LABEL_MAX_CHARS } from "../../../shared/chatBehaviorRules";
-import { ResizableTextarea } from "../primitives";
+import { ResizableTextarea, IconButton } from "../primitives";
 import { Avatar } from "../avatar/avatar";
 import { avatarForChatParticipant } from "../chat/chat-avatars";
 
@@ -196,9 +196,7 @@ function BehaviorRuleEditorDialog(props: {
               <DialogDescription>{rule ? `v${rule.version} behavior rule` : "Reusable behavior rule"}</DialogDescription>
             </span>
             <DialogClose asChild>
-              <button type="button" className="rules-editor-close" aria-label="Close rule editor">
-                <X size={16} aria-hidden />
-              </button>
+              <IconButton label="Close rule editor" icon={X} />
             </DialogClose>
           </div>
         </DialogHeader>

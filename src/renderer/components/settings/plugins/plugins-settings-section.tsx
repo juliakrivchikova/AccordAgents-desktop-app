@@ -63,7 +63,6 @@ export function PluginsSettingsSection(props: {
         icon={RefreshCw}
         label="Refresh plugins and skills"
         tooltip="Refresh"
-        variant="ghost"
         disabled={state.loading}
         data-testid="plugins-refresh"
         onClick={() => void load(true)}

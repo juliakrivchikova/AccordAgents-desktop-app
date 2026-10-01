@@ -75,3 +75,69 @@ test("Escape closes only search and preserves an underlying dismissable surface"
     trigger.remove();
   }
 });
+
+test("closing search returns focus to where the User was, never to a hidden sidebar field", async () => {
+  Object.defineProperty(window, "requestAnimationFrame", {
+    configurable: true,
+    value: (callback: FrameRequestCallback) => { callback(0); return 1; }
+  });
+  const hiddenSidebar = document.createElement("div");
+  hiddenSidebar.setAttribute("aria-hidden", "true");
+  const trigger = document.createElement("button");
+  trigger.id = "chat-search-trigger";
+  hiddenSidebar.append(trigger);
+  const composer = document.createElement("textarea");
+  document.body.append(hiddenSidebar, composer);
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  function Harness(props: { open: boolean; onClose: () => void }): JSX.Element {
+    return (
+      <ChatSearchModal
+        open={props.open}
+        query=""
+        loading={false}
+        loadingMore={false}
+        onOpenChange={(open) => { if (!open) props.onClose(); }}
+        onQueryChange={() => undefined}
+        onClear={() => undefined}
+        onLoadMore={() => undefined}
+        onOpenConversation={() => undefined}
+        onOpenMessage={(_match: ChatSearchMessageMatch) => undefined}
+      />
+    );
+  }
+
+  const escape = async (): Promise<void> => {
+    const input = document.querySelector<HTMLInputElement>(".aa-searchmodal-input");
+    assert.ok(input);
+    await act(async () => {
+      input.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  };
+
+  try {
+    composer.focus();
+    let closed = false;
+    await act(async () => { root.render(<Harness open onClose={() => { closed = true; }} />); });
+    await escape();
+    await act(async () => { root.render(<Harness open={!closed} onClose={() => undefined} />); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(document.activeElement, composer, "search opened from the composer returns to it");
+
+    composer.blur();
+    closed = false;
+    await act(async () => { root.render(<Harness open onClose={() => { closed = true; }} />); });
+    await escape();
+    await act(async () => { root.render(<Harness open={!closed} onClose={() => undefined} />); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.notEqual(document.activeElement, trigger, "a collapsed, hidden sidebar field never takes focus");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    hiddenSidebar.remove();
+    composer.remove();
+  }
+});

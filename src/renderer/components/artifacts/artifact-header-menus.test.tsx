@@ -6,7 +6,7 @@ import type { ArtifactDraftView, PublishedArtifactReadResult } from "../../../sh
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ArtifactActionsMenu, artifactMenuActions } from "./artifact-actions-menu";
 import { ArtifactDetailView } from "./artifact-detail";
-import { ArtifactVersionSelector, artifactPickerEntries, artifactSubtitleParts } from "./artifact-version-selector";
+import { artifactPickerEntries, artifactSubtitleParts } from "./artifact-version-selector";
 
 const NOW = "2026-09-20T12:00:00.000Z";
 const noop = (): void => undefined;
@@ -38,20 +38,27 @@ test("the artifact title is the menu trigger", () => {
   renderer.unmount();
 });
 
-test("the version line under the title is the picker trigger", () => {
-  const renderer = create(<ArtifactVersionSelector
-    label={<><strong>v2</strong> by @drew · Updated 5d ago</>}
-    selectedVersion={2}
-    headVersion={2}
-    history={[]}
-    drafts={[]}
-    onShowVersion={noop}
-    onShowDraft={noop}
+test("the title shows a version tag only when the screen is not the current version", () => {
+  const render = (tag?: string) => create(<ArtifactActionsMenu
+    title="Cloud runs rollout plan"
+    tag={tag}
+    approved={false}
+    meta={[]}
+    archived={false}
+    canRename={false}
+    canManage={false}
+    busy={false}
+    onSign={noop}
+    onRename={noop}
+    onOpenAccess={noop}
+    onArchivedChange={noop}
   />);
-  const trigger = renderer.root.findByProps({ "data-testid": "artifact-version-selector" });
-  assert.equal(trigger.type, "button");
-  assert.match(JSON.stringify(renderer.toJSON()), /by @drew · Updated 5d ago/);
-  renderer.unmount();
+  const current = render();
+  assert.equal(current.root.findAllByProps({ "data-testid": "artifact-title-tag" }).length, 0);
+  current.unmount();
+  const older = render("v1");
+  assert.match(JSON.stringify(older.toJSON()), /"v1"/);
+  older.unmount();
 });
 
 test("picker rows show who signed each version and the version note", () => {

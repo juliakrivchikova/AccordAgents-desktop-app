@@ -117,7 +117,6 @@ export function ChatTopBarTitle(props: {
         <div className="topbar-chat-title-row">
           <span className="topbar-chat-title-text">{props.conversation.title}</span>
           <IconButton
-            className="border-0 bg-transparent text-[var(--app-muted)] shadow-none hover:border-0 hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)]"
             size="xs"
             icon={Pencil}
             label="Edit chat name"

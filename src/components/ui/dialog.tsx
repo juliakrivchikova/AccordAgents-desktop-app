@@ -5,6 +5,7 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { IconButton } from "@/renderer/components/primitives/icon-button"
 import { XIcon } from "lucide-react"
 
 function Dialog({
@@ -69,15 +70,7 @@ function DialogContent({
         {children}
         {showCloseButton && (
           <DialogPrimitive.Close data-slot="dialog-close" asChild>
-            <Button
-              variant="ghost"
-              className="absolute top-2 right-2"
-              size="icon-sm"
-            >
-              <XIcon
-              />
-              <span className="sr-only">Close</span>
-            </Button>
+            <IconButton className="absolute top-2 right-2" size="md" label="Close" icon={XIcon} />
           </DialogPrimitive.Close>
         )}
       </DialogPrimitive.Content>

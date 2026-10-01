@@ -35,12 +35,10 @@ export function ArtifactContentSurface(props: {
       <div className="artifact-content-fabs">
         {props.onSign && (
           <IconButton
-            className="artifact-content-action"
             icon={BadgeCheck}
             label={props.signLabel ?? "Sign"}
             tooltip={props.signLabel ?? "Sign"}
-            size="xs"
-            variant="ghost"
+            floating
             disabled={props.reviseDisabled}
             data-testid="artifact-sign-shortcut"
             onClick={props.onSign}
@@ -48,23 +46,19 @@ export function ArtifactContentSurface(props: {
         )}
         {props.onRevise && (
           <IconButton
-            className="artifact-content-action"
             icon={Pencil}
             label="Revise"
             tooltip="Revise"
-            size="xs"
-            variant="ghost"
+            floating
             disabled={props.reviseDisabled}
             onClick={props.onRevise}
           />
         )}
         <IconButton
-          className="artifact-content-action artifact-content-copy"
           icon={copied ? CheckCircle2 : Copy}
           label={copied ? "Copied" : "Copy content"}
           tooltip={copied ? "Copied" : "Copy content"}
-          size="xs"
-          variant="ghost"
+          floating
           data-testid="artifact-copy-content"
           onClick={copyContent}
         />

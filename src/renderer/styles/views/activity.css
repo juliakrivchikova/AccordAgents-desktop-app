@@ -51,15 +51,30 @@
 }
 
 .activity-list-header {
-  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: stretch;
+  border-bottom: 1px solid var(--app-border-subtle);
+}
+
+/* Activity takes the sidebar's place, so its title row is the window's
+   top-left title bar and leaves room for the macOS traffic lights. */
+.activity-list-title {
   display: flex;
   height: var(--app-header-height);
   flex: 0 0 var(--app-header-height);
-  flex-direction: column;
-  align-items: stretch;
-  gap: 0;
-  padding: 0 16px 0 20px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 var(--app-gutter) 0 calc(var(--app-gutter) + var(--app-titlebar-inset));
   border-bottom: 1px solid var(--app-border-subtle);
+}
+
+.activity-list-title-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
 }
 
 .activity-list-header h1 {
@@ -74,16 +89,12 @@
   font-weight: 600;
   line-height: 22px;
   letter-spacing: 0;
-  transform: translateY(var(--app-header-title-offset-y));
 }
 
 .activity-status-tabs {
-  position: absolute;
-  right: 16px;
-  bottom: 0;
-  left: 20px;
   display: flex;
-  height: 36px;
+  height: var(--app-subbar-height);
+  padding: 0 16px 0 20px;
   min-width: 0;
   align-items: flex-end;
   gap: 18px;
@@ -232,18 +243,6 @@
 .activity-row:focus-within .activity-row-count,
 .activity-row[data-active="true"] .activity-row-count {
   opacity: 0;
-}
-
-.activity-row-action {
-  width: 28px;
-  height: 28px;
-  min-height: 28px;
-  color: var(--app-muted);
-}
-
-.activity-row-action:hover:not(:disabled) {
-  color: var(--app-text-strong);
-  background: var(--app-surface-hover) !important;
 }
 
 .activity-status-dot {
@@ -397,45 +396,48 @@
   border-bottom: 1px solid var(--app-border-subtle);
 }
 
-.activity-detail-header h2 {
-  flex: 1;
+.activity-conversation-title {
+  display: flex;
   min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
   margin: 0;
-  overflow: hidden;
   color: var(--app-text-strong);
   font-family: var(--font-body);
   font-size: 15px;
   font-weight: 600;
   line-height: 22px;
   letter-spacing: 0;
+}
+
+.activity-conversation-title > svg {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+}
+
+.activity-conversation-title > span {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
-  transform: translateY(var(--app-header-title-offset-y));
   white-space: nowrap;
 }
 
-.activity-detail-header-icon {
-  flex: 0 0 auto;
-  color: var(--app-muted);
-  transform: translateY(var(--app-header-title-offset-y));
+/* This top row sits in the right-hand pane, never at the window's left edge. */
+.activity-detail-pane [data-shell="topbar"] {
+  padding-left: 22px;
 }
 
-.activity-detail-header .activity-open-chat {
-  width: 34px !important;
-  height: 34px !important;
-  flex: 0 0 auto;
-  border-color: transparent !important;
-  border-radius: 10px;
-  color: var(--app-muted);
-  background: transparent;
-}
-
-.activity-detail-header .activity-open-chat:hover {
-  border-color: var(--app-border) !important;
-  color: var(--app-text-strong);
-  background: var(--app-surface-muted);
+.activity-detail-error-overlay {
+  position: absolute;
+  z-index: 3;
+  top: calc(var(--app-header-height) + 8px);
+  right: 12px;
+  left: 12px;
 }
 
 .activity-detail-body {
+  position: relative;
   min-height: 0;
   flex: 1;
   overflow: hidden;

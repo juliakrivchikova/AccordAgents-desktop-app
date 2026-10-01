@@ -327,26 +327,6 @@
   padding-right: 48px;
 }
 
-.artifact-content-copy {
-  position: absolute;
-  z-index: 2;
-  top: 8px;
-  right: 8px;
-  width: 30px;
-  height: 30px;
-  border: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-surface) 90%, transparent);
-  color: var(--app-text);
-  opacity: 0.82;
-  backdrop-filter: blur(6px);
-}
-
-.artifact-content-copy:hover,
-.artifact-content-copy:focus-visible {
-  opacity: 1;
-  background: var(--app-surface-hover);
-}
-
 .artifact-content-markdown .markdown-text {
   font-size: 13px;
   line-height: 1.5;
@@ -814,7 +794,6 @@
   font-weight: 600;
   line-height: 22px;
   letter-spacing: 0;
-  transform: translateY(var(--app-header-title-offset-y));
 }
 
 .artifacts-panel-header.is-detail .artifacts-panel-title {
@@ -826,94 +805,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.artifacts-panel-title [data-slot="button"] {
-  width: 24px;
-  height: 24px;
-  min-height: 24px;
-  border: 0 !important;
-  background: transparent !important;
-  color: var(--app-muted);
-}
-
-.artifacts-panel-header.is-detail [data-slot="button"],
-.artifacts-panel-header.is-detail [data-slot="tooltip-trigger"] {
-  width: 30px;
-  height: 30px;
-  min-height: 30px;
-  border: 0 !important;
-  background: transparent !important;
-  color: var(--app-muted);
-  box-shadow: none !important;
-}
-
-.artifacts-panel-header.is-detail [data-slot="button"] svg,
-.artifacts-panel-header.is-detail [data-slot="tooltip-trigger"] svg {
-  width: 16px;
-  height: 16px;
-}
-
-.artifacts-panel-header.is-detail .artifacts-panel-title [data-slot="button"],
-.artifacts-panel-header.is-detail .artifacts-panel-title [data-slot="tooltip-trigger"] {
-  width: 24px;
-  height: 24px;
-  min-height: 24px;
-}
-
-.artifacts-panel-title [data-slot="button"]:hover {
-  background: var(--app-surface-hover) !important;
-  color: var(--app-text-strong);
-}
-
-.artifacts-panel-subtitle {
-  position: absolute;
-  top: calc(50% + 12px);
-  right: 0;
-  left: 0;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--app-muted);
-  font-family: var(--font-body);
-  font-size: 11.5px;
-  font-weight: 500;
-  line-height: 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.artifacts-panel-header.is-detail .artifacts-panel-subtitle {
-  top: calc(50% + 12px);
-  font-size: 11.5px;
-  font-weight: 500;
-  line-height: 16px;
-}
-
-.artifacts-panel-mark,
-.artifact-list-mark {
-  display: inline-grid;
-  flex: 0 0 auto;
-  place-items: center;
-  background: color-mix(in srgb, var(--app-accent) 15%, transparent);
-  color: var(--app-accent);
-}
-
-.artifacts-panel-mark {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-}
-
-.artifacts-panel-header.is-detail .artifacts-panel-mark {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--app-accent) 15%, transparent);
-}
-
-.artifacts-panel-header.is-detail .artifacts-panel-mark svg {
-  width: 17px;
-  height: 17px;
 }
 
 .artifact-approved-mark {
@@ -929,14 +820,9 @@
 }
 
 .artifact-list-tabs {
-  position: absolute;
-  z-index: 1;
-  top: calc(var(--app-header-height) - 36px);
-  right: 0;
-  left: 1px;
   display: flex;
-  height: 36px;
-  flex: 0 0 36px;
+  height: var(--app-subbar-height);
+  flex: 0 0 var(--app-subbar-height);
   align-items: flex-end;
   gap: 22px;
   padding: 0 16px;
@@ -1016,9 +902,12 @@
 }
 
 .artifact-list-mark {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--app-muted);
 }
 
 .artifact-list-body {
@@ -1174,40 +1063,6 @@
   display: flex;
   align-items: center;
   gap: 4px;
-}
-
-.artifact-content-action,
-.artifact-content-copy {
-  position: static;
-  z-index: auto;
-  top: auto;
-  right: auto;
-  width: 30px;
-  height: 30px;
-  min-height: 30px;
-  border: 0 !important;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--app-surface) 88%, transparent) !important;
-  color: var(--app-muted);
-  opacity: 1;
-  backdrop-filter: blur(6px);
-}
-
-.artifact-edit-save:not(:disabled) {
-  color: var(--app-success);
-}
-
-.artifact-content-action:disabled {
-  cursor: default;
-  opacity: 0.45;
-}
-
-.artifact-content-action:hover,
-.artifact-content-copy:hover,
-.artifact-content-action:focus-visible,
-.artifact-content-copy:focus-visible {
-  background: var(--app-surface-hover) !important;
-  color: var(--app-text-strong);
 }
 
 /* Artifact document typography. Everything uses the app's body face, like the chat
@@ -1407,55 +1262,53 @@
   color: var(--app-muted);
 }
 
-.artifact-version-trigger {
-  min-height: 22px;
-  display: inline-flex;
-  max-width: 100%;
-  align-items: center;
-  gap: 3px;
-  margin-left: -5px;
-  padding: 0 4px 0 5px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
+.artifact-title-tag {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--app-muted);
-  font: inherit;
-  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 500;
 }
 
-.artifact-version-trigger > span {
+.artifact-version-subtrigger .artifact-menu-item-label {
+  display: flex;
   min-width: 0;
+  flex-direction: column;
+}
+
+.artifact-version-subtrigger-meta {
   overflow: hidden;
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.artifact-version-trigger strong {
-  color: var(--app-text-strong);
-  font-weight: 600;
-}
-
-.artifact-version-trigger > svg {
-  flex: 0 0 auto;
-}
-
-.artifact-title-trigger:hover:not(:disabled),
-.artifact-title-trigger[data-state="open"],
-.artifact-version-trigger:hover:not(:disabled),
-.artifact-version-trigger[data-state="open"] {
+.artifact-version-subtrigger[data-state="open"] {
   background: var(--app-surface-hover);
 }
 
-.artifact-title-trigger:disabled,
-.artifact-version-trigger:disabled {
+.artifact-menu-chevron {
+  margin-left: auto;
+}
+
+.artifact-title-trigger:hover:not(:disabled),
+.artifact-title-trigger[data-state="open"] {
+  background: var(--app-surface-hover);
+}
+
+.artifact-title-trigger:disabled {
   background: transparent;
   cursor: default;
   opacity: 0.55;
 }
 
 /* Inset ring: the header clips overflow, so an outside outline would be cut off. */
-.artifact-title-trigger:focus-visible,
-.artifact-version-trigger:focus-visible {
+.artifact-title-trigger:focus-visible {
   outline: none;
   box-shadow: inset 0 0 0 2px var(--app-accent);
 }

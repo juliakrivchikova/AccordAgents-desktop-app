@@ -1,5 +1,5 @@
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, FilePlus2, FileText, X } from "lucide-react";
+import { ArrowLeft, FilePlus2, X } from "lucide-react";
 import { ARTIFACT_USER_MEMBER } from "../../../shared/types";
 import { artifactMemberLabel, artifactSummaryStatusLabel } from "../../../shared/artifacts";
 import type {
@@ -12,7 +12,7 @@ import type {
 import { IconButton } from "../primitives";
 import { ArtifactDetailView, formatArtifactRelativeTimestamp, type ArtifactCompareState } from "./artifact-detail";
 import { ArtifactActionsMenu } from "./artifact-actions-menu";
-import { ArtifactVersionSelector, artifactSubtitleParts } from "./artifact-version-selector";
+import { ArtifactVersionSubmenu, artifactSubtitleParts } from "./artifact-version-selector";
 import { AccessArtifactForm, CreateArtifactForm } from "./artifact-forms";
 import type { ArtifactAccessValues } from "./artifact-forms";
 import { useArtifactsPanelResize } from "./use-artifacts-panel-resize";
@@ -411,6 +411,16 @@ export function ArtifactsPanel(props: {
     requiredDraftCount: detail.summary.requiredDraftCount,
     updatedLabel: `Updated ${formatArtifactRelativeTimestamp(detail.summary.updatedAt)}`
   }) : undefined;
+  // Shown after the title only when the screen is not simply the current
+  // version. A draft keeps its state ("Withdrawn") and draft collection its
+  // progress, so neither can read as the live version; an older version is
+  // just its number, the body announces the rest.
+  const draftOnScreen = Boolean(detail && (selectedDraft || detail.lifecycle === "collecting_drafts"));
+  const olderVersionOnScreen = Boolean(publishedDetail && publishedDetail.version.version !== publishedDetail.summary.headVersion);
+  const titleTag = !subtitle ? undefined
+    : draftOnScreen ? `${subtitle.prefix}${subtitle.strong}${subtitle.suffix}`
+    : olderVersionOnScreen ? `${isArchived ? "Archived · " : ""}${subtitle.strong}`
+    : isArchived ? "Archived" : undefined;
   const menuMeta = detail ? [
     detail.summary.name,
     `Owned by ${artifactMemberLabel(detail.summary.owner)}`,
@@ -433,7 +443,7 @@ export function ArtifactsPanel(props: {
         onKeyDown={panelResize.resizeWithKeyboard}
         onDoubleClick={panelResize.resetWidth}
       />
-      <div className={`artifacts-panel-header${props.selectedId ? " is-detail" : ""}${isListMode ? " is-list" : ""}`}>
+      <div data-titlebar className={`artifacts-panel-header${props.selectedId ? " is-detail" : ""}${isListMode ? " is-list" : ""}`}>
         {props.selectedId || mode === "create" ? (
           <IconButton
             label="Back to artifact list"
@@ -445,11 +455,6 @@ export function ArtifactsPanel(props: {
               props.onSelect(undefined);
             }}
           />
-        ) : null}
-        {props.selectedId && mode !== "create" ? (
-          <span className="artifacts-panel-mark" aria-hidden>
-            <FileText size={17} strokeWidth={1.9} />
-          </span>
         ) : null}
         <div className="artifacts-panel-title-block">
           {renaming && detail ? (
@@ -463,8 +468,24 @@ export function ArtifactsPanel(props: {
               <h3 className="artifacts-panel-title">
                 <ArtifactActionsMenu
                   title={detail.summary.name}
+                  tag={titleTag}
                   approved={detail.summary.approval.state === "approved"}
                   meta={menuMeta}
+                  versionMenu={(
+                    <ArtifactVersionSubmenu
+                      key={detail.summary.id}
+                      label={`${subtitle.prefix}${subtitle.strong}${subtitle.suffix}`}
+                      selectedVersion={selectedDraft ? undefined : publishedDetail?.version.version}
+                      headVersion={publishedDetail?.summary.headVersion}
+                      history={publishedDetail?.history ?? []}
+                      drafts={detail.lifecycle === "collecting_drafts" ? detail.drafts : drafts}
+                      selectedDraftId={selectedDraft?.id}
+                      requiredSigners={detail.summary.approval.requiredSigners}
+                      disabled={mode === "revise"}
+                      onShowVersion={showVersion}
+                      onShowDraft={showDraft}
+                    />
+                  )}
                   view={publishedDetail && mode !== "revise" && !selectedDraft && publishedDetail.version.version > 1
                     ? { showDiff, fromVersion: publishedDetail.version.version - 1, onChange: changeShowDiff }
                     : undefined}
@@ -480,21 +501,6 @@ export function ArtifactsPanel(props: {
                   onArchivedChange={(archived) => void submitArchived(archived)}
                 />
               </h3>
-              <div className="artifacts-panel-subtitle">
-                <ArtifactVersionSelector
-                  key={detail.summary.id}
-                  label={<>{subtitle.prefix}{subtitle.strong ? <strong>{subtitle.strong}</strong> : null}{subtitle.suffix}</>}
-                  selectedVersion={selectedDraft ? undefined : publishedDetail?.version.version}
-                  headVersion={publishedDetail?.summary.headVersion}
-                  history={publishedDetail?.history ?? []}
-                  drafts={detail.lifecycle === "collecting_drafts" ? detail.drafts : drafts}
-                  selectedDraftId={selectedDraft?.id}
-                  requiredSigners={detail.summary.approval.requiredSigners}
-                  disabled={mode === "revise"}
-                  onShowVersion={showVersion}
-                  onShowDraft={showDraft}
-                />
-              </div>
             </>
           ) : (
             <h3 className="artifacts-panel-title">

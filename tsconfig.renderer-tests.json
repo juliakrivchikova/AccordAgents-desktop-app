@@ -27,6 +27,9 @@
     "src/renderer/components/search/chat-search-escape.test.tsx",
     "src/renderer/components/settings/aws-worker-panel.test.tsx",
     "src/renderer/components/shell/chat-search.test.tsx",
+    "src/renderer/components/shell/sidebar-nav.test.tsx",
+    "src/renderer/app/use-app-navigation.test.ts",
+    "src/renderer/app/app-notices.test.tsx",
     "src/preload/global.d.ts"
   ],
   "exclude": []

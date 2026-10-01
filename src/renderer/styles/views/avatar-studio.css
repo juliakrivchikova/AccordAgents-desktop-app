@@ -37,26 +37,6 @@
   gap: 4px;
 }
 
-.avatar-studio-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border: 1px solid var(--app-border);
-  border-radius: var(--radius-control);
-  background: var(--app-surface);
-  color: var(--app-muted);
-  cursor: pointer;
-}
-
-.avatar-studio-close:hover {
-  border-color: var(--app-border-strong);
-  color: var(--app-text-strong);
-}
-
 .avatar-studio-body {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);

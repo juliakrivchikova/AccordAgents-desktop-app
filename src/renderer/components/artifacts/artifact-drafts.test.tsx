@@ -25,8 +25,8 @@ const NOW = "2026-07-13T12:00:00.000Z";
 test("collecting artifact renders one selector and one draft body", () => {
   const inboxSource = readFileSync(resolve("src/renderer/components/artifacts/draft-inbox.tsx"), "utf8");
   const panelSource = readFileSync(resolve("src/renderer/components/artifacts/artifacts-panel.tsx"), "utf8");
-  // The draft picker lives in the panel header and lists the collected drafts.
-  assert.match(panelSource, /<ArtifactVersionSelector/);
+  // The draft picker is the Version entry of the title menu and lists the collected drafts.
+  assert.match(panelSource, /<ArtifactVersionSubmenu/);
   assert.match(panelSource, /drafts=\{detail\.lifecycle === "collecting_drafts" \? detail\.drafts : drafts\}/);
   assert.match(inboxSource, /const selectedDraft =/);
   assert.match(inboxSource, /selectedContent\.content/);

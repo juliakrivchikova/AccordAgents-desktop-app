@@ -852,7 +852,9 @@ function createWindow(): void {
     backgroundColor: "#f5f2ec",
     ...(process.platform === "darwin" ? {
       titleBarStyle: "hiddenInset" as const,
-      trafficLightPosition: { x: 16, y: 16 }
+      // Centred in the renderer's 46px title rows (--app-header-height); rows
+      // leave --app-traffic-light-inset (80px) clear for the lights.
+      trafficLightPosition: { x: 16, y: 17 }
     } : {}),
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),

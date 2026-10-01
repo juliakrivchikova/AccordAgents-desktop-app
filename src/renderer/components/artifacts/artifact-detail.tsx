@@ -4,6 +4,7 @@ import { Check, Eye, History, Pencil, X } from "lucide-react";
 import type { ArtifactDraftContent, ArtifactDraftView, ArtifactError, PublishedArtifactReadResult } from "../../../shared/types";
 import { artifactMemberLabel } from "../../../shared/artifacts";
 import { ArtifactContentSurface } from "./artifact-content-surface";
+import { IconButton } from "../primitives";
 import { MarkdownText } from "../content/markdown-text";
 
 export interface ArtifactCompareState {
@@ -193,19 +194,14 @@ function ArtifactRevisionSurface(props: {
             <Pencil size={14} aria-hidden /> Edit
           </button>
         </div>
-        <button type="button" className="artifact-content-action" aria-label="Cancel editing" title="Cancel" onClick={props.onCancel}>
-          <X size={15} aria-hidden />
-        </button>
-        <button
-          type="button"
-          className="artifact-content-action artifact-edit-save"
-          aria-label={`Save as v${props.baseVersion + 1}`}
-          title={`Save as v${props.baseVersion + 1}`}
+        <IconButton floating label="Cancel editing" icon={X} onClick={props.onCancel} />
+        <IconButton
+          floating
+          label={`Save as v${props.baseVersion + 1}`}
+          icon={Check}
           disabled={props.busy || !content}
           onClick={() => props.onSubmit(content, note.trim() ? note : undefined)}
-        >
-          <Check size={15} aria-hidden />
-        </button>
+        />
       </div>
       {preview && (
         <div className="artifact-content-markdown" data-testid="artifact-revise-preview">

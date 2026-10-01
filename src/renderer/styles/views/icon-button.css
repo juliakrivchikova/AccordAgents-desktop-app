@@ -1,0 +1,75 @@
+/* The one icon-only button (components/primitives/icon-button.tsx). Imported
+   last so no view stylesheet restyles it; views only place it. */
+
+button.aa-icon-button {
+  display: inline-flex;
+  width: 28px;
+  min-width: 0;
+  height: 28px;
+  min-height: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 7px;
+  padding: 0;
+  color: var(--app-muted);
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+button.aa-icon-button[data-size="xs"] {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+
+button.aa-icon-button > svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+button.aa-icon-button[data-size="xs"] > svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* Menus and popovers mark their open trigger with data-state="open";
+   aria-expanded alone is not used, because the sidebar toggle is expanded
+   while it sits at rest. */
+button.aa-icon-button:hover:not(:disabled),
+button.aa-icon-button[data-state="open"] {
+  color: var(--app-text-strong);
+  background: var(--app-surface-hover);
+}
+
+button.aa-icon-button[aria-pressed="true"] {
+  color: var(--app-text-strong);
+  background: var(--app-surface-active);
+}
+
+button.aa-icon-button[data-tone="danger"]:hover:not(:disabled) {
+  color: var(--app-danger);
+}
+
+button.aa-icon-button[data-floating="true"] {
+  background: var(--app-surface);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--shadow-color) 16%, transparent);
+}
+
+button.aa-icon-button[data-floating="true"]:hover:not(:disabled) {
+  background: var(--app-surface-hover);
+}
+
+button.aa-icon-button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+button.aa-icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}

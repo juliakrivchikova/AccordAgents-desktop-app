@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search } from "lucide-react";
+import { Search, X } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
 import type { ChatSearchMessageMatch, ChatSearchResponse } from "../../../shared/types";
+import { IconButton } from "../primitives";
 import { ChatSearchResults, groupSearchMatches, searchActionDomId, searchActions } from "./chat-search-results";
 
 export function ChatSearchModal({
@@ -31,6 +32,7 @@ export function ChatSearchModal({
   onOpenMessage: (match: ChatSearchMessageMatch) => void;
 }): JSX.Element {
   const inputRef = useRef<HTMLInputElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const groups = useMemo(() => groupSearchMatches(response), [response]);
   const actions = useMemo(() => searchActions(groups), [groups]);
@@ -98,11 +100,13 @@ export function ChatSearchModal({
             data-testid="chat-search-modal"
             onOpenAutoFocus={(event) => {
               event.preventDefault();
+              returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
               window.requestAnimationFrame(() => inputRef.current?.focus());
             }}
             onCloseAutoFocus={(event) => {
               event.preventDefault();
-              document.getElementById("chat-search-trigger")?.focus();
+              searchReturnFocusTarget(returnFocusRef.current)?.focus();
+              returnFocusRef.current = null;
             }}
             onEscapeKeyDown={(event) => {
               event.preventDefault();
@@ -128,9 +132,7 @@ export function ChatSearchModal({
                 autoComplete="off"
               />
               {searching && (
-                <button className="aa-search-clear" type="button" onClick={onClear} title="Clear search" aria-label="Clear search">
-                  ×
-                </button>
+                <IconButton size="xs" label="Clear search" icon={X} onClick={onClear} />
               )}
               <kbd className="aa-searchmodal-kbd">esc</kbd>
             </div>
@@ -156,4 +158,19 @@ export function ChatSearchModal({
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
   );
+}
+
+// Search opens from anywhere (the sidebar field or Cmd/Ctrl+K), so closing it
+// returns focus to where the User was, such as the composer. The sidebar field
+// is the fallback, and only while it is actually visible.
+function searchReturnFocusTarget(previous: HTMLElement | null): HTMLElement | null {
+  if (previous && previous !== document.body && focusableNow(previous)) {
+    return previous;
+  }
+  const trigger = document.getElementById("chat-search-trigger");
+  return trigger && focusableNow(trigger) ? trigger : null;
+}
+
+function focusableNow(element: HTMLElement): boolean {
+  return element.isConnected && !element.closest("[aria-hidden='true'], [inert]");
 }

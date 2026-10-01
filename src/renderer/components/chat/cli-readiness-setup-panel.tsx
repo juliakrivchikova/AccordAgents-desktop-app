@@ -24,6 +24,7 @@ import {
   deriveAgentReadiness,
   providerEnabled
 } from "../../../shared/cliReadiness";
+import { IconButton } from "../primitives";
 
 export function CliReadinessSetupPanel(props: {
   agents: AgentHealth[];
@@ -117,16 +118,13 @@ export function CliReadinessSetupPanel(props: {
                     {health?.checking && readiness !== "checking" && <span> · Checking</span>}
                   </span>
                 </div>
-                <button
-                  type="button"
+                <IconButton
                   className="cli-readiness-toggle"
-                  aria-label={`${expanded ? "Hide" : "Set up"} ${metadata.label}`}
+                  label={`${expanded ? "Hide" : "Set up"} ${metadata.label}`}
+                  icon={expanded ? ChevronUp : ChevronDown}
                   aria-expanded={expanded}
-                  title={expanded ? "Hide" : "Set up"}
                   onClick={() => toggleProvider(kind)}
-                >
-                  {expanded ? <ChevronUp size={17} aria-hidden /> : <ChevronDown size={17} aria-hidden />}
-                </button>
+                />
               </div>
 
               {expanded && (
@@ -308,9 +306,12 @@ function SetupCommand(props: {
   return (
     <div className="cli-readiness-command">
       <code><span aria-hidden="true">$</span> {props.command}</code>
-      <button type="button" aria-label={`Copy ${props.label} command`} title="Copy command" onClick={() => void props.onCopy(props.command as string)}>
-        {props.copiedValue === props.command ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />}
-      </button>
+      <IconButton
+        size="xs"
+        label={`Copy ${props.label} command`}
+        icon={props.copiedValue === props.command ? Check : Copy}
+        onClick={() => void props.onCopy(props.command as string)}
+      />
     </div>
   );
 }

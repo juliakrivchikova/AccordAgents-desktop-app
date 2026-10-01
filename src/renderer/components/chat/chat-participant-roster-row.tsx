@@ -75,7 +75,6 @@ export function ChatParticipantRosterRow(props: {
           </button>
           <div className="chat-participant-row-actions">
             <IconButton
-              className="chat-participant-row-action chat-participant-row-disclosure"
               size="xs"
               icon={ChevronDown}
               iconClassName={expanded ? undefined : "-rotate-90"}
@@ -85,7 +84,6 @@ export function ChatParticipantRosterRow(props: {
               onClick={() => setExpanded((value) => !value)}
             />
             <IconButton
-              className="chat-participant-row-action"
               size="xs"
               icon={Minimize2}
               label={`Compact ${displayName} context`}
@@ -94,7 +92,6 @@ export function ChatParticipantRosterRow(props: {
               onClick={() => props.onCompactParticipant(props.participant.id)}
             />
             <IconButton
-              className="chat-participant-row-action"
               size="xs"
               icon={AtSign}
               label={`Mention ${displayName}`}
@@ -102,8 +99,8 @@ export function ChatParticipantRosterRow(props: {
               onClick={() => props.onInsertMention(props.participant)}
             />
             <IconButton
-              className="chat-participant-row-action is-danger"
               size="xs"
+              tone="danger"
               icon={Trash2}
               label={`Remove ${displayName} from chat`}
               tooltip={props.removeDisabledReason ?? "Remove from chat"}
@@ -192,7 +189,6 @@ export function ChatParticipantSelectableRosterRow(props: {
           </button>
           <div className="chat-participant-row-actions">
             <IconButton
-              className="chat-participant-row-action chat-participant-row-disclosure"
               size="xs"
               icon={ChevronDown}
               iconClassName={expanded ? undefined : "-rotate-90"}
