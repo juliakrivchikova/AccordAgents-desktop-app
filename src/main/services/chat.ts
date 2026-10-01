@@ -6,15 +6,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
-import {
-  applyChatChanges,
-  chatChangeBaseline,
-  diffChatChanges,
-  type ChatChangeApplyPolicy,
-  type ChatChangeBaseline,
-  type ChatChangeDiffPolicy,
-  type ChatChangesPayload
-} from "./chatChanges";
+import { applyChatChanges, CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges, type ChatChangeApplyPolicy, type ChatChangeBaseline, type ChatChangeDiffPolicy, type ChatChangesPayload, isSafeChatId } from "./chatChanges";
 import type {
   AgentContextUsage,
   AgentHealth,
@@ -120,7 +112,7 @@ import type {
   RemoteParticipantSessionHandle,
   RemoteRunSyncInfo
 } from "../../shared/types";
-import { isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
+import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
 import {
@@ -6135,6 +6127,11 @@ export class ChatService {
   }
 
   async applyReplicatedConversationDeletion(conversationId: string, deletedAt: string): Promise<void> {
+    // The id names a directory that is removed with the chat.
+    if (!isSafeChatId(conversationId)) {
+      void this.debugLogs.write("chat.delete.unsafe-id-refused", { length: String(conversationId).length });
+      return;
+    }
     const conversation = await this.storage.getConversation(conversationId);
     const marker = conversation ? await this.enqueueDeletedConversationArtifactCleanup(conversation) : undefined;
     const machineIds = conversation ? this.chatParticipants(conversation).map(participant => participant.homeMachineId)
@@ -9202,17 +9199,7 @@ export class ChatService {
   }
 
   private autoWatchStableMessages(conversation: Conversation, participantId: string): ChatMessage[] {
-    return conversation.messages.filter((message) => {
-      if (message.metadata?.autoWatchTrigger || isChatMessageHiddenFromTimeline(message)) {
-        return false;
-      }
-      if (message.role === "user") {
-        return message.status !== "pending";
-      }
-      return message.role === "participant" &&
-        message.participantId !== participantId &&
-        message.status !== "pending";
-    });
+    return conversation.messages.filter((message) => isAutoWatchStableMessage(message, participantId));
   }
 
   private autoWatchMessagesAfterCursor(conversation: Conversation, participantId: string, cursor?: string): ChatMessage[] {
@@ -18297,13 +18284,11 @@ export class ChatService {
         void this.debugLogs.write("chat.changes.not-owner", { conversationId: snapshot.id, messageIds: diff.suppressedMessageIds.slice(0, 20) });
       }
       if (diff.changes.length) {
-        payload = { version: 1, conversationId: snapshot.id, updatedAt: snapshot.updatedAt, changes: diff.changes };
+        payload = { version: CHAT_CHANGES_VERSION, conversationId: snapshot.id, updatedAt: snapshot.updatedAt, changes: diff.changes };
       }
-    } else if (tracked && !this.chatChangeBaselines.has(snapshot.id)) {
-      // A save that must not emit (an incoming change being stored) still
-      // moves the baseline, so the next local save does not echo it back.
-      await this.chatChangeBaselineFor(snapshot.id);
     }
+    // A save that must not emit (an incoming change being stored) still moves
+    // the baseline below, so the next local save does not echo it back.
     try {
       const previous = this.chatEventMirror?.isEnabled() ? await this.storage.getConversation(snapshot.id) : undefined;
       if (payload) {
@@ -18405,10 +18390,17 @@ export class ChatService {
     if (this.deletedConversationIds.has(conversationId) || await this.storage.conversationTombstones?.().isDeleted(conversationId)) {
       return "applied";
     }
+    const logIgnored = (ignored: string[]): void => {
+      if (ignored.length) {
+        void this.debugLogs.write("chat.changes.ignored", { conversationId, originId: event.originId, eventId: event.eventId, ignored: ignored.slice(0, 20) });
+      }
+    };
     const existing = await this.storage.getConversation(conversationId);
     if (!existing) {
       const result = applyChatChanges(undefined, payload, event.originId, transport.applyPolicy(undefined));
       if (result.status === "missing-conversation") return "missing-conversation";
+      logIgnored(result.ignored);
+      if (result.status === "ignored") return "applied";
       this.localizeRepoPath(result.conversation, result.conversation.repoPath);
       await this.saveConversation(result.conversation, { emitChanges: false });
       this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
@@ -18418,10 +18410,11 @@ export class ChatService {
     await this.withChatMutation(existing, async () => {
       const result = applyChatChanges(existing, payload, event.originId, transport.applyPolicy(existing));
       if (result.status !== "applied") return;
-      if (result.ignored.length) {
-        void this.debugLogs.write("chat.changes.ignored", { conversationId, originId: event.originId, eventId: event.eventId, ignored: result.ignored.slice(0, 20) });
-      }
+      logIgnored(result.ignored);
       if (!result.changed) return;
+      // A member that watches the chat here sees new user messages the way a
+      // local one does: a new one resets its wake chain.
+      this.reconcileReplicatedWatcher(existing, result.conversation);
       const wasArchived = existing.metadata.archived === true;
       existing.title = result.conversation.title;
       const repoChanged = payload.changes.some((change) => change.type === "conversation.updated" && change.repoPath !== undefined);

@@ -24,13 +24,26 @@ import type { ChatMessage, ChatMessageReactions, ChatReactor, Conversation } fro
 export const CHAT_CHANGES_EVENT_KIND = "chat.changes";
 export const CHAT_CHANGES_VERSION = 1;
 
+export const CHAT_CHANGES_LOG_SCOPE_PREFIX = "chat-changes:";
+
 /** One log scope per chat, so a gap in one chat never holds another. */
 export function chatChangesLogScope(conversationId: string): string {
-  return `chat-changes:${conversationId}`;
+  return `${CHAT_CHANGES_LOG_SCOPE_PREFIX}${conversationId}`;
 }
 
 export function isChatChangesLogScope(logScopeId: string): boolean {
-  return logScopeId.startsWith("chat-changes:") && logScopeId.length > "chat-changes:".length;
+  return logScopeId.startsWith(CHAT_CHANGES_LOG_SCOPE_PREFIX) && isSafeChatId(logScopeId.slice(CHAT_CHANGES_LOG_SCOPE_PREFIX.length));
+}
+
+/** A SQL condition selecting chat change scopes on `column`, as an index range. */
+export function chatChangesScopeSql(column: string): string {
+  return `${column} >= '${CHAT_CHANGES_LOG_SCOPE_PREFIX}' and ${column} < 'chat-changes;'`;
+}
+
+/** Chat ids name directories (chats/<id>) on every device, so one that
+ *  arrives from another device must be a plain token, never a path. */
+export function isSafeChatId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
 }
 
 /** Conversation metadata that is chat content. Every other key is local. */
@@ -110,13 +123,30 @@ export interface ChatChangeDiff {
 }
 
 export interface ChatChangeApplyPolicy {
+  /** May `originId` set the chat's shared fields, including creating it? */
   acceptsConversationFields(originId: string): boolean;
+  /** May `originId` change this message's content and status? */
   acceptsMessageUpdate(existing: ChatMessage, conversation: Conversation, originId: string): boolean;
+  /** May `originId` add this message? A member's reply comes only from where
+   *  that member runs (or the desktop that dispatches it). */
+  acceptsMessageCreate(message: ChatMessage, conversation: Conversation, originId: string): boolean;
+  /** May `originId` remove this message? Only the desktop, or the device that
+   *  may change it. */
+  acceptsMessageRemoval(existing: ChatMessage | undefined, conversation: Conversation, originId: string): boolean;
+  /** A chat this device does not hold yet is waited for (machines), or a
+   *  change for it is refused (the desktop, where every chat starts). */
+  holdsUnknownChats: boolean;
 }
 
 export type ChatChangeApplyResult =
   | { status: "applied"; conversation: Conversation; created: boolean; changed: boolean; ignored: string[] }
-  | { status: "missing-conversation" };
+  | { status: "missing-conversation" }
+  /** Nothing to store: every change was refused (a chat this device will
+   *  never hold, or one the sender may not create). */
+  | { status: "ignored"; ignored: string[] };
+
+/** How many removed message ids a chat remembers (the same cap ChatService uses). */
+export const CHAT_REMOVED_MESSAGE_IDS_MAX = 100;
 
 function hash(value: unknown): string {
   return createHash("sha1").update(stableJson(value ?? null)).digest("hex");
@@ -181,16 +211,29 @@ function sharedFieldHashes(conversation: Conversation): Record<string, string> {
   return hashes;
 }
 
+type MessageDigest = { shared: string; reactions: Map<string, string> };
+
+/**
+ * A saved chat's messages are immutable objects, kept from one save to the
+ * next while unchanged (see buildConversationSnapshot), so a message is
+ * digested once, not on every save of a chat that is thousands long.
+ */
+const messageDigests = new WeakMap<ChatMessage, MessageDigest>();
+
+function messageDigest(message: ChatMessage): MessageDigest {
+  let digest = messageDigests.get(message);
+  if (!digest) {
+    digest = { shared: hash(sharedMessage(message, { withReactions: false })), reactions: reactionEntries(message) };
+    messageDigests.set(message, digest);
+  }
+  return digest;
+}
+
 /** Undefined when the database holds no row for the chat yet. */
 export function chatChangeBaseline(conversation: Conversation | undefined): ChatChangeBaseline | undefined {
   if (!conversation) return undefined;
-  const messages = new Map<string, { shared: string; reactions: Map<string, string> }>();
-  for (const message of conversation.messages) {
-    messages.set(message.id, {
-      shared: hash(sharedMessage(message, { withReactions: false })),
-      reactions: reactionEntries(message)
-    });
-  }
+  const messages = new Map<string, MessageDigest>();
+  for (const message of conversation.messages) messages.set(message.id, messageDigest(message));
   return { shared: sharedFieldHashes(conversation), messages, removed: removedIds(conversation) };
 }
 
@@ -241,14 +284,16 @@ export function diffChatChanges(
       changes.push({ type: "message.created", message: sharedMessage(message, { withReactions: true }) });
       continue;
     }
-    if (hash(sharedMessage(message, { withReactions: false })) !== before.shared) {
+    const digest = messageDigest(message);
+    if (digest === before) continue;
+    if (digest.shared !== before.shared) {
       if (policy.ownsMessage(message)) {
         changes.push({ type: "message.updated", message: sharedMessage(message, { withReactions: false }) });
       } else {
         suppressedMessageIds.push(message.id);
       }
     }
-    const after = reactionEntries(message);
+    const after = digest.reactions;
     const added: ChatReactionAdded[] = [];
     const removedReactions: ChatReactionRemoved[] = [];
     for (const [key, value] of after) {
@@ -270,6 +315,7 @@ export function diffChatChanges(
   return { changes, suppressedMessageIds };
 }
 
+/** Messages in creation order; the original order breaks ties. */
 function sortedByCreatedAt(messages: ChatMessage[]): ChatMessage[] {
   return messages
     .map((message, index) => ({ message, index }))
@@ -278,8 +324,8 @@ function sortedByCreatedAt(messages: ChatMessage[]): ChatMessage[] {
 }
 
 /** Keeps this device's own bookkeeping and reactions on a message whose
- *  shared content is replaced by an incoming copy. */
-function mergeIncomingMessage(existing: ChatMessage | undefined, incoming: ChatMessage, originId: string, created: boolean): ChatMessage {
+ *  shared content is replaced by an incoming change. */
+function mergeIncomingMessage(existing: ChatMessage | undefined, incoming: ChatMessage, originId: string): ChatMessage {
   const metadata: Record<string, unknown> = { ...(incoming.metadata ?? {}) };
   for (const key of LOCAL_MESSAGE_METADATA_KEYS) delete metadata[key];
   if (existing?.metadata) {
@@ -288,7 +334,8 @@ function mergeIncomingMessage(existing: ChatMessage | undefined, incoming: ChatM
         metadata[key] = existing.metadata[key as keyof typeof existing.metadata];
       }
     }
-    if (!created && existing.metadata.reactions !== undefined) metadata.reactions = existing.metadata.reactions;
+    // An owner's update carries no reactions; this device's merged set stays.
+    if (existing.metadata.reactions !== undefined) metadata.reactions = existing.metadata.reactions;
   }
   if (!existing) metadata.remoteAuthorOriginId = originId;
   return Object.keys(metadata).length ? { ...incoming, metadata: metadata as ChatMessage["metadata"] } : { ...incoming, metadata: undefined };
@@ -315,22 +362,53 @@ function applyReactions(message: ChatMessage, added: ChatReactionAdded[], remove
 }
 
 function newConversation(conversationId: string, state: SharedConversationState, updatedAt: string): Conversation {
+  // Only the chat's shared fields are taken from another device; everything
+  // else on a new chat starts as this device's own.
+  const metadata: Record<string, unknown> = { participantSessions: [], warnings: [], running: false };
+  for (const key of SHARED_CONVERSATION_METADATA_KEYS) {
+    if (state.metadata?.[key] !== undefined) metadata[key] = state.metadata[key];
+  }
   return {
     id: conversationId,
     title: state.title,
-    kind: state.kind,
+    kind: "chat",
     createdAt: state.createdAt,
     updatedAt,
     ...(state.repoPath ? { repoPath: state.repoPath } : {}),
     messages: [],
     findings: [],
-    metadata: { ...state.metadata, participantSessions: [], warnings: [], running: false }
+    metadata: metadata as Conversation["metadata"]
   };
+}
+
+/** Reactions to a message this device does not hold yet. They come from
+ *  another device's log than the message itself, so they can arrive first;
+ *  they are kept here (device-local) and applied when the message arrives. */
+const PENDING_REACTIONS_KEY = "pendingChatReactions";
+const PENDING_REACTIONS_MAX = 200;
+
+type PendingReactions = Record<string, { added: ChatReactionAdded[]; removed: ChatReactionRemoved[] }>;
+
+function pendingReactions(conversation: Conversation): PendingReactions {
+  const value = (conversation.metadata as Record<string, unknown>)[PENDING_REACTIONS_KEY];
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as PendingReactions) } : {};
+}
+
+function setPendingReactions(conversation: Conversation, pending: PendingReactions): void {
+  const ids = Object.keys(pending);
+  const metadata = conversation.metadata as Record<string, unknown>;
+  if (!ids.length) {
+    delete metadata[PENDING_REACTIONS_KEY];
+    return;
+  }
+  const kept = ids.slice(-PENDING_REACTIONS_MAX);
+  metadata[PENDING_REACTIONS_KEY] = Object.fromEntries(kept.map((id) => [id, pending[id]]));
 }
 
 /**
  * Folds one incoming `chat.changes` event into this device's copy. Pure: the
- * caller persists the result (without emitting it again).
+ * caller persists the result (without emitting it again). A change the rules
+ * refuse is listed in `ignored`; it never stops the rest of the event.
  */
 export function applyChatChanges(
   existing: Conversation | undefined,
@@ -343,15 +421,27 @@ export function applyChatChanges(
   let changed = false;
   const ignored: string[] = [];
   for (const change of payload.changes) {
+    if (!isValidChange(change)) {
+      ignored.push(`invalid:${typeof (change as { type?: unknown })?.type === "string" ? (change as { type: string }).type : "unknown"}`);
+      continue;
+    }
     if (change.type === "conversation.created") {
       if (!conversation) {
+        if (!policy.acceptsConversationFields(originId)) {
+          ignored.push("conversation.created");
+          continue;
+        }
         conversation = newConversation(payload.conversationId, change.conversation, payload.updatedAt);
         created = true;
         changed = true;
       }
       continue;
     }
-    if (!conversation) return { status: "missing-conversation" };
+    if (!conversation) {
+      if (policy.holdsUnknownChats) return { status: "missing-conversation" };
+      ignored.push(`${change.type}:unknown-chat`);
+      continue;
+    }
     switch (change.type) {
       case "conversation.updated": {
         if (!policy.acceptsConversationFields(originId)) {
@@ -372,14 +462,22 @@ export function applyChatChanges(
       }
       case "message.created":
       case "message.updated": {
-        if (!change.message || typeof change.message.id !== "string") {
-          ignored.push(change.type);
-          break;
-        }
         if (removedIds(conversation).has(change.message.id)) break;
         const index = conversation.messages.findIndex((message) => message.id === change.message.id);
         if (index < 0) {
-          conversation.messages.push(mergeIncomingMessage(undefined, change.message, originId, true));
+          if (!policy.acceptsMessageCreate(change.message, conversation, originId)) {
+            ignored.push(`${change.type}:${change.message.id}`);
+            break;
+          }
+          let inserted = mergeIncomingMessage(undefined, change.message, originId);
+          const pending = pendingReactions(conversation);
+          const held = pending[inserted.id];
+          if (held) {
+            inserted = applyReactions(inserted, held.added, held.removed);
+            delete pending[inserted.id];
+            setPendingReactions(conversation, pending);
+          }
+          conversation.messages.push(inserted);
           changed = true;
           break;
         }
@@ -388,24 +486,34 @@ export function applyChatChanges(
           ignored.push(`${change.type}:${change.message.id}`);
           break;
         }
-        conversation.messages[index] = mergeIncomingMessage(current, change.message, originId, false);
+        conversation.messages[index] = mergeIncomingMessage(current, change.message, originId);
         changed = true;
         break;
       }
       case "message.reactions": {
         const index = conversation.messages.findIndex((message) => message.id === change.messageId);
         if (index < 0) {
-          ignored.push(`message.reactions:${change.messageId}`);
+          if (removedIds(conversation).has(change.messageId)) break;
+          const pending = pendingReactions(conversation);
+          const held = pending[change.messageId] ?? { added: [], removed: [] };
+          pending[change.messageId] = { added: [...held.added, ...change.added], removed: [...held.removed, ...change.removed] };
+          setPendingReactions(conversation, pending);
+          changed = true;
           break;
         }
-        conversation.messages[index] = applyReactions(conversation.messages[index], change.added ?? [], change.removed ?? []);
+        conversation.messages[index] = applyReactions(conversation.messages[index], change.added, change.removed);
         changed = true;
         break;
       }
       case "message.removed": {
+        const current = conversation.messages.find((message) => message.id === change.messageId);
+        if (!policy.acceptsMessageRemoval(current, conversation, originId)) {
+          ignored.push(`message.removed:${change.messageId}`);
+          break;
+        }
         const removed = removedIds(conversation);
         if (!removed.has(change.messageId)) {
-          conversation.metadata.removedChatMessageIds = [...removed, change.messageId].slice(-100);
+          conversation.metadata.removedChatMessageIds = [...removed, change.messageId].slice(-CHAT_REMOVED_MESSAGE_IDS_MAX);
         }
         conversation.messages = conversation.messages.filter((message) => message.id !== change.messageId);
         changed = true;
@@ -413,7 +521,9 @@ export function applyChatChanges(
       }
     }
   }
-  if (!conversation) return { status: "missing-conversation" };
+  if (!conversation) {
+    return policy.holdsUnknownChats ? { status: "missing-conversation" } : { status: "ignored", ignored };
+  }
   if (changed) {
     conversation.messages = sortedByCreatedAt(conversation.messages);
     if (payload.updatedAt && (!conversation.updatedAt || payload.updatedAt > conversation.updatedAt)) conversation.updatedAt = payload.updatedAt;
@@ -421,12 +531,54 @@ export function applyChatChanges(
   return { status: "applied", conversation, created, changed, ignored };
 }
 
-const CHANGE_TYPES = new Set(["conversation.created", "conversation.updated", "message.created", "message.updated", "message.reactions", "message.removed"]);
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
 
+function isValidMessage(value: unknown): value is ChatMessage {
+  return isRecord(value) && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256 &&
+    typeof value.role === "string" && typeof value.content === "string" && typeof value.createdAt === "string" &&
+    (value.metadata === undefined || isRecord(value.metadata));
+}
+
+function isValidReactor(value: unknown): value is ChatReactor {
+  return isRecord(value) && typeof value.actorId === "string" && value.actorId.length > 0;
+}
+
+/** One change of a known type with the fields applying it reads. Anything
+ *  else is skipped: refusing the whole event would stop that chat's log on
+ *  this device for good, and a newer peer may add change types. */
+export function isValidChange(value: unknown): value is ChatChange {
+  if (!isRecord(value)) return false;
+  switch (value.type) {
+    case "conversation.created": {
+      const state = value.conversation;
+      return isRecord(state) && typeof state.title === "string" && typeof state.createdAt === "string" &&
+        state.kind === "chat" && (state.repoPath === undefined || typeof state.repoPath === "string") && isRecord(state.metadata);
+    }
+    case "conversation.updated":
+      return (value.title === undefined || typeof value.title === "string") &&
+        (value.repoPath === undefined || value.repoPath === null || typeof value.repoPath === "string") &&
+        (value.metadata === undefined || isRecord(value.metadata)) &&
+        (value.removedMetadataKeys === undefined || (Array.isArray(value.removedMetadataKeys) && value.removedMetadataKeys.every((key) => typeof key === "string")));
+    case "message.created":
+    case "message.updated":
+      return isValidMessage(value.message);
+    case "message.reactions":
+      return typeof value.messageId === "string" && Array.isArray(value.added) && Array.isArray(value.removed) &&
+        value.added.every((entry) => isRecord(entry) && typeof entry.emoji === "string" && isValidReactor(entry.reactor)) &&
+        value.removed.every((entry) => isRecord(entry) && typeof entry.emoji === "string" && typeof entry.actorId === "string");
+    case "message.removed":
+      return typeof value.messageId === "string" && value.messageId.length > 0;
+    default:
+      return false;
+  }
+}
+
+/** A chat change event a device can fold: a safe chat id and a list of
+ *  changes. Individual changes are checked when applied. */
 export function isChatChangesPayload(value: unknown): value is ChatChangesPayload {
-  if (!value || typeof value !== "object") return false;
-  const payload = value as Partial<ChatChangesPayload>;
-  return payload.version === CHAT_CHANGES_VERSION && typeof payload.conversationId === "string" && payload.conversationId.length > 0 &&
-    typeof payload.updatedAt === "string" && Array.isArray(payload.changes) &&
-    payload.changes.every((change) => Boolean(change) && typeof change === "object" && CHANGE_TYPES.has((change as ChatChange).type));
+  if (!isRecord(value)) return false;
+  return typeof value.version === "number" && value.version >= 1 && isSafeChatId(value.conversationId) &&
+    typeof value.updatedAt === "string" && Array.isArray(value.changes);
 }

@@ -235,7 +235,7 @@ test("a turn waits for the chat change it names and then runs on the whole chat"
   }, { getConversation: async (id) => store.get(id) }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
   { ...hostEvents, pairing: enrollment, deviceId: MACHINE_ID, appVersion: "test", createClient: stubClient,
     applyChatChanges: async (event, payload) => {
-      const result = chatChanges.applyChatChanges(store.get(payload.conversationId), payload, event.originId, { acceptsConversationFields: () => true, acceptsMessageUpdate: () => true });
+      const result = chatChanges.applyChatChanges(store.get(payload.conversationId), payload, event.originId, { acceptsConversationFields: () => true, acceptsMessageUpdate: () => true, acceptsMessageCreate: () => true, acceptsMessageRemoval: () => true, holdsUnknownChats: true });
       if (result.status !== "applied") return "missing-conversation";
       store.set(payload.conversationId, result.conversation);
       return "applied";

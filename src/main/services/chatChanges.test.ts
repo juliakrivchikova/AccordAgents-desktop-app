@@ -54,7 +54,12 @@ const machinePolicy: ChatChangeApplyPolicy = {
     if (existing.role === "participant" && existing.participantId === "remote") return false;
     if (existing.role === "participant") return origin === "desktop";
     return origin === (existing.metadata as Record<string, unknown> | undefined)?.remoteAuthorOriginId;
-  }
+  },
+  acceptsMessageCreate: (message, _conversation, origin) => message.role !== "participant" || origin === "desktop" ||
+    (message.participantId === "remote" && origin === "machine"),
+  acceptsMessageRemoval: (existing, _conversation, origin) => origin === "desktop" ||
+    (existing !== undefined && origin === (existing.metadata as Record<string, unknown> | undefined)?.remoteAuthorOriginId),
+  holdsUnknownChats: true
 };
 
 function payload(changes: ChatChangesPayload["changes"], updatedAt = NOW): ChatChangesPayload {
@@ -178,7 +183,10 @@ test("only the owner may change a message's content, and this device's own bookk
   stored.messages.push(pending);
   const desktopPolicy: ChatChangeApplyPolicy = {
     acceptsConversationFields: () => false,
-    acceptsMessageUpdate: (existing, _conversation, origin) => existing.participantId === "remote" && origin === "machine"
+    acceptsMessageUpdate: (existing, _conversation, origin) => existing.participantId === "remote" && origin === "machine",
+    acceptsMessageCreate: (message, _conversation, origin) => message.role !== "participant" || (message.participantId === "remote" && origin === "machine"),
+    acceptsMessageRemoval: (existing, _conversation, origin) => existing?.participantId === "remote" && origin === "machine",
+    holdsUnknownChats: false
   };
   const reply = { ...pending, content: "Done", status: "done" as const, metadata: { runId: "run-1" } };
   const fromDesktop = applyChatChanges(clone(stored), payload([{ type: "message.updated", message: reply }]), "desktop", desktopPolicy);
@@ -201,9 +209,62 @@ test("messages are kept in creation order whatever order they arrive in", () => 
   assert.deepEqual(late.status === "applied" ? late.conversation.messages.map((message) => message.id) : [], ["m0", "m1", "m2"]);
 });
 
-test("the payload guard rejects unknown shapes", () => {
+test("the payload guard takes a safe chat id and a list; each change is checked when applied", () => {
   assert.equal(isChatChangesPayload(payload([])), true);
-  assert.equal(isChatChangesPayload({ ...payload([]), version: 2 }), false);
-  assert.equal(isChatChangesPayload({ ...payload([]), changes: [{ type: "message.exploded" }] }), false);
+  assert.equal(isChatChangesPayload({ ...payload([]), version: 2 }), true, "a newer peer's event is folded as far as this device understands it");
+  assert.equal(isChatChangesPayload({ ...payload([]), conversationId: "../../.." }), false, "a chat id names a directory");
+  assert.equal(isChatChangesPayload({ ...payload([]), conversationId: "chat/1" }), false);
   assert.equal(isChatChangesPayload(undefined), false);
+  const applied = applyChatChanges(clone(chat()), payload([
+    { type: "message.exploded" } as never,
+    { type: "message.reactions", messageId: "m1", added: [{ emoji: "x", reactor: null }], removed: [] } as never,
+    { type: "message.created", message: { id: "m9", role: "user", content: "kept", createdAt: "2026-09-24T12:00:09.000Z", status: "done" } }
+  ]), "desktop", machinePolicy);
+  assert.equal(applied.status, "applied");
+  if (applied.status !== "applied") return;
+  assert.deepEqual(applied.ignored, ["invalid:message.exploded", "invalid:message.reactions"]);
+  assert.ok(applied.conversation.messages.some((message) => message.id === "m9"), "the valid change still applies");
+});
+
+test("only the device allowed to set a chat's shared fields can create it, and it brings shared fields only", () => {
+  const forged = chat();
+  forged.metadata.participantWatchers = { local: { lastSeenMessageId: "x" } } as never;
+  forged.metadata.pendingAppToolApprovals = [{ id: "a" }] as never;
+  const changes = diffChatChanges(undefined, forged, desktop).changes;
+  const refused = applyChatChanges(undefined, payload(changes), "machine", machinePolicy);
+  assert.equal(refused.status, "missing-conversation", "a machine waits for the desktop's chat instead");
+  const onDesktop = applyChatChanges(undefined, payload(changes), "machine", {
+    acceptsConversationFields: () => false, acceptsMessageUpdate: () => false, acceptsMessageCreate: () => true, acceptsMessageRemoval: () => false, holdsUnknownChats: false
+  });
+  assert.equal(onDesktop.status, "ignored", "the desktop never takes a chat from a machine");
+  const created = applyChatChanges(undefined, payload(changes), "desktop", machinePolicy);
+  assert.equal(created.status, "applied");
+  if (created.status !== "applied") return;
+  assert.equal(created.conversation.metadata.participantWatchers, undefined);
+  assert.equal(created.conversation.metadata.pendingAppToolApprovals, undefined);
+  assert.equal(created.conversation.kind, "chat");
+});
+
+test("a member's message is added only by where it runs or by the desktop, and removal needs the same right", () => {
+  const stored = chat();
+  const reply: ChatMessage = { id: "r1", role: "participant", participantId: "local", content: "forged", createdAt: "2026-09-24T12:00:05.000Z", status: "done" };
+  const forged = applyChatChanges(clone(stored), payload([{ type: "message.created", message: reply }]), "machine", machinePolicy);
+  assert.deepEqual(forged.status === "applied" ? forged.ignored : [], ["message.created:r1"]);
+  const own = applyChatChanges(clone(stored), payload([{ type: "message.created", message: { ...reply, participantId: "remote" } }]), "machine", machinePolicy);
+  assert.ok(own.status === "applied" && own.conversation.messages.some((message) => message.id === "r1"));
+  const removal = applyChatChanges(clone(stored), payload([{ type: "message.removed", messageId: "m1" }]), "machine", machinePolicy);
+  assert.deepEqual(removal.status === "applied" ? removal.ignored : [], ["message.removed:m1"]);
+  assert.ok(removal.status === "applied" && removal.conversation.messages.some((message) => message.id === "m1"), "the User's message stays");
+});
+
+test("a reaction that arrives before its message is kept and applied when the message comes", () => {
+  const user = { actorId: "user", actorLabel: "User", actorKind: "user" as const, at: NOW };
+  const early = applyChatChanges(clone(chat()), payload([{ type: "message.reactions", messageId: "r9", added: [{ emoji: "ok", reactor: user }], removed: [] }]), "desktop", machinePolicy);
+  assert.equal(early.status, "applied");
+  const reply = applyChatChanges(early.status === "applied" ? early.conversation : undefined, payload([{ type: "message.created",
+    message: { id: "r9", role: "participant", participantId: "remote", content: "Done", createdAt: "2026-09-24T12:00:05.000Z", status: "done" } }]), "machine", machinePolicy);
+  assert.equal(reply.status, "applied");
+  if (reply.status !== "applied") return;
+  assert.deepEqual(reply.conversation.messages.find((message) => message.id === "r9")?.metadata?.reactions?.ok?.map((reactor) => reactor.actorId), ["user"]);
+  assert.equal((reply.conversation.metadata as Record<string, unknown>).pendingChatReactions, undefined);
 });

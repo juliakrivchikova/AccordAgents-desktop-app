@@ -86,7 +86,7 @@ async function pair() {
   return {
     desktop: devices.desktop,
     machine: devices.machine,
-    cleanup: () => rm(directory, { recursive: true, force: true })
+    cleanup: () => rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   };
 }
 
@@ -242,5 +242,33 @@ test("a change for a chat the machine does not have is held until the chat arriv
     assert.equal(await deliver(desktop, machine, desktop.committed[0]), "applied");
     assert.equal(await deliver(desktop, machine, desktop.committed[1]), "applied");
     assert.deepEqual((await machine.storage.getConversation("chat-1"))?.messages.map((message) => message.id), ["m1", "m2", "m4"]);
+  } finally { await cleanup(); }
+});
+
+test("the desktop does not let a machine create a chat; every chat starts on the desktop", async () => {
+  const { desktop, machine, cleanup } = await pair();
+  try {
+    // The machine holds a chat the desktop never had and announces it.
+    await save(machine, { ...chat(), id: "chat-from-machine" });
+    assert.equal(machine.committed.length, 1);
+    assert.equal(await deliver(machine, desktop, machine.committed[0]), "applied", "settled, so it is not offered again");
+    assert.equal(await desktop.storage.getConversation("chat-from-machine"), undefined);
+  } finally { await cleanup(); }
+});
+
+test("a save sends only the messages that changed, however long the chat is", async () => {
+  const { desktop, cleanup } = await pair();
+  try {
+    const conversation = chat();
+    for (let index = 0; index < 300; index += 1) {
+      conversation.messages.push({ id: `bulk-${index}`, role: "user", content: `Message ${index}`, createdAt: `2026-09-24T13:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`, status: "done" });
+    }
+    await save(desktop, conversation);
+    const stored = (await desktop.storage.getConversation("chat-1"))!;
+    stored.messages[150] = { ...stored.messages[150], content: "Edited" };
+    stored.messages.push({ id: "last", role: "user", content: "Last", createdAt: "2026-09-24T14:00:00.000Z", status: "done" });
+    await save(desktop, stored);
+    const { payload } = await event(desktop, desktop.committed[1]);
+    assert.deepEqual(types(payload), [`message.updated:${stored.messages[150].id}`, "message.created:last"]);
   } finally { await cleanup(); }
 });

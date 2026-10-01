@@ -79,13 +79,35 @@ export function createChatChangeTransport(options: ChatChangeTransportOptions): 
       emitsConversationFields: options.role === "desktop",
       ownsMessage: (message) => ownsMessage(conversation, message)
     }),
-    applyPolicy: (): ChatChangeApplyPolicy => ({
-      acceptsConversationFields: (originId) => options.role === "machine" && originId === options.desktopOriginId?.(),
-      acceptsMessageUpdate: (existing, conversation, originId) => {
-        const writer = expectedWriter(conversation, existing);
-        return Boolean(writer) && writer === originId;
-      }
-    }),
+    applyPolicy: (): ChatChangeApplyPolicy => {
+      const fromDesktop = (originId: string): boolean => options.role === "machine" && originId === options.desktopOriginId?.();
+      return {
+        acceptsConversationFields: fromDesktop,
+        acceptsMessageUpdate: (existing, conversation, originId) => {
+          const writer = expectedWriter(conversation, existing);
+          return Boolean(writer) && writer === originId;
+        },
+        acceptsMessageCreate: (message, conversation, originId) => {
+          if (message.role !== "participant" || !message.participantId) return true;
+          // A member's message comes from where it runs, or from the desktop
+          // that dispatches it (the pending bubble of a member on a machine).
+          if (fromDesktop(originId)) return true;
+          const participants = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as ChatParticipant[] : [];
+          if (!participants.some((participant) => participant?.id === message.participantId)) return false;
+          const home = participantHome(conversation, message.participantId);
+          if (!home) return false;
+          if (options.role === "machine" && home === options.hostMachineId?.()) return false;
+          return options.machineOriginId?.(home) === originId;
+        },
+        acceptsMessageRemoval: (existing, conversation, originId) => {
+          if (fromDesktop(originId)) return true;
+          if (!existing) return false;
+          const writer = expectedWriter(conversation, existing);
+          return Boolean(writer) && writer === originId;
+        },
+        holdsUnknownChats: options.role === "machine"
+      };
+    },
     commit: async (payload, write) => {
       const audience = options.recipients();
       const prepared = await options.storage.deviceEventBlobs().prepare(payload);

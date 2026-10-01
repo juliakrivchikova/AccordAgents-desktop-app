@@ -87,9 +87,7 @@ async function machine(dir, controls = {}) {
       applyChatChanges: async (event, payload) => {
         if (await storage.conversationTombstones().isDeleted(payload.conversationId)) return "applied";
         const existing = await storage.getConversation(payload.conversationId);
-        const result = chatChanges.applyChatChanges(existing ?? undefined, payload, event.originId, {
-          acceptsConversationFields: () => true, acceptsMessageUpdate: () => true
-        });
+        const result = chatChanges.applyChatChanges(existing ?? undefined, payload, event.originId, { acceptsConversationFields: () => true, acceptsMessageUpdate: () => true, acceptsMessageCreate: () => true, acceptsMessageRemoval: () => true, holdsUnknownChats: true });
         if (result.status !== "applied") return "missing-conversation";
         await storage.saveConversation(result.conversation);
         return "applied";

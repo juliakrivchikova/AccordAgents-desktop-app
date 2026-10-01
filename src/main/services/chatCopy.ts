@@ -2,7 +2,8 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { once } from "node:events";
-import type { ChatMessage, Conversation } from "../../shared/types";
+import { isAutoWatchStableMessage } from "../../shared/chatTimelineVisibility";
+import type { ChatMessage, ChatMessageReactions, ChatParticipantWatcherState, Conversation } from "../../shared/types";
 import {
   LOCAL_MESSAGE_METADATA_KEYS,
   SHARED_CONVERSATION_METADATA_KEYS,
@@ -48,6 +49,8 @@ export interface CopiedConversation {
   shared: SharedConversationState;
   messages: ChatMessage[];
   removed: string[];
+  /** Which device wrote a message, for the ones not written on the desktop. */
+  authors?: Record<string, string>;
 }
 
 export interface ChatCopyImportSummary {
@@ -68,17 +71,22 @@ function jsonLine(value: unknown): string {
 }
 
 async function* jsonLines(file: string): AsyncGenerator<string> {
-  let pending = "";
+  // A chat can be megabytes on one line: its pieces are joined once, at its end.
+  let pending: string[] = [];
   for await (const chunk of createReadStream(file, { encoding: "utf8" })) {
-    pending += chunk as string;
-    let end = pending.indexOf("\n");
+    const text = chunk as string;
+    let start = 0;
+    let end = text.indexOf("\n");
     while (end >= 0) {
-      yield pending.slice(0, end);
-      pending = pending.slice(end + 1);
-      end = pending.indexOf("\n");
+      pending.push(text.slice(start, end));
+      yield pending.join("");
+      pending = [];
+      start = end + 1;
+      end = text.indexOf("\n", start);
     }
+    if (start < text.length) pending.push(text.slice(start));
   }
-  if (pending) yield pending;
+  if (pending.length) yield pending.join("");
 }
 
 function removedIds(conversation: Pick<Conversation, "metadata">): string[] {
@@ -106,12 +114,18 @@ export async function exportChatCopy(
       if (summary.kind !== "chat") continue;
       const conversation = await storage.getConversation(summary.id);
       if (!conversation || conversation.kind !== "chat") continue;
+      const authors: Record<string, string> = {};
+      for (const message of conversation.messages) {
+        const author = (message.metadata as Record<string, unknown> | undefined)?.remoteAuthorOriginId;
+        if (typeof author === "string" && author) authors[message.id] = author;
+      }
       const copied: CopiedConversation = {
         id: conversation.id,
         updatedAt: conversation.updatedAt,
         shared: sharedConversationState(conversation),
         messages: conversation.messages.map((message) => sharedMessage(message, { withReactions: true })),
-        removed: removedIds(conversation)
+        removed: removedIds(conversation),
+        ...(Object.keys(authors).length ? { authors } : {})
       };
       const line = `${jsonLine(copied)}\n`;
       bytes += Buffer.byteLength(line);
@@ -197,15 +211,54 @@ export function localizedRepository(
   };
 }
 
+function participantHomes(metadata: Record<string, unknown> | undefined): Map<string, string> {
+  const homes = new Map<string, string>();
+  const participants = metadata?.participants;
+  for (const participant of Array.isArray(participants) ? participants as Array<{ id?: string; homeMachineId?: string }> : []) {
+    if (participant?.id && participant.homeMachineId) homes.set(participant.id, participant.homeMachineId);
+  }
+  return homes;
+}
+
+/** The desktop's reactions, except those of members that live on this
+ *  machine: this machine is where they react, so its own set of theirs stays. */
+function copiedReactions(
+  incoming: ChatMessageReactions | undefined,
+  local: ChatMessageReactions | undefined,
+  livesHere: (participantId: string) => boolean
+): ChatMessageReactions | undefined {
+  const result: ChatMessageReactions = {};
+  const add = (emoji: string, reactor: ChatMessageReactions[string][number]): void => {
+    result[emoji] = [...(result[emoji] ?? []).filter((item) => item.actorId !== reactor.actorId), reactor];
+  };
+  const memberHere = (reactor: { actorKind?: string; actorId?: string }): boolean =>
+    reactor.actorKind === "participant" && typeof reactor.actorId === "string" && livesHere(reactor.actorId);
+  for (const [emoji, reactors] of Object.entries(incoming ?? {})) {
+    for (const reactor of Array.isArray(reactors) ? reactors : []) if (reactor && !memberHere(reactor)) add(emoji, reactor);
+  }
+  for (const [emoji, reactors] of Object.entries(local ?? {})) {
+    for (const reactor of Array.isArray(reactors) ? reactors : []) if (reactor && memberHere(reactor)) add(emoji, reactor);
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+function withReactions(message: ChatMessage, reactions: ChatMessageReactions | undefined): ChatMessage {
+  const metadata: Record<string, unknown> = { ...(message.metadata ?? {}) };
+  if (reactions) metadata.reactions = reactions;
+  else delete metadata.reactions;
+  return { ...message, metadata: metadata as ChatMessage["metadata"] };
+}
+
 /**
  * One chat of the copy merged into this machine's own copy of it (if any).
  * The desktop's shared fields win; this machine keeps its own run bookkeeping,
- * its sessions, and its own members' replies.
+ * its sessions, and what it wrote itself: its own members' replies, and the
+ * messages the desktop knows came from this machine.
  */
 export function mergeCopiedConversation(
   local: Conversation | undefined,
   copied: CopiedConversation,
-  options: { desktopOriginId: string; hostMachineId?: string }
+  options: { desktopOriginId: string; hostMachineId?: string; localOriginId?: string; now?: () => Date }
 ): Conversation {
   const shared = new Set(SHARED_CONVERSATION_METADATA_KEYS);
   const metadata: Record<string, unknown> = {};
@@ -224,13 +277,16 @@ export function mergeCopiedConversation(
   const removed = new Set([...removedIds(local ?? { metadata: {} }), ...copied.removed]);
   if (removed.size) metadata.removedChatMessageIds = [...removed].slice(-100);
   else delete metadata.removedChatMessageIds;
-  const homes = new Map<string, string>();
-  for (const participant of Array.isArray(metadata.participants) ? metadata.participants as Array<{ id?: string; homeMachineId?: string }> : []) {
-    if (participant?.id && participant.homeMachineId) homes.set(participant.id, participant.homeMachineId);
-  }
-  const ownedHere = (message: ChatMessage): boolean =>
-    message.role === "participant" && Boolean(message.participantId) && Boolean(options.hostMachineId) &&
-    homes.get(message.participantId!) === options.hostMachineId;
+  // A member counts as living here if either copy says so: one that has just
+  // moved away still wrote its earlier replies here.
+  const localHomes = participantHomes(local?.metadata as Record<string, unknown> | undefined);
+  const copiedHomes = participantHomes(copied.shared.metadata);
+  const livesHere = (participantId: string): boolean => Boolean(options.hostMachineId) &&
+    (localHomes.get(participantId) === options.hostMachineId || copiedHomes.get(participantId) === options.hostMachineId);
+  const authors = copied.authors ?? {};
+  const writtenHere = (message: ChatMessage): boolean =>
+    (message.role === "participant" && Boolean(message.participantId) && livesHere(message.participantId!)) ||
+    (Boolean(options.localOriginId) && authors[message.id] === options.localOriginId);
   const byId = new Map<string, ChatMessage>();
   const order: string[] = [];
   for (const message of local?.messages ?? []) {
@@ -239,16 +295,24 @@ export function mergeCopiedConversation(
   }
   for (const incoming of copied.messages) {
     const current = byId.get(incoming.id);
-    if (current && ownedHere(current)) continue;
-    const merged: Record<string, unknown> = { ...(incoming.metadata ?? {}) };
-    for (const key of LOCAL_MESSAGE_METADATA_KEYS) delete merged[key];
-    const currentMetadata = (current?.metadata ?? {}) as Record<string, unknown>;
-    for (const key of LOCAL_MESSAGE_METADATA_KEYS) {
-      if (currentMetadata[key] !== undefined) merged[key] = currentMetadata[key];
+    const here = writtenHere(incoming) || (current !== undefined && writtenHere(current));
+    let next: ChatMessage;
+    if (current && here) {
+      // Its content and run state are this machine's own, and newest here.
+      next = current;
+    } else {
+      const merged: Record<string, unknown> = { ...(incoming.metadata ?? {}) };
+      for (const key of LOCAL_MESSAGE_METADATA_KEYS) delete merged[key];
+      const currentMetadata = (current?.metadata ?? {}) as Record<string, unknown>;
+      for (const key of LOCAL_MESSAGE_METADATA_KEYS) {
+        if (currentMetadata[key] !== undefined) merged[key] = currentMetadata[key];
+      }
+      if (here) delete merged.remoteAuthorOriginId;
+      else merged.remoteAuthorOriginId = authors[incoming.id] ?? options.desktopOriginId;
+      next = { ...incoming, metadata: merged as ChatMessage["metadata"] };
     }
-    if (!ownedHere(incoming)) merged.remoteAuthorOriginId = currentMetadata.remoteAuthorOriginId ?? options.desktopOriginId;
-    else delete merged.remoteAuthorOriginId;
-    byId.set(incoming.id, { ...incoming, metadata: merged as ChatMessage["metadata"] });
+    if (current) next = withReactions(next, copiedReactions(incoming.metadata?.reactions, current.metadata?.reactions, livesHere));
+    byId.set(incoming.id, next);
     if (!current) order.push(incoming.id);
   }
   const messages = order
@@ -256,6 +320,24 @@ export function mergeCopiedConversation(
     .map((id, index) => ({ message: byId.get(id)!, index }))
     .sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.index - right.index)
     .map((entry) => entry.message);
+  // A member that watches the chat from here starts caught up: what was said
+  // before the copy is not news to it.
+  const rawWatchers = metadata.participantWatchers;
+  const watchers: Record<string, ChatParticipantWatcherState> = rawWatchers && typeof rawWatchers === "object" && !Array.isArray(rawWatchers)
+    ? { ...(rawWatchers as Record<string, ChatParticipantWatcherState>) } : {};
+  let watchersChanged = false;
+  const participants = Array.isArray(metadata.participants) ? metadata.participants as Array<{ id?: string; autoWatch?: boolean }> : [];
+  for (const participant of participants) {
+    if (!participant?.id || participant.autoWatch !== true || !livesHere(participant.id) || watchers[participant.id]) continue;
+    const stable = messages.filter((message) => isAutoWatchStableMessage(message, participant.id!));
+    watchers[participant.id] = {
+      ...(stable.length ? { lastSeenMessageId: stable[stable.length - 1].id } : {}),
+      wakeChainDepth: 0,
+      updatedAt: (options.now ?? (() => new Date()))().toISOString()
+    };
+    watchersChanged = true;
+  }
+  if (watchersChanged) metadata.participantWatchers = watchers;
   const repository = localizedRepository(local, copied.shared.repoPath, options.hostMachineId);
   if (repository.machineRepository) metadata.machineRepository = repository.machineRepository;
   else delete metadata.machineRepository;
@@ -300,7 +382,9 @@ export async function importChatCopy(
     const local = await storage.getConversation(copied.id);
     const merged = mergeCopiedConversation(local && local.kind === "chat" ? local : undefined, copied, {
       desktopOriginId: manifest.desktopOriginId,
-      hostMachineId: options.hostMachineId
+      hostMachineId: options.hostMachineId,
+      localOriginId: options.localOriginId,
+      now
     });
     await storage.saveConversation(merged);
     summary.conversations += 1;

@@ -14,7 +14,7 @@ import { StorageService } from "./storage";
 const ROOM = "room-1";
 const FUTURE = "2999-01-01T00:00:00.000Z";
 
-async function device(dbPath: string, peer: () => string) {
+async function device(dbPath: string, peer: () => string, role: "desktop" | "machine" = "desktop") {
   const storage = new StorageService({ dbPath });
   const log = new ChatEventLogService(storage);
   const { originId } = await log.getOrCreateDeviceIdentity();
@@ -24,8 +24,9 @@ async function device(dbPath: string, peer: () => string) {
   (service as unknown as { ensureHistoryFiles(): Promise<string> }).ensureHistoryFiles = async () => "/mock/history";
   const committed: string[] = [];
   const inner = createChatChangeTransport({
-    role: "desktop", storage, log,
-    recipients: () => [{ deviceId: peer(), channelId: ROOM }]
+    role, storage, log,
+    recipients: () => [{ deviceId: peer(), channelId: ROOM }],
+    desktopOriginId: () => (role === "machine" ? peer() : undefined)
   });
   service.setChatChangeTransport({
     ...inner,
@@ -98,7 +99,7 @@ test("confirmed chat changes are forgotten; the newest of a chat, unconfirmed on
     assert.deepEqual(await desktop.storage.deviceEvents().pruneConfirmedChatChanges(desktop.originId, FUTURE), { events: 1, blobs: 0 });
     assert.ok(await desktop.storage.getChatEvent(desktop.committed[3]));
     assert.equal(await desktop.storage.deviceEvents().appliedHead(desktop.originId, chatChangesLogScope("chat-1")), 0);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
 test("a receiver forgets what it applied, and an old event delivered again afterwards is confirmed, not applied", async () => {
@@ -106,7 +107,7 @@ test("a receiver forgets what it applied, and an old event delivered again after
   try {
     const peerId = { value: "" };
     const desktop = await device(path.join(directory, "desktop.sqlite3"), () => peerId.value);
-    const machine = await device(path.join(directory, "machine.sqlite3"), () => desktop.originId);
+    const machine = await device(path.join(directory, "machine.sqlite3"), () => desktop.originId, "machine");
     peerId.value = machine.originId;
     await save(desktop, chat());
     await addMessage(desktop, "m2", "Second");
@@ -131,5 +132,5 @@ test("a receiver forgets what it applied, and an old event delivered again after
     const settled = await machine.storage.deviceEvents().settleCovered(ROOM, desktop.originId, "2026-10-01T09:50:00.000Z");
     assert.deepEqual(settled.map((receipt) => receipt.eventId), [first.eventId]);
     assert.deepEqual((await machine.storage.getConversation("chat-1"))?.messages.map((message) => message.id), ["m1", "m2", "m3"]);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });

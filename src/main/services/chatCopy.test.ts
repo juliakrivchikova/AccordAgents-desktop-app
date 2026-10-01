@@ -65,7 +65,7 @@ async function pair() {
   const devices: { desktop?: Device; machine?: Device } = {};
   devices.desktop = await device(path.join(directory, "desktop.sqlite3"), "desktop", () => devices.machine!.originId);
   devices.machine = await device(path.join(directory, "machine.sqlite3"), "machine", () => devices.desktop!.originId);
-  return { directory, desktop: devices.desktop, machine: devices.machine, cleanup: () => rm(directory, { recursive: true, force: true }) };
+  return { directory, desktop: devices.desktop, machine: devices.machine, cleanup: () => rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) };
 }
 
 function chat(id: string, messages: ChatMessage[]): Conversation {
@@ -195,6 +195,47 @@ test("a copy merged into a machine's existing chat keeps that machine's own repl
   assert.equal(merged.repoPath, "/Users/someone/project", "without a copy of its own the machine names the project by the desktop's path");
 });
 
+test("a copy marks each message with the device that wrote it, keeps this machine's own, and its members' reactions", () => {
+  const reactor = (actorId: string, actorKind: "user" | "participant") => ({ actorId, actorLabel: actorId, actorKind, at: NOW });
+  const authored = (origin: string, extra: Record<string, unknown> = {}) => ({ remoteAuthorOriginId: origin, ...extra }) as ChatMessage["metadata"];
+  const authorOf = (item: ChatMessage | undefined) => (item?.metadata as Record<string, unknown> | undefined)?.remoteAuthorOriginId;
+  const local = chat("chat-1", [
+    message("phone", "Typed on the phone into this machine", 1),
+    message("m1", "Hello", 2, { metadata: authored("desktop-origin", { reactions: { "👍": [reactor("remote", "participant")] } }) })
+  ]);
+  const desktopSide = chat("chat-1", [
+    message("phone", "Typed on the phone into this machine", 1, { metadata: authored("machine-origin") }),
+    message("m1", "Hello", 2, { metadata: { reactions: { "🎉": [reactor("user", "user")] } } }),
+    message("other", "From another machine", 3, { role: "participant", participantId: "elsewhere", metadata: authored("other-machine") })
+  ]);
+  const authors: Record<string, string> = { phone: "machine-origin", other: "other-machine" };
+  const copied: CopiedConversation = {
+    id: "chat-1", updatedAt: NOW, shared: sharedConversationState(desktopSide),
+    messages: desktopSide.messages.map((item) => sharedMessage(item, { withReactions: true })), removed: [], authors
+  };
+  const merged = mergeCopiedConversation(local, copied, { desktopOriginId: "desktop-origin", hostMachineId: "machine-1", localOriginId: "machine-origin" });
+  const byId = new Map(merged.messages.map((item) => [item.id, item]));
+  assert.equal(authorOf(byId.get("phone")), undefined, "written here, so this machine may still change it");
+  assert.equal(authorOf(byId.get("m1")), "desktop-origin");
+  assert.equal(authorOf(byId.get("other")), "other-machine");
+  assert.deepEqual(byId.get("m1")?.metadata?.reactions, { "🎉": [reactor("user", "user")], "👍": [reactor("remote", "participant")] },
+    "the desktop's reactions, plus the one a member living here made");
+});
+
+test("a member that watches a copied chat from this machine starts caught up", () => {
+  const desktopSide = chat("chat-1", [message("m1", "Old question", 1), message("m2", "Older answer", 2, { role: "participant", participantId: "local" })]);
+  (desktopSide.metadata.participants as Array<{ id: string; autoWatch?: boolean }>)[1].autoWatch = true;
+  const copied: CopiedConversation = {
+    id: "chat-1", updatedAt: NOW, shared: sharedConversationState(desktopSide),
+    messages: desktopSide.messages.map((item) => sharedMessage(item, { withReactions: true })), removed: []
+  };
+  const merged = mergeCopiedConversation(undefined, copied, { desktopOriginId: "desktop-origin", hostMachineId: "machine-1", now: () => new Date(NOW) });
+  const watchers = merged.metadata.participantWatchers as Record<string, { lastSeenMessageId?: string; wakeChainDepth: number }>;
+  assert.equal(watchers.remote.lastSeenMessageId, "m2", "nothing said before the copy wakes it");
+  assert.equal(watchers.remote.wakeChainDepth, 0);
+  assert.equal(watchers.local, undefined, "a member living elsewhere is watched there");
+});
+
 test("setup adopts the machine, waits for running saves, then exports; a failed export leaves nothing behind", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accord-chat-copy-provider-"));
   try {
@@ -225,7 +266,7 @@ test("setup adopts the machine, waits for running saves, then exports; a failed 
     await assert.rejects(provider.export("machine-1", { originId: "machine-origin", publicKeyDerBase64: "KEY" }), /database busy/);
     const { readdir } = await import("node:fs/promises");
     assert.deepEqual(await readdir(directory), [], "the half-written export was removed");
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
 test("a save that started before the machine became a recipient is waited for before the copy is taken", async () => {
@@ -292,7 +333,7 @@ test("artifacts go with the copy into a machine whose store refuses the old arti
       ...artifactEventWriter(machine, machineLog, () => [{ deviceId: desktopIdentity.originId, channelId: "room" }], machineStore) });
     assert.equal(await machineArtifacts.recoverActionEvents("chat-1"), 0);
     assert.ok((await machine.getChatEventClock()).wallMs >= Date.parse("2026-01-01"), "the clock is past the copied actions");
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
 test("a message holding the Unicode line and paragraph separators survives the copy whole", async () => {
@@ -311,5 +352,5 @@ test("a message holding the Unicode line and paragraph separators survives the c
     const machine = new StorageService({ dbPath: path.join(directory, "machine.sqlite3") });
     await importChatCopy(machine, copyDir, { hostMachineId: "machine-1", localOriginId: "machine-origin" });
     assert.equal((await machine.getConversation("chat-1"))?.messages[0].content, text);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
