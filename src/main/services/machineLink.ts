@@ -45,7 +45,7 @@ import { permissionDecisionAction, choiceDecisionAction, chatActionEventId } fro
 import type { ChatActionDependency } from "../../shared/deviceEventChannel";
 import type { MachineTrustRoster, TrustedPeerAccess } from "../../shared/machineTrust";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
+import { CHAT_CHANGES_EVENT_KIND, isChatChangesLogScope, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
 
 export interface MachineLinkOptions {
   repositoryPaths?: (sourcePath: string) => Promise<Record<string, string>>;
@@ -579,6 +579,30 @@ export class MachineLinkService implements MachineTurnDispatcher {
     connection.record = { ...connection.record, deviceId: identity.originId };
     await this.persistCancels(connection, true);
     void this.debugLogs.write("machine-link.identity.adopted", { machineId, deviceId: identity.originId });
+  }
+
+  /**
+   * After a machine's chat copy: changes other machines wrote that this
+   * desktop holds beyond the copy's marks go to the new machine as events.
+   * One that arrived before the new machine was known, and was not applied
+   * here when the marks were read, would otherwise reach it never.
+   */
+  async shareChatChangesAfterCopy(machineId: string, marks: Array<{ originId: string; logScopeId: string; originSeq: number }>): Promise<number> {
+    const target = this.connections.get(machineId);
+    const deviceId = target?.machineDeviceId ?? target?.record.deviceId;
+    if (!target || !deviceId) return 0;
+    let shared = 0;
+    for (const connection of this.connections.values()) {
+      const origin = connection.machineDeviceId ?? connection.record.deviceId;
+      if (!origin || connection === target) continue;
+      shared += await this.options.eventStorage.deviceEvents().shareChatChangesAfter(
+        origin,
+        marks.filter((mark) => mark.originId === origin),
+        { deviceId, channelId: target.record.pairingKey }
+      );
+    }
+    if (shared) target.eventChannel?.nudge();
+    return shared;
   }
 
   /** A chat save committed change events for the machines: send them now
@@ -1379,6 +1403,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
         onDependencyUnavailable: (dependency) => {
           void this.debugLogs.write("machine-link.action.dependency-unavailable", { ...dependency, machineId: connection.record.id });
         },
+        // Every chat is on every machine: a reply this machine wrote goes on,
+        // unchanged and signed by it, to every other machine.
+        forwardTo: (event) => isChatChangesLogScope(event.logScopeId) && event.originId === deviceId
+          ? this.chatActionRecipients().filter((recipient) => recipient.deviceId !== deviceId)
+          : [],
         apply: async (event, body) => {
           if (event.kind === CHAT_CHANGES_EVENT_KIND) {
             if (!this.options.applyChatChanges || !isChatChangesPayload(body)) throw new Error("Unexpected chat change event.");

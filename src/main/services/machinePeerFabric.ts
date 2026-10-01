@@ -94,6 +94,18 @@ export class MachinePeerFabric {
     }));
   }
 
+  /** Sends what was just committed for the peers without waiting for the timer. */
+  nudge(): void {
+    for (const connection of this.connections.values()) connection.channel.nudge();
+  }
+
+  /** The owner's other machines among them, each in the room it is met in. */
+  machineRecipients(): Array<{ deviceId: string; channelId: string }> {
+    return [...this.connections.values()]
+      .filter((connection) => connection.peer.role === "machine")
+      .map((connection) => ({ deviceId: connection.peer.deviceId, channelId: this.channelIdFor(connection.peer) }));
+  }
+
   start(): void {
     this.started = true;
     for (const connection of this.connections.values()) connection.channel.start();

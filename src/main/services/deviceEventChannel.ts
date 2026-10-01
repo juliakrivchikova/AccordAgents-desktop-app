@@ -7,7 +7,7 @@ import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import { isChatChangesLogScope } from "./chatChanges";
 import { DEVICE_EVENT_INLINE_BYTES, isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import type { DeviceEventApplyOutcome, DeviceEventGap, DeviceEventReceipt } from "../../shared/deviceEventDelivery";
+import type { DeviceEventApplyOutcome, DeviceEventGap, DeviceEventReceipt, DeviceEventRecipient } from "../../shared/deviceEventDelivery";
 import { DeviceEventProjectionPendingError } from "../../shared/deviceEventDelivery";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import { ChatEventLogService, verifySignedChatEvent } from "./chatEventLog";
@@ -37,6 +37,13 @@ interface DeviceEventChannelOptions {
   /** The peer cannot produce something a held action needs. Reported, because
    *  a deferred action that can never apply is not a transient state. */
   onDependencyUnavailable?(dependency: ChatActionDependency): void;
+  /** Desktop: who else should hold a chat change this peer wrote. Recorded
+   *  with its arrival, so the other machines get it unchanged, signed by its
+   *  author, whether or not that author is online later. */
+  forwardTo?(event: ChatEventEnvelope): DeviceEventRecipient[];
+  /** Machine: the signing key of another of the owner's machines whose chat
+   *  changes this peer may forward. Undefined refuses the forward. */
+  forwardedOriginKey?(originId: string): string | undefined;
   onError(error: Error): void;
 }
 
@@ -140,9 +147,10 @@ export class DeviceEventChannel {
         case "event": {
           this.receivePending = true;
           const event = value.event;
-          if (!event || Buffer.byteLength(JSON.stringify(event), "utf8") > DEVICE_EVENT_INLINE_BYTES * 2 || event.originId !== value.from ||
+          const originKey = event ? this.originKey(event.originId, event.logScopeId, value.from) : undefined;
+          if (!event || Buffer.byteLength(JSON.stringify(event), "utf8") > DEVICE_EVENT_INLINE_BYTES * 2 || !originKey ||
               !this.inScope(event.logScopeId) ||
-              !verifySignedChatEvent(event, this.options.peerPublicKeyDerBase64)) {
+              !verifySignedChatEvent(event, originKey)) {
             throw new DevicePacketAuthenticationError("Device event signature or channel scope is invalid.");
           }
           const remembered = this.received.get(event.eventId);
@@ -156,8 +164,10 @@ export class DeviceEventChannel {
             return;
           }
           if (remembered) break; // Stored but unapplied: retry the domain below.
+          const forward = event.originId === value.from ? this.options.forwardTo?.(event) ?? [] : [];
           const stored = await this.options.storage.appendChatEvent(event, {
-            ingress: { deviceId: value.from, channelId: this.options.channelId }
+            ingress: { deviceId: value.from, channelId: this.options.channelId },
+            ...(forward.length ? { recipients: forward } : {})
           });
           if (stored.status === "conflict") throw new Error(`Conflicting device event ${event.eventId}.`);
           const receipt = await this.options.storage.deviceEvents().receipt(event.eventId);
@@ -197,7 +207,7 @@ export class DeviceEventChannel {
         case "probe":
           if (!Array.isArray(value.events) || value.events.length > 100) throw new Error("Invalid device event receipt probe.");
           for (const header of value.events) {
-            if (!header || header.originId !== value.from || typeof header.eventId !== "string" ||
+            if (!header || typeof header.originId !== "string" || !this.originKey(header.originId, header.logScopeId, value.from) || typeof header.eventId !== "string" ||
                 typeof header.eventHash !== "string" || typeof header.logScopeId !== "string" ||
                 !this.inScope(header.logScopeId) || !Number.isSafeInteger(header.originSeq) || header.originSeq < 1) {
               throw new Error("Invalid device event receipt probe identity.");
@@ -365,6 +375,15 @@ export class DeviceEventChannel {
       this.requestedDependencies.set(key, performance.now());
     }
     if (applyError !== undefined) throw applyError;
+  }
+
+  /** The key an event arriving from `from` must be signed with: the peer's own
+   *  for its own events, and for a chat change it forwards, the key of the
+   *  machine that wrote it. Nothing else is accepted second-hand. */
+  private originKey(originId: string, logScopeId: unknown, from: string): string | undefined {
+    if (originId === from) return this.options.peerPublicKeyDerBase64;
+    if (typeof logScopeId !== "string" || !isChatChangesLogScope(logScopeId) || originId === this.options.localDeviceId) return undefined;
+    return this.options.forwardedOriginKey?.(originId);
   }
 
   /** Chat actions share one log across every machine, so one decision is one

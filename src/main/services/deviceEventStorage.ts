@@ -1,4 +1,5 @@
 import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
+import { isChatChangesLogScope } from "./chatChanges";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { decideChatEventRetention, type ChatEventRetentionDecision } from "../../shared/chatEventRetention";
 import {
@@ -8,7 +9,8 @@ import {
   type DeviceEventApplyOutcome,
   type DeviceEventDelivery,
   type DeviceEventGap,
-  type DeviceEventReceipt
+  type DeviceEventReceipt,
+  type DeviceEventRecipient
 } from "../../shared/deviceEventDelivery";
 
 export const DEVICE_EVENT_SCHEMA_SQL = `
@@ -387,6 +389,30 @@ export class DeviceEventStorage {
     `));
   }
 
+  /**
+   * Gives `to` every chat change of `originId` this device holds beyond the
+   * given marks (all of them in a chat without a mark). Delivery rows only:
+   * the events themselves are the author's, unchanged.
+   */
+  async shareChatChangesAfter(originId: string, marks: Array<{ logScopeId: string; originSeq: number }>, to: DeviceEventRecipient): Promise<number> {
+    if (!to.deviceId.trim() || !to.channelId.trim()) throw new Error("Device event delivery requires a device and channel identity.");
+    await this.database.init();
+    const known = marks.filter((mark) => isChatChangesLogScope(mark.logScopeId) && Number.isSafeInteger(mark.originSeq));
+    const values = known.length
+      ? known.map((mark) => `(${quote(mark.logScopeId)}, ${Math.floor(mark.originSeq)})`).join(", ")
+      : "(null, 0)";
+    const rows = await this.database.query<{ eventId: string }>(durable(`
+      with marks(log_scope_id, origin_seq) as (values ${values})
+      insert or ignore into device_event_outbox(event_id, device_id, channel_id)
+        select e.event_id, ${quote(to.deviceId)}, ${quote(to.channelId)} from chat_events e
+        left join marks m on m.log_scope_id = e.log_scope_id
+        where e.origin_id = ${quote(originId)} and e.log_scope_id >= 'chat-changes:' and e.log_scope_id < 'chat-changes;'
+          and e.origin_seq > coalesce(m.origin_seq, 0)
+      returning event_id as eventId;
+    `));
+    return rows.length;
+  }
+
   async gaps(channelId: string, deviceId?: string): Promise<DeviceEventGap[]> {
     await this.database.init();
     return this.database.query<DeviceEventGap>(`
@@ -521,13 +547,18 @@ export class DeviceEventStorage {
    * this it would sit behind a gap it can never close, and no action would
    * ever apply there. The rows it is served are recorded as deliveries, so
    * retention still waits for its acknowledgement.
+   *
+   * Chat changes are the same: every chat goes to every machine, so a machine
+   * is a recipient of every chat change, including one that was written before
+   * it knew of that machine, and one written by another machine that this
+   * device holds (it is served unchanged, signed by its author).
    */
   async repair(channelId: string, deviceId: string, gap: DeviceEventGap): Promise<ChatEventEnvelope[]> {
     requireCursor(gap.fromSeq);
     requireCursor(gap.toSeq);
     if (gap.fromSeq < 1 || gap.toSeq < gap.fromSeq) throw new Error("Invalid device event repair range.");
     await this.database.init();
-    const broadcast = gap.logScopeId === CHAT_ACTION_LOG_SCOPE;
+    const broadcast = gap.logScopeId === CHAT_ACTION_LOG_SCOPE || isChatChangesLogScope(gap.logScopeId);
     const rows = await this.database.query<{ envelope: string }>(`
       with candidates as (
       select e.envelope_json as envelope, e.origin_seq from ${broadcast ? "chat_events e" : `device_event_outbox o join chat_events e on e.event_id = o.event_id`}

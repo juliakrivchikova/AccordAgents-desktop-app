@@ -415,7 +415,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   });
   hostRef = host;
   // This machine's own changes (its members' replies, messages typed into it
-  // while the desktop is away) go back to the desktop the same way.
+  // while the desktop is away) go to the desktop and the other machines the
+  // same way.
   chatService.setChatChangeTransport(createChatChangeTransport({
     role: "machine",
     storage: storageService,
@@ -423,7 +424,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     recipients: () => host.chatChangeRecipients(),
     onCommitted: () => host.nudgeEventChannel(),
     hostMachineId: () => host.enrolledMachineId(),
-    desktopOriginId: () => enrollment.issuer.originId
+    desktopOriginId: () => enrollment.issuer.originId,
+    machineOriginId: (machineId) => host.machineOriginId(machineId)
   }));
   // A member here asking other members goes through the desktop: it owns the
   // roster and runs each target where that member lives.

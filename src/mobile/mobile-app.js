@@ -1615,6 +1615,26 @@
       await render("synced");
       return "applied";
     }
+    if (event.kind === "chat.changes") {
+      // A machine writes its members' messages as chat change events. With the
+      // desktop away they reach this phone directly, and are shown the way the
+      // back delta that carried them before was shown, choice cards included.
+      const messages = (Array.isArray(body.changes) ? body.changes : [])
+        .filter(function (change) { return change && (change.type === "message.created" || change.type === "message.updated") && change.message; })
+        .map(function (change) { return change.message; });
+      if (!messages.length) return "applied";
+      await handleRelayTimelinePayload({
+        type: "mobile.timeline.events",
+        conversationId: conversationId,
+        events: messages.map(function (message) { return machineTimelineEvent(message, "done"); })
+      }, conversationId);
+      for (const message of messages) {
+        const card = machineChoiceCard(conversationId, message);
+        if (card) mergeControlCard(conversationId, card);
+      }
+      await render("synced");
+      return "applied";
+    }
     if (body.type === "machine.approval.requested" || body.type === "machine.approval.updated") {
       mergeControlCard(conversationId, machineApprovalCard(conversationId, body.approval, machine && machine.name));
       await render("synced");

@@ -467,6 +467,7 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
     desktopOriginId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
     adoptMachineIdentity: (machineId, identity) => requireMachineLink().adoptMachineIdentity(machineId, identity),
     settleChatSaves: () => chatService.settleChatSaves(),
+    shareAfterCopy: (machineId, marks) => requireMachineLink().shareChatChangesAfterCopy(machineId, marks),
     attachmentsDir: path.join(app.getPath("userData"), "chats"),
     tempDir: app.getPath("temp")
   }),

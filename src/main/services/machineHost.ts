@@ -443,6 +443,12 @@ export class MachineHostService {
         void this.debugLogs.write("machine-host.action.dependency-unavailable", { ...dependency });
       },
       apply: (event, body) => this.applyDeviceEvent(event, body, this.eventChannel),
+      // The desktop forwards what the owner's other machines wrote in chats,
+      // unchanged: accepted when its author is one of them.
+      forwardedOriginKey: (originId) => {
+        const peer = this.trust.peer(originId);
+        return peer?.role === "machine" ? peer.publicKeyDerBase64 : undefined;
+      },
       onError: (error) => { void this.debugLogs.write("machine-host.events.error", { message: error.message }); }
     });
   }
@@ -1773,15 +1779,28 @@ export class MachineHostService {
     return [issuer, ...peers];
   }
 
-  /** Where this machine's own chat changes go: the desktop that installed it.
-   *  Phones are not sent them; they read the chat from the desktop. */
+  /** Where this machine's own chat changes go: the desktop that installed it,
+   *  and every other machine of the owner it knows (each holds every chat).
+   *  Phones are not addressed; they read the chat from the desktop. */
   chatChangeRecipients(): Array<{ deviceId: string; channelId: string }> {
-    return [{ deviceId: this.options.pairing.issuer.originId, channelId: this.options.pairing.rendezvousId }];
+    return [
+      { deviceId: this.options.pairing.issuer.originId, channelId: this.options.pairing.rendezvousId },
+      ...this.peers.machineRecipients()
+    ];
+  }
+
+  /** The device identity of another of the owner's machines, by machine id:
+   *  the only device that may change its members' replies. */
+  machineOriginId(machineId: string): string | undefined {
+    return this.trust.peers().find((peer) => peer.role === "machine" && peer.machineId === machineId)?.deviceId;
   }
 
   /** A chat save committed change events: send them now. */
   nudgeEventChannel(): void {
-    this.eventChannel.nudge();
+    // A save during startup can commit before the channel exists; the
+    // channel sends what is waiting when it starts.
+    if (this.eventChannel) this.eventChannel.nudge();
+    this.peers.nudge();
   }
 
   /** Recipients for artifact actions committed directly with their store write. */

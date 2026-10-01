@@ -129,6 +129,8 @@ export function machineChatCopyProvider(options: {
   desktopOriginId(): Promise<string>;
   adoptMachineIdentity(machineId: string, identity: { originId: string; publicKeyDerBase64: string }): Promise<void>;
   settleChatSaves(): Promise<void>;
+  /** Other machines' changes held here beyond the marks, sent as events. */
+  shareAfterCopy?(machineId: string, marks: ChatCopyMark[]): Promise<number>;
   /** The desktop's `chats` directory, whose pictures go along. */
   attachmentsDir?: string;
   tempDir: string;
@@ -141,6 +143,7 @@ export function machineChatCopyProvider(options: {
       const cleanup = (): Promise<void> => rm(dir, { recursive: true, force: true });
       try {
         const manifest = await exportChatCopy(options.storage, dir, { desktopOriginId: await options.desktopOriginId() });
+        await options.shareAfterCopy?.(machineId, manifest.marks);
         return {
           dir,
           ...(options.attachmentsDir ? { attachmentsDir: options.attachmentsDir } : {}),

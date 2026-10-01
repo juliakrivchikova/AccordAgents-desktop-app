@@ -99,7 +99,11 @@ export function createChatChangeTransport(options: ChatChangeTransportOptions): 
         sql: ready.sql,
         onlyIfSql: (condition) => ready.sql ? options.storage.chatEventAppendSql(ready.event, { recipients: audience }, condition) : ""
       }));
-      if (outcome.committed) options.onCommitted?.();
+      // Only a hint to send now: the channels' own timers send it regardless,
+      // and a committed save must not be reported as failed because of it.
+      if (outcome.committed) {
+        try { options.onCommitted?.(); } catch { /* sent by the next retry tick */ }
+      }
       return { token: outcome.result, committed: outcome.committed, eventId: outcome.event.eventId };
     }
   };
