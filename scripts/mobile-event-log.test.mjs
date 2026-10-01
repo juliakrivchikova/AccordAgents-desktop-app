@@ -115,24 +115,28 @@ test("a missing sequence is reported as a gap to repair, not skipped", async () 
   assert.equal(await phone.receive(from(2)), "duplicate", "a repeat of a repaired event changes nothing");
 });
 
-test("a machine's chat changes are taken from the first one seen; a gap after it is still repaired", async () => {
+test("a machine's chat changes are shown as they arrive: no gap holds them, a late one still applies, a repeat does not", async () => {
   const port = memoryPort();
   const phone = log(port);
   const from = (seq) => ({
     eventId: "c" + seq, conversationId: "chat-1", logScopeId: "chat-changes:chat-1",
-    originId: "cloud-box", originSeq: seq, logicalTs: "hlc:1700000000000:00000" + seq + ":cloud-box",
+    originId: "cloud-box", originSeq: seq, logicalTs: "hlc:1700000000000:00000" + seq + ":cloud-box", eventHash: "h" + seq,
     kind: "chat.changes", payload: {}, createdAt: "2026-10-01T00:00:0" + seq + ".000Z"
   });
-  // The desktop confirmed 1..4 long ago; the machine offers this phone what it still holds.
+  // The desktop confirmed 1..4 long ago; then it was away, came back for 6, and left again.
   assert.equal(await phone.receive(from(5)), "applied");
+  assert.equal(await phone.receive(from(7)), "applied", "6 went to the desktop only; nothing waits for it");
   assert.deepEqual(await phone.gaps(), []);
-  assert.deepEqual((await phone.inboundReady("cloud-box")).map((event) => event.originSeq), [5]);
-  assert.equal(await phone.receive(from(7)), "gap");
-  assert.deepEqual(await phone.gaps(), [{ originId: "cloud-box", logScopeId: "chat-changes:chat-1", fromSeq: 6, toSeq: 6 }]);
-  // The start survives a reload.
-  const reopened = log(port);
-  assert.equal(await reopened.receive(from(4)), "duplicate");
-  // Any other scope still waits for its first event.
+  assert.deepEqual((await phone.inboundReady("cloud-box")).map((event) => event.originSeq), [5, 7]);
+  for (const seq of [5, 7]) await phone.markApplied(from(seq), "applied");
+  // Delivered late by the mailbox: still shown, not mistaken for one already shown.
+  assert.equal(await phone.receive(from(6)), "applied");
+  assert.deepEqual((await phone.inboundReady("cloud-box")).map((event) => event.originSeq), [6]);
+  await phone.markApplied(from(6), "applied");
+  // The machine offers one again (its acknowledgement was lost): recognised, also after a reload.
+  assert.equal(await phone.receive(from(7)), "duplicate");
+  assert.equal(await log(port).receive(from(5)), "duplicate");
+  // Any other scope still waits for what comes before.
   assert.equal(await phone.receive({ ...from(3), eventId: "a3", logScopeId: "chat:actions", kind: "choice.answered" }), "gap");
 });
 

@@ -289,15 +289,16 @@
       return event;
     }
 
-    // A machine's chat changes are shown from the first one this phone sees.
-    // What the machine wrote before is in the chat the desktop shows, and it
-    // keeps no earlier ones for a phone, so waiting for them would wait forever.
-    function startsAtFirstSight(logScopeId) {
+    // A machine's chat changes are shown as they arrive. What the machine wrote
+    // while this phone was not listening went to the desktop, which shows it;
+    // the machine keeps none of it for a phone, so waiting for a gap to close
+    // would hold everything after it for good.
+    function appliedInArrivalOrder(logScopeId) {
       return String(logScopeId).indexOf("chat-changes:") === 0;
     }
 
     // Applies an event from another device. A missing sequence is a gap to
-    // repair, never a hole to skip.
+    // repair, never a hole to skip (except for a machine's chat changes, above).
     async function receive(event) {
       await ensureRestored();
       // A shared room key says the sender is in the room, not who wrote this.
@@ -305,28 +306,28 @@
       // acknowledged; it is refused so a forged event cannot release history.
       if (verify && !await verify(event)) return "unverified";
       let status = "applied";
-      let applied = appliedHeadOf(event.originId, event.logScopeId);
-      let startedAt;
+      const applied = appliedHeadOf(event.originId, event.logScopeId);
+      const arrivalOrder = appliedInArrivalOrder(event.logScopeId);
       await port.runAtomic([EVENTS, META], async function (tx) {
         const existing = await tx.get(EVENTS, event.eventId);
         if (existing) { status = "duplicate"; return; }
-        // Already applied and dropped: repeating it must not put it back, or a
-        // machine's re-offer after a reconnect would replay a finished turn.
-        if (event.originSeq <= applied.seq) { status = "duplicate"; return; }
-        const held = (await tx.getAll(EVENTS))
-          .filter(function (item) { return item.originId === event.originId && item.logScopeId === event.logScopeId; });
-        if (applied.seq === 0 && !held.length && event.originSeq > 1 && startsAtFirstSight(event.logScopeId)) {
-          startedAt = { seq: event.originSeq - 1 };
-          await tx.put(META, { key: appliedKey(event.originId, event.logScopeId), head: startedAt });
-          applied = startedAt;
+        if (arrivalOrder) {
+          // Already shown (its receipt is kept), not merely older than the newest.
+          const held = await tx.get(META, receiptKey(event.originId));
+          if (held && (held.receipts || []).some(function (item) { return item.eventId === event.eventId; })) { status = "duplicate"; return; }
+        } else {
+          // Already applied and dropped: repeating it must not put it back, or a
+          // machine's re-offer after a reconnect would replay a finished turn.
+          if (event.originSeq <= applied.seq) { status = "duplicate"; return; }
+          const held = (await tx.getAll(EVENTS))
+            .filter(function (item) { return item.originId === event.originId && item.logScopeId === event.logScopeId; });
+          const highest = held.reduce(function (max, item) { return Math.max(max, item.originSeq); }, applied.seq);
+          if (event.originSeq > highest + 1) status = "gap";
         }
-        const highest = held.reduce(function (max, item) { return Math.max(max, item.originSeq); }, applied.seq);
-        if (event.originSeq > highest + 1) status = "gap";
         await tx.put(EVENTS, event);
         clock.observe(event.logicalTs);
         await tx.put(META, { key: CLOCK_KEY, value: formatHlc(clock.current()) });
       });
-      if (startedAt) appliedHeads.set(appliedKey(event.originId, event.logScopeId), startedAt);
       return status;
     }
 
@@ -344,6 +345,7 @@
       }
       const missing = [];
       byScope.forEach(function (scope) {
+        if (appliedInArrivalOrder(scope.logScopeId)) return;
         const highest = Math.max.apply(null, Array.from(scope.seqs));
         const start = appliedHeadOf(scope.originId, scope.logScopeId).seq + 1;
         let from = 0;
@@ -460,6 +462,7 @@
       const ready = [];
       byScope.forEach(function (list, logScopeId) {
         list.sort(function (left, right) { return left.originSeq - right.originSeq; });
+        if (appliedInArrivalOrder(logScopeId)) { ready.push.apply(ready, list); return; }
         let expected = appliedHeadOf(originId, logScopeId).seq + 1;
         for (const event of list) {
           if (event.originSeq !== expected) break;
