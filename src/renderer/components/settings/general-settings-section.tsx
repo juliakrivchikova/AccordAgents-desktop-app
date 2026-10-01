@@ -64,6 +64,7 @@ export function GeneralSettingsSection(props: {
   assistantProviderKind?: ChatProviderKind;
   repoFileOpenAction?: RepoFileOpenAction;
   betaUpdates: boolean;
+  crashReports: boolean;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
   chatParticipantRequestPromptMaxChars: number;
@@ -75,6 +76,7 @@ export function GeneralSettingsSection(props: {
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
+  setCrashReports: (enabled: boolean) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
   setChatParticipantRequestPromptMaxChars: (maxChars: number) => Promise<void>;
@@ -199,6 +201,24 @@ export function GeneralSettingsSection(props: {
                 data-testid="beta-updates-toggle"
                 checked={props.betaUpdates}
                 onChange={(event) => void props.setBetaUpdates(event.target.checked)}
+              />
+              <span />
+            </label>
+          </div>
+          <div className="gen-card-divider" />
+          <div className="gen-row">
+            <div className="gen-row-text">
+              <div className="gen-row-title">Crash and usage reports</div>
+              <div className="gen-row-desc">
+                Send error reports and an anonymous count of active installs to help fix bugs. File paths, links and secrets are removed. Turning on applies on next restart.
+              </div>
+            </div>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                data-testid="crash-reports-toggle"
+                checked={props.crashReports}
+                onChange={(event) => void props.setCrashReports(event.target.checked)}
               />
               <span />
             </label>

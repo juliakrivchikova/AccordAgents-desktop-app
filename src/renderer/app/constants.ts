@@ -16,6 +16,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   chatCustomAvatars: [],
   roundLimitDefault: 2,
   betaUpdates: false,
+  crashReports: true,
   cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
   chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
   chatParticipantRequestPromptMaxChars: CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,

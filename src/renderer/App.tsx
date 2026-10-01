@@ -1,5 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
+import { startRendererCrashReporting } from "./app/crash-reporting";
 import type {
   ChatActivityItem,
   ChatSkillMention,
@@ -437,6 +438,7 @@ function App(): JSX.Element {
           deleteCliProviderHost={settingsActions.deleteCliProviderHost}
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
           setBetaUpdates={settingsActions.setBetaUpdates}
+          setCrashReports={settingsActions.setCrashReports}
           setCliAgentRunTimeoutMs={settingsActions.setCliAgentRunTimeoutMs}
           setChatParticipantRequestMaxDepth={settingsActions.setChatParticipantRequestMaxDepth}
           setChatParticipantRequestPromptMaxChars={settingsActions.setChatParticipantRequestPromptMaxChars}
@@ -553,6 +555,8 @@ function App(): JSX.Element {
     </AppShell>
   );
 }
+
+startRendererCrashReporting();
 
 createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

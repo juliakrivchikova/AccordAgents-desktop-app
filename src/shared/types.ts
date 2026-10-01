@@ -438,6 +438,9 @@ import type {
 export interface AppSettings {
   roundLimitDefault: number;
   betaUpdates: boolean;
+  /** Error, crash and usage reports to the app's Sentry project; on unless
+   *  the User turned them off. */
+  crashReports: boolean;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
   chatParticipantRequestPromptMaxChars: number;
@@ -2737,6 +2740,11 @@ export interface AppBridge {
   openLocalFile(request: OpenLocalFileRequest): Promise<OpenLocalFileResult>;
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
   setBetaUpdates(enabled: boolean): Promise<AppSettings>;
+  /** Off takes effect at once; on applies from the next launch. */
+  setCrashReports(enabled: boolean): Promise<AppSettings>;
+  /** Whether this window was opened with reports running, so the renderer
+   *  starts its half of the SDK only then. */
+  readonly crashReportsActive: boolean;
   setCliAgentRunTimeoutMs(timeoutMs: number): Promise<AppSettings>;
   setChatParticipantRequestMaxDepth(maxDepth: number): Promise<AppSettings>;
   setChatParticipantRequestPromptMaxChars(maxChars: number): Promise<AppSettings>;

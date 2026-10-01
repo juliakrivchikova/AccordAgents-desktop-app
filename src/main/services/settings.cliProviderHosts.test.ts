@@ -58,6 +58,7 @@ function settingsServiceWith(initial: { chatParticipantConfigs?: unknown[]; cliP
   service.getPublicSettings = async (): Promise<AppSettings> => ({
     roundLimitDefault: stored.roundLimitDefault,
     betaUpdates: false,
+    crashReports: true,
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,
     chatAutoWatchWakeLimit: stored.chatAutoWatchWakeLimit,
     chatParticipantRequestMaxDepth: stored.chatParticipantRequestMaxDepth,
