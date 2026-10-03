@@ -227,32 +227,34 @@ export function ChatParticipantInlineModelRow(props: {
             <ChevronDown size={14} aria-hidden />
           </button>
         </PopoverTrigger>
-        <PopoverContent align="end" sideOffset={6} className="chat-app-tool-inline-menu">
-          <button
-            type="button"
-            className={`chat-app-tool-inline-option ${!value ? "selected" : ""}`}
-            onClick={() => {
-              props.onSelect(undefined);
-              setOpen(false);
-            }}
-          >
-            <span>{inheritedLabel}</span>
-            {!value && <Check size={14} aria-hidden />}
-          </button>
-          {models.map((item) => (
+        <PopoverContent align="end" sideOffset={6} className="chat-app-tool-inline-menu chat-app-tool-inline-model-menu">
+          <div className="chat-app-tool-inline-options">
             <button
               type="button"
-              key={item.id}
-              className={`chat-app-tool-inline-option ${item.id === value ? "selected" : ""}`}
+              className={`chat-app-tool-inline-option ${!value ? "selected" : ""}`}
               onClick={() => {
-                props.onSelect(item.id);
+                props.onSelect(undefined);
                 setOpen(false);
               }}
             >
-              <span>{item.label}</span>
-              {item.id === value && <Check size={14} aria-hidden />}
+              <span>{inheritedLabel}</span>
+              {!value && <Check size={14} aria-hidden />}
             </button>
-          ))}
+            {models.map((item) => (
+              <button
+                type="button"
+                key={item.id}
+                className={`chat-app-tool-inline-option ${item.id === value ? "selected" : ""}`}
+                onClick={() => {
+                  props.onSelect(item.id);
+                  setOpen(false);
+                }}
+              >
+                <span>{item.label}</span>
+                {item.id === value && <Check size={14} aria-hidden />}
+              </button>
+            ))}
+          </div>
           <form
             className="chat-app-tool-inline-manual"
             onSubmit={(event) => {

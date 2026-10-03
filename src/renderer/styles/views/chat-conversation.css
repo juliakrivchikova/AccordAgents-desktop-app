@@ -1822,6 +1822,14 @@
   overflow-y: auto;
 }
 
+.chat-app-tool-inline-model-menu {
+  overflow: hidden;
+}
+
+.chat-app-tool-inline-model-menu > .chat-app-tool-inline-options {
+  max-height: min(220px, calc(100vh - 104px));
+}
+
 .chat-app-tool-inline-menu.is-searchable {
   max-height: min(340px, calc(100vh - 32px));
   overflow: hidden;
