@@ -36,7 +36,7 @@ export function preflightReleaseRepo(releaseRepo, branch, tagName, { api = ghApi
   const existing = releaseTagCommit(releaseRepo, tagName, api);
   if (existing) {
     throw new Error(
-      `Tag ${tagName} already exists in ${releaseRepo} at ${existing}; a release on it would stay hidden from the update feed. Remove that tag from ${releaseRepo} or release another version.`
+      `Tag ${tagName} already exists in ${releaseRepo} at ${existing}; a release on it would stay hidden from the update feed. Release another version, or remove that tag from ${releaseRepo} if no release uses it.`
     );
   }
 }
@@ -109,7 +109,7 @@ export async function verifyReleaseListing(
     try {
       problem = releaseListingProblem(releaseRepo, tagName, targetCommit, checkOrder, api);
     } catch (error) {
-      problem = `the release list could not be read: ${error.message}`;
+      problem = `the release could not be checked: ${error.message.trim()}`;
     }
     if (!problem) {
       return "";

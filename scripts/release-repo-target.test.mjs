@@ -188,7 +188,7 @@ test("retries a list that is briefly stale or unreadable and never throws", asyn
   publish(broken);
   assert.equal(
     await verifyReleaseListing({ releaseRepo: repo, tagName: tag, targetCommit: "fresh-sha", checkOrder: true }, { api: broken.api, ...noWait }),
-    "the release list could not be read: HTTP 502"
+    "the release could not be checked: HTTP 502"
   );
 });
 

@@ -570,9 +570,17 @@ const listingProblem =
 if (listingProblem) {
   console.warn(`\n${tagName} is published in ${options.releaseRepo}, but ${listingProblem}.`);
 }
-await checkUpdateEndpoint(options, version, previousVersion, repoInfo.isPrivate);
+let updateCheckError = null;
+try {
+  await checkUpdateEndpoint(options, version, previousVersion, repoInfo.isPrivate);
+} catch (error) {
+  updateCheckError = error;
+}
 if (listingProblem) {
-  fail(`${tagName} is published, but ${listingProblem}. Do not rerun the release.`);
+  fail(`${tagName} is published, but ${listingProblem}. Do not rerun the release.${updateCheckError ? `\nUpdate check: ${updateCheckError.message}` : ""}`);
+}
+if (updateCheckError) {
+  throw updateCheckError;
 }
 
 console.log(`\nRelease ${tagName} is ready in ${options.releaseRepo}.`);

@@ -394,9 +394,17 @@ async function main() {
   if (listingProblem) {
     console.warn(`\n${tagName} is published in ${options.releaseRepo}, but ${listingProblem}.`);
   }
-  await checkUpdateEndpoint(options, version, repoInfo.isPrivate);
+  let updateCheckError = null;
+  try {
+    await checkUpdateEndpoint(options, version, repoInfo.isPrivate);
+  } catch (error) {
+    updateCheckError = error;
+  }
   if (listingProblem) {
-    fail(`${tagName} is published, but ${listingProblem}.`);
+    fail(`${tagName} is published, but ${listingProblem}.${updateCheckError ? `\nUpdate check: ${updateCheckError.message}` : ""}`);
+  }
+  if (updateCheckError) {
+    throw updateCheckError;
   }
 
   console.log(`\nWindows update artifacts for ${tagName} are ready in ${options.releaseRepo}.`);
