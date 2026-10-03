@@ -388,7 +388,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           )}
           {isStreaming && message.metadata?.cloudRunPreparation && !stopPending && (
             <div className="chat-cloud-preparation" role="status">
-              <p>{message.metadata.cloudRunPreparation.message}</p>
+              <p title={message.metadata.cloudRunPreparation.message}>{message.metadata.cloudRunPreparation.message}</p>
               {message.metadata.cloudRunPreparation.authUrl && <CloudProviderAuth {...message.metadata.cloudRunPreparation} authUrl={message.metadata.cloudRunPreparation.authUrl} />}
             </div>
           )}

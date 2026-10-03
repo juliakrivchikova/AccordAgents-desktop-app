@@ -3512,6 +3512,24 @@
   font-style: italic;
 }
 
+/* Cloud setup progress reads like the activity line under "Thinking";
+   the sign-in card, when shown, sits 8px below it. */
+.chat-cloud-preparation {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-cloud-preparation > p {
+  max-width: min(720px, 100%);
+  margin: 6px 0 0;
+  overflow: hidden;
+  color: var(--app-muted-subtle);
+  font-size: 13px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-choice-row {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);
