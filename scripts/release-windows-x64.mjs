@@ -5,7 +5,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { createReleaseTargetCommit } from "./release-repo-target.mjs";
+import { createReleaseAtFreshCommit } from "./release-repo-target.mjs";
 
 const rootDir = process.cwd();
 const packageJsonPath = path.join(rootDir, "package.json");
@@ -22,6 +22,8 @@ Builds and publishes Squirrel.Windows x64 update assets for the current package 
 Run this after the corresponding source tag exists. It uses the same stable/beta
 release repositories as the in-app updater and uploads the Setup executable,
 full NuGet package, and RELEASES manifest required by update.electronjs.org.
+When it has to create the GitHub Release, the tag goes on a new empty commit
+on the release repo's default branch so the update feed lists it first.
 
 Options:
   --repo owner/repo              Public GitHub release repo. Defaults to package.json config for this channel.
@@ -260,20 +262,27 @@ function createOrUpdateRelease(options, tagName, defaultBranch, assets) {
     return;
   }
 
-  runInherited("gh", [
-    "release",
-    "create",
-    tagName,
-    ...assets,
-    "--repo",
-    options.releaseRepo,
-    "--target",
-    createReleaseTargetCommit(options.releaseRepo, defaultBranch, tagName),
-    "--title",
-    `AccordAgents ${tagName}`,
-    "--notes",
-    "Windows x64 Squirrel update artifacts."
-  ]);
+  try {
+    createReleaseAtFreshCommit(
+      {
+        releaseRepo: options.releaseRepo,
+        branch: defaultBranch,
+        tagName,
+        releaseArgs: [
+          ...assets,
+          "--repo",
+          options.releaseRepo,
+          "--title",
+          `AccordAgents ${tagName}`,
+          "--notes",
+          "Windows x64 Squirrel update artifacts."
+        ]
+      },
+      { gh: (args) => runInherited("gh", args) }
+    );
+  } catch (error) {
+    fail(`Publishing ${tagName} to ${options.releaseRepo} failed or could not be verified: ${error.message}`);
+  }
 }
 
 export function validateWindowsUpdateResponse({ endpoint, status, statusText, url, body }, version) {

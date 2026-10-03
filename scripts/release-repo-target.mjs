@@ -4,14 +4,39 @@ function ghApi(args) {
   return JSON.parse(execFileSync("gh", ["api", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
 }
 
+function ghInherited(args) {
+  execFileSync("gh", args, { stdio: "inherit" });
+}
+
 // update.electronjs.org serves the first published release in GitHub's release list. GitHub orders
-// that list by the date of each tag's commit and breaks ties by tag name as text, so while every tag
-// pointed at one commit, v1.11.1-beta.9 stayed above v1.11.1-beta.10 and the feed never offered
-// beta.10. Tagging each new release at a fresh empty commit keeps the newest release first.
+// that list by the date of each tag's commit and breaks ties by version, comparing a prerelease
+// suffix as text, so while every tag pointed at one commit, v1.11.1-beta.9 stayed above
+// v1.11.1-beta.10 and the feed never offered beta.10. Tagging each new release at a fresh empty
+// commit keeps the newest release first.
+
+function releaseTagCommit(releaseRepo, tagName, api) {
+  const refs = api([`repos/${releaseRepo}/git/matching-refs/tags/${tagName}`]);
+  const ref = refs.find((candidate) => candidate.ref === `refs/tags/${tagName}`);
+  return ref ? ref.object.sha : "";
+}
+
+// GitHub ignores the release target when the tag already exists, so such a release would keep the
+// old commit date and stay hidden from the feed.
+export function preflightReleaseRepo(releaseRepo, branch, tagName, { api = ghApi } = {}) {
+  if (!api([`repos/${releaseRepo}`]).permissions?.push) {
+    throw new Error(`The current GitHub account cannot push to ${releaseRepo}.`);
+  }
+  api([`repos/${releaseRepo}/git/ref/heads/${branch}`]);
+  const existing = releaseTagCommit(releaseRepo, tagName, api);
+  if (existing) {
+    throw new Error(`Tag ${tagName} already exists in ${releaseRepo} at ${existing}; a release on it would stay hidden from the update feed.`);
+  }
+}
+
 export function createReleaseTargetCommit(releaseRepo, branch, tagName, { api = ghApi, warn = console.warn } = {}) {
   const headSha = api([`repos/${releaseRepo}/git/ref/heads/${branch}`]).object.sha;
   const treeSha = api([`repos/${releaseRepo}/git/commits/${headSha}`]).tree.sha;
-  const commitSha = api([
+  const commit = api([
     "--method",
     "POST",
     `repos/${releaseRepo}/git/commits`,
@@ -21,14 +46,47 @@ export function createReleaseTargetCommit(releaseRepo, branch, tagName, { api = 
     `tree=${treeSha}`,
     "-f",
     `parents[]=${headSha}`
-  ]).sha;
-
-  try {
-    // Fast-forward only: a branch that moved meanwhile is left alone, and the tag still keeps the commit.
-    api(["--method", "PATCH", `repos/${releaseRepo}/git/refs/heads/${branch}`, "-f", `sha=${commitSha}`]);
-  } catch (error) {
-    warn(`Could not move ${branch} in ${releaseRepo} to ${commitSha}; ${tagName} still targets it. ${error.message}`);
+  ]);
+  if (commit.parents?.[0]?.sha !== headSha) {
+    throw new Error(`New commit ${commit.sha} in ${releaseRepo} does not descend from ${branch} at ${headSha}.`);
   }
 
-  return commitSha;
+  try {
+    // Fast-forward only: a branch that moved meanwhile is left alone; the release tag is created at the commit anyway.
+    api(["--method", "PATCH", `repos/${releaseRepo}/git/refs/heads/${branch}`, "-f", `sha=${commit.sha}`]);
+  } catch (error) {
+    warn(`Could not move ${branch} in ${releaseRepo} to ${commit.sha}; ${tagName} will be created at it anyway. ${error.message}`);
+  }
+
+  return commit.sha;
+}
+
+function firstPublishedRelease(releaseRepo, api) {
+  return api([`repos/${releaseRepo}/releases?per_page=100`]).find((release) => !release.draft && !release.prerelease);
+}
+
+// releaseArgs are the `gh release create` arguments after the tag name, without --target.
+export function createReleaseAtFreshCommit(
+  { releaseRepo, branch, tagName, releaseArgs, draft = false, prerelease = false },
+  { api = ghApi, gh = ghInherited, log = console.log, warn = console.warn } = {}
+) {
+  preflightReleaseRepo(releaseRepo, branch, tagName, { api });
+  const targetCommit = createReleaseTargetCommit(releaseRepo, branch, tagName, { api, warn });
+  log(`Release tag target: ${targetCommit}`);
+  gh(["release", "create", tagName, ...releaseArgs, "--target", targetCommit]);
+
+  if (draft) {
+    return targetCommit;
+  }
+  const taggedCommit = releaseTagCommit(releaseRepo, tagName, api);
+  if (taggedCommit !== targetCommit) {
+    throw new Error(`Tag ${tagName} in ${releaseRepo} points at ${taggedCommit || "nothing"}, not ${targetCommit}.`);
+  }
+  if (!prerelease) {
+    const first = firstPublishedRelease(releaseRepo, api);
+    if (first?.tag_name !== tagName) {
+      throw new Error(`${releaseRepo} lists ${first?.tag_name || "no release"} before ${tagName}, so the update feed will not offer ${tagName}.`);
+    }
+  }
+  return targetCommit;
 }

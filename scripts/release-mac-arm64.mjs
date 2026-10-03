@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { createReleaseTargetCommit } from "./release-repo-target.mjs";
+import { createReleaseAtFreshCommit, preflightReleaseRepo } from "./release-repo-target.mjs";
 
 const rootDir = process.cwd();
 const signedDir = path.join(rootDir, "signed");
@@ -25,7 +25,8 @@ Creates a macOS arm64 release:
   2. commits and pushes the version bump to the source repo,
   3. tags the source repo at v<version>,
   4. builds signed/notarized DMG and signed ZIP artifacts,
-  5. creates or updates a GitHub Release in the public release repo,
+  5. creates or updates a GitHub Release in the public release repo; a new release is tagged at a new
+     empty commit on the release repo's default branch so the update feed lists it first,
   6. checks update.electronjs.org for the ZIP asset.
 
 Options:
@@ -397,7 +398,7 @@ function releaseExists(tagName, releaseRepo) {
   return commandSucceeds("gh", ["release", "view", tagName, "--repo", releaseRepo]);
 }
 
-function createOrUpdateGitHubRelease(options, tagName, releaseRepoTargetBranch, assets) {
+function createOrUpdateGitHubRelease(options, tagName, releaseRepoBranch, assets) {
   const title = `${productName()} ${tagName}`;
   const notes = releaseNotes(tagName, assets);
 
@@ -409,34 +410,34 @@ function createOrUpdateGitHubRelease(options, tagName, releaseRepoTargetBranch, 
   }
 
   console.log(`\n==> Creating GitHub Release ${tagName} in ${options.releaseRepo}`);
-  const targetCommit = createReleaseTargetCommit(options.releaseRepo, releaseRepoTargetBranch, tagName);
-  console.log(`Release tag target: ${targetCommit}`);
-  const args = [
-    "release",
-    "create",
-    tagName,
-    ...assets,
-    "--repo",
-    options.releaseRepo,
-    "--target",
-    targetCommit,
-    "--title",
-    title,
-    "--notes",
-    notes
-  ];
+  const releaseArgs = [...assets, "--repo", options.releaseRepo, "--title", title, "--notes", notes];
 
   if (options.draft) {
-    args.push("--draft");
+    releaseArgs.push("--draft");
   }
   if (options.prerelease) {
-    args.push("--prerelease");
+    releaseArgs.push("--prerelease");
   }
   if (!options.draft && !options.prerelease) {
-    args.push("--latest");
+    releaseArgs.push("--latest");
   }
 
-  runInherited("gh", args);
+  try {
+    createReleaseAtFreshCommit(
+      {
+        releaseRepo: options.releaseRepo,
+        branch: releaseRepoBranch,
+        tagName,
+        releaseArgs,
+        draft: options.draft,
+        prerelease: options.prerelease
+      },
+      { gh: (args) => runInherited("gh", args) }
+    );
+  } catch (error) {
+    fail(`Publishing ${tagName} to ${options.releaseRepo} failed or could not be verified after the version bump and build: ${error.message}
+Do not rerun the release. If ${tagName} is missing from ${options.releaseRepo}, create it by hand from ${path.relative(rootDir, signedDir)}/ at a new empty commit on ${releaseRepoBranch} (see scripts/release-repo-target.mjs), never with --target ${releaseRepoBranch}.`);
+  }
 }
 
 function sleep(ms) {
@@ -517,6 +518,7 @@ if (options.dryRun) {
   console.log(`Next version: ${nextVersion}`);
   console.log("Build: npm run signed:mac-arm64");
   console.log(`GitHub Release state: ${options.draft ? "draft" : options.prerelease ? "prerelease" : "published"}`);
+  console.log("Release tag target: new empty commit on the release repo's default branch");
   console.log(`Update check: ${options.skipUpdateCheck || options.draft || options.prerelease ? "skipped" : "enabled against release repo"}`);
   process.exit(0);
 }
@@ -542,6 +544,15 @@ ensureCleanWorktree();
 runInherited("git", ["pull", "--ff-only", "origin", sourceBranch]);
 ensureCleanWorktree();
 
+const releaseRepoBranch = repoInfo.defaultBranchRef?.name || "main";
+const plannedTagName = `v${nextVersionForTarget(options.target, currentVersion())}`;
+console.log(`\n==> Checking that ${options.releaseRepo} can take ${plannedTagName}`);
+try {
+  preflightReleaseRepo(options.releaseRepo, releaseRepoBranch, plannedTagName);
+} catch (error) {
+  fail(error.message);
+}
+
 const previousVersion = currentVersion();
 const version = bumpVersion(options.target, sourceBranch);
 const tagName = `v${version}`;
@@ -551,12 +562,7 @@ console.log("\n==> Building signed macOS arm64 artifacts");
 runInherited("npm", ["run", "signed:mac-arm64"]);
 
 const assets = releaseAssets(version);
-createOrUpdateGitHubRelease(
-  options,
-  tagName,
-  repoInfo.defaultBranchRef?.name || "main",
-  assets
-);
+createOrUpdateGitHubRelease(options, tagName, releaseRepoBranch, assets);
 await checkUpdateEndpoint(options, version, previousVersion, repoInfo.isPrivate);
 
 console.log(`\nRelease ${tagName} is ready in ${options.releaseRepo}.`);
