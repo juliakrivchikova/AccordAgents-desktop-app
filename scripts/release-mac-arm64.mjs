@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { createReleaseAtFreshCommit, preflightReleaseRepo } from "./release-repo-target.mjs";
+import { createReleaseAtFreshCommit, preflightReleaseRepo, verifyReleaseListing } from "./release-repo-target.mjs";
 
 const rootDir = process.cwd();
 const signedDir = path.join(rootDir, "signed");
@@ -423,19 +423,12 @@ function createOrUpdateGitHubRelease(options, tagName, releaseRepoBranch, assets
   }
 
   try {
-    createReleaseAtFreshCommit(
-      {
-        releaseRepo: options.releaseRepo,
-        branch: releaseRepoBranch,
-        tagName,
-        releaseArgs,
-        draft: options.draft,
-        prerelease: options.prerelease
-      },
+    return createReleaseAtFreshCommit(
+      { releaseRepo: options.releaseRepo, branch: releaseRepoBranch, tagName, releaseArgs },
       { gh: (args) => runInherited("gh", args) }
     );
   } catch (error) {
-    fail(`Publishing ${tagName} to ${options.releaseRepo} failed or could not be verified after the version bump and build: ${error.message}
+    fail(`Publishing ${tagName} to ${options.releaseRepo} failed after the version bump and build: ${error.message}
 Do not rerun the release. If ${tagName} is missing from ${options.releaseRepo}, create it by hand from ${path.relative(rootDir, signedDir)}/ at a new empty commit on ${releaseRepoBranch} (see scripts/release-repo-target.mjs), never with --target ${releaseRepoBranch}.`);
   }
 }
@@ -556,13 +549,30 @@ try {
 const previousVersion = currentVersion();
 const version = bumpVersion(options.target, sourceBranch);
 const tagName = `v${version}`;
+if (tagName !== plannedTagName) {
+  try {
+    preflightReleaseRepo(options.releaseRepo, releaseRepoBranch, tagName);
+  } catch (error) {
+    fail(error.message);
+  }
+}
 ensureSourceTag(tagName);
 
 console.log("\n==> Building signed macOS arm64 artifacts");
 runInherited("npm", ["run", "signed:mac-arm64"]);
 
 const assets = releaseAssets(version);
-createOrUpdateGitHubRelease(options, tagName, releaseRepoBranch, assets);
+const targetCommit = createOrUpdateGitHubRelease(options, tagName, releaseRepoBranch, assets);
+const listingProblem =
+  targetCommit && !options.draft
+    ? await verifyReleaseListing({ releaseRepo: options.releaseRepo, tagName, targetCommit, checkOrder: !options.prerelease })
+    : "";
+if (listingProblem) {
+  console.warn(`\n${tagName} is published in ${options.releaseRepo}, but ${listingProblem}.`);
+}
 await checkUpdateEndpoint(options, version, previousVersion, repoInfo.isPrivate);
+if (listingProblem) {
+  fail(`${tagName} is published, but ${listingProblem}. Do not rerun the release.`);
+}
 
 console.log(`\nRelease ${tagName} is ready in ${options.releaseRepo}.`);

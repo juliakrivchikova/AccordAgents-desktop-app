@@ -5,7 +5,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { createReleaseAtFreshCommit } from "./release-repo-target.mjs";
+import { createReleaseAtFreshCommit, preflightReleaseRepo, verifyReleaseListing } from "./release-repo-target.mjs";
 
 const rootDir = process.cwd();
 const packageJsonPath = path.join(rootDir, "package.json");
@@ -263,7 +263,7 @@ function createOrUpdateRelease(options, tagName, defaultBranch, assets) {
   }
 
   try {
-    createReleaseAtFreshCommit(
+    return createReleaseAtFreshCommit(
       {
         releaseRepo: options.releaseRepo,
         branch: defaultBranch,
@@ -281,7 +281,8 @@ function createOrUpdateRelease(options, tagName, defaultBranch, assets) {
       { gh: (args) => runInherited("gh", args) }
     );
   } catch (error) {
-    fail(`Publishing ${tagName} to ${options.releaseRepo} failed or could not be verified: ${error.message}`);
+    fail(`Publishing ${tagName} to ${options.releaseRepo} failed: ${error.message}
+Fix the cause and rerun; when the release exists the script only uploads to it.`);
   }
 }
 
@@ -374,11 +375,29 @@ async function main() {
     fail(`${options.releaseRepo} is private. update.electronjs.org requires a public GitHub release repo.`);
   }
 
+  const defaultBranch = repoInfo.defaultBranchRef?.name || "main";
+  if (!releaseExists(tagName, options.releaseRepo)) {
+    try {
+      preflightReleaseRepo(options.releaseRepo, defaultBranch, tagName);
+    } catch (error) {
+      fail(error.message);
+    }
+  }
+
   console.log("\n==> Building Windows x64 update artifacts");
   runNpmInherited(["run", "make:win-x64"]);
   const assets = releaseAssets();
-  createOrUpdateRelease(options, tagName, repoInfo.defaultBranchRef?.name || "main", assets);
+  const targetCommit = createOrUpdateRelease(options, tagName, defaultBranch, assets);
+  const listingProblem = targetCommit
+    ? await verifyReleaseListing({ releaseRepo: options.releaseRepo, tagName, targetCommit, checkOrder: true })
+    : "";
+  if (listingProblem) {
+    console.warn(`\n${tagName} is published in ${options.releaseRepo}, but ${listingProblem}.`);
+  }
   await checkUpdateEndpoint(options, version, repoInfo.isPrivate);
+  if (listingProblem) {
+    fail(`${tagName} is published, but ${listingProblem}.`);
+  }
 
   console.log(`\nWindows update artifacts for ${tagName} are ready in ${options.releaseRepo}.`);
 }

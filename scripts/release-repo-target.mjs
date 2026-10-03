@@ -1,11 +1,17 @@
 import { execFileSync } from "node:child_process";
 
 function ghApi(args) {
-  return JSON.parse(execFileSync("gh", ["api", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  return JSON.parse(
+    execFileSync("gh", ["api", ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] })
+  );
 }
 
 function ghInherited(args) {
   execFileSync("gh", args, { stdio: "inherit" });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // update.electronjs.org serves the first published release in GitHub's release list. GitHub orders
@@ -29,7 +35,9 @@ export function preflightReleaseRepo(releaseRepo, branch, tagName, { api = ghApi
   api([`repos/${releaseRepo}/git/ref/heads/${branch}`]);
   const existing = releaseTagCommit(releaseRepo, tagName, api);
   if (existing) {
-    throw new Error(`Tag ${tagName} already exists in ${releaseRepo} at ${existing}; a release on it would stay hidden from the update feed.`);
+    throw new Error(
+      `Tag ${tagName} already exists in ${releaseRepo} at ${existing}; a release on it would stay hidden from the update feed. Remove that tag from ${releaseRepo} or release another version.`
+    );
   }
 }
 
@@ -61,32 +69,54 @@ export function createReleaseTargetCommit(releaseRepo, branch, tagName, { api = 
   return commit.sha;
 }
 
-function firstPublishedRelease(releaseRepo, api) {
-  return api([`repos/${releaseRepo}/releases?per_page=100`]).find((release) => !release.draft && !release.prerelease);
-}
-
 // releaseArgs are the `gh release create` arguments after the tag name, without --target.
 export function createReleaseAtFreshCommit(
-  { releaseRepo, branch, tagName, releaseArgs, draft = false, prerelease = false },
+  { releaseRepo, branch, tagName, releaseArgs },
   { api = ghApi, gh = ghInherited, log = console.log, warn = console.warn } = {}
 ) {
   preflightReleaseRepo(releaseRepo, branch, tagName, { api });
   const targetCommit = createReleaseTargetCommit(releaseRepo, branch, tagName, { api, warn });
   log(`Release tag target: ${targetCommit}`);
   gh(["release", "create", tagName, ...releaseArgs, "--target", targetCommit]);
+  return targetCommit;
+}
 
-  if (draft) {
-    return targetCommit;
-  }
+const semverTag = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+function releaseListingProblem(releaseRepo, tagName, targetCommit, checkOrder, api) {
   const taggedCommit = releaseTagCommit(releaseRepo, tagName, api);
   if (taggedCommit !== targetCommit) {
-    throw new Error(`Tag ${tagName} in ${releaseRepo} points at ${taggedCommit || "nothing"}, not ${targetCommit}.`);
+    return `tag ${tagName} points at ${taggedCommit || "nothing"}, not ${targetCommit}`;
   }
-  if (!prerelease) {
-    const first = firstPublishedRelease(releaseRepo, api);
-    if (first?.tag_name !== tagName) {
-      throw new Error(`${releaseRepo} lists ${first?.tag_name || "no release"} before ${tagName}, so the update feed will not offer ${tagName}.`);
+  if (!checkOrder) {
+    return "";
+  }
+  // The same list update.electronjs.org reads; --jq keeps the body small however many assets releases carry.
+  const releases = api([`repos/${releaseRepo}/releases?per_page=100`, "--jq", "[.[] | {tag_name, draft, prerelease}]"]);
+  const first = releases.find((release) => !release.draft && !release.prerelease && semverTag.test(release.tag_name));
+  return first?.tag_name === tagName ? "" : `${releaseRepo} lists ${first?.tag_name || "no release"} first, so the update feed would not offer ${tagName}`;
+}
+
+// Returns "" when the published release sits on its fresh commit and, if checkOrder, heads the release
+// list; otherwise a description of what is still wrong after a few attempts. It never throws, because
+// the release is already published by the time this runs.
+export async function verifyReleaseListing(
+  { releaseRepo, tagName, targetCommit, checkOrder },
+  { api = ghApi, wait = sleep, attempts = 4, delayMs = 5_000 } = {}
+) {
+  let problem = "";
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      problem = releaseListingProblem(releaseRepo, tagName, targetCommit, checkOrder, api);
+    } catch (error) {
+      problem = `the release list could not be read: ${error.message}`;
+    }
+    if (!problem) {
+      return "";
+    }
+    if (attempt < attempts) {
+      await wait(delayMs);
     }
   }
-  return targetCommit;
+  return problem;
 }

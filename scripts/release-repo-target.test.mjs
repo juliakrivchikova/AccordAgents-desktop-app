@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createReleaseAtFreshCommit, createReleaseTargetCommit, preflightReleaseRepo } from "./release-repo-target.mjs";
+import { createReleaseAtFreshCommit, createReleaseTargetCommit, preflightReleaseRepo, verifyReleaseListing } from "./release-repo-target.mjs";
 
 const repo = "owner/releases";
 const tag = "v1.11.1-beta.10";
@@ -37,7 +37,10 @@ function fakeGitHub(overrides = {}) {
         .filter(([name]) => name.startsWith(prefix))
         .map(([name, sha]) => ({ ref: `refs/tags/${name}`, object: { sha } }));
     }
-    if (key === `GET ${repo}/releases?per_page=100`) return state.releases;
+    if (key === `GET ${repo}/releases?per_page=100`) {
+      assert.ok(args.includes("--jq"), "the full release list can outgrow the output buffer");
+      return state.releases;
+    }
     throw new Error(`Unexpected gh api call: ${key}`);
   };
   const ghCalls = [];
@@ -112,41 +115,88 @@ test("preflight refuses a tag that already exists or a repo it cannot push to", 
   assert.deepEqual(free.calls.at(-1), [`repos/${repo}/git/matching-refs/tags/${tag}`]);
 });
 
-test("creates the release at the fresh commit and checks that the feed lists it first", () => {
-  const { api, gh, ghCalls, state } = fakeGitHub();
+test("creates the release at the fresh commit, after the preflight", () => {
+  const { api, gh, calls, ghCalls } = fakeGitHub();
 
   assert.equal(createReleaseAtFreshCommit({ releaseRepo: repo, branch: "main", tagName: tag, releaseArgs: ["a.zip", "--repo", repo, "--latest"] }, { api, gh, ...quiet() }), "fresh-sha");
   assert.deepEqual(ghCalls, [["release", "create", tag, "a.zip", "--repo", repo, "--latest", "--target", "fresh-sha"]]);
-  assert.equal(state.releases[0].tag_name, tag);
+  assert.deepEqual(calls[0], [`repos/${repo}`]);
+
+  const taken = fakeGitHub();
+  taken.state.tags[tag] = "old-sha";
+  assert.throws(() => createReleaseAtFreshCommit({ releaseRepo: repo, branch: "main", tagName: tag, releaseArgs: [] }, { api: taken.api, gh: taken.gh, ...quiet() }), /already exists/);
+  assert.equal(taken.ghCalls.length, 0);
+  assert.ok(!taken.calls.some((args) => args.includes("POST")), "no commit for a taken tag");
 });
 
-test("fails loudly when the release lands on another commit or behind an older release", () => {
-  const existingTag = fakeGitHub({
-    [`GET ${repo}/git/matching-refs/tags/${tag}`]: (_args, state) =>
-      state.releases.some((release) => release.tag_name === tag) ? [{ ref: `refs/tags/${tag}`, object: { sha: "old-sha" } }] : []
+function publish(github) {
+  createReleaseAtFreshCommit({ releaseRepo: repo, branch: "main", tagName: tag, releaseArgs: [] }, { api: github.api, gh: github.gh, ...quiet() });
+}
+
+const noWait = { wait: async () => {} };
+
+test("a published release on its fresh commit at the head of the list passes", async () => {
+  const github = fakeGitHub();
+  publish(github);
+  // Drafts and tags the feed ignores may sit above it.
+  github.state.releases.unshift({ tag_name: "v1.9.5-beta.12", draft: true, prerelease: false }, { tag_name: "nightly", draft: false, prerelease: false });
+
+  assert.equal(await verifyReleaseListing({ releaseRepo: repo, tagName: tag, targetCommit: "fresh-sha", checkOrder: true }, { api: github.api, ...noWait }), "");
+});
+
+test("reports a release that landed on another commit or behind an older release", async () => {
+  const existingTag = fakeGitHub();
+  publish(existingTag);
+  existingTag.state.tags[tag] = "old-sha";
+  assert.equal(
+    await verifyReleaseListing({ releaseRepo: repo, tagName: tag, targetCommit: "fresh-sha", checkOrder: true }, { api: existingTag.api, ...noWait }),
+    "tag v1.11.1-beta.10 points at old-sha, not fresh-sha"
+  );
+
+  const hidden = fakeGitHub();
+  publish(hidden);
+  hidden.state.releases.push(hidden.state.releases.shift());
+  assert.equal(
+    await verifyReleaseListing({ releaseRepo: repo, tagName: tag, targetCommit: "fresh-sha", checkOrder: true }, { api: hidden.api, ...noWait }),
+    "owner/releases lists v1.11.1-beta.9 first, so the update feed would not offer v1.11.1-beta.10"
+  );
+});
+
+test("retries a list that is briefly stale or unreadable and never throws", async () => {
+  let reads = 0;
+  const github = fakeGitHub({
+    [`GET ${repo}/releases?per_page=100`]: (_args, state) => {
+      reads += 1;
+      if (reads === 1) throw new Error("HTTP 502");
+      return reads === 2 ? state.releases.slice(1) : state.releases;
+    }
   });
-  assert.throws(
-    () => createReleaseAtFreshCommit({ releaseRepo: repo, branch: "main", tagName: tag, releaseArgs: [] }, { api: existingTag.api, gh: existingTag.gh, ...quiet() }),
-    /Tag v1\.11\.1-beta\.10 in owner\/releases points at old-sha, not fresh-sha/
-  );
+  publish(github);
+  const waits = [];
 
-  const hidden = fakeGitHub({ [`GET ${repo}/releases?per_page=100`]: (_args, state) => [...state.releases.slice(1), state.releases[0]] });
-  assert.throws(
-    () => createReleaseAtFreshCommit({ releaseRepo: repo, branch: "main", tagName: tag, releaseArgs: [] }, { api: hidden.api, gh: hidden.gh, ...quiet() }),
-    /owner\/releases lists v1\.11\.1-beta\.9 before v1\.11\.1-beta\.10, so the update feed will not offer v1\.11\.1-beta\.10/
+  assert.equal(
+    await verifyReleaseListing({ releaseRepo: repo, tagName: tag, targetCommit: "fresh-sha", checkOrder: true }, { api: github.api, wait: async (ms) => waits.push(ms) }),
+    ""
+  );
+  assert.deepEqual(waits, [5000, 5000]);
+
+  const broken = fakeGitHub({
+    [`GET ${repo}/releases?per_page=100`]: () => {
+      throw new Error("HTTP 502");
+    }
+  });
+  publish(broken);
+  assert.equal(
+    await verifyReleaseListing({ releaseRepo: repo, tagName: tag, targetCommit: "fresh-sha", checkOrder: true }, { api: broken.api, ...noWait }),
+    "the release list could not be read: HTTP 502"
   );
 });
 
-test("a draft is not checked for a tag and a prerelease is not checked against the feed", () => {
-  const draft = fakeGitHub();
-  createReleaseAtFreshCommit({ releaseRepo: repo, branch: "main", tagName: tag, releaseArgs: ["--draft"], draft: true }, { api: draft.api, gh: draft.gh, ...quiet() });
-  assert.equal(draft.calls.filter((args) => args[0].includes("matching-refs")).length, 1, "only the preflight looks up the tag");
+test("a prerelease is checked for its tag but not against the feed", async () => {
+  const github = fakeGitHub({ [`GET ${repo}/releases?per_page=100`]: assert.fail });
+  publish(github);
 
-  const prerelease = fakeGitHub({ [`GET ${repo}/releases?per_page=100`]: assert.fail });
-  createReleaseAtFreshCommit(
-    { releaseRepo: repo, branch: "main", tagName: tag, releaseArgs: ["--prerelease"], prerelease: true },
-    { api: prerelease.api, gh: prerelease.gh, ...quiet() }
-  );
+  assert.equal(await verifyReleaseListing({ releaseRepo: repo, tagName: tag, targetCommit: "fresh-sha", checkOrder: false }, { api: github.api, ...noWait }), "");
 });
 
 test("the default runner passes the arguments to gh api and parses its JSON", { skip: process.platform === "win32" }, () => {
