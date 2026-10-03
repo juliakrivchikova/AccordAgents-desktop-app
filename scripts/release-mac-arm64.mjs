@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { createReleaseTargetCommit } from "./release-repo-target.mjs";
 
 const rootDir = process.cwd();
 const signedDir = path.join(rootDir, "signed");
@@ -408,6 +409,8 @@ function createOrUpdateGitHubRelease(options, tagName, releaseRepoTargetBranch, 
   }
 
   console.log(`\n==> Creating GitHub Release ${tagName} in ${options.releaseRepo}`);
+  const targetCommit = createReleaseTargetCommit(options.releaseRepo, releaseRepoTargetBranch, tagName);
+  console.log(`Release tag target: ${targetCommit}`);
   const args = [
     "release",
     "create",
@@ -416,7 +419,7 @@ function createOrUpdateGitHubRelease(options, tagName, releaseRepoTargetBranch, 
     "--repo",
     options.releaseRepo,
     "--target",
-    releaseRepoTargetBranch,
+    targetCommit,
     "--title",
     title,
     "--notes",
