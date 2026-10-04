@@ -220,9 +220,9 @@ export interface MachineRuntimeProbe {
   runtimePids: number[];
   supervisorPids: number[];
   providerPids: number[];
-  /** Seconds the oldest runtime process has run; a unit that keeps
+  /** Seconds the unit's own main process has run; a unit that keeps
    *  restarting its program shows a young one. */
-  runtimeAgeSeconds?: number;
+  serviceAgeSeconds?: number;
 }
 
 /** Where the runtime payload the desktop would install comes from. */
@@ -414,7 +414,10 @@ export function machineRuntimeStatus(input: {
   if (live && !isMachineInstallTerminalPhase(live.phase) && (!waitingNotice || (connected && behind))) {
     return { state: "updating", text: live.message };
   }
-  const last = install?.lastOperation;
+  // A setup that brought a program back stood down because the program
+  // came back by itself: nothing failed and nothing of it waits.
+  const recorded = install?.lastOperation;
+  const last = recorded && isMachineRecoveryOperation(recorded.operationId) && recorded.recovery?.kind === "machine-busy" ? undefined : recorded;
   if (last && !isMachineInstallTerminalPhase(last.phase)) {
     // Settings opened while an update was already running: its progress is
     // on the record until the next snapshot arrives.

@@ -296,7 +296,14 @@ export function machineProbeScript(options: {
     `fi`,
     `scan_processes`,
     `printf 'runtime-pids=%s\\n' "$RUNTIME"`,
-    `printf 'runtime-age=%s\\n' "$(for p in $RUNTIME; do ps -o etimes= -p "$p" 2>/dev/null; done | sort -n | tail -n 1 | tr -d ' ')"`,
+    // How long the unit's own process has run: one that keeps restarting
+    // its program shows a young one, whatever else matches the scan.
+    `MAIN_PID=''`,
+    `if command -v systemctl >/dev/null 2>&1; then`,
+    `  if systemctl cat "$SVC.service" >/dev/null 2>&1; then MAIN_PID="$(systemctl show -p MainPID --value "$SVC.service" 2>/dev/null || true)"`,
+    `  elif systemctl --user cat "$SVC.service" >/dev/null 2>&1; then MAIN_PID="$(systemctl --user show -p MainPID --value "$SVC.service" 2>/dev/null || true)"; fi`,
+    `fi`,
+    `if [ -n "$MAIN_PID" ] && [ "$MAIN_PID" != 0 ]; then printf 'service-age=%s\\n' "$(ps -o etimes= -p "$MAIN_PID" 2>/dev/null | tr -d ' ' || true)"; fi`,
     `printf 'supervisor-pids=%s\\n' "$SUPERVISOR"`,
     `printf 'provider-pids=%s\\n' "$PROVIDER"`
   ].join("\n");
@@ -369,7 +376,7 @@ export function parseMachineProbe(stdout: string): ParsedMachineProbe {
     runtimePids: parsePids(values.get("runtime-pids")),
     supervisorPids: parsePids(values.get("supervisor-pids")),
     providerPids: parsePids(values.get("provider-pids")),
-    ...(/^\d+$/.test(values.get("runtime-age") ?? "") ? { runtimeAgeSeconds: Number(values.get("runtime-age")) } : {})
+    ...(/^\d+$/.test(values.get("service-age") ?? "") ? { serviceAgeSeconds: Number(values.get("service-age")) } : {})
   };
 }
 

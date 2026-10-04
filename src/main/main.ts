@@ -1669,7 +1669,7 @@ async function inspectCloudMachine(record: MachineInstallRecord): Promise<{ prog
     { installRoot: record.installRoot, userDataDir: record.userDataDir, serviceName: record.serviceName });
   // A program its unit keeps restarting is not running: it never stays up
   // long enough to connect, and only a new setup can help it.
-  const settled = (probe.runtimeAgeSeconds ?? Number.POSITIVE_INFINITY) >= 60;
+  const settled = (probe.serviceAgeSeconds ?? Number.POSITIVE_INFINITY) >= 60;
   return { programRunning: probe.serviceState === "active" && probe.runtimePids.length > 0 && settled, agentsRunning: probe.providerPids.length > 0 };
 }
 
@@ -3671,7 +3671,7 @@ void app.whenReady().then(async () => {
         // reaching one that is about to be stopped.
         const release = link.holdTurns(machineId, "The cloud machine's program is being set up again.");
         try {
-          await cloudRunPreparation.prepareRuntime({ agentsChecked: true, machineId });
+          await cloudRunPreparation.prepareRuntime({ agentsChecked: true, machineId, automatic: true });
         } finally {
           release();
         }

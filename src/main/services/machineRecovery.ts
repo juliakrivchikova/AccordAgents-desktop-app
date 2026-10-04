@@ -10,9 +10,10 @@ export const MACHINE_RECOVERY_RETRY_MS = 15 * 60_000;
 export const MACHINE_RECOVERY_MAX_RETRY_MS = 4 * 60 * 60_000;
 /** A program that runs but stays out of touch this long is reported. */
 export const MACHINE_RECOVERY_RUNNING_REPORT_MS = 30 * 60_000;
-/** A check starting this long after the previous one ended means the
- *  desktop slept or hung: what was seen before says nothing about now, so the
- *  watch starts again. A check that itself takes long is not such a gap. */
+/** Timer ticks this far apart mean the desktop slept or hung, even in the
+ *  middle of a check: what was seen before says nothing about now, so the
+ *  watch starts again. A check that itself takes long is not such a gap: the
+ *  timer keeps ticking through it. */
 export const MACHINE_RECOVERY_WATCH_GAP_MS = 3 * 60_000;
 
 /** What this desktop sees of a machine over the relay: there, missing while
@@ -77,7 +78,8 @@ export class MachineRecoveryService {
   private readonly failedSetups = new Map<string, number>();
   private readonly waitedOnAgents = new Set<string>();
   private readonly failures = new Map<string, MachineRecoveryFailure>();
-  private lastCheckEndedAt?: number;
+  private lastTickAt?: number;
+  private slept = false;
   private running?: Promise<void>;
 
   constructor(private readonly options: MachineRecoveryOptions) {}
@@ -87,18 +89,24 @@ export class MachineRecoveryService {
     return this.failures.get(machineId);
   }
 
-  /** One check; overlapping calls share the check in progress. Never
-   *  rejects: it runs from a timer. */
+  /** One tick of the timer: a check, or the one in progress. Never rejects:
+   *  it runs from a timer. */
   check(): Promise<void> {
+    const now = this.options.now();
+    if (this.lastTickAt !== undefined && now - this.lastTickAt > MACHINE_RECOVERY_WATCH_GAP_MS) this.slept = true;
+    this.lastTickAt = now;
     this.running ??= this.checkNow()
       .catch((error) => { this.options.log("machines.recovery.error", { message: errorText(error) }); })
-      .finally(() => { this.lastCheckEndedAt = this.options.now(); this.running = undefined; });
+      .finally(() => { this.running = undefined; });
     return this.running;
   }
 
   private async checkNow(): Promise<void> {
     const now = this.options.now();
-    if (this.lastCheckEndedAt !== undefined && now - this.lastCheckEndedAt > MACHINE_RECOVERY_WATCH_GAP_MS) this.forgetAll();
+    if (this.slept) {
+      this.slept = false;
+      this.forgetAll();
+    }
     const linkStartedAt = this.options.linkStartedAt();
     if (linkStartedAt === undefined || now - linkStartedAt < MACHINE_RECOVERY_LINK_GRACE_MS) return;
     const record = await this.options.machineOnInstance();

@@ -278,6 +278,14 @@ test("the Machines row says when an update runs, failed, or is still owed, and s
   const stepped = record({ lastOperation: snapshot({ phase: "needs-attention", message: "A member started work…", recovery: { kind: "machine-busy", detail: "staged" } }) });
   assert.equal(machineRuntimeStatus({ install: stepped, live: undefined, connected: true, runningVersion: "1.10.4-beta.10", desktopVersion })?.state, "pending");
   assert.match(machineRuntimeStatus({ install: stepped, live: undefined, connected: true, runningVersion: "1.10.4-beta.10", desktopVersion })?.text ?? "", /waits for the machine to be idle/);
+  // A setup that brought a program back stood down because it came back by
+  // itself: nothing failed, and only a version behind is still pending.
+  const cameBack = (installedVersion: string) => record({ installedVersion, lastOperation: snapshot({ operationId: "recovery-5", phase: "needs-attention",
+    message: "The machine's program came back while it was being set up again, so it was not stopped.",
+    error: "The machine's program came back while it was being set up again, so it was not stopped.", recovery: { kind: "machine-busy", detail: "staged" } }) });
+  assert.equal(machineRuntimeStatus({ install: cameBack(desktopVersion), live: undefined, connected: true, runningVersion: desktopVersion, desktopVersion }), undefined);
+  assert.deepEqual(machineRuntimeStatus({ install: cameBack("1.10.4-beta.10"), live: undefined, connected: true, runningVersion: "1.10.4-beta.10", desktopVersion }),
+    { state: "pending", text: "Runtime update to 1.10.4-beta.11 pending; it starts when the machine is connected and idle." });
 });
 
 test("the waiting notice is believed only while the machine is connected and behind", () => {

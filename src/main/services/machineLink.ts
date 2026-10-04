@@ -1058,17 +1058,20 @@ export class MachineLinkService implements MachineTurnDispatcher {
       return { status: "failed", messages: [], warnings: [], error: `@${request.participant.handle} is hosted on a machine that is not enrolled on this desktop.` };
     }
     const interrupted: MachineTurnDispatchResult = { status: "interrupted", messages: [], warnings: [] };
-    if (connection.turnHold) {
-      void this.debugLogs.write("machine-link.turn.held", { machineId, runId: request.runId, reason: connection.turnHold.reason });
-      await request.onMachineWaiting?.(connection.record.name, connection.turnHold.reason).catch(() => undefined);
-      const stopped = await Promise.race([
-        connection.turnHold.released.then(() => false),
-        new Promise<boolean>((resolve) => {
-          if (request.signal?.aborted) resolve(true);
-          else request.signal?.addEventListener("abort", () => resolve(true), { once: true });
-        })
-      ]);
-      if (stopped) return interrupted;
+    let hold = connection.turnHold;
+    if (hold) {
+      void this.debugLogs.write("machine-link.turn.held", { machineId, runId: request.runId, reason: hold.reason });
+      await request.onMachineWaiting?.(connection.record.name, hold.reason).catch(() => undefined);
+      const aborted = new Promise<boolean>((resolve) => {
+        if (request.signal?.aborted) resolve(true);
+        else request.signal?.addEventListener("abort", () => resolve(true), { once: true });
+      });
+      // The hold may end while the bubble is written, and another may follow
+      // at once (an update evaluated right after a setup): wait for all.
+      while (hold) {
+        if (await Promise.race([hold.released.then(() => false), aborted])) return interrupted;
+        hold = connection.turnHold;
+      }
     }
     if (!connection.eventChannel && !connection.machineDeviceId) {
       return { status: "failed", messages: [], warnings: [], error: `@${request.participant.handle} is hosted on ${connection.record.name}, which is not connected.` };

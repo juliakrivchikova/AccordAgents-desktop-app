@@ -29,7 +29,11 @@ function harness() {
     },
     reinstall: async (machineId) => {
       state.reinstalls.push(machineId);
-      state.now += state.setupTakesMs;
+      // The timer keeps ticking through a long setup.
+      for (let took = 0; took < state.setupTakesMs; took += 60_000) {
+        state.now += 60_000;
+        void service.check();
+      }
       if (state.fail) throw new Error(state.fail);
       state.connected = true;
     },
@@ -213,6 +217,22 @@ test("a stopped instance drops what was known, and a running program is reported
   assert.equal(h.service.failure("cloud"), undefined, "minutes after the start, not 'over half an hour'");
   await h.after(MACHINE_RECOVERY_RUNNING_REPORT_MS);
   assert.deepEqual(h.service.failure("cloud"), { kind: "running" });
+});
+
+test("a sleep in the middle of a check starts the watch again once it ends", async () => {
+  const h = harness();
+  h.state.fail = "ssh: connect to host timed out";
+  await h.outOfTouch();
+  await h.after(MACHINE_RECOVERY_AFTER_MS);
+  assert.ok(h.service.failure("cloud"));
+  h.state.now += 3 * 60 * 60_000;
+  await h.service.check();
+  assert.equal(h.service.failure("cloud"), undefined, "what was known before the sleep is dropped");
+  h.state.fail = undefined;
+  await h.after(MACHINE_RECOVERY_AFTER_MS - 60_000);
+  assert.equal(h.state.reinstalls.length, 1, "and five minutes are watched again before acting");
+  await h.after(60_000);
+  assert.equal(h.state.reinstalls.length, 2);
 });
 
 test("a check that fails to read its own records never rejects into the timer", async () => {

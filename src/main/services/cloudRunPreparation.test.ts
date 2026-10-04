@@ -391,8 +391,7 @@ test("Settings sets the machine's program up again without any provider, and lea
   const h = harness();
   await h.service.prepareRuntime();
   assert.doesNotMatch(h.installRequests[0].operationId, /^recovery-/, "a setup that did not ask the machine is not marked");
-  assert.deepEqual(h.calls, ["access:i-abc:no-start", "enroll", "install:machine-1:undefined"],
-    "an absent program is installed, no provider is checked, and the instance is never started for it");
+  assert.deepEqual(h.calls, ["access:i-abc", "enroll", "install:machine-1:undefined"], "an absent program is installed, no provider is checked");
   assert.equal(h.installRequests[0].requiredProvider, undefined);
   const connected = await connectedHarness();
   connected.calls.length = 0;
@@ -417,8 +416,18 @@ test("a program that crashed mid-turn, or has a turn waiting for it, is set up a
   assert.match(h.installRequests[0].operationId, /^recovery-/, "marked, so the drain refuses a program that came back meanwhile");
   assert.equal(h.installRequests[0].machineId, "machine-1", "the same machine is set up again, so the waiting turn reaches it");
   h.options.isConnected = (machineId) => machineId === "machine-1";
-  await assert.rejects(new CloudRunPreparationService(h.options).prepareRuntime({ agentsChecked: true }), /Finish its current runs/,
-    "a program that came back meanwhile reports afresh, and its report counts again");
+  h.installRequests.length = 0;
+  await new CloudRunPreparationService(h.options).prepareRuntime({ agentsChecked: true });
+  assert.equal(h.installRequests.length, 0, "a program that came back meanwhile is not set up again; a version behind waits for the automatic update");
+});
+
+test("the app's own recovery never starts the instance or holds it to its configured size; the Settings button keeps its usual path", async () => {
+  const h = harness();
+  await h.service.prepareRuntime({ automatic: true });
+  assert.equal(h.calls[0], "access:i-abc:no-start");
+  h.calls.length = 0;
+  await new CloudRunPreparationService(h.options).prepareRuntime({ agentsChecked: true, machineId: "machine-1" });
+  assert.equal(h.calls[0], "access:i-abc", "a size the User must decide on is still offered by the button");
 });
 
 test("the machine that was asked is the one set up again, even beside another on the same instance", async () => {
