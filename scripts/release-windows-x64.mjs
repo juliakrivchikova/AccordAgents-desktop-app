@@ -5,6 +5,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { createReleaseAtFreshCommit, preflightReleaseRepo, verifyReleaseListing } from "./release-repo-target.mjs";
 
 const rootDir = process.cwd();
 const packageJsonPath = path.join(rootDir, "package.json");
@@ -21,6 +22,8 @@ Builds and publishes Squirrel.Windows x64 update assets for the current package 
 Run this after the corresponding source tag exists. It uses the same stable/beta
 release repositories as the in-app updater and uploads the Setup executable,
 full NuGet package, and RELEASES manifest required by update.electronjs.org.
+When it has to create the GitHub Release, the tag goes on a new empty commit
+on the release repo's default branch so the update feed lists it first.
 
 Options:
   --repo owner/repo              Public GitHub release repo. Defaults to package.json config for this channel.
@@ -259,20 +262,28 @@ function createOrUpdateRelease(options, tagName, defaultBranch, assets) {
     return;
   }
 
-  runInherited("gh", [
-    "release",
-    "create",
-    tagName,
-    ...assets,
-    "--repo",
-    options.releaseRepo,
-    "--target",
-    defaultBranch,
-    "--title",
-    `AccordAgents ${tagName}`,
-    "--notes",
-    "Windows x64 Squirrel update artifacts."
-  ]);
+  try {
+    return createReleaseAtFreshCommit(
+      {
+        releaseRepo: options.releaseRepo,
+        branch: defaultBranch,
+        tagName,
+        releaseArgs: [
+          ...assets,
+          "--repo",
+          options.releaseRepo,
+          "--title",
+          `AccordAgents ${tagName}`,
+          "--notes",
+          "Windows x64 Squirrel update artifacts."
+        ]
+      },
+      { gh: (args) => runInherited("gh", args) }
+    );
+  } catch (error) {
+    fail(`Publishing ${tagName} to ${options.releaseRepo} failed: ${error.message}
+Fix the cause and rerun; when the release exists the script only uploads to it.`);
+  }
 }
 
 export function validateWindowsUpdateResponse({ endpoint, status, statusText, url, body }, version) {
@@ -364,11 +375,37 @@ async function main() {
     fail(`${options.releaseRepo} is private. update.electronjs.org requires a public GitHub release repo.`);
   }
 
+  const defaultBranch = repoInfo.defaultBranchRef?.name || "main";
+  if (!releaseExists(tagName, options.releaseRepo)) {
+    try {
+      preflightReleaseRepo(options.releaseRepo, defaultBranch, tagName);
+    } catch (error) {
+      fail(error.message);
+    }
+  }
+
   console.log("\n==> Building Windows x64 update artifacts");
   runNpmInherited(["run", "make:win-x64"]);
   const assets = releaseAssets();
-  createOrUpdateRelease(options, tagName, repoInfo.defaultBranchRef?.name || "main", assets);
-  await checkUpdateEndpoint(options, version, repoInfo.isPrivate);
+  const targetCommit = createOrUpdateRelease(options, tagName, defaultBranch, assets);
+  const listingProblem = targetCommit
+    ? await verifyReleaseListing({ releaseRepo: options.releaseRepo, tagName, targetCommit, checkOrder: true })
+    : "";
+  if (listingProblem) {
+    console.warn(`\n${tagName} is published in ${options.releaseRepo}, but ${listingProblem}.`);
+  }
+  let updateCheckError = null;
+  try {
+    await checkUpdateEndpoint(options, version, repoInfo.isPrivate);
+  } catch (error) {
+    updateCheckError = error;
+  }
+  if (listingProblem) {
+    fail(`${tagName} is published, but ${listingProblem}.${updateCheckError ? `\nUpdate check: ${updateCheckError.message}` : ""}`);
+  }
+  if (updateCheckError) {
+    throw updateCheckError;
+  }
 
   console.log(`\nWindows update artifacts for ${tagName} are ready in ${options.releaseRepo}.`);
 }

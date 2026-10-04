@@ -52,6 +52,7 @@ test("beta dry-run uses the beta release repo and a normal published release", (
   assert.match(output, /Release repo: juliakrivchikova\/AccordAgents-Beta-Releases/);
   assert.match(output, /Next version: \d+\.\d+\.\d+-beta\.\d+/);
   assert.match(output, /GitHub Release state: published/);
+  assert.match(output, /Release tag target: new empty commit on the release repo's default branch/);
   assert.match(output, /Update check: enabled against release repo/);
 });
 
