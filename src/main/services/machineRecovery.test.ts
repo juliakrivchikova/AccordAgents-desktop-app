@@ -13,7 +13,7 @@ function harness() {
   const state = {
     now: 10 * 60 * 60_000, linkStartedAt: 0 as number | undefined, connected: true, relay: true, runningSince: 0 as number | undefined,
     programRunning: false, agents: false, inspectError: undefined as string | undefined, setup: false,
-    fail: undefined as string | undefined, reinstalls: [] as string[], inspections: 0, events: [] as string[]
+    fail: undefined as string | undefined, reinstalls: [] as string[], inspections: 0, events: [] as string[], setupTakesMs: 0
   };
   const service = new MachineRecoveryService({
     now: () => state.now,
@@ -27,7 +27,12 @@ function harness() {
       if (state.inspectError) throw new Error(state.inspectError);
       return { programRunning: state.programRunning, agentsRunning: state.agents };
     },
-    reinstall: async (machineId) => { state.reinstalls.push(machineId); if (state.fail) throw new Error(state.fail); state.connected = true; },
+    reinstall: async (machineId) => {
+      state.reinstalls.push(machineId);
+      state.now += state.setupTakesMs;
+      if (state.fail) throw new Error(state.fail);
+      state.connected = true;
+    },
     log: (event) => { state.events.push(event); }
   });
   // Checks every minute, as the desktop's timer does.
@@ -102,9 +107,8 @@ test("nothing is touched while a setup runs, or while the instance is stopped or
   await h.after(MACHINE_RECOVERY_RETRY_MS);
   assert.equal(h.state.inspections, 0, "a stopped instance has no program to run, and is not started to ask it");
   h.state.runningSince = h.state.now;
-  await h.after(60_000);
+  await h.after(MACHINE_RECOVERY_AFTER_MS - 60_000);
   assert.equal(h.state.inspections, 0, "an instance that just started is still bringing its program up");
-  h.state.runningSince = 0;
   await h.after(60_000);
   assert.deepEqual(h.state.reinstalls, ["cloud"]);
 });
@@ -175,6 +179,40 @@ test("a relay this desktop cannot reach, or a desktop that slept, starts the wat
   assert.deepEqual(slept.state.reinstalls, [], "a check after a sleep starts a new watch rather than judging across it");
   await slept.after(MACHINE_RECOVERY_AFTER_MS);
   assert.deepEqual(slept.state.reinstalls, ["cloud"]);
+});
+
+test("a check that itself takes long is not a sleep: the wait between attempts and the report are kept", async () => {
+  const h = harness();
+  h.state.fail = "the machine did not connect after setup";
+  h.state.setupTakesMs = 4 * 60_000;
+  await h.outOfTouch();
+  await h.after(MACHINE_RECOVERY_AFTER_MS);
+  assert.equal(h.state.reinstalls.length, 1);
+  await h.after(60_000);
+  assert.deepEqual(h.service.failure("cloud"), { kind: "setup", reason: "the machine did not connect after setup" },
+    "the next tick after a four-minute setup still knows it failed");
+  await h.after(MACHINE_RECOVERY_RETRY_MS - 4 * 60_000);
+  assert.equal(h.state.reinstalls.length, 1, "and still waits its turn");
+});
+
+test("a stopped instance drops what was known, and a running program is reported only half an hour after the instance started", async () => {
+  const h = harness();
+  h.state.fail = "ssh: connect to host timed out";
+  await h.outOfTouch();
+  await h.after(MACHINE_RECOVERY_AFTER_MS);
+  assert.ok(h.service.failure("cloud"));
+  h.state.runningSince = undefined;
+  await h.after(MACHINE_RECOVERY_RETRY_MS);
+  assert.equal(h.service.failure("cloud"), undefined, "an old failure is not shown again after the next start");
+  h.state.fail = undefined;
+  h.state.programRunning = true;
+  h.state.runningSince = h.state.now;
+  const before = h.state.inspections;
+  await h.after(MACHINE_RECOVERY_AFTER_MS + 60_000);
+  assert.equal(h.state.inspections - before, 1);
+  assert.equal(h.service.failure("cloud"), undefined, "minutes after the start, not 'over half an hour'");
+  await h.after(MACHINE_RECOVERY_RUNNING_REPORT_MS);
+  assert.deepEqual(h.service.failure("cloud"), { kind: "running" });
 });
 
 test("a check that fails to read its own records never rejects into the timer", async () => {

@@ -173,7 +173,7 @@ import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashRepo
 import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
 import { MachineRecoveryService } from "./services/machineRecovery";
-import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase } from "../shared/machineInstall";
+import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, isMachineRecoveryOperation } from "../shared/machineInstall";
 import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService, enabledCloudProviders } from "./services/cloudRunDoctor";
@@ -499,6 +499,13 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
   // Only for the automatic update: the button is the recovery path and must
   // still be able to replace a runtime that no longer answers.
   beforeDrain: async (record, operationId, purpose) => {
+    // Set up again because the machine said its program was not running: if
+    // it came back meanwhile, it may be running turns again.
+    if (isMachineRecoveryOperation(operationId)) {
+      return machineLinkService?.isMachineConnected(record.machineId)
+        ? "The machine's program came back while it was being set up again, so it was not stopped."
+        : undefined;
+    }
     // The Update button may replace a runtime that does not answer; a healthy
     // one is never stopped mid-turn only to hand it a stop key.
     if (!isMachineAutoUpgradeOperation(operationId) && purpose !== "key") return undefined;
@@ -1660,7 +1667,10 @@ async function inspectCloudMachine(record: MachineInstallRecord): Promise<{ prog
   const probe = await machineInstallerService.probe(
     { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias },
     { installRoot: record.installRoot, userDataDir: record.userDataDir, serviceName: record.serviceName });
-  return { programRunning: probe.serviceState === "active" && probe.runtimePids.length > 0, agentsRunning: probe.providerPids.length > 0 };
+  // A program its unit keeps restarting is not running: it never stays up
+  // long enough to connect, and only a new setup can help it.
+  const settled = (probe.runtimeAgeSeconds ?? Number.POSITIVE_INFINITY) >= 60;
+  return { programRunning: probe.serviceState === "active" && probe.runtimePids.length > 0 && settled, agentsRunning: probe.providerPids.length > 0 };
 }
 
 async function machineListResult(): Promise<MachineListResult> {
@@ -3666,7 +3676,7 @@ void app.whenReady().then(async () => {
           release();
         }
         void autoUpgrade.evaluate();
-        sendToMainWindow("machines:updated", await machineListResult());
+        void machineListResult().then((result) => sendToMainWindow("machines:updated", result)).catch(() => undefined);
       },
       log: (event, payload) => { void debugLogService.write(event, payload); }
     });

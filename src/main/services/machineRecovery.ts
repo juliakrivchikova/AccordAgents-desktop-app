@@ -10,8 +10,9 @@ export const MACHINE_RECOVERY_RETRY_MS = 15 * 60_000;
 export const MACHINE_RECOVERY_MAX_RETRY_MS = 4 * 60 * 60_000;
 /** A program that runs but stays out of touch this long is reported. */
 export const MACHINE_RECOVERY_RUNNING_REPORT_MS = 30 * 60_000;
-/** Checks further apart than this mean the desktop slept or hung: what was
- *  seen before says nothing about now, so the watch starts again. */
+/** A check starting this long after the previous one ended means the
+ *  desktop slept or hung: what was seen before says nothing about now, so the
+ *  watch starts again. A check that itself takes long is not such a gap. */
 export const MACHINE_RECOVERY_WATCH_GAP_MS = 3 * 60_000;
 
 /** What this desktop sees of a machine over the relay: there, missing while
@@ -76,7 +77,7 @@ export class MachineRecoveryService {
   private readonly failedSetups = new Map<string, number>();
   private readonly waitedOnAgents = new Set<string>();
   private readonly failures = new Map<string, MachineRecoveryFailure>();
-  private lastCheckAt?: number;
+  private lastCheckEndedAt?: number;
   private running?: Promise<void>;
 
   constructor(private readonly options: MachineRecoveryOptions) {}
@@ -91,15 +92,13 @@ export class MachineRecoveryService {
   check(): Promise<void> {
     this.running ??= this.checkNow()
       .catch((error) => { this.options.log("machines.recovery.error", { message: errorText(error) }); })
-      .finally(() => { this.running = undefined; });
+      .finally(() => { this.lastCheckEndedAt = this.options.now(); this.running = undefined; });
     return this.running;
   }
 
   private async checkNow(): Promise<void> {
     const now = this.options.now();
-    const previousCheckAt = this.lastCheckAt;
-    this.lastCheckAt = now;
-    if (previousCheckAt !== undefined && now - previousCheckAt > MACHINE_RECOVERY_WATCH_GAP_MS) this.forgetAll();
+    if (this.lastCheckEndedAt !== undefined && now - this.lastCheckEndedAt > MACHINE_RECOVERY_WATCH_GAP_MS) this.forgetAll();
     const linkStartedAt = this.options.linkStartedAt();
     if (linkStartedAt === undefined || now - linkStartedAt < MACHINE_RECOVERY_LINK_GRACE_MS) return;
     const record = await this.options.machineOnInstance();
@@ -121,10 +120,19 @@ export class MachineRecoveryService {
     this.outOfTouchSince.set(id, since);
     if (now - since < MACHINE_RECOVERY_AFTER_MS || this.options.setupRunning(id)) return;
     if (now < (this.nextLookAt.get(id) ?? 0)) return;
-    // A stopped instance has no program to run; one that just started is
-    // still bringing it up.
-    const runningSince = await this.options.instanceRunningSince().catch(() => undefined);
-    if (runningSince === undefined || now - runningSince < MACHINE_RECOVERY_AFTER_MS) return;
+    let runningSince: number | undefined;
+    try {
+      runningSince = await this.options.instanceRunningSince();
+    } catch {
+      return; // AWS did not answer; nothing new is known
+    }
+    // A stopped instance has no program to run, and what was known about the
+    // last run no longer holds; one that just started is still bringing it up.
+    if (runningSince === undefined) {
+      this.forget(id);
+      return;
+    }
+    if (now - runningSince < MACHINE_RECOVERY_AFTER_MS) return;
     this.nextLookAt.set(id, now + MACHINE_RECOVERY_RETRY_MS);
     let inspection: MachineRecoveryInspection;
     try {
@@ -136,7 +144,8 @@ export class MachineRecoveryService {
     if (inspection.programRunning) {
       this.waitedOnAgents.delete(id);
       this.options.log("machines.recovery.waiting", { machineId: id, reason: "program-running", outOfTouchMs: now - since });
-      if (now - since >= MACHINE_RECOVERY_RUNNING_REPORT_MS) this.fail(id, { kind: "running" });
+      // Counted from the instance's start: before it, there was nothing to hear.
+      if (now - Math.max(since, runningSince) >= MACHINE_RECOVERY_RUNNING_REPORT_MS) this.fail(id, { kind: "running" });
       else this.failures.delete(id);
       return;
     }

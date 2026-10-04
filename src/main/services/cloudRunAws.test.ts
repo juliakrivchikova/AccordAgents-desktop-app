@@ -136,6 +136,25 @@ test("Cloud selection refuses a replaced or missing instance without provisionin
   assert.equal(client.runCount, 0);
 });
 
+test("bringing a program back reaches a running instance only: nothing is started, grown or held to the configured size", async () => {
+  const settings = new FakeSettings();
+  settings.credentials = OLD_CREDS;
+  settings.handle = OLD_HANDLE;
+  settings.awsRootVolumeSizeGb = 64;
+  settings.volumeExpansion = { instanceId: OLD_HANDLE.instanceId, volumeId: "vol-1", targetSizeGb: 64, updatedAt: "t" };
+  const client = new FakeEc2Client({ instanceId: OLD_HANDLE.instanceId, state: "stopped" });
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]));
+  await assert.rejects(service.ensureExistingWorkerForRun(OLD_HANDLE.instanceId, { start: false }), /is stopped, so nothing was started/);
+  assert.equal(client.state?.state, "stopped", "a stop is never undone");
+  assert.deepEqual(client.modifiedSizes, [], "a pending disk growth is left for a Cloud run the User chooses");
+  client.state = { instanceId: OLD_HANDLE.instanceId, state: "running", publicIp: "198.51.100.7", rootVolumeSizeGb: 8 };
+  const worker = await service.ensureExistingWorkerForRun(OLD_HANDLE.instanceId, { start: false });
+  assert.equal(worker.host, "198.51.100.7");
+  assert.deepEqual(client.modifiedSizes, []);
+  assert.deepEqual(client.authorizedCidrs, ["203.0.113.9/32"], "this device's SSH access is renewed for its current address");
+  await assert.rejects(service.ensureExistingWorkerForRun("i-other", { start: false }), /instance changed/);
+});
+
 class FakeEc2Client implements Ec2Client {
   importedKeyPairs: string[] = [];
   terminatedInstances: string[] = [];

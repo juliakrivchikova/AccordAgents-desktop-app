@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AwsWorkerStatus, CloudRunWorkerSettings } from "../../shared/types";
 import type { MachineRecord } from "../../shared/machineLink";
 import type { MachineInstallRecord, MachineInstallRequest, MachineInstallResult, MachineInstallSnapshot, MachineMirrorBootstrapResult } from "../../shared/machineInstall";
+import { MACHINE_RECOVERY_OPERATION_PREFIX } from "../../shared/machineInstall";
 import type { CloudRunPreparationProgress, CloudRunPreparationState, PrepareCloudRunRequest, PrepareCloudRunResult } from "../../shared/cloudRunPreparation";
 
 interface Options {
@@ -311,7 +312,9 @@ export class CloudRunPreparationService {
     const directory = cloudEnvironmentDirectory(environmentId);
     const established = existing?.installRoot ? existing : undefined;
     const result = await this.options.install({
-      machineId: machine.id, operationId: randomUUID(), requiredProvider: provider,
+      // A setup that trusted the SSH check is marked, so the drain refuses a
+      // program that came back while the new release was being staged.
+      machineId: machine.id, operationId: `${checked ? MACHINE_RECOVERY_OPERATION_PREFIX : ""}${randomUUID()}`, requiredProvider: provider,
       installRoot: established?.installRoot || `~/${directory}`,
       userDataDir: established?.userDataDir || undefined,
       serviceName: established?.serviceName || undefined,

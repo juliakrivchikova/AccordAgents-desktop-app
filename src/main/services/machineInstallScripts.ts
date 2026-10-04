@@ -296,6 +296,7 @@ export function machineProbeScript(options: {
     `fi`,
     `scan_processes`,
     `printf 'runtime-pids=%s\\n' "$RUNTIME"`,
+    `printf 'runtime-age=%s\\n' "$(for p in $RUNTIME; do ps -o etimes= -p "$p" 2>/dev/null; done | sort -n | tail -n 1 | tr -d ' ')"`,
     `printf 'supervisor-pids=%s\\n' "$SUPERVISOR"`,
     `printf 'provider-pids=%s\\n' "$PROVIDER"`
   ].join("\n");
@@ -367,7 +368,8 @@ export function parseMachineProbe(stdout: string): ParsedMachineProbe {
     serviceState: values.get("service-state") || undefined,
     runtimePids: parsePids(values.get("runtime-pids")),
     supervisorPids: parsePids(values.get("supervisor-pids")),
-    providerPids: parsePids(values.get("provider-pids"))
+    providerPids: parsePids(values.get("provider-pids")),
+    ...(/^\d+$/.test(values.get("runtime-age") ?? "") ? { runtimeAgeSeconds: Number(values.get("runtime-age")) } : {})
   };
 }
 

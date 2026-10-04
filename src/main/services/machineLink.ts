@@ -159,7 +159,7 @@ interface MachineConnection {
   activityProbe?: Promise<boolean>;
   /** While the runtime is being replaced, turns wait here instead of being
    *  dispatched into a process that is about to be stopped. */
-  turnHold?: { reason: string; released: Promise<void>; release: () => void };
+  turnHold?: { reason: string; released: Promise<void>; release: () => void; holders: number };
   /** Start time of the newest runtime instance seen; a late hello from an
    *  older instance is ignored. */
   latestInstanceStartedAt?: string;
@@ -789,20 +789,30 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   /** Holds every turn for this machine until released: the runtime is being
    *  replaced, and a turn dispatched now would be killed by the drain. A held
-   *  turn that is stopped by the User ends as interrupted without being sent. */
+   *  turn that is stopped by the User ends as interrupted without being sent.
+   *  Each caller gets its own release; turns go on once every holder let go. */
   holdTurns(machineId: string, reason: string): () => void {
     const connection = this.connections.get(machineId);
     if (!connection) return () => undefined;
-    if (connection.turnHold) return connection.turnHold.release;
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => { release = resolve; });
-    const hold = { reason, released, release: () => {
-      if (connection.turnHold === hold) connection.turnHold = undefined;
-      release();
-    } };
-    connection.turnHold = hold;
-    void this.debugLogs.write("machine-link.turns.held", { machineId, reason });
-    return hold.release;
+    if (!connection.turnHold) {
+      let resolve!: () => void;
+      const released = new Promise<void>((done) => { resolve = done; });
+      const created = { reason, released, holders: 0, release: () => {
+        if (connection.turnHold === created) connection.turnHold = undefined;
+        resolve();
+      } };
+      connection.turnHold = created;
+      void this.debugLogs.write("machine-link.turns.held", { machineId, reason });
+    }
+    const hold = connection.turnHold;
+    hold.holders += 1;
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      hold.holders -= 1;
+      if (hold.holders <= 0) hold.release();
+    };
   }
 
   /** True while any connected machine is running or holding a turn, asked

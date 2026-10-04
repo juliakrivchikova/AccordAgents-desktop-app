@@ -263,21 +263,25 @@ The program on the machine is brought back by the desktop itself
 (`MachineRecoveryService`). It looks when the instance has been running for
 five minutes and the program has been out of touch for five minutes by this
 desktop's own watch; the watch counts only while this desktop reaches the
-relay and starts again after a sleep. It then asks the machine over SSH,
-having renewed this device's SSH access and never starting a stopped
-instance:
+relay and starts again after a sleep or a stop of the instance. It then asks
+the machine over SSH, having renewed this device's SSH access; nothing is
+started, grown or held to the configured size for it:
 
-- the program runs: it is left alone. Being out of touch is then the link,
-  which a new setup would not fix, and every restart would count as work and
-  keep the instance from stopping. After half an hour Diagnostics says this
-  computer has not heard from it.
+- the program runs (its unit is active and its process has been up for a
+  minute; one its unit keeps restarting does not count): it is left alone.
+  Being out of touch is then the link, which a new setup would not fix, and
+  every restart would count as work and keep the instance from stopping.
+  Half an hour after the instance started, Diagnostics says this computer has
+  not heard from it.
 - it does not run, but agents of this deployment still do: they are waited
   for; a wait that outlasts one look is said in Diagnostics.
 - it does not run and no agent does: the program of the machine that was
   watched is set up again the way choosing Cloud run does, with that
   machine's turns held meanwhile. Having asked the machine itself, the setup
   is not held back by what the program last reported or by a turn waiting
-  for it, unless the program came back meanwhile.
+  for it, unless the program came back meanwhile; such a setup is marked
+  (`recovery-…`) and its drain refuses a program that reconnected while the
+  new release was being staged.
 
 The machine is looked at again after fifteen minutes; after a failed setup
 the wait doubles, up to four hours. Only what did not come back is shown, in

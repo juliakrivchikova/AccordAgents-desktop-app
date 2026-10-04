@@ -767,6 +767,7 @@ test("machineActivity asks the machine afresh: a turn that started or ended sinc
     // While the runtime is being replaced, a turn waits instead of being
     // dispatched into a process about to be stopped; Stop ends the wait.
     const release = link.holdTurns("machine-act", "updating the runtime");
+    const otherRelease = link.holdTurns("machine-act", "setting the program up again");
     const waitingMarks = [];
     const held = link.runTurn({ conversation, participant, triggerMessage, runId: "run-act-held", pendingMessageId: "pm-act-held", onMachineWaiting: async (name, reason) => { waitingMarks.push({ name, reason }); } });
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -777,6 +778,10 @@ test("machineActivity asks the machine afresh: a turn that started or ended sinc
     stopper.abort();
     assert.equal((await stopped).status, "interrupted", "a held turn that is stopped ends without being sent");
     release();
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.ok(!hostRuns.includes("run-act-held"), "one holder letting go, even twice, does not release another's hold");
+    otherRelease();
     await waitFor(() => hostRuns.includes("run-act-held"), 10_000);
     releaseTurn();
     await (await held).acknowledge();

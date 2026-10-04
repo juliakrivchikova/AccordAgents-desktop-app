@@ -483,7 +483,8 @@ export class CloudRunAwsService {
     });
   }
 
-  async ensurePreparedRunning(prepared: PreparedAwsWorker, options: { start?: boolean } = {}): Promise<CloudRunWorkerSettings> {
+  async ensurePreparedRunning(prepared: Pick<PreparedAwsWorker, "credentials" | "handle">,
+    options: { start?: boolean } = {}): Promise<CloudRunWorkerSettings> {
     const deviceId = await (this.settings as SettingsService & { getCloudRunsDeviceId?: () => Promise<string> }).getCloudRunsDeviceId?.() ?? "legacy";
     const running = await this.lifecycle.ensureRunning(this.credentialsForHandle(prepared.credentials, prepared.handle), this.toHandle(prepared.handle),
       deviceId, options);
@@ -833,11 +834,16 @@ export class CloudRunAwsService {
     return this.status();
   }
 
-  /** With `start: false` a stopped instance is not started: what sets the
-   *  machine's program up again must never undo a stop. This device's SSH
-   *  access is renewed either way, as its address may have changed. */
+  /** With `start: false`, the way to a running instance only, for looking
+   *  at or setting up the program on it: this device's SSH access is renewed,
+   *  as its address may have changed, and nothing is started, grown or held
+   *  to the configured size. Bringing a program back must never undo a stop. */
   async ensureExistingWorkerForRun(instanceId: string, options: { start?: boolean } = {}): Promise<CloudRunWorkerSettings> {
-    return this.ensureWorkerForRun(instanceId, options);
+    if (options.start !== false) return this.ensureWorkerForRun(instanceId);
+    const { credentials, handle } = await this.workerContext();
+    if (!credentials || !handle) throw new Error("The AWS instance is not configured. Connect it in Settings first.");
+    if (handle.instanceId !== instanceId) throw new Error("The selected AWS instance changed. Select Cloud run again.");
+    return this.ensurePreparedRunning({ credentials, handle }, { start: false });
   }
 
   /** Diagnostics must never wake or prepare an instance to inspect it. */
@@ -864,7 +870,7 @@ export class CloudRunAwsService {
     return { info, handle };
   }
 
-  async ensureWorkerForRun(expectedInstanceId?: string, options: { start?: boolean } = {}): Promise<CloudRunWorkerSettings> {
+  async ensureWorkerForRun(expectedInstanceId?: string): Promise<CloudRunWorkerSettings> {
     const credentials = await this.settings.getAwsWorkerCredentials();
     const settings = await this.settings.getPublicSettings();
     if (!credentials) throw new Error("The AWS worker is not configured. Start it in Settings first.");
@@ -885,7 +891,7 @@ export class CloudRunAwsService {
       if (prepared.mismatch && !await this.hasAcceptedMismatch(prepared)) {
         throw new Error("The shared AWS worker is smaller than the configured requirement. Open Settings and choose Keep, Grow disk, or Recreate.");
       }
-      return this.ensurePreparedRunning(prepared, options);
+      return this.ensurePreparedRunning(prepared);
     }
     const prepared: PreparedAwsWorker = {
       credentials,
@@ -905,7 +911,7 @@ export class CloudRunAwsService {
     if (resumed.mismatch && !await this.hasAcceptedMismatch(resumed)) {
       throw new Error("The shared AWS worker is smaller than the configured requirement. Open Settings and choose what to do.");
     }
-    return this.ensurePreparedRunning(resumed, options);
+    return this.ensurePreparedRunning(resumed);
   }
 
   noteRunStarted(runId: string): void {

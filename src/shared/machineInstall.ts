@@ -220,6 +220,9 @@ export interface MachineRuntimeProbe {
   runtimePids: number[];
   supervisorPids: number[];
   providerPids: number[];
+  /** Seconds the oldest runtime process has run; a unit that keeps
+   *  restarting its program shows a young one. */
+  runtimeAgeSeconds?: number;
 }
 
 /** Where the runtime payload the desktop would install comes from. */
@@ -355,6 +358,15 @@ export function machineAutoUpgradeOperationPrefix(desktopVersion: string): strin
 
 export function isMachineAutoUpgradeOperation(operationId: string): boolean {
   return operationId.startsWith("auto-upgrade-");
+}
+
+/** Operation id prefix of a setup that brings a program back after the
+ *  machine itself said over SSH that it is not running: such a setup must
+ *  not stop a program that came back meanwhile. */
+export const MACHINE_RECOVERY_OPERATION_PREFIX = "recovery-";
+
+export function isMachineRecoveryOperation(operationId: string): boolean {
+  return operationId.startsWith(MACHINE_RECOVERY_OPERATION_PREFIX);
 }
 
 /** Whether an operation id is this desktop version's automatic update:

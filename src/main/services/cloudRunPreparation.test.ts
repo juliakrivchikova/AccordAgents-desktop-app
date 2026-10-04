@@ -390,6 +390,7 @@ test("Settings sets the machine's program up again without any provider, and lea
   // is not connected, or could not take its automatic-stop key.
   const h = harness();
   await h.service.prepareRuntime();
+  assert.doesNotMatch(h.installRequests[0].operationId, /^recovery-/, "a setup that did not ask the machine is not marked");
   assert.deepEqual(h.calls, ["access:i-abc:no-start", "enroll", "install:machine-1:undefined"],
     "an absent program is installed, no provider is checked, and the instance is never started for it");
   assert.equal(h.installRequests[0].requiredProvider, undefined);
@@ -413,6 +414,7 @@ test("a program that crashed mid-turn, or has a turn waiting for it, is set up a
   assert.equal(h.installRequests.length, 0);
   await h.service.prepareRuntime({ agentsChecked: true });
   assert.equal(h.installRequests.length, 1, "asked over SSH, the stale report no longer keeps the program down");
+  assert.match(h.installRequests[0].operationId, /^recovery-/, "marked, so the drain refuses a program that came back meanwhile");
   assert.equal(h.installRequests[0].machineId, "machine-1", "the same machine is set up again, so the waiting turn reaches it");
   h.options.isConnected = (machineId) => machineId === "machine-1";
   await assert.rejects(new CloudRunPreparationService(h.options).prepareRuntime({ agentsChecked: true }), /Finish its current runs/,
