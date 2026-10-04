@@ -30,9 +30,14 @@ class FakeSettings {
   volumeExpansion: { instanceId: string; volumeId: string; targetSizeGb: number; updatedAt: string } | undefined;
   provisioningToken: string | undefined;
   operation: AwsWorkerOperationSnapshot | undefined;
-  machines: Array<{ id: string; awsInstanceId?: string; lastHello?: { idleStopWarning?: string } }> = [];
+  machines: Array<{ id: string; awsInstanceId?: string; lastSeenAt?: string; lastHello?: { idleStopWarning?: string; autoStopEnabled?: boolean } }> = [];
   installs: MachineInstallRecord[] = [];
   autoStopEnabled = true;
+  changedAt: string | undefined;
+
+  async getMachineAutoStopChangedAt(): Promise<string | undefined> {
+    return this.changedAt;
+  }
 
   async getMachineAutoStopEnabled(): Promise<boolean> {
     return this.autoStopEnabled;
@@ -42,7 +47,7 @@ class FakeSettings {
     this.autoStopEnabled = enabled;
   }
 
-  async listMachines(): Promise<Array<{ id: string; awsInstanceId?: string; lastHello?: { idleStopWarning?: string } }>> {
+  async listMachines(): Promise<Array<{ id: string; awsInstanceId?: string; lastSeenAt?: string; lastHello?: { idleStopWarning?: string; autoStopEnabled?: boolean } }>> {
     return this.machines;
   }
 
@@ -1154,8 +1159,19 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   assert.deepEqual(await autoStop(), { ...ON, problem: { message:
     "The cloud machine could not finish its check, so it stays on for now and tries again by itself. If this stays, stop the instance when you finish." } },
   "the machine's own fault is shown, in plain words");
-  settings.machines[0] = { ...settings.machines[0], lastHello: { autoStopEnabled: false } } as never;
+  settings.changedAt = new Date(Date.now() - 60_000).toISOString();
+  settings.machines[0] = { ...settings.machines[0], lastSeenAt: new Date(Date.now() - 120_000).toISOString(), lastHello: { autoStopEnabled: false } } as never;
+  assert.deepEqual(await autoStop(), ON, "a report from before the change says nothing about it");
+  settings.machines[0] = { ...settings.machines[0], lastSeenAt: new Date().toISOString(), lastHello: { autoStopEnabled: false } } as never;
   assert.match((await autoStop())?.problem?.message ?? "", /still has automatic stop switched off/, "the machine says it did not get the switch");
+  settings.autoStopEnabled = false;
+  assert.equal((await autoStop())?.problem, undefined, "off, and the machine has it off");
+  settings.machines[0] = { ...settings.machines[0], lastSeenAt: new Date().toISOString(), lastHello: { autoStopEnabled: true } } as never;
+  assert.match((await autoStop())?.problem?.message ?? "", /still has automatic stop switched on, so it may stop the instance/);
+  settings.machines[0] = { ...settings.machines[0], lastSeenAt: new Date().toISOString(), lastHello: {} } as never;
+  assert.match((await autoStop())?.problem?.message ?? "", /older and still stops the instance by itself/, "a runtime before the switch ignores off");
+  settings.autoStopEnabled = true;
+  settings.changedAt = undefined;
   settings.machines[0] = { ...settings.machines[0], lastHello: { idleStopWarning:
     "Automatic idle stop is suspended: AWS does not accept this machine's stop key, so it stays awake (AuthFailure: AWS was not able to validate the provided access credentials)." } };
   assert.deepEqual(await autoStop(), SET_UP_AGAIN, "a key AWS stopped accepting is set up again");

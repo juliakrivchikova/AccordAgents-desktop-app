@@ -304,6 +304,60 @@ test("a dead owner's pid taken by a later process does not keep its claim alive"
     .releaseDeadClaims(async () => false, 120_000), 0, "an owner that started within the slack of its claim is that claim's owner");
 });
 
+test("a runtime that keeps crashing carries its crash restarts, and the others can tell it from work", async () => {
+  const shared = dir();
+  let now = 1_000;
+  const alive = new Set<number>();
+  const start = (pid: number, kind?: "runtime" | "maintenance") => {
+    alive.add(pid);
+    return registry({ dir: shared, profile: "/srv/looping", pid, now: () => now, alive: (candidate) => alive.has(candidate), kind });
+  };
+  const neighbour = registry({ dir: shared, profile: "/srv/one", pid: 9, now: () => now, alive: () => true });
+  let runtime = start(100);
+  runtime.publish(true);
+  assert.equal(neighbour.restartLoop(2), undefined);
+  for (const pid of [101, 102]) {
+    alive.delete(pid - 1);                       // crashed: its claim stays
+    now += 20 * 60_000;
+    runtime = start(pid);
+    assert.equal(await runtime.adoptOwnStaleClaims(async () => undefined), 1);
+    runtime.publish(true);
+  }
+  assert.equal(neighbour.restartLoop(2), "/srv/looping", "two crashes within the idle window");
+  now += 3 * 60 * 60_000;
+  runtime.publish(false);
+  assert.equal(neighbour.restartLoop(2), undefined, "old crashes age out");
+  const shutdown = registry({ dir: shared, profile: "/srv/graceful", pid: 200, now: () => now, alive: () => true });
+  shutdown.publish(true);
+  shutdown.release();
+  const next = registry({ dir: shared, profile: "/srv/graceful", pid: 201, now: () => now, alive: () => true });
+  assert.equal(await next.adoptOwnStaleClaims(async () => undefined), 0, "a runtime that released its claim did not crash");
+  for (const pid of [300, 301, 302, 303]) {
+    const command = start(pid, "maintenance");
+    command.publish(true);
+    alive.delete(pid);
+  }
+  assert.equal(neighbour.restartLoop(2), undefined, "maintenance commands are not restarts");
+});
+
+test("a released dead claim's work still counts toward host idle; a live maintenance command is not reported", async () => {
+  const shared = dir();
+  let now = 1_000;
+  const alive = new Set([1, 2]);
+  const mine = registry({ dir: shared, profile: "/srv/one", pid: 1, now: () => now, alive: (pid) => alive.has(pid) });
+  now = 500_000;
+  registry({ dir: shared, profile: "/srv/crashed", pid: 3, now: () => now, alive: (pid) => alive.has(pid) }).publish(true);
+  now += 120_000;
+  assert.equal(await mine.releaseDeadClaims(async () => false, 120_000), 1);
+  assert.equal(mine.hostIdleForMs(0), 120_000, "idle counts from the dead runtime's last work, not from before it");
+  const maintenance = registry({ dir: shared, profile: "/srv/one", pid: 2, now: () => now, alive: (pid) => alive.has(pid), kind: "maintenance" });
+  maintenance.publish(true);
+  now += 20 * 60_000;
+  assert.deepEqual(mine.unconfirmedClaims(600_000), [], "a long maintenance command holds its lease");
+  alive.delete(2);
+  assert.deepEqual(mine.unconfirmedClaims(600_000).map((claim) => claim.kind), ["maintenance"], "one whose command died is reported");
+});
+
 test("a process start is read from field 22 of /proc stat, past a command name with spaces and parentheses", () => {
   const fields = Array.from({ length: 50 }, (_, index) => String(index + 3));
   fields[19] = "12345";

@@ -239,6 +239,7 @@ test("automatic stop is one switch; what keeps it from working is shown only in 
     [{ enabled: false, needsSetup: true }, false, false],
     [{ enabled: false, needsSetup: false }, false, false],
     [{ enabled: true, needsSetup: false, problem }, true, true],
+    [{ enabled: false, needsSetup: false, problem: { message: "The cloud machine still has automatic stop switched on, so it may stop the instance." } }, false, true],
     [undefined, undefined, false]
   ];
   for (const [autoStop, checked, flagged] of cases) {
@@ -277,7 +278,7 @@ test("Diagnostics names the problem and its fix runs from there", async () => {
   const renderer = await renderPanel({ status: { ...RUNNING, autoStop: { enabled: true, needsSetup: false, problem } },
     reconnect: async () => { reconnects++; return { ...RUNNING, autoStop: { enabled: true, needsSetup: false } }; } });
   await click(renderer.root.findByProps({ "data-testid": "machine-instance-diagnostics-toggle" }));
-  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-auto-stop-problem" })), /^Automatic stop is not working\. The program on the cloud machine is not connected/);
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-auto-stop-problem" })), /^Automatic stop: The program on the cloud machine is not connected/);
   const fix = renderer.root.findByProps({ "data-testid": "aws-auto-stop-problem-action" });
   assert.equal(textOf(fix), "Reconnect");
   await click(fix);

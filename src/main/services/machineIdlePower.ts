@@ -20,7 +20,9 @@ import { readPosixProcessTableAsync, type PosixProcessRow } from "./processTermi
 import { MachineMaintenance } from "./machineMaintenance";
 
 type PowerClient = Pick<AwsMachinePowerClient, "stopAfterDrain" | "close" | "assertCanStop">;
-type WarningCause = "activity" | "key" | "coordination";
+/** What clears a warning: new work, AWS accepting the stop key, the host's
+ *  deployments coordinating again, or the next idle check that succeeds. */
+type WarningCause = "activity" | "key" | "coordination" | "check";
 /** How long reading another deployment's registry may take. */
 const FOREIGN_REGISTRY_TIMEOUT_MS = 10_000;
 /** How long a dead runtime's claim holds the host while systemd restarts it
@@ -28,9 +30,9 @@ const FOREIGN_REGISTRY_TIMEOUT_MS = 10_000;
 const DEAD_CLAIM_RESTART_GRACE_MS = 2 * 60_000;
 /** How long a claim nobody refreshes may hold the host before it is shown. */
 const UNCONFIRMED_CLAIM_REPORT_MS = 10 * 60_000;
-/** A neighbour seen starting this many times within an hour is crashing. */
-const RESTART_LOOP_STARTS = 4;
-const RESTART_LOOP_WINDOW_MS = 60 * 60_000;
+/** A runtime that crashed and restarted this often within the idle window
+ *  holds the host with its starts alone. */
+const RESTART_LOOP_CRASHES = 2;
 
 /** How long a stop key AWS refused is left alone before it is asked again.
  *  The key only changes when the runtime restarts with a new one. */
@@ -46,13 +48,10 @@ export class MachineIdlePower {
   private stopping = false;
   private uncertainFence = false;
   private lastWarning?: string;
-  /** What makes the current warning stale: new work, AWS accepting the stop
-   *  key, or the host's deployments being readable again and coordinating.
-   *  Unset, a warning stays until another replaces it. */
+  /** What makes the current warning stale (see `WarningCause`). Unset, a
+   *  warning stays until another replaces it. */
   private warningResolvedBy?: WarningCause;
-  /** Each neighbour's runtime instances seen, and when first: a deployment
-   *  that keeps restarting holds the host with every start. */
-  private readonly neighbourStarts = new Map<string, Map<string, number>>();
+
   /** Host uptime until which a refused stop key is not asked about again. */
   private keyRefusedUntilMs?: number;
   private hostIdentity?: NativeHostIdentity;
@@ -139,7 +138,9 @@ export class MachineIdlePower {
         // Publish before answering, so a deployment deciding to stop right now
         // reads this one's current state rather than a stale claim.
         try { this.hostPower?.publish(busy); }
-        catch (error) { this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`); return true; }
+        catch (error) { this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`, "check"); return true; }
+        // A check that went through clears a failed one's warning.
+        this.resolveWarning("check");
         return busy;
       },
       prepareStop: async since => {
@@ -201,7 +202,7 @@ export class MachineIdlePower {
           if (!committed && !this.stopping) await this.abandonHostStop();
         }
       },
-      onError: error => this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`, "coordination") });
+      onError: error => this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`, "check") });
   }
 
   /**
@@ -280,7 +281,7 @@ export class MachineIdlePower {
       this.setWarning(`The machine stays awake: this machine's deployments cannot be read (${errorText(error)}).`, "coordination");
       return false;
     }
-    let busy: Array<{ version: number; profilePath: string; kind: string; instanceId?: string }>;
+    let busy: Array<{ version: number; profilePath: string; kind: string }>;
     try { busy = this.hostPower.others().filter(claim => claim.busy); }
     catch (error) {
       this.setWarning(`The machine stays awake: this machine's deployments cannot be read (${errorText(error)}).`, "coordination");
@@ -300,7 +301,9 @@ export class MachineIdlePower {
       this.setWarning(`The machine stays awake: a program on it (${unconfirmed}) stopped responding, so its agents cannot be confirmed finished.`, "coordination");
       return false;
     }
-    const restarting = this.restartingNeighbour(busy);
+    let restarting: string | undefined;
+    try { restarting = this.hostPower.restartLoop(RESTART_LOOP_CRASHES); }
+    catch { restarting = undefined; }
     if (restarting) {
       this.setWarning(`The machine stays awake: a program on it (${restarting}) keeps restarting.`, "coordination");
       return false;
@@ -311,25 +314,6 @@ export class MachineIdlePower {
     this.resolveWarning("activity");
     this.resolveWarning("coordination");
     return false;
-  }
-
-  /** Records the neighbours' runtime instances and names one that started
-   *  again and again within the last hour, if any. */
-  private restartingNeighbour(claims: Array<{ profilePath: string; instanceId?: string }>): string | undefined {
-    const now = this.environment.uptimeMs();
-    for (const claim of claims) {
-      if (!claim.instanceId) continue;
-      const starts = this.neighbourStarts.get(claim.profilePath) ?? new Map<string, number>();
-      if (!starts.has(claim.instanceId)) starts.set(claim.instanceId, now);
-      this.neighbourStarts.set(claim.profilePath, starts);
-    }
-    let restarting: string | undefined;
-    for (const [profilePath, starts] of this.neighbourStarts) {
-      for (const [instanceId, seenAt] of starts) if (now - seenAt > RESTART_LOOP_WINDOW_MS) starts.delete(instanceId);
-      if (!starts.size) this.neighbourStarts.delete(profilePath);
-      else if (starts.size >= RESTART_LOOP_STARTS) restarting ??= profilePath;
-    }
-    return restarting;
   }
 
   private hasLiveNativeWork(profilePath: string): Promise<boolean> {

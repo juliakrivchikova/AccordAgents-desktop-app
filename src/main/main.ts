@@ -2524,7 +2524,13 @@ function registerIpc(): void {
     // The machine decides when to stop; tell a connected one now, without
     // making the switch wait behind replication. One that is offline gets the
     // switch with the settings it receives on connecting.
-    void machineLinkService?.syncSettings().catch((error) => {
+    // Then ask the machine to report in: its answer confirms what it has, or
+    // shows in Diagnostics that the change did not arrive.
+    void (async () => {
+      await machineLinkService?.syncSettings();
+      const holder = await cloudRunAwsService.autoStopMachineRecord();
+      if (holder) await machineLinkService?.machineActivity(holder.machineId, { fresh: true });
+    })().catch((error) => {
       void debugLogService.write("machines.auto-stop.sync-failed", { message: error instanceof Error ? error.message : String(error) });
     });
     // A new key goes over to the machine the next time it is idle.
@@ -2550,6 +2556,19 @@ function registerIpc(): void {
       void debugLogService.write("machines.auto-stop.retry", { machineId: record.machineId });
     } else {
       // Not connected: set its program up again, as choosing Cloud run does.
+      // What it reported last may be stale, so the machine itself is asked
+      // whether agents are running before anything is stopped.
+      if (record?.installRoot) {
+        const worker = await cloudRunAwsService.workerForInspection();
+        if (worker.host && worker.hostKeyAlias === record.target?.hostKeyAlias) {
+          const probe = await machineInstallerService.probe(
+            { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias },
+            { installRoot: record.installRoot, userDataDir: record.userDataDir, serviceName: record.serviceName });
+          if (probe.providerPids.length) {
+            throw new Error("Agents are still running on the cloud machine. Try again when they finish.");
+          }
+        }
+      }
       await cloudRunPreparation.prepareRuntime();
       evaluateMachineUpdates?.();
       void debugLogService.write("machines.auto-stop.reconnected", { machineId: record?.machineId ?? "" });

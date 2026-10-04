@@ -388,7 +388,7 @@ export function AwsWorkerPanel(props: {
       <AwsWorkerHistory operation={currentOperation ? null : operation} />
       {/* Checks and setup exist once an instance does; the live status knows
           that before the parent's settings are re-read. */}
-      {configured ? <AwsInstanceDiagnostics autoStopProblem={autoStop?.enabled ? autoStop.problem : undefined} onAutoStopAction={autoStopControl.fix} /> : null}
+      {configured ? <AwsInstanceDiagnostics autoStopProblem={autoStop?.problem} onAutoStopAction={autoStopControl.fix} /> : null}
     </div>
   );
 }

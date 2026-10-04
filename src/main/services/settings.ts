@@ -188,6 +188,9 @@ interface StoredSettings {
    *  up before the switch existed keeps working. Shared with machines in the
    *  settings snapshot: the machine's runtime is what decides to stop. */
   machineAutoStopEnabled?: boolean;
+  /** When the User last changed the switch: a machine's report older than
+   *  this predates the change and says nothing about whether it arrived. */
+  machineAutoStopChangedAt?: string;
   /** Who holds a copy of the phone's start key. Records only, never the
    *  secret, and never sent to a machine: they name the User's devices. */
   machinePowerHandoffs?: MachinePowerHandoffRecord[];
@@ -2874,6 +2877,7 @@ export class SettingsService {
       encryptedMachinePowerPrevious: typeof settings.encryptedMachinePowerPrevious === "string" && settings.encryptedMachinePowerPrevious.trim()
         ? settings.encryptedMachinePowerPrevious : undefined,
       ...(typeof settings.machineAutoStopEnabled === "boolean" ? { machineAutoStopEnabled: settings.machineAutoStopEnabled } : {}),
+      ...(typeof settings.machineAutoStopChangedAt === "string" ? { machineAutoStopChangedAt: settings.machineAutoStopChangedAt } : {}),
       machinePowerHandoffs: normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs).length
         ? normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs)
         : undefined,
@@ -3512,10 +3516,15 @@ export class SettingsService {
     return stored.machineAutoStopEnabled !== false;
   }
 
+  async getMachineAutoStopChangedAt(): Promise<string | undefined> {
+    return (await this.readStored()).machineAutoStopChangedAt;
+  }
+
   async setMachineAutoStopEnabled(enabled: boolean): Promise<void> {
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
     stored.machineAutoStopEnabled = enabled === true;
+    stored.machineAutoStopChangedAt = new Date().toISOString();
     await this.writeStored(stored, true);
   }
 

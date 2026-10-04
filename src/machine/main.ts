@@ -408,10 +408,14 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       // this machine now has, so the two cannot silently disagree.
       const enabled = await settingsService.getMachineAutoStopEnabled().catch(() => undefined);
       if (enabled === autoStopEnabled) return;
-      const switchedOn = enabled === true && autoStopEnabled === false;
-      autoStopEnabled = enabled;
-      if (switchedOn) await idlePower?.switchedOn();
-      void hostRef?.publishPowerStatus().catch(() => undefined);
+      try {
+        // The new idle start is written before the switch reads on here: a
+        // failed write keeps it off, and the next import tries again.
+        if (enabled === true && autoStopEnabled === false) await idlePower?.switchedOn();
+        autoStopEnabled = enabled;
+      } finally {
+        void hostRef?.publishPowerStatus().catch(() => undefined);
+      }
     },
     onDesktopMachineId: (machineId) => {
       chatService.setHostMachineId(machineId);
@@ -444,8 +448,11 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     idlePower = new MachineIdlePower({ config: powerConfig, store: storageService.machinePower(), host,
       runner: cliAgentRunner, nativeProcessDbPath: nativeProcessDbPath,
       ...(presence ? { presence } : {}),
-      // The User's switch arrives with the desktop's settings snapshot.
-      enabled: () => settingsService.getMachineAutoStopEnabled(),
+      // The User's switch as this machine took it from the desktop's settings.
+      enabled: async () => {
+        if (autoStopEnabled === undefined) throw new Error("Settings could not be read; automatic stop waits until they can.");
+        return autoStopEnabled;
+      },
       log: (event, payload) => { void debugLogService.write(event, payload); } });
     await idlePower.start();
   }

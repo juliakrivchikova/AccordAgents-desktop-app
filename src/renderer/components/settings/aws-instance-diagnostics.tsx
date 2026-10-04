@@ -85,7 +85,7 @@ export function AwsInstanceDiagnostics(props: {
           {problem ? (
             <div className="gen-aws-problem" data-testid="aws-auto-stop-problem" role="alert">
               <div className="gen-aws-problem-text">
-                <strong>Automatic stop is not working.</strong> {problem.message}
+                <strong>Automatic stop:</strong> {problem.message}
               </div>
               {fixError ? <div className="gen-aws-inline-error" role="alert">{fixError}</div> : null}
               {problem.action ? (

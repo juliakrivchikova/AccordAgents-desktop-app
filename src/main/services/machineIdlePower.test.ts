@@ -462,22 +462,31 @@ test("another deployment's registry is read without guessing: only an absent one
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("a neighbour that keeps restarting is reported instead of holding the instance in silence", async () => {
+test("a neighbour that keeps crashing is reported instead of holding the instance in silence; maintenance is not", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-loop-"));
   const now = MACHINE_IDLE_STOP_MS * 2;
   const h = idleHarness(dir, { now: () => now });
   try {
     await h.store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
     await h.power.start();
-    for (let start = 1; start <= 4; start++) {
-      const instance = new MachineHostPowerRegistry({ dir: h.shared, profilePath: "/srv/looping", bootId: identity.boot, uptimeMs: () => now,
-        pid: process.pid, isAlive: () => true });
-      instance.publish(true);
+    const fs = await import("node:fs");
+    for (let command = 0; command < 4; command++) {
+      const maintenance = new MachineHostPowerRegistry({ dir: h.shared, profilePath: "/srv/neighbour", bootId: identity.boot, uptimeMs: () => now,
+        pid: process.pid, isAlive: () => true, kind: "maintenance" });
+      maintenance.publish(true);
       await checkOf(h.power);
-      if (start < 4) assert.equal(h.power.warning(), undefined, "one start is ordinary work");
-      instance.release();
+      maintenance.release();
     }
+    assert.equal(h.power.warning(), undefined, "maintenance commands are work, not a crash loop");
+    const looping = new MachineHostPowerRegistry({ dir: h.shared, profilePath: "/srv/looping", bootId: identity.boot, uptimeMs: () => now,
+      pid: process.pid, isAlive: () => true });
+    looping.publish(true);
+    const file = fs.readdirSync(h.shared).find((name) => name.startsWith(machineHostProfileId("/srv/looping")))!;
+    const claimPath = path.join(h.shared, file);
+    fs.writeFileSync(claimPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(claimPath, "utf8")), crashRestartsUptimeMs: [now - 60 * 60_000, now - 5_000] }));
+    await checkOf(h.power);
     assert.match(h.power.warning() ?? "", /\/srv\/looping\) keeps restarting/);
     assert.equal(h.stops, 0);
+    looping.release();
   } finally { h.power.close(); await rm(dir, { recursive: true, force: true }); }
 });

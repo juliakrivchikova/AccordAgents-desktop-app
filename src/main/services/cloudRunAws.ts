@@ -534,7 +534,11 @@ export class CloudRunAwsService {
     state: AwsWorkerStatus["state"], launchedAt?: string): Promise<AwsWorkerAutoStop> {
     const power = powerConfigFor(credentials, handle);
     if (!power) return { enabled: false, needsSetup: true };
-    if (!await this.settings.getMachineAutoStopEnabled()) return { enabled: false, needsSetup: false };
+    if (!await this.settings.getMachineAutoStopEnabled()) {
+      // Off must hold on the machine too: it is the one that stops.
+      const problem = state === "running" ? await this.switchNotTaken(power, handle, false) : undefined;
+      return { enabled: false, needsSetup: false, ...(problem ? { problem } : {}) };
+    }
     // A stopped instance has nothing to stop; what keeps a running one up is
     // only worth showing while it runs.
     const problem = state === "running" ? await this.autoStopProblem(power, handle, launchedAt) : undefined;
@@ -588,10 +592,8 @@ export class CloudRunAwsService {
       }
       return undefined;
     }
-    // A runtime from before the switch reports nothing and always stops.
-    if (machineOf(taken.machineId)?.lastHello?.autoStopEnabled === false) {
-      return { message: "The cloud machine still has automatic stop switched off. Switch it off and on again to send it once more." };
-    }
+    const notTaken = await this.switchNotTaken(power, handle, true);
+    if (notTaken) return notTaken;
     const warning = warningOf(taken.machineId);
     const kind = warning ? machineIdleWarningKind(warning) : undefined;
     if (kind === "unconfirmed") {
@@ -599,6 +601,30 @@ export class CloudRunAwsService {
     }
     if (kind !== "fault") return undefined;
     return { message: "The cloud machine could not finish its check, so it stays on for now and tries again by itself. If this stays, stop the instance when you finish." };
+  }
+
+  /**
+   * The machine holding the key reports a different switch than the User set,
+   * in a report made after the change: the change did not arrive. A runtime
+   * from before the switch reports none and always stops when idle, which
+   * matters only while the switch is off.
+   */
+  private async switchNotTaken(power: AwsMachinePowerConfig, handle: AwsWorkerHandleInfo,
+    enabled: boolean): Promise<AwsWorkerAutoStopProblem | undefined> {
+    const { machines, records } = await this.installsOnInstance(handle);
+    const holder = records.find((record) => record.power?.keyId === power.credentials.accessKeyId);
+    const machine = holder ? machines.find((item) => item.id === holder.machineId) : undefined;
+    if (!machine?.lastHello || this.machineConnected?.(machine.id) !== true) return undefined;
+    const reported = machine.lastHello.autoStopEnabled;
+    if (reported === undefined) {
+      return enabled ? undefined : { message: "The program on the cloud machine is older and still stops the instance by itself; it takes the switch after its next update." };
+    }
+    const changedAt = Date.parse(await this.settings.getMachineAutoStopChangedAt() ?? "");
+    const reportedAfterChange = !Number.isFinite(changedAt) || Date.parse(machine.lastSeenAt ?? "") > changedAt;
+    if (reported === enabled || !reportedAfterChange) return undefined;
+    return { message: enabled
+      ? "The cloud machine still has automatic stop switched off. Switch it off and on again to send it once more."
+      : "The cloud machine still has automatic stop switched on, so it may stop the instance. Switch it on and off again to send it once more." };
   }
 
   /** Saves the stop key from a pasted setup result. The result must carry
