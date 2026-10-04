@@ -249,8 +249,8 @@ export function AwsWorkerPanel(props: {
   );
   const instanceRegion = status?.handle?.region ?? actual?.region ?? region;
   // The switch is read from this app's own settings, so it stays while AWS
-  // itself cannot be read; only a failed status read hides it.
-  const autoStop = configured && !monitor.error ? status?.autoStop : undefined;
+  // itself cannot be read; a status that could not be read has none.
+  const autoStop = configured ? status?.autoStop : undefined;
 
   return (
     <div className="gen-aws" data-testid="aws-worker-panel" aria-busy={locked}>
