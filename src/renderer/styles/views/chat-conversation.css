@@ -2899,14 +2899,14 @@
 
 .streaming-message-text .markdown-text {
   gap: 8px;
-  font-size: 15px;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.625;
 }
 
 .streaming-message-tail {
   color: var(--app-text-strong);
-  font-size: 15px;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.625;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -3378,8 +3378,8 @@
 
 .chat-message .markdown-text {
   gap: 8px;
-  font-size: 15px;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.625;
 }
 
 .chat-message .markdown-text h4 {
@@ -3397,6 +3397,7 @@
 
 .chat-message .markdown-code {
   padding: 8px 9px;
+  font-size: 12px;
   line-height: 1.34;
 }
 
