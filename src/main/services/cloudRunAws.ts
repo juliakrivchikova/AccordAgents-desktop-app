@@ -568,7 +568,8 @@ export class CloudRunAwsService {
     const launched = launchedAt ? Date.parse(launchedAt) : Number.NaN;
     const settled = !Number.isFinite(launched) || Date.now() - launched >= INSTANCE_BOOT_CONNECT_GRACE_MS;
     if (settled && this.machineConnected?.(record.machineId) === false) {
-      return { message: "The program on the cloud machine is not connected, so it cannot stop the instance.", action: "reconnect", actionLabel: "Reconnect" };
+      return { message: "The program on the cloud machine is not connected, so it cannot stop the instance.", action: "reconnect",
+        actionLabel: "Reconnect", machineId: record.machineId };
     }
     if (!taken) {
       // The key goes over by an update that waits for the machine to be idle.
@@ -580,18 +581,24 @@ export class CloudRunAwsService {
           && isAutoUpgradeOf(last.operationId, appVersion) && item.installedVersion !== appVersion;
       }) : undefined;
       const exhausted = records.find((item) => item.powerRetry?.keyId === keyId && (item.powerRetry.attempts ?? 1) >= MACHINE_POWER_MAX_ATTEMPTS);
-      if (stalled || exhausted) {
-        return { message: "The cloud machine could not take its automatic-stop key.", action: "reconnect", actionLabel: "Try again" };
+      const failed = stalled ?? exhausted;
+      if (failed) {
+        return { message: "The cloud machine could not take its automatic-stop key.", action: "reconnect", actionLabel: "Try again",
+          machineId: failed.machineId };
       }
       return undefined;
+    }
+    // A runtime from before the switch reports nothing and always stops.
+    if (machineOf(taken.machineId)?.lastHello?.autoStopEnabled === false) {
+      return { message: "The cloud machine still has automatic stop switched off. Switch it off and on again to send it once more." };
     }
     const warning = warningOf(taken.machineId);
     const kind = warning ? machineIdleWarningKind(warning) : undefined;
     if (kind === "unconfirmed") {
-      return { message: "The cloud machine asked AWS to stop the instance and is still waiting for a confirmation; it keeps asking." };
+      return { message: "The cloud machine is stopping the instance and has not finished yet; it keeps trying. Stop above stops it now." };
     }
     if (kind !== "fault") return undefined;
-    return { message: "The cloud machine cannot check whether agents are working, so it stays on. Stop the instance when you finish." };
+    return { message: "The cloud machine could not finish its check, so it stays on for now and tries again by itself. If this stays, stop the instance when you finish." };
   }
 
   /** Saves the stop key from a pasted setup result. The result must carry
@@ -626,6 +633,13 @@ export class CloudRunAwsService {
     const records = (await this.installsOnInstance(handle)).records.filter((record) => record.installedVersion);
     const keyId = credentials?.power?.accessKeyId;
     return records.find((record) => keyId && record.power?.keyId === keyId) ?? records[0];
+  }
+
+  /** The install record of one machine on this instance. */
+  async machineRecordOnInstance(machineId: string): Promise<MachineInstallRecord | undefined> {
+    const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
+    if (!handle) return undefined;
+    return (await this.installsOnInstance(handle)).records.find((record) => record.machineId === machineId && record.installedVersion);
   }
 
   /** A stop key for the instance's own region is saved. */

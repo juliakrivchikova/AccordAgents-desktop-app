@@ -242,6 +242,8 @@ export interface AwsWorkerAutoStopProblem {
    *  the cloud machine again. Without one, the message says what to do. */
   action?: "set-up-again" | "reconnect";
   actionLabel?: string;
+  /** The machine the fix acts on. */
+  machineId?: string;
 }
 
 /** The automatic-stop switch. Turning it on with a pasted setup result also
@@ -2798,7 +2800,7 @@ export interface AppBridge {
   setAwsAutoStop(request: SetAwsAutoStopRequest): Promise<AwsWorkerStatus>;
   /** Sets the program on the instance's cloud machine up again, the way
    *  choosing Cloud run does, so it can stop the instance by itself. */
-  reconnectAwsMachine(): Promise<AwsWorkerStatus>;
+  reconnectAwsMachine(machineId?: string): Promise<AwsWorkerStatus>;
   stopAwsWorker(): Promise<AwsWorkerStatus>;
   deleteAwsWorker(): Promise<AwsWorkerStatus>;
   getAgentEnvironment(): Promise<AgentEnvironmentSnapshot>;

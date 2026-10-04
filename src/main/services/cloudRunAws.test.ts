@@ -1108,7 +1108,7 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   const autoStop = async () => (await service.status()).autoStop;
   const ON = { enabled: true, needsSetup: false };
   const SET_UP_AGAIN = { ...ON, problem: { message: "AWS does not accept the automatic-stop key.", action: "set-up-again", actionLabel: "Set up again" } };
-  const TRY_AGAIN = { ...ON, problem: { message: "The cloud machine could not take its automatic-stop key.", action: "reconnect", actionLabel: "Try again" } };
+  const TRY_AGAIN = { ...ON, problem: { message: "The cloud machine could not take its automatic-stop key.", action: "reconnect", actionLabel: "Try again", machineId: "cloud" } };
   assert.deepEqual(await autoStop(), { ...ON, problem: { message: "The program that stops the instance is not set up on it yet.",
     action: "reconnect", actionLabel: "Set it up" } });
   settings.installs = [installFor("cloud")];
@@ -1149,18 +1149,20 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
     assert.deepEqual(await autoStop(), ON, ordinary);
   }
   settings.machines[0] = { ...settings.machines[0], lastHello: { idleStopWarning: "Idle stop is not confirmed; native work remains queued: throttled" } };
-  assert.match((await autoStop())?.problem?.message ?? "", /still waiting for a confirmation/);
+  assert.match((await autoStop())?.problem?.message ?? "", /has not finished yet; it keeps trying/);
   settings.machines[0] = { ...settings.machines[0], lastHello: { idleStopWarning: "Automatic idle stop is suspended: metadata unavailable" } };
   assert.deepEqual(await autoStop(), { ...ON, problem: { message:
-    "The cloud machine cannot check whether agents are working, so it stays on. Stop the instance when you finish." } },
+    "The cloud machine could not finish its check, so it stays on for now and tries again by itself. If this stays, stop the instance when you finish." } },
   "the machine's own fault is shown, in plain words");
+  settings.machines[0] = { ...settings.machines[0], lastHello: { autoStopEnabled: false } } as never;
+  assert.match((await autoStop())?.problem?.message ?? "", /still has automatic stop switched off/, "the machine says it did not get the switch");
   settings.machines[0] = { ...settings.machines[0], lastHello: { idleStopWarning:
     "Automatic idle stop is suspended: AWS does not accept this machine's stop key, so it stays awake (AuthFailure: AWS was not able to validate the provided access credentials)." } };
   assert.deepEqual(await autoStop(), SET_UP_AGAIN, "a key AWS stopped accepting is set up again");
   settings.machines[0] = { id: "cloud", awsInstanceId: POWER_HANDLE.instanceId };
   connected = false;
   const NOT_CONNECTED = { ...ON, problem: { message: "The program on the cloud machine is not connected, so it cannot stop the instance.",
-    action: "reconnect", actionLabel: "Reconnect" } };
+    action: "reconnect", actionLabel: "Reconnect", machineId: "cloud" } };
   assert.deepEqual(await autoStop(), NOT_CONNECTED);
   client.state = { instanceId: POWER_HANDLE.instanceId, state: "running", launchedAt: new Date().toISOString() };
   assert.deepEqual(await autoStop(), ON, "an instance that has just started is given time to connect");

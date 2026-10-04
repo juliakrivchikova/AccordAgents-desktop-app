@@ -19,7 +19,7 @@ export function useAwsAutoStop(
   setup: AutoStopSetupMode | undefined;
   closeSetup: () => void;
   toggle: (enabled: boolean) => void;
-  fix: (action: NonNullable<AwsWorkerAutoStopProblem["action"]>) => Promise<void>;
+  fix: (problem: AwsWorkerAutoStopProblem) => Promise<void>;
 } {
   const [busy, setBusy] = useState(false);
   const [setup, setSetup] = useState<AutoStopSetupMode>();
@@ -30,9 +30,9 @@ export function useAwsAutoStop(
     window.consensus.setAwsAutoStop({ enabled }).then(accept, (cause) => report(new Error(ipcErrorMessage(cause))))
       .finally(() => setBusy(false));
   };
-  const fix = async (action: NonNullable<AwsWorkerAutoStopProblem["action"]>): Promise<void> => {
-    if (action === "set-up-again") { setSetup("set-up-again"); return; }
-    accept(await window.consensus.reconnectAwsMachine());
+  const fix = async (problem: AwsWorkerAutoStopProblem): Promise<void> => {
+    if (problem.action === "set-up-again") { setSetup("set-up-again"); return; }
+    accept(await window.consensus.reconnectAwsMachine(problem.machineId));
   };
   return { busy, setup, closeSetup: () => setSetup(undefined), toggle, fix };
 }

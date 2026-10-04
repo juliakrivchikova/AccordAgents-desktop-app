@@ -2531,10 +2531,17 @@ function registerIpc(): void {
     if (keyAdded) evaluateMachineUpdates?.();
     return cloudRunAwsService.status();
   });
-  ipcMain.handle("cloud-runs:aws-reconnect-machine", async () => {
-    const record = await cloudRunAwsService.autoStopMachineRecord();
-    const settled = !record?.lastOperation || isMachineInstallTerminalPhase(record.lastOperation.phase);
-    if (record && settled && machineLinkService?.isMachineConnected(record.machineId)) {
+  ipcMain.handle("cloud-runs:aws-reconnect-machine", async (_event, machineId?: string) => {
+    const record = typeof machineId === "string" && machineId
+      ? await cloudRunAwsService.machineRecordOnInstance(machineId)
+      : await cloudRunAwsService.autoStopMachineRecord();
+    if (machineLinkStartedAt === undefined || Date.now() - machineLinkStartedAt < DESKTOP_LINK_STARTUP_GRACE_MS) {
+      throw new Error("Still connecting to the cloud machine. Try again in a minute.");
+    }
+    if (record?.lastOperation && !isMachineInstallTerminalPhase(record.lastOperation.phase)) {
+      throw new Error("The cloud machine is being set up right now. Try again when that finishes.");
+    }
+    if (record && machineLinkService?.isMachineConnected(record.machineId)) {
       // A connected program is never drained by this button: the key goes
       // over the way automatic updates hand it over, once the machine is idle
       // and with new turns held.

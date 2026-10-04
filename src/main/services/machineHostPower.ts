@@ -346,14 +346,15 @@ export class MachineHostPowerRegistry {
    * own process registry. Removal happens under the host lock and only if the
    * claim is still the one that was judged.
    */
-  async releaseDeadClaims(hasLiveNativeWork: (profilePath: string) => Promise<boolean>, quietForMs: number): Promise<number> {
+  async releaseDeadClaims(hasLiveNativeWork: (profilePath: string) => Promise<boolean>, restartGraceMs: number): Promise<number> {
     const now = this.options.uptimeMs();
     let released = 0;
     for (const claim of this.others()) {
       if (claim.instanceId === this.instanceId || this.ownerAlive(claim)) continue;
-      // Its last work still counts: a runtime that crashed a minute after a
-      // turn is no reason to stop the instance under the turn that follows.
-      if (now - claimLastBusyMs(this.raw(claim) ?? claim) < quietForMs) continue;
+      // A runtime that just died is usually being restarted; its next claim
+      // carries its activity on, since starting counts as work. Until then
+      // this one holds the host.
+      if (now - (this.raw(claim) ?? claim).uptimeMs < restartGraceMs) continue;
       // The path to follow comes from a file anyone on the host could have
       // written; only this OS user's own claims are trusted with it.
       if (!this.ownedByThisUser(claim)) continue;
@@ -370,16 +371,15 @@ export class MachineHostPowerRegistry {
 
   /**
    * Claims that keep the host awake although nobody can confirm work behind
-   * them: an owner that exited and cannot be released, or one still running
-   * that stopped refreshing, whose last work is older than `quietForMs`.
-   * Recent work is the ordinary reason to stay up; this is a fault to show.
+   * them, not written for `olderThanMs`: an owner that exited and left agents
+   * running, or one still running that stopped refreshing. Agents working
+   * are the ordinary reason to stay up; this is a fault to show.
    */
-  unconfirmedClaims(quietForMs: number): MachineHostClaim[] {
+  unconfirmedClaims(olderThanMs: number): MachineHostClaim[] {
     const now = this.options.uptimeMs();
     return this.others().filter((claim) => {
       const raw = this.raw(claim);
-      if (!raw || now - claimLastBusyMs(raw) < quietForMs) return false;
-      return !this.ownerAlive(raw) || now - raw.uptimeMs > this.staleAfterMs;
+      return Boolean(raw) && now - raw!.uptimeMs >= Math.max(olderThanMs, this.staleAfterMs);
     });
   }
 
@@ -533,11 +533,6 @@ function prune(file: string): boolean {
     // gone is enough, and the directory is cleared on the next boot.
     return false;
   }
-}
-
-/** When a claim's owner last worked: a claim written busy was busy then. */
-function claimLastBusyMs(claim: MachineHostClaim): number {
-  return claim.busy ? claim.uptimeMs : claim.lastBusyUptimeMs ?? claim.uptimeMs;
 }
 
 function claimFileName(claim: Pick<MachineHostClaim, "profileId" | "instanceId">): string {

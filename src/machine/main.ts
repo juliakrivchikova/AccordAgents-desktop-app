@@ -324,6 +324,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   await storageService.machineProgress().recoverLocal(identity.originId);
 
   let idlePower: MachineIdlePower | undefined;
+  /** The switch as this machine last read it; reported in every hello. */
+  let autoStopEnabled: boolean | undefined = await settingsService.getMachineAutoStopEnabled().catch(() => undefined);
   // Every runtime on this host publishes what it is doing and consults the
   // shared barrier, with or without AWS power configuration. A deployment that
   // cannot stop the instance itself must still stop another one from stopping
@@ -398,8 +400,18 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     detectProviders: () => cliAgentRunner.detectAgents(),
     onNativeActivitySettled: () => idlePower?.noteActivity() ?? Promise.resolve(),
     idleStopWarning: () => presenceWarning || idlePower?.warning(),
+    autoStopEnabled: () => autoStopEnabled,
     onSettingsImported: async () => {
       cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());
+      // The User's automatic-stop switch arrives with the settings. Switched
+      // on again, idle counts from now; either way the desktop is told what
+      // this machine now has, so the two cannot silently disagree.
+      const enabled = await settingsService.getMachineAutoStopEnabled().catch(() => undefined);
+      if (enabled === autoStopEnabled) return;
+      const switchedOn = enabled === true && autoStopEnabled === false;
+      autoStopEnabled = enabled;
+      if (switchedOn) await idlePower?.switchedOn();
+      void hostRef?.publishPowerStatus().catch(() => undefined);
     },
     onDesktopMachineId: (machineId) => {
       chatService.setHostMachineId(machineId);

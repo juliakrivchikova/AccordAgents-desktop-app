@@ -147,7 +147,7 @@ const bridge: AppBridge = {
   },
   getAwsWorkerStatus: () => ipcRenderer.invoke("cloud-runs:aws-status"),
   setAwsAutoStop: (request: SetAwsAutoStopRequest) => ipcRenderer.invoke("cloud-runs:aws-auto-stop", request),
-  reconnectAwsMachine: () => ipcRenderer.invoke("cloud-runs:aws-reconnect-machine"),
+  reconnectAwsMachine: (machineId?: string) => ipcRenderer.invoke("cloud-runs:aws-reconnect-machine", machineId),
   stopAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-stop"),
   deleteAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-delete"),
   getAgentEnvironment: () => ipcRenderer.invoke("settings:get-agent-environment"),

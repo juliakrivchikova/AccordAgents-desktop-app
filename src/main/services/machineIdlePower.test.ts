@@ -327,6 +327,7 @@ test("a crashed deployment stops keeping the instance awake once its agents are 
     assert.equal(stops, 0, "switched off, the machine never stops the instance");
     assert.equal(power.warning(), undefined, "and switched off is not a fault either");
     enabled = true;
+    await power.switchedOn();
     await check();
     assert.equal(stops, 0, "switched on again, idle counts from now");
     now += MACHINE_IDLE_STOP_MS + 1;
@@ -397,6 +398,7 @@ test("switched back on, the machine waits three idle hours from then and asks AW
     await checkOf(h.power);
     assert.equal(h.power.warning(), undefined, "off is not a fault");
     enabled = true; refuse = false; now += 60_000;
+    await h.power.switchedOn();
     await checkOf(h.power);
     assert.equal(h.stops, 0, "turning it on does not stop an instance that was already idle");
     now += MACHINE_IDLE_STOP_MS - 1_000;
@@ -458,4 +460,24 @@ test("another deployment's registry is read without guessing: only an absent one
     assert.equal(await nativeRegistryHasLiveWork(registryPath, identity, async () => undefined), true, "no process table, no proof");
     assert.equal(await nativeRegistryHasLiveWork(registryPath, identity), false);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a neighbour that keeps restarting is reported instead of holding the instance in silence", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-loop-"));
+  const now = MACHINE_IDLE_STOP_MS * 2;
+  const h = idleHarness(dir, { now: () => now });
+  try {
+    await h.store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
+    await h.power.start();
+    for (let start = 1; start <= 4; start++) {
+      const instance = new MachineHostPowerRegistry({ dir: h.shared, profilePath: "/srv/looping", bootId: identity.boot, uptimeMs: () => now,
+        pid: process.pid, isAlive: () => true });
+      instance.publish(true);
+      await checkOf(h.power);
+      if (start < 4) assert.equal(h.power.warning(), undefined, "one start is ordinary work");
+      instance.release();
+    }
+    assert.match(h.power.warning() ?? "", /\/srv\/looping\) keeps restarting/);
+    assert.equal(h.stops, 0);
+  } finally { h.power.close(); await rm(dir, { recursive: true, force: true }); }
 });

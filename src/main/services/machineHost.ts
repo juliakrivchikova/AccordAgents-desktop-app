@@ -100,6 +100,8 @@ export interface MachineHostOptions {
   /** Commit idle accounting before a completed native run stops being busy. */
   onNativeActivitySettled?: () => Promise<void>;
   idleStopWarning?: () => string | undefined;
+  /** The User's automatic-stop switch as this machine has it. */
+  autoStopEnabled?: () => boolean | undefined;
 }
 
 /** Conversation metadata the machine owns and never takes from the desktop:
@@ -726,7 +728,8 @@ export class MachineHostService {
       instanceStartedAt: this.instanceStartedAt,
       ...(typeof this.instanceSequence === "number" ? { instanceSequence: this.instanceSequence } : {}),
       ...((this.outboxError || this.progressErrors.size) ? { outboxError: [this.outboxError, ...this.progressErrors.values()].filter(Boolean).join("; ") } : {}),
-      ...(this.options.idleStopWarning?.() ? { idleStopWarning: this.options.idleStopWarning() } : {})
+      ...(this.options.idleStopWarning?.() ? { idleStopWarning: this.options.idleStopWarning() } : {}),
+      ...(typeof this.options.autoStopEnabled?.() === "boolean" ? { autoStopEnabled: this.options.autoStopEnabled() } : {})
     }, to);
   }
 

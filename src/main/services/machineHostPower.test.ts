@@ -246,7 +246,7 @@ test("a dead owner's claim is released once its own registry shows no agent stil
   const shared = dir();
   const alive = new Set([4243]);
   const live = new Set<string>();
-  const QUIET = 10_800_000;
+  const GRACE = 120_000;
   let now = 1_000;
   const make = (profile: string, pid: number) => registry({ dir: shared, profile, pid, now: () => now, alive: (candidate) => alive.has(candidate) });
   const mine = make("/srv/one", 4243);
@@ -259,34 +259,37 @@ test("a dead owner's claim is released once its own registry shows no agent stil
   live.add("/tmp/repro-b/machine");
   const asked: string[] = [];
   const probe = async (profilePath: string) => { asked.push(profilePath); return live.has(profilePath); };
-  assert.equal(await mine.releaseDeadClaims(probe, QUIET), 0, "work a minute ago still counts after its runtime died");
-  assert.deepEqual(asked, [], "nothing is read while the dead runtime's last work is recent");
-  now += QUIET;
+  assert.equal(await mine.releaseDeadClaims(probe, GRACE), 0, "a runtime that just died may be restarting");
+  assert.deepEqual(asked, [], "nothing is read during the restart grace");
+  now += GRACE;
   three.publish(true);
-  const released = await mine.releaseDeadClaims(probe, QUIET);
+  const released = await mine.releaseDeadClaims(probe, GRACE);
   assert.equal(released, 1, "only the dead runtime with nothing left running is released");
   assert.deepEqual(asked.sort(), ["/tmp/repro-a/machine", "/tmp/repro-b/machine"], "a live owner is never second-guessed");
   assert.deepEqual(mine.others().map((claim) => claim.profilePath).sort(), ["/srv/three", "/tmp/repro-b/machine"]);
-  assert.deepEqual(mine.unconfirmedClaims(QUIET).map((claim) => claim.profilePath), ["/tmp/repro-b/machine"],
-    "a dead claim that cannot be released, held past the idle window, is reported");
+  assert.deepEqual(mine.unconfirmedClaims(600_000), [], "a few minutes are not yet a fault");
+  now += 600_000;
+  three.publish(true);
+  assert.deepEqual(mine.unconfirmedClaims(600_000).map((claim) => claim.profilePath), ["/tmp/repro-b/machine"],
+    "a dead runtime whose agent still runs ten minutes later is reported");
   live.clear();
-  assert.equal(await mine.releaseDeadClaims(async () => false, QUIET), 1, "once its agent exits, the other one goes too");
+  assert.equal(await mine.releaseDeadClaims(async () => false, GRACE), 1, "once its agent exits, the other one goes too");
   alive.delete(703);
-  now += QUIET;
-  await assert.rejects(mine.releaseDeadClaims(async () => { throw new Error("registry unreadable"); }, QUIET), /unreadable/,
+  now += GRACE;
+  await assert.rejects(mine.releaseDeadClaims(async () => { throw new Error("registry unreadable"); }, GRACE), /unreadable/,
     "a registry that cannot be read is not evidence of an idle host");
   assert.deepEqual(mine.others().map((claim) => claim.profilePath), ["/srv/three"]);
 });
 
-test("a hung runtime that stopped refreshing is reported once its quiet passes the idle window", () => {
+test("a hung runtime that stopped refreshing is reported after ten minutes", () => {
   const shared = dir();
   let now = 1_000;
   registry({ dir: shared, profile: "/srv/hung", pid: 11, now: () => now }).publish(false);
   const mine = registry({ dir: shared, profile: "/srv/one", pid: 12, now: () => now });
   now += 120_000;
-  assert.deepEqual(mine.unconfirmedClaims(10_800_000), [], "a short pause is ordinary");
-  now += 10_800_000;
-  assert.deepEqual(mine.unconfirmedClaims(10_800_000).map((claim) => claim.profilePath), ["/srv/hung"]);
+  assert.deepEqual(mine.unconfirmedClaims(600_000), [], "a short pause is ordinary");
+  now += 600_000;
+  assert.deepEqual(mine.unconfirmedClaims(600_000).map((claim) => claim.profilePath), ["/srv/hung"]);
 });
 
 test("a dead owner's pid taken by a later process does not keep its claim alive", async () => {
@@ -295,10 +298,10 @@ test("a dead owner's pid taken by a later process does not keep its claim alive"
   // now started at 50 s, so it is not the runtime that wrote it.
   registry({ dir: shared, profile: "/tmp/repro/machine", pid: 801, now: () => 1_000 }).publish(false);
   const mine = registry({ dir: shared, profile: "/srv/one", pid: 802, now: () => 20_000_000, started: (pid) => pid === 801 ? 50_000 : 500 });
-  assert.equal(await mine.releaseDeadClaims(async () => false, 10_800_000), 1);
+  assert.equal(await mine.releaseDeadClaims(async () => false, 120_000), 1);
   registry({ dir: shared, profile: "/tmp/repro/machine", pid: 803, now: () => 20_000_000 }).publish(false);
   assert.equal(await registry({ dir: shared, profile: "/srv/one", pid: 802, now: () => 40_000_000, started: () => 20_001_000 })
-    .releaseDeadClaims(async () => false, 10_800_000), 0, "an owner that started within the slack of its claim is that claim's owner");
+    .releaseDeadClaims(async () => false, 120_000), 0, "an owner that started within the slack of its claim is that claim's owner");
 });
 
 test("a process start is read from field 22 of /proc stat, past a command name with spaces and parentheses", () => {

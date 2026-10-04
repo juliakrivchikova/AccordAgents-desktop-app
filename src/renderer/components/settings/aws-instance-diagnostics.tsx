@@ -11,7 +11,7 @@ import { ipcErrorMessage } from "./aws-worker-auto-stop";
  */
 export function AwsInstanceDiagnostics(props: {
   autoStopProblem?: AwsWorkerAutoStopProblem;
-  onAutoStopAction?: (action: NonNullable<AwsWorkerAutoStopProblem["action"]>) => Promise<void>;
+  onAutoStopAction?: (problem: AwsWorkerAutoStopProblem) => Promise<void>;
 } = {}): JSX.Element {
   const [open, setOpen] = useState(false);
   const [fixing, setFixing] = useState(false);
@@ -58,10 +58,10 @@ export function AwsInstanceDiagnostics(props: {
   };
 
   const problem = props.autoStopProblem;
-  const fix = async (action: NonNullable<AwsWorkerAutoStopProblem["action"]>): Promise<void> => {
+  const fix = async (current: AwsWorkerAutoStopProblem): Promise<void> => {
     setFixing(true);
     setFixError(undefined);
-    try { await props.onAutoStopAction?.(action); }
+    try { await props.onAutoStopAction?.(current); }
     catch (error) { setFixError(ipcErrorMessage(error)); }
     finally { setFixing(false); }
   };
@@ -90,7 +90,7 @@ export function AwsInstanceDiagnostics(props: {
               {fixError ? <div className="gen-aws-inline-error" role="alert">{fixError}</div> : null}
               {problem.action ? (
                 <div className="gen-actions">
-                  <button type="button" className="gen-pill" data-testid="aws-auto-stop-problem-action" disabled={fixing} onClick={() => void fix(problem.action!)}>
+                  <button type="button" className="gen-pill" data-testid="aws-auto-stop-problem-action" disabled={fixing} onClick={() => void fix(problem)}>
                     {fixing ? <span className="gen-pill-lead"><Loader2 size={16} className="gen-aws-spinner" aria-hidden /></span> : null}
                     <span className="gen-pill-label">{fixing && problem.action === "reconnect" ? "Working…" : problem.actionLabel ?? "Fix"}</span>
                   </button>
