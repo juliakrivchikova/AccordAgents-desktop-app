@@ -455,13 +455,12 @@ export class MachineHostPowerRegistry {
     const ownDeadIntent = intent?.phase === "pending" && intent.profileId === this.profileId && !this.isAlive(intent.pid);
     const mine = this.others().filter((claim) => claim.profileId === this.profileId);
     if (!mine.length && !ownDeadIntent) return 0;
-    await proveClosed();
-    let cleared = 0;
+    // Recorded before the proof: a start after a crash is one even when the
+    // crashed runtime's work cannot be proven closed yet.
     const now = this.options.uptimeMs();
     let crashed = false;
     for (const claim of mine) {
-      if (claim.instanceId === this.instanceId) continue;
-      if (this.isAlive(claim.pid)) continue;
+      if (claim.instanceId === this.instanceId || this.isAlive(claim.pid)) continue;
       const raw = this.raw(claim);
       if (raw?.kind === "runtime" && this.options.kind !== "maintenance") {
         // An earlier runtime of this profile died without releasing its
@@ -469,11 +468,17 @@ export class MachineHostPowerRegistry {
         crashed = true;
         this.crashRestarts.push(...(raw.crashRestartsUptimeMs ?? []));
       }
-      prune(path.join(this.dir, claimFileName(claim)));
-      cleared += 1;
     }
     if (crashed) {
       this.crashRestarts = [...new Set([...this.crashRestarts, now])].filter((at) => now - at < CRASH_HISTORY_MS).sort((a, b) => a - b);
+    }
+    await proveClosed();
+    let cleared = 0;
+    for (const claim of mine) {
+      if (claim.instanceId === this.instanceId) continue;
+      if (this.isAlive(claim.pid)) continue;
+      prune(path.join(this.dir, claimFileName(claim)));
+      cleared += 1;
     }
     if (ownDeadIntent) {
       // An uncommitted attempt may be withdrawn after closure. A committed

@@ -338,6 +338,15 @@ test("a runtime that keeps crashing carries its crash restarts, and the others c
     alive.delete(pid);
   }
   assert.equal(neighbour.restartLoop(2), undefined, "maintenance commands are not restarts");
+  // A crash whose work cannot be proven closed yet is still a crash.
+  const unproven = registry({ dir: shared, profile: "/srv/unproven", pid: 400, now: () => now, alive: (pid) => pid === 401 });
+  unproven.publish(true);
+  const after = registry({ dir: shared, profile: "/srv/unproven", pid: 401, now: () => now, alive: (pid) => pid === 401 });
+  await assert.rejects(after.adoptOwnStaleClaims(async () => { throw new Error("a native executor has not confirmed that its processes are gone"); }));
+  after.publish(true);
+  const claims = fs.readdirSync(shared).filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(fs.readFileSync(path.join(shared, name), "utf8")) as MachineHostClaim);
+  assert.equal(claims.find((item) => item.pid === 401)?.crashRestartsUptimeMs?.length, 1);
 });
 
 test("a released dead claim's work still counts toward host idle; a live maintenance command is not reported", async () => {

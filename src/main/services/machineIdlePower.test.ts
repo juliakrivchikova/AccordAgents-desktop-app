@@ -484,6 +484,12 @@ test("a neighbour that keeps crashing is reported instead of holding the instanc
     const file = fs.readdirSync(h.shared).find((name) => name.startsWith(machineHostProfileId("/srv/looping")))!;
     const claimPath = path.join(h.shared, file);
     fs.writeFileSync(claimPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(claimPath, "utf8")), crashRestartsUptimeMs: [now - 60 * 60_000, now - 5_000] }));
+    const working = new MachineHostPowerRegistry({ dir: h.shared, profilePath: "/srv/working", bootId: identity.boot, uptimeMs: () => now,
+      pid: process.pid, isAlive: () => true });
+    working.publish(true);
+    await checkOf(h.power);
+    assert.equal(h.power.warning(), undefined, "another deployment at work is the reason, not the crashing one");
+    working.release();
     await checkOf(h.power);
     assert.match(h.power.warning() ?? "", /\/srv\/looping\) keeps restarting/);
     assert.equal(h.stops, 0);

@@ -2528,6 +2528,8 @@ function registerIpc(): void {
     // shows in Diagnostics that the change did not arrive.
     void (async () => {
       await machineLinkService?.syncSettings();
+      // A moment later, so the answer follows the settings it was sent.
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
       const holder = await cloudRunAwsService.autoStopMachineRecord();
       if (holder) await machineLinkService?.machineActivity(holder.machineId, { fresh: true });
     })().catch((error) => {
@@ -2560,13 +2562,14 @@ function registerIpc(): void {
       // whether agents are running before anything is stopped.
       if (record?.installRoot) {
         const worker = await cloudRunAwsService.workerForInspection();
-        if (worker.host && worker.hostKeyAlias === record.target?.hostKeyAlias) {
-          const probe = await machineInstallerService.probe(
-            { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias },
-            { installRoot: record.installRoot, userDataDir: record.userDataDir, serviceName: record.serviceName });
-          if (probe.providerPids.length) {
-            throw new Error("Agents are still running on the cloud machine. Try again when they finish.");
-          }
+        if (!worker.host || worker.hostKeyAlias !== record.target?.hostKeyAlias) {
+          throw new Error("The cloud machine could not be checked for running agents, so nothing was changed.");
+        }
+        const probe = await machineInstallerService.probe(
+          { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias },
+          { installRoot: record.installRoot, userDataDir: record.userDataDir, serviceName: record.serviceName });
+        if (probe.providerPids.length) {
+          throw new Error("Agents are still running on the cloud machine. Try again when they finish.");
         }
       }
       await cloudRunPreparation.prepareRuntime();

@@ -1170,6 +1170,12 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   assert.match((await autoStop())?.problem?.message ?? "", /still has automatic stop switched on, so it may stop the instance/);
   settings.machines[0] = { ...settings.machines[0], lastSeenAt: new Date().toISOString(), lastHello: {} } as never;
   assert.match((await autoStop())?.problem?.message ?? "", /older and still stops the instance by itself/, "a runtime before the switch ignores off");
+  connected = false;
+  assert.match((await autoStop())?.problem?.message ?? "", /not connected; it takes the switch when it reconnects/);
+  connected = true;
+  settings.changedAt = new Date().toISOString();
+  settings.machines[0] = { ...settings.machines[0], lastSeenAt: new Date().toISOString(), lastHello: { autoStopEnabled: true } } as never;
+  assert.equal((await autoStop())?.problem, undefined, "a report moments after the change may predate the settings it is about");
   settings.autoStopEnabled = true;
   settings.changedAt = undefined;
   settings.machines[0] = { ...settings.machines[0], lastHello: { idleStopWarning:

@@ -31,6 +31,8 @@ export class MachineIdleScheduler {
     isBusy(): Promise<boolean>;
     prepareStop(idleSinceMs: number): Promise<(() => Promise<void>) | undefined>;
     onError(error: unknown): void;
+    /** A timed check that went through from start to end. */
+    onChecked?(): void;
     onIdleChanged?(idleSinceMs: number | null): void;
     idleMs?: number;
     pollMs?: number;
@@ -110,7 +112,8 @@ export class MachineIdleScheduler {
     if (this.closed || this.stopping || this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      void this.check().catch(error => this.options.onError(error)).finally(() => this.schedule(this.options.pollMs ?? 15_000));
+      void this.check().then(() => this.options.onChecked?.(), error => this.options.onError(error))
+        .finally(() => this.schedule(this.options.pollMs ?? 15_000));
     }, delay);
     this.timer.unref?.();
   }

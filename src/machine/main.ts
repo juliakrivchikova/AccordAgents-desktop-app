@@ -408,14 +408,11 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       // this machine now has, so the two cannot silently disagree.
       const enabled = await settingsService.getMachineAutoStopEnabled().catch(() => undefined);
       if (enabled === autoStopEnabled) return;
-      try {
-        // The new idle start is written before the switch reads on here: a
-        // failed write keeps it off, and the next import tries again.
-        if (enabled === true && autoStopEnabled === false) await idlePower?.switchedOn();
-        autoStopEnabled = enabled;
-      } finally {
-        void hostRef?.publishPowerStatus().catch(() => undefined);
-      }
+      // The new idle start is written before the switch reads on here: a
+      // failed write keeps it off, and the next import tries again.
+      if (enabled === true && autoStopEnabled === false) await idlePower?.switchedOn();
+      autoStopEnabled = enabled;
+      void hostRef?.publishPowerStatus().catch(() => undefined);
     },
     onDesktopMachineId: (machineId) => {
       chatService.setHostMachineId(machineId);

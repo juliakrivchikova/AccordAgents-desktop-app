@@ -139,8 +139,6 @@ export class MachineIdlePower {
         // reads this one's current state rather than a stale claim.
         try { this.hostPower?.publish(busy); }
         catch (error) { this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`, "check"); return true; }
-        // A check that went through clears a failed one's warning.
-        this.resolveWarning("check");
         return busy;
       },
       prepareStop: async since => {
@@ -202,7 +200,9 @@ export class MachineIdlePower {
           if (!committed && !this.stopping) await this.abandonHostStop();
         }
       },
-      onError: error => this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`, "check") });
+      onError: error => this.setWarning(`Automatic idle stop is suspended: ${errorText(error)}`, "check"),
+      // Only a whole check that went through clears a failed one's warning.
+      onChecked: () => this.resolveWarning("check") });
   }
 
   /**
@@ -304,7 +304,9 @@ export class MachineIdlePower {
     let restarting: string | undefined;
     try { restarting = this.hostPower.restartLoop(RESTART_LOOP_CRASHES); }
     catch { restarting = undefined; }
-    if (restarting) {
+    // Named only when nothing else holds the host: another deployment's work
+    // is the ordinary reason, whatever a crashing one does.
+    if (restarting && busy.every((claim) => claim.profilePath === restarting)) {
       this.setWarning(`The machine stays awake: a program on it (${restarting}) keeps restarting.`, "coordination");
       return false;
     }

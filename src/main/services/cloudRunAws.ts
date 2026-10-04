@@ -54,6 +54,8 @@ const AWS_AUTHORIZATION_RETRY_DELAYS_MS = [250, 1_000, 2_500] as const;
 /** How long a running instance's machine may take to connect before
  *  Diagnostics says it is not connected. */
 const INSTANCE_BOOT_CONNECT_GRACE_MS = 5 * 60_000;
+/** How soon after a switch change a machine's report can still predate it. */
+const SWITCH_REPORT_MARGIN_MS = 2_000;
 
 export interface CloudRunAwsServiceOptions {
   /** This desktop's version: an automatic update of it that already failed
@@ -614,13 +616,20 @@ export class CloudRunAwsService {
     const { machines, records } = await this.installsOnInstance(handle);
     const holder = records.find((record) => record.power?.keyId === power.credentials.accessKeyId);
     const machine = holder ? machines.find((item) => item.id === holder.machineId) : undefined;
-    if (!machine?.lastHello || this.machineConnected?.(machine.id) !== true) return undefined;
+    if (!machine?.lastHello) return undefined;
+    const connected = this.machineConnected?.(machine.id);
+    if (connected === false && !enabled) {
+      return { message: "The program on the cloud machine is not connected; it takes the switch when it reconnects, and until then it may still stop the instance." };
+    }
+    if (connected !== true) return undefined;
     const reported = machine.lastHello.autoStopEnabled;
     if (reported === undefined) {
       return enabled ? undefined : { message: "The program on the cloud machine is older and still stops the instance by itself; it takes the switch after its next update." };
     }
     const changedAt = Date.parse(await this.settings.getMachineAutoStopChangedAt() ?? "");
-    const reportedAfterChange = !Number.isFinite(changedAt) || Date.parse(machine.lastSeenAt ?? "") > changedAt;
+    // A report within moments of the change may predate the settings it is
+    // about; only a later one says the change did not arrive.
+    const reportedAfterChange = !Number.isFinite(changedAt) || Date.parse(machine.lastSeenAt ?? "") > changedAt + SWITCH_REPORT_MARGIN_MS;
     if (reported === enabled || !reportedAfterChange) return undefined;
     return { message: enabled
       ? "The cloud machine still has automatic stop switched off. Switch it off and on again to send it once more."
