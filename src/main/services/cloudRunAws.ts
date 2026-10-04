@@ -51,9 +51,6 @@ import type {
 const WORKER_SSH_USER = "ubuntu";
 const WORKER_ROOT = "~/.accordagents/remote-runs";
 const AWS_AUTHORIZATION_RETRY_DELAYS_MS = [250, 1_000, 2_500] as const;
-/** How long a running instance's machine may take to connect before
- *  Diagnostics says it is not connected. */
-const INSTANCE_BOOT_CONNECT_GRACE_MS = 5 * 60_000;
 /** How soon after a switch change a machine's report can still predate it. */
 const SWITCH_REPORT_MARGIN_MS = 2_000;
 
@@ -64,6 +61,8 @@ export interface CloudRunAwsServiceOptions {
   /** Whether the machine's runtime is connected to this desktop now;
    *  undefined while that is not known yet (the link is still starting). */
   machineConnected?: (machineId: string) => boolean | undefined;
+  /** Why the app could not bring the machine's program back, after it tried. */
+  machineRecoveryFailure?: (machineId: string) => string | undefined;
   createEc2Client?: (credentials: AwsWorkerCredentials) => Ec2Client;
   generateKeyMaterial?: typeof generateAwsWorkerKeyMaterial;
   deleteKeyMaterial?: typeof deleteGeneratedAwsWorkerKeyMaterial;
@@ -110,6 +109,7 @@ export class CloudRunAwsService {
   private readonly logger?: (event: string, payload: Record<string, unknown>) => void;
   private readonly appVersion?: string;
   private readonly machineConnected?: (machineId: string) => boolean | undefined;
+  private readonly machineRecoveryFailure?: (machineId: string) => string | undefined;
   private readonly automaticStopOwnerId = randomUUID();
   private readonly activeRunIds = new Set<string>();
   private readonly wait: (delayMs: number) => Promise<void>;
@@ -123,6 +123,7 @@ export class CloudRunAwsService {
   ) {
     this.appVersion = options.appVersion;
     this.machineConnected = options.machineConnected;
+    this.machineRecoveryFailure = options.machineRecoveryFailure;
     this.logger = options.logger;
     this.createEc2Client = options.createEc2Client ?? createAwsEc2Client;
     this.generateKeyMaterial = options.generateKeyMaterial ?? generateAwsWorkerKeyMaterial;
@@ -509,14 +510,13 @@ export class CloudRunAwsService {
     const context = await this.workerContext();
     if (!context.credentials || !context.handle) return { configured: false, operation: context.operation };
     let status: AwsWorkerStatus;
-    let launchedAt: string | undefined;
     try {
-      ({ status, launchedAt } = await this.describeWorker(context.credentials, context.handle, context.operation));
+      ({ status } = await this.describeWorker(context.credentials, context.handle, context.operation));
     } catch (error) {
       status = { configured: true, handle: context.handle, operation: context.operation, message: errorMessage(error) };
     }
     // A settings read that fails leaves the switch unknown, never "on".
-    const autoStop = await this.autoStopFor(context.credentials, context.handle, status.state, launchedAt).catch(() => undefined);
+    const autoStop = await this.autoStopFor(context.credentials, context.handle, status.state).catch(() => undefined);
     return { ...status, ...(autoStop ? { autoStop } : {}) };
   }
 
@@ -533,17 +533,21 @@ export class CloudRunAwsService {
   }
 
   private async autoStopFor(credentials: AwsWorkerCredentials, handle: AwsWorkerHandleInfo,
-    state: AwsWorkerStatus["state"], launchedAt?: string): Promise<AwsWorkerAutoStop> {
+    state: AwsWorkerStatus["state"]): Promise<AwsWorkerAutoStop> {
     const power = powerConfigFor(credentials, handle);
     if (!power) return { enabled: false, needsSetup: true };
+    // A program the app could not bring back is everyone's problem, switch
+    // on or off: nothing runs in the cloud without it.
+    const down = state === "running" ? await this.machineDown(handle) : undefined;
     if (!await this.settings.getMachineAutoStopEnabled()) {
       // Off must hold on the machine too: it is the one that stops.
-      const problem = state === "running" ? await this.switchNotTaken(power, handle, false) : undefined;
+      const problem = down ?? (state === "running" ? await this.switchNotTaken(power, handle, false) : undefined);
       return { enabled: false, needsSetup: false, ...(problem ? { problem } : {}) };
     }
+    if (down) return { enabled: true, needsSetup: false, problem: down };
     // A stopped instance has nothing to stop; what keeps a running one up is
     // only worth showing while it runs.
-    const problem = state === "running" ? await this.autoStopProblem(power, handle, launchedAt) : undefined;
+    const problem = state === "running" ? await this.autoStopProblem(power, handle) : undefined;
     return { enabled: true, needsSetup: false, ...(problem ? { problem } : {}) };
   }
 
@@ -552,8 +556,7 @@ export class CloudRunAwsService {
    * for Diagnostics, or nothing. Agents working keep it up by design and are
    * not a problem. Each answer says what fixes it.
    */
-  private async autoStopProblem(power: AwsMachinePowerConfig, handle: AwsWorkerHandleInfo,
-    launchedAt?: string): Promise<AwsWorkerAutoStopProblem | undefined> {
+  private async autoStopProblem(power: AwsMachinePowerConfig, handle: AwsWorkerHandleInfo): Promise<AwsWorkerAutoStopProblem | undefined> {
     const keyId = power.credentials.accessKeyId;
     const { machines, records: all } = await this.installsOnInstance(handle);
     const records = all.filter((record) => record.installedVersion);
@@ -569,14 +572,6 @@ export class CloudRunAwsService {
     if (refused) {
       return { message: "AWS does not accept the automatic-stop key.", action: "set-up-again", actionLabel: "Set up again" };
     }
-    const record = taken ?? records[0];
-    // A machine that has just started needs a minute or two to connect.
-    const launched = launchedAt ? Date.parse(launchedAt) : Number.NaN;
-    const settled = !Number.isFinite(launched) || Date.now() - launched >= INSTANCE_BOOT_CONNECT_GRACE_MS;
-    if (settled && this.machineConnected?.(record.machineId) === false) {
-      return { message: "The program on the cloud machine is not connected, so it cannot stop the instance.", action: "reconnect",
-        actionLabel: "Reconnect", machineId: record.machineId };
-    }
     if (!taken) {
       // The key goes over by an update that waits for the machine to be idle.
       // Only an update that gave up needs the User; one that waits does not.
@@ -584,7 +579,7 @@ export class CloudRunAwsService {
       const stalled = appVersion ? records.find((item) => {
         const last = item.lastOperation;
         return last && last.phase !== "ready" && isMachineInstallTerminalPhase(last.phase) && last.recovery?.kind !== "machine-busy"
-          && isAutoUpgradeOf(last.operationId, appVersion) && item.installedVersion !== appVersion;
+          && !last.interrupted && isAutoUpgradeOf(last.operationId, appVersion) && item.installedVersion !== appVersion;
       }) : undefined;
       const exhausted = records.find((item) => item.powerRetry?.keyId === keyId && (item.powerRetry.attempts ?? 1) >= MACHINE_POWER_MAX_ATTEMPTS);
       const failed = stalled ?? exhausted;
@@ -605,6 +600,28 @@ export class CloudRunAwsService {
     return { message: "The cloud machine could not finish its check, so it stays on for now and tries again by itself. If this stays, stop the instance when you finish." };
   }
 
+  /** The program on the instance's machine is down and the app's own
+   *  attempt to bring it back failed; it keeps trying. */
+  private async machineDown(handle: AwsWorkerHandleInfo): Promise<AwsWorkerAutoStopProblem | undefined> {
+    const { records } = await this.installsOnInstance(handle);
+    const failed = records.find((record) => record.installedVersion && this.machineConnected?.(record.machineId) === false
+      && this.machineRecoveryFailure?.(record.machineId));
+    if (!failed) return undefined;
+    return { message: "The AccordAgents program on the cloud machine is not running, and the app could not start it again. "
+      + "Cloud members and automatic stop don't work until it runs; the app keeps trying." };
+  }
+
+  /** When the instance last started, while it is running; 0 when it runs
+   *  but AWS does not say since when. Reads only. */
+  async instanceRunningSince(): Promise<number | undefined> {
+    const context = await this.workerContext();
+    if (!context.credentials || !context.handle) return undefined;
+    const { status, launchedAt } = await this.describeWorker(context.credentials, context.handle, context.operation);
+    if (status.state !== "running") return undefined;
+    const launched = launchedAt ? Date.parse(launchedAt) : Number.NaN;
+    return Number.isFinite(launched) ? launched : 0;
+  }
+
   /**
    * The machine holding the key reports a different switch than the User set,
    * in a report made after the change: the change did not arrive. A runtime
@@ -616,12 +633,7 @@ export class CloudRunAwsService {
     const { machines, records } = await this.installsOnInstance(handle);
     const holder = records.find((record) => record.power?.keyId === power.credentials.accessKeyId);
     const machine = holder ? machines.find((item) => item.id === holder.machineId) : undefined;
-    if (!machine?.lastHello) return undefined;
-    const connected = this.machineConnected?.(machine.id);
-    if (connected === false && !enabled) {
-      return { message: "The program on the cloud machine is not connected; it takes the switch when it reconnects, and until then it may still stop the instance." };
-    }
-    if (connected !== true) return undefined;
+    if (!machine?.lastHello || this.machineConnected?.(machine.id) !== true) return undefined;
     const reported = machine.lastHello.autoStopEnabled;
     if (reported === undefined) {
       return enabled ? undefined : { message: "The program on the cloud machine is older and still stops the instance by itself; it takes the switch after its next update." };
@@ -694,8 +706,8 @@ export class CloudRunAwsService {
   async probeAccess(): Promise<AwsWorkerStatus> {
     const context = await this.workerContext();
     if (!context.credentials || !context.handle) return { configured: false, operation: context.operation };
-    const { status, launchedAt } = await this.describeWorker(context.credentials, context.handle, context.operation);
-    const autoStop = await this.autoStopFor(context.credentials, context.handle, status.state, launchedAt).catch(() => undefined);
+    const { status } = await this.describeWorker(context.credentials, context.handle, context.operation);
+    const autoStop = await this.autoStopFor(context.credentials, context.handle, status.state).catch(() => undefined);
     return { ...status, ...(autoStop ? { autoStop } : {}) };
   }
 

@@ -1109,7 +1109,9 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   const settings = powerSettings();
   const client = new FakeEc2Client({ instanceId: POWER_HANDLE.instanceId, state: "running" });
   let connected: boolean | undefined = true;
-  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), { machineConnected: () => connected });
+  let recoveryFailure: string | undefined;
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]),
+    { machineConnected: () => connected, machineRecoveryFailure: () => recoveryFailure });
   const autoStop = async () => (await service.status()).autoStop;
   const ON = { enabled: true, needsSetup: false };
   const SET_UP_AGAIN = { ...ON, problem: { message: "AWS does not accept the automatic-stop key.", action: "set-up-again", actionLabel: "Set up again" } };
@@ -1170,8 +1172,6 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   assert.match((await autoStop())?.problem?.message ?? "", /still has automatic stop switched on, so it may stop the instance/);
   settings.machines[0] = { ...settings.machines[0], lastSeenAt: new Date().toISOString(), lastHello: {} } as never;
   assert.match((await autoStop())?.problem?.message ?? "", /older and still stops the instance by itself/, "a runtime before the switch ignores off");
-  connected = false;
-  assert.match((await autoStop())?.problem?.message ?? "", /not connected; it takes the switch when it reconnects/);
   connected = true;
   settings.changedAt = new Date().toISOString();
   settings.machines[0] = { ...settings.machines[0], lastSeenAt: new Date().toISOString(), lastHello: { autoStopEnabled: true } } as never;
@@ -1183,20 +1183,23 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   assert.deepEqual(await autoStop(), SET_UP_AGAIN, "a key AWS stopped accepting is set up again");
   settings.machines[0] = { id: "cloud", awsInstanceId: POWER_HANDLE.instanceId };
   connected = false;
-  const NOT_CONNECTED = { ...ON, problem: { message: "The program on the cloud machine is not connected, so it cannot stop the instance.",
-    action: "reconnect", actionLabel: "Reconnect", machineId: "cloud" } };
-  assert.deepEqual(await autoStop(), NOT_CONNECTED);
-  client.state = { instanceId: POWER_HANDLE.instanceId, state: "running", launchedAt: new Date().toISOString() };
-  assert.deepEqual(await autoStop(), ON, "an instance that has just started is given time to connect");
-  client.state = { instanceId: POWER_HANDLE.instanceId, state: "running", launchedAt: new Date(Date.now() - 10 * 60_000).toISOString() };
-  assert.deepEqual(await autoStop(), NOT_CONNECTED);
-  connected = undefined;
-  assert.deepEqual(await autoStop(), ON, "while this desktop is still connecting, nothing is claimed");
-  connected = false;
+  assert.deepEqual(await autoStop(), ON, "a program out of touch is brought back by the app; the User is not asked");
+  recoveryFailure = "ssh: connect to host timed out";
+  const DOWN = { ...ON, problem: { message: "The AccordAgents program on the cloud machine is not running, and the app could not start it again. "
+    + "Cloud members and automatic stop don't work until it runs; the app keeps trying." } };
+  assert.deepEqual(await autoStop(), DOWN, "only a failed attempt is shown, and as what it is: nothing runs in the cloud");
+  settings.autoStopEnabled = false;
+  assert.deepEqual(await autoStop(), { enabled: false, needsSetup: false, problem: DOWN.problem }, "switched off or not");
+  settings.autoStopEnabled = true;
   client.state = { instanceId: POWER_HANDLE.instanceId, state: "stopped" };
-  assert.deepEqual(await autoStop(), ON, "a stopped instance has nothing to stop");
+  assert.deepEqual(await autoStop(), ON, "a stopped instance has no program to run");
+  client.state = { instanceId: POWER_HANDLE.instanceId, state: "running", launchedAt: new Date(Date.now() - 3_600_000).toISOString() };
+  assert.deepEqual((await service.probeAccess()).autoStop, DOWN, "the read-only check reports it too");
+  assert.equal(await service.instanceRunningSince(), Date.parse(client.state.launchedAt!));
+  client.state = { instanceId: POWER_HANDLE.instanceId, state: "stopped" };
+  assert.equal(await service.instanceRunningSince(), undefined);
   client.state = { instanceId: POWER_HANDLE.instanceId, state: "running" };
-  assert.deepEqual((await service.probeAccess()).autoStop, NOT_CONNECTED, "the read-only check reports it too");
+  recoveryFailure = undefined;
   connected = true;
   settings.installs = [installFor("desk-box", { power: { keyId: POWER_KEY.accessKeyId, configuredAt: "t" } })];
   assert.equal((await autoStop())?.problem?.actionLabel, "Set it up", "a machine elsewhere does not count");

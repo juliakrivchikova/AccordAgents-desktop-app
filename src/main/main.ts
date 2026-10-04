@@ -172,6 +172,7 @@ import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, startCrashReporting, st
 import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
 import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
+import { MachineRecoveryService } from "./services/machineRecovery";
 import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase } from "../shared/machineInstall";
 import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
@@ -393,6 +394,7 @@ const cloudRunAwsService = new CloudRunAwsService(settingsService, {
   machineConnected: (machineId) => machineLinkService && machineLinkStartedAt !== undefined
     && Date.now() - machineLinkStartedAt >= DESKTOP_LINK_STARTUP_GRACE_MS
     ? machineLinkService.isMachineConnected(machineId) : undefined,
+  machineRecoveryFailure: (machineId) => machineRecovery?.failure(machineId),
   // The box is no longer asked over SSH whether a turn is running on it: the
   // machine on it reports its own work over the link, and an idle stop waits
   // while any of it is in flight.
@@ -520,6 +522,8 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
 let evaluateMachineUpdates: (() => void) | undefined;
 /** The User asked Settings to try the machine's update or stop key again. */
 let retryMachineUpdate: ((machineId: string) => Promise<void>) | undefined;
+/** Brings the program on the cloud machine back by itself. */
+let machineRecovery: MachineRecoveryService | undefined;
 const cloudRunPreparation = new CloudRunPreparationService({
   onProgress: snapshot => sendToMainWindow("machines:cloud-run-progress", snapshot),
   configuredInstanceId: async () => (await settingsService.getPublicSettings()).cloudRuns.awsHandle?.instanceId,
@@ -1644,6 +1648,19 @@ async function trustedDevicesResult(): Promise<MachineTrustedDevicesResult> {
   };
 }
 
+/** Whether agents of this deployment run on the cloud machine, asked over
+ *  SSH: what its program last reported may be stale. Unsure is a yes. */
+async function cloudMachineAgentsRunning(record: MachineInstallRecord): Promise<boolean> {
+  const worker = await cloudRunAwsService.workerForInspection();
+  if (!worker.host || worker.hostKeyAlias !== record.target?.hostKeyAlias) {
+    throw new Error("The cloud machine could not be checked for running agents, so nothing was changed.");
+  }
+  const probe = await machineInstallerService.probe(
+    { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias },
+    { installRoot: record.installRoot, userDataDir: record.userDataDir, serviceName: record.serviceName });
+  return probe.providerPids.length > 0;
+}
+
 async function machineListResult(): Promise<MachineListResult> {
   return {
     machines: await settingsService.listMachines(),
@@ -2560,19 +2577,10 @@ function registerIpc(): void {
       // Not connected: set its program up again, as choosing Cloud run does.
       // What it reported last may be stale, so the machine itself is asked
       // whether agents are running before anything is stopped.
-      if (record?.installRoot) {
-        const worker = await cloudRunAwsService.workerForInspection();
-        if (!worker.host || worker.hostKeyAlias !== record.target?.hostKeyAlias) {
-          throw new Error("The cloud machine could not be checked for running agents, so nothing was changed.");
-        }
-        const probe = await machineInstallerService.probe(
-          { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias },
-          { installRoot: record.installRoot, userDataDir: record.userDataDir, serviceName: record.serviceName });
-        if (probe.providerPids.length) {
-          throw new Error("Agents are still running on the cloud machine. Try again when they finish.");
-        }
+      if (record?.installRoot && await cloudMachineAgentsRunning(record)) {
+        throw new Error("Agents are still running on the cloud machine. Try again when they finish.");
       }
-      await cloudRunPreparation.prepareRuntime();
+      await cloudRunPreparation.prepareRuntime({ agentsChecked: Boolean(record?.installRoot) });
       evaluateMachineUpdates?.();
       void debugLogService.write("machines.auto-stop.reconnected", { machineId: record?.machineId ?? "" });
     }
@@ -3632,6 +3640,24 @@ void app.whenReady().then(async () => {
     // here, so evaluating on every hello cannot feed itself.
     link.onHello((event) => { void autoUpgrade.evaluate(event.machineId); });
     evaluateMachineUpdates = () => { void autoUpgrade.evaluate(); };
+    machineRecovery = new MachineRecoveryService({
+      now: () => Date.now(),
+      linkStartedAt: () => machineLinkStartedAt,
+      linkState: (machineId) => link.isMachineConnected(machineId) ? "connected"
+        : link.reachesRelay(machineId) ? "out-of-touch" : "unknown",
+      machineOnInstance: () => cloudRunAwsService.autoStopMachineRecord(),
+      instanceRunningSince: () => cloudRunAwsService.instanceRunningSince(),
+      setupRunning: (machineId) => Boolean(machineInstallerService.activeOperation(machineId)),
+      agentsRunning: (record) => cloudMachineAgentsRunning(record),
+      reinstall: async () => {
+        await cloudRunPreparation.prepareRuntime({ agentsChecked: true });
+        void autoUpgrade.evaluate();
+        sendToMainWindow("machines:updated", await machineListResult());
+      },
+      log: (event, payload) => { void debugLogService.write(event, payload); }
+    });
+    const recoveryTimer = setInterval(() => { void machineRecovery?.check(); }, 60_000);
+    recoveryTimer.unref?.();
     retryMachineUpdate = (machineId) => autoUpgrade.retry(machineId);
     chatService.onParticipantRunSettled(() => { if (autoUpgrade.hasWaiting()) void autoUpgrade.evaluate(); });
     // A turn started from the phone ends on the machine without an event this

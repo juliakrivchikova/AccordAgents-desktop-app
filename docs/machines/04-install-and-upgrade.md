@@ -253,14 +253,25 @@ instance, and this desktop's own idle stop is held too.
 Agents working keep the instance up by design and are not reported. Anything
 else that keeps a switched-on instance from stopping by itself is shown only in
 Diagnostics, in plain words and with what fixes it: AWS does not accept the
-stop key (set up again), the program on the machine is not connected or could
-not take the key (`cloud-runs:aws-reconnect-machine`), or the machine cannot
-check whether agents are working. The fix never drains a connected program:
-for one that is connected it clears the retry count and asks the automatic
-update to hand the key over again, which waits for the machine to be idle and
-holds new turns; only a program that is not connected is set up again over SSH,
-the way choosing Cloud run does, without any provider. Switching automatic stop
-back on counts three idle hours from then.
+stop key (set up again), the machine could not take the key (Try again, which
+clears the retry count and asks the automatic update to hand the key over once
+the machine is idle, with new turns held), or the machine cannot check whether
+agents are working. Switching automatic stop back on counts three idle hours
+from then.
+
+The program on the machine is brought back by the desktop itself
+(`MachineRecoveryService`): when the instance has been running for five
+minutes and the program has been out of touch for five minutes by this
+desktop's own watch, counted only while this desktop reaches the relay and
+started again after a sleep, and no agent of this deployment runs on the
+machine (asked over SSH), the program is set up again the way choosing Cloud
+run does. Having asked the machine itself, the setup is not held back by what
+the program last reported or by a turn waiting for it. A
+failed attempt is retried every fifteen minutes and is the only time the User
+is told: without that program nothing runs in the cloud, so it is shown as
+that, not as a detail of automatic stop. An update the desktop's closing cut
+short (`interrupted`) is finished by the automatic update, not held back as a
+failure.
 
 Agents run on the machine as the same OS user, so they can read the sealed key
 and the key that seals it. What they can do with it is what the policy allows:

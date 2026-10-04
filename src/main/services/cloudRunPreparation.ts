@@ -233,20 +233,23 @@ export class CloudRunPreparationService {
    * preparing any provider: what Settings → AWS offers when that program is
    * not connected, or could not take its automatic-stop key. A machine that is
    * connected and current is left running; a setup already under way is
-   * waited for, not raced.
+   * waited for, not raced. `agentsChecked`: the caller has just asked the
+   * machine itself over SSH that no agent runs, so what its program last
+   * reported (stale once it is down) does not hold the setup back.
    */
-  async prepareRuntime(): Promise<void> {
+  async prepareRuntime(options: { agentsChecked?: boolean } = {}): Promise<void> {
     while (this.active) await this.active.catch(() => undefined);
     // Claimed before anything is awaited, so a second caller waits for this one.
     this.active = (async () => {
       const currentInstance = await this.options.configuredInstanceId();
       this.activeInstance = currentInstance;
-      return this.run(undefined, currentInstance);
+      return this.run(undefined, currentInstance, options.agentsChecked);
     })().finally(() => this.clearActive());
     await this.active;
   }
 
-  private async run(provider: PrepareCloudRunRequest["provider"] | undefined, expectedInstanceId?: string): Promise<PrepareCloudRunResult> {
+  private async run(provider: PrepareCloudRunRequest["provider"] | undefined, expectedInstanceId?: string,
+    agentsChecked = false): Promise<PrepareCloudRunResult> {
     const prepared = await this.reusableMachine(expectedInstanceId);
     if (prepared && !provider) return { machine: prepared.machine };
     if (prepared && provider && !prepared.retryProviders.has(provider)) {
@@ -288,7 +291,10 @@ export class CloudRunPreparationService {
       this.report({ message: "Cloud run is ready." });
       return { machine };
     }
-    if (machine?.lastHello?.activeRunIds?.length || machine?.pendingRuns?.length) {
+    // A program that crashed mid-turn keeps reporting that turn, and a turn
+    // sent while it is down waits for it: neither may keep it down once the
+    // machine itself said nothing runs. The drain proves that again.
+    if (!agentsChecked && (machine?.lastHello?.activeRunIds?.length || machine?.pendingRuns?.length)) {
       throw new Error("The cloud runtime needs an update. Finish its current runs, then select Cloud run again.");
     }
     machine ??= await this.options.createMachine("Cloud run", instanceId);

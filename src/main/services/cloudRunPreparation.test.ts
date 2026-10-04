@@ -398,6 +398,20 @@ test("Settings sets the machine's program up again without any provider, and lea
   assert.ok(connected.calls.includes("provider:codex-cli"), "a member choosing Cloud run afterwards still gets its provider checked");
 });
 
+test("a program that crashed mid-turn, or has a turn waiting for it, is set up again once the machine said nothing runs", async () => {
+  const h = harness();
+  await h.service.prepareRuntime();
+  h.installRequests.length = 0;
+  h.machines[0].lastHello = { deviceId: "cloud", machineName: "cloud", platform: "linux", appVersion: "old", instanceId: "p", providers: [],
+    activeRunIds: ["run-from-before-the-crash"] };
+  h.machines[0].pendingRuns = [{ runId: "run-sent-while-down", conversationId: "chat" }];
+  await assert.rejects(h.service.prepareRuntime(), /Finish its current runs/, "without asking the machine, its last report holds");
+  assert.equal(h.installRequests.length, 0);
+  await h.service.prepareRuntime({ agentsChecked: true });
+  assert.equal(h.installRequests.length, 1, "asked over SSH, the stale report no longer keeps the program down");
+  assert.equal(h.installRequests[0].machineId, "machine-1", "the same machine is set up again, so the waiting turn reaches it");
+});
+
 test("two requests to set the program up again run one setup, and a member's Cloud run waits for it", async () => {
   const h = harness();
   let release!: () => void;

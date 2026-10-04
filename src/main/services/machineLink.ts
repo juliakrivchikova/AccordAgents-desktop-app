@@ -817,6 +817,13 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return Boolean(this.connections.get(machineId)?.machineDeviceId);
   }
 
+  /** This desktop's own way to a machine through the relay is open, so a
+   *  machine missing there is missing, not hidden by a relay or network
+   *  outage on this side. */
+  reachesRelay(machineId: string): boolean {
+    return this.connections.get(machineId)?.client.currentState() === "connected";
+  }
+
   /** The enrollment package for a machine, as the installer writes it to the
    *  machine. It carries the relay seal key, so it is read on demand and never
    *  held anywhere else. */

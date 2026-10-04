@@ -213,6 +213,7 @@ export class MachineInstallerService {
           message: "The desktop closed while the machine was being set up.",
           error: "Setup was interrupted.",
           retryable: true,
+          interrupted: true,
           recovery: {
             kind: operation.completed.includes("activate")
               ? "new-runtime-installed-not-started"

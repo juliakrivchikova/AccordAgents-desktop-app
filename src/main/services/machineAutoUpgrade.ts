@@ -131,8 +131,9 @@ export class MachineAutoUpgradeService {
     if (last && !isMachineInstallTerminalPhase(last.phase)) return; // a setup action is running
     // This desktop version already failed on this machine; the row shows why
     // and the manual button is the way forward.
+    // An update the desktop's closing cut short is finished, not held back.
     const versionFailed = Boolean(last && last.phase !== "ready" && isAutoUpgradeOf(last.operationId, this.options.desktopVersion)
-      && last.recovery?.kind !== "machine-busy") && !this.retryRequested.has(id);
+      && last.recovery?.kind !== "machine-busy" && !last.interrupted) && !this.retryRequested.has(id);
     // The stored version is what this desktop last installed; only a machine
     // it says is behind is asked what it actually runs.
     const versionDue = !this.attempted.has(id) && !versionFailed

@@ -112,6 +112,9 @@ export interface MachineInstallSnapshot {
   warnings?: string[];
   error?: string;
   retryable?: boolean;
+  /** Cut short by the desktop closing, not refused by the machine: finished
+   *  automatically, never held back as a failure. */
+  interrupted?: boolean;
   recovery?: MachineInstallRecovery;
   installedVersion?: string;
   previousVersion?: string;

@@ -467,3 +467,11 @@ test("the User's Try again re-attempts an update that already failed here, still
   await h.service.evaluate();
   assert.equal(h.upgrades.length, 1, "one try per request");
 });
+
+test("an update this desktop's closing cut short is finished by itself once the machine is idle", async () => {
+  const h = harness({ records: [record({ lastOperation: snapshot({ operationId: "auto-upgrade-1.10.4-beta.11-1", phase: "needs-attention",
+    message: "The desktop closed while the machine was being set up.", error: "Setup was interrupted.", interrupted: true }) })] });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1, "interrupted is not refused");
+  assert.equal(h.holds.length, 1);
+});
