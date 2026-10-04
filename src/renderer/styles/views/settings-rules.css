@@ -60,7 +60,7 @@
   padding: 0 15px !important;
   border: 0 !important;
   border-radius: 10px !important;
-  background: var(--app-text-strong) !important;
+  background: var(--app-primary) !important;
   color: var(--app-primary-fg) !important;
   font-size: 12.5px !important;
   font-weight: 600 !important;
@@ -335,7 +335,7 @@
 .rules-editor-footer [data-slot="button"][data-variant="default"] {
   padding: 9px 17px !important;
   border: 0 !important;
-  background: var(--app-text-strong) !important;
+  background: var(--app-primary) !important;
   color: var(--app-primary-fg) !important;
   opacity: 1 !important;
 }

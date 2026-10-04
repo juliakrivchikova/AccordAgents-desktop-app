@@ -872,7 +872,7 @@ img.chat-draft-plugin-token-icon {
 }
 
 /* ============================================================
-   Typography — design language (Space Grotesk display / JetBrains mono)
+   Typography — design language (display family on titles / mono on file tokens)
    ============================================================ */
 
 /* Display family on brand wordmark + primary titles */
@@ -909,7 +909,7 @@ img.chat-draft-plugin-token-icon {
 .chat-choice-submit {
   gap: 6px;
   border-color: transparent !important;
-  background: var(--app-text-strong) !important;
+  background: var(--app-primary) !important;
   /* Explicit constant-light token (not var(--app-surface)) so the label can't pick up an
      ambient surface token and render gray on the dark button. */
   color: var(--app-on-dark) !important;
@@ -922,7 +922,7 @@ img.chat-draft-plugin-token-icon {
 }
 
 .chat-choice-submit:hover:not(:disabled) {
-  background: var(--app-text-strong) !important;
+  background: var(--app-primary) !important;
   opacity: 0.88;
 }
 
@@ -931,15 +931,15 @@ img.chat-draft-plugin-token-icon {
 }
 
 /* Keep the submit a dark button with white text in dark mode too, instead of
-   letting --app-text-strong / --app-surface flip it to a light button. */
+   letting --app-primary / --app-surface flip it to a light button. */
 .dark .chat-choice-submit {
-  background: var(--app-bg) !important;
+  background: var(--app-primary-fg) !important;
   color: var(--app-on-dark) !important;
   border-color: var(--app-border-strong) !important;
 }
 
 .dark .chat-choice-submit:hover:not(:disabled) {
-  background: var(--app-bg) !important;
+  background: var(--app-primary-fg) !important;
 }
 
 .chat-choice-submit kbd {

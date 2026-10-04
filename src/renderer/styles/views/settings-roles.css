@@ -108,7 +108,7 @@
   padding: 0 15px !important;
   border: none !important;
   border-radius: 10px !important;
-  background: var(--app-text-strong) !important;
+  background: var(--app-primary) !important;
   color: var(--app-primary-fg) !important;
   font-size: 12.5px !important;
   font-weight: 600 !important;
@@ -373,7 +373,7 @@ body:has(.roles-editor-dialog) [data-slot="dialog-overlay"] {
   padding: 8px 14px !important;
   border: 0 !important;
   border-radius: 8px;
-  background: var(--app-text-strong);
+  background: var(--app-primary);
   box-shadow: none !important;
   color: var(--app-primary-fg);
   font-size: 12px;
@@ -600,7 +600,7 @@ body:has(.roles-editor-dialog) [data-slot="dialog-overlay"] {
   padding: 9px 17px !important;
   border: none !important;
   border-radius: 9px !important;
-  background: var(--app-text-strong) !important;
+  background: var(--app-primary) !important;
   color: var(--app-surface) !important;
   font-size: 12.5px !important;
   font-weight: 600 !important;

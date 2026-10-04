@@ -11,7 +11,7 @@
 }
 
 /* Canonical pane title — one rule for every settings screen so titles share
-   the same face, size, and weight (the app's Space Grotesk display family). */
+   the same face, size, and weight (the app's display family). */
 .settings-view .settings-view-head h1 {
   font-family: var(--font-display);
   font-size: 21px;
@@ -499,7 +499,7 @@
 
 .settings-view .gen-timeout-save.is-dirty {
   border-color: transparent;
-  background: var(--app-text-strong);
+  background: var(--app-primary);
   color: var(--app-primary-fg);
   cursor: pointer;
 }
@@ -596,7 +596,7 @@
 }
 
 .settings-view .gen-segment.is-active {
-  background: var(--app-text-strong);
+  background: var(--app-primary);
   color: var(--app-primary-fg);
 }
 
