@@ -20,7 +20,10 @@ function harness() {
     environmentId: async () => "home-desktop",
     aws: {
       status: async () => ({ configured: true, state, handle: { instanceId: "i-abc", region: "eu-west-1" } } as AwsWorkerStatus),
-      ensureExistingWorkerForRun: async id => { calls.push(`access:${id}`); return { host: "198.51.100.8", user: "ubuntu" }; }
+      ensureExistingWorkerForRun: async (id, access) => {
+        calls.push(`access:${id}${access?.start === false ? ":no-start" : ""}`);
+        return { host: "198.51.100.8", user: "ubuntu" };
+      }
     },
     listMachines: async () => machines,
     listInstalls: async () => installs,
@@ -387,7 +390,8 @@ test("Settings sets the machine's program up again without any provider, and lea
   // is not connected, or could not take its automatic-stop key.
   const h = harness();
   await h.service.prepareRuntime();
-  assert.deepEqual(h.calls, ["access:i-abc", "enroll", "install:machine-1:undefined"], "an absent program is installed, no provider is checked");
+  assert.deepEqual(h.calls, ["access:i-abc:no-start", "enroll", "install:machine-1:undefined"],
+    "an absent program is installed, no provider is checked, and the instance is never started for it");
   assert.equal(h.installRequests[0].requiredProvider, undefined);
   const connected = await connectedHarness();
   connected.calls.length = 0;
@@ -410,6 +414,20 @@ test("a program that crashed mid-turn, or has a turn waiting for it, is set up a
   await h.service.prepareRuntime({ agentsChecked: true });
   assert.equal(h.installRequests.length, 1, "asked over SSH, the stale report no longer keeps the program down");
   assert.equal(h.installRequests[0].machineId, "machine-1", "the same machine is set up again, so the waiting turn reaches it");
+  h.options.isConnected = (machineId) => machineId === "machine-1";
+  await assert.rejects(new CloudRunPreparationService(h.options).prepareRuntime({ agentsChecked: true }), /Finish its current runs/,
+    "a program that came back meanwhile reports afresh, and its report counts again");
+});
+
+test("the machine that was asked is the one set up again, even beside another on the same instance", async () => {
+  const h = harness();
+  await h.service.prepareRuntime();
+  h.machines.push({ id: "watched", name: "Cloud run", awsInstanceId: "i-abc", deviceId: "", pairingKey: "p", createdAt: "2026-09-11" });
+  h.installs.push({ ...h.installs[0], machineId: "watched", installRoot: "/home/ubuntu/watched" });
+  h.installRequests.length = 0;
+  await h.service.prepareRuntime({ agentsChecked: true, machineId: "watched" });
+  assert.deepEqual(h.installRequests.map((request) => request.machineId), ["watched"]);
+  assert.equal(h.installRequests[0].installRoot, "/home/ubuntu/watched");
 });
 
 test("two requests to set the program up again run one setup, and a member's Cloud run waits for it", async () => {

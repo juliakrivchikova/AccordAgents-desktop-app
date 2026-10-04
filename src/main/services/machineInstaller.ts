@@ -199,8 +199,9 @@ export class MachineInstallerService {
   /** An install interrupted by the desktop closing left the machine in a known
    *  state (staged, drained, or started) but nobody watching it. The record is
    *  marked so the UI offers a retry instead of showing a step that will never
-   *  finish. Nothing is retried automatically: a half-finished drain must be
-   *  re-proven, not assumed. */
+   *  finish, and `interrupted` so the automatic update or the program's
+   *  recovery finishes it. Nothing is resumed from where it stopped: the next
+   *  setup re-proves a half-finished drain instead of assuming it. */
   async recoverInterruptedOperation(): Promise<void> {
     for (const record of await this.options.store.listMachineInstalls()) {
       const operation = record.lastOperation;

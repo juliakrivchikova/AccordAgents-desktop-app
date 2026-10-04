@@ -5,11 +5,13 @@ import { CloudProviderAuth } from "../cloud-provider-auth";
 import { ipcErrorMessage } from "./aws-worker-auto-stop";
 
 /**
- * Checks of the instance, and the one place a switched-on automatic stop
- * that cannot work says why. Each problem names what fixes it; a collapsed
- * section still shows that there is one.
+ * Checks of the instance, and the one place problems are said: a program on
+ * the machine the app could not bring back, and a switched-on automatic stop
+ * that cannot work. Each says what happens next or what fixes it; a
+ * collapsed section still shows how many there are.
  */
 export function AwsInstanceDiagnostics(props: {
+  machineProblem?: string;
   autoStopProblem?: AwsWorkerAutoStopProblem;
   onAutoStopAction?: (problem: AwsWorkerAutoStopProblem) => Promise<void>;
 } = {}): JSX.Element {
@@ -58,6 +60,7 @@ export function AwsInstanceDiagnostics(props: {
   };
 
   const problem = props.autoStopProblem;
+  const problemCount = (props.machineProblem ? 1 : 0) + (problem ? 1 : 0);
   const fix = async (current: AwsWorkerAutoStopProblem): Promise<void> => {
     setFixing(true);
     setFixError(undefined);
@@ -69,7 +72,7 @@ export function AwsInstanceDiagnostics(props: {
   return (
     <div className="gen-aws-diagnostics">
       <button type="button" className="gen-aws-disclosure" data-testid="machine-instance-diagnostics-toggle" aria-expanded={open} aria-controls="aws-instance-diagnostics" onClick={() => setOpen(!open)}>
-        <span>Diagnostics{problem ? <>{" "}<span className="gen-aws-diagnostics-badge" data-testid="machine-instance-diagnostics-problem-count">1 problem</span></> : null}</span>
+        <span>Diagnostics{problemCount ? <>{" "}<span className="gen-aws-diagnostics-badge" data-testid="machine-instance-diagnostics-problem-count">{problemCount === 1 ? "1 problem" : `${problemCount} problems`}</span></> : null}</span>
         <ChevronDown size={16} aria-hidden />
       </button>
       {status ? (
@@ -82,6 +85,11 @@ export function AwsInstanceDiagnostics(props: {
       ) : null}
       {open ? (
         <div id="aws-instance-diagnostics">
+          {props.machineProblem ? (
+            <div className="gen-aws-problem" data-testid="aws-machine-problem" role="alert">
+              <div className="gen-aws-problem-text">{props.machineProblem}</div>
+            </div>
+          ) : null}
           {problem ? (
             <div className="gen-aws-problem" data-testid="aws-auto-stop-problem" role="alert">
               <div className="gen-aws-problem-text">

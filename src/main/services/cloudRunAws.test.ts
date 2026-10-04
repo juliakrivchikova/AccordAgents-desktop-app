@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { MachineRecoveryFailure } from "./machineRecovery";
 import test from "node:test";
 import type { AppSettings, AwsWorkerHandleInfo, AwsWorkerOperationSnapshot } from "../../shared/types";
 import type { MachineInstallRecord } from "../../shared/machineInstall";
@@ -1109,7 +1110,7 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   const settings = powerSettings();
   const client = new FakeEc2Client({ instanceId: POWER_HANDLE.instanceId, state: "running" });
   let connected: boolean | undefined = true;
-  let recoveryFailure: string | undefined;
+  let recoveryFailure: MachineRecoveryFailure | undefined;
   const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]),
     { machineConnected: () => connected, machineRecoveryFailure: () => recoveryFailure });
   const autoStop = async () => (await service.status()).autoStop;
@@ -1184,17 +1185,32 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   settings.machines[0] = { id: "cloud", awsInstanceId: POWER_HANDLE.instanceId };
   connected = false;
   assert.deepEqual(await autoStop(), ON, "a program out of touch is brought back by the app; the User is not asked");
-  recoveryFailure = "ssh: connect to host timed out";
-  const DOWN = { ...ON, problem: { message: "The AccordAgents program on the cloud machine is not running, and the app could not start it again. "
-    + "Cloud members and automatic stop don't work until it runs; the app keeps trying." } };
-  assert.deepEqual(await autoStop(), DOWN, "only a failed attempt is shown, and as what it is: nothing runs in the cloud");
+  assert.equal((await service.status()).machineProblem, undefined);
+  recoveryFailure = { kind: "setup", reason: "ssh: connect to host 203.0.113.9 port 22: Operation timed out\nmore detail" };
+  const DOWN = "The AccordAgents program on the cloud machine is not running, and the app could not start it again. "
+    + "ssh: connect to host 203.0.113.9 port 22: Operation timed out. It tries again by itself. "
+    + "Until it is, cloud members don't run and the instance does not stop by itself.";
+  assert.equal((await service.status()).machineProblem, DOWN, "only what did not come back is shown, as itself and with its reason");
+  assert.deepEqual(await autoStop(), ON, "not as a detail of automatic stop");
   settings.autoStopEnabled = false;
-  assert.deepEqual(await autoStop(), { enabled: false, needsSetup: false, problem: DOWN.problem }, "switched off or not");
+  assert.deepEqual(await service.status().then((status) => [status.autoStop, status.machineProblem]),
+    [{ enabled: false, needsSetup: false }, DOWN], "switched off or not");
   settings.autoStopEnabled = true;
+  recoveryFailure = { kind: "agents" };
+  assert.match((await service.status()).machineProblem ?? "", /agents it started are still running there\. The app starts it again once they finish\./);
+  recoveryFailure = { kind: "running" };
+  assert.match((await service.status()).machineProblem ?? "", /is running, but this computer has not heard from it/);
+  recoveryFailure = { kind: "check", reason: "The AWS instance is stopping, so nothing was started." };
+  assert.match((await service.status()).machineProblem ?? "", /could not reach the machine to check it\. The AWS instance is stopping/);
+  recoveryFailure = { kind: "setup", reason: "ssh: connect to host 203.0.113.9 port 22: Operation timed out\nmore detail" };
   client.state = { instanceId: POWER_HANDLE.instanceId, state: "stopped" };
-  assert.deepEqual(await autoStop(), ON, "a stopped instance has no program to run");
+  assert.deepEqual(await service.status().then((status) => [status.autoStop, status.machineProblem]), [ON, undefined],
+    "a stopped instance has no program to run");
   client.state = { instanceId: POWER_HANDLE.instanceId, state: "running", launchedAt: new Date(Date.now() - 3_600_000).toISOString() };
-  assert.deepEqual((await service.probeAccess()).autoStop, DOWN, "the read-only check reports it too");
+  assert.equal((await service.probeAccess()).machineProblem, DOWN, "the read-only check reports it too");
+  connected = undefined;
+  assert.equal((await service.status()).machineProblem, undefined, "nothing is said while this desktop does not know yet");
+  connected = false;
   assert.equal(await service.instanceRunningSince(), Date.parse(client.state.launchedAt!));
   client.state = { instanceId: POWER_HANDLE.instanceId, state: "stopped" };
   assert.equal(await service.instanceRunningSince(), undefined);

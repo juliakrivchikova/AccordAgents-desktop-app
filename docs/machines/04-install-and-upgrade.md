@@ -260,18 +260,31 @@ agents are working. Switching automatic stop back on counts three idle hours
 from then.
 
 The program on the machine is brought back by the desktop itself
-(`MachineRecoveryService`): when the instance has been running for five
-minutes and the program has been out of touch for five minutes by this
-desktop's own watch, counted only while this desktop reaches the relay and
-started again after a sleep, and no agent of this deployment runs on the
-machine (asked over SSH), the program is set up again the way choosing Cloud
-run does. Having asked the machine itself, the setup is not held back by what
-the program last reported or by a turn waiting for it. A
-failed attempt is retried every fifteen minutes and is the only time the User
-is told: without that program nothing runs in the cloud, so it is shown as
-that, not as a detail of automatic stop. An update the desktop's closing cut
-short (`interrupted`) is finished by the automatic update, not held back as a
-failure.
+(`MachineRecoveryService`). It looks when the instance has been running for
+five minutes and the program has been out of touch for five minutes by this
+desktop's own watch; the watch counts only while this desktop reaches the
+relay and starts again after a sleep. It then asks the machine over SSH,
+having renewed this device's SSH access and never starting a stopped
+instance:
+
+- the program runs: it is left alone. Being out of touch is then the link,
+  which a new setup would not fix, and every restart would count as work and
+  keep the instance from stopping. After half an hour Diagnostics says this
+  computer has not heard from it.
+- it does not run, but agents of this deployment still do: they are waited
+  for; a wait that outlasts one look is said in Diagnostics.
+- it does not run and no agent does: the program of the machine that was
+  watched is set up again the way choosing Cloud run does, with that
+  machine's turns held meanwhile. Having asked the machine itself, the setup
+  is not held back by what the program last reported or by a turn waiting
+  for it, unless the program came back meanwhile.
+
+The machine is looked at again after fifteen minutes; after a failed setup
+the wait doubles, up to four hours. Only what did not come back is shown, in
+Diagnostics, as itself rather than as a detail of automatic stop, with the
+reason and with what happens next; there is nothing to press. An update the
+desktop's closing cut short (`interrupted`) is finished by the automatic
+update, not held back as a failure.
 
 Agents run on the machine as the same OS user, so they can read the sealed key
 and the key that seals it. What they can do with it is what the policy allows:

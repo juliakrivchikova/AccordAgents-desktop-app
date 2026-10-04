@@ -627,6 +627,19 @@ test("ensureRunning starts a stopped instance and rebuilds ingress to the curren
   assert.deepEqual([...client.ingressCidrs], ["203.0.113.9/32"]);
 });
 
+test("without starting, a stopped instance is left stopped and a running one still gets this device's SSH access", async () => {
+  const stopped = new FakeEc2Client({ state: "stopped", publicIp: undefined });
+  await assert.rejects(lifecycleWith(stopped).ensureRunning(CREDS, HANDLE, "device", { start: false }), /is stopped, so nothing was started/);
+  assert.equal(stopped.startCount, 0);
+  const stopping = new FakeEc2Client({ state: "stopping", publicIp: undefined });
+  await assert.rejects(lifecycleWith(stopping).ensureRunning(CREDS, HANDLE, "device", { start: false }), /is stopping/);
+  assert.equal(stopping.startCount, 0, "a stop under way is not undone");
+  const running = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
+  const info = await lifecycleWith(running).ensureRunning(CREDS, HANDLE, "device", { start: false });
+  assert.equal(info.publicIp, "1.1.1.1");
+  assert.deepEqual([...running.ingressCidrs], ["203.0.113.9/32"], "a laptop on a new network can still reach the machine");
+});
+
 test("ensureRunning permits an EC2 root-volume state that is not known yet", async () => {
   const client = new FakeEc2Client({
     state: "running",

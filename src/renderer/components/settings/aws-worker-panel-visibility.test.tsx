@@ -233,7 +233,7 @@ test("Cloud run says what the desktop is doing to the machine's runtime: owed, r
 });
 
 test("automatic stop is one switch; what keeps it from working is shown only in Diagnostics", async () => {
-  const problem = { message: "The program on the cloud machine is not connected, so it cannot stop the instance.", action: "reconnect" as const, actionLabel: "Reconnect" };
+  const problem = { message: "The cloud machine could not take its automatic-stop key.", action: "reconnect" as const, actionLabel: "Try again", machineId: "cloud" };
   const cases: Array<[AwsWorkerStatus["autoStop"], boolean | undefined, boolean]> = [
     [{ enabled: true, needsSetup: false }, true, false],
     [{ enabled: false, needsSetup: true }, false, false],
@@ -273,17 +273,35 @@ test("the switch turns automatic stop off and on again without the command once 
 });
 
 test("Diagnostics names the problem and its fix runs from there", async () => {
-  const problem = { message: "The program on the cloud machine is not connected, so it cannot stop the instance.", action: "reconnect" as const, actionLabel: "Reconnect" };
+  const problem = { message: "The cloud machine could not take its automatic-stop key.", action: "reconnect" as const, actionLabel: "Try again", machineId: "cloud" };
   let reconnects = 0;
   const renderer = await renderPanel({ status: { ...RUNNING, autoStop: { enabled: true, needsSetup: false, problem } },
     reconnect: async () => { reconnects++; return { ...RUNNING, autoStop: { enabled: true, needsSetup: false } }; } });
   await click(renderer.root.findByProps({ "data-testid": "machine-instance-diagnostics-toggle" }));
-  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-auto-stop-problem" })), /^Automatic stop: The program on the cloud machine is not connected/);
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-auto-stop-problem" })), /^Automatic stop: The cloud machine could not take its automatic-stop key/);
   const fix = renderer.root.findByProps({ "data-testid": "aws-auto-stop-problem-action" });
-  assert.equal(textOf(fix), "Reconnect");
+  assert.equal(textOf(fix), "Try again");
   await click(fix);
   assert.equal(reconnects, 1);
   assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-auto-stop-problem" }).length, 0, "a fixed problem is gone");
   assert.equal(renderer.root.findAllByProps({ "data-testid": "machine-instance-diagnostics-problem-count" }).length, 0);
   unmount(renderer);
+});
+
+test("a program the app could not bring back is its own problem in Diagnostics, not one of automatic stop, with nothing to press", async () => {
+  const machineProblem = "The AccordAgents program on the cloud machine is not running, and the app could not start it again. "
+    + "It tries again by itself. Until it is, cloud members don't run and the instance does not stop by itself.";
+  const renderer = await renderPanel({ status: { ...RUNNING, machineProblem, autoStop: { enabled: true, needsSetup: false } } });
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "machine-instance-diagnostics-problem-count" })), "1 problem");
+  assert.equal(textOf(renderer.root).includes(machineProblem), false, "the reason waits in Diagnostics");
+  assert.equal(renderer.root.findByProps({ "data-testid": "aws-worker-auto-stop-toggle" }).props.checked, true, "the switch is what the User set");
+  await click(renderer.root.findByProps({ "data-testid": "machine-instance-diagnostics-toggle" }));
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-machine-problem" })), machineProblem, "said as itself, without an automatic-stop label");
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-auto-stop-problem" }).length, 0);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-auto-stop-problem-action" }).length, 0, "the app keeps trying; there is no button");
+  unmount(renderer);
+  const both = await renderPanel({ status: { ...RUNNING, machineProblem, autoStop: { enabled: false, needsSetup: false,
+    problem: { message: "The cloud machine still has automatic stop switched on, so it may stop the instance." } } } });
+  assert.equal(textOf(both.root.findByProps({ "data-testid": "machine-instance-diagnostics-problem-count" })), "2 problems");
+  unmount(both);
 });

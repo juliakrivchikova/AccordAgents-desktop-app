@@ -185,8 +185,10 @@ export class AwsWorkerLifecycle {
 
   // Bring the worker up for a run: start it if stopped, wait for running, then
   // re-resolve its (changed-on-each-start) public IP and re-open SSH ingress
-  // to the caller's current IP. Returns the reachable public IP.
-  async ensureRunning(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle, deviceId = "legacy"): Promise<AwsWorkerInstanceInfo> {
+  // to the caller's current IP. Returns the reachable public IP. With
+  // `start: false` an instance that is not running is left as it is.
+  async ensureRunning(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle, deviceId = "legacy",
+    options: { start?: boolean } = {}): Promise<AwsWorkerInstanceInfo> {
     const client = this.options.createEc2Client(credentials);
     let info = await client.describeInstance(handle.instanceId);
     if (!info || info.state === "terminated") {
@@ -194,6 +196,9 @@ export class AwsWorkerLifecycle {
     }
     if (info.rootVolumeBackedByEbs === false) {
       throw new Error("The AWS worker root device is not backed by persistent EBS storage.");
+    }
+    if (options.start === false && info.state !== "running") {
+      throw new Error(`The AWS instance is ${info.state}, so nothing was started.`);
     }
     if (info.state === "stopped" || info.state === "stopping") {
       this.log("aws-worker.starting", { instanceId: handle.instanceId });

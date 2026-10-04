@@ -1,11 +1,15 @@
 import type { MachineInstallRecord } from "../../shared/machineInstall";
 
-/** How long the program may be out of touch before it is set up again. */
+/** How long the program may be out of touch before the machine is asked. */
 export const MACHINE_RECOVERY_AFTER_MS = 5 * 60_000;
 /** How long after its own start this desktop waits before judging. */
 export const MACHINE_RECOVERY_LINK_GRACE_MS = 60_000;
-/** Between two attempts on one machine, so a failing setup does not loop. */
+/** Between two looks at one machine; doubled after each failed setup, up to
+ *  MACHINE_RECOVERY_MAX_RETRY_MS, so a failing setup does not loop. */
 export const MACHINE_RECOVERY_RETRY_MS = 15 * 60_000;
+export const MACHINE_RECOVERY_MAX_RETRY_MS = 4 * 60 * 60_000;
+/** A program that runs but stays out of touch this long is reported. */
+export const MACHINE_RECOVERY_RUNNING_REPORT_MS = 30 * 60_000;
 /** Checks further apart than this mean the desktop slept or hung: what was
  *  seen before says nothing about now, so the watch starts again. */
 export const MACHINE_RECOVERY_WATCH_GAP_MS = 3 * 60_000;
@@ -13,6 +17,24 @@ export const MACHINE_RECOVERY_WATCH_GAP_MS = 3 * 60_000;
 /** What this desktop sees of a machine over the relay: there, missing while
  *  the relay is reachable, or unknown because this side cannot reach it. */
 export type MachineRecoveryLinkState = "connected" | "out-of-touch" | "unknown";
+
+/** What the machine itself says, asked over SSH. */
+export interface MachineRecoveryInspection {
+  /** Its service is active and the program's process is there. */
+  programRunning: boolean;
+  /** Agent processes of this desktop's deployment are there. */
+  agentsRunning: boolean;
+}
+
+/** Why the program is still not back, for Settings → AWS → Diagnostics.
+ *  - `check`: the machine could not be asked;
+ *  - `setup`: setting the program up again failed;
+ *  - `agents`: it is not running, but agents it started still are;
+ *  - `running`: it runs, but has not reached this desktop for a long time. */
+export interface MachineRecoveryFailure {
+  kind: "check" | "setup" | "agents" | "running";
+  reason?: string;
+}
 
 export interface MachineRecoveryOptions {
   now(): number;
@@ -25,11 +47,11 @@ export interface MachineRecoveryOptions {
   instanceRunningSince(): Promise<number | undefined>;
   /** A setup of this machine is already running. */
   setupRunning(machineId: string): boolean;
-  /** Whether agents of this deployment are running on the machine, asked
-   *  over SSH: its program being out of touch says nothing about them. */
-  agentsRunning(record: MachineInstallRecord): Promise<boolean>;
-  /** Sets the program on the instance up again, as choosing Cloud run does. */
-  reinstall(): Promise<void>;
+  /** Asks the machine over SSH; never starts the instance. */
+  inspect(record: MachineInstallRecord): Promise<MachineRecoveryInspection>;
+  /** Sets the program on the instance up again, as choosing Cloud run does,
+   *  without starting the instance. */
+  reinstall(machineId: string): Promise<void>;
   log(event: string, payload: Record<string, unknown>): void;
 }
 
@@ -39,30 +61,37 @@ export interface MachineRecoveryOptions {
  * Without that program nothing works in the cloud: members cannot run there
  * and the instance never stops by itself. It used to wait for the User to
  * notice; after one interrupted update it stayed down for nine days. Here the
- * desktop notices instead: the instance is running, the program has been out
- * of touch for five minutes while this desktop reaches the relay, and no
- * agent of this deployment is running on the machine. Only when setting it up again fails is the User told, and it
- * keeps being tried.
+ * desktop notices instead. When the instance is running and the program has
+ * been out of touch for five minutes while this desktop reaches the relay,
+ * the machine itself is asked over SSH, and only a program that is not
+ * running, with no agent of this deployment left, is set up again. One that
+ * runs is never drained for being out of touch: that is the link, and setting
+ * it up again would not fix it. The User is told only what did not come back.
  */
 export class MachineRecoveryService {
   /** Since when, by this desktop's own observation, each machine has been
    *  out of touch. A machine this desktop has not watched yet starts now. */
   private readonly outOfTouchSince = new Map<string, number>();
-  private readonly lastAttemptAt = new Map<string, number>();
-  private readonly failures = new Map<string, string>();
+  private readonly nextLookAt = new Map<string, number>();
+  private readonly failedSetups = new Map<string, number>();
+  private readonly waitedOnAgents = new Set<string>();
+  private readonly failures = new Map<string, MachineRecoveryFailure>();
   private lastCheckAt?: number;
   private running?: Promise<void>;
 
   constructor(private readonly options: MachineRecoveryOptions) {}
 
-  /** Why the program could not be brought back, if the last attempt failed. */
-  failure(machineId: string): string | undefined {
+  /** Why the program is still not back, if this desktop knows. */
+  failure(machineId: string): MachineRecoveryFailure | undefined {
     return this.failures.get(machineId);
   }
 
-  /** One check; overlapping calls share the check in progress. */
+  /** One check; overlapping calls share the check in progress. Never
+   *  rejects: it runs from a timer. */
   check(): Promise<void> {
-    this.running ??= this.checkNow().finally(() => { this.running = undefined; });
+    this.running ??= this.checkNow()
+      .catch((error) => { this.options.log("machines.recovery.error", { message: errorText(error) }); })
+      .finally(() => { this.running = undefined; });
     return this.running;
   }
 
@@ -70,7 +99,7 @@ export class MachineRecoveryService {
     const now = this.options.now();
     const previousCheckAt = this.lastCheckAt;
     this.lastCheckAt = now;
-    if (previousCheckAt !== undefined && now - previousCheckAt > MACHINE_RECOVERY_WATCH_GAP_MS) this.outOfTouchSince.clear();
+    if (previousCheckAt !== undefined && now - previousCheckAt > MACHINE_RECOVERY_WATCH_GAP_MS) this.forgetAll();
     const linkStartedAt = this.options.linkStartedAt();
     if (linkStartedAt === undefined || now - linkStartedAt < MACHINE_RECOVERY_LINK_GRACE_MS) return;
     const record = await this.options.machineOnInstance();
@@ -78,39 +107,80 @@ export class MachineRecoveryService {
     const id = record.machineId;
     const link = this.options.linkState(id);
     if (link === "connected") {
-      this.outOfTouchSince.delete(id);
-      if (this.failures.delete(id)) this.options.log("machines.recovery.recovered", { machineId: id });
+      if (this.failures.has(id)) this.options.log("machines.recovery.recovered", { machineId: id });
+      this.forget(id);
       return;
     }
-    // This side cannot reach the relay: the program may be fine, and setting
-    // it up again would not bring the relay back.
+    // This side cannot reach the relay: the program may be fine, and nothing
+    // known about it before still holds.
     if (link === "unknown") {
-      this.outOfTouchSince.delete(id);
+      this.forget(id);
       return;
     }
     const since = this.outOfTouchSince.get(id) ?? now;
     this.outOfTouchSince.set(id, since);
     if (now - since < MACHINE_RECOVERY_AFTER_MS || this.options.setupRunning(id)) return;
-    const lastAttempt = this.lastAttemptAt.get(id);
-    if (lastAttempt !== undefined && now - lastAttempt < MACHINE_RECOVERY_RETRY_MS) return;
+    if (now < (this.nextLookAt.get(id) ?? 0)) return;
     // A stopped instance has no program to run; one that just started is
     // still bringing it up.
     const runningSince = await this.options.instanceRunningSince().catch(() => undefined);
     if (runningSince === undefined || now - runningSince < MACHINE_RECOVERY_AFTER_MS) return;
-    this.lastAttemptAt.set(id, now);
+    this.nextLookAt.set(id, now + MACHINE_RECOVERY_RETRY_MS);
+    let inspection: MachineRecoveryInspection;
     try {
-      if (await this.options.agentsRunning(record)) {
-        this.options.log("machines.recovery.waiting", { machineId: id, reason: "agents-running" });
-        return;
-      }
-      this.options.log("machines.recovery.start", { machineId: id, outOfTouchMs: now - since });
-      await this.options.reinstall();
+      inspection = await this.options.inspect(record);
+    } catch (error) {
+      this.fail(id, { kind: "check", reason: errorText(error) });
+      return;
+    }
+    if (inspection.programRunning) {
+      this.waitedOnAgents.delete(id);
+      this.options.log("machines.recovery.waiting", { machineId: id, reason: "program-running", outOfTouchMs: now - since });
+      if (now - since >= MACHINE_RECOVERY_RUNNING_REPORT_MS) this.fail(id, { kind: "running" });
+      else this.failures.delete(id);
+      return;
+    }
+    if (inspection.agentsRunning) {
+      this.options.log("machines.recovery.waiting", { machineId: id, reason: "agents-running" });
+      // Said once the wait outlasts one look, not on the first.
+      if (this.waitedOnAgents.has(id)) this.fail(id, { kind: "agents" });
+      else this.failures.delete(id);
+      this.waitedOnAgents.add(id);
+      return;
+    }
+    this.waitedOnAgents.delete(id);
+    this.options.log("machines.recovery.start", { machineId: id, outOfTouchMs: now - since });
+    try {
+      await this.options.reinstall(id);
+      this.failedSetups.delete(id);
       this.failures.delete(id);
       this.options.log("machines.recovery.finished", { machineId: id });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.failures.set(id, message);
-      this.options.log("machines.recovery.failed", { machineId: id, message });
+      const failed = (this.failedSetups.get(id) ?? 0) + 1;
+      this.failedSetups.set(id, failed);
+      this.nextLookAt.set(id, this.options.now() + Math.min(MACHINE_RECOVERY_RETRY_MS * 2 ** (failed - 1), MACHINE_RECOVERY_MAX_RETRY_MS));
+      this.fail(id, { kind: "setup", reason: errorText(error) });
     }
   }
+
+  private fail(machineId: string, failure: MachineRecoveryFailure): void {
+    this.failures.set(machineId, failure);
+    this.options.log("machines.recovery.failed", { machineId, ...failure });
+  }
+
+  private forget(machineId: string): void {
+    this.outOfTouchSince.delete(machineId);
+    this.nextLookAt.delete(machineId);
+    this.failedSetups.delete(machineId);
+    this.waitedOnAgents.delete(machineId);
+    this.failures.delete(machineId);
+  }
+
+  private forgetAll(): void {
+    for (const id of new Set([...this.outOfTouchSince.keys(), ...this.failures.keys(), ...this.nextLookAt.keys()])) this.forget(id);
+  }
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

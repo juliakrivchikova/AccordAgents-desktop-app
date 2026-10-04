@@ -1648,17 +1648,19 @@ async function trustedDevicesResult(): Promise<MachineTrustedDevicesResult> {
   };
 }
 
-/** Whether agents of this deployment run on the cloud machine, asked over
- *  SSH: what its program last reported may be stale. Unsure is a yes. */
-async function cloudMachineAgentsRunning(record: MachineInstallRecord): Promise<boolean> {
-  const worker = await cloudRunAwsService.workerForInspection();
-  if (!worker.host || worker.hostKeyAlias !== record.target?.hostKeyAlias) {
-    throw new Error("The cloud machine could not be checked for running agents, so nothing was changed.");
-  }
+/** What the cloud machine itself says about this deployment, asked over
+ *  SSH: what its program last reported may be stale. This device's SSH
+ *  access is renewed first, as its address may have changed since; a stopped
+ *  instance is never started for it. */
+async function inspectCloudMachine(record: MachineInstallRecord): Promise<{ programRunning: boolean; agentsRunning: boolean }> {
+  const instanceId = (await settingsService.getPublicSettings()).cloudRuns.awsHandle?.instanceId;
+  if (!instanceId) throw new Error("No AWS instance is set up in Settings.");
+  const worker = await cloudRunAwsService.ensureExistingWorkerForRun(instanceId, { start: false });
+  if (!worker.host) throw new Error("AWS did not return an address for the instance.");
   const probe = await machineInstallerService.probe(
     { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias },
     { installRoot: record.installRoot, userDataDir: record.userDataDir, serviceName: record.serviceName });
-  return probe.providerPids.length > 0;
+  return { programRunning: probe.serviceState === "active" && probe.runtimePids.length > 0, agentsRunning: probe.providerPids.length > 0 };
 }
 
 async function machineListResult(): Promise<MachineListResult> {
@@ -2577,10 +2579,15 @@ function registerIpc(): void {
       // Not connected: set its program up again, as choosing Cloud run does.
       // What it reported last may be stale, so the machine itself is asked
       // whether agents are running before anything is stopped.
-      if (record?.installRoot && await cloudMachineAgentsRunning(record)) {
+      if (record?.installRoot && (await inspectCloudMachine(record)).agentsRunning) {
         throw new Error("Agents are still running on the cloud machine. Try again when they finish.");
       }
-      await cloudRunPreparation.prepareRuntime({ agentsChecked: Boolean(record?.installRoot) });
+      const release = record ? machineLinkService?.holdTurns(record.machineId, "The cloud machine's program is being set up again.") : undefined;
+      try {
+        await cloudRunPreparation.prepareRuntime({ agentsChecked: Boolean(record?.installRoot), machineId: record?.machineId });
+      } finally {
+        release?.();
+      }
       evaluateMachineUpdates?.();
       void debugLogService.write("machines.auto-stop.reconnected", { machineId: record?.machineId ?? "" });
     }
@@ -3648,9 +3655,16 @@ void app.whenReady().then(async () => {
       machineOnInstance: () => cloudRunAwsService.autoStopMachineRecord(),
       instanceRunningSince: () => cloudRunAwsService.instanceRunningSince(),
       setupRunning: (machineId) => Boolean(machineInstallerService.activeOperation(machineId)),
-      agentsRunning: (record) => cloudMachineAgentsRunning(record),
-      reinstall: async () => {
-        await cloudRunPreparation.prepareRuntime({ agentsChecked: true });
+      inspect: (record) => inspectCloudMachine(record),
+      reinstall: async (machineId) => {
+        // A turn sent meanwhile waits for the new program instead of
+        // reaching one that is about to be stopped.
+        const release = link.holdTurns(machineId, "The cloud machine's program is being set up again.");
+        try {
+          await cloudRunPreparation.prepareRuntime({ agentsChecked: true, machineId });
+        } finally {
+          release();
+        }
         void autoUpgrade.evaluate();
         sendToMainWindow("machines:updated", await machineListResult());
       },

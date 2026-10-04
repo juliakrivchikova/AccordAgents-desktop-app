@@ -222,6 +222,9 @@ export interface AwsWorkerStatus {
   /** The automatic-stop switch and, while it is on, anything that keeps the
    *  instance from stopping by itself. Absent when it could not be read. */
   autoStop?: AwsWorkerAutoStop;
+  /** The program on the running instance is still not back although the
+   *  app tried to bring it back itself, in plain words; for Diagnostics. */
+  machineProblem?: string;
 }
 
 /** Automatic stop as Settings → AWS shows it: one switch, and, when the
