@@ -21,16 +21,14 @@ test("reopening AWS settings restores the live sign-in card and terminal results
 });
 
 test("a healthy running instance offers Stop only; a stopped one offers Start only", async () => {
-  const running = await renderPanel({ status: { ...RUNNING, autoStop: { state: "off" } } });
+  const running = await renderPanel({ status: { ...RUNNING, autoStop: { enabled: false, needsSetup: true } } });
   assert.equal(running.root.findAllByProps({ "data-testid": "aws-worker-start" }).length, 0);
   assert.equal(running.root.findAllByProps({ "data-testid": "aws-worker-stop" }).length, 1);
-  assert.match(textOf(running.root.findByProps({ "data-testid": "aws-worker-billing-note" })), /does not stop by itself/);
   assert.match(textOf(running.root.findByProps({ "data-testid": "aws-cloud-run-readiness" })), /select it in a member/);
   unmount(running);
   const stopped = await renderPanel({ status: { ...RUNNING, state: "stopped" } });
   assert.equal(textOf(stopped.root.findByProps({ "data-testid": "aws-worker-start" })), "Start instance");
   assert.equal(stopped.root.findAllByProps({ "data-testid": "aws-worker-stop" }).length, 0);
-  assert.equal(stopped.root.findAllByProps({ "data-testid": "aws-worker-billing-note" }).length, 0);
   assert.match(textOf(stopped.root.findByProps({ "data-testid": "aws-cloud-run-readiness" })), /Start the instance to use Cloud run/);
   assert.equal(textOf(stopped.root).includes("unavailable while the instance is stopped"), false);
   unmount(stopped);
@@ -234,87 +232,57 @@ test("Cloud run says what the desktop is doing to the machine's runtime: owed, r
   unmount(current);
 });
 
-test("the running instance says whether it stops by itself, and offers to set that up only when it does not", async () => {
-  const cases: Array<[AwsWorkerStatus["autoStop"], RegExp, string | undefined, boolean]> = [
-    [{ state: "on" }, /stops by itself after three hours without work/, undefined, false],
-    [{ state: "on", detail: "Automatic idle stop is suspended: metadata unavailable" }, /set up, but the machine reports: Automatic idle stop is suspended/, undefined, true],
-    [{ state: "pending" }, /starts once the machine has its new key, which it takes the next time it is idle/, undefined, false],
-    [{ state: "pending", detail: "No machine runs on this instance yet." }, /^Billed while running\. Automatic stop starts once a machine is set up on this instance\.$/, undefined, false],
-    [{ state: "pending", detail: "The last update of this machine did not finish. Select Update in Settings → Machines to hand the key over." },
-      /starts once the machine has its new key\. The last update of this machine did not finish/, undefined, true],
-    [undefined, /^Billed while running\.$/, undefined, false],
-    [{ state: "failed", detail: "names a different AWS machine" }, /^Billed until you stop it; the machine could not set up automatic stop: names a different AWS machine$/, "Set up automatic stop again", true],
-    [{ state: "failed", detail: "AWS refused the automatic-stop key.", previousKeyActive: true },
-      /^Billed while running; it still stops by itself after three hours without work, with its previous key\. The new key was not taken: AWS refused/, "Set up automatic stop again", true],
-    [{ state: "off" }, /does not stop by itself/, "Set up automatic stop", false]
+test("automatic stop is one switch; what keeps it from working is shown only in Diagnostics", async () => {
+  const problem = { message: "The program on the cloud machine is not connected, so it cannot stop the instance.", action: "reconnect" as const, actionLabel: "Reconnect" };
+  const cases: Array<[AwsWorkerStatus["autoStop"], boolean | undefined, boolean]> = [
+    [{ enabled: true, needsSetup: false }, true, false],
+    [{ enabled: false, needsSetup: true }, false, false],
+    [{ enabled: false, needsSetup: false }, false, false],
+    [{ enabled: true, needsSetup: false, problem }, true, true],
+    [undefined, undefined, false]
   ];
-  for (const [autoStop, note, toggle, warning] of cases) {
+  for (const [autoStop, checked, flagged] of cases) {
     const renderer = await renderPanel({ status: { ...RUNNING, autoStop } });
-    const billing = renderer.root.findByProps({ "data-testid": "aws-worker-billing-note" });
-    assert.match(textOf(billing), note);
-    assert.equal(String(billing.props.className).includes("is-warning"), warning, `${autoStop?.state} reads as a warning only when the User has to act`);
     const toggles = renderer.root.findAllByProps({ "data-testid": "aws-worker-auto-stop-toggle" });
-    assert.equal(toggles.length, toggle ? 1 : 0, autoStop?.state);
-    if (toggle) assert.equal(textOf(toggles[0]), toggle);
+    assert.equal(toggles.length, checked === undefined ? 0 : 1, "a switch that could not be read is not shown as off");
+    if (toggles.length) assert.equal(toggles[0].props.checked, checked);
+    assert.equal(renderer.root.findAllByProps({ "data-testid": "machine-instance-diagnostics-problem-count" }).length, flagged ? 1 : 0);
+    assert.equal(textOf(renderer.root).includes("Billed"), false, "no second line about billing next to the switch");
+    assert.equal(textOf(renderer.root).includes(problem.message), false, "the reason waits in Diagnostics");
     unmount(renderer);
   }
-  const stopped = await renderPanel({ status: { ...RUNNING, state: "stopped", autoStop: { state: "failed", detail: "names a different AWS machine" } } });
-  assert.equal(stopped.root.findAllByProps({ "data-testid": "aws-worker-billing-note" }).length, 0, "nothing is billed while stopped");
-  assert.match(textOf(stopped.root.findByProps({ "data-testid": "aws-worker-auto-stop" })), /could not set up automatic stop: names a different AWS machine/,
-    "the reason stays visible next to the action while stopped");
+  const stopped = await renderPanel({ status: { ...RUNNING, state: "stopped", autoStop: { enabled: true, needsSetup: false } } });
+  assert.equal(stopped.root.findByProps({ "data-testid": "aws-worker-auto-stop-toggle" }).props.checked, true, "the switch stays while stopped");
   unmount(stopped);
 });
 
-test("setting up automatic stop asks for a fresh setup command for the instance's region and says what the paste did", async () => {
-  const commands: Array<string | undefined> = [];
-  const regions: string[] = [];
-  const requests: AwsWorkerStartRequest[] = [];
-  const renderer = await renderPanel({
-    status: { ...RUNNING, autoStop: { state: "off" } },
-    settings: { ...SETTINGS, awsRegion: "eu-west-1" },
-    command: async (region, recoveryOperationId) => { regions.push(region); commands.push(recoveryOperationId); return "setup-command"; },
-    start: async request => { requests.push(request); return ready(request, { ...RUNNING, autoStop: { state: "pending" } }); }
-  });
-  await click(renderer.root.findByProps({ "data-testid": "aws-worker-auto-stop-toggle" }));
-  const form = () => renderer.root.findByProps({ "data-testid": "aws-worker-auto-stop-form" });
-  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-auto-stop-steps" })), /three hours without work, even when this app is closed/);
-  assert.equal(form().findAll(node => node.type === "div" && node.props.className === "gen-row-title").length, 0, "the toggle already names the task");
-  const named = renderer.root.findAll(node => node.type === "button" && textOf(node) === "Turn on automatic stop");
-  assert.equal(named.length, 1, "step 3 points to exactly one control");
-  assert.equal(form().find(node => node.props["aria-label"] === "AWS region").props.disabled, true, "the stop key only works in the instance's region");
-  await click(form().find(node => node.type === "button" && textOf(node) === "Show setup command"));
-  assert.deepEqual(commands, [undefined]);
-  assert.equal(regions[0], "us-east-1", "the command is built for the instance's region, not the last one typed");
-  assert.match(textOf(form()), /setup-command/);
-  await change(form().find(node => node.props["aria-label"] === "AWS setup result"), "accord-aws-v1:pasted");
-  await click(renderer.root.findByProps({ "data-testid": "aws-worker-auto-stop-apply" }));
-  assert.equal(requests.at(-1)?.intent, "check", "nothing is started, created or set up");
-  assert.equal(requests.at(-1)?.blob, "accord-aws-v1:pasted");
-  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-message" })), "Automatic stop: The new key is saved.",
-    "the line under the panel confirms; the billing note says what it means");
-  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-worker-billing-note" })), /starts once the machine has its new key/);
-  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-auto-stop-toggle" }).length, 0);
+test("the switch turns automatic stop off and on again without the command once a key is saved", async () => {
+  const requests: Array<{ enabled: boolean; blob?: string }> = [];
+  let status: AwsWorkerStatus = { ...RUNNING, autoStop: { enabled: true, needsSetup: false } };
+  const renderer = await renderPanel({ status, getStatus: async () => status,
+    setAutoStop: async (request) => { requests.push(request); status = { ...RUNNING, autoStop: { enabled: request.enabled, needsSetup: false } }; return status; } });
+  const toggle = () => renderer.root.findByProps({ "data-testid": "aws-worker-auto-stop-toggle" });
+  await act(async () => { toggle().props.onChange({ target: { checked: false } }); await flush(); });
+  assert.deepEqual(requests, [{ enabled: false }]);
+  assert.equal(toggle().props.checked, false);
+  await act(async () => { toggle().props.onChange({ target: { checked: true } }); await flush(); });
+  assert.deepEqual(requests.at(-1), { enabled: true }, "no setup command is asked for again");
+  assert.equal(toggle().props.checked, true);
   unmount(renderer);
 });
 
-test("only one command-and-paste form is open: a permission failure replaces the automatic-stop form", async () => {
-  const commands: Array<string | undefined> = [];
-  const renderer = await renderPanel({
-    status: { ...RUNNING, autoStop: { state: "off" } },
-    command: async (_region, recoveryOperationId) => { commands.push(recoveryOperationId); return recoveryOperationId ? "update-command" : "setup-command"; },
-    start: async request => {
-      const operation = { ...OLD_ERROR, operationId: request.operationId, updatedAt: new Date().toISOString() };
-      return { operation, status: { ...RUNNING, autoStop: { state: "off" }, operation } };
-    }
-  });
-  await click(renderer.root.findByProps({ "data-testid": "aws-worker-auto-stop-toggle" }));
-  await change(renderer.root.findByProps({ "aria-label": "AWS setup result" }), "accord-aws-v1:refused");
-  await click(renderer.root.findByProps({ "data-testid": "aws-worker-auto-stop-apply" }));
-  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-worker-auto-stop" }).length, 0, "the automatic-stop form steps aside");
-  await click(renderer.root.findByProps({ "data-testid": "aws-worker-authorization-toggle" }));
-  const recovery = renderer.root.findByProps({ "data-testid": "aws-worker-authorization-recovery" });
-  await click(recovery.find(node => node.type === "button" && textOf(node) === "Show setup command"));
-  assert.equal(commands.length, 1);
-  assert.ok(commands[0], "the permission recovery asks for its own command");
+test("Diagnostics names the problem and its fix runs from there", async () => {
+  const problem = { message: "The program on the cloud machine is not connected, so it cannot stop the instance.", action: "reconnect" as const, actionLabel: "Reconnect" };
+  let reconnects = 0;
+  const renderer = await renderPanel({ status: { ...RUNNING, autoStop: { enabled: true, needsSetup: false, problem } },
+    reconnect: async () => { reconnects++; return { ...RUNNING, autoStop: { enabled: true, needsSetup: false } }; } });
+  await click(renderer.root.findByProps({ "data-testid": "machine-instance-diagnostics-toggle" }));
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "aws-auto-stop-problem" })), /^Automatic stop is not working\. The program on the cloud machine is not connected/);
+  const fix = renderer.root.findByProps({ "data-testid": "aws-auto-stop-problem-action" });
+  assert.equal(textOf(fix), "Reconnect");
+  await click(fix);
+  assert.equal(reconnects, 1);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "aws-auto-stop-problem" }).length, 0, "a fixed problem is gone");
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "machine-instance-diagnostics-problem-count" }).length, 0);
   unmount(renderer);
 });

@@ -123,6 +123,23 @@ test("a lost guardian cannot be mistaken for confirmed termination or silently r
   } finally { await f.close(); }
 });
 
+test("a session whose app and guardian were killed together starts again once nothing they recorded runs", { skip: process.platform === "win32" }, async () => {
+  // A crashed runtime under systemd takes its guardians with it: no receipt is
+  // written. Without this the member could not start again until a reboot.
+  const f = await fixture();
+  try {
+    const host = (await nativeHostIdentity())!;
+    const gone = (name: string) => ({ pid: 999_990 + name.length, startedAt: `synthetic-${name}` });
+    const lease = (await f.registry.acquire({ scope: "chat:member", token: "crashed", host, parent: gone("app"), supervisor: gone("guardian") }))!;
+    await f.registry.update({ ...lease, phase: "running", provider: gone("provider"), descendants: [gone("tool")] });
+    const child = await spawnNativeProcess(f.options);
+    child.on("error", () => undefined);
+    const receipt = (await f.registry.get("chat:member"))!;
+    assert.equal(receipt.generation, lease.generation + 1, "the session started again");
+    await confirmNativeProcessClosed(child);
+  } finally { await f.close(); }
+});
+
 test("a large final provider record drains before close and disk failure retains process ownership", { skip: process.platform === "win32" }, async () => {
   const f = await fixture();
   try {

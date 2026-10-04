@@ -381,3 +381,19 @@ test("queued configured selections resolve a changed instance again instead of r
   await assert.rejects(h.service.prepare({ ...request, instanceId: "i-abc" }, () => {}), /different AWS instance/);
   assert.equal(h.calls.filter(call => call === "access:i-abc").length, 1);
 });
+
+test("Settings sets the machine's program up again without any provider, and leaves a connected current one running", async () => {
+  // Settings → AWS → Diagnostics offers this when the program on the instance
+  // is not connected, or could not take its automatic-stop key.
+  const h = harness();
+  await h.service.prepareRuntime();
+  assert.deepEqual(h.calls, ["access:i-abc", "enroll", "install:machine-1:undefined"], "an absent program is installed, no provider is checked");
+  assert.equal(h.installRequests[0].requiredProvider, undefined);
+  const connected = await connectedHarness();
+  connected.calls.length = 0;
+  await connected.service.prepareRuntime();
+  assert.equal(connected.calls.some((call) => call.startsWith("install:")), false, "a connected program on this version is not reinstalled");
+  assert.equal(connected.calls.some((call) => call.startsWith("provider:")), false);
+  await connected.service.prepare(request, () => {});
+  assert.ok(connected.calls.includes("provider:codex-cli"), "a member choosing Cloud run afterwards still gets its provider checked");
+});

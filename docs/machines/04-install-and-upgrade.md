@@ -238,9 +238,25 @@ The key is handed over by the installer, never put on a command line:
 
 Automatic updates hand a new key over in the same idle-gated update that
 replaces the runtime, so a member's turn is never cut off for it. Pasting a new
-setup result re-checks machines right away. Settings → AWS shows whether the
-instance stops by itself: off, pending, on, or failed (the machine refused the
-key, or reports that AWS no longer accepts it).
+setup result re-checks machines right away.
+
+Settings → AWS shows automatic stop as one switch. Turning it on without a stop
+key opens a dialog with the setup command for the instance's region, ready to
+copy, and the box for its result; the switch reads on once that result is
+applied (`cloud-runs:aws-auto-stop` saves the key, sets
+`machineAutoStopEnabled` and sends the settings to connected machines). With a
+key saved, the switch turns automatic stop off and on again without the
+command. The setting travels to machines in the settings snapshot, because the
+machine decides when to stop; switched off, its runtime never stops the
+instance, and this desktop's own idle stop is held too.
+
+Agents working keep the instance up by design and are not reported. Anything
+else that keeps a switched-on instance from stopping by itself is shown only in
+Diagnostics, in plain words and with what fixes it: AWS does not accept the
+stop key (set up again), the program on the machine is not connected or could
+not take the key (`cloud-runs:aws-reconnect-machine`, which sets the program on
+the instance up again the way choosing Cloud run does, without any provider), or
+the machine cannot check whether agents are working.
 
 Agents run on the machine as the same OS user, so they can read the sealed key
 and the key that seals it. What they can do with it is what the policy allows:

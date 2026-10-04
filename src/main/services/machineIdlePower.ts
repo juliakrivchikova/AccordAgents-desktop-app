@@ -1,4 +1,6 @@
+import { existsSync } from "node:fs";
 import { uptime } from "node:os";
+import path from "node:path";
 import { AwsMachinePowerClient, awsErrorText, isAwsPowerRefusal } from "../../shared/awsMachinePowerClient";
 import type { AwsMachinePowerConfig } from "../../shared/machinePower";
 import { assertCurrentAwsMachine } from "./awsMachineIdentity";
@@ -10,7 +12,8 @@ import { MACHINE_IDLE_STOP_MS, MACHINE_STOP_KEY_REFUSED } from "../../shared/mac
 import { userDataPath } from "../platform";
 import type { MachinePowerStore } from "./machinePowerStore";
 import { nativeHostIdentity, verifiedNativeHostReboot, type NativeHostIdentity } from "./nativeHostIdentity";
-import { NativeProcessRegistry } from "./nativeProcessRegistry";
+import { leaseProcessesGone, NativeProcessRegistry } from "./nativeProcessRegistry";
+import { readPosixProcessTableAsync, type PosixProcessRow } from "./processTermination";
 import { MachineMaintenance } from "./machineMaintenance";
 
 type PowerClient = Pick<AwsMachinePowerClient, "stopAfterDrain" | "close" | "assertCanStop">;
@@ -32,7 +35,7 @@ export class MachineIdlePower {
   /** What makes the current warning stale: new work (a neighbour was busy
    *  at the stop), or AWS accepting the stop key. Unset, a warning stays
    *  until another replaces it. */
-  private warningResolvedBy?: "activity" | "key";
+  private warningResolvedBy?: "activity" | "key" | "coordination";
   /** Host uptime until which a refused stop key is not asked about again. */
   private keyRefusedUntilMs?: number;
   private hostIdentity?: NativeHostIdentity;
@@ -54,12 +57,18 @@ export class MachineIdlePower {
      *  deployment that cannot stop the instance still keeps another one from
      *  stopping it underneath. */
     presence?: MachineHostPowerRegistry;
+    /** The User's automatic-stop switch on the desktop, as last synced here.
+     *  Off, this machine never stops the instance; it still publishes its
+     *  work so a neighbour that is switched on can coordinate. */
+    enabled?: () => Promise<boolean>;
     log(event: string, payload: Record<string, unknown>): void;
   }, private readonly environment: {
     identity(): Promise<NativeHostIdentity | undefined>;
     verifyAws(config: AwsMachinePowerConfig): Promise<void>;
     uptimeMs(): number;
     createHostRegistry?(options: MachineHostPowerOptions): MachineHostPowerRegistry;
+    /** Whether a deployment whose runtime is gone still has agents running. */
+    hasLiveNativeWork?(profilePath: string, host: NativeHostIdentity): Promise<boolean>;
     client?: PowerClient;
   } = {
     identity: async () => process.platform === "linux" ? nativeHostIdentity() : undefined,
@@ -117,6 +126,11 @@ export class MachineIdlePower {
         return busy;
       },
       prepareStop: async since => {
+        if (this.options.enabled && !await this.options.enabled()) {
+          // Switched off is not a problem to report: nothing here is broken.
+          this.clearWarning();
+          return undefined;
+        }
         if (this.keyRefusedUntilMs !== undefined && this.environment.uptimeMs() < this.keyRefusedUntilMs) return undefined;
         // The decision and the work that could invalidate it are one critical
         // section on this host. `beginStop` surveys every deployment's claim
@@ -210,7 +224,9 @@ export class MachineIdlePower {
   }
 
   /**
-   * Takes the host-wide intent to stop, or explains why the host stays awake.
+   * Takes the host-wide intent to stop. Agents working on this host keep it
+   * up without a warning: that is the rule, not a fault. Only a host whose
+   * deployments cannot be read, or cannot coordinate, is reported.
    *
    * Three hours of quiet in this profile is not three hours of host idle: the
    * survey inside `beginStop` measures from the last moment ANY deployment
@@ -222,16 +238,42 @@ export class MachineIdlePower {
       return false;
     }
     try {
-      if (await this.hostPower.beginStop({ minIdleMs: MACHINE_IDLE_STOP_MS, ownIdleSinceUptimeMs })) return true;
+      // A deployment that crashed or was killed cannot release its claim.
+      // Its owner is gone; only agents it left running may hold the host.
+      const released = await this.hostPower.releaseDeadClaims(profilePath => this.hasLiveNativeWork(profilePath));
+      if (released) this.options.log("machine.host-power.released", { released });
+      if (await this.hostPower.beginStop({ minIdleMs: MACHINE_IDLE_STOP_MS, ownIdleSinceUptimeMs })) {
+        this.resolveWarning("coordination");
+        return true;
+      }
     } catch (error) {
-      this.setWarning(`The machine stays awake: this machine's deployments cannot be read (${errorText(error)}).`);
+      this.setWarning(`The machine stays awake: this machine's deployments cannot be read (${errorText(error)}).`, "coordination");
       return false;
     }
-    let reason: string | undefined;
-    try { reason = this.hostPower.blockingReason(); }
-    catch (error) { reason = `they cannot be read (${errorText(error)})`; }
-    this.setWarning(`The machine stays awake: ${reason ?? "another deployment on this machine worked recently."}`, "activity");
+    let busy: Array<{ version: number; profilePath: string; kind: string }>;
+    try { busy = this.hostPower.others().filter(claim => claim.busy); }
+    catch (error) {
+      this.setWarning(`The machine stays awake: this machine's deployments cannot be read (${errorText(error)}).`, "coordination");
+      return false;
+    }
+    const outdated = busy.find(claim => claim.version !== 2);
+    if (outdated) {
+      this.setWarning(`The machine stays awake: another deployment on it (${outdated.profilePath}) needs an update before automatic stop can coordinate with it.`, "coordination");
+      return false;
+    }
+    // Agents working, or working recently, next door is the ordinary reason to
+    // stay up, not something the User has to act on.
+    this.options.log("machine.idle.held", { busy: busy.length });
+    this.resolveWarning("activity");
+    this.resolveWarning("coordination");
     return false;
+  }
+
+  private hasLiveNativeWork(profilePath: string): Promise<boolean> {
+    const host = this.hostIdentity!;
+    return this.environment.hasLiveNativeWork
+      ? this.environment.hasLiveNativeWork(profilePath, host)
+      : nativeRegistryHasLiveWork(path.join(profilePath, "native-processes.sqlite3"), host);
   }
 
   private async abandonHostStop(): Promise<void> {
@@ -290,7 +332,7 @@ export class MachineIdlePower {
     this.retry.unref();
   }
 
-  private setWarning(warning: string, resolvedBy?: "activity" | "key"): void {
+  private setWarning(warning: string, resolvedBy?: "activity" | "key" | "coordination"): void {
     this.warningResolvedBy = resolvedBy;
     if (this.lastWarning === warning) return;
     this.lastWarning = warning;
@@ -298,9 +340,18 @@ export class MachineIdlePower {
     void this.options.host.publishPowerStatus().catch(() => undefined);
   }
 
+  /** Drops whatever warning is shown, for a state that has none. */
+  private clearWarning(): void {
+    if (!this.lastWarning) return;
+    this.lastWarning = undefined;
+    this.warningResolvedBy = undefined;
+    this.options.log("machine.idle.status", { warning: null });
+    void this.options.host.publishPowerStatus().catch(() => undefined);
+  }
+
   /** Drops a warning its own cause has resolved, so the desktop does not keep
    *  showing a moment that has passed. */
-  private resolveWarning(cause: "activity" | "key"): void {
+  private resolveWarning(cause: "activity" | "key" | "coordination"): void {
     if (!this.lastWarning || this.warningResolvedBy !== cause) return;
     this.lastWarning = undefined;
     this.warningResolvedBy = undefined;
@@ -310,17 +361,56 @@ export class MachineIdlePower {
 }
 
 /** A dead runtime is not proof that its native work is gone. Every retained
- * executor needs its guardian's close receipt, or a verified host reboot. */
-export async function assertNativeRegistryClosed(registryPath: string, host: NativeHostIdentity): Promise<void> {
+ * executor needs its guardian's close receipt, a verified host reboot, or
+ * proof that every process it recorded is gone. The last is what a guardian
+ * killed together with its runtime leaves behind; without it one crash would
+ * keep this machine awake, and this participant unable to start, until the
+ * next reboot. */
+export async function assertNativeRegistryClosed(registryPath: string, host: NativeHostIdentity,
+  readProcessTable: () => Promise<Map<number, PosixProcessRow> | undefined> = readPosixProcessTableAsync): Promise<void> {
   const registry = new NativeProcessRegistry(registryPath);
   await registry.init();
+  let rows: Map<number, PosixProcessRow> | undefined;
   let cursor = "";
   for (;;) {
     const leases = await registry.openLeases(cursor);
     if (!leases.length) return;
     for (const lease of leases) {
-      if (!verifiedNativeHostReboot(lease.host, host)) throw new Error("A native executor has not confirmed that its processes are gone.");
-      await registry.update({ ...lease, phase: "closed", shutdownReason: "host-rebooted" });
+      if (verifiedNativeHostReboot(lease.host, host)) {
+        await registry.update({ ...lease, phase: "closed", shutdownReason: "host-rebooted" });
+      } else {
+        rows ??= await readProcessTable();
+        if (!rows || !leaseProcessesGone(lease, host, rows)) throw new Error("A native executor has not confirmed that its processes are gone.");
+        await registry.update({ ...lease, phase: "closed", shutdownReason: "processes-gone" });
+      }
+      cursor = lease.scope;
+    }
+  }
+}
+
+/**
+ * Whether another deployment on this host still has native work running,
+ * read from its own registry without changing it.
+ *
+ * Its owner is gone, so nobody will close its leases; what counts is whether
+ * the processes they recorded still exist. A deployment that never started a
+ * native executor has no registry at all. One that cannot be read is assumed
+ * to be working: a stop that kills a provider turn is lost work.
+ */
+export async function nativeRegistryHasLiveWork(registryPath: string, host: NativeHostIdentity,
+  readProcessTable: () => Promise<Map<number, PosixProcessRow> | undefined> = readPosixProcessTableAsync): Promise<boolean> {
+  if (!existsSync(registryPath)) return false;
+  const registry = new NativeProcessRegistry(registryPath);
+  let rows: Map<number, PosixProcessRow> | undefined;
+  let cursor = "";
+  for (;;) {
+    const leases = await registry.openLeases(cursor);
+    if (!leases.length) return false;
+    for (const lease of leases) {
+      if (!verifiedNativeHostReboot(lease.host, host)) {
+        rows ??= await readProcessTable();
+        if (!rows || !leaseProcessesGone(lease, host, rows)) return true;
+      }
       cursor = lease.scope;
     }
   }

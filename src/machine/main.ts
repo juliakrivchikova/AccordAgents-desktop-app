@@ -431,6 +431,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     idlePower = new MachineIdlePower({ config: powerConfig, store: storageService.machinePower(), host,
       runner: cliAgentRunner, nativeProcessDbPath: nativeProcessDbPath,
       ...(presence ? { presence } : {}),
+      // The User's switch arrives with the desktop's settings snapshot.
+      enabled: () => settingsService.getMachineAutoStopEnabled(),
       log: (event, payload) => { void debugLogService.write(event, payload); } });
     await idlePower.start();
   }

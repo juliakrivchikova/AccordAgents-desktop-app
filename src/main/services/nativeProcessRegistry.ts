@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
-import type { CapturedPosixProcess } from "./processTermination";
+import { hasLiveCapturedPosixProcesses, type CapturedPosixProcess, type PosixProcessRow } from "./processTermination";
 import type { NativeHostIdentity } from "./nativeHostIdentity";
 
 const initializing = new Map<string, Promise<void>>();
@@ -21,6 +21,22 @@ export interface NativeProcessLease {
   /** A shell gate cannot exec the provider before the running receipt commits. */
   launchGate?: 1;
   shutdownReason?: "processes-gone" | "host-rebooted" | "never-started";
+}
+
+/**
+ * Whether every process a lease recorded is gone: its supervisor, its provider
+ * and each descendant the supervisor captured while it ran.
+ *
+ * Without the supervisor this is the same proof the supervisor writes as
+ * `processes-gone` when it closes a lease itself. With it, it is the proof
+ * for a supervisor that was killed before it could write that receipt (a
+ * crashed runtime under systemd takes its whole service with it). The pids
+ * mean something only on the boot that recorded them, so a lease from an
+ * unknown or another boot is never proven gone here.
+ */
+export function leaseProcessesGone(lease: NativeProcessLease, host: NativeHostIdentity, rows: Map<number, PosixProcessRow>): boolean {
+  if (!lease.host || lease.host.machine !== host.machine || lease.host.boot !== host.boot) return false;
+  return !hasLiveCapturedPosixProcesses([lease.supervisor, ...(lease.provider ? [lease.provider] : []), ...lease.descendants], () => rows);
 }
 
 /** A process receipt contains identities only, never CLI arguments, environment,

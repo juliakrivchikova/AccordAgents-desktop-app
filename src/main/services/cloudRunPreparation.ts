@@ -226,9 +226,30 @@ export class CloudRunPreparationService {
     return this.prepared = { instanceId, machine, record, worker, identity, providers, retryProviders: new Set() };
   }
 
-  private async run(provider: PrepareCloudRunRequest["provider"], expectedInstanceId?: string): Promise<PrepareCloudRunResult> {
+  /**
+   * Sets the program on the instance's cloud machine up again, without
+   * preparing any provider: what Settings → AWS offers when that program is
+   * not connected, or could not take its automatic-stop key. A machine that is
+   * connected and current is left running; a setup already under way is
+   * waited for, not raced.
+   */
+  async prepareRuntime(): Promise<void> {
+    while (this.active) await this.active.catch(() => undefined);
+    const currentInstance = await this.options.configuredInstanceId();
+    this.activeInstance = currentInstance;
+    this.active = this.run(undefined, currentInstance).finally(() => {
+      this.active = undefined;
+      this.activeProvider = undefined;
+      this.activeInstance = undefined;
+      this.latest = undefined;
+    });
+    await this.active;
+  }
+
+  private async run(provider: PrepareCloudRunRequest["provider"] | undefined, expectedInstanceId?: string): Promise<PrepareCloudRunResult> {
     const prepared = await this.reusableMachine(expectedInstanceId);
-    if (prepared && !prepared.retryProviders.has(provider)) {
+    if (prepared && !provider) return { machine: prepared.machine };
+    if (prepared && provider && !prepared.retryProviders.has(provider)) {
       if (!prepared.providers.has(provider)) {
         await this.options.prepareProvider(prepared.worker, provider, prepared.record, snapshot => this.report(snapshot));
         prepared.providers.add(provider);
@@ -261,8 +282,9 @@ export class CloudRunPreparationService {
     if (machine && existing?.installRoot && this.options.isConnected(machine.id) && machine.lastHello?.appVersion === this.options.appVersion) {
       // Selecting another member must never drain an already running machine.
       await this.options.prepareMachine(worker, existing);
-      await this.options.prepareProvider(worker, provider, existing, snapshot => this.report(snapshot));
-      this.remember(instanceId, machine, existing, worker).providers.add(provider);
+      if (provider) await this.options.prepareProvider(worker, provider, existing, snapshot => this.report(snapshot));
+      const remembered = this.remember(instanceId, machine, existing, worker);
+      if (provider) remembered.providers.add(provider);
       this.report({ message: "Cloud run is ready." });
       return { machine };
     }
@@ -291,7 +313,8 @@ export class CloudRunPreparationService {
     this.report({ message: "Cloud run is ready." });
     const restored = (await this.options.listMachines()).find(item => item.id === result.record.machineId);
     if (!restored) throw new Error("The cloud machine was removed during setup. Select Cloud run again.");
-    this.remember(instanceId, restored, result.record, worker).providers.add(provider);
+    const remembered = this.remember(instanceId, restored, result.record, worker);
+    if (provider) remembered.providers.add(provider);
     return { machine: restored };
   }
 }

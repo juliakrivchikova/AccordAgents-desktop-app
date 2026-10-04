@@ -57,6 +57,7 @@ import type {
   RevokeMobilePairingRequest,
   AwsWorkerOperationSnapshot,
   AwsWorkerStartRequest,
+  SetAwsAutoStopRequest,
   DeleteAgentEnvironmentVariableRequest,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
@@ -145,6 +146,8 @@ const bridge: AppBridge = {
     return () => ipcRenderer.removeListener("cloud-runs:aws-progress", listener);
   },
   getAwsWorkerStatus: () => ipcRenderer.invoke("cloud-runs:aws-status"),
+  setAwsAutoStop: (request: SetAwsAutoStopRequest) => ipcRenderer.invoke("cloud-runs:aws-auto-stop", request),
+  reconnectAwsMachine: () => ipcRenderer.invoke("cloud-runs:aws-reconnect-machine"),
   stopAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-stop"),
   deleteAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-delete"),
   getAgentEnvironment: () => ipcRenderer.invoke("settings:get-agent-environment"),

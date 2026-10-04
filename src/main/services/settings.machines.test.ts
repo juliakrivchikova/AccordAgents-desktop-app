@@ -340,3 +340,25 @@ test("the devices the owner trusts, and the ones removed, survive a restart", as
       /pair again/, "a device removed before the restart is still removed after it");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("the automatic-stop switch survives a restart and reaches the machine with the settings snapshot", async () => {
+  const desktopDir = await mkdtemp(path.join(tmpdir(), "accord-auto-stop-desktop-"));
+  const machineDir = await mkdtemp(path.join(tmpdir(), "accord-auto-stop-machine-"));
+  const make = (dir: string) => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: desktopDir, appVersion: "test" }));
+  try {
+    assert.equal(await make(desktopDir).getMachineAutoStopEnabled(), true, "a key set up before the switch existed keeps working");
+    await make(desktopDir).setMachineAutoStopEnabled(false);
+    assert.equal(await make(desktopDir).getMachineAutoStopEnabled(), false);
+    const machine = make(machineDir);
+    assert.equal(await machine.getMachineAutoStopEnabled(), true);
+    await machine.importMachineSettingsSnapshot(await make(desktopDir).exportMachineSettingsSnapshot());
+    assert.equal(await make(machineDir).getMachineAutoStopEnabled(), false, "the machine, which decides to stop, is told");
+    await make(desktopDir).setMachineAutoStopEnabled(true);
+    await make(machineDir).importMachineSettingsSnapshot(await make(desktopDir).exportMachineSettingsSnapshot());
+    assert.equal(await make(machineDir).getMachineAutoStopEnabled(), true);
+  } finally {
+    await rm(desktopDir, { recursive: true, force: true });
+    await rm(machineDir, { recursive: true, force: true });
+  }
+});

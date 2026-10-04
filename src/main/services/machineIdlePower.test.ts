@@ -3,7 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { MachineIdlePower, assertNativeRegistryClosed } from "./machineIdlePower";
+import { MachineIdlePower, assertNativeRegistryClosed, nativeRegistryHasLiveWork } from "./machineIdlePower";
+import { capturePosixProcessIdentity } from "./processTermination";
 import { MachineHostPowerRegistry } from "./machineHostPower";
 import { assertCurrentAwsMachine } from "./awsMachineIdentity";
 import { StorageService } from "./storage";
@@ -13,6 +14,11 @@ import { MACHINE_IDLE_STOP_MS } from "../../shared/machinePower";
 const config = { version: 1 as const, instanceId: "i-0123456789abcdef0",
   credentials: { accessKeyId: "AKIAFAKEMACHINEPOWER1", secretAccessKey: "synthetic-power-secret", region: "us-east-1" } };
 const identity = { machine: "a".repeat(64), boot: "a".repeat(32) };
+/** A process that is certainly running: this test itself. */
+const LIVE = capturePosixProcessIdentity(process.pid)!;
+/** Identities no running process has. */
+const GONE_PARENT = { pid: 1234, startedAt: "synthetic-parent" };
+const GONE_SUPERVISOR = { pid: 1235, startedAt: "synthetic-guardian" };
 
 test("a retained power stop survives runtime restart, never reopens admission and waits for native close receipts", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-power-"));
@@ -44,8 +50,9 @@ test("a retained power stop survives runtime restart, never reopens admission an
     assert.equal(await store.stopFence(identity.boot), "stop");
     power.close();
     const registry = new NativeProcessRegistry(nativePath); await registry.init();
+    // A guardian still running has not proven anything about its agents.
     const lease = await registry.acquire({ scope: "chat:member", token: "owner", host: identity,
-      parent: { pid: 1234, startedAt: "synthetic-parent" }, supervisor: { pid: 1235, startedAt: "synthetic-guardian" } });
+      parent: GONE_PARENT, supervisor: LIVE });
     assert.ok(lease);
     fenced = false; power = create(); await power.start();
     assert.equal(fenced, true, "retained intent fences native work before the link starts");
@@ -55,7 +62,7 @@ test("a retained power stop survives runtime restart, never reopens admission an
     }
     assert.match(power.warning()!, /processes are gone/);
     await assert.rejects((power as any).stopAws(), /not confirmed that its processes are gone/);
-    assert.equal(stops, 1, "a disappeared runtime is not a native-close receipt");
+    assert.equal(stops, 1, "a disappeared runtime whose guardian still runs is not a native-close receipt");
     await registry.update({ ...lease, phase: "closed", shutdownReason: "processes-gone" });
     failedAws = false; await (power as any).stopAws();
     assert.equal(stops, 2); assert.equal(fenced, true);
@@ -87,11 +94,38 @@ test("idle recovery accepts a verified host reboot but refuses missing native pr
   try {
     const registryPath = path.join(dir, "native.sqlite3"); const registry = new NativeProcessRegistry(registryPath);
     await registry.init();
-    await registry.acquire({ scope: "chat:member", token: "owner", host: identity,
-      parent: { pid: 1234, startedAt: "parent" }, supervisor: { pid: 1235, startedAt: "guardian" } });
+    await registry.acquire({ scope: "chat:member", token: "owner", host: identity, parent: GONE_PARENT, supervisor: LIVE });
     await assert.rejects(assertNativeRegistryClosed(registryPath, identity), /processes are gone/);
     await assertNativeRegistryClosed(registryPath, { ...identity, boot: "b".repeat(32) });
     assert.equal((await registry.get("chat:member"))?.shutdownReason, "host-rebooted");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a guardian killed with its runtime is closed once every process it recorded is gone, never while one runs", async () => {
+  // A runtime under systemd that crashes takes its whole service with it,
+  // guardians included, so no close receipt is ever written. On the User's
+  // machine that kept the instance awake, and the member unable to start,
+  // until the next reboot.
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-killed-"));
+  try {
+    const registryPath = path.join(dir, "native.sqlite3"); const registry = new NativeProcessRegistry(registryPath);
+    await registry.init();
+    const running = await registry.acquire({ scope: "chat:a", token: "owner", host: identity, parent: GONE_PARENT, supervisor: GONE_SUPERVISOR });
+    assert.ok(running);
+    await registry.update({ ...running, phase: "running", provider: LIVE });
+    assert.equal(await nativeRegistryHasLiveWork(registryPath, identity), true, "an agent still running keeps its lease");
+    await assert.rejects(assertNativeRegistryClosed(registryPath, identity), /processes are gone/);
+    await registry.update({ ...(await registry.get("chat:a"))!, provider: { pid: 1236, startedAt: "synthetic-provider" }, descendants: [LIVE] });
+    assert.equal(await nativeRegistryHasLiveWork(registryPath, identity), true, "a captured descendant still running keeps it too");
+    await registry.update({ ...(await registry.get("chat:a"))!, descendants: [{ pid: 1237, startedAt: "synthetic-child" }] });
+    assert.equal(await nativeRegistryHasLiveWork(registryPath, identity), false);
+    assert.equal((await registry.get("chat:a"))?.phase, "running", "reading another deployment's registry changes nothing");
+    await assertNativeRegistryClosed(registryPath, identity);
+    assert.equal((await registry.get("chat:a"))?.shutdownReason, "processes-gone");
+    await registry.acquire({ scope: "chat:b", token: "owner", host: { ...identity, machine: "c".repeat(64) }, parent: GONE_PARENT, supervisor: GONE_SUPERVISOR });
+    assert.equal(await nativeRegistryHasLiveWork(registryPath, identity), true, "pids from another host prove nothing here");
+    assert.equal(await nativeRegistryHasLiveWork(path.join(dir, "never-ran.sqlite3"), identity), false,
+      "a deployment that never started an agent has no registry");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -141,8 +175,7 @@ test("a deployment sharing this instance keeps it awake, and its own claim is pu
     neighbour.publish(true);
     await (power as unknown as { scheduler: { check(): Promise<void> } }).scheduler.check();
     assert.equal(stops, 0, "a busy deployment on the same instance must prevent the stop");
-    assert.match(power.warning() ?? "", /stays awake/);
-    assert.match(power.warning() ?? "", /\/home\/ubuntu\/\.accordagents\/other/);
+    assert.equal(power.warning(), undefined, "agents working next door are the rule, not a fault to report");
 
     // This deployment's own state is visible to the others.
     const mine = neighbour.others().find((claim) => claim.profilePath === "/home/ubuntu/.accordagents/mine");
@@ -154,7 +187,7 @@ test("a deployment sharing this instance keeps it awake, and its own claim is pu
     neighbour.publish(false);
     await (power as unknown as { scheduler: { check(): Promise<void> } }).scheduler.check();
     assert.equal(stops, 0, "a neighbour's recent work is not three hours of host idle");
-    assert.match(power.warning() ?? "", /stays awake/);
+    assert.equal(power.warning(), undefined);
 
     // Once the whole host has been quiet for the window, the stop proceeds.
     now += MACHINE_IDLE_STOP_MS + 100;
@@ -247,5 +280,56 @@ test("an AWS that cannot be reached is asked again on the next poll, not after t
     await scheduler.check().catch(() => undefined);
     assert.equal(checks, 2, "a network failure says nothing about the key");
     assert.equal(prepared, 0, "and no turn is fenced for it");
+  } finally { power.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a crashed deployment stops keeping the instance awake once its agents are gone; the User's switch can turn stopping off", async () => {
+  // On the User's machine seven claims of runtimes that had crashed or were
+  // killed counted as busy forever, so the instance ran for weeks.
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-dead-claims-"));
+  const shared = path.join(dir, "host-power");
+  const store = new StorageService({ dbPath: path.join(dir, "state.sqlite3") }).machinePower();
+  let stops = 0; let enabled = true;
+  const live = new Set<string>();
+  const host = { hasWorkForIdleStop: async () => false, recoverIdleFence: async () => Boolean(await store.stopFence(identity.boot)),
+    retainIdleFence: () => undefined, publishPowerStatus: async () => undefined, shutdown: async () => undefined,
+    prepareIdleStop: async (request: { commitHostStop?(prepare: () => Promise<boolean>): Promise<boolean> }) =>
+      await request.commitHostStop?.(async () => true) ? async () => undefined : undefined };
+  const runner = { hasActiveNativeWork: () => false, shutdownWarmAgents: async () => undefined, fenceIdleNativeAdmissions: () => () => undefined };
+  const alive = new Set([4321]);
+  const now = MACHINE_IDLE_STOP_MS * 3;
+  const crashed = new MachineHostPowerRegistry({ dir: shared, profilePath: "/tmp/accord-choice-repro/machine", bootId: identity.boot,
+    uptimeMs: () => 1_000, pid: 4321, isAlive: (pid) => alive.has(pid) });
+  const power = new MachineIdlePower({ config, store, host, runner, nativeProcessDbPath: path.join(dir, "native.sqlite3"),
+    profilePath: "/home/ubuntu/.accordagents/mine", enabled: async () => enabled, log: () => undefined }, {
+    identity: async () => identity, verifyAws: async () => undefined, uptimeMs: () => now,
+    createHostRegistry: options => new MachineHostPowerRegistry({ ...options, dir: shared, isAlive: (pid) => alive.has(pid) || pid === process.pid }),
+    hasLiveNativeWork: async (profilePath) => live.has(profilePath),
+    client: { close: () => undefined, assertCanStop: async () => undefined,
+      stopAfterDrain: async () => { stops++; return { instanceId: config.instanceId, state: "stopping" }; } }
+  });
+  const check = () => (power as unknown as { scheduler: { check(): Promise<void> } }).scheduler.check();
+  try {
+    await store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
+    crashed.publish(true);
+    await power.start();
+    await check();
+    assert.equal(stops, 0, "a runtime that is still alive and busy keeps the instance up");
+    alive.delete(4321);
+    live.add("/tmp/accord-choice-repro/machine");
+    await check();
+    assert.equal(stops, 0, "its runtime died, but an agent it started is still running");
+    assert.equal(power.warning(), undefined, "agents working are not a fault");
+    live.clear();
+    enabled = false;
+    await check();
+    assert.equal(stops, 0, "switched off, the machine never stops the instance");
+    assert.equal(power.warning(), undefined, "and switched off is not a fault either");
+    enabled = true;
+    await check();
+    assert.equal(stops, 1, "the dead runtime's claim no longer holds the instance");
+    assert.deepEqual(new MachineHostPowerRegistry({ dir: shared, profilePath: "/home/ubuntu/.accordagents/probe", bootId: identity.boot,
+      uptimeMs: () => now, isAlive: () => true }).others().map((claim) => claim.profilePath), ["/home/ubuntu/.accordagents/mine"],
+    "its claim is gone from the host directory");
   } finally { power.close(); await rm(dir, { recursive: true, force: true }); }
 });

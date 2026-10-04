@@ -23,6 +23,7 @@ function registry(options: {
   now?: () => number;
   pid?: number;
   alive?: (pid: number) => boolean;
+  started?: (pid: number) => number | undefined;
   kind?: "runtime" | "maintenance";
 }): MachineHostPowerRegistry {
   return new MachineHostPowerRegistry({
@@ -32,7 +33,8 @@ function registry(options: {
     uptimeMs: options.now ?? (() => 1_000),
     pid: options.pid ?? 4242,
     kind: options.kind,
-    isAlive: options.alive ?? (() => true)
+    isAlive: options.alive ?? (() => true),
+    ...(options.started ? { startedAtUptimeMs: options.started } : {})
   });
 }
 
@@ -239,6 +241,42 @@ test("one deployment's crash does not let it clear another profile's claim", asy
   assert.ok(mine.blockingReason(), "the other profile still keeps the host awake");
 });
 
+test("a dead owner's claim is released once its own registry shows no agent still running", async () => {
+  const shared = dir();
+  const alive = new Set([4243]);
+  const live = new Set<string>();
+  const mine = registry({ dir: shared, profile: "/srv/one", pid: 4243, alive: (pid) => alive.has(pid) });
+  mine.publish(false);
+  registry({ dir: shared, profile: "/tmp/repro-a/machine", pid: 701, alive: (pid) => alive.has(pid) }).publish(true);
+  registry({ dir: shared, profile: "/tmp/repro-b/machine", pid: 702, alive: (pid) => alive.has(pid) }).publish(false);
+  alive.add(703);
+  registry({ dir: shared, profile: "/srv/three", pid: 703, alive: (pid) => alive.has(pid) }).publish(true);
+  live.add("/tmp/repro-b/machine");
+  const asked: string[] = [];
+  const released = await mine.releaseDeadClaims(async (profilePath) => { asked.push(profilePath); return live.has(profilePath); });
+  assert.equal(released, 1, "only the dead runtime with nothing left running is released");
+  assert.deepEqual(asked.sort(), ["/tmp/repro-a/machine", "/tmp/repro-b/machine"], "a live owner is never second-guessed");
+  assert.deepEqual(mine.others().map((claim) => claim.profilePath).sort(), ["/srv/three", "/tmp/repro-b/machine"]);
+  live.clear();
+  assert.equal(await mine.releaseDeadClaims(async () => false), 1, "once its agent exits, the other one goes too");
+  alive.delete(703);
+  await assert.rejects(mine.releaseDeadClaims(async () => { throw new Error("registry unreadable"); }), /unreadable/,
+    "a registry that cannot be read is not evidence of an idle host");
+  assert.deepEqual(mine.others().map((claim) => claim.profilePath), ["/srv/three"]);
+});
+
+test("a dead owner's pid taken by a later process does not keep its claim alive", async () => {
+  const shared = dir();
+  // The claim was last written at 1 s of uptime; whatever runs as pid 801
+  // now started at 50 s, so it is not the runtime that wrote it.
+  registry({ dir: shared, profile: "/tmp/repro/machine", pid: 801, now: () => 1_000 }).publish(true);
+  const mine = registry({ dir: shared, profile: "/srv/one", pid: 802, now: () => 60_000, started: (pid) => pid === 801 ? 50_000 : 500 });
+  assert.equal(await mine.releaseDeadClaims(async () => false), 1);
+  const original = registry({ dir: shared, profile: "/tmp/repro/machine", pid: 803, now: () => 60_000 });
+  original.publish(true);
+  assert.equal(await registry({ dir: shared, profile: "/srv/one", pid: 802, now: () => 60_000, started: () => 500 })
+    .releaseDeadClaims(async () => false), 0, "a live owner that started before its claim is left alone");
+});
 
 test("an unreadable stop intent stops both stopping and admitting", async () => {
   const shared = dir();

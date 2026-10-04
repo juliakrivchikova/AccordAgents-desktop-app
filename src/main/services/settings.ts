@@ -184,6 +184,10 @@ interface StoredSettings {
    *  none), so a handover the runtime did not come back from can put it back.
    *  Consumed by that revert; absent, there is nothing to revert. */
   encryptedMachinePowerPrevious?: string;
+  /** The User's automatic-stop switch. Unset reads as on, so a stop key set
+   *  up before the switch existed keeps working. Shared with machines in the
+   *  settings snapshot: the machine's runtime is what decides to stop. */
+  machineAutoStopEnabled?: boolean;
   /** Who holds a copy of the phone's start key. Records only, never the
    *  secret, and never sent to a machine: they name the User's devices. */
   machinePowerHandoffs?: MachinePowerHandoffRecord[];
@@ -2869,6 +2873,7 @@ export class SettingsService {
         ? settings.encryptedMachinePower : undefined,
       encryptedMachinePowerPrevious: typeof settings.encryptedMachinePowerPrevious === "string" && settings.encryptedMachinePowerPrevious.trim()
         ? settings.encryptedMachinePowerPrevious : undefined,
+      ...(typeof settings.machineAutoStopEnabled === "boolean" ? { machineAutoStopEnabled: settings.machineAutoStopEnabled } : {}),
       machinePowerHandoffs: normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs).length
         ? normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs)
         : undefined,
@@ -3496,6 +3501,17 @@ export class SettingsService {
   async getMachinePairing(pairingKey: string): Promise<MobilePairingPackage | undefined> {
     const stored = await this.readStored();
     return this.readMachinePairings(stored)[pairingKey];
+  }
+
+  /** Whether the User left automatic stop on; the stop key is separate. */
+  async getMachineAutoStopEnabled(): Promise<boolean> {
+    return (await this.readStored()).machineAutoStopEnabled !== false;
+  }
+
+  async setMachineAutoStopEnabled(enabled: boolean): Promise<void> {
+    const stored = await this.readStored();
+    stored.machineAutoStopEnabled = enabled === true;
+    await this.writeStored(stored, true);
   }
 
   async getMachinePower(): Promise<AwsMachinePowerConfig | undefined> {

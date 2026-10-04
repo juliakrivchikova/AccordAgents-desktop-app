@@ -16,9 +16,14 @@ on `8b9619c`, not cutover or release approval. The root checkout remains clean
   Local event persistence failure rejects before the caller tells the provider.
   A Stop effect receipt records a request, not confirmed process termination.
 - Host-power observations preserve damaged claims and dead owners whose native
-  descendants are unproven. Separate runtime identities cannot overwrite one
-  another's claim. Registration is released only after explicit native closure,
-  not when the timer stops. Power tests use private coordination directories.
+  descendants are unproven. A dead owner's claim is released once that
+  deployment's own process registry shows every process it recorded has exited
+  (`releaseDeadClaims`); before that, crashed runtimes and killed test
+  deployments kept the User's instance awake for weeks. A guardian killed
+  together with its runtime is closed the same way (`processes-gone`). Separate
+  runtime identities cannot overwrite one another's claim. Registration is
+  released only after explicit native closure, not when the timer stops. Power
+  tests use private coordination directories.
 
 ## Evidence and limits
 

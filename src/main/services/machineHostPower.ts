@@ -30,8 +30,10 @@
  *
  *   - A claim from another boot is stale: `/tmp` is cleared on boot and the
  *     boot id is checked as well, so a claim can never outlive its host.
- *   - A dead owner does not prove its native descendants are gone. Only an
- *     explicit release after shutdown or another host boot removes its claim.
+ *   - A dead owner does not prove its native descendants are gone, so its
+ *     claim stays busy until its own registry shows that every process it
+ *     started has exited (`releaseDeadClaims`), it is released after shutdown,
+ *     or the host reboots.
  *   - A claim whose process is alive but has stopped refreshing counts as
  *     BUSY, not idle. A hung runtime that never stops is a visible cost; a
  *     stop that kills another profile's provider turn is lost work.
@@ -100,6 +102,10 @@ export interface MachineHostPowerOptions {
   staleAfterMs?: number;
   /** Injectable for tests; a live pid means the claim's owner still exists. */
   isAlive?(pid: number): boolean;
+  /** Host uptime at which a live pid started, when it can be read. A claim
+   *  refreshed before its pid's process started belongs to a process that has
+   *  since exited and whose pid was reused. */
+  startedAtUptimeMs?(pid: number): number | undefined;
 }
 
 export function machineHostProfileId(profilePath: string): string {
@@ -112,6 +118,7 @@ export class MachineHostPowerRegistry {
   private readonly pid: number;
   private readonly staleAfterMs: number;
   private readonly isAlive: (pid: number) => boolean;
+  private readonly startedAtUptimeMs: (pid: number) => number | undefined;
   private readonly instanceId = randomUUID();
   private readonly claimPath: string;
   private released = false;
@@ -126,6 +133,7 @@ export class MachineHostPowerRegistry {
     this.claimPath = path.join(this.dir, `${this.profileId}-${this.instanceId}.json`);
     this.staleAfterMs = options.staleAfterMs ?? MACHINE_HOST_CLAIM_STALE_MS;
     this.isAlive = options.isAlive ?? defaultIsAlive;
+    this.startedAtUptimeMs = options.startedAtUptimeMs ?? (options.isAlive ? () => undefined : linuxStartedAtUptimeMs);
     this.lastBusyUptimeMs = options.uptimeMs();
   }
 
@@ -173,7 +181,7 @@ export class MachineHostPowerRegistry {
       if (!name.endsWith(".json") || name === STOP_INTENT_FILE) continue;
       const full = path.join(this.dir, name);
       const claim = readClaim(full);
-      const expectedName = claim && `${claim.profileId}${claim.instanceId ? `-${claim.instanceId}` : ""}.json`;
+      const expectedName = claim && claimFileName(claim);
       if (!claim || name !== expectedName || machineHostProfileId(claim.profilePath) !== claim.profileId) {
         throw new Error(`Host-power claim ${name} cannot be verified; the host must remain awake.`);
       }
@@ -325,6 +333,41 @@ export class MachineHostPowerRegistry {
   }
 
   /**
+   * Removes claims whose owner has exited and left no native work running.
+   *
+   * A runtime that crashes, or a test deployment that is killed, cannot
+   * release its claim. Counting such a claim as busy kept the instance awake
+   * until the next reboot, for weeks, although nothing was working. Its owner
+   * is gone, so the claim says nothing any more; what still matters is whether
+   * the agents it started are running, and that is read from the deployment's
+   * own process registry. Removal happens under the host lock and only if the
+   * claim is still the one that was judged.
+   */
+  async releaseDeadClaims(hasLiveNativeWork: (profilePath: string) => Promise<boolean>): Promise<number> {
+    let released = 0;
+    for (const claim of this.others()) {
+      if (claim.instanceId === this.instanceId || this.ownerAlive(claim)) continue;
+      if (await hasLiveNativeWork(claim.profilePath)) continue;
+      await this.withLock(() => {
+        const file = path.join(this.dir, claimFileName(claim));
+        const current = readClaim(file);
+        if (!current || current.pid !== claim.pid || current.instanceId !== claim.instanceId || this.ownerAlive(current)) return;
+        prune(file);
+        released += 1;
+      });
+    }
+    return released;
+  }
+
+  /** The claim's own process is still running: its pid exists and started
+   *  before the claim was last written, so it is not a reused pid. */
+  private ownerAlive(claim: MachineHostClaim): boolean {
+    if (!this.isAlive(claim.pid)) return false;
+    const started = this.startedAtUptimeMs(claim.pid);
+    return started === undefined || started <= claim.uptimeMs;
+  }
+
+  /**
    * Clears claims this same profile left behind, once its own native work is
    * proven gone.
    *
@@ -344,7 +387,7 @@ export class MachineHostPowerRegistry {
     for (const claim of mine) {
       if (claim.instanceId === this.instanceId) continue;
       if (this.isAlive(claim.pid)) continue;
-      prune(path.join(this.dir, `${claim.profileId}-${claim.instanceId}.json`));
+      prune(path.join(this.dir, claimFileName(claim)));
       cleared += 1;
     }
     if (ownDeadIntent) {
@@ -450,6 +493,24 @@ function prune(file: string): void {
   } catch {
     // A claim owned by another user cannot be removed here; treating it as
     // gone is enough, and the directory is cleared on the next boot.
+  }
+}
+
+function claimFileName(claim: Pick<MachineHostClaim, "profileId" | "instanceId">): string {
+  return `${claim.profileId}${claim.instanceId ? `-${claim.instanceId}` : ""}.json`;
+}
+
+/** Linux reports a process's start in clock ticks since boot (proc(5), stat
+ *  field 22); user-space ticks are 100 per second on every Linux this runs on.
+ *  Elsewhere, or when the process is gone, there is no answer. */
+function linuxStartedAtUptimeMs(pid: number): number | undefined {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const ticks = Number(stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19]);
+    return Number.isFinite(ticks) && ticks >= 0 ? ticks * 10 : undefined;
+  } catch {
+    return undefined;
   }
 }
 

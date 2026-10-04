@@ -1,10 +1,20 @@
 import { useEffect, useState } from "react";
-import { ChevronDown } from "lucide-react";
-import type { CloudRunWorkerDoctorReport, CloudRunWorkerSetupProgress } from "../../../shared/types";
+import { ChevronDown, Loader2 } from "lucide-react";
+import type { AwsWorkerAutoStopProblem, CloudRunWorkerDoctorReport, CloudRunWorkerSetupProgress } from "../../../shared/types";
 import { CloudProviderAuth } from "../cloud-provider-auth";
 
-export function AwsInstanceDiagnostics(): JSX.Element {
+/**
+ * Checks of the instance, and the one place a switched-on automatic stop
+ * that cannot work says why. Each problem names what fixes it; a collapsed
+ * section still shows that there is one.
+ */
+export function AwsInstanceDiagnostics(props: {
+  autoStopProblem?: AwsWorkerAutoStopProblem;
+  onAutoStopAction?: (action: NonNullable<AwsWorkerAutoStopProblem["action"]>) => Promise<void>;
+} = {}): JSX.Element {
   const [open, setOpen] = useState(false);
+  const [fixing, setFixing] = useState(false);
+  const [fixError, setFixError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [failed, setFailed] = useState(false);
@@ -46,10 +56,20 @@ export function AwsInstanceDiagnostics(): JSX.Element {
     }
   };
 
+  const problem = props.autoStopProblem;
+  const fix = async (action: NonNullable<AwsWorkerAutoStopProblem["action"]>): Promise<void> => {
+    setFixing(true);
+    setFixError(undefined);
+    try { await props.onAutoStopAction?.(action); }
+    catch (error) { setFixError((error instanceof Error ? error.message : String(error)).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "")); }
+    finally { setFixing(false); }
+  };
+
   return (
     <div className="gen-aws-diagnostics">
       <button type="button" className="gen-aws-disclosure" data-testid="machine-instance-diagnostics-toggle" aria-expanded={open} aria-controls="aws-instance-diagnostics" onClick={() => setOpen(!open)}>
-        <span>Diagnostics</span><ChevronDown size={16} aria-hidden />
+        <span>Diagnostics{problem ? <span className="gen-aws-diagnostics-badge" data-testid="machine-instance-diagnostics-problem-count">1 problem</span> : null}</span>
+        <ChevronDown size={16} aria-hidden />
       </button>
       {status ? (
         <div className={`gen-aws-feedback${failed ? " is-error" : ""}`} data-testid="machine-instance-diagnostics-status" role={failed ? "alert" : "status"}>
@@ -61,6 +81,22 @@ export function AwsInstanceDiagnostics(): JSX.Element {
       ) : null}
       {open ? (
         <div id="aws-instance-diagnostics">
+          {problem ? (
+            <div className="gen-aws-problem" data-testid="aws-auto-stop-problem" role="alert">
+              <div className="gen-aws-problem-text">
+                <strong>Automatic stop is not working.</strong> {problem.message}
+              </div>
+              {fixError ? <div className="gen-aws-dialog-error">{fixError}</div> : null}
+              {problem.action ? (
+                <div className="gen-actions">
+                  <button type="button" className="gen-pill" data-testid="aws-auto-stop-problem-action" disabled={fixing} onClick={() => void fix(problem.action!)}>
+                    {fixing ? <span className="gen-pill-lead"><Loader2 size={16} className="gen-aws-spinner" aria-hidden /></span> : null}
+                    <span className="gen-pill-label">{fixing && problem.action === "reconnect" ? "Working…" : problem.actionLabel ?? "Fix"}</span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div className="gen-row gen-row-stack">
             <div className="gen-row-desc">Check the cloud runtime and provider sign-in, or set up missing components.</div>
             <div className="gen-actions">

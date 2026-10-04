@@ -26,6 +26,7 @@ import type {
   RevokeMobilePairingResult,
   StoredPendingMailboxRevocation,
   AwsWorkerStartRequest,
+  SetAwsAutoStopRequest,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
@@ -325,6 +326,9 @@ const MOBILE_EVENT_EXECUTION_CLAIM_TTL_MS = 45_000;
 const mobileRelayControls = new Map<string, MobileRelayControlService>();
 // Machines transport: enrolled machines that host participants.
 let machineLinkService: MachineLinkService | undefined;
+/** When this desktop started connecting to its machines. */
+let machineLinkStartedAt: number | undefined;
+const MACHINE_LINK_CONNECT_GRACE_MS = 60_000;
 const mobileMailboxPollers = new Map<string, NodeJS.Timeout>();
 const mobilePairingsByKey = new Map<string, MobilePairingPackage>();
 // W1 arrival cursors, per pairing. Persisted with paired devices so a restart
@@ -385,13 +389,22 @@ const cloudRunDoctorService: CloudRunDoctorService = new CloudRunDoctorService({
 const cloudRunSetupSession = new CloudRunSetupSession();
 const cloudRunAwsService = new CloudRunAwsService(settingsService, {
   appVersion: app.getVersion(),
+  // Unknown while the link is still connecting after this desktop started.
+  machineConnected: (machineId) => machineLinkService && machineLinkStartedAt !== undefined
+    && Date.now() - machineLinkStartedAt >= MACHINE_LINK_CONNECT_GRACE_MS
+    ? machineLinkService.isMachineConnected(machineId) : undefined,
   // The box is no longer asked over SSH whether a turn is running on it: the
   // machine on it reports its own work over the link, and an idle stop waits
   // while any of it is in flight.
   automaticStopGate: {
-    authorizeAutomaticWorkerStop: async () => machineLinkService?.hasActiveMachineWork()
-      ? { allowed: false, reason: "A machine is still working." }
-      : { allowed: true, lease: { leaseId: "machine-idle", expiresAt: new Date(Date.now() + 30_000).toISOString() } },
+    // The User's automatic-stop switch governs this desktop's own idle stop
+    // too: off means the instance is never stopped by itself.
+    authorizeAutomaticWorkerStop: async () => !(await settingsService.getAwsWorkerCredentials())?.power
+      || !await settingsService.getMachineAutoStopEnabled()
+      ? { allowed: false, reason: "Automatic stop is off." }
+      : machineLinkService?.hasActiveMachineWork()
+        ? { allowed: false, reason: "A machine is still working." }
+        : { allowed: true, lease: { leaseId: "machine-idle", expiresAt: new Date(Date.now() + 30_000).toISOString() } },
     renewAutomaticWorkerStopLease: async (_worker, lease) => machineLinkService?.hasActiveMachineWork()
       ? Promise.reject(new Error("A machine started working; the automatic stop is abandoned."))
       : { ...lease, expiresAt: new Date(Date.now() + 30_000).toISOString() },
@@ -2507,6 +2520,30 @@ function registerIpc(): void {
     return result;
   });
   ipcMain.handle("cloud-runs:aws-status", () => cloudRunAwsService.status());
+  ipcMain.handle("cloud-runs:aws-auto-stop", async (_event, request: SetAwsAutoStopRequest) => {
+    const enabled = request?.enabled === true;
+    const blob = typeof request?.blob === "string" ? request.blob.trim() : "";
+    if (blob) await cloudRunAwsService.adoptAutoStopKey(blob);
+    else if (enabled && (await cloudRunAwsService.status()).autoStop?.needsSetup !== false) {
+      throw new Error("Run the setup command first: there is no automatic-stop key yet.");
+    }
+    await settingsService.setMachineAutoStopEnabled(enabled);
+    // The machine decides when to stop; tell a connected one now. One that is
+    // offline gets the switch with the settings it receives on connecting.
+    await machineLinkService?.syncSettings().catch((error) => {
+      void debugLogService.write("machines.auto-stop.sync-failed", { message: error instanceof Error ? error.message : String(error) });
+    });
+    // A new key goes over to the machine the next time it is idle.
+    if (blob) evaluateMachineUpdates?.();
+    void debugLogService.write("machines.auto-stop.switched", { enabled, newKey: Boolean(blob) });
+    return cloudRunAwsService.status();
+  });
+  ipcMain.handle("cloud-runs:aws-reconnect-machine", async () => {
+    await cloudRunPreparation.prepareRuntime();
+    evaluateMachineUpdates?.();
+    sendToMainWindow("machines:updated", await machineListResult());
+    return cloudRunAwsService.status();
+  });
   ipcMain.handle("cloud-runs:aws-stop", () => cloudRunAwsService.stopWorker());
   ipcMain.handle("cloud-runs:aws-delete", () => cloudRunAwsService.deleteWorker());
   ipcMain.handle("settings:get-agent-environment", () => agentEnvironmentService.snapshot());
@@ -3565,6 +3602,7 @@ void app.whenReady().then(async () => {
     // desktop subscribes to; while a machine waits for idle, ask again.
     const autoUpgradeTimer = setInterval(() => { if (autoUpgrade.hasWaiting()) void autoUpgrade.evaluate(); }, ACTIVITY_RECHECK_MS);
     autoUpgradeTimer.unref?.();
+    machineLinkStartedAt = Date.now();
     void machineLinkService.start().then(() => autoUpgrade.evaluate()).catch((error) => {
       void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });
     });
