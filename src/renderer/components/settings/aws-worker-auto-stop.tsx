@@ -16,25 +16,29 @@ export function useAwsAutoStop(
   report: (cause?: unknown) => void
 ): {
   busy: boolean;
-  setupOpen: boolean;
-  setSetupOpen: (open: boolean) => void;
+  setup: AutoStopSetupMode | undefined;
+  closeSetup: () => void;
   toggle: (enabled: boolean) => void;
   fix: (action: NonNullable<AwsWorkerAutoStopProblem["action"]>) => Promise<void>;
 } {
   const [busy, setBusy] = useState(false);
-  const [setupOpen, setSetupOpen] = useState(false);
+  const [setup, setSetup] = useState<AutoStopSetupMode>();
   const toggle = (enabled: boolean): void => {
-    if (enabled && autoStop?.needsSetup) { setSetupOpen(true); return; }
+    if (enabled && autoStop?.needsSetup) { setSetup("turn-on"); return; }
     setBusy(true);
     report();
-    window.consensus.setAwsAutoStop({ enabled }).then(accept, report).finally(() => setBusy(false));
+    window.consensus.setAwsAutoStop({ enabled }).then(accept, (cause) => report(new Error(ipcErrorMessage(cause))))
+      .finally(() => setBusy(false));
   };
   const fix = async (action: NonNullable<AwsWorkerAutoStopProblem["action"]>): Promise<void> => {
-    if (action === "set-up-again") { setSetupOpen(true); return; }
+    if (action === "set-up-again") { setSetup("set-up-again"); return; }
     accept(await window.consensus.reconnectAwsMachine());
   };
-  return { busy, setupOpen, setSetupOpen, toggle, fix };
+  return { busy, setup, closeSetup: () => setSetup(undefined), toggle, fix };
 }
+
+/** Turning the switch on, or replacing a key AWS no longer accepts. */
+export type AutoStopSetupMode = "turn-on" | "set-up-again";
 
 /**
  * Automatic stop is one switch. Whatever keeps a switched-on instance from
@@ -73,11 +77,12 @@ export function AwsAutoStopRow(props: {
  * switch shows on once the result is applied, not before.
  */
 export function AwsAutoStopSetupDialog(props: {
-  open: boolean;
+  mode: AutoStopSetupMode | undefined;
   region: string;
-  onOpenChange: (open: boolean) => void;
+  onClose: () => void;
   onEnabled: (status: AwsWorkerStatus) => void;
 }): JSX.Element {
+  const open = Boolean(props.mode);
   const [command, setCommand] = useState("");
   const [commandError, setCommandError] = useState<string>();
   const [blob, setBlob] = useState("");
@@ -85,8 +90,10 @@ export function AwsAutoStopSetupDialog(props: {
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string>();
 
+  // Loaded once per opening: a status refresh while it is open must not
+  // replace the command or clear what was pasted.
   useEffect(() => {
-    if (!props.open) return;
+    if (!open) return;
     let current = true;
     setCommand("");
     setCommandError(undefined);
@@ -95,10 +102,11 @@ export function AwsAutoStopSetupDialog(props: {
     setError(undefined);
     window.consensus.getAwsWorkerBootstrapCommand(props.region).then(
       (text) => { if (current) setCommand(text); },
-      (cause) => { if (current) setCommandError(messageOf(cause)); }
+      (cause) => { if (current) setCommandError(ipcErrorMessage(cause)); }
     );
     return () => { current = false; };
-  }, [props.open, props.region]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const copy = async (): Promise<void> => {
     if (command) setCopied(await writeClipboardText(command, (value) => navigator.clipboard.writeText(value)));
@@ -109,22 +117,23 @@ export function AwsAutoStopSetupDialog(props: {
     try {
       const status = await window.consensus.setAwsAutoStop({ enabled: true, blob: blob.trim() });
       props.onEnabled(status);
-      props.onOpenChange(false);
+      props.onClose();
     } catch (cause) {
-      setError(messageOf(cause));
+      setError(ipcErrorMessage(cause));
     } finally {
       setApplying(false);
     }
   };
 
   return (
-    <Dialog open={props.open} onOpenChange={(open) => { if (!applying) props.onOpenChange(open); }}>
-      <DialogContent className="gen-aws-auto-stop-dialog" data-testid="aws-worker-auto-stop-dialog">
+    <Dialog open={open} onOpenChange={(next) => { if (!next && !applying) props.onClose(); }}>
+      <DialogContent className="gen-aws-auto-stop-dialog" data-testid="aws-worker-auto-stop-dialog" showCloseButton={false}>
         <DialogHeader>
-          <DialogTitle>Turn on automatic stop</DialogTitle>
+          <DialogTitle>{props.mode === "set-up-again" ? "Set up automatic stop again" : "Turn on automatic stop"}</DialogTitle>
           <DialogDescription>
-            The instance will stop by itself after three hours without working agents, even when this app is closed.
-            Run this command once in Terminal with an AWS administrator account, then paste its result here.
+            {props.mode === "set-up-again"
+              ? "AWS no longer accepts the key the instance stops itself with. Run this command once in Terminal with an AWS administrator account to make a new one, then paste its result here."
+              : "The instance will stop by itself after three hours without working agents, even when this app is closed. Run this command once in Terminal with an AWS administrator account, then paste its result here."}
           </DialogDescription>
         </DialogHeader>
         <div className="gen-aws-command-box">
@@ -136,7 +145,7 @@ export function AwsAutoStopSetupDialog(props: {
             {command || (commandError ? "" : "Preparing the command…")}
           </pre>
         </div>
-        {commandError ? <div className="gen-aws-dialog-error" role="alert">{commandError}</div> : null}
+        {commandError ? <div className="gen-aws-inline-error" role="alert">{commandError}</div> : null}
         <label className="gen-aws-field">
           <span>Paste the result</span>
           <textarea
@@ -148,14 +157,14 @@ export function AwsAutoStopSetupDialog(props: {
             onChange={(event) => setBlob(event.target.value)}
           />
         </label>
-        {error ? <div className="gen-aws-dialog-error" role="alert" data-testid="aws-worker-auto-stop-error">{error}</div> : null}
+        {error ? <div className="gen-aws-inline-error" role="alert" data-testid="aws-worker-auto-stop-error">{error}</div> : null}
         <DialogFooter>
           <DialogClose asChild>
             <Button type="button" variant="outline" size="sm" disabled={applying}>Cancel</Button>
           </DialogClose>
           <Button type="button" size="sm" data-testid="aws-worker-auto-stop-apply" disabled={applying || !blob.trim()} onClick={() => void apply()}>
             {applying ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
-            {applying ? "Turning on…" : "Turn on"}
+            {applying ? "Applying…" : props.mode === "set-up-again" ? "Apply" : "Turn on"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -163,8 +172,8 @@ export function AwsAutoStopSetupDialog(props: {
   );
 }
 
-function messageOf(cause: unknown): string {
+/** The reason only: Electron prefixes errors thrown in the main process. */
+export function ipcErrorMessage(cause: unknown): string {
   const text = cause instanceof Error ? cause.message : String(cause);
-  // Electron prefixes errors thrown in the main process; the User needs the reason only.
   return text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
 }

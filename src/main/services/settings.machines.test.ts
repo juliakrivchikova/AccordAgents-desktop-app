@@ -362,3 +362,15 @@ test("the automatic-stop switch survives a restart and reaches the machine with 
     await rm(machineDir, { recursive: true, force: true });
   }
 });
+
+test("an unreadable settings file never reads as automatic stop left on, and is not overwritten by the switch", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-auto-stop-unreadable-"));
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  try {
+    await writeFile(path.join(dir, "settings.json"), "{ not json");
+    await assert.rejects(make().getMachineAutoStopEnabled(), /could not be read/);
+    await assert.rejects(make().setMachineAutoStopEnabled(false), /nothing was changed/);
+    assert.equal(await readFile(path.join(dir, "settings.json"), "utf8"), "{ not json");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

@@ -397,3 +397,29 @@ test("Settings sets the machine's program up again without any provider, and lea
   await connected.service.prepare(request, () => {});
   assert.ok(connected.calls.includes("provider:codex-cli"), "a member choosing Cloud run afterwards still gets its provider checked");
 });
+
+test("two requests to set the program up again run one setup, and a member's Cloud run waits for it", async () => {
+  const h = harness();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const install = h.options.install;
+  let connected = false;
+  h.options.isConnected = () => connected;
+  h.options.install = async (request, progress) => {
+    await held;
+    const result = await install(request, progress);
+    // The program it installed connects, on this desktop's version.
+    h.machines[0].lastHello = { deviceId: "cloud", machineName: "cloud", platform: "linux", appVersion: "test", instanceId: "p", providers: [] };
+    connected = true;
+    return result;
+  };
+  const service = new CloudRunPreparationService(h.options);
+  const first = service.prepareRuntime();
+  const second = service.prepareRuntime();
+  const member = service.prepare(request, () => {});
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  release();
+  await Promise.all([first, second, member]);
+  assert.equal(h.installRequests.length, 1, "one setup, however many asked");
+  assert.ok(h.calls.includes("provider:codex-cli"), "the member still gets its provider checked");
+});

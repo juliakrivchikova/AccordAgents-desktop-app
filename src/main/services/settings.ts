@@ -3505,11 +3505,16 @@ export class SettingsService {
 
   /** Whether the User left automatic stop on; the stop key is separate. */
   async getMachineAutoStopEnabled(): Promise<boolean> {
-    return (await this.readStored()).machineAutoStopEnabled !== false;
+    const stored = await this.readStored();
+    // An unreadable file is not a switch left on: the machine must not stop
+    // the instance on defaults the User never chose.
+    if (this.storedReadError) throw new Error("Settings could not be read; automatic stop waits until they can.");
+    return stored.machineAutoStopEnabled !== false;
   }
 
   async setMachineAutoStopEnabled(enabled: boolean): Promise<void> {
     const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
     stored.machineAutoStopEnabled = enabled === true;
     await this.writeStored(stored, true);
   }

@@ -448,3 +448,22 @@ test("a key whose temporary failure was recorded before this process is tried ag
   for (let waited = 0; h.upgrades.length < 1 && waited < 2_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(h.upgrades.length, 1, "nothing else would have come back to it");
 });
+
+test("the User's Try again re-attempts an update that already failed here, still only once the machine is idle", async () => {
+  let busy = true;
+  const h = harness({
+    records: [record({ lastOperation: snapshot({ operationId: "auto-upgrade-1.10.4-beta.11-1", phase: "error", message: "The machine's current runtime did not stop." }) })],
+    activity: () => activity(busy ? { activeRunIds: ["run-1"] } : {})
+  });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 0, "a failed automatic attempt is not repeated by itself");
+  await h.service.retry("m1");
+  assert.equal(h.upgrades.length, 0, "a busy machine is not drained for it");
+  assert.equal(h.service.hasWaiting(), true, "it waits for idle");
+  busy = false;
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1);
+  assert.equal(h.holds.length, 1, "new turns are held while it runs");
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1, "one try per request");
+});

@@ -653,7 +653,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .settings-view .gen-aws-spinner { animation: none; }
+  .settings-view .gen-aws-spinner,
+  .gen-aws-auto-stop-dialog .gen-aws-spinner { animation: none; }
 }
 
 .settings-view .gen-aws-history summary { list-style: none; }
@@ -691,13 +692,6 @@
 .settings-view .gen-aws-feedback.is-error {
   border-color: var(--app-warning);
   background: color-mix(in srgb, var(--app-warning) 8%, var(--app-surface));
-}
-
-.settings-view .gen-aws-size-change {
-  margin: 0 18px 12px;
-  color: var(--app-warning);
-  font-size: 12.5px;
-  line-height: 1.5;
 }
 
 .settings-view .gen-aws-disclosure {
@@ -1168,11 +1162,6 @@
   color: var(--app-muted);
 }
 
-/* A billing note the User has to act on: automatic stop refused or not working. */
-.settings-view .gen-aws-summary .gen-row-desc.is-warning {
-  color: var(--app-warning);
-}
-
 /* Automatic stop: one switch in the instance card; the setup it needs opens
    in a dialog, which renders outside the settings view. */
 .settings-view .gen-aws-auto-stop {
@@ -1181,6 +1170,7 @@
 
 .gen-aws-auto-stop-dialog {
   width: min(560px, calc(100vw - 32px)) !important;
+  max-width: min(560px, calc(100vw - 32px)) !important;
   gap: 14px !important;
 }
 
@@ -1199,8 +1189,8 @@
   background: transparent !important;
 }
 
-.gen-aws-dialog-error {
-  color: var(--app-warning);
+.gen-aws-inline-error {
+  color: var(--app-status-warning-text);
   font-size: 12.5px;
   line-height: 1.5;
   overflow-wrap: anywhere;
@@ -1208,7 +1198,7 @@
 
 .settings-view .gen-aws-diagnostics-badge {
   margin-left: 8px;
-  color: var(--app-warning);
+  color: var(--app-status-warning-text);
   font-size: 12px;
   font-weight: 600;
 }

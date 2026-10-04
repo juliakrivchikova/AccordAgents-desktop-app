@@ -29,6 +29,37 @@ export const MACHINE_POWER_REFUSED_EXIT_CODE = 3;
  *  desktop reads it to offer setting automatic stop up again. */
 export const MACHINE_STOP_KEY_REFUSED = "AWS does not accept this machine's stop key";
 
+/** What a machine reports while its idle stop goes as intended. */
+export const MACHINE_IDLE_STOPPING = "The machine is stopping after three hours idle; new turns remain queued.";
+export const MACHINE_IDLE_COMPLETING = "The machine is completing its retained idle stop; new turns remain queued.";
+export const MACHINE_IDLE_STOP_WITHDRAWN = "The interrupted idle-stop preparation did not commit; queued work can continue.";
+export const machineIdleStoppedWarning = (state: string): string =>
+  `The AWS machine is ${state} after three hours idle; queued turns run after it wakes.`;
+/** Begins what a machine reports while AWS has not confirmed its stop yet. */
+export const MACHINE_IDLE_STOP_UNCONFIRMED = "Idle stop is not confirmed";
+
+/**
+ * What a machine's idle-stop warning means for the User:
+ * - `progress`: the stop is happening as intended;
+ * - `activity`: agents are working (only runtimes before 1.11.1 report this);
+ * - `refused`: AWS does not accept the stop key;
+ * - `unconfirmed`: AWS has not confirmed a stop yet, and it is asked again;
+ * - `fault`: the machine cannot tell whether agents are working.
+ */
+export function machineIdleWarningKind(warning: string): "progress" | "activity" | "refused" | "unconfirmed" | "fault" {
+  if (warning.includes(MACHINE_STOP_KEY_REFUSED)) return "refused";
+  if (warning === MACHINE_IDLE_STOPPING || warning === MACHINE_IDLE_COMPLETING || warning === MACHINE_IDLE_STOP_WITHDRAWN
+    || /^The AWS machine is \S+ after three hours idle; queued turns run after it wakes\.$/.test(warning)) return "progress";
+  if (warning.startsWith(MACHINE_IDLE_STOP_UNCONFIRMED)) return "unconfirmed";
+  if (LEGACY_ACTIVITY_WARNING.test(warning)) return "activity";
+  return "fault";
+}
+
+/** What runtimes before 1.11.1 reported while agents in another deployment
+ *  were working: the ordinary reason to stay up, not a fault. */
+const LEGACY_ACTIVITY_WARNING =
+  /^The machine stays awake: (Another deployment on this machine \(.*\) is running (work|a maintenance command)\.|another deployment on this machine worked recently\.)$/;
+
 /** A definitive no to a power key: retrying the same key cannot succeed. */
 export class MachinePowerRefusal extends Error {
   override name = "MachinePowerRefusal";

@@ -38,6 +38,10 @@ class FakeSettings {
     return this.autoStopEnabled;
   }
 
+  async setMachineAutoStopEnabled(enabled: boolean): Promise<void> {
+    this.autoStopEnabled = enabled;
+  }
+
   async listMachines(): Promise<Array<{ id: string; awsInstanceId?: string; lastHello?: { idleStopWarning?: string } }>> {
     return this.machines;
   }
@@ -504,10 +508,11 @@ test("AWS run references are acquired and released exactly once per run id", asy
 
 test("a Settings-only AWS operation rearms automatic idle stop", async () => {
   const settings = new FakeSettings();
-  settings.credentials = OLD_CREDS;
-  settings.handle = OLD_HANDLE;
+  // Automatic stop is on: a stop key for the instance's region is saved.
+  settings.credentials = { ...OLD_CREDS, power: { accessKeyId: "AKIAPOWERKEY000000001", secretAccessKey: "power-secret" } };
+  settings.handle = { ...OLD_HANDLE, instanceId: "i-0123456789abcdef0" };
   settings.mode = "aws";
-  const client = new FakeEc2Client({ instanceId: "i-old", state: "running", publicIp: "198.51.100.10" });
+  const client = new FakeEc2Client({ instanceId: "i-0123456789abcdef0", state: "running", publicIp: "198.51.100.10" });
   const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), {
     idleStopMs: 5,
     idleStopRetryMs: 5,
@@ -1103,7 +1108,7 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   const autoStop = async () => (await service.status()).autoStop;
   const ON = { enabled: true, needsSetup: false };
   const SET_UP_AGAIN = { ...ON, problem: { message: "AWS does not accept the automatic-stop key.", action: "set-up-again", actionLabel: "Set up again" } };
-  const TRY_AGAIN = { ...ON, problem: { message: "Automatic stop could not be set up on the cloud machine.", action: "reconnect", actionLabel: "Try again" } };
+  const TRY_AGAIN = { ...ON, problem: { message: "The cloud machine could not take its automatic-stop key.", action: "reconnect", actionLabel: "Try again" } };
   assert.deepEqual(await autoStop(), { ...ON, problem: { message: "The program that stops the instance is not set up on it yet.",
     action: "reconnect", actionLabel: "Set it up" } });
   settings.installs = [installFor("cloud")];
@@ -1134,6 +1139,17 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   settings.machines[0] = { ...settings.machines[0], lastHello: { idleStopWarning:
     "The machine stays awake: Another deployment on this machine (/tmp/accord-choice-repro-vYcpVH/machine and 6 more) is running work." } };
   assert.deepEqual(await autoStop(), ON, "an older runtime reporting agents at work is not a problem");
+  for (const ordinary of [
+    "The machine stays awake: Another deployment on this machine (/srv/other) is running a maintenance command.",
+    "The machine stays awake: another deployment on this machine worked recently.",
+    "The machine is stopping after three hours idle; new turns remain queued.",
+    "The AWS machine is stopping after three hours idle; queued turns run after it wakes."
+  ]) {
+    settings.machines[0] = { ...settings.machines[0], lastHello: { idleStopWarning: ordinary } };
+    assert.deepEqual(await autoStop(), ON, ordinary);
+  }
+  settings.machines[0] = { ...settings.machines[0], lastHello: { idleStopWarning: "Idle stop is not confirmed; native work remains queued: throttled" } };
+  assert.match((await autoStop())?.problem?.message ?? "", /still waiting for a confirmation/);
   settings.machines[0] = { ...settings.machines[0], lastHello: { idleStopWarning: "Automatic idle stop is suspended: metadata unavailable" } };
   assert.deepEqual(await autoStop(), { ...ON, problem: { message:
     "The cloud machine cannot check whether agents are working, so it stays on. Stop the instance when you finish." } },
@@ -1165,6 +1181,26 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   settings.credentials = OLD_CREDS;
   settings.autoStopEnabled = true;
   assert.deepEqual(await autoStop(), { enabled: false, needsSetup: true }, "no stop key: the switch is off and turning it on asks for one");
+});
+
+test("the switch turns on only with a usable key, and off keeps the key", async () => {
+  const settings = powerSettings();
+  const service = serviceWith(settings, new Map());
+  assert.equal(await service.autoStopSwitchedOn(), true);
+  assert.deepEqual(await service.setAutoStop({ enabled: false }), { keyAdded: false });
+  assert.equal(settings.autoStopEnabled, false);
+  assert.equal(await service.autoStopSwitchedOn(), false, "this desktop's own idle stop is held too");
+  assert.deepEqual(settings.credentials?.power, POWER_KEY, "the key stays for turning it on again");
+  await service.setAutoStop({ enabled: true });
+  assert.equal(settings.autoStopEnabled, true);
+  settings.handle = { ...POWER_HANDLE, region: "eu-west-1" };
+  settings.autoStopEnabled = false;
+  await assert.rejects(service.setAutoStop({ enabled: true }), /Run the setup command first/, "a key for another region cannot stop this instance");
+  assert.equal(settings.autoStopEnabled, false, "nothing changes");
+  settings.handle = POWER_HANDLE;
+  settings.installs = [installFor("cloud", { power: { keyId: POWER_KEY.accessKeyId, configuredAt: "t" } }), installFor("other")];
+  settings.machines.push({ id: "other", awsInstanceId: POWER_HANDLE.instanceId });
+  assert.equal((await service.autoStopMachineRecord())?.machineId, "cloud", "the fix acts on the machine that holds the key");
 });
 
 test("turning automatic stop on takes only a result that carries a stop key", async () => {

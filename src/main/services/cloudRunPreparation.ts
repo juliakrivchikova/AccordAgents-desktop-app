@@ -185,12 +185,7 @@ export class CloudRunPreparationService {
         // another member repeat a preparation that already succeeded.
         if (this.prepared && this.prepared.instanceId === currentInstance) this.prepared.retryProviders.add(request.provider);
         throw error;
-      }).finally(() => {
-        this.active = undefined;
-        this.activeProvider = undefined;
-        this.activeInstance = undefined;
-        this.latest = undefined;
-      });
+      }).finally(() => this.clearActive());
     }
     try {
       const result = await this.active;
@@ -201,6 +196,13 @@ export class CloudRunPreparationService {
       throw error;
     }
     finally { this.listeners.delete(listener); }
+  }
+
+  private clearActive(): void {
+    this.active = undefined;
+    this.activeProvider = undefined;
+    this.activeInstance = undefined;
+    this.latest = undefined;
   }
 
   private report(snapshot: Omit<CloudRunPreparationProgress, "operationId">): void {
@@ -235,14 +237,12 @@ export class CloudRunPreparationService {
    */
   async prepareRuntime(): Promise<void> {
     while (this.active) await this.active.catch(() => undefined);
-    const currentInstance = await this.options.configuredInstanceId();
-    this.activeInstance = currentInstance;
-    this.active = this.run(undefined, currentInstance).finally(() => {
-      this.active = undefined;
-      this.activeProvider = undefined;
-      this.activeInstance = undefined;
-      this.latest = undefined;
-    });
+    // Claimed before anything is awaited, so a second caller waits for this one.
+    this.active = (async () => {
+      const currentInstance = await this.options.configuredInstanceId();
+      this.activeInstance = currentInstance;
+      return this.run(undefined, currentInstance);
+    })().finally(() => this.clearActive());
     await this.active;
   }
 

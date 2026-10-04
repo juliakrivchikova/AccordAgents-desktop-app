@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { lstatSync, type Stats } from "node:fs";
 import { uptime } from "node:os";
 import path from "node:path";
 import { AwsMachinePowerClient, awsErrorText, isAwsPowerRefusal } from "../../shared/awsMachinePowerClient";
@@ -8,15 +8,21 @@ import type { CliAgentRunner } from "./cliAgents";
 import type { MachineHostService } from "./machineHost";
 import { MachineIdleScheduler } from "./machineIdle";
 import { MachineHostPowerRegistry, type MachineHostPowerOptions } from "./machineHostPower";
-import { MACHINE_IDLE_STOP_MS, MACHINE_STOP_KEY_REFUSED } from "../../shared/machinePower";
+import {
+  MACHINE_IDLE_COMPLETING, MACHINE_IDLE_STOP_MS, MACHINE_IDLE_STOP_UNCONFIRMED, MACHINE_IDLE_STOP_WITHDRAWN, MACHINE_IDLE_STOPPING,
+  MACHINE_STOP_KEY_REFUSED, machineIdleStoppedWarning
+} from "../../shared/machinePower";
 import { userDataPath } from "../platform";
 import type { MachinePowerStore } from "./machinePowerStore";
 import { nativeHostIdentity, verifiedNativeHostReboot, type NativeHostIdentity } from "./nativeHostIdentity";
-import { leaseProcessesGone, NativeProcessRegistry } from "./nativeProcessRegistry";
+import { leaseProcessesGone, NATIVE_PROCESS_REGISTRY_FILE, NativeProcessRegistry, type NativeProcessLease } from "./nativeProcessRegistry";
 import { readPosixProcessTableAsync, type PosixProcessRow } from "./processTermination";
 import { MachineMaintenance } from "./machineMaintenance";
 
 type PowerClient = Pick<AwsMachinePowerClient, "stopAfterDrain" | "close" | "assertCanStop">;
+type WarningCause = "activity" | "key" | "coordination";
+/** How long reading another deployment's registry may take. */
+const FOREIGN_REGISTRY_TIMEOUT_MS = 10_000;
 
 /** How long a stop key AWS refused is left alone before it is asked again.
  *  The key only changes when the runtime restarts with a new one. */
@@ -32,10 +38,12 @@ export class MachineIdlePower {
   private stopping = false;
   private uncertainFence = false;
   private lastWarning?: string;
-  /** What makes the current warning stale: new work (a neighbour was busy
-   *  at the stop), or AWS accepting the stop key. Unset, a warning stays
-   *  until another replaces it. */
-  private warningResolvedBy?: "activity" | "key" | "coordination";
+  /** What makes the current warning stale: new work, AWS accepting the stop
+   *  key, or the host's deployments being readable again and coordinating.
+   *  Unset, a warning stays until another replaces it. */
+  private warningResolvedBy?: WarningCause;
+  /** The User switched automatic stop off; on again, idle counts from then. */
+  private switchedOff = false;
   /** Host uptime until which a refused stop key is not asked about again. */
   private keyRefusedUntilMs?: number;
   private hostIdentity?: NativeHostIdentity;
@@ -107,7 +115,7 @@ export class MachineIdlePower {
       this.options.host.retainIdleFence();
       if (!this.options.runner.fenceIdleNativeAdmissions()) throw new Error("The retained idle stop raced native session admission.");
       this.stopping = true;
-      this.setWarning("The machine is completing its retained idle stop; new turns remain queued.");
+      this.setWarning(MACHINE_IDLE_COMPLETING);
       return;
     }
     const previous = await this.options.store.read();
@@ -128,7 +136,17 @@ export class MachineIdlePower {
       prepareStop: async since => {
         if (this.options.enabled && !await this.options.enabled()) {
           // Switched off is not a problem to report: nothing here is broken.
+          this.switchedOff = true;
           this.clearWarning();
+          return undefined;
+        }
+        if (this.switchedOff) {
+          // Switched on again: three idle hours from now, not from before,
+          // and a key that was refused meanwhile is asked about afresh.
+          this.switchedOff = false;
+          this.keyRefusedUntilMs = undefined;
+          await this.options.store.write({ version: 1, bootId, idleSinceMs: this.environment.uptimeMs() });
+          this.options.log("machine.idle.switched-on", {});
           return undefined;
         }
         if (this.keyRefusedUntilMs !== undefined && this.environment.uptimeMs() < this.keyRefusedUntilMs) return undefined;
@@ -162,7 +180,7 @@ export class MachineIdlePower {
           committed = true;
           return async () => {
             this.stopping = true;
-            this.setWarning("The machine is stopping after three hours idle; new turns remain queued.");
+            this.setWarning(MACHINE_IDLE_STOPPING);
             try { await drain(); await this.stopAws(); }
             catch (error) { this.failedStop(error); }
           };
@@ -240,7 +258,7 @@ export class MachineIdlePower {
     try {
       // A deployment that crashed or was killed cannot release its claim.
       // Its owner is gone; only agents it left running may hold the host.
-      const released = await this.hostPower.releaseDeadClaims(profilePath => this.hasLiveNativeWork(profilePath));
+      const released = await this.hostPower.releaseDeadClaims(profilePath => this.hasLiveNativeWork(profilePath), MACHINE_IDLE_STOP_MS);
       if (released) this.options.log("machine.host-power.released", { released });
       if (await this.hostPower.beginStop({ minIdleMs: MACHINE_IDLE_STOP_MS, ownIdleSinceUptimeMs })) {
         this.resolveWarning("coordination");
@@ -261,6 +279,15 @@ export class MachineIdlePower {
       this.setWarning(`The machine stays awake: another deployment on it (${outdated.profilePath}) needs an update before automatic stop can coordinate with it.`, "coordination");
       return false;
     }
+    // A hold nobody can confirm work behind, kept this long, is a fault:
+    // without saying so the instance would again run for weeks unexplained.
+    let unconfirmed: string | undefined;
+    try { unconfirmed = this.hostPower.unconfirmedClaims(MACHINE_IDLE_STOP_MS)[0]?.profilePath; }
+    catch { unconfirmed = undefined; }
+    if (unconfirmed) {
+      this.setWarning(`The machine stays awake: a program on it (${unconfirmed}) stopped responding, so its agents cannot be confirmed finished.`, "coordination");
+      return false;
+    }
     // Agents working, or working recently, next door is the ordinary reason to
     // stay up, not something the User has to act on.
     this.options.log("machine.idle.held", { busy: busy.length });
@@ -273,7 +300,7 @@ export class MachineIdlePower {
     const host = this.hostIdentity!;
     return this.environment.hasLiveNativeWork
       ? this.environment.hasLiveNativeWork(profilePath, host)
-      : nativeRegistryHasLiveWork(path.join(profilePath, "native-processes.sqlite3"), host);
+      : nativeRegistryHasLiveWork(path.join(profilePath, NATIVE_PROCESS_REGISTRY_FILE), host);
   }
 
   private async abandonHostStop(): Promise<void> {
@@ -294,7 +321,7 @@ export class MachineIdlePower {
         await this.abandonHostStop();
         this.uncertainFence = false;
         this.stopping = false;
-        this.setWarning("The interrupted idle-stop preparation did not commit; queued work can continue.");
+        this.setWarning(MACHINE_IDLE_STOP_WITHDRAWN);
         return;
       }
       this.uncertainFence = false;
@@ -317,12 +344,12 @@ export class MachineIdlePower {
     await assertNativeRegistryClosed(this.options.nativeProcessDbPath, this.hostIdentity!);
     if (this.closed) return;
     const state = await this.client.stopAfterDrain();
-    this.setWarning(`The AWS machine is ${state.state} after three hours idle; queued turns run after it wakes.`);
+    this.setWarning(machineIdleStoppedWarning(state.state));
     this.options.log("machine.idle.stop.accepted", { state: state.state });
   }
 
   private failedStop(error: unknown): void {
-    this.setWarning(`Idle stop is not confirmed; native work remains queued: ${errorText(error)}`);
+    this.setWarning(`${MACHINE_IDLE_STOP_UNCONFIRMED}; native work remains queued: ${errorText(error)}`);
     this.scheduleRetry(30_000);
   }
 
@@ -332,7 +359,7 @@ export class MachineIdlePower {
     this.retry.unref();
   }
 
-  private setWarning(warning: string, resolvedBy?: "activity" | "key" | "coordination"): void {
+  private setWarning(warning: string, resolvedBy?: WarningCause): void {
     this.warningResolvedBy = resolvedBy;
     if (this.lastWarning === warning) return;
     this.lastWarning = warning;
@@ -351,7 +378,7 @@ export class MachineIdlePower {
 
   /** Drops a warning its own cause has resolved, so the desktop does not keep
    *  showing a moment that has passed. */
-  private resolveWarning(cause: "activity" | "key" | "coordination"): void {
+  private resolveWarning(cause: WarningCause): void {
     if (!this.lastWarning || this.warningResolvedBy !== cause) return;
     this.lastWarning = undefined;
     this.warningResolvedBy = undefined;
@@ -399,12 +426,26 @@ export async function assertNativeRegistryClosed(registryPath: string, host: Nat
  */
 export async function nativeRegistryHasLiveWork(registryPath: string, host: NativeHostIdentity,
   readProcessTable: () => Promise<Map<number, PosixProcessRow> | undefined> = readPosixProcessTableAsync): Promise<boolean> {
-  if (!existsSync(registryPath)) return false;
-  const registry = new NativeProcessRegistry(registryPath);
+  let entry: Stats;
+  try { entry = lstatSync(registryPath); }
+  catch (error) {
+    // Only an absent registry means none was started; one that cannot be
+    // reached says nothing about its agents.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  if (!entry.isFile()) throw new Error(`${registryPath} is not a process registry.`);
+  const registry = new NativeProcessRegistry(registryPath, "sqlite3", { readOnly: true, timeoutMs: FOREIGN_REGISTRY_TIMEOUT_MS });
   let rows: Map<number, PosixProcessRow> | undefined;
   let cursor = "";
   for (;;) {
-    const leases = await registry.openLeases(cursor);
+    let leases: NativeProcessLease[];
+    try { leases = await registry.openLeases(cursor); }
+    catch (error) {
+      // A file its owner never got to set up has no executor in it.
+      if (cursor === "" && /no such table: native_provider_processes/.test(errorText(error))) return false;
+      throw error;
+    }
     if (!leases.length) return false;
     for (const lease of leases) {
       if (!verifiedNativeHostReboot(lease.host, host)) {

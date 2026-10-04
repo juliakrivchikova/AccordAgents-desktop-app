@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 import { MachineIdlePower, assertNativeRegistryClosed, nativeRegistryHasLiveWork } from "./machineIdlePower";
 import { capturePosixProcessIdentity } from "./processTermination";
-import { MachineHostPowerRegistry } from "./machineHostPower";
+import { MachineHostPowerRegistry, machineHostProfileId } from "./machineHostPower";
 import { assertCurrentAwsMachine } from "./awsMachineIdentity";
 import { StorageService } from "./storage";
-import { NativeProcessRegistry } from "./nativeProcessRegistry";
+import { NATIVE_PROCESS_REGISTRY_FILE, NativeProcessRegistry } from "./nativeProcessRegistry";
 import { MACHINE_IDLE_STOP_MS } from "../../shared/machinePower";
 
 const config = { version: 1 as const, instanceId: "i-0123456789abcdef0",
@@ -297,7 +297,7 @@ test("a crashed deployment stops keeping the instance awake once its agents are 
       await request.commitHostStop?.(async () => true) ? async () => undefined : undefined };
   const runner = { hasActiveNativeWork: () => false, shutdownWarmAgents: async () => undefined, fenceIdleNativeAdmissions: () => () => undefined };
   const alive = new Set([4321]);
-  const now = MACHINE_IDLE_STOP_MS * 3;
+  let now = MACHINE_IDLE_STOP_MS * 3;
   const crashed = new MachineHostPowerRegistry({ dir: shared, profilePath: "/tmp/accord-choice-repro/machine", bootId: identity.boot,
     uptimeMs: () => 1_000, pid: 4321, isAlive: (pid) => alive.has(pid) });
   const power = new MachineIdlePower({ config, store, host, runner, nativeProcessDbPath: path.join(dir, "native.sqlite3"),
@@ -319,7 +319,8 @@ test("a crashed deployment stops keeping the instance awake once its agents are 
     live.add("/tmp/accord-choice-repro/machine");
     await check();
     assert.equal(stops, 0, "its runtime died, but an agent it started is still running");
-    assert.equal(power.warning(), undefined, "agents working are not a fault");
+    assert.match(power.warning() ?? "", /cannot be confirmed finished/,
+      "an agent outliving its runtime for hours is reported, not taken for ordinary work");
     live.clear();
     enabled = false;
     await check();
@@ -327,9 +328,134 @@ test("a crashed deployment stops keeping the instance awake once its agents are 
     assert.equal(power.warning(), undefined, "and switched off is not a fault either");
     enabled = true;
     await check();
+    assert.equal(stops, 0, "switched on again, idle counts from now");
+    now += MACHINE_IDLE_STOP_MS + 1;
+    await check();
     assert.equal(stops, 1, "the dead runtime's claim no longer holds the instance");
     assert.deepEqual(new MachineHostPowerRegistry({ dir: shared, profilePath: "/home/ubuntu/.accordagents/probe", bootId: identity.boot,
       uptimeMs: () => now, isAlive: () => true }).others().map((claim) => claim.profilePath), ["/home/ubuntu/.accordagents/mine"],
     "its claim is gone from the host directory");
   } finally { power.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+function idleHarness(dir: string, options: { enabled?: () => Promise<boolean>; refuseKey?: () => boolean; now: () => number }) {
+  const shared = path.join(dir, "host-power");
+  const store = new StorageService({ dbPath: path.join(dir, "state.sqlite3") }).machinePower();
+  const result = { stops: 0, checks: 0, warnings: [] as Array<string | null>, store, shared, power: undefined as unknown as MachineIdlePower };
+  const host = { hasWorkForIdleStop: async () => false, recoverIdleFence: async () => Boolean(await store.stopFence(identity.boot)),
+    retainIdleFence: () => undefined, publishPowerStatus: async () => undefined, shutdown: async () => undefined,
+    prepareIdleStop: async (request: { commitHostStop?(prepare: () => Promise<boolean>): Promise<boolean> }) =>
+      await request.commitHostStop?.(async () => true) ? async () => undefined : undefined };
+  const runner = { hasActiveNativeWork: () => false, shutdownWarmAgents: async () => undefined, fenceIdleNativeAdmissions: () => () => undefined };
+  result.power = new MachineIdlePower({ config, store, host, runner, nativeProcessDbPath: path.join(dir, "native.sqlite3"),
+    profilePath: path.join(dir, "mine"), ...(options.enabled ? { enabled: options.enabled } : {}),
+    log: (event, payload) => { if (event === "machine.idle.status") result.warnings.push(payload.warning as string | null); } }, {
+    identity: async () => identity, verifyAws: async () => undefined, uptimeMs: options.now,
+    createHostRegistry: registryOptions => new MachineHostPowerRegistry({ ...registryOptions, dir: shared, isAlive: (pid) => pid === process.pid }),
+    client: { close: () => undefined,
+      assertCanStop: async () => { result.checks++; if (options.refuseKey?.()) throw Object.assign(new Error("not authorized"), { name: "UnauthorizedOperation", $fault: "client" }); },
+      stopAfterDrain: async () => { result.stops++; return { instanceId: config.instanceId, state: "stopping" }; } }
+  });
+  return result;
+}
+const checkOf = (power: MachineIdlePower) => (power as unknown as { scheduler: { check(): Promise<void> } }).scheduler.check();
+
+test("a dead deployment's own registry decides: an agent it left running keeps the instance up until it exits", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-real-registry-"));
+  const now = MACHINE_IDLE_STOP_MS * 3;
+  const h = idleHarness(dir, { now: () => now });
+  try {
+    const profile = path.join(dir, "crashed");
+    const registry = new NativeProcessRegistry(path.join(profile, NATIVE_PROCESS_REGISTRY_FILE));
+    await (await import("node:fs/promises")).mkdir(profile, { recursive: true });
+    await registry.init();
+    const lease = (await registry.acquire({ scope: "chat:a", token: "t", host: identity, parent: GONE_PARENT, supervisor: GONE_SUPERVISOR }))!;
+    await registry.update({ ...lease, phase: "running", provider: LIVE });
+    new MachineHostPowerRegistry({ dir: h.shared, profilePath: profile, bootId: identity.boot, uptimeMs: () => 1_000, pid: 4321,
+      isAlive: () => false }).publish(true);
+    await h.store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
+    await h.power.start();
+    await checkOf(h.power);
+    assert.equal(h.stops, 0, "its agent still runs");
+    await registry.update({ ...(await registry.get("chat:a"))!, provider: { pid: 1236, startedAt: "synthetic-provider" } });
+    await checkOf(h.power);
+    assert.equal(h.stops, 1, "once nothing it started runs, the instance stops");
+  } finally { h.power.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("switched back on, the machine waits three idle hours from then and asks AWS about a refused key again", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-switch-"));
+  let now = MACHINE_IDLE_STOP_MS + 100;
+  let enabled = true; let refuse = true;
+  const h = idleHarness(dir, { now: () => now, enabled: async () => enabled, refuseKey: () => refuse });
+  try {
+    await h.store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
+    await h.power.start();
+    await checkOf(h.power);
+    assert.match(h.power.warning() ?? "", /does not accept/);
+    enabled = false;
+    await checkOf(h.power);
+    assert.equal(h.power.warning(), undefined, "off is not a fault");
+    enabled = true; refuse = false; now += 60_000;
+    await checkOf(h.power);
+    assert.equal(h.stops, 0, "turning it on does not stop an instance that was already idle");
+    now += MACHINE_IDLE_STOP_MS - 1_000;
+    await checkOf(h.power);
+    assert.equal(h.stops, 0);
+    now += 2_000;
+    await checkOf(h.power);
+    assert.equal(h.stops, 1, "three hours after it was switched on");
+    enabled = true; refuse = true;
+  } finally { h.power.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a neighbour on the old protocol, or one nobody can confirm, is reported; agents working are not", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-report-"));
+  let now = MACHINE_IDLE_STOP_MS * 2;
+  const h = idleHarness(dir, { now: () => now });
+  try {
+    await h.store.write({ version: 1, bootId: identity.boot, idleSinceMs: 1 });
+    await h.power.start();
+    const old = new MachineHostPowerRegistry({ dir: h.shared, profilePath: "/srv/old", bootId: identity.boot, uptimeMs: () => now,
+      pid: process.pid, isAlive: () => true });
+    old.publish(true);
+    const file = (await import("node:fs")).readdirSync(h.shared).find((name) => name.startsWith(machineHostProfileId("/srv/old")))!;
+    const claimPath = path.join(h.shared, file);
+    const fs = await import("node:fs");
+    fs.writeFileSync(claimPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(claimPath, "utf8")), version: 1 }));
+    await checkOf(h.power);
+    assert.match(h.power.warning() ?? "", /needs an update/);
+    old.release();
+    const hung = new MachineHostPowerRegistry({ dir: h.shared, profilePath: "/srv/hung", bootId: identity.boot, uptimeMs: () => 1_000,
+      pid: process.pid, isAlive: () => true });
+    hung.publish(true);
+    await checkOf(h.power);
+    assert.match(h.power.warning() ?? "", /stopped responding, so its agents cannot be confirmed finished/);
+    assert.equal(h.stops, 0);
+    hung.release();
+    now += 1_000;
+    await checkOf(h.power);
+    assert.doesNotMatch(h.power.warning() ?? "", /stopped responding|needs an update/, "the report clears once the host can coordinate again");
+    assert.equal(h.stops, 1);
+  } finally { h.power.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("another deployment's registry is read without guessing: only an absent one means no agents", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-foreign-"));
+  try {
+    const fs = await import("node:fs");
+    const empty = path.join(dir, "empty.sqlite3"); fs.writeFileSync(empty, "");
+    assert.equal(await nativeRegistryHasLiveWork(empty, identity), false, "a file its owner never set up has no executor");
+    await assert.rejects(nativeRegistryHasLiveWork(dir, identity), /not a process registry/);
+    const registryPath = path.join(dir, "native.sqlite3"); const registry = new NativeProcessRegistry(registryPath);
+    await registry.init();
+    await registry.acquire({ scope: "rebooted", token: "t", host: { ...identity, boot: "b".repeat(32) }, parent: GONE_PARENT, supervisor: GONE_SUPERVISOR });
+    assert.equal(await nativeRegistryHasLiveWork(registryPath, identity), false, "a lease from before a reboot ran nothing that is left");
+    await registry.acquire({ scope: "legacy", token: "t", parent: GONE_PARENT, supervisor: GONE_SUPERVISOR });
+    assert.equal(await nativeRegistryHasLiveWork(registryPath, identity), true, "a lease without its host cannot be proven gone");
+    await registry.update({ ...(await registry.get("legacy"))!, phase: "closed", shutdownReason: "processes-gone" });
+    await registry.acquire({ scope: "current", token: "t", host: identity, parent: GONE_PARENT, supervisor: GONE_SUPERVISOR });
+    assert.equal(await nativeRegistryHasLiveWork(registryPath, identity, async () => undefined), true, "no process table, no proof");
+    assert.equal(await nativeRegistryHasLiveWork(registryPath, identity), false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

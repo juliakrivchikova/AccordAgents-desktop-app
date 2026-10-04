@@ -248,7 +248,9 @@ export function AwsWorkerPanel(props: {
       onLoadCommand={() => loadCommand()} onApply={() => start(undefined, baseSpec, retryIntent)} />
   );
   const instanceRegion = status?.handle?.region ?? actual?.region ?? region;
-  const autoStop = configured && !statusUnavailable ? status?.autoStop : undefined;
+  // The switch is read from this app's own settings, so it stays while AWS
+  // itself cannot be read; only a failed status read hides it.
+  const autoStop = configured && !monitor.error ? status?.autoStop : undefined;
 
   return (
     <div className="gen-aws" data-testid="aws-worker-panel" aria-busy={locked}>
@@ -287,7 +289,7 @@ export function AwsWorkerPanel(props: {
         <AwsCloudRunNextStep status={status} />
       </div>
       {autoStop ? <AwsAutoStopRow autoStop={autoStop} busy={autoStopControl.busy || locked} onToggle={autoStopControl.toggle} /> : null}
-      <AwsAutoStopSetupDialog open={autoStopControl.setupOpen} region={instanceRegion} onOpenChange={autoStopControl.setSetupOpen}
+      <AwsAutoStopSetupDialog mode={autoStopControl.setup} region={instanceRegion} onClose={autoStopControl.closeSetup}
         onEnabled={monitor.accept} />
       {isAwsTransition(status) || monitor.awaitingStop ? (
         <AwsWorkerTransition

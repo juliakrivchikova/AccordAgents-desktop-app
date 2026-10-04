@@ -4,6 +4,9 @@ import { hasLiveCapturedPosixProcesses, type CapturedPosixProcess, type PosixPro
 import type { NativeHostIdentity } from "./nativeHostIdentity";
 
 const initializing = new Map<string, Promise<void>>();
+/** Each deployment keeps its registry under this name in its user-data
+ *  directory; other deployments on the host find it there. */
+export const NATIVE_PROCESS_REGISTRY_FILE = "native-processes.sqlite3";
 class NativeRegistryError extends Error {
   constructor(message: string, readonly busy: boolean) { super(message); }
 }
@@ -36,14 +39,27 @@ export interface NativeProcessLease {
  */
 export function leaseProcessesGone(lease: NativeProcessLease, host: NativeHostIdentity, rows: Map<number, PosixProcessRow>): boolean {
   if (!lease.host || lease.host.machine !== host.machine || lease.host.boot !== host.boot) return false;
-  return !hasLiveCapturedPosixProcesses([lease.supervisor, ...(lease.provider ? [lease.provider] : []), ...lease.descendants], () => rows);
+  if (hasLiveCapturedPosixProcesses([lease.supervisor, ...(lease.provider ? [lease.provider] : []), ...lease.descendants], () => rows)) return false;
+  // A detached provider owns its process group while any member exists, so a
+  // child started after the last capture is still found, as the supervisor
+  // itself finds it. A group whose leader's pid was reused is not followed.
+  const provider = lease.provider;
+  if (provider && (!rows.has(provider.pid) || rows.get(provider.pid)?.startedAt === provider.startedAt)) {
+    for (const row of rows.values()) {
+      if (row.pgid === provider.pid && row.pid !== provider.pid && !row.state?.startsWith("Z")) return false;
+    }
+  }
+  return true;
 }
 
 /** A process receipt contains identities only, never CLI arguments, environment,
  * prompts or output. SQLite arbitrates competing processes; timeouts never
  * release ownership. The supervisor is responsible for proving termination. */
 export class NativeProcessRegistry {
-  constructor(readonly dbPath: string, readonly sqliteExecutable = "sqlite3") {}
+  /** `readOnly` with a `timeoutMs` reads another deployment's registry:
+   *  nothing is written to it, and a stalled file cannot hold the reader. */
+  constructor(readonly dbPath: string, readonly sqliteExecutable = "sqlite3",
+    private readonly access: { readOnly?: boolean; timeoutMs?: number } = {}) {}
 
   init(): Promise<void> {
     const key = JSON.stringify([path.resolve(this.dbPath), this.sqliteExecutable]);
@@ -108,8 +124,8 @@ export class NativeProcessRegistry {
 
   private query<T>(sql: string, operation = "query"): Promise<T[]> {
     return new Promise((resolve, reject) => {
-      const child = execFile(this.sqliteExecutable, ["-batch", "-bail", "-json", "-cmd", ".timeout 5000", this.dbPath],
-        { encoding: "utf8", maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+      const child = execFile(this.sqliteExecutable, ["-batch", "-bail", "-json", ...(this.access.readOnly ? ["-readonly"] : []), "-cmd", ".timeout 5000", this.dbPath],
+        { encoding: "utf8", maxBuffer: 2 * 1024 * 1024, ...(this.access.timeoutMs ? { timeout: this.access.timeoutMs } : {}) }, (error, stdout, stderr) => {
           if (error) { reject(new NativeRegistryError(`The native process receipt ${operation} failed: ${error.message}`, /(?:database is (?:locked|busy)|database table is locked).*\([56]\)/.test(stderr))); return; }
           try { resolve(stdout.trim() ? JSON.parse(stdout) as T[] : []); } catch { reject(new Error("The native process receipt query returned invalid data.")); }
         });

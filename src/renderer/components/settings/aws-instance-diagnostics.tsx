@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ChevronDown, Loader2 } from "lucide-react";
 import type { AwsWorkerAutoStopProblem, CloudRunWorkerDoctorReport, CloudRunWorkerSetupProgress } from "../../../shared/types";
 import { CloudProviderAuth } from "../cloud-provider-auth";
+import { ipcErrorMessage } from "./aws-worker-auto-stop";
 
 /**
  * Checks of the instance, and the one place a switched-on automatic stop
@@ -61,14 +62,14 @@ export function AwsInstanceDiagnostics(props: {
     setFixing(true);
     setFixError(undefined);
     try { await props.onAutoStopAction?.(action); }
-    catch (error) { setFixError((error instanceof Error ? error.message : String(error)).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "")); }
+    catch (error) { setFixError(ipcErrorMessage(error)); }
     finally { setFixing(false); }
   };
 
   return (
     <div className="gen-aws-diagnostics">
       <button type="button" className="gen-aws-disclosure" data-testid="machine-instance-diagnostics-toggle" aria-expanded={open} aria-controls="aws-instance-diagnostics" onClick={() => setOpen(!open)}>
-        <span>Diagnostics{problem ? <span className="gen-aws-diagnostics-badge" data-testid="machine-instance-diagnostics-problem-count">1 problem</span> : null}</span>
+        <span>Diagnostics{problem ? <>{" "}<span className="gen-aws-diagnostics-badge" data-testid="machine-instance-diagnostics-problem-count">1 problem</span></> : null}</span>
         <ChevronDown size={16} aria-hidden />
       </button>
       {status ? (
@@ -86,7 +87,7 @@ export function AwsInstanceDiagnostics(props: {
               <div className="gen-aws-problem-text">
                 <strong>Automatic stop is not working.</strong> {problem.message}
               </div>
-              {fixError ? <div className="gen-aws-dialog-error">{fixError}</div> : null}
+              {fixError ? <div className="gen-aws-inline-error" role="alert">{fixError}</div> : null}
               {problem.action ? (
                 <div className="gen-actions">
                   <button type="button" className="gen-pill" data-testid="aws-auto-stop-problem-action" disabled={fixing} onClick={() => void fix(problem.action!)}>

@@ -172,7 +172,7 @@ import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, startCrashReporting, st
 import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
 import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
-import { isMachineAutoUpgradeOperation } from "../shared/machineInstall";
+import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase } from "../shared/machineInstall";
 import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService, enabledCloudProviders } from "./services/cloudRunDoctor";
@@ -328,7 +328,7 @@ const mobileRelayControls = new Map<string, MobileRelayControlService>();
 let machineLinkService: MachineLinkService | undefined;
 /** When this desktop started connecting to its machines. */
 let machineLinkStartedAt: number | undefined;
-const MACHINE_LINK_CONNECT_GRACE_MS = 60_000;
+const DESKTOP_LINK_STARTUP_GRACE_MS = 60_000;
 const mobileMailboxPollers = new Map<string, NodeJS.Timeout>();
 const mobilePairingsByKey = new Map<string, MobilePairingPackage>();
 // W1 arrival cursors, per pairing. Persisted with paired devices so a restart
@@ -391,20 +391,15 @@ const cloudRunAwsService = new CloudRunAwsService(settingsService, {
   appVersion: app.getVersion(),
   // Unknown while the link is still connecting after this desktop started.
   machineConnected: (machineId) => machineLinkService && machineLinkStartedAt !== undefined
-    && Date.now() - machineLinkStartedAt >= MACHINE_LINK_CONNECT_GRACE_MS
+    && Date.now() - machineLinkStartedAt >= DESKTOP_LINK_STARTUP_GRACE_MS
     ? machineLinkService.isMachineConnected(machineId) : undefined,
   // The box is no longer asked over SSH whether a turn is running on it: the
   // machine on it reports its own work over the link, and an idle stop waits
   // while any of it is in flight.
   automaticStopGate: {
-    // The User's automatic-stop switch governs this desktop's own idle stop
-    // too: off means the instance is never stopped by itself.
-    authorizeAutomaticWorkerStop: async () => !(await settingsService.getAwsWorkerCredentials())?.power
-      || !await settingsService.getMachineAutoStopEnabled()
-      ? { allowed: false, reason: "Automatic stop is off." }
-      : machineLinkService?.hasActiveMachineWork()
-        ? { allowed: false, reason: "A machine is still working." }
-        : { allowed: true, lease: { leaseId: "machine-idle", expiresAt: new Date(Date.now() + 30_000).toISOString() } },
+    authorizeAutomaticWorkerStop: async () => machineLinkService?.hasActiveMachineWork()
+      ? { allowed: false, reason: "A machine is still working." }
+      : { allowed: true, lease: { leaseId: "machine-idle", expiresAt: new Date(Date.now() + 30_000).toISOString() } },
     renewAutomaticWorkerStopLease: async (_worker, lease) => machineLinkService?.hasActiveMachineWork()
       ? Promise.reject(new Error("A machine started working; the automatic stop is abandoned."))
       : { ...lease, expiresAt: new Date(Date.now() + 30_000).toISOString() },
@@ -523,6 +518,8 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
 /** Re-checks machines for a runtime update or a stop key to hand over; set
  *  once the machine link is up. */
 let evaluateMachineUpdates: (() => void) | undefined;
+/** The User asked Settings to try the machine's update or stop key again. */
+let retryMachineUpdate: ((machineId: string) => Promise<void>) | undefined;
 const cloudRunPreparation = new CloudRunPreparationService({
   onProgress: snapshot => sendToMainWindow("machines:cloud-run-progress", snapshot),
   configuredInstanceId: async () => (await settingsService.getPublicSettings()).cloudRuns.awsHandle?.instanceId,
@@ -2521,26 +2518,35 @@ function registerIpc(): void {
   });
   ipcMain.handle("cloud-runs:aws-status", () => cloudRunAwsService.status());
   ipcMain.handle("cloud-runs:aws-auto-stop", async (_event, request: SetAwsAutoStopRequest) => {
+    const { keyAdded } = await cloudRunAwsService.setAutoStop(request);
     const enabled = request?.enabled === true;
-    const blob = typeof request?.blob === "string" ? request.blob.trim() : "";
-    if (blob) await cloudRunAwsService.adoptAutoStopKey(blob);
-    else if (enabled && (await cloudRunAwsService.status()).autoStop?.needsSetup !== false) {
-      throw new Error("Run the setup command first: there is no automatic-stop key yet.");
-    }
-    await settingsService.setMachineAutoStopEnabled(enabled);
-    // The machine decides when to stop; tell a connected one now. One that is
-    // offline gets the switch with the settings it receives on connecting.
-    await machineLinkService?.syncSettings().catch((error) => {
+    void debugLogService.write("machines.auto-stop.switched", { enabled, newKey: keyAdded });
+    // The machine decides when to stop; tell a connected one now, without
+    // making the switch wait behind replication. One that is offline gets the
+    // switch with the settings it receives on connecting.
+    void machineLinkService?.syncSettings().catch((error) => {
       void debugLogService.write("machines.auto-stop.sync-failed", { message: error instanceof Error ? error.message : String(error) });
     });
     // A new key goes over to the machine the next time it is idle.
-    if (blob) evaluateMachineUpdates?.();
-    void debugLogService.write("machines.auto-stop.switched", { enabled, newKey: Boolean(blob) });
+    if (keyAdded) evaluateMachineUpdates?.();
     return cloudRunAwsService.status();
   });
   ipcMain.handle("cloud-runs:aws-reconnect-machine", async () => {
-    await cloudRunPreparation.prepareRuntime();
-    evaluateMachineUpdates?.();
+    const record = await cloudRunAwsService.autoStopMachineRecord();
+    const settled = !record?.lastOperation || isMachineInstallTerminalPhase(record.lastOperation.phase);
+    if (record && settled && machineLinkService?.isMachineConnected(record.machineId)) {
+      // A connected program is never drained by this button: the key goes
+      // over the way automatic updates hand it over, once the machine is idle
+      // and with new turns held.
+      if (record.powerRetry) await settingsService.saveMachineInstall({ ...record, powerRetry: undefined });
+      await retryMachineUpdate?.(record.machineId);
+      void debugLogService.write("machines.auto-stop.retry", { machineId: record.machineId });
+    } else {
+      // Not connected: set its program up again, as choosing Cloud run does.
+      await cloudRunPreparation.prepareRuntime();
+      evaluateMachineUpdates?.();
+      void debugLogService.write("machines.auto-stop.reconnected", { machineId: record?.machineId ?? "" });
+    }
     sendToMainWindow("machines:updated", await machineListResult());
     return cloudRunAwsService.status();
   });
@@ -3597,6 +3603,7 @@ void app.whenReady().then(async () => {
     // here, so evaluating on every hello cannot feed itself.
     link.onHello((event) => { void autoUpgrade.evaluate(event.machineId); });
     evaluateMachineUpdates = () => { void autoUpgrade.evaluate(); };
+    retryMachineUpdate = (machineId) => autoUpgrade.retry(machineId);
     chatService.onParticipantRunSettled(() => { if (autoUpgrade.hasWaiting()) void autoUpgrade.evaluate(); });
     // A turn started from the phone ends on the machine without an event this
     // desktop subscribes to; while a machine waits for idle, ask again.

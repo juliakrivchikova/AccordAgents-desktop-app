@@ -42,7 +42,7 @@
  * if a deployment's OS user cannot use it, automatic stop is suspended.
  */
 
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { withHostAdmissionLock } from "./hostAdmissionLock";
@@ -51,6 +51,9 @@ export const MACHINE_HOST_POWER_DIR = "/tmp/accordagents-host-power";
 /** A live claim that has not been refreshed within this counts as busy. */
 export const MACHINE_HOST_CLAIM_STALE_MS = 90_000;
 const STOP_INTENT_FILE = "stop-intent.json";
+/** How much later than a claim's last write its pid may have started and
+ *  still be the process that wrote it (uptime readings are coarse). */
+const PID_REUSE_SLACK_MS = 2_000;
 
 export type MachineHostClaimKind = "runtime" | "maintenance";
 
@@ -343,28 +346,62 @@ export class MachineHostPowerRegistry {
    * own process registry. Removal happens under the host lock and only if the
    * claim is still the one that was judged.
    */
-  async releaseDeadClaims(hasLiveNativeWork: (profilePath: string) => Promise<boolean>): Promise<number> {
+  async releaseDeadClaims(hasLiveNativeWork: (profilePath: string) => Promise<boolean>, quietForMs: number): Promise<number> {
+    const now = this.options.uptimeMs();
     let released = 0;
     for (const claim of this.others()) {
       if (claim.instanceId === this.instanceId || this.ownerAlive(claim)) continue;
+      // Its last work still counts: a runtime that crashed a minute after a
+      // turn is no reason to stop the instance under the turn that follows.
+      if (now - claimLastBusyMs(this.raw(claim) ?? claim) < quietForMs) continue;
+      // The path to follow comes from a file anyone on the host could have
+      // written; only this OS user's own claims are trusted with it.
+      if (!this.ownedByThisUser(claim)) continue;
       if (await hasLiveNativeWork(claim.profilePath)) continue;
       await this.withLock(() => {
         const file = path.join(this.dir, claimFileName(claim));
         const current = readClaim(file);
         if (!current || current.pid !== claim.pid || current.instanceId !== claim.instanceId || this.ownerAlive(current)) return;
-        prune(file);
-        released += 1;
+        if (prune(file)) released += 1;
       });
     }
     return released;
   }
 
+  /**
+   * Claims that keep the host awake although nobody can confirm work behind
+   * them: an owner that exited and cannot be released, or one still running
+   * that stopped refreshing, whose last work is older than `quietForMs`.
+   * Recent work is the ordinary reason to stay up; this is a fault to show.
+   */
+  unconfirmedClaims(quietForMs: number): MachineHostClaim[] {
+    const now = this.options.uptimeMs();
+    return this.others().filter((claim) => {
+      const raw = this.raw(claim);
+      if (!raw || now - claimLastBusyMs(raw) < quietForMs) return false;
+      return !this.ownerAlive(raw) || now - raw.uptimeMs > this.staleAfterMs;
+    });
+  }
+
+  /** The claim as its owner wrote it, before `others()` marked it busy. */
+  private raw(claim: MachineHostClaim): MachineHostClaim | undefined {
+    return readClaim(path.join(this.dir, claimFileName(claim)));
+  }
+
+  private ownedByThisUser(claim: MachineHostClaim): boolean {
+    if (typeof process.getuid !== "function") return true;
+    try { return lstatSync(path.join(this.dir, claimFileName(claim))).uid === process.getuid(); }
+    catch { return false; }
+  }
+
   /** The claim's own process is still running: its pid exists and started
-   *  before the claim was last written, so it is not a reused pid. */
+   *  before the claim was last written, so it is not a reused pid. Host
+   *  uptime may be read in whole seconds, so a start within the slack of the
+   *  claim still counts as its owner. */
   private ownerAlive(claim: MachineHostClaim): boolean {
     if (!this.isAlive(claim.pid)) return false;
     const started = this.startedAtUptimeMs(claim.pid);
-    return started === undefined || started <= claim.uptimeMs;
+    return started === undefined || started <= claim.uptimeMs + PID_REUSE_SLACK_MS;
   }
 
   /**
@@ -487,13 +524,20 @@ function readStopIntent(file: string): MachineHostStopIntent | undefined {
   return intent as MachineHostStopIntent;
 }
 
-function prune(file: string): void {
+function prune(file: string): boolean {
   try {
     rmSync(file, { force: true });
+    return true;
   } catch {
     // A claim owned by another user cannot be removed here; treating it as
     // gone is enough, and the directory is cleared on the next boot.
+    return false;
   }
+}
+
+/** When a claim's owner last worked: a claim written busy was busy then. */
+function claimLastBusyMs(claim: MachineHostClaim): number {
+  return claim.busy ? claim.uptimeMs : claim.lastBusyUptimeMs ?? claim.uptimeMs;
 }
 
 function claimFileName(claim: Pick<MachineHostClaim, "profileId" | "instanceId">): string {
@@ -506,12 +550,20 @@ function claimFileName(claim: Pick<MachineHostClaim, "profileId" | "instanceId">
 function linuxStartedAtUptimeMs(pid: number): number | undefined {
   if (process.platform !== "linux") return undefined;
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const ticks = Number(stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19]);
-    return Number.isFinite(ticks) && ticks >= 0 ? ticks * 10 : undefined;
+    return linuxStatStartedAtMs(readFileSync(`/proc/${pid}/stat`, "utf8"));
   } catch {
     return undefined;
   }
+}
+
+/** Field 22 of a /proc/<pid>/stat line, in milliseconds since boot. The
+ *  command name in field 2 may contain spaces and parentheses, so fields are
+ *  counted from the last ")". */
+export function linuxStatStartedAtMs(stat: string): number | undefined {
+  const close = stat.lastIndexOf(")");
+  if (close < 0) return undefined;
+  const ticks = Number(stat.slice(close + 2).trim().split(/\s+/)[19]);
+  return Number.isFinite(ticks) && ticks >= 0 ? ticks * 10 : undefined;
 }
 
 function defaultIsAlive(pid: number): boolean {

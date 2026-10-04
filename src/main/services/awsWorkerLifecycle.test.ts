@@ -718,6 +718,31 @@ test("automatic stop fails closed while worker work is registered, then retries 
   assert.equal(attempts, 2);
 });
 
+test("with automatic stop switched off this desktop neither stops the instance nor keeps asking", async () => {
+  const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
+  let enabled = false; let asked = 0; let authorized = 0;
+  const lifecycle = new AwsWorkerLifecycle({
+    createEc2Client: () => client,
+    generateKeyMaterial: async () => ({ keyName: "k", publicKeyOpenSsh: "x", privateKeyPath: "/tmp/k" }),
+    currentPublicIp: async () => "203.0.113.9",
+    idleStopMs: 10,
+    idleStopRetryMs: 10,
+    automaticStopEnabled: async () => { asked++; return enabled; },
+    authorizeAutomaticStop: async () => { authorized++; return { renew: async () => undefined, release: async () => undefined }; }
+  });
+  lifecycle.runStarted();
+  lifecycle.runEnded(CREDS, HANDLE);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(client.stopCount, 0);
+  assert.equal(asked, 1, "a switch left off is not polled every minute");
+  assert.equal(authorized, 0);
+  enabled = true;
+  lifecycle.runStarted();
+  lifecycle.runEnded(CREDS, HANDLE);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(client.stopCount, 1, "the next run that ends arms it again");
+});
+
 test("automatic stop releases its worker lease when a local run starts during authorization", async () => {
   const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
   let authorizationRequested = false;

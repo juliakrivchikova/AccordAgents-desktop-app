@@ -19,20 +19,21 @@ const OFF: AwsWorkerStatus = { configured: true, state: "running",
 
 let mounted: ReturnType<typeof createRoot> | undefined;
 
-async function mount(setAutoStop: (request: SetAwsAutoStopRequest) => Promise<AwsWorkerStatus>) {
+async function mount(setAutoStop: (request: SetAwsAutoStopRequest) => Promise<AwsWorkerStatus>,
+  options: { initial?: AwsWorkerStatus; reconnect?: () => Promise<AwsWorkerStatus>; command?: (region: string) => Promise<string> } = {}) {
   assert.equal(globalThis.ACCORD_RENDERER_JSDOM, true, "run this test with scripts/renderer-jsdom-setup.mjs");
   if (mounted) { const previous = mounted; mounted = undefined; await act(async () => { previous.unmount(); }); }
   const regions: string[] = [];
-  let status = OFF;
+  let status = options.initial ?? OFF;
   (window as unknown as { consensus: unknown }).consensus = {
     getAwsWorkerStatus: async () => status,
     onAwsWorkerProgress: () => () => undefined,
     listMachines: async () => ({ machines: [], status: [] }), onMachinesUpdated: () => () => undefined,
     listMachineInstalls: async () => [], getAppVersion: async () => "1.0.0", onMachineInstallProgress: () => () => undefined,
     onCloudRunSetupProgress: () => () => undefined, getCloudRunSetupProgress: async () => undefined,
-    getAwsWorkerBootstrapCommand: async (region: string) => { regions.push(region); return `setup-command-for-${region}`; },
+    getAwsWorkerBootstrapCommand: async (region: string) => { regions.push(region); return options.command ? options.command(region) : `setup-command-for-${region}`; },
     setAwsAutoStop: async (request: SetAwsAutoStopRequest) => { status = await setAutoStop(request); return status; },
-    reconnectAwsMachine: async () => status
+    reconnectAwsMachine: async () => { status = options.reconnect ? await options.reconnect() : status; return status; }
   };
   document.body.replaceChildren();
   const container = document.createElement("div");
@@ -94,6 +95,56 @@ test("a result that cannot be applied keeps the dialog open with the reason and 
   await ui.click(cancel ?? null);
   assert.equal(ui.find("aws-worker-auto-stop-dialog"), null);
   assert.equal(ui.find<HTMLInputElement>("aws-worker-auto-stop-toggle")?.checked, false, "cancelled, the switch stays off");
+  await act(async () => { mounted?.unmount(); });
+  mounted = undefined;
+});
+
+const ON: AwsWorkerStatus = { ...OFF, autoStop: { enabled: true, needsSetup: false } } as AwsWorkerStatus;
+
+test("a switch that cannot be changed says why, in plain words, and stays as it was", async () => {
+  const ui = await mount(async () => { throw new Error("Error invoking remote method 'cloud-runs:aws-auto-stop': Error: Settings could not be read; nothing was changed."); },
+    { initial: ON });
+  await ui.click(ui.find("aws-worker-auto-stop-toggle"));
+  assert.equal(ui.find<HTMLInputElement>("aws-worker-auto-stop-toggle")?.checked, true);
+  assert.match(ui.find("aws-worker-message")?.textContent ?? "", /Settings could not be read; nothing was changed\./);
+  assert.doesNotMatch(ui.find("aws-worker-message")?.textContent ?? "", /invoking remote method/);
+  await act(async () => { mounted?.unmount(); });
+  mounted = undefined;
+});
+
+test("a key AWS refused is set up again from Diagnostics, in a dialog that says so", async () => {
+  const requests: SetAwsAutoStopRequest[] = [];
+  const refused = { ...ON, autoStop: { enabled: true, needsSetup: false,
+    problem: { message: "AWS does not accept the automatic-stop key.", action: "set-up-again", actionLabel: "Set up again" } } } as AwsWorkerStatus;
+  const ui = await mount(async (request) => { requests.push(request); return ON; }, { initial: refused });
+  assert.equal(ui.find("machine-instance-diagnostics-toggle")?.textContent, "Diagnostics 1 problem");
+  await ui.click(ui.find("machine-instance-diagnostics-toggle"));
+  await ui.click(ui.find("aws-auto-stop-problem-action"));
+  assert.match(ui.find("aws-worker-auto-stop-dialog")?.textContent ?? "", /Set up automatic stop again/);
+  assert.equal(ui.find("aws-worker-auto-stop-apply")?.textContent, "Apply");
+  await ui.paste("accord-aws-v1:new");
+  await ui.click(ui.find("aws-worker-auto-stop-apply"));
+  assert.deepEqual(requests, [{ enabled: true, blob: "accord-aws-v1:new" }]);
+  assert.equal(ui.find("aws-auto-stop-problem"), null, "the problem is gone once the new key is saved");
+  await act(async () => { mounted?.unmount(); });
+  mounted = undefined;
+});
+
+test("a fix that fails keeps the problem and says why; a command that cannot be made is said in the dialog", async () => {
+  const notConnected = { ...ON, autoStop: { enabled: true, needsSetup: false,
+    problem: { message: "The program on the cloud machine is not connected, so it cannot stop the instance.", action: "reconnect", actionLabel: "Reconnect" } } } as AwsWorkerStatus;
+  const ui = await mount(async () => ON, { initial: notConnected,
+    reconnect: async () => { throw new Error("Error invoking remote method 'cloud-runs:aws-reconnect-machine': Error: AWS did not return an address for this instance."); } });
+  await ui.click(ui.find("machine-instance-diagnostics-toggle"));
+  await ui.click(ui.find("aws-auto-stop-problem-action"));
+  assert.match(ui.find("aws-auto-stop-problem")?.textContent ?? "", /AWS did not return an address for this instance\./);
+  assert.doesNotMatch(ui.find("aws-auto-stop-problem")?.textContent ?? "", /invoking remote method/);
+  await act(async () => { mounted?.unmount(); });
+  mounted = undefined;
+  const off = await mount(async () => ON, { command: async () => { throw new Error("The setup command could not be made: AWS settings are missing."); } });
+  await off.click(off.find("aws-worker-auto-stop-toggle"));
+  assert.match(off.find("aws-worker-auto-stop-dialog")?.textContent ?? "", /The setup command could not be made/);
+  assert.equal(document.querySelector<HTMLButtonElement>('[aria-label="Copy AWS setup command"]')?.disabled, true, "nothing to copy");
   await act(async () => { mounted?.unmount(); });
   mounted = undefined;
 });
