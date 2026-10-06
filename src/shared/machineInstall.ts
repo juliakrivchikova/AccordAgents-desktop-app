@@ -112,6 +112,9 @@ export interface MachineInstallSnapshot {
   warnings?: string[];
   error?: string;
   retryable?: boolean;
+  /** Cut short by the desktop closing, not refused by the machine: finished
+   *  automatically, never held back as a failure. */
+  interrupted?: boolean;
   recovery?: MachineInstallRecovery;
   installedVersion?: string;
   previousVersion?: string;
@@ -217,6 +220,9 @@ export interface MachineRuntimeProbe {
   runtimePids: number[];
   supervisorPids: number[];
   providerPids: number[];
+  /** Seconds the unit's own main process has run; a unit that keeps
+   *  restarting its program shows a young one. */
+  serviceAgeSeconds?: number;
 }
 
 /** Where the runtime payload the desktop would install comes from. */
@@ -354,6 +360,15 @@ export function isMachineAutoUpgradeOperation(operationId: string): boolean {
   return operationId.startsWith("auto-upgrade-");
 }
 
+/** Operation id prefix of a setup that brings a program back after the
+ *  machine itself said over SSH that it is not running: such a setup must
+ *  not stop a program that came back meanwhile. */
+export const MACHINE_RECOVERY_OPERATION_PREFIX = "recovery-";
+
+export function isMachineRecoveryOperation(operationId: string): boolean {
+  return operationId.startsWith(MACHINE_RECOVERY_OPERATION_PREFIX);
+}
+
 /** Whether an operation id is this desktop version's automatic update:
  *  `auto-upgrade-<version>-<timestamp>`, where 1.11.1 is not 1.11.1-beta.6. */
 export function isAutoUpgradeOf(operationId: string, version: string): boolean {
@@ -399,7 +414,10 @@ export function machineRuntimeStatus(input: {
   if (live && !isMachineInstallTerminalPhase(live.phase) && (!waitingNotice || (connected && behind))) {
     return { state: "updating", text: live.message };
   }
-  const last = install?.lastOperation;
+  // A setup that brought a program back stood down because the program
+  // came back by itself: nothing failed and nothing of it waits.
+  const recorded = install?.lastOperation;
+  const last = recorded && isMachineRecoveryOperation(recorded.operationId) && recorded.recovery?.kind === "machine-busy" ? undefined : recorded;
   if (last && !isMachineInstallTerminalPhase(last.phase)) {
     // Settings opened while an update was already running: its progress is
     // on the record until the next snapshot arrives.

@@ -627,6 +627,19 @@ test("ensureRunning starts a stopped instance and rebuilds ingress to the curren
   assert.deepEqual([...client.ingressCidrs], ["203.0.113.9/32"]);
 });
 
+test("without starting, a stopped instance is left stopped and a running one still gets this device's SSH access", async () => {
+  const stopped = new FakeEc2Client({ state: "stopped", publicIp: undefined });
+  await assert.rejects(lifecycleWith(stopped).ensureRunning(CREDS, HANDLE, "device", { start: false }), /is stopped, so nothing was started/);
+  assert.equal(stopped.startCount, 0);
+  const stopping = new FakeEc2Client({ state: "stopping", publicIp: undefined });
+  await assert.rejects(lifecycleWith(stopping).ensureRunning(CREDS, HANDLE, "device", { start: false }), /is stopping/);
+  assert.equal(stopping.startCount, 0, "a stop under way is not undone");
+  const running = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
+  const info = await lifecycleWith(running).ensureRunning(CREDS, HANDLE, "device", { start: false });
+  assert.equal(info.publicIp, "1.1.1.1");
+  assert.deepEqual([...running.ingressCidrs], ["203.0.113.9/32"], "a laptop on a new network can still reach the machine");
+});
+
 test("ensureRunning permits an EC2 root-volume state that is not known yet", async () => {
   const client = new FakeEc2Client({
     state: "running",
@@ -716,6 +729,31 @@ test("automatic stop fails closed while worker work is registered, then retries 
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(client.stopCount, 1);
   assert.equal(attempts, 2);
+});
+
+test("with automatic stop switched off this desktop neither stops the instance nor keeps asking", async () => {
+  const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
+  let enabled = false; let asked = 0; let authorized = 0;
+  const lifecycle = new AwsWorkerLifecycle({
+    createEc2Client: () => client,
+    generateKeyMaterial: async () => ({ keyName: "k", publicKeyOpenSsh: "x", privateKeyPath: "/tmp/k" }),
+    currentPublicIp: async () => "203.0.113.9",
+    idleStopMs: 10,
+    idleStopRetryMs: 10,
+    automaticStopEnabled: async () => { asked++; return enabled; },
+    authorizeAutomaticStop: async () => { authorized++; return { renew: async () => undefined, release: async () => undefined }; }
+  });
+  lifecycle.runStarted();
+  lifecycle.runEnded(CREDS, HANDLE);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(client.stopCount, 0);
+  assert.equal(asked, 1, "a switch left off is not polled every minute");
+  assert.equal(authorized, 0);
+  enabled = true;
+  lifecycle.runStarted();
+  lifecycle.runEnded(CREDS, HANDLE);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(client.stopCount, 1, "the next run that ends arms it again");
 });
 
 test("automatic stop releases its worker lease when a local run starts during authorization", async () => {

@@ -1,10 +1,23 @@
 import { useEffect, useState } from "react";
-import { ChevronDown } from "lucide-react";
-import type { CloudRunWorkerDoctorReport, CloudRunWorkerSetupProgress } from "../../../shared/types";
+import { ChevronDown, Loader2 } from "lucide-react";
+import type { AwsWorkerAutoStopProblem, CloudRunWorkerDoctorReport, CloudRunWorkerSetupProgress } from "../../../shared/types";
 import { CloudProviderAuth } from "../cloud-provider-auth";
+import { ipcErrorMessage } from "./aws-worker-auto-stop";
 
-export function AwsInstanceDiagnostics(): JSX.Element {
+/**
+ * Checks of the instance, and the one place problems are said: a program on
+ * the machine the app could not bring back, and a switched-on automatic stop
+ * that cannot work. Each says what happens next or what fixes it; a
+ * collapsed section still shows how many there are.
+ */
+export function AwsInstanceDiagnostics(props: {
+  machineProblem?: string;
+  autoStopProblem?: AwsWorkerAutoStopProblem;
+  onAutoStopAction?: (problem: AwsWorkerAutoStopProblem) => Promise<void>;
+} = {}): JSX.Element {
   const [open, setOpen] = useState(false);
+  const [fixing, setFixing] = useState(false);
+  const [fixError, setFixError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [failed, setFailed] = useState(false);
@@ -46,10 +59,21 @@ export function AwsInstanceDiagnostics(): JSX.Element {
     }
   };
 
+  const problem = props.autoStopProblem;
+  const problemCount = (props.machineProblem ? 1 : 0) + (problem ? 1 : 0);
+  const fix = async (current: AwsWorkerAutoStopProblem): Promise<void> => {
+    setFixing(true);
+    setFixError(undefined);
+    try { await props.onAutoStopAction?.(current); }
+    catch (error) { setFixError(ipcErrorMessage(error)); }
+    finally { setFixing(false); }
+  };
+
   return (
     <div className="gen-aws-diagnostics">
       <button type="button" className="gen-aws-disclosure" data-testid="machine-instance-diagnostics-toggle" aria-expanded={open} aria-controls="aws-instance-diagnostics" onClick={() => setOpen(!open)}>
-        <span>Diagnostics</span><ChevronDown size={16} aria-hidden />
+        <span>Diagnostics{problemCount ? <>{" "}<span className="gen-aws-diagnostics-badge" data-testid="machine-instance-diagnostics-problem-count">{problemCount === 1 ? "1 problem" : `${problemCount} problems`}</span></> : null}</span>
+        <ChevronDown size={16} aria-hidden />
       </button>
       {status ? (
         <div className={`gen-aws-feedback${failed ? " is-error" : ""}`} data-testid="machine-instance-diagnostics-status" role={failed ? "alert" : "status"}>
@@ -61,6 +85,27 @@ export function AwsInstanceDiagnostics(): JSX.Element {
       ) : null}
       {open ? (
         <div id="aws-instance-diagnostics">
+          {props.machineProblem ? (
+            <div className="gen-aws-problem" data-testid="aws-machine-problem" role="alert">
+              <div className="gen-aws-problem-text">{props.machineProblem}</div>
+            </div>
+          ) : null}
+          {problem ? (
+            <div className="gen-aws-problem" data-testid="aws-auto-stop-problem" role="alert">
+              <div className="gen-aws-problem-text">
+                <strong>Automatic stop:</strong> {problem.message}
+              </div>
+              {fixError ? <div className="gen-aws-inline-error" role="alert">{fixError}</div> : null}
+              {problem.action ? (
+                <div className="gen-actions">
+                  <button type="button" className="gen-pill" data-testid="aws-auto-stop-problem-action" disabled={fixing} onClick={() => void fix(problem)}>
+                    {fixing ? <span className="gen-pill-lead"><Loader2 size={16} className="gen-aws-spinner" aria-hidden /></span> : null}
+                    <span className="gen-pill-label">{fixing && problem.action === "reconnect" ? "Working…" : problem.actionLabel ?? "Fix"}</span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div className="gen-row gen-row-stack">
             <div className="gen-row-desc">Check the cloud runtime and provider sign-in, or set up missing components.</div>
             <div className="gen-actions">

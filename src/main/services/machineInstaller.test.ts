@@ -391,6 +391,15 @@ test("the probe reports tools, releases and the processes this install owns", ()
   assert.equal(probe.loginPath, "/home/ubuntu/.npm-global/bin:/usr/bin:/bin");
 });
 
+test("the probe says how long the unit's own process has run", () => {
+  assert.equal(parseMachineProbe(probeOutput({ "runtime-pids": " 41 52", "service-age": "3605" })).serviceAgeSeconds, 3605);
+  assert.equal(parseMachineProbe(probeOutput({ "service-age": "" })).serviceAgeSeconds, undefined, "no process, no age");
+  assert.equal(parseMachineProbe(probeOutput({ "service-age": "12:04" })).serviceAgeSeconds, undefined, "only whole seconds are read");
+  const script = machineProbeScript({});
+  assert.match(script, /show -p MainPID --value "\$SVC\.service"/);
+  assert.match(script, /service-age=%s/);
+});
+
 test("a damaged install-state file reads as an unknown version, never as none", () => {
   const probe = parseMachineProbe(probeOutput({ state: "{not json" }));
   assert.equal(probe.installedVersion, undefined);

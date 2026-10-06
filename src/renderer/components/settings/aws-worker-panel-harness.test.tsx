@@ -1,5 +1,5 @@
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
-import type { AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStatus, CloudRunsSettings } from "../../../shared/types";
+import type { AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStatus, CloudRunsSettings, SetAwsAutoStopRequest } from "../../../shared/types";
 import { AwsWorkerPanel } from "./aws-worker-panel";
 
 export const SETTINGS: CloudRunsSettings = { enabled: true, mode: "aws", worker: {}, hasAwsCredentials: true, awsInstanceType: "t3.small", awsRootVolumeSizeGb: 8, maxRuntimeMs: 86_400_000, pollIntervalMs: 2_500 };
@@ -26,6 +26,8 @@ export async function renderPanel(options: {
   installs?: any[];
   appVersion?: string;
   onInstallProgress?: (listener: (snapshot: any) => void) => void;
+  setAutoStop?: (request: SetAwsAutoStopRequest) => Promise<AwsWorkerStatus>;
+  reconnect?: () => Promise<AwsWorkerStatus>;
 }): Promise<ReactTestRenderer> {
   const bridge = {
     getAwsWorkerStatus: options.getStatus ?? (async () => options.status),
@@ -38,7 +40,9 @@ export async function renderPanel(options: {
     getAwsWorkerBootstrapCommand: options.command ?? (async () => "command"), openExternal: async () => undefined,
     onCloudRunSetupProgress: () => () => undefined,
     diagnoseCloudRunWorker: async () => ({ ok: true, message: "Checked", checks: [] }),
-    setupCloudRunWorker: async () => ({ ok: true, message: "Set up", checks: [] })
+    setupCloudRunWorker: async () => ({ ok: true, message: "Set up", checks: [] }),
+    setAwsAutoStop: options.setAutoStop ?? (async () => options.status),
+    reconnectAwsMachine: options.reconnect ?? (async () => options.status)
   };
   (globalThis as any).window = { consensus: bridge, setTimeout };
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: { writeText: async () => undefined } } });

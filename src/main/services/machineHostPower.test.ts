@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import {
+  linuxStatStartedAtMs,
   MachineHostPowerRegistry,
   machineHostProfileId,
   type MachineHostClaim
@@ -23,6 +24,7 @@ function registry(options: {
   now?: () => number;
   pid?: number;
   alive?: (pid: number) => boolean;
+  started?: (pid: number) => number | undefined;
   kind?: "runtime" | "maintenance";
 }): MachineHostPowerRegistry {
   return new MachineHostPowerRegistry({
@@ -32,7 +34,8 @@ function registry(options: {
     uptimeMs: options.now ?? (() => 1_000),
     pid: options.pid ?? 4242,
     kind: options.kind,
-    isAlive: options.alive ?? (() => true)
+    isAlive: options.alive ?? (() => true),
+    ...(options.started ? { startedAtUptimeMs: options.started } : {})
   });
 }
 
@@ -239,6 +242,137 @@ test("one deployment's crash does not let it clear another profile's claim", asy
   assert.ok(mine.blockingReason(), "the other profile still keeps the host awake");
 });
 
+test("a dead owner's claim is released once its own registry shows no agent still running", async () => {
+  const shared = dir();
+  const alive = new Set([4243]);
+  const live = new Set<string>();
+  const GRACE = 120_000;
+  let now = 1_000;
+  const make = (profile: string, pid: number) => registry({ dir: shared, profile, pid, now: () => now, alive: (candidate) => alive.has(candidate) });
+  const mine = make("/srv/one", 4243);
+  mine.publish(false);
+  make("/tmp/repro-a/machine", 701).publish(true);
+  make("/tmp/repro-b/machine", 702).publish(false);
+  alive.add(703);
+  const three = make("/srv/three", 703);
+  three.publish(true);
+  live.add("/tmp/repro-b/machine");
+  const asked: string[] = [];
+  const probe = async (profilePath: string) => { asked.push(profilePath); return live.has(profilePath); };
+  assert.equal(await mine.releaseDeadClaims(probe, GRACE), 0, "a runtime that just died may be restarting");
+  assert.deepEqual(asked, [], "nothing is read during the restart grace");
+  now += GRACE;
+  three.publish(true);
+  const released = await mine.releaseDeadClaims(probe, GRACE);
+  assert.equal(released, 1, "only the dead runtime with nothing left running is released");
+  assert.deepEqual(asked.sort(), ["/tmp/repro-a/machine", "/tmp/repro-b/machine"], "a live owner is never second-guessed");
+  assert.deepEqual(mine.others().map((claim) => claim.profilePath).sort(), ["/srv/three", "/tmp/repro-b/machine"]);
+  assert.deepEqual(mine.unconfirmedClaims(600_000), [], "a few minutes are not yet a fault");
+  now += 600_000;
+  three.publish(true);
+  assert.deepEqual(mine.unconfirmedClaims(600_000).map((claim) => claim.profilePath), ["/tmp/repro-b/machine"],
+    "a dead runtime whose agent still runs ten minutes later is reported");
+  live.clear();
+  assert.equal(await mine.releaseDeadClaims(async () => false, GRACE), 1, "once its agent exits, the other one goes too");
+  alive.delete(703);
+  now += GRACE;
+  await assert.rejects(mine.releaseDeadClaims(async () => { throw new Error("registry unreadable"); }, GRACE), /unreadable/,
+    "a registry that cannot be read is not evidence of an idle host");
+  assert.deepEqual(mine.others().map((claim) => claim.profilePath), ["/srv/three"]);
+});
+
+test("a hung runtime that stopped refreshing is reported after ten minutes", () => {
+  const shared = dir();
+  let now = 1_000;
+  registry({ dir: shared, profile: "/srv/hung", pid: 11, now: () => now }).publish(false);
+  const mine = registry({ dir: shared, profile: "/srv/one", pid: 12, now: () => now });
+  now += 120_000;
+  assert.deepEqual(mine.unconfirmedClaims(600_000), [], "a short pause is ordinary");
+  now += 600_000;
+  assert.deepEqual(mine.unconfirmedClaims(600_000).map((claim) => claim.profilePath), ["/srv/hung"]);
+});
+
+test("a dead owner's pid taken by a later process does not keep its claim alive", async () => {
+  const shared = dir();
+  // The claim was last written at 1 s of uptime; whatever runs as pid 801
+  // now started at 50 s, so it is not the runtime that wrote it.
+  registry({ dir: shared, profile: "/tmp/repro/machine", pid: 801, now: () => 1_000 }).publish(false);
+  const mine = registry({ dir: shared, profile: "/srv/one", pid: 802, now: () => 20_000_000, started: (pid) => pid === 801 ? 50_000 : 500 });
+  assert.equal(await mine.releaseDeadClaims(async () => false, 120_000), 1);
+  registry({ dir: shared, profile: "/tmp/repro/machine", pid: 803, now: () => 20_000_000 }).publish(false);
+  assert.equal(await registry({ dir: shared, profile: "/srv/one", pid: 802, now: () => 40_000_000, started: () => 20_001_000 })
+    .releaseDeadClaims(async () => false, 120_000), 0, "an owner that started within the slack of its claim is that claim's owner");
+});
+
+test("a runtime that keeps crashing carries its crash restarts, and the others can tell it from work", async () => {
+  const shared = dir();
+  let now = 1_000;
+  const alive = new Set<number>();
+  const start = (pid: number, kind?: "runtime" | "maintenance") => {
+    alive.add(pid);
+    return registry({ dir: shared, profile: "/srv/looping", pid, now: () => now, alive: (candidate) => alive.has(candidate), kind });
+  };
+  const neighbour = registry({ dir: shared, profile: "/srv/one", pid: 9, now: () => now, alive: () => true });
+  let runtime = start(100);
+  runtime.publish(true);
+  assert.equal(neighbour.restartLoop(2), undefined);
+  for (const pid of [101, 102]) {
+    alive.delete(pid - 1);                       // crashed: its claim stays
+    now += 20 * 60_000;
+    runtime = start(pid);
+    assert.equal(await runtime.adoptOwnStaleClaims(async () => undefined), 1);
+    runtime.publish(true);
+  }
+  assert.equal(neighbour.restartLoop(2), "/srv/looping", "two crashes within the idle window");
+  now += 3 * 60 * 60_000;
+  runtime.publish(false);
+  assert.equal(neighbour.restartLoop(2), undefined, "old crashes age out");
+  const shutdown = registry({ dir: shared, profile: "/srv/graceful", pid: 200, now: () => now, alive: () => true });
+  shutdown.publish(true);
+  shutdown.release();
+  const next = registry({ dir: shared, profile: "/srv/graceful", pid: 201, now: () => now, alive: () => true });
+  assert.equal(await next.adoptOwnStaleClaims(async () => undefined), 0, "a runtime that released its claim did not crash");
+  for (const pid of [300, 301, 302, 303]) {
+    const command = start(pid, "maintenance");
+    command.publish(true);
+    alive.delete(pid);
+  }
+  assert.equal(neighbour.restartLoop(2), undefined, "maintenance commands are not restarts");
+  // A crash whose work cannot be proven closed yet is still a crash.
+  const unproven = registry({ dir: shared, profile: "/srv/unproven", pid: 400, now: () => now, alive: (pid) => pid === 401 });
+  unproven.publish(true);
+  const after = registry({ dir: shared, profile: "/srv/unproven", pid: 401, now: () => now, alive: (pid) => pid === 401 });
+  await assert.rejects(after.adoptOwnStaleClaims(async () => { throw new Error("a native executor has not confirmed that its processes are gone"); }));
+  after.publish(true);
+  const claims = fs.readdirSync(shared).filter((name) => name.endsWith(".json"))
+    .map((name) => JSON.parse(fs.readFileSync(path.join(shared, name), "utf8")) as MachineHostClaim);
+  assert.equal(claims.find((item) => item.pid === 401)?.crashRestartsUptimeMs?.length, 1);
+});
+
+test("a released dead claim's work still counts toward host idle; a live maintenance command is not reported", async () => {
+  const shared = dir();
+  let now = 1_000;
+  const alive = new Set([1, 2]);
+  const mine = registry({ dir: shared, profile: "/srv/one", pid: 1, now: () => now, alive: (pid) => alive.has(pid) });
+  now = 500_000;
+  registry({ dir: shared, profile: "/srv/crashed", pid: 3, now: () => now, alive: (pid) => alive.has(pid) }).publish(true);
+  now += 120_000;
+  assert.equal(await mine.releaseDeadClaims(async () => false, 120_000), 1);
+  assert.equal(mine.hostIdleForMs(0), 120_000, "idle counts from the dead runtime's last work, not from before it");
+  const maintenance = registry({ dir: shared, profile: "/srv/one", pid: 2, now: () => now, alive: (pid) => alive.has(pid), kind: "maintenance" });
+  maintenance.publish(true);
+  now += 20 * 60_000;
+  assert.deepEqual(mine.unconfirmedClaims(600_000), [], "a long maintenance command holds its lease");
+  alive.delete(2);
+  assert.deepEqual(mine.unconfirmedClaims(600_000).map((claim) => claim.kind), ["maintenance"], "one whose command died is reported");
+});
+
+test("a process start is read from field 22 of /proc stat, past a command name with spaces and parentheses", () => {
+  const fields = Array.from({ length: 50 }, (_, index) => String(index + 3));
+  fields[19] = "12345";
+  assert.equal(linuxStatStartedAtMs(`4242 (node (x) y) ${fields.join(" ")}`), 123_450);
+  assert.equal(linuxStatStartedAtMs("garbage"), undefined);
+});
 
 test("an unreadable stop intent stops both stopping and admitting", async () => {
   const shared = dir();

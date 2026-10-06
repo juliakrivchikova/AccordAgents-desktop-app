@@ -278,6 +278,14 @@ test("the Machines row says when an update runs, failed, or is still owed, and s
   const stepped = record({ lastOperation: snapshot({ phase: "needs-attention", message: "A member started work…", recovery: { kind: "machine-busy", detail: "staged" } }) });
   assert.equal(machineRuntimeStatus({ install: stepped, live: undefined, connected: true, runningVersion: "1.10.4-beta.10", desktopVersion })?.state, "pending");
   assert.match(machineRuntimeStatus({ install: stepped, live: undefined, connected: true, runningVersion: "1.10.4-beta.10", desktopVersion })?.text ?? "", /waits for the machine to be idle/);
+  // A setup that brought a program back stood down because it came back by
+  // itself: nothing failed, and only a version behind is still pending.
+  const cameBack = (installedVersion: string) => record({ installedVersion, lastOperation: snapshot({ operationId: "recovery-5", phase: "needs-attention",
+    message: "The machine's program came back while it was being set up again, so it was not stopped.",
+    error: "The machine's program came back while it was being set up again, so it was not stopped.", recovery: { kind: "machine-busy", detail: "staged" } }) });
+  assert.equal(machineRuntimeStatus({ install: cameBack(desktopVersion), live: undefined, connected: true, runningVersion: desktopVersion, desktopVersion }), undefined);
+  assert.deepEqual(machineRuntimeStatus({ install: cameBack("1.10.4-beta.10"), live: undefined, connected: true, runningVersion: "1.10.4-beta.10", desktopVersion }),
+    { state: "pending", text: "Runtime update to 1.10.4-beta.11 pending; it starts when the machine is connected and idle." });
 });
 
 test("the waiting notice is believed only while the machine is connected and behind", () => {
@@ -447,4 +455,31 @@ test("a key whose temporary failure was recorded before this process is tried ag
   due = "AKIAPOWERKEY000000001";
   for (let waited = 0; h.upgrades.length < 1 && waited < 2_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(h.upgrades.length, 1, "nothing else would have come back to it");
+});
+
+test("the User's Try again re-attempts an update that already failed here, still only once the machine is idle", async () => {
+  let busy = true;
+  const h = harness({
+    records: [record({ lastOperation: snapshot({ operationId: "auto-upgrade-1.10.4-beta.11-1", phase: "error", message: "The machine's current runtime did not stop." }) })],
+    activity: () => activity(busy ? { activeRunIds: ["run-1"] } : {})
+  });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 0, "a failed automatic attempt is not repeated by itself");
+  await h.service.retry("m1");
+  assert.equal(h.upgrades.length, 0, "a busy machine is not drained for it");
+  assert.equal(h.service.hasWaiting(), true, "it waits for idle");
+  busy = false;
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1);
+  assert.equal(h.holds.length, 1, "new turns are held while it runs");
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1, "one try per request");
+});
+
+test("an update this desktop's closing cut short is finished by itself once the machine is idle", async () => {
+  const h = harness({ records: [record({ lastOperation: snapshot({ operationId: "auto-upgrade-1.10.4-beta.11-1", phase: "needs-attention",
+    message: "The desktop closed while the machine was being set up.", error: "Setup was interrupted.", interrupted: true }) })] });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1, "interrupted is not refused");
+  assert.equal(h.holds.length, 1);
 });

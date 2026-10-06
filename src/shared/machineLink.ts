@@ -39,6 +39,9 @@ export interface MachineSettingsSnapshot {
 
 export interface MachineHelloBody {
   idleStopWarning?: string;
+  /** The User's automatic-stop switch as the machine has it; absent from
+   *  runtimes before 1.11.1, which always stop when idle. */
+  autoStopEnabled?: boolean;
   type: "machine.hello";
   deviceId: string;
   machineName: string;

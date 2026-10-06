@@ -238,9 +238,62 @@ The key is handed over by the installer, never put on a command line:
 
 Automatic updates hand a new key over in the same idle-gated update that
 replaces the runtime, so a member's turn is never cut off for it. Pasting a new
-setup result re-checks machines right away. Settings → AWS shows whether the
-instance stops by itself: off, pending, on, or failed (the machine refused the
-key, or reports that AWS no longer accepts it).
+setup result re-checks machines right away.
+
+Settings → AWS shows automatic stop as one switch. Turning it on without a stop
+key opens a dialog with the setup command for the instance's region, ready to
+copy, and the box for its result; the switch reads on once that result is
+applied (`cloud-runs:aws-auto-stop` saves the key, sets
+`machineAutoStopEnabled` and sends the settings to connected machines). With a
+key saved, the switch turns automatic stop off and on again without the
+command. The setting travels to machines in the settings snapshot, because the
+machine decides when to stop; switched off, its runtime never stops the
+instance, and this desktop's own idle stop is held too.
+
+Agents working keep the instance up by design and are not reported. Anything
+else that keeps a switched-on instance from stopping by itself is shown only in
+Diagnostics, in plain words and with what fixes it: AWS does not accept the
+stop key (set up again), the machine could not take the key (Try again, which
+clears the retry count and asks the automatic update to hand the key over once
+the machine is idle, with new turns held), or the machine cannot check whether
+agents are working. Switching automatic stop back on counts three idle hours
+from then.
+
+The program on the machine is brought back by the desktop itself
+(`MachineRecoveryService`). It looks when the instance has been running for
+five minutes and the program has been out of touch for five minutes by this
+desktop's own watch; the watch counts only while this desktop reaches the
+relay and starts again after a sleep (timer ticks far apart, even during a
+check) or a stop of the instance. It then asks
+the machine over SSH, having renewed this device's SSH access; nothing is
+started, grown or held to the configured size for it:
+
+- the program runs (its unit is active and the unit's own process has been
+  up for a minute; one its unit keeps restarting does not count): it is left
+  alone.
+  Being out of touch is then the link, which a new setup would not fix, and
+  every restart would count as work and keep the instance from stopping.
+  Half an hour after the instance started, Diagnostics says this computer has
+  not heard from it.
+- it does not run, but agents of this deployment still do: they are waited
+  for; a wait that outlasts one look is said in Diagnostics.
+- it does not run and no agent does: the program of the machine that was
+  watched is set up again the way choosing Cloud run does, with that
+  machine's turns held meanwhile. Having asked the machine itself, the setup
+  is not held back by what the program last reported or by a turn waiting
+  for it. A program back by the time the setup starts is left to the
+  automatic update; such a setup is marked (`recovery-…`) and its drain
+  refuses a program that reconnected while the new release was being staged,
+  which the Machines row does not show as a failure. The Settings button
+  that sets the program up takes the usual way to the instance, size check
+  included; only the automatic recovery never starts or grows it.
+
+The machine is looked at again after fifteen minutes; after a failed setup
+the wait doubles, up to four hours. Only what did not come back is shown, in
+Diagnostics, as itself rather than as a detail of automatic stop, with the
+reason and with what happens next; there is nothing to press. An update the
+desktop's closing cut short (`interrupted`) is finished by the automatic
+update, not held back as a failure.
 
 Agents run on the machine as the same OS user, so they can read the sealed key
 and the key that seals it. What they can do with it is what the policy allows:

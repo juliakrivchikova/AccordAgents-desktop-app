@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AwsWorkerStatus, CloudRunWorkerSettings } from "../../shared/types";
 import type { MachineRecord } from "../../shared/machineLink";
 import type { MachineInstallRecord, MachineInstallRequest, MachineInstallResult, MachineInstallSnapshot, MachineMirrorBootstrapResult } from "../../shared/machineInstall";
+import { MACHINE_RECOVERY_OPERATION_PREFIX } from "../../shared/machineInstall";
 import type { CloudRunPreparationProgress, CloudRunPreparationState, PrepareCloudRunRequest, PrepareCloudRunResult } from "../../shared/cloudRunPreparation";
 
 interface Options {
@@ -11,7 +12,7 @@ interface Options {
   environmentId(): Promise<string>;
   aws: {
     status(): Promise<AwsWorkerStatus>;
-    ensureExistingWorkerForRun(instanceId: string): Promise<CloudRunWorkerSettings>;
+    ensureExistingWorkerForRun(instanceId: string, options?: { start?: boolean }): Promise<CloudRunWorkerSettings>;
   };
   listMachines(): Promise<MachineRecord[]>;
   listInstalls(): Promise<MachineInstallRecord[]>;
@@ -185,12 +186,7 @@ export class CloudRunPreparationService {
         // another member repeat a preparation that already succeeded.
         if (this.prepared && this.prepared.instanceId === currentInstance) this.prepared.retryProviders.add(request.provider);
         throw error;
-      }).finally(() => {
-        this.active = undefined;
-        this.activeProvider = undefined;
-        this.activeInstance = undefined;
-        this.latest = undefined;
-      });
+      }).finally(() => this.clearActive());
     }
     try {
       const result = await this.active;
@@ -201,6 +197,13 @@ export class CloudRunPreparationService {
       throw error;
     }
     finally { this.listeners.delete(listener); }
+  }
+
+  private clearActive(): void {
+    this.active = undefined;
+    this.activeProvider = undefined;
+    this.activeInstance = undefined;
+    this.latest = undefined;
   }
 
   private report(snapshot: Omit<CloudRunPreparationProgress, "operationId">): void {
@@ -226,9 +229,38 @@ export class CloudRunPreparationService {
     return this.prepared = { instanceId, machine, record, worker, identity, providers, retryProviders: new Set() };
   }
 
-  private async run(provider: PrepareCloudRunRequest["provider"], expectedInstanceId?: string): Promise<PrepareCloudRunResult> {
+  /**
+   * Sets the program on the instance's cloud machine up again, without
+   * preparing any provider: what the app does by itself when that program is
+   * not running, and what Settings → AWS offers when it is not set up or
+   * could not take its automatic-stop key. A machine that is
+   * connected and current is left running; a setup already under way is
+   * waited for, not raced. `machineId`: the machine to set up, when the
+   * caller knows which. `agentsChecked`: the caller has just asked the
+   * machine itself over SSH that no agent runs, so what its program last
+   * reported (stale once it is down) does not hold the setup back while it
+   * stays away; a program that is back by the time the setup starts is left
+   * to the automatic update, and one back before the drain is not stopped.
+   * `automatic`: the app's own recovery, which never starts, grows or holds
+   * the instance to its configured size.
+   */
+  async prepareRuntime(options: { agentsChecked?: boolean; machineId?: string; automatic?: boolean } = {}): Promise<void> {
+    while (this.active) await this.active.catch(() => undefined);
+    // Claimed before anything is awaited, so a second caller waits for this one.
+    this.active = (async () => {
+      const currentInstance = await this.options.configuredInstanceId();
+      this.activeInstance = currentInstance;
+      return this.run(undefined, currentInstance, { agentsChecked: options.agentsChecked, machineId: options.machineId,
+        ...(options.automatic ? { start: false } : {}) });
+    })().finally(() => this.clearActive());
+    await this.active;
+  }
+
+  private async run(provider: PrepareCloudRunRequest["provider"] | undefined, expectedInstanceId?: string,
+    runtime: { agentsChecked?: boolean; machineId?: string; start?: boolean } = {}): Promise<PrepareCloudRunResult> {
     const prepared = await this.reusableMachine(expectedInstanceId);
-    if (prepared && !prepared.retryProviders.has(provider)) {
+    if (prepared && !provider && (!runtime.machineId || prepared.machine.id === runtime.machineId)) return { machine: prepared.machine };
+    if (prepared && provider && !prepared.retryProviders.has(provider)) {
       if (!prepared.providers.has(provider)) {
         await this.options.prepareProvider(prepared.worker, provider, prepared.record, snapshot => this.report(snapshot));
         prepared.providers.add(provider);
@@ -247,26 +279,37 @@ export class CloudRunPreparationService {
     const machines = await this.options.listMachines();
     const installs = await this.options.listInstalls();
     const installed = installs.find(item => item.target.hostKeyAlias === `accordagents-${instanceId}`);
-    let machine = machines.find(item => item.awsInstanceId === instanceId)
+    let machine = (runtime.machineId ? machines.find(item => item.id === runtime.machineId) : undefined)
+      ?? machines.find(item => item.awsInstanceId === instanceId)
       ?? machines.find(item => item.id === installed?.machineId);
     if (machine && this.options.awaitActiveInstall) {
       await this.options.awaitActiveInstall(machine.id);
       const refreshed = (await this.options.listMachines()).find(item => item.id === machine?.id);
       if (refreshed) machine = refreshed;
     }
+    // The machine said its program was down, and it is back: nothing to set
+    // up here, and a version behind waits for the automatic update, which
+    // waits for the machine to be idle.
+    if (runtime.agentsChecked && machine && this.options.isConnected(machine.id)) return { machine };
     this.report({ message: "Connecting to your AWS instance…" });
-    const worker = await this.options.aws.ensureExistingWorkerForRun(instanceId);
+    const worker = await this.options.aws.ensureExistingWorkerForRun(instanceId, runtime.start === false ? { start: false } : {});
     if (!worker.host) throw new Error("AWS did not return an address for this instance.");
     const existing = installs.find(item => item.machineId === machine?.id);
     if (machine && existing?.installRoot && this.options.isConnected(machine.id) && machine.lastHello?.appVersion === this.options.appVersion) {
       // Selecting another member must never drain an already running machine.
       await this.options.prepareMachine(worker, existing);
-      await this.options.prepareProvider(worker, provider, existing, snapshot => this.report(snapshot));
-      this.remember(instanceId, machine, existing, worker).providers.add(provider);
+      if (provider) await this.options.prepareProvider(worker, provider, existing, snapshot => this.report(snapshot));
+      const remembered = this.remember(instanceId, machine, existing, worker);
+      if (provider) remembered.providers.add(provider);
       this.report({ message: "Cloud run is ready." });
       return { machine };
     }
-    if (machine?.lastHello?.activeRunIds?.length || machine?.pendingRuns?.length) {
+    // A program that crashed mid-turn keeps reporting that turn, and a turn
+    // sent while it is down waits for it: neither may keep it down once the
+    // machine itself said nothing runs. A program that came back meanwhile
+    // reports afresh, and that report counts again.
+    const checked = runtime.agentsChecked && !(machine && this.options.isConnected(machine.id));
+    if (!checked && (machine?.lastHello?.activeRunIds?.length || machine?.pendingRuns?.length)) {
       throw new Error("The cloud runtime needs an update. Finish its current runs, then select Cloud run again.");
     }
     machine ??= await this.options.createMachine("Cloud run", instanceId);
@@ -277,7 +320,9 @@ export class CloudRunPreparationService {
     const directory = cloudEnvironmentDirectory(environmentId);
     const established = existing?.installRoot ? existing : undefined;
     const result = await this.options.install({
-      machineId: machine.id, operationId: randomUUID(), requiredProvider: provider,
+      // A setup that trusted the SSH check is marked, so the drain refuses a
+      // program that came back while the new release was being staged.
+      machineId: machine.id, operationId: `${runtime.agentsChecked ? MACHINE_RECOVERY_OPERATION_PREFIX : ""}${randomUUID()}`, requiredProvider: provider,
       installRoot: established?.installRoot || `~/${directory}`,
       userDataDir: established?.userDataDir || undefined,
       serviceName: established?.serviceName || undefined,
@@ -291,7 +336,8 @@ export class CloudRunPreparationService {
     this.report({ message: "Cloud run is ready." });
     const restored = (await this.options.listMachines()).find(item => item.id === result.record.machineId);
     if (!restored) throw new Error("The cloud machine was removed during setup. Select Cloud run again.");
-    this.remember(instanceId, restored, result.record, worker).providers.add(provider);
+    const remembered = this.remember(instanceId, restored, result.record, worker);
+    if (provider) remembered.providers.add(provider);
     return { machine: restored };
   }
 }

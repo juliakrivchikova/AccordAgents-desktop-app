@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { Writable, type Duplex } from "node:stream";
-import { NativeProcessRegistry, type NativeProcessLease } from "./nativeProcessRegistry";
+import { leaseProcessesGone, NativeProcessRegistry, type NativeProcessLease } from "./nativeProcessRegistry";
 import { openMachinePowerStore } from "./machinePowerStore";
 import { nativeHostIdentity, verifiedNativeHostReboot, type NativeHostIdentity } from "./nativeHostIdentity";
 import {
@@ -230,6 +230,14 @@ async function awaitPreviousSupervisor(registry: NativeProcessRegistry, scope: s
     return;
   }
   if (hasLiveCapturedPosixProcesses([previous.parent], () => rows)) throw new Error("This participant session is owned by another running app instance.");
+  if (host && leaseProcessesGone(previous, host, rows)) {
+    // The app and its supervisor were killed together before a receipt could
+    // be written (a crashed runtime under systemd takes its whole service
+    // with it), and nothing they recorded is still running. That is the
+    // supervisor's own closure proof.
+    await registry.update({ ...previous, phase: "closed", shutdownReason: "processes-gone" });
+    return;
+  }
   if (!hasLiveCapturedPosixProcesses([previous.supervisor], () => rows)) {
     throw new Error("The previous native supervisor disappeared before confirming shutdown; a new executor cannot be started safely.");
   }

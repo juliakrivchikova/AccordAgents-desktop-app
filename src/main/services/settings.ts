@@ -184,6 +184,13 @@ interface StoredSettings {
    *  none), so a handover the runtime did not come back from can put it back.
    *  Consumed by that revert; absent, there is nothing to revert. */
   encryptedMachinePowerPrevious?: string;
+  /** The User's automatic-stop switch. Unset reads as on, so a stop key set
+   *  up before the switch existed keeps working. Shared with machines in the
+   *  settings snapshot: the machine's runtime is what decides to stop. */
+  machineAutoStopEnabled?: boolean;
+  /** When the User last changed the switch: a machine's report older than
+   *  this predates the change and says nothing about whether it arrived. */
+  machineAutoStopChangedAt?: string;
   /** Who holds a copy of the phone's start key. Records only, never the
    *  secret, and never sent to a machine: they name the User's devices. */
   machinePowerHandoffs?: MachinePowerHandoffRecord[];
@@ -2869,6 +2876,8 @@ export class SettingsService {
         ? settings.encryptedMachinePower : undefined,
       encryptedMachinePowerPrevious: typeof settings.encryptedMachinePowerPrevious === "string" && settings.encryptedMachinePowerPrevious.trim()
         ? settings.encryptedMachinePowerPrevious : undefined,
+      ...(typeof settings.machineAutoStopEnabled === "boolean" ? { machineAutoStopEnabled: settings.machineAutoStopEnabled } : {}),
+      ...(typeof settings.machineAutoStopChangedAt === "string" ? { machineAutoStopChangedAt: settings.machineAutoStopChangedAt } : {}),
       machinePowerHandoffs: normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs).length
         ? normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs)
         : undefined,
@@ -3496,6 +3505,27 @@ export class SettingsService {
   async getMachinePairing(pairingKey: string): Promise<MobilePairingPackage | undefined> {
     const stored = await this.readStored();
     return this.readMachinePairings(stored)[pairingKey];
+  }
+
+  /** Whether the User left automatic stop on; the stop key is separate. */
+  async getMachineAutoStopEnabled(): Promise<boolean> {
+    const stored = await this.readStored();
+    // An unreadable file is not a switch left on: the machine must not stop
+    // the instance on defaults the User never chose.
+    if (this.storedReadError) throw new Error("Settings could not be read; automatic stop waits until they can.");
+    return stored.machineAutoStopEnabled !== false;
+  }
+
+  async getMachineAutoStopChangedAt(): Promise<string | undefined> {
+    return (await this.readStored()).machineAutoStopChangedAt;
+  }
+
+  async setMachineAutoStopEnabled(enabled: boolean): Promise<void> {
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+    stored.machineAutoStopEnabled = enabled === true;
+    stored.machineAutoStopChangedAt = new Date().toISOString();
+    await this.writeStored(stored, true);
   }
 
   async getMachinePower(): Promise<AwsMachinePowerConfig | undefined> {

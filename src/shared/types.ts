@@ -219,24 +219,41 @@ export interface AwsWorkerStatus {
   actualSpec?: AwsWorkerActualSpec;
   specMismatch?: AwsWorkerSpecMismatch;
   operation?: AwsWorkerOperationSnapshot;
-  /** Whether the machine on this instance stops it by itself after three
-   *  idle hours. Absent while nothing is connected. */
+  /** The automatic-stop switch and, while it is on, anything that keeps the
+   *  instance from stopping by itself. Absent when it could not be read. */
   autoStop?: AwsWorkerAutoStop;
+  /** The program on the running instance is still not back although the
+   *  app tried to bring it back itself, in plain words; for Diagnostics. */
+  machineProblem?: string;
 }
 
-/**
- * - `off`: this app has no stop key; the setup command has to be run again.
- * - `pending`: the key is here but the machine has not taken it yet (it is
- *   handed over the next time the machine is connected and idle, or when a
- *   machine is first set up on the instance).
- * - `on`: the machine accepted the key.
- * - `failed`: the machine refused this key; `detail` says why.
- */
+/** Automatic stop as Settings → AWS shows it: one switch, and, when the
+ *  switch is on but the instance will not stop by itself, why. */
 export interface AwsWorkerAutoStop {
-  state: "off" | "pending" | "on" | "failed";
-  detail?: string;
-  /** `failed` only: the machine still stops with the key it took before. */
-  previousKeyActive?: boolean;
+  /** The switch: a stop key is saved and the User left automatic stop on. */
+  enabled: boolean;
+  /** Turning the switch on first needs the setup command: there is no stop key. */
+  needsSetup: boolean;
+  /** Shown in Diagnostics only. Agents working is not a problem. */
+  problem?: AwsWorkerAutoStopProblem;
+}
+
+export interface AwsWorkerAutoStopProblem {
+  /** What is wrong, in plain words. */
+  message: string;
+  /** What fixes it: the setup command again, or setting up the program on
+   *  the cloud machine again. Without one, the message says what to do. */
+  action?: "set-up-again" | "reconnect";
+  actionLabel?: string;
+  /** The machine the fix acts on. */
+  machineId?: string;
+}
+
+/** The automatic-stop switch. Turning it on with a pasted setup result also
+ *  saves the result's stop key; without one, a saved key must exist. */
+export interface SetAwsAutoStopRequest {
+  enabled: boolean;
+  blob?: string;
 }
 
 export interface ConnectAwsWorkerRequest {
@@ -2782,6 +2799,11 @@ export interface AppBridge {
   startAwsWorker(request: AwsWorkerStartRequest): Promise<AwsWorkerStartResult>;
   onAwsWorkerProgress(callback: (progress: AwsWorkerOperationSnapshot) => void): () => void;
   getAwsWorkerStatus(): Promise<AwsWorkerStatus>;
+  /** The automatic-stop switch; returns the status it leads to. */
+  setAwsAutoStop(request: SetAwsAutoStopRequest): Promise<AwsWorkerStatus>;
+  /** Sets the program on the instance's cloud machine up again, the way
+   *  choosing Cloud run does, so it can stop the instance by itself. */
+  reconnectAwsMachine(machineId?: string): Promise<AwsWorkerStatus>;
   stopAwsWorker(): Promise<AwsWorkerStatus>;
   deleteAwsWorker(): Promise<AwsWorkerStatus>;
   getAgentEnvironment(): Promise<AgentEnvironmentSnapshot>;

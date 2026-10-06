@@ -87,6 +87,9 @@ export interface AwsWorkerLifecycleOptions {
   logger?: (event: string, payload: Record<string, unknown>) => void;
   idleStopMs?: number;
   idleStopRetryMs?: number;
+  /** The User's automatic-stop switch. Off, an idle stop is not attempted
+   *  and not retried; the next run that ends arms it again. */
+  automaticStopEnabled?: () => Promise<boolean>;
   authorizeAutomaticStop?: (info: AwsWorkerInstanceInfo) => Promise<{
     renew(): Promise<void>;
     release(): Promise<void>;
@@ -119,7 +122,7 @@ const DEFAULT_IDLE_STOP_MS = 3 * 60 * 60_000;
 export class AwsWorkerLifecycle {
   private readonly options: Required<Pick<AwsWorkerLifecycleOptions,
     "createEc2Client" | "generateKeyMaterial" | "deleteKeyMaterial" | "currentPublicIp" | "waitForState" | "idleStopMs" | "idleStopRetryMs" | "authorizeAutomaticStop" | "now">>
-    & Pick<AwsWorkerLifecycleOptions, "logger">;
+    & Pick<AwsWorkerLifecycleOptions, "logger" | "automaticStopEnabled">;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
   private activeRuns = 0;
 
@@ -134,7 +137,8 @@ export class AwsWorkerLifecycle {
       idleStopRetryMs: options.idleStopRetryMs ?? 60_000,
       authorizeAutomaticStop: options.authorizeAutomaticStop ?? (async () => undefined),
       now: options.now ?? (() => Date.now()),
-      logger: options.logger
+      logger: options.logger,
+      automaticStopEnabled: options.automaticStopEnabled
     };
   }
 
@@ -181,8 +185,10 @@ export class AwsWorkerLifecycle {
 
   // Bring the worker up for a run: start it if stopped, wait for running, then
   // re-resolve its (changed-on-each-start) public IP and re-open SSH ingress
-  // to the caller's current IP. Returns the reachable public IP.
-  async ensureRunning(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle, deviceId = "legacy"): Promise<AwsWorkerInstanceInfo> {
+  // to the caller's current IP. Returns the reachable public IP. With
+  // `start: false` an instance that is not running is left as it is.
+  async ensureRunning(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle, deviceId = "legacy",
+    options: { start?: boolean } = {}): Promise<AwsWorkerInstanceInfo> {
     const client = this.options.createEc2Client(credentials);
     let info = await client.describeInstance(handle.instanceId);
     if (!info || info.state === "terminated") {
@@ -190,6 +196,9 @@ export class AwsWorkerLifecycle {
     }
     if (info.rootVolumeBackedByEbs === false) {
       throw new Error("The AWS worker root device is not backed by persistent EBS storage.");
+    }
+    if (options.start === false && info.state !== "running") {
+      throw new Error(`The AWS instance is ${info.state}, so nothing was started.`);
     }
     if (info.state === "stopped" || info.state === "stopping") {
       this.log("aws-worker.starting", { instanceId: handle.instanceId });
@@ -239,6 +248,10 @@ export class AwsWorkerLifecycle {
 
   private async stopIfIdle(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle): Promise<void> {
     if (this.activeRuns > 0) {
+      return;
+    }
+    if (this.options.automaticStopEnabled && !await this.options.automaticStopEnabled().catch(() => false)) {
+      this.log("aws-worker.idle-stop.switched-off", { instanceId: handle.instanceId });
       return;
     }
     let authorization: { renew(): Promise<void>; release(): Promise<void> } | undefined;

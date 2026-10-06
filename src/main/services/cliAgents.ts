@@ -43,6 +43,7 @@ import {
 import { CliReadinessService } from "./cliReadiness";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { spawnNativeProcess, confirmNativeProcessClosed, isSupervisedNativeProcess } from "./nativeProcess";
+import { NATIVE_PROCESS_REGISTRY_FILE } from "./nativeProcessRegistry";
 import {
   capturePosixDescendants,
   capturePosixDescendantsFromTable,
@@ -1065,7 +1066,7 @@ export class CliAgentRunner {
     const options = typeof codexExecutableOrOptions === "string"
       ? { codexExecutable: codexExecutableOrOptions }
       : codexExecutableOrOptions;
-    this.nativeProcessDbPath = options.nativeProcessDbPath ?? (hasConfiguredHostPlatform() ? path.join(userDataPath(), "native-processes.sqlite3") : undefined);
+    this.nativeProcessDbPath = options.nativeProcessDbPath ?? (hasConfiguredHostPlatform() ? path.join(userDataPath(), NATIVE_PROCESS_REGISTRY_FILE) : undefined);
     this.codexExecutable = options.codexExecutable ?? "codex";
     this.electronAppPath = options.electronAppPath ?? process.argv[1];
     this.readiness = new CliReadinessService(debugLogs, {

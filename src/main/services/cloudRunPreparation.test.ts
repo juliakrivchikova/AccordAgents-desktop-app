@@ -20,7 +20,10 @@ function harness() {
     environmentId: async () => "home-desktop",
     aws: {
       status: async () => ({ configured: true, state, handle: { instanceId: "i-abc", region: "eu-west-1" } } as AwsWorkerStatus),
-      ensureExistingWorkerForRun: async id => { calls.push(`access:${id}`); return { host: "198.51.100.8", user: "ubuntu" }; }
+      ensureExistingWorkerForRun: async (id, access) => {
+        calls.push(`access:${id}${access?.start === false ? ":no-start" : ""}`);
+        return { host: "198.51.100.8", user: "ubuntu" };
+      }
     },
     listMachines: async () => machines,
     listInstalls: async () => installs,
@@ -380,4 +383,86 @@ test("queued configured selections resolve a changed instance again instead of r
   await rejected;
   await assert.rejects(h.service.prepare({ ...request, instanceId: "i-abc" }, () => {}), /different AWS instance/);
   assert.equal(h.calls.filter(call => call === "access:i-abc").length, 1);
+});
+
+test("Settings sets the machine's program up again without any provider, and leaves a connected current one running", async () => {
+  // Settings → AWS → Diagnostics offers this when the program on the instance
+  // is not connected, or could not take its automatic-stop key.
+  const h = harness();
+  await h.service.prepareRuntime();
+  assert.doesNotMatch(h.installRequests[0].operationId, /^recovery-/, "a setup that did not ask the machine is not marked");
+  assert.deepEqual(h.calls, ["access:i-abc", "enroll", "install:machine-1:undefined"], "an absent program is installed, no provider is checked");
+  assert.equal(h.installRequests[0].requiredProvider, undefined);
+  const connected = await connectedHarness();
+  connected.calls.length = 0;
+  await connected.service.prepareRuntime();
+  assert.equal(connected.calls.some((call) => call.startsWith("install:")), false, "a connected program on this version is not reinstalled");
+  assert.equal(connected.calls.some((call) => call.startsWith("provider:")), false);
+  await connected.service.prepare(request, () => {});
+  assert.ok(connected.calls.includes("provider:codex-cli"), "a member choosing Cloud run afterwards still gets its provider checked");
+});
+
+test("a program that crashed mid-turn, or has a turn waiting for it, is set up again once the machine said nothing runs", async () => {
+  const h = harness();
+  await h.service.prepareRuntime();
+  h.installRequests.length = 0;
+  h.machines[0].lastHello = { deviceId: "cloud", machineName: "cloud", platform: "linux", appVersion: "old", instanceId: "p", providers: [],
+    activeRunIds: ["run-from-before-the-crash"] };
+  h.machines[0].pendingRuns = [{ runId: "run-sent-while-down", conversationId: "chat" }];
+  await assert.rejects(h.service.prepareRuntime(), /Finish its current runs/, "without asking the machine, its last report holds");
+  assert.equal(h.installRequests.length, 0);
+  await h.service.prepareRuntime({ agentsChecked: true });
+  assert.equal(h.installRequests.length, 1, "asked over SSH, the stale report no longer keeps the program down");
+  assert.match(h.installRequests[0].operationId, /^recovery-/, "marked, so the drain refuses a program that came back meanwhile");
+  assert.equal(h.installRequests[0].machineId, "machine-1", "the same machine is set up again, so the waiting turn reaches it");
+  h.options.isConnected = (machineId) => machineId === "machine-1";
+  h.installRequests.length = 0;
+  await new CloudRunPreparationService(h.options).prepareRuntime({ agentsChecked: true });
+  assert.equal(h.installRequests.length, 0, "a program that came back meanwhile is not set up again; a version behind waits for the automatic update");
+});
+
+test("the app's own recovery never starts the instance or holds it to its configured size; the Settings button keeps its usual path", async () => {
+  const h = harness();
+  await h.service.prepareRuntime({ automatic: true });
+  assert.equal(h.calls[0], "access:i-abc:no-start");
+  h.calls.length = 0;
+  await new CloudRunPreparationService(h.options).prepareRuntime({ agentsChecked: true, machineId: "machine-1" });
+  assert.equal(h.calls[0], "access:i-abc", "a size the User must decide on is still offered by the button");
+});
+
+test("the machine that was asked is the one set up again, even beside another on the same instance", async () => {
+  const h = harness();
+  await h.service.prepareRuntime();
+  h.machines.push({ id: "watched", name: "Cloud run", awsInstanceId: "i-abc", deviceId: "", pairingKey: "p", createdAt: "2026-09-11" });
+  h.installs.push({ ...h.installs[0], machineId: "watched", installRoot: "/home/ubuntu/watched" });
+  h.installRequests.length = 0;
+  await h.service.prepareRuntime({ agentsChecked: true, machineId: "watched" });
+  assert.deepEqual(h.installRequests.map((request) => request.machineId), ["watched"]);
+  assert.equal(h.installRequests[0].installRoot, "/home/ubuntu/watched");
+});
+
+test("two requests to set the program up again run one setup, and a member's Cloud run waits for it", async () => {
+  const h = harness();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const install = h.options.install;
+  let connected = false;
+  h.options.isConnected = () => connected;
+  h.options.install = async (request, progress) => {
+    await held;
+    const result = await install(request, progress);
+    // The program it installed connects, on this desktop's version.
+    h.machines[0].lastHello = { deviceId: "cloud", machineName: "cloud", platform: "linux", appVersion: "test", instanceId: "p", providers: [] };
+    connected = true;
+    return result;
+  };
+  const service = new CloudRunPreparationService(h.options);
+  const first = service.prepareRuntime();
+  const second = service.prepareRuntime();
+  const member = service.prepare(request, () => {});
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  release();
+  await Promise.all([first, second, member]);
+  assert.equal(h.installRequests.length, 1, "one setup, however many asked");
+  assert.ok(h.calls.includes("provider:codex-cli"), "the member still gets its provider checked");
 });

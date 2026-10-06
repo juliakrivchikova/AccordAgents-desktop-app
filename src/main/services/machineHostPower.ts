@@ -30,8 +30,10 @@
  *
  *   - A claim from another boot is stale: `/tmp` is cleared on boot and the
  *     boot id is checked as well, so a claim can never outlive its host.
- *   - A dead owner does not prove its native descendants are gone. Only an
- *     explicit release after shutdown or another host boot removes its claim.
+ *   - A dead owner does not prove its native descendants are gone, so its
+ *     claim stays busy until its own registry shows that every process it
+ *     started has exited (`releaseDeadClaims`), it is released after shutdown,
+ *     or the host reboots.
  *   - A claim whose process is alive but has stopped refreshing counts as
  *     BUSY, not idle. A hung runtime that never stops is a visible cost; a
  *     stop that kills another profile's provider turn is lost work.
@@ -40,7 +42,7 @@
  * if a deployment's OS user cannot use it, automatic stop is suspended.
  */
 
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { withHostAdmissionLock } from "./hostAdmissionLock";
@@ -49,6 +51,9 @@ export const MACHINE_HOST_POWER_DIR = "/tmp/accordagents-host-power";
 /** A live claim that has not been refreshed within this counts as busy. */
 export const MACHINE_HOST_CLAIM_STALE_MS = 90_000;
 const STOP_INTENT_FILE = "stop-intent.json";
+/** How much later than a claim's last write its pid may have started and
+ *  still be the process that wrote it (uptime readings are coarse). */
+const PID_REUSE_SLACK_MS = 2_000;
 
 export type MachineHostClaimKind = "runtime" | "maintenance";
 
@@ -71,7 +76,15 @@ export interface MachineHostClaim {
    *  since the most recent of these, so a neighbour's short turn between two
    *  polls is not swallowed by another profile's long quiet. */
   lastBusyUptimeMs?: number;
+  /** Host uptimes at which this profile's runtime started again after its
+   *  previous instance had crashed, carried from instance to instance. A
+   *  runtime that keeps crashing holds the host with every start; this is how
+   *  the others can tell it from one that is working. */
+  crashRestartsUptimeMs?: number[];
 }
+
+/** How far back crash restarts are kept: the idle window they can hold. */
+const CRASH_HISTORY_MS = 3 * 60 * 60_000;
 
 /** A stop one deployment has decided on, as every deployment can read it. */
 export interface MachineHostStopIntent {
@@ -100,6 +113,10 @@ export interface MachineHostPowerOptions {
   staleAfterMs?: number;
   /** Injectable for tests; a live pid means the claim's owner still exists. */
   isAlive?(pid: number): boolean;
+  /** Host uptime at which a live pid started, when it can be read. A claim
+   *  refreshed before its pid's process started belongs to a process that has
+   *  since exited and whose pid was reused. */
+  startedAtUptimeMs?(pid: number): number | undefined;
 }
 
 export function machineHostProfileId(profilePath: string): string {
@@ -112,11 +129,17 @@ export class MachineHostPowerRegistry {
   private readonly pid: number;
   private readonly staleAfterMs: number;
   private readonly isAlive: (pid: number) => boolean;
+  private readonly startedAtUptimeMs: (pid: number) => number | undefined;
   private readonly instanceId = randomUUID();
   private readonly claimPath: string;
   private released = false;
   /** When this owner was last doing work; starting counts as work. */
   private lastBusyUptimeMs: number;
+  /** See `MachineHostClaim.crashRestartsUptimeMs`. */
+  private crashRestarts: number[] = [];
+  /** The latest work of dead claims this registration released: their work
+   *  still counts toward host idle after their files are gone. */
+  private releasedLastBusyUptimeMs = 0;
 
   constructor(private readonly options: MachineHostPowerOptions) {
     if (!options.bootId.trim()) throw new Error("Host-wide power coordination requires the host boot identity.");
@@ -126,6 +149,7 @@ export class MachineHostPowerRegistry {
     this.claimPath = path.join(this.dir, `${this.profileId}-${this.instanceId}.json`);
     this.staleAfterMs = options.staleAfterMs ?? MACHINE_HOST_CLAIM_STALE_MS;
     this.isAlive = options.isAlive ?? defaultIsAlive;
+    this.startedAtUptimeMs = options.startedAtUptimeMs ?? (options.isAlive ? () => undefined : linuxStartedAtUptimeMs);
     this.lastBusyUptimeMs = options.uptimeMs();
   }
 
@@ -150,7 +174,8 @@ export class MachineHostPowerRegistry {
       busy,
       kind: this.options.kind ?? "runtime",
       instanceId: this.instanceId,
-      lastBusyUptimeMs: this.lastBusyUptimeMs
+      lastBusyUptimeMs: this.lastBusyUptimeMs,
+      ...(this.crashRestarts.length ? { crashRestartsUptimeMs: this.crashRestarts } : {})
     };
     // 0777/0644 on purpose: profiles may run as different OS users and must be
     // able to publish into, and read, the same directory.
@@ -173,7 +198,7 @@ export class MachineHostPowerRegistry {
       if (!name.endsWith(".json") || name === STOP_INTENT_FILE) continue;
       const full = path.join(this.dir, name);
       const claim = readClaim(full);
-      const expectedName = claim && `${claim.profileId}${claim.instanceId ? `-${claim.instanceId}` : ""}.json`;
+      const expectedName = claim && claimFileName(claim);
       if (!claim || name !== expectedName || machineHostProfileId(claim.profilePath) !== claim.profileId) {
         throw new Error(`Host-power claim ${name} cannot be verified; the host must remain awake.`);
       }
@@ -313,7 +338,7 @@ export class MachineHostPowerRegistry {
    */
   hostIdleForMs(ownIdleSinceUptimeMs: number): number {
     const now = this.options.uptimeMs();
-    let lastBusy = ownIdleSinceUptimeMs;
+    let lastBusy = Math.max(ownIdleSinceUptimeMs, this.releasedLastBusyUptimeMs);
     for (const claim of this.others()) {
       if (claim.busy) return 0;
       // A claim written by an older release has no busy clock of its own; the
@@ -322,6 +347,97 @@ export class MachineHostPowerRegistry {
       if (busyAt > lastBusy) lastBusy = busyAt;
     }
     return Math.max(0, now - lastBusy);
+  }
+
+  /**
+   * Removes claims whose owner has exited and left no native work running.
+   *
+   * A runtime that crashes, or a test deployment that is killed, cannot
+   * release its claim. Counting such a claim as busy kept the instance awake
+   * until the next reboot, for weeks, although nothing was working. Its owner
+   * is gone, so the claim says nothing any more; what still matters is whether
+   * the agents it started are running, and that is read from the deployment's
+   * own process registry. Removal happens under the host lock and only if the
+   * claim is still the one that was judged.
+   */
+  async releaseDeadClaims(hasLiveNativeWork: (profilePath: string) => Promise<boolean>, restartGraceMs: number): Promise<number> {
+    const now = this.options.uptimeMs();
+    let released = 0;
+    for (const claim of this.others()) {
+      if (claim.instanceId === this.instanceId || this.ownerAlive(claim)) continue;
+      // A runtime that just died is usually being restarted; its next claim
+      // carries its activity on, since starting counts as work. Until then
+      // this one holds the host.
+      if (now - (this.raw(claim) ?? claim).uptimeMs < restartGraceMs) continue;
+      // The path to follow comes from a file anyone on the host could have
+      // written; only this OS user's own claims are trusted with it.
+      if (!this.ownedByThisUser(claim)) continue;
+      if (await hasLiveNativeWork(claim.profilePath)) continue;
+      await this.withLock(() => {
+        const file = path.join(this.dir, claimFileName(claim));
+        const current = readClaim(file);
+        if (!current || current.pid !== claim.pid || current.instanceId !== claim.instanceId || this.ownerAlive(current)) return;
+        if (!prune(file)) return;
+        released += 1;
+        const lastBusy = current.busy ? current.uptimeMs : current.lastBusyUptimeMs ?? current.uptimeMs;
+        this.releasedLastBusyUptimeMs = Math.max(this.releasedLastBusyUptimeMs, lastBusy);
+      });
+    }
+    return released;
+  }
+
+  /**
+   * Claims that keep the host awake although nobody can confirm work behind
+   * them, not written for `olderThanMs`: an owner that exited and left agents
+   * running, or one still running that stopped refreshing. Agents working
+   * are the ordinary reason to stay up; this is a fault to show.
+   */
+  unconfirmedClaims(olderThanMs: number): MachineHostClaim[] {
+    const now = this.options.uptimeMs();
+    return this.others().filter((claim) => {
+      const raw = this.raw(claim);
+      if (!raw || now - raw.uptimeMs < Math.max(olderThanMs, this.staleAfterMs)) return false;
+      // A maintenance command publishes once and holds its lease while it
+      // runs; a long one is not a program that stopped responding.
+      return !(raw.kind === "maintenance" && this.ownerAlive(raw));
+    });
+  }
+
+  /**
+   * A profile whose runtime crashed and restarted at least `times` times
+   * within the idle window, this one included: every start counts as work,
+   * so it holds the host without doing any.
+   */
+  restartLoop(times: number): string | undefined {
+    const now = this.options.uptimeMs();
+    const recent = (history: number[] | undefined) => (history ?? []).filter((at) => now - at < CRASH_HISTORY_MS).length;
+    if (recent(this.crashRestarts) >= times) return path.resolve(this.options.profilePath);
+    for (const claim of this.others()) {
+      const raw = this.raw(claim);
+      if (raw?.kind === "runtime" && recent(raw.crashRestartsUptimeMs) >= times) return raw.profilePath;
+    }
+    return undefined;
+  }
+
+  /** The claim as its owner wrote it, before `others()` marked it busy. */
+  private raw(claim: MachineHostClaim): MachineHostClaim | undefined {
+    return readClaim(path.join(this.dir, claimFileName(claim)));
+  }
+
+  private ownedByThisUser(claim: MachineHostClaim): boolean {
+    if (typeof process.getuid !== "function") return true;
+    try { return lstatSync(path.join(this.dir, claimFileName(claim))).uid === process.getuid(); }
+    catch { return false; }
+  }
+
+  /** The claim's own process is still running: its pid exists and started
+   *  before the claim was last written, so it is not a reused pid. Host
+   *  uptime may be read in whole seconds, so a start within the slack of the
+   *  claim still counts as its owner. */
+  private ownerAlive(claim: MachineHostClaim): boolean {
+    if (!this.isAlive(claim.pid)) return false;
+    const started = this.startedAtUptimeMs(claim.pid);
+    return started === undefined || started <= claim.uptimeMs + PID_REUSE_SLACK_MS;
   }
 
   /**
@@ -339,12 +455,29 @@ export class MachineHostPowerRegistry {
     const ownDeadIntent = intent?.phase === "pending" && intent.profileId === this.profileId && !this.isAlive(intent.pid);
     const mine = this.others().filter((claim) => claim.profileId === this.profileId);
     if (!mine.length && !ownDeadIntent) return 0;
+    // Recorded before the proof: a start after a crash is one even when the
+    // crashed runtime's work cannot be proven closed yet.
+    const now = this.options.uptimeMs();
+    let crashed = false;
+    for (const claim of mine) {
+      if (claim.instanceId === this.instanceId || this.isAlive(claim.pid)) continue;
+      const raw = this.raw(claim);
+      if (raw?.kind === "runtime" && this.options.kind !== "maintenance") {
+        // An earlier runtime of this profile died without releasing its
+        // claim: this start follows a crash. Its history comes along.
+        crashed = true;
+        this.crashRestarts.push(...(raw.crashRestartsUptimeMs ?? []));
+      }
+    }
+    if (crashed) {
+      this.crashRestarts = [...new Set([...this.crashRestarts, now])].filter((at) => now - at < CRASH_HISTORY_MS).sort((a, b) => a - b);
+    }
     await proveClosed();
     let cleared = 0;
     for (const claim of mine) {
       if (claim.instanceId === this.instanceId) continue;
       if (this.isAlive(claim.pid)) continue;
-      prune(path.join(this.dir, `${claim.profileId}-${claim.instanceId}.json`));
+      prune(path.join(this.dir, claimFileName(claim)));
       cleared += 1;
     }
     if (ownDeadIntent) {
@@ -402,7 +535,10 @@ function readClaim(file: string): MachineHostClaim | undefined {
     busy: claim.busy,
     kind: claim.kind === "maintenance" ? "maintenance" : "runtime",
     ...(claim.instanceId ? { instanceId: claim.instanceId } : {}),
-    ...(claim.lastBusyUptimeMs !== undefined ? { lastBusyUptimeMs: claim.lastBusyUptimeMs } : {})
+    ...(claim.lastBusyUptimeMs !== undefined ? { lastBusyUptimeMs: claim.lastBusyUptimeMs } : {}),
+    ...(Array.isArray(claim.crashRestartsUptimeMs)
+      ? { crashRestartsUptimeMs: claim.crashRestartsUptimeMs.filter((at): at is number => typeof at === "number" && Number.isFinite(at) && at >= 0).slice(-50) }
+      : {})
   };
 }
 
@@ -444,13 +580,41 @@ function readStopIntent(file: string): MachineHostStopIntent | undefined {
   return intent as MachineHostStopIntent;
 }
 
-function prune(file: string): void {
+function prune(file: string): boolean {
   try {
     rmSync(file, { force: true });
+    return true;
   } catch {
     // A claim owned by another user cannot be removed here; treating it as
     // gone is enough, and the directory is cleared on the next boot.
+    return false;
   }
+}
+
+function claimFileName(claim: Pick<MachineHostClaim, "profileId" | "instanceId">): string {
+  return `${claim.profileId}${claim.instanceId ? `-${claim.instanceId}` : ""}.json`;
+}
+
+/** Linux reports a process's start in clock ticks since boot (proc(5), stat
+ *  field 22); user-space ticks are 100 per second on every Linux this runs on.
+ *  Elsewhere, or when the process is gone, there is no answer. */
+function linuxStartedAtUptimeMs(pid: number): number | undefined {
+  if (process.platform !== "linux") return undefined;
+  try {
+    return linuxStatStartedAtMs(readFileSync(`/proc/${pid}/stat`, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Field 22 of a /proc/<pid>/stat line, in milliseconds since boot. The
+ *  command name in field 2 may contain spaces and parentheses, so fields are
+ *  counted from the last ")". */
+export function linuxStatStartedAtMs(stat: string): number | undefined {
+  const close = stat.lastIndexOf(")");
+  if (close < 0) return undefined;
+  const ticks = Number(stat.slice(close + 2).trim().split(/\s+/)[19]);
+  return Number.isFinite(ticks) && ticks >= 0 ? ticks * 10 : undefined;
 }
 
 function defaultIsAlive(pid: number): boolean {

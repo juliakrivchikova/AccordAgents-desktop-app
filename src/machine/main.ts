@@ -37,6 +37,7 @@ import { ChatActionEmitter } from "../main/services/chatActionEmitter";
 import { createChatActionEffects } from "../main/services/chatActionEffects";
 import { MachineIdlePower, assertNativeRegistryClosed } from "../main/services/machineIdlePower";
 import { MachineHostPowerRegistry } from "../main/services/machineHostPower";
+import { NATIVE_PROCESS_REGISTRY_FILE } from "../main/services/nativeProcessRegistry";
 import { uptime } from "node:os";
 import { MachineMaintenance } from "../main/services/machineMaintenance";
 import { nativeHostIdentity } from "../main/services/nativeHostIdentity";
@@ -116,7 +117,7 @@ async function runMachineMaintenance(args: MachineArgs): Promise<void> {
   setHostPlatform(createHeadlessPlatform({ userDataDir: args.userDataDir }));
   const storage = new StorageService({ sqliteExecutable: "sqlite3" });
   await storage.init();
-  const maintenance = new MachineMaintenance(storage.machinePower(), path.join(userDataPath(), "native-processes.sqlite3"),
+  const maintenance = new MachineMaintenance(storage.machinePower(), path.join(userDataPath(), NATIVE_PROCESS_REGISTRY_FILE),
     path.join(userDataPath(), "accordagents.sqlite3"));
   // Maintenance is work like any other on this host. Without its own claim a
   // runtime in another profile could find the instance idle and stop it in the
@@ -323,11 +324,13 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   await storageService.machineProgress().recoverLocal(identity.originId);
 
   let idlePower: MachineIdlePower | undefined;
+  /** The switch as this machine last read it; reported in every hello. */
+  let autoStopEnabled: boolean | undefined = await settingsService.getMachineAutoStopEnabled().catch(() => undefined);
   // Every runtime on this host publishes what it is doing and consults the
   // shared barrier, with or without AWS power configuration. A deployment that
   // cannot stop the instance itself must still stop another one from stopping
   // it underneath, and must refuse to start work into a stop already decided.
-  const nativeProcessDbPath = path.join(userDataPath(), "native-processes.sqlite3");
+  const nativeProcessDbPath = path.join(userDataPath(), NATIVE_PROCESS_REGISTRY_FILE);
   let presence: MachineHostPowerRegistry | undefined;
   let presenceWarning = "This machine cannot verify host-wide admission; native work remains queued.";
   const hostIdentity = await nativeHostIdentity().catch(() => undefined);
@@ -387,7 +390,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     eventLog: chatEventLogService,
     publicKeyDerBase64: identity.publicKeyDerBase64,
     outboxPath: path.join(userDataPath(), "machine-outbox.json"),
-    nativeProcessDbPath: path.join(userDataPath(), "native-processes.sqlite3"),
+    nativeProcessDbPath: path.join(userDataPath(), NATIVE_PROCESS_REGISTRY_FILE),
     // A stop another deployment has made final holds this one's queued
     // commands in the durable inbox instead of failing them as turns.
     hostStopCommitted: () => {
@@ -397,8 +400,19 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     detectProviders: () => cliAgentRunner.detectAgents(),
     onNativeActivitySettled: () => idlePower?.noteActivity() ?? Promise.resolve(),
     idleStopWarning: () => presenceWarning || idlePower?.warning(),
+    autoStopEnabled: () => autoStopEnabled,
     onSettingsImported: async () => {
       cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());
+      // The User's automatic-stop switch arrives with the settings. Switched
+      // on again, idle counts from now; either way the desktop is told what
+      // this machine now has, so the two cannot silently disagree.
+      const enabled = await settingsService.getMachineAutoStopEnabled().catch(() => undefined);
+      if (enabled === autoStopEnabled) return;
+      // The new idle start is written before the switch reads on here: a
+      // failed write keeps it off, and the next import tries again.
+      if (enabled === true && autoStopEnabled === false) await idlePower?.switchedOn();
+      autoStopEnabled = enabled;
+      void hostRef?.publishPowerStatus().catch(() => undefined);
     },
     onDesktopMachineId: (machineId) => {
       chatService.setHostMachineId(machineId);
@@ -431,6 +445,11 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     idlePower = new MachineIdlePower({ config: powerConfig, store: storageService.machinePower(), host,
       runner: cliAgentRunner, nativeProcessDbPath: nativeProcessDbPath,
       ...(presence ? { presence } : {}),
+      // The User's switch as this machine took it from the desktop's settings.
+      enabled: async () => {
+        if (autoStopEnabled === undefined) throw new Error("Settings could not be read; automatic stop waits until they can.");
+        return autoStopEnabled;
+      },
       log: (event, payload) => { void debugLogService.write(event, payload); } });
     await idlePower.start();
   }

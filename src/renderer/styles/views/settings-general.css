@@ -217,7 +217,8 @@
   grid-template-columns: repeat(2, minmax(120px, 180px));
 }
 
-.settings-view .gen-input {
+.settings-view .gen-input,
+.gen-aws-auto-stop-dialog .gen-input {
   min-width: 0;
   width: 100%;
   padding: 9px 11px;
@@ -228,7 +229,8 @@
   font: 500 13px var(--font-body);
 }
 
-.settings-view .gen-input:focus {
+.settings-view .gen-input:focus,
+.gen-aws-auto-stop-dialog .gen-input:focus {
   outline: 2px solid var(--app-accent);
   outline-offset: 1px;
 }
@@ -639,7 +641,8 @@
   font-size: 14px;
 }
 
-.settings-view .gen-aws-spinner {
+.settings-view .gen-aws-spinner,
+.gen-aws-auto-stop-dialog .gen-aws-spinner {
   display: inline-block;
   vertical-align: middle;
   animation: gen-aws-spin 1s linear infinite;
@@ -650,7 +653,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .settings-view .gen-aws-spinner { animation: none; }
+  .settings-view .gen-aws-spinner,
+  .gen-aws-auto-stop-dialog .gen-aws-spinner { animation: none; }
 }
 
 .settings-view .gen-aws-history summary { list-style: none; }
@@ -660,7 +664,8 @@
   color: var(--app-warning);
 }
 
-.settings-view .gen-aws-field {
+.settings-view .gen-aws-field,
+.gen-aws-auto-stop-dialog .gen-aws-field {
   display: grid;
   gap: 6px;
   min-width: 0;
@@ -687,13 +692,6 @@
 .settings-view .gen-aws-feedback.is-error {
   border-color: var(--app-warning);
   background: color-mix(in srgb, var(--app-warning) 8%, var(--app-surface));
-}
-
-.settings-view .gen-aws-size-change {
-  margin: 0 18px 12px;
-  color: var(--app-warning);
-  font-size: 12.5px;
-  line-height: 1.5;
 }
 
 .settings-view .gen-aws-disclosure {
@@ -739,7 +737,8 @@
   font-family: var(--font-mono, monospace);
 }
 
-.settings-view .gen-aws-command-box {
+.settings-view .gen-aws-command-box,
+.gen-aws-auto-stop-dialog .gen-aws-command-box {
   position: relative;
   margin: 0 18px 14px;
   border-radius: 10px;
@@ -748,7 +747,8 @@
   overflow: hidden;
 }
 
-.settings-view .gen-aws-command {
+.settings-view .gen-aws-command,
+.gen-aws-auto-stop-dialog .gen-aws-command {
   margin: 0;
   padding: 42px 14px 12px;
   font-family: var(--font-mono, monospace);
@@ -760,7 +760,8 @@
   overflow: auto;
 }
 
-.settings-view .gen-aws-copy {
+.settings-view .gen-aws-copy,
+.gen-aws-auto-stop-dialog .gen-aws-copy {
   position: absolute;
   top: 8px;
   right: 8px;
@@ -780,13 +781,16 @@
 }
 
 .settings-view .gen-aws-copy:hover,
-.settings-view .gen-aws-copy:focus-visible {
+.settings-view .gen-aws-copy:focus-visible,
+.gen-aws-auto-stop-dialog .gen-aws-copy:hover,
+.gen-aws-auto-stop-dialog .gen-aws-copy:focus-visible {
   border-color: var(--app-border-strong);
   color: var(--app-text-strong);
   outline: none;
 }
 
-.settings-view .gen-aws-paste {
+.settings-view .gen-aws-paste,
+.gen-aws-auto-stop-dialog .gen-aws-paste {
   min-height: 60px;
   resize: vertical;
   font-family: var(--font-mono, monospace);
@@ -1158,7 +1162,64 @@
   color: var(--app-muted);
 }
 
-/* A billing note the User has to act on: automatic stop refused or not working. */
-.settings-view .gen-aws-summary .gen-row-desc.is-warning {
-  color: var(--app-warning);
+/* Automatic stop: one switch in the instance card; the setup it needs opens
+   in a dialog, which renders outside the settings view. */
+.settings-view .gen-aws-auto-stop {
+  border-top: 1px solid var(--app-border);
+}
+
+.gen-aws-auto-stop-dialog {
+  width: min(560px, calc(100vw - 32px)) !important;
+  max-width: min(560px, calc(100vw - 32px)) !important;
+  gap: 14px !important;
+}
+
+.gen-aws-auto-stop-dialog .gen-aws-command-box {
+  margin: 0;
+}
+
+.gen-aws-auto-stop-dialog .gen-aws-command {
+  max-height: 160px;
+}
+
+.gen-aws-auto-stop-dialog [data-slot="dialog-footer"] {
+  margin: 0 !important;
+  padding: 12px 0 0 !important;
+  border-top: 1px solid var(--app-border-subtle);
+  background: transparent !important;
+}
+
+.gen-aws-inline-error {
+  color: var(--app-status-warning-text);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.settings-view .gen-aws-diagnostics-badge {
+  margin-left: 8px;
+  color: var(--app-status-warning-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-view .gen-aws-problem {
+  display: grid;
+  gap: 10px;
+  margin: 4px 18px 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--app-warning);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-warning) 8%, var(--app-surface));
+  color: var(--app-text);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.settings-view .gen-aws-problem strong {
+  color: var(--app-text-strong);
+}
+
+.settings-view .gen-aws-problem .gen-actions {
+  justify-content: flex-start;
 }

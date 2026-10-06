@@ -7,7 +7,7 @@ import test from "node:test";
 import { createHash } from "node:crypto";
 import { nativeHostIdentity, verifiedNativeHostReboot } from "./nativeHostIdentity";
 import { confirmNativeProcessClosed, spawnNativeProcess } from "./nativeProcess";
-import { NativeProcessRegistry } from "./nativeProcessRegistry";
+import { leaseProcessesGone, NativeProcessRegistry } from "./nativeProcessRegistry";
 import { hasLiveCapturedPosixProcesses, readPosixProcessTableAsync, terminateCapturedPosixProcesses } from "./processTermination";
 
 test("independent controllers initialize one process registry while admitting different sessions", { skip: process.platform === "win32" }, async () => {
@@ -121,6 +121,50 @@ test("a lost guardian cannot be mistaken for confirmed termination or silently r
     await assert.rejects(spawnNativeProcess(f.options), /owned by another|before confirming shutdown/);
     assert.equal((await f.registry.get("chat:member"))?.generation, receipt.generation);
   } finally { await f.close(); }
+});
+
+test("a session whose app and guardian were killed together starts again once nothing they recorded runs", { skip: process.platform === "win32" }, async () => {
+  // A crashed runtime under systemd takes its guardians with it: no receipt is
+  // written. Without this the member could not start again until a reboot.
+  const f = await fixture();
+  try {
+    const host = (await nativeHostIdentity())!;
+    const gone = (name: string) => ({ pid: 999_990 + name.length, startedAt: `synthetic-${name}` });
+    const lease = (await f.registry.acquire({ scope: "chat:member", token: "crashed", host, parent: gone("app"), supervisor: gone("guardian") }))!;
+    await f.registry.update({ ...lease, phase: "running", provider: gone("provider"), descendants: [gone("tool")] });
+    const child = await spawnNativeProcess(f.options);
+    child.on("error", () => undefined);
+    const receipt = (await f.registry.get("chat:member"))!;
+    assert.equal(receipt.generation, lease.generation + 1, "the session started again");
+    await confirmNativeProcessClosed(child);
+  } finally { await f.close(); }
+});
+
+test("a killed session with an agent still running is not taken over", { skip: process.platform === "win32" }, async () => {
+  const f = await fixture();
+  // An agent the killed session left behind, still running.
+  const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  try {
+    const host = (await nativeHostIdentity())!;
+    let row: { pid: number; startedAt: string } | undefined;
+    await eventually(async () => Boolean(row = (await readPosixProcessTableAsync())?.get(orphan.pid!)));
+    const gone = (name: string) => ({ pid: 999_980 + name.length, startedAt: `synthetic-${name}` });
+    const lease = (await f.registry.acquire({ scope: "chat:member", token: "crashed", host, parent: gone("app"), supervisor: gone("guardian") }))!;
+    await f.registry.update({ ...lease, phase: "running", provider: gone("provider"), descendants: [{ pid: row!.pid, startedAt: row!.startedAt }] });
+    await assert.rejects(spawnNativeProcess(f.options), /before confirming shutdown/);
+    assert.equal((await f.registry.get("chat:member"))?.generation, lease.generation);
+  } finally { orphan.kill("SIGKILL"); await f.close(); }
+});
+
+test("a provider's process group counts as its own: a member started after the last capture keeps the lease", () => {
+  const host = { machine: "a".repeat(64), boot: "a".repeat(32) };
+  const lease = { scope: "s", generation: 1, token: "t", host, phase: "running" as const, descendants: [],
+    supervisor: { pid: 10, startedAt: "s" }, parent: { pid: 9, startedAt: "p" }, provider: { pid: 20, startedAt: "x" } };
+  const row = (pid: number, pgid: number, startedAt = `t${pid}`) => [pid, { pid, ppid: 1, pgid, startedAt, state: "S" }] as const;
+  assert.equal(leaseProcessesGone(lease, host, new Map([row(21, 20)])), false, "a group member outlives its leader");
+  assert.equal(leaseProcessesGone(lease, host, new Map([row(20, 20, "reused"), row(21, 20)])), true, "a reused leader's group is not followed");
+  assert.equal(leaseProcessesGone(lease, host, new Map([row(22, 22)])), true);
+  assert.equal(leaseProcessesGone(lease, { ...host, boot: "b".repeat(32) }, new Map()), false, "pids from another boot prove nothing");
 });
 
 test("a large final provider record drains before close and disk failure retains process ownership", { skip: process.platform === "win32" }, async () => {

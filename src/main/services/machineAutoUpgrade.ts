@@ -74,6 +74,9 @@ export class MachineAutoUpgradeService {
   private readonly waiting = new Set<string>();
   /** Machines told why nothing can be attempted, so the notice is shown once. */
   private readonly noticed = new Set<string>();
+  /** Machines the User asked to try again: an update of this version that
+   *  already failed on them is attempted once more. */
+  private readonly retryRequested = new Set<string>();
   private evaluating: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: MachineAutoUpgradeOptions) {}
@@ -87,6 +90,20 @@ export class MachineAutoUpgradeService {
     });
     this.evaluating = run;
     return run;
+  }
+
+  /**
+   * The User asked to try again. What this process already tried for the
+   * machine, and an update of this version that failed on it, no longer hold
+   * it back; the attempt still waits for the machine to be idle and holds new
+   * turns, as every automatic update does.
+   */
+  retry(machineId: string): Promise<void> {
+    this.attempted.delete(machineId);
+    for (const attempt of [...this.attemptedPower]) if (attempt.startsWith(`${machineId}:`)) this.attemptedPower.delete(attempt);
+    this.noticed.delete(machineId);
+    this.retryRequested.add(machineId);
+    return this.evaluate(machineId);
   }
 
   /** Whether a machine still waits for idle to be upgraded; the periodic
@@ -114,8 +131,9 @@ export class MachineAutoUpgradeService {
     if (last && !isMachineInstallTerminalPhase(last.phase)) return; // a setup action is running
     // This desktop version already failed on this machine; the row shows why
     // and the manual button is the way forward.
+    // An update the desktop's closing cut short is finished, not held back.
     const versionFailed = Boolean(last && last.phase !== "ready" && isAutoUpgradeOf(last.operationId, this.options.desktopVersion)
-      && last.recovery?.kind !== "machine-busy");
+      && last.recovery?.kind !== "machine-busy" && !last.interrupted) && !this.retryRequested.has(id);
     // The stored version is what this desktop last installed; only a machine
     // it says is behind is asked what it actually runs.
     const versionDue = !this.attempted.has(id) && !versionFailed
@@ -188,6 +206,7 @@ export class MachineAutoUpgradeService {
       return;
     }
     this.waiting.delete(id);
+    this.retryRequested.delete(id);
     if (upgrade) this.attempted.add(id);
     if (power && powerAttempt) this.attemptedPower.add(powerAttempt);
     this.inFlight.add(id);
