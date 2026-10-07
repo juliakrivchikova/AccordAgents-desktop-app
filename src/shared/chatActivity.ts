@@ -120,6 +120,9 @@ export function buildChatActivityItems(
     if (message.role !== "participant" || message.status !== "done" || !isVisibleTimelineMessage(message)) {
       continue;
     }
+    if (hasClosedCard(message)) {
+      continue;
+    }
     const runId = cleanString(message.metadata?.runId);
     if (runId && runningRunIds.has(runId)) {
       continue;
@@ -724,6 +727,20 @@ function newestMessageByCreatedAt(messages: ChatMessage[]): ChatMessage | undefi
     const timeDelta = timeValue(right.createdAt) - timeValue(left.createdAt);
     return timeDelta || right.id.localeCompare(left.id);
   })[0];
+}
+
+/**
+ * The message carries a card the User closed: a cancelled choice, or mentions she declined. While
+ * the card waited, the message was listed under Pending; closing it is finished business that stays
+ * on the chat card, so the same message must not come back as a finished update. A mention the app
+ * closed itself because the member took a newer turn has no `rejectedAt` and does not count.
+ */
+function hasClosedCard(message: ChatMessage): boolean {
+  if (message.metadata?.pendingChoice?.status === "cancelled") {
+    return true;
+  }
+  const mentions = Array.isArray(message.metadata?.pendingMentions) ? message.metadata.pendingMentions : [];
+  return mentions.length > 0 && mentions.every((mention) => mention.status === "rejected" && Boolean(mention.rejectedAt));
 }
 
 function finishedMessageActivityTime(message: ChatMessage): string {

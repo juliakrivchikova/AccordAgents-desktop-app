@@ -6,6 +6,7 @@ import test from "node:test";
 import { DeviceEventChannel } from "./deviceEventChannel";
 import { ChatEventLogService } from "./chatEventLog";
 import { StorageService } from "./storage";
+import { DeviceEventStorage } from "./deviceEventStorage";
 import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { DeviceEventPacket } from "../../shared/deviceEventChannel";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
@@ -232,6 +233,32 @@ async function devices() {
   };
   return pair;
 }
+
+test("a retry pass reads only identities while every waiting event is still inside its backoff", async () => {
+  // An unreachable peer let 942 events wait on the User's desktop; each five-second pass re-read
+  // every envelope and kept the one database connection busy, so a Cancel took 18 seconds.
+  const pair = await devices();
+  const listPending = DeviceEventStorage.prototype.listPending;
+  try {
+    for (const text of ["one", "two", "three"]) {
+      await pair.a.publish({ conversationId: "chat", kind: "message.created", payload: { text } });
+    }
+    await pair.a.flush();
+    assert.equal(pair.sentA.filter((packet) => packet.type === "event").length, 3);
+    const storage = (pair.a as unknown as { options: { storage: StorageService } }).options.storage;
+    const getChatEvent = storage.getChatEvent.bind(storage);
+    let envelopeReads = 0;
+    storage.getChatEvent = async (eventId) => { envelopeReads += 1; return getChatEvent(eventId); };
+    DeviceEventStorage.prototype.listPending = async () => { throw new Error("a retry pass must not read every waiting envelope"); };
+    await pair.a.flush();
+    assert.equal(envelopeReads, 0, "nothing is due again yet, so no envelope is read");
+    assert.equal(pair.sentA.filter((packet) => packet.type === "event").length, 3, "nothing is re-sent inside the backoff");
+    assert.equal((await pair.storageA.deviceEvents().listPendingHeaders("room")).length, 3, "all three still wait for an ACK");
+  } finally {
+    DeviceEventStorage.prototype.listPending = listPending;
+    await pair.cleanup();
+  }
+});
 
 test("a shared room key cannot forge another device's application ACK", async () => {
   const pair = await devices();

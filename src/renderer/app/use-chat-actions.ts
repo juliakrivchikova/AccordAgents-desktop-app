@@ -5,6 +5,7 @@ import type {
   ChatParticipant,
   ChatParticipantConfig,
   ChatSkillMention,
+  Conversation,
   RepoFileMention
 } from "../../shared/types";
 import {
@@ -174,6 +175,15 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     const openRequestAtStart = state.openConversationRequestRef.current;
     const previewingElsewhere = (): boolean =>
       state.railViewRef.current === "activity" && state.openConversationRequestRef.current !== openRequestAtStart;
+    // So is a chat opened from the sidebar or search while this one was being
+    // created: once it is on screen, the new chat does not take its place. An
+    // empty screen (still on New chat, or back from Activity) shows the new chat.
+    const showCreated = (created: Conversation): void => {
+      state.setConversation((current) =>
+        current && current.id !== created.id && state.openConversationRequestRef.current !== openRequestAtStart
+          ? current
+          : created);
+    };
     try {
       const result = await window.consensus.createChatConversation({
         runId,
@@ -186,7 +196,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       creation.signal.throwIfAborted();
       state.chatCreationRef.current = undefined;
       if (!previewingElsewhere()) {
-        state.setConversation(result.conversation);
+        showCreated(result.conversation);
         state.setWarnings(result.warnings);
       }
       // Opened Activity while this chat was being created: Back lands on it,
@@ -203,7 +213,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         imageAttachments
       });
       if (!previewingElsewhere()) {
-        state.setConversation(mergeProgressIntoConversation(sendResult.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
+        showCreated(mergeProgressIntoConversation(sendResult.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
         state.setWarnings([...result.warnings, ...sendResult.warnings]);
       }
       await refreshPersistedProviderPreference();
@@ -228,16 +238,14 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
           conversationId, archived: true, onlyIfEmpty: true
         }).catch(() => window.consensus.getConversation(conversationId).catch(() => undefined));
         if (saved?.metadata.archived === true) {
-          if (!previewingElsewhere()) {
-            state.setConversation(undefined);
-          }
+          state.setConversation((current) => current?.id === conversationId ? undefined : current);
           // Back from Activity returns to the restored draft, not the archived chat.
           if (state.chatBeforeActivityRef.current?.conversationId === conversationId) {
             state.chatBeforeActivityRef.current = {};
           }
           state.setQuestion(draftMessage);
         } else if (saved && !previewingElsewhere()) {
-          state.setConversation(saved);
+          showCreated(saved);
         }
         await conversationActions.refreshConversations().catch(() => undefined);
       }
@@ -386,6 +394,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
 
   async function respondToChatMentions(sourceMessageId: string, targetParticipantIds: string[], approve: boolean, continueRequester = false): Promise<void> {
     await runBusyChatAction("Mention approval run cancelled.", async (runId) => {
+      const openRequest = state.openConversationRequestRef.current;
       const result = await window.consensus.respondToChatMentions({
         conversationId: state.conversation!.id,
         sourceMessageId,
@@ -394,8 +403,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         continueRequester,
         runId
       });
-      state.setConversation(mergeProgressIntoConversation(result.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
-      state.setWarnings(result.warnings);
+      updateIfStillOpen(result.conversation, runId);
+      if (state.openConversationRequestRef.current === openRequest) state.setWarnings(result.warnings);
       await conversationActions.refreshConversations();
     });
   }
@@ -406,7 +415,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     try {
       const saved = await window.consensus.toggleChatReaction({ conversationId: state.conversation.id, messageId, emoji });
       if (saved) {
-        state.setConversation(saved);
+        updateIfStillOpen(saved);
         state.setSummaries((current) => upsertConversationSummary(current, saved));
       }
     } catch (caught) {
@@ -416,6 +425,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
 
   async function respondToChatChoice(sourceMessageId: string, choiceId: string, response: ChatChoiceResponse): Promise<void> {
     await runBusyChatAction("Choice response cancelled.", async (runId) => {
+      const openRequest = state.openConversationRequestRef.current;
       const result = await window.consensus.respondToChatChoice({
         conversationId: state.conversation!.id,
         sourceMessageId,
@@ -423,8 +433,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         ...response,
         runId
       });
-      state.setConversation(mergeProgressIntoConversation(result.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
-      state.setWarnings(result.warnings);
+      updateIfStillOpen(result.conversation, runId);
+      if (state.openConversationRequestRef.current === openRequest) state.setWarnings(result.warnings);
       await conversationActions.refreshConversations();
     });
   }
@@ -460,7 +470,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         skipToolchainPreflight: patch.skipToolchainPreflight,
         autoWatch: patch.autoWatch
       });
-      if (saved) state.setConversation(saved);
+      if (saved) updateIfStillOpen(saved);
       await conversationActions.refreshConversations();
       return true;
     } catch (caught) {
@@ -474,7 +484,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     state.setError(undefined);
     try {
       const saved = await window.consensus.removeChatParticipant({ conversationId: state.conversation.id, participantId });
-      if (saved) state.setConversation(saved);
+      if (saved) updateIfStillOpen(saved);
       await conversationActions.refreshConversations();
     } catch (caught) {
       state.setError(errorText(caught));
@@ -544,7 +554,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       const saved = await window.consensus.respondToChatAppToolApproval({ conversationId: state.conversation.id, approvalId, approve, scope, draftOverride, codexDecisionId });
       const [nextSettings] = await Promise.all([window.consensus.getSettings(), conversationActions.refreshConversations()]);
       state.setSettings(nextSettings);
-      if (saved) state.setConversation(saved);
+      if (saved) updateIfStillOpen(saved);
     } catch (caught) {
       state.setError(errorText(caught));
     }
@@ -561,7 +571,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     state.setError(undefined);
     try {
       const saved = await window.consensus.addChatParticipant({ conversationId: state.conversation.id, participant });
-      if (saved) state.setConversation(saved);
+      if (saved) updateIfStillOpen(saved);
       await conversationActions.refreshConversations();
       return true;
     } catch (caught) {
@@ -592,6 +602,20 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setBusy(false);
       state.setCurrentRunId(undefined);
     }
+  }
+
+  // An answer can take seconds to come back, and by then the User may be in
+  // another chat or previewing one in Activity. It updates its own chat only
+  // while that chat is still the one loaded, and never brings it back on
+  // screen: answering a card and moving on used to throw the User back to the
+  // card's chat once the answer landed.
+  function updateIfStillOpen(conversation: Conversation, runId?: string): void {
+    state.setConversation((current) => {
+      if (current?.id !== conversation.id) return current;
+      return runId
+        ? mergeProgressIntoConversation(conversation, state.progressLogRef.current.filter((item) => item.runId === runId))
+        : conversation;
+    });
   }
 
   async function refreshPersistedProviderPreference(): Promise<void> {

@@ -2,12 +2,14 @@ import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { decideChatEventRetention, type ChatEventRetentionDecision } from "../../shared/chatEventRetention";
 import {
+  DEVICE_EVENT_HEADER_PAGE_COUNT,
   DEVICE_EVENT_PAGE_BYTES,
   DEVICE_EVENT_PAGE_COUNT,
   type DeviceEventAppendOptions,
   type DeviceEventApplyOutcome,
   type DeviceEventDelivery,
   type DeviceEventGap,
+  type DeviceEventPendingHeader,
   type DeviceEventReceipt
 } from "../../shared/deviceEventDelivery";
 
@@ -198,6 +200,26 @@ export class DeviceEventStorage {
       recipient: { deviceId: row.deviceId, channelId: row.channelId },
       ...(row.deliveredAt ? { deliveredAt: row.deliveredAt } : {})
     }));
+  }
+
+  /**
+   * The same pending outbox as `listPending`, as identities only. A retry pass
+   * reads these and loads the envelope of an event only when it is due again.
+   * An unreachable peer lets the outbox grow into the hundreds, and re-reading
+   * every retained envelope on each five-second pass kept the one database
+   * connection busy for everything else the User did.
+   */
+  async listPendingHeaders(channelId: string, afterRowId = 0, deviceId?: string): Promise<DeviceEventPendingHeader[]> {
+    await this.database.init();
+    requireCursor(afterRowId);
+    return this.database.query<DeviceEventPendingHeader>(`
+      select o.rowid as rowId, e.event_id as eventId, e.event_hash as eventHash, e.origin_id as originId,
+        e.origin_seq as originSeq, e.log_scope_id as logScopeId, o.delivered_at as deliveredAt
+      from device_event_outbox o join chat_events e on e.event_id = o.event_id
+      where o.channel_id = ${quote(channelId)} and o.acknowledged_at is null and o.rowid > ${afterRowId}
+        ${deviceId ? `and o.device_id = ${quote(deviceId)}` : ""}
+      order by o.rowid limit ${DEVICE_EVENT_HEADER_PAGE_COUNT};
+    `);
   }
 
   /** Only a mailbox success calls this; WebSocket write success is not delivery. */
