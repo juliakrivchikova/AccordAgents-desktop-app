@@ -252,15 +252,21 @@ export class DeviceEventChannel {
     if (this.options.isPeerConnected?.() === false) return;
     let cursor = 0;
     while (!this.stopped) {
-      const page = await this.options.storage.deviceEvents().listPending(this.options.channelId, cursor, this.options.peerDeviceId);
+      // Identities first; an envelope is read only for an event that is due.
+      // Re-reading every waiting envelope on each pass kept the database busy
+      // for everything else while the peer was unreachable.
+      const page = await this.options.storage.deviceEvents().listPendingHeaders(this.options.channelId, cursor, this.options.peerDeviceId);
       if (!page.length) return;
       for (const entry of page) {
         if (this.stopped) return;
-        const previous = this.lastSent.get(entry.event.eventId);
+        const previous = this.lastSent.get(entry.eventId);
         const delay = previous ? Math.min(5_000 * 2 ** previous.attempts, 300_000) : 0;
         if (!previous || performance.now() - previous.at >= delay) {
-          await this.sendEvent(entry.event);
-          this.lastSent.set(entry.event.eventId, { at: performance.now(), attempts: Math.min((previous?.attempts ?? -1) + 1, 6) });
+          const event = await this.options.storage.getChatEvent(entry.eventId);
+          if (event) {
+            await this.sendEvent(event);
+            this.lastSent.set(entry.eventId, { at: performance.now(), attempts: Math.min((previous?.attempts ?? -1) + 1, 6) });
+          }
         }
         cursor = entry.rowId;
       }

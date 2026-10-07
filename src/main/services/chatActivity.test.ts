@@ -305,11 +305,45 @@ test("buildChatActivityItems keeps cancelled pending cards out of activity entir
     ]
   }), { now: NOW });
 
-  // The three timeline messages are ordinary finished member updates; only the cancelled
-  // approval, choice and mention cards are gone, and the updates collapse into one row.
+  // The cancelled approval, choice and mention cards are gone, and so are the messages that
+  // carried the closed choice and mention: cancelling a card in Pending must not bring the same
+  // message back under Finished (the User, 2026-10-07). Only the ordinary update remains.
   assert.deepEqual(items.map((item) => item.kind), ["message"]);
   assert.equal(items[0].target.messageId, "finished");
-  assert.equal(items[0].groupedCount, 3);
+  assert.equal(items[0].groupedCount, undefined);
+});
+
+test("buildChatActivityItems lists a pending card once and drops its message after it is cancelled", () => {
+  const choice = {
+    id: "choice-1",
+    title: "Choose scope",
+    question: "Phase 1 or full handoff?",
+    options: [{ id: "phase-1", label: "Phase 1" }]
+  };
+  const pending = buildChatActivityItems(conversation({
+    messages: [participantMessage("asking", {
+      createdAt: "2026-01-08T10:00:00.000Z",
+      metadata: { runId: "run-asking", pendingChoice: { ...choice, status: "pending" } }
+    })]
+  }), { now: NOW });
+  assert.deepEqual(pending.map((item) => [item.status, item.kind]), [["pending", "choice"]]);
+
+  const cancelled = buildChatActivityItems(conversation({
+    messages: [participantMessage("asking", {
+      createdAt: "2026-01-08T10:00:00.000Z",
+      metadata: { runId: "run-asking", pendingChoice: { ...choice, status: "cancelled", cancelledAt: "2026-01-08T11:00:00.000Z" } }
+    })]
+  }), { now: NOW });
+  assert.deepEqual(cancelled, []);
+
+  // An answered choice is not closed business: its message stays a finished update.
+  const answered = buildChatActivityItems(conversation({
+    messages: [participantMessage("asking", {
+      createdAt: "2026-01-08T10:00:00.000Z",
+      metadata: { runId: "run-asking", pendingChoice: { ...choice, status: "selected", selectedOptionId: "phase-1" } }
+    })]
+  }), { now: NOW });
+  assert.deepEqual(answered.map((item) => [item.status, item.kind, item.target.messageId]), [["recent", "message", "asking"]]);
 });
 
 test("mergeChatActivityItems drops a cancelled card preserved from older renderer state", () => {

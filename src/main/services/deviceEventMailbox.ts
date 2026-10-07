@@ -97,33 +97,38 @@ export class DeviceEventMailbox {
     let cursor = 0;
     const pendingIds = new Set<string>();
     while (!this.lifetime.signal.aborted) {
-      const page = await storage.deviceEvents().listPending(pairing.rendezvousId, cursor, peerDeviceId);
+      // Identities only: a delivered event is probed by its header, and an
+      // envelope is read just before it is posted. Re-reading every waiting
+      // envelope on each pass kept the database busy for everything else.
+      const page = await storage.deviceEvents().listPendingHeaders(pairing.rendezvousId, cursor, peerDeviceId);
       if (!page.length) break;
       const probes: Extract<DeviceEventPacket, { type: "probe" }>["events"] = [];
       for (const item of page) {
-        pendingIds.add(item.event.eventId);
+        pendingIds.add(item.eventId);
         cursor = item.rowId;
         if (item.deliveredAt) {
-          const last = this.lastProbed.get(item.event.eventId);
+          const last = this.lastProbed.get(item.eventId);
           if (last === undefined || performance.now() - last >= 300_000) {
-            const { eventId, eventHash, originId, originSeq, logScopeId } = item.event;
+            const { eventId, eventHash, originId, originSeq, logScopeId } = item;
             probes.push({ eventId, eventHash, originId, originSeq, logScopeId });
           }
           continue;
         }
+        const event = await storage.getChatEvent(item.eventId);
+        if (!event) continue;
         const base = { protocol: "accord-device-events-v1" as const, from: localDeviceId, to: peerDeviceId };
-        if (isDeviceEventBlobReference(item.event.payload)) {
-          for (let index = 0; index < item.event.payload.fragments; index += 1) {
-            const fragment = await storage.deviceEventBlobs().fragment(item.event.payload, index);
+        if (isDeviceEventBlobReference(event.payload)) {
+          for (let index = 0; index < event.payload.fragments; index += 1) {
+            const fragment = await storage.deviceEventBlobs().fragment(event.payload, index);
             if (!fragment) throw new Error("A retained device event has a missing fragment.");
             await this.sendPacket({ ...base, type: "fragment", fragment });
           }
         }
-        await this.sendPacket({ ...base, type: "event", event: item.event });
+        await this.sendPacket({ ...base, type: "event", event });
         // This is recorded only after the relay has accepted every dependency
         // and the manifest; it still does not release the peer's outbox entry.
-        await storage.deviceEvents().markDelivered(item.event.eventId, item.event.eventHash, peerDeviceId, new Date().toISOString());
-        this.lastProbed.set(item.event.eventId, performance.now());
+        await storage.deviceEvents().markDelivered(event.eventId, event.eventHash, peerDeviceId, new Date().toISOString());
+        this.lastProbed.set(event.eventId, performance.now());
       }
       if (probes.length) {
         // The relay may have expired an event or its ACK while the peers

@@ -46,6 +46,7 @@ export interface ActivityViewProps {
   trailing?: React.ReactNode;
   onSelect: (item: ChatActivityItem) => void;
   onMarkRead: (item: ChatActivityItem) => void;
+  cancellingItemIds?: ReadonlySet<string>; // Cancel pressed, still being applied.
   onCancelPending: (item: ChatActivityItem) => void;
   onClear: (item: ChatActivityItem) => void;
   onOpenInChat: (item: ChatActivityItem) => void;
@@ -76,6 +77,7 @@ export function ActivityView({
   trailing,
   onSelect,
   onMarkRead,
+  cancellingItemIds,
   onCancelPending,
   onClear,
   onOpenInChat,
@@ -213,6 +215,7 @@ export function ActivityView({
                 key={item.id}
                 item={item}
                 active={item.id === selectedItem?.id}
+                cancelling={cancellingItemIds?.has(item.id) === true}
                 onSelect={() => onSelect(item)}
                 onMarkRead={() => onMarkRead(item)}
                 onCancelPending={() => onCancelPending(item)}
@@ -281,6 +284,7 @@ function emptyActivityTabDescription(tab: ActivityStatusTab): string {
 function ActivityRow({
   item,
   active,
+  cancelling,
   onSelect,
   onMarkRead,
   onCancelPending,
@@ -288,6 +292,7 @@ function ActivityRow({
 }: {
   item: ChatActivityItem;
   active: boolean;
+  cancelling: boolean;
   onSelect: () => void;
   onMarkRead: () => void;
   onCancelPending: () => void;
@@ -302,6 +307,8 @@ function ActivityRow({
       data-status={item.status}
       data-read={item.read ? "true" : undefined}
       data-active={active ? "true" : undefined}
+      data-cancelling={cancelling ? "true" : undefined}
+      aria-busy={cancelling ? true : undefined}
     >
       <button
         type="button"
@@ -340,7 +347,7 @@ function ActivityRow({
           <IconButton label="Mark read" icon={CheckCheck} onClick={onMarkRead} />
         ) : null}
         {canCancelPending ? (
-          <IconButton label="Cancel pending card" icon={CircleX} tone="danger" onClick={onCancelPending} />
+          <IconButton label={cancelling ? "Cancelling pending card" : "Cancel pending card"} icon={CircleX} tone="danger" disabled={cancelling} onClick={onCancelPending} />
         ) : null}
         {item.status !== "pending" ? (
           <IconButton label="Clear from activity" icon={Eraser} onClick={onClear} />

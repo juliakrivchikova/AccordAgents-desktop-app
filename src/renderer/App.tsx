@@ -142,23 +142,38 @@ function App(): JSX.Element {
     });
   };
 
+  // Pending rows whose Cancel is on its way: the row says so at once and cannot
+  // be cancelled twice while the answer is applied.
+  const [cancellingActivityItemIds, setCancellingActivityItemIds] = React.useState<ReadonlySet<string>>(() => new Set());
+  const cancellingActivityItemIdsRef = React.useRef(new Set<string>());
+  const setActivityItemCancelling = (itemId: string, cancelling: boolean): void => {
+    const next = new Set(cancellingActivityItemIdsRef.current);
+    if (cancelling) next.add(itemId); else next.delete(itemId);
+    cancellingActivityItemIdsRef.current = next;
+    setCancellingActivityItemIds(next);
+  };
+
   const applyActivityCancelResult = async (item: ChatActivityItem, conversation?: Conversation, warnings?: string[]): Promise<void> => {
-    if (conversation && state.conversation?.id === conversation.id) {
-      state.setConversation(conversation);
+    // The answer can land after the User moved to another chat or preview; it
+    // updates its own chat only if that is still the one loaded.
+    if (conversation) {
+      state.setConversation((current) => current?.id === conversation.id ? conversation : current);
     }
     if (warnings) {
       state.setWarnings(warnings);
     }
+    // Answered: the row leaves Pending now, not after the lists are re-read.
+    state.setActivityItems((items) => items.filter((candidate) => candidate.id !== item.id));
     state.setSelectedActivityItem((current) => current?.id === item.id ? undefined : current);
-    await conversationActions.refreshConversations();
-    await conversationActions.refreshActivity();
+    await Promise.all([conversationActions.refreshConversations(), conversationActions.refreshActivity()]);
   };
 
   const cancelPendingActivityItem = async (item: ChatActivityItem): Promise<void> => {
-    if (item.status !== "pending") {
+    if (item.status !== "pending" || cancellingActivityItemIdsRef.current.has(item.id)) {
       return;
     }
     state.setError(undefined);
+    setActivityItemCancelling(item.id, true);
     try {
       if (item.kind === "approval" && item.target.approvalId) {
         if (isCodexActivityApprovalItem(item)) {
@@ -198,6 +213,8 @@ function App(): JSX.Element {
       throw new Error("This activity item cannot be cancelled from the Activity list.");
     } catch (caught) {
       state.setError(errorText(caught));
+    } finally {
+      setActivityItemCancelling(item.id, false);
     }
   };
 
@@ -494,6 +511,7 @@ function App(): JSX.Element {
             void conversationActions.openConversationAndFocusActivityItem(item, { markViewed: false });
           }}
           onMarkRead={(item) => markActivityItemRead(state, item.id)}
+          cancellingItemIds={cancellingActivityItemIds}
           onCancelPending={(item) => void cancelPendingActivityItem(item)}
           onClear={(item) => clearActivityItem(state, item.id)}
           detailHasHeader={Boolean(activityTopBar && conversationPanel)}
