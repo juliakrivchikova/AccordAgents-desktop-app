@@ -732,14 +732,15 @@ function newestMessageByCreatedAt(messages: ChatMessage[]): ChatMessage | undefi
 /**
  * The message carries a card the User closed: a cancelled choice, or mentions she declined. While
  * the card waited, the message was listed under Pending; closing it is finished business that stays
- * on the chat card, so the same message must not come back as a finished update.
+ * on the chat card, so the same message must not come back as a finished update. A mention the app
+ * closed itself because the member took a newer turn has no `rejectedAt` and does not count.
  */
 function hasClosedCard(message: ChatMessage): boolean {
   if (message.metadata?.pendingChoice?.status === "cancelled") {
     return true;
   }
   const mentions = Array.isArray(message.metadata?.pendingMentions) ? message.metadata.pendingMentions : [];
-  return mentions.length > 0 && mentions.every((mention) => mention.status === "rejected");
+  return mentions.length > 0 && mentions.every((mention) => mention.status === "rejected" && Boolean(mention.rejectedAt));
 }
 
 function finishedMessageActivityTime(message: ChatMessage): string {

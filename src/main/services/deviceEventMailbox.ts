@@ -6,7 +6,7 @@ import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import { mailboxAuthHeaders, mailboxEndpointForSealKey, registerMailboxForSealKey } from "./mailboxAccess";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
 import type { StorageService } from "./storage";
-import { DeviceEventProjectionPendingError } from "../../shared/deviceEventDelivery";
+import { DEVICE_EVENT_PROBE_LIMIT, DeviceEventProjectionPendingError } from "../../shared/deviceEventDelivery";
 import { DevicePacketAuthenticationError } from "./devicePacketAuthentication";
 
 interface DeviceEventMailboxOptions {
@@ -130,13 +130,15 @@ export class DeviceEventMailbox {
         await storage.deviceEvents().markDelivered(event.eventId, event.eventHash, peerDeviceId, new Date().toISOString());
         this.lastProbed.set(event.eventId, performance.now());
       }
-      if (probes.length) {
-        // The relay may have expired an event or its ACK while the peers
-        // never overlapped online. Ask with small headers; the receiver can
-        // repeat a stored receipt or request the original bytes if missing.
+      // The relay may have expired an event or its ACK while the peers
+      // never overlapped online. Ask with small headers; the receiver can
+      // repeat a stored receipt or request the original bytes if missing.
+      // A header page is larger than one probe may be, so it goes in parts.
+      for (let start = 0; start < probes.length; start += DEVICE_EVENT_PROBE_LIMIT) {
+        const part = probes.slice(start, start + DEVICE_EVENT_PROBE_LIMIT);
         await this.sendPacket({ protocol: "accord-device-events-v1", from: localDeviceId, to: peerDeviceId,
-          type: "probe", events: probes, deliveryId: randomUUID() });
-        for (const header of probes) this.lastProbed.set(header.eventId, performance.now());
+          type: "probe", events: part, deliveryId: randomUUID() });
+        for (const header of part) this.lastProbed.set(header.eventId, performance.now());
       }
     }
     for (const id of this.lastProbed.keys()) if (!pendingIds.has(id)) this.lastProbed.delete(id);

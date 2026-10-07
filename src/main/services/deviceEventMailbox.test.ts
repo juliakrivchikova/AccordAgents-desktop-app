@@ -141,6 +141,28 @@ test("header probes repair expired events and ACKs when enrolled peers never ove
   } finally { await pair.close(); }
 });
 
+test("more delivered events than one probe may carry are probed in parts the peer accepts", async () => {
+  // A retry pass reads 500 headers at a time; a probe the receiver refuses would
+  // pin its mailbox cursor, exactly while a machine is catching up.
+  const pair = await mailboxDevices();
+  try {
+    for (let index = 0; index < 150; index += 1) {
+      await pair.a.channel.publish({ conversationId: "chat", kind: "message.created", payload: { text: `update ${index}` } });
+    }
+    await pair.a.mailbox.flush(); // Every event is posted and recorded as delivered.
+    pair.expire(); // The relay dropped them before the peer came back.
+    await pair.restartA(); // A restart forgets when each event was last probed.
+    pair.packets.length = 0;
+    await pair.a.mailbox.flush();
+    const probes = pair.packets.flatMap(packet => packet.type === "probe" ? [packet] : []);
+    assert.ok(probes.length >= 2, "150 headers need more than one probe");
+    assert.ok(probes.every(probe => probe.events.length <= 100), "no probe is larger than a receiver accepts");
+    assert.equal(probes.reduce((count, probe) => count + probe.events.length, 0), 150);
+    await pair.b.mailbox.poll(); // Refusing any part would reject here and pin the cursor.
+    assert.ok(pair.packets.some(packet => packet.type === "resend"), "the receiver asks for the bodies it is missing");
+  } finally { await pair.close(); }
+});
+
 async function mailboxDevices() {
   const directory = await mkdtemp(path.join(tmpdir(), "accord-mailbox-repair-"));
   const pairing = { rendezvousId: "room", relaySealKeyBase64: Buffer.alloc(32, 7).toString("base64url"),

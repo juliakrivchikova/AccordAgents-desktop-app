@@ -67,3 +67,6 @@ export const DEVICE_EVENT_PAGE_BYTES = 1024 * 1024;
 export const DEVICE_EVENT_PAGE_COUNT = 100;
 /** Headers carry no body, so a retry pass reads them in larger pages. */
 export const DEVICE_EVENT_HEADER_PAGE_COUNT = 500;
+/** Most event headers one receipt probe may carry. Every runtime already in
+ *  the field refuses a larger probe, so a sender splits instead. */
+export const DEVICE_EVENT_PROBE_LIMIT = 100;

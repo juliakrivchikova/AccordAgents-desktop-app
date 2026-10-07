@@ -187,3 +187,67 @@ test("a preview still loading when Back is pressed never lands on screen or coun
   assert.equal(h.state().question, "Draft must survive");
   await act(async () => { h.renderer.unmount(); });
 });
+
+// The User, 2026-10-07: "I'm on one screen and it throws me to another". A card
+// answered in one chat landed seconds later and replaced the chat opened since.
+test("a late card answer never takes the screen back from the chat opened since", async () => {
+  globalThis.requestAnimationFrame ??= (callback) => setTimeout(() => callback(0), 0) as unknown as number;
+  const h = await harness();
+  const answer = deferred<StartReviewResult>();
+  const chat = (id: string): Conversation => ({ ...conversation(), id, title: id });
+  Object.assign(window.consensus, {
+    openConversation: async (id: string) => ({ conversation: chat(id) }),
+    respondToChatChoice: () => answer.promise
+  });
+  await act(async () => { await h.navigation().openConversation("chat-a"); });
+  assert.equal(h.state().conversation?.id, "chat-a");
+  let pending!: Promise<void>;
+  await act(async () => { pending = h.actions().respondToChatChoice("message-1", "choice-1", { cancel: true }); });
+  await act(async () => { await h.navigation().openConversation("chat-b"); });
+  assert.equal(h.state().conversation?.id, "chat-b");
+  await act(async () => { answer.resolve({ conversation: { ...chat("chat-a"), title: "answered" }, warnings: ["about chat A"] }); await pending; });
+  assert.equal(h.state().conversation?.id, "chat-b");
+  assert.deepEqual(h.state().warnings, []);
+  await act(async () => { h.renderer.unmount(); });
+});
+
+test("a card answer that lands while its chat is still open updates that chat", async () => {
+  globalThis.requestAnimationFrame ??= (callback) => setTimeout(() => callback(0), 0) as unknown as number;
+  const h = await harness();
+  const chat = (id: string): Conversation => ({ ...conversation(), id, title: id });
+  Object.assign(window.consensus, {
+    openConversation: async (id: string) => ({ conversation: chat(id) }),
+    respondToChatChoice: async () => ({ conversation: { ...chat("chat-a"), title: "answered" }, warnings: [] })
+  });
+  await act(async () => { await h.navigation().openConversation("chat-a"); });
+  await act(async () => { await h.actions().respondToChatChoice("message-1", "choice-1", { cancel: true }); });
+  assert.equal(h.state().conversation?.title, "answered");
+  await act(async () => { h.renderer.unmount(); });
+});
+
+test("Back from Activity while the new chat is being created still lands on the new chat", async () => {
+  const h = await harness();
+  let pending!: Promise<boolean>;
+  await act(async () => { pending = h.actions().startChat(); });
+  // Back from Activity drops any preview first; that is not another chat opened.
+  await act(async () => { h.navigation().returnToNewChatDraft(); });
+  await act(async () => { h.creation.resolve({ conversation: conversation(), warnings: [] }); });
+  await act(async () => { h.sent.resolve({ conversation: conversation(), warnings: [] }); assert.equal(await pending, true); });
+  assert.equal(h.state().conversation?.id, "created");
+  await act(async () => { h.renderer.unmount(); });
+});
+
+test("a chat opened from the sidebar while the new chat is being created stays on screen", async () => {
+  globalThis.requestAnimationFrame ??= (callback) => setTimeout(() => callback(0), 0) as unknown as number;
+  const h = await harness();
+  let pending!: Promise<boolean>;
+  await act(async () => { pending = h.actions().startChat(); });
+  let opening!: Promise<void>;
+  await act(async () => { opening = h.navigation().openConversation("other"); });
+  await act(async () => { h.opened.resolve({ conversation: { ...conversation(), id: "other", title: "other" } }); await opening; });
+  assert.equal(h.state().conversation?.id, "other");
+  await act(async () => { h.creation.resolve({ conversation: conversation(), warnings: [] }); });
+  await act(async () => { h.sent.resolve({ conversation: conversation(), warnings: [] }); assert.equal(await pending, true); });
+  assert.equal(h.state().conversation?.id, "other");
+  await act(async () => { h.renderer.unmount(); });
+});

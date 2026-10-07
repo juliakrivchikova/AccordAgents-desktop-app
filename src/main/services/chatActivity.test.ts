@@ -336,6 +336,15 @@ test("buildChatActivityItems lists a pending card once and drops its message aft
   }), { now: NOW });
   assert.deepEqual(cancelled, []);
 
+  // Mentions the app closed itself (the member took a newer turn) were not declined by the User.
+  const superseded = buildChatActivityItems(conversation({
+    messages: [participantMessage("asking", {
+      createdAt: "2026-01-08T10:00:00.000Z",
+      metadata: { runId: "run-asking", pendingMentions: [{ targetParticipantId: "p2", targetHandle: "taylor", status: "rejected" }] }
+    })]
+  }), { now: NOW });
+  assert.deepEqual(superseded.map((item) => [item.status, item.kind]), [["recent", "message"]]);
+
   // An answered choice is not closed business: its message stays a finished update.
   const answered = buildChatActivityItems(conversation({
     messages: [participantMessage("asking", {

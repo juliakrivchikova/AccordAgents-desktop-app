@@ -159,7 +159,8 @@ function App(): JSX.Element {
     if (conversation) {
       state.setConversation((current) => current?.id === conversation.id ? conversation : current);
     }
-    if (warnings) {
+    // Only real warnings: an empty list would wipe those of the chat on screen.
+    if (warnings?.length) {
       state.setWarnings(warnings);
     }
     // Answered: the row leaves Pending now, not after the lists are re-read.

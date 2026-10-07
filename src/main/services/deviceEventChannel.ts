@@ -7,7 +7,7 @@ import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import { DEVICE_EVENT_INLINE_BYTES, isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { DeviceEventApplyOutcome, DeviceEventGap, DeviceEventReceipt } from "../../shared/deviceEventDelivery";
-import { DeviceEventProjectionPendingError } from "../../shared/deviceEventDelivery";
+import { DEVICE_EVENT_PROBE_LIMIT, DeviceEventProjectionPendingError } from "../../shared/deviceEventDelivery";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import { ChatEventLogService, verifySignedChatEvent } from "./chatEventLog";
 import type { StorageService } from "./storage";
@@ -194,7 +194,7 @@ export class DeviceEventChannel {
           this.options.onDependencyUnavailable?.(value.dependency);
           return;
         case "probe":
-          if (!Array.isArray(value.events) || value.events.length > 100) throw new Error("Invalid device event receipt probe.");
+          if (!Array.isArray(value.events) || value.events.length > DEVICE_EVENT_PROBE_LIMIT) throw new Error("Invalid device event receipt probe.");
           for (const header of value.events) {
             if (!header || header.originId !== value.from || typeof header.eventId !== "string" ||
                 typeof header.eventHash !== "string" || typeof header.logScopeId !== "string" ||
