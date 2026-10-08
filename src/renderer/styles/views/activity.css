@@ -30,7 +30,7 @@
 .activity-list-resizer:hover::before,
 .activity-list-resizer:focus-visible::before,
 .activity-view[data-resizing="true"] .activity-list-resizer::before {
-  background: var(--app-accent);
+  background: var(--app-primary);
 }
 
 .activity-list-resizer:focus-visible {
@@ -218,7 +218,7 @@
 
 .activity-row-open:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 2px var(--app-accent), var(--focus-ring);
+  box-shadow: var(--focus-ring);
 }
 
 .activity-row-actions {

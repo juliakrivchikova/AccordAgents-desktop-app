@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Copy, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { AwsWorkerAutoStop, AwsWorkerAutoStopProblem, AwsWorkerStatus } from "../../../shared/types";
-import { writeClipboardText, type ClipboardWriteResult } from "../../../shared/clipboard";
+import { AwsCommandBox, AwsDialog } from "./aws-dialog";
+import { ADMIN_COMMAND_TEXT, AwsPasteField, cleanError } from "./aws-shared";
 
 /**
- * What the switch and Diagnostics do. On with a saved key is immediate; on
- * without one opens the setup dialog, and the switch turns on only once that
- * is applied. `report` gets a failure to show, or nothing when one is cleared.
+ * What the switch and the fix in its row do. On with a saved key is
+ * immediate; on without one opens the setup dialog, and the switch turns on
+ * only once that is applied. `report` gets a failure to show, or nothing when
+ * one is cleared.
  */
 export function useAwsAutoStop(
   autoStop: AwsWorkerAutoStop | undefined,
@@ -27,7 +28,7 @@ export function useAwsAutoStop(
     if (enabled && autoStop?.needsSetup) { setSetup("turn-on"); return; }
     setBusy(true);
     report();
-    window.consensus.setAwsAutoStop({ enabled }).then(accept, (cause) => report(new Error(ipcErrorMessage(cause))))
+    window.consensus.setAwsAutoStop({ enabled }).then(accept, (cause) => report(new Error(cleanError(cause))))
       .finally(() => setBusy(false));
   };
   const fix = async (problem: AwsWorkerAutoStopProblem): Promise<void> => {
@@ -41,21 +42,32 @@ export function useAwsAutoStop(
 export type AutoStopSetupMode = "turn-on" | "set-up-again";
 
 /**
- * Automatic stop is one switch. Whatever keeps a switched-on instance from
- * stopping is for Diagnostics, not for this row: agents working keep it up by
- * design, and anything else comes with its own way to fix it there.
+ * Automatic stop is one switch. Agents working keep the instance up by
+ * design; anything else that keeps a switched-on instance from stopping is a
+ * red line in this row, with its own way to fix it beside the switch.
  */
 export function AwsAutoStopRow(props: {
   autoStop: AwsWorkerAutoStop;
   busy: boolean;
   onToggle: (enabled: boolean) => void;
+  /** Why a switched-on automatic stop cannot work, and what fixes it. */
+  error?: string;
+  fix?: { label: string; busy: boolean; onClick: () => void };
 }): JSX.Element {
   return (
     <div className="gen-row gen-aws-auto-stop" data-testid="aws-worker-auto-stop">
       <div className="gen-row-text">
         <div className="gen-row-title">Automatic stop</div>
         <div className="gen-row-desc">Stops the instance after three hours without working agents.</div>
+        {props.error ? <div className="gen-row-error" data-testid="aws-auto-stop-problem">{props.error}</div> : null}
       </div>
+      {props.fix ? (
+        <div className="gen-actions">
+          <button type="button" className="gen-pill" data-testid="aws-auto-stop-problem-action" disabled={props.fix.busy} onClick={props.fix.onClick}>
+            <span className="gen-pill-label">{props.fix.busy ? "Working…" : props.fix.label}</span>
+          </button>
+        </div>
+      ) : null}
       <label className="toggle">
         <input
           type="checkbox"
@@ -86,7 +98,6 @@ export function AwsAutoStopSetupDialog(props: {
   const [command, setCommand] = useState("");
   const [commandError, setCommandError] = useState<string>();
   const [blob, setBlob] = useState("");
-  const [copied, setCopied] = useState<"idle" | ClipboardWriteResult>("idle");
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -98,19 +109,15 @@ export function AwsAutoStopSetupDialog(props: {
     setCommand("");
     setCommandError(undefined);
     setBlob("");
-    setCopied("idle");
     setError(undefined);
     window.consensus.getAwsWorkerBootstrapCommand(props.region).then(
       (text) => { if (current) setCommand(text); },
-      (cause) => { if (current) setCommandError(ipcErrorMessage(cause)); }
+      (cause) => { if (current) setCommandError(cleanError(cause)); }
     );
     return () => { current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const copy = async (): Promise<void> => {
-    if (command) setCopied(await writeClipboardText(command, (value) => navigator.clipboard.writeText(value)));
-  };
   const apply = async (): Promise<void> => {
     setApplying(true);
     setError(undefined);
@@ -119,61 +126,33 @@ export function AwsAutoStopSetupDialog(props: {
       props.onEnabled(status);
       props.onClose();
     } catch (cause) {
-      setError(ipcErrorMessage(cause));
+      setError(cleanError(cause));
     } finally {
       setApplying(false);
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={(next) => { if (!next && !applying) props.onClose(); }}>
-      <DialogContent className="gen-aws-auto-stop-dialog" data-testid="aws-worker-auto-stop-dialog" showCloseButton={false}>
-        <DialogHeader>
-          <DialogTitle>{props.mode === "set-up-again" ? "Set up automatic stop again" : "Turn on automatic stop"}</DialogTitle>
-          <DialogDescription>
-            {props.mode === "set-up-again"
-              ? "AWS no longer accepts the key the instance stops itself with. Run this command once in Terminal with an AWS administrator account to make a new one, then paste its result here."
-              : "The instance will stop by itself after three hours without working agents, even when this app is closed. Run this command once in Terminal with an AWS administrator account, then paste its result here."}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="gen-aws-command-box">
-          <button type="button" className="gen-aws-copy" aria-label="Copy AWS setup command" disabled={!command} onClick={() => void copy()}>
-            {copied === "copied" ? <CheckCircle2 size={14} /> : <Copy size={14} />}
-            <span>{copied === "copied" ? "Copied" : copied === "failed" ? "Copy failed" : "Copy"}</span>
-          </button>
-          <pre className="gen-aws-command" data-testid="aws-worker-auto-stop-command">
-            {command || (commandError ? "" : "Preparing the command…")}
-          </pre>
-        </div>
-        {commandError ? <div className="gen-aws-inline-error" role="alert">{commandError}</div> : null}
-        <label className="gen-aws-field">
-          <span>Paste the result</span>
-          <textarea
-            className="gen-input gen-aws-paste"
-            aria-label="AWS setup result"
-            placeholder="accord-aws-v1:…"
-            value={blob}
-            disabled={applying}
-            onChange={(event) => setBlob(event.target.value)}
-          />
-        </label>
-        {error ? <div className="gen-aws-inline-error" role="alert" data-testid="aws-worker-auto-stop-error">{error}</div> : null}
-        <DialogFooter>
-          <DialogClose asChild>
-            <Button type="button" variant="outline" size="sm" disabled={applying}>Cancel</Button>
-          </DialogClose>
-          <Button type="button" size="sm" data-testid="aws-worker-auto-stop-apply" disabled={applying || !blob.trim()} onClick={() => void apply()}>
-            {applying ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
-            {applying ? "Applying…" : props.mode === "set-up-again" ? "Apply" : "Turn on"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <AwsDialog
+      open={open}
+      title={props.mode === "set-up-again" ? "Set up automatic stop again" : "Turn on automatic stop"}
+      testId="aws-worker-auto-stop-dialog"
+      busy={applying}
+      onClose={props.onClose}
+      description={props.mode === "set-up-again"
+        ? `AWS no longer accepts the key the instance stops itself with. ${ADMIN_COMMAND_TEXT} to make a new one, then paste its result here.`
+        : `The instance will stop by itself after three hours without working agents, even when this app is closed. ${ADMIN_COMMAND_TEXT}, then paste its result here.`}
+      actions={<>
+        <Button type="button" variant="outline" size="sm" disabled={applying} onClick={props.onClose}>Cancel</Button>
+        <Button type="button" size="sm" data-testid="aws-worker-auto-stop-apply" disabled={applying || !blob.trim()} onClick={() => void apply()}>
+          {applying ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
+          {applying ? "Applying…" : props.mode === "set-up-again" ? "Apply" : "Turn on"}
+        </Button>
+      </>}
+    >
+      <AwsCommandBox command={command} error={commandError} label="Copy AWS setup command" testId="aws-worker-auto-stop-command" />
+      <AwsPasteField value={blob} disabled={applying} onChange={setBlob} />
+      {error ? <div className="gen-row-error" role="alert" data-testid="aws-worker-auto-stop-error">{error}</div> : null}
+    </AwsDialog>
   );
-}
-
-/** The reason only: Electron prefixes errors thrown in the main process. */
-export function ipcErrorMessage(cause: unknown): string {
-  const text = cause instanceof Error ? cause.message : String(cause);
-  return text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
 }

@@ -140,6 +140,7 @@ export function ParticipantHoverCard(props: {
           size="xs"
           icon={copied ? CheckCircle2 : Copy}
           label={copied ? "Copied session ID" : "Copy session ID"}
+          tooltip={copied ? "Copied" : "Copy"}
           disabled={!sessionId}
           onClick={(event) => void copySession(event)}
         />

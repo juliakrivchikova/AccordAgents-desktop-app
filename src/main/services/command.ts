@@ -122,6 +122,28 @@ export class CommandError extends Error {
   }
 }
 
+/** True when a failed command (or any error) ran out of disk space. */
+export function isDiskSpaceFailure(error: unknown): boolean {
+  const chunks = [error instanceof Error ? error.message : String(error)];
+  if (error instanceof CommandError) chunks.push(error.result.stdout, error.result.stderr);
+  // Node's "ENOSPC: System limit for number of file watchers" is not the disk.
+  return /no space left on device|disk quota exceeded|\benospc\b(?!:?\s*system limit)/i.test(chunks.join("\n"));
+}
+
+/** The last meaningful line a failed command printed, cleaned for a person:
+ *  "ssh exited with code 1" alone does not say what went wrong. */
+export function commandFailureDetail(error: unknown, maxLength = 240): string | undefined {
+  if (!(error instanceof CommandError)) return undefined;
+  const lines = `${error.result.stderr}`
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter((line) => line && !/^(warning: permanently added|\+ )/i.test(line));
+  const last = lines[lines.length - 1];
+  if (!last) return undefined;
+  return last.length > maxLength ? `${last.slice(0, maxLength - 1)}…` : last;
+}
+
 export function resolveCommandTimeoutMs(requestedTimeoutMs: number | undefined, allowNoTimeout = false): number {
   const requested = requestedTimeoutMs ?? 30_000;
   if (requested > 0) {

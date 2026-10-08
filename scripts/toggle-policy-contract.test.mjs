@@ -7,10 +7,16 @@ function read(path) {
 }
 
 const generalSettings = read("src/renderer/components/settings/general-settings-section.tsx");
-const awsDiagnostics = read("src/renderer/components/settings/aws-instance-diagnostics.tsx");
-const awsConnection = read("src/renderer/components/settings/aws-worker-connection-form.tsx");
-const awsWorkerPanel = read("src/renderer/components/settings/aws-worker-panel.tsx");
-const awsWorkerParts = read("src/renderer/components/settings/aws-worker-panel-parts.tsx");
+const awsPage = read("src/renderer/components/settings/aws-settings-page.tsx");
+const awsSetup = read("src/renderer/components/settings/aws-setup-section.tsx");
+const awsStatus = read("src/renderer/components/settings/aws-status-section.tsx");
+const awsStatusLabel = read("src/renderer/components/settings/use-aws-worker-status.ts");
+const awsDialogParts = read("src/renderer/components/settings/aws-dialog.tsx");
+const awsShared = read("src/renderer/components/settings/aws-shared.tsx");
+const copyButton = read("src/renderer/components/primitives/copy-button.tsx");
+const awsFiles = ["aws-settings-page", "aws-status-section", "aws-program-section", "aws-instance-section", "aws-disk-section",
+  "aws-disk-browser", "aws-setup-section", "aws-connect-section", "aws-dialog", "aws-sign-in-dialog", "aws-worker-auto-stop", "aws-shared"]
+  .map((name) => read(`src/renderer/components/settings/${name}.tsx`));
 const environmentSettings = read("src/renderer/components/settings/environment-settings-section.tsx");
 const toggleCss = read("src/renderer/styles/views/content-markdown.css");
 const approvalCss = read("src/renderer/styles/views/chat-conversation.css");
@@ -19,46 +25,48 @@ const appCss = read("src/renderer/styles/app.css");
 const codexDeviceAuth = read("src/renderer/components/codex-device-auth.tsx");
 const iconButtonCss = read("src/renderer/styles/views/icon-button.css");
 
-test("the machine instance panel offers nothing the deleted worker used to need", () => {
+test("the machine instance page offers nothing the deleted worker used to need", () => {
   // The per-turn worker is gone, and with it the toggle that switched it on,
   // the SSH target and paths it ran through, its timeouts, and the doctor that
-  // checked them. What is left is the instance a machine is installed onto.
-  assert.match(generalSettings, /data-testid="machine-instance-settings"/);
-  assert.doesNotMatch(generalSettings, /data-testid="remote-codex-worker-toggle"/);
-  assert.doesNotMatch(generalSettings, /Worker source/);
-  assert.doesNotMatch(generalSettings, /placeholder="Worker root"/);
-  assert.doesNotMatch(generalSettings, /placeholder="Codex path"/);
+  // checked them. What is left is the instance a machine is installed onto,
+  // on its own Settings page.
+  assert.match(awsPage, /data-testid="machine-instance-settings"/);
+  assert.doesNotMatch(generalSettings, /machine-instance-settings|AwsWorkerPanel|AwsSettingsPage/);
+  for (const source of [generalSettings, ...awsFiles]) {
+    assert.doesNotMatch(source, /data-testid="remote-codex-worker-toggle"/);
+    assert.doesNotMatch(source, /Worker source/);
+    assert.doesNotMatch(source, /placeholder="Worker root"/);
+    assert.doesNotMatch(source, /placeholder="Codex path"/);
+    assert.doesNotMatch(source, /Cloud Runs \(beta\)/);
+  }
   // Checking and preparing the instance are retained by the resolution and
-  // must stay reachable; what they may not offer is a hand-written worker.
-  assert.match(awsDiagnostics, /diagnoseCloudRunWorker\(undefined\)/);
-  assert.match(awsDiagnostics, /setupCloudRunWorker\(undefined\)/);
-  assert.match(awsDiagnostics, /data-testid="machine-instance-check"/);
-  assert.match(awsDiagnostics, /data-testid="machine-instance-setup"/);
-  assert.doesNotMatch(generalSettings, /Cloud Runs \(beta\)/);
+  // must stay reachable; the page checks by itself and fixes from each row.
+  assert.match(awsSetup, /diagnoseCloudRunWorker\(undefined\)/);
+  assert.match(awsSetup, /setupCloudRunWorker\(undefined\)/);
 });
 
-test("the surviving worker copy button uses a guarded exact-payload clipboard write", () => {
-  // The general settings copy button belonged to the deleted worker's device
-  // sign-in. The instance panel's remains, and its guarantee is unchanged.
-  assert.equal(generalSettings.match(/writeClipboardText\(/g)?.length, undefined);
-  assert.equal(awsWorkerPanel.match(/writeClipboardText\(/g)?.length, 1);
-  assert.match(awsWorkerPanel, /writeClipboardText\(command,/);
-  assert.equal(awsConnection.match(/\? "Copy failed"/g)?.length, 1);
-  assert.doesNotMatch(generalSettings, /await navigator\.clipboard\.writeText/);
-  assert.doesNotMatch(awsWorkerPanel, /await navigator\.clipboard\.writeText/);
+test("every copy control is the shared icon with a guarded exact-payload clipboard write", () => {
+  assert.equal(copyButton.match(/writeClipboardText\(/g)?.length, 1);
+  assert.match(copyButton, /writeClipboardText\(props\.text,/);
+  assert.match(copyButton, /"Copy failed"/);
+  assert.match(awsDialogParts, /<CopyButton /);
+  for (const source of [generalSettings, ...awsFiles]) {
+    assert.doesNotMatch(source, /await navigator\.clipboard\.writeText/);
+    assert.doesNotMatch(source, /className="gen-aws-copy"/);
+  }
 });
 
-test("AWS worker panel exposes one-click progress, actual specs, choices, and shared cost warning", () => {
-  assert.match(awsWorkerPanel, /data-testid="aws-worker-start"/);
-  assert.match(awsWorkerParts, /Starting/);
-  assert.match(awsWorkerParts, /Waiting for running/);
-  assert.match(awsWorkerParts, /Setting up/);
-  assert.match(awsWorkerPanel, /data-testid="aws-worker-actual-specs"/);
-  assert.match(awsWorkerPanel, /Keep current size/);
-  assert.match(awsWorkerPanel, /Grow disk/);
-  assert.match(awsWorkerPanel, /Recreate/);
-  assert.match(awsWorkerPanel, /Running · billable/);
-  assert.doesNotMatch(awsWorkerPanel, />Set up</);
+test("AWS page exposes one-click progress, actual specs, choices, and shared cost warning", () => {
+  assert.match(awsStatus, /data-testid="aws-worker-start"/);
+  assert.match(awsShared, /Starting/);
+  assert.match(awsShared, /Waiting for running/);
+  assert.match(awsShared, /Setting up/);
+  assert.match(awsStatus, /data-testid="aws-worker-actual-specs"/);
+  assert.match(awsStatus, /Keep current size/);
+  assert.match(awsStatus, /Grow disk/);
+  assert.match(awsStatus, /Recreate/);
+  assert.match(awsStatusLabel, /Running · billable/);
+  for (const source of awsFiles) assert.doesNotMatch(source, />Set up</);
 });
 
 test("generic toggles distinguish usable-off and disabled-checked states", () => {

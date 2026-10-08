@@ -1738,8 +1738,8 @@
 }
 
 .chat-app-tool-permission-pill:focus-visible {
-  outline: 2px solid var(--app-accent);
-  outline-offset: 2px;
+  outline: none;
+  border-color: var(--app-focus-border);
 }
 
 .chat-app-tool-inline-menu {
@@ -2757,8 +2757,8 @@
 }
 
 .agent-avatar-wrap:focus-visible .message-avatar {
-  outline: 2px solid var(--app-accent);
-  outline-offset: 2px;
+  outline: 1px solid var(--app-focus-border);
+  outline-offset: 0;
 }
 
 .agent-avatar-details {
@@ -3336,7 +3336,7 @@
 
 .chat-reaction-chip:hover,
 .chat-reaction-chip:focus-visible {
-  border-color: var(--app-accent-border);
+  border-color: var(--app-focus-border);
   background: var(--app-surface-hover);
   outline: none;
 }
@@ -3865,8 +3865,8 @@
 }
 
 .chat-choice-text-panel textarea:focus {
-  border-color: var(--app-accent);
-  box-shadow: 0 0 0 1px var(--app-accent);
+  border-color: var(--app-focus-border);
+  box-shadow: none;
 }
 
 .chat-choice-actions {
@@ -3946,10 +3946,8 @@
 }
 
 .chat-composer-shell:focus-within {
-  border-color: var(--app-accent);
-  box-shadow:
-    0 0 0 3px var(--app-accent-soft),
-    var(--shadow-sm);
+  border-color: var(--app-focus-border);
+  box-shadow: var(--shadow-sm);
 }
 
 .chat-composer-toolbar {

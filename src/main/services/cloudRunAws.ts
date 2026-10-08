@@ -562,7 +562,7 @@ export class CloudRunAwsService {
 
   /**
    * Why a running instance will not stop by itself although the switch is on,
-   * for Diagnostics, or nothing. Agents working keep it up by design and are
+   * for the Automatic stop row, or nothing. Agents working keep it up by design and are
    * not a problem. Each answer says what fixes it.
    */
   private async autoStopProblem(power: AwsMachinePowerConfig, handle: AwsWorkerHandleInfo): Promise<AwsWorkerAutoStopProblem | undefined> {
@@ -682,7 +682,7 @@ export class CloudRunAwsService {
   }
 
   /** The install record of the machine on this instance that holds, or is
-   *  to take, the stop key: the one Diagnostics' fix acts on. */
+   *  to take, the stop key: the one the Automatic stop row's fix acts on. */
   async autoStopMachineRecord(): Promise<MachineInstallRecord | undefined> {
     const [credentials, publicSettings] = await Promise.all([this.settings.getAwsWorkerCredentials(), this.settings.getPublicSettings()]);
     const handle = publicSettings.cloudRuns.awsHandle;
@@ -690,6 +690,15 @@ export class CloudRunAwsService {
     const records = (await this.installsOnInstance(handle)).records.filter((record) => record.installedVersion);
     const keyId = credentials?.power?.accessKeyId;
     return records.find((record) => keyId && record.power?.keyId === keyId) ?? records[0];
+  }
+
+  /** Where this desktop's program and its data live on the instance, as
+   *  its setup recorded them; undefined before the first setup. */
+  async programFoldersOnInstance(): Promise<{ installRoot: string; userDataDir?: string } | undefined> {
+    const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
+    if (!handle) return undefined;
+    const record = (await this.installsOnInstance(handle)).records.find((item) => item.installRoot && item.installedVersion);
+    return record ? { installRoot: record.installRoot, userDataDir: record.userDataDir || undefined } : undefined;
   }
 
   /** The install record of one machine on this instance. */
@@ -846,7 +855,7 @@ export class CloudRunAwsService {
     return this.ensurePreparedRunning({ credentials, handle }, { start: false });
   }
 
-  /** Diagnostics must never wake or prepare an instance to inspect it. */
+  /** Inspecting an instance (its setup, its disk) must never wake or prepare it. */
   async workerForInspection(): Promise<CloudRunWorkerSettings> {
     const { info, handle } = await this.existingWorker();
     if (info.state !== "running") {
@@ -1215,7 +1224,7 @@ function retainedActionFailure(
 
 const MACHINE_DOWN_EFFECT = "Until it is, cloud members don't run and the instance does not stop by itself.";
 
-/** What Diagnostics says when the program on the cloud machine is not back. */
+/** What the Connection row says when the program on the cloud machine is not back. */
 function machineRecoveryMessage(failure: MachineRecoveryFailure): string {
   const reason = failure.reason ? ` ${plainReason(failure.reason)}` : "";
   switch (failure.kind) {

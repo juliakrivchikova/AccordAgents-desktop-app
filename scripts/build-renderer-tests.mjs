@@ -12,7 +12,7 @@ const entries = [
   "src/renderer/components/artifacts/artifact-navigation.test.ts",
   "src/renderer/components/chat/chat-progress-rendering.test.tsx",
   "src/renderer/components/chat/cli-readiness-setup-panel.test.tsx",
-  "src/renderer/components/settings/aws-worker-panel.test.tsx"
+  "src/renderer/components/settings/aws-settings-text.test.ts"
 ];
 
 await mkdir(outdir, { recursive: true });

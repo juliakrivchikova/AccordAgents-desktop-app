@@ -46,7 +46,7 @@ import type {
   MachineUpgradeRequest
 } from "../../shared/machineInstall";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, shellQuotePosix } from "./cloudRunWorkers";
-import { CommandError, runCommand } from "./command";
+import { CommandError, commandFailureDetail, isDiskSpaceFailure, runCommand } from "./command";
 import {
   DEFAULT_MACHINE_INSTALL_DIRNAME,
   DEFAULT_MACHINE_SERVICE_NAME,
@@ -622,6 +622,8 @@ export class MachineInstallerService {
             timeoutMs: DEPENDENCIES_TIMEOUT_MS
           });
         } catch (error) {
+          // A full disk fails here first and is not a build-tools problem.
+          if (isDiskSpaceFailure(error)) throw new Error(MACHINE_DISK_FULL_MESSAGE);
           // The one native dependency (node-pty) is compiled on the machine, so
           // this is where a box without build tools or without network fails.
           throw new Error(
@@ -1477,8 +1479,14 @@ export function redactKeyLikeText(value: string): string {
     .replace(/[0-9a-fA-F]{40,}/g, "[redacted]");
 }
 
+/** Said when an install or update stops because the machine ran out of disk. */
+export const MACHINE_DISK_FULL_MESSAGE = "the machine's disk is full";
+
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (isDiskSpaceFailure(error)) return MACHINE_DISK_FULL_MESSAGE;
+  const message = error instanceof Error ? error.message : String(error);
+  const detail = commandFailureDetail(error);
+  return detail && !message.includes(detail) ? `${message}: ${redactKeyLikeText(detail)}` : message;
 }
 
 export { compareVersions };

@@ -7,6 +7,8 @@ export type { SeverityBadgeProps } from "./severity-badge";
 export { IconButton } from "./icon-button";
 export type { IconButtonIcon, IconButtonProps, IconButtonSize, IconButtonTone } from "./icon-button";
 
+export { CopyButton } from "./copy-button";
+
 export { EmptyState } from "./empty-state";
 
 export { LoadingDot } from "./loading-dot";

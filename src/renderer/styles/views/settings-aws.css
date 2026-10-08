@@ -1,0 +1,260 @@
+/* Settings → AWS. The page is General's sections and rows; what is new here
+   is the disk bar, the file tree, the setup marks and the dialog details.
+   Dialogs render outside the settings view, so their rules hang off the
+   dialog class. */
+
+.settings-view .gen-aws-page {
+  display: contents;
+}
+
+/* Something the page is waiting on: a small spinner and the words. */
+.gen-aws-waiting {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--app-text-secondary);
+}
+
+/* The AWS item in the Settings sidebar when something there needs the User. */
+.settings-nav-attention {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  flex: none;
+  border-radius: 999px;
+  background: var(--app-danger);
+}
+
+/* Disk: each part grows by its bytes and the free space takes the rest, so
+   the gaps between parts never push the last one out of the bar. */
+.settings-view .gen-aws-disk-bar {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--app-surface-muted);
+}
+
+.settings-view .gen-aws-disk-bar > span {
+  min-width: 2px;
+}
+
+.settings-view .gen-aws-disk-bar > .gen-aws-disk-free {
+  min-width: 0;
+}
+
+.settings-view .gen-aws-swatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 8px;
+  border-radius: 3px;
+  vertical-align: 1px;
+}
+
+.settings-view .is-c1 { background: var(--app-disk-1); }
+.settings-view .is-c2 { background: var(--app-disk-2); }
+.settings-view .is-c3 { background: var(--app-disk-3); }
+.settings-view .is-c4 { background: var(--app-disk-4); }
+.settings-view .is-c5 { background: var(--app-disk-5); }
+.settings-view .is-c6 { background: var(--app-disk-6); }
+.settings-view .is-c7 { background: var(--app-disk-7); }
+.settings-view .is-c8 { background: var(--app-disk-8); }
+.settings-view .is-c9 { background: var(--app-disk-9); }
+.settings-view .is-c10 { background: var(--app-disk-10); }
+.settings-view .is-swap {
+  background: repeating-linear-gradient(135deg, var(--app-disk-swap) 0 2px, var(--app-disk-swap-gap) 2px 4px);
+}
+
+.settings-view .gen-row-stack .gen-row-error {
+  margin-top: 0;
+}
+
+/* Setup marks: a quiet tick for ready, a red cross for what needs the User. */
+.settings-view .gen-aws-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  vertical-align: -3px;
+}
+
+.settings-view .gen-aws-mark.is-ok,
+.settings-view .gen-aws-mark.is-warn {
+  color: var(--app-muted);
+}
+
+.settings-view .gen-aws-mark.is-fail {
+  color: var(--app-danger);
+}
+
+/* Dialogs */
+.gen-aws-dialog .gen-aws-progress {
+  margin: 0;
+}
+
+.gen-aws-dialog.gen-aws-dialog-wide {
+  width: min(760px, calc(100vw - 32px)) !important;
+  max-width: min(760px, calc(100vw - 32px)) !important;
+}
+
+.gen-aws-dialog .gen-aws-dialog-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  color: var(--app-muted);
+  font-size: 12.5px;
+}
+
+.gen-aws-dialog .gen-row-error {
+  margin: 0;
+}
+
+.gen-aws-dialog .gen-aws-hint {
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.gen-aws-dialog .gen-aws-narrow {
+  width: 160px;
+}
+
+.gen-aws-dialog .gen-aws-select {
+  position: relative;
+  display: block;
+}
+
+.gen-aws-dialog .gen-aws-select .gen-input {
+  appearance: none;
+  padding-right: 34px;
+}
+
+.gen-aws-dialog .gen-aws-select svg {
+  position: absolute;
+  top: 50%;
+  right: 11px;
+  color: var(--app-muted);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+/* The one-time code of a provider sign-in, large enough to read and type. */
+.gen-aws-dialog .gen-aws-code {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 8px 8px 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+}
+
+.gen-aws-dialog .gen-aws-code code {
+  color: var(--app-text-strong);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+/* The file tree */
+.gen-aws-dialog .gen-aws-tree {
+  max-height: min(460px, calc(100vh - 320px));
+  overflow: auto;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+}
+
+.gen-aws-dialog .gen-aws-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 5px 12px;
+  border-top: 1px solid var(--app-border-subtle);
+  color: var(--app-text);
+  font-size: 12.5px;
+}
+
+.gen-aws-dialog .gen-aws-tree > .gen-aws-tree-row:first-child {
+  border-top: 0;
+}
+
+.gen-aws-dialog .gen-aws-tree-row.is-locked,
+.gen-aws-dialog .gen-aws-tree-row.is-note {
+  color: var(--app-muted);
+}
+
+.gen-aws-dialog .gen-aws-tree-chev {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
+}
+
+.gen-aws-dialog .gen-aws-tree-chev:hover {
+  background: var(--app-surface-hover);
+}
+
+.gen-aws-dialog .gen-aws-tree-chev:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.gen-aws-dialog .gen-aws-tree-check {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  flex: none;
+  color: var(--app-muted);
+}
+
+.gen-aws-dialog .gen-aws-tree-check input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--app-accent);
+}
+
+.gen-aws-dialog .gen-aws-tree-icon {
+  flex: none;
+  color: var(--app-muted);
+}
+
+.gen-aws-dialog .gen-aws-tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gen-aws-dialog .gen-aws-tree-name code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.gen-aws-dialog .gen-aws-tree-name span {
+  color: var(--app-muted);
+}
+
+.gen-aws-dialog .gen-aws-tree-name em {
+  color: var(--app-muted-subtle);
+  font-style: normal;
+}
+
+.gen-aws-dialog .gen-aws-tree-size {
+  flex: none;
+  color: var(--app-muted);
+  font-variant-numeric: tabular-nums;
+}

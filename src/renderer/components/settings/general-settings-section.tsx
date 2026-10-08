@@ -7,8 +7,6 @@ import type {
   ChatProviderKind,
   CliProviderHost,
   CliProviderHostUpdate,
-  CloudRunsSettings,
-  CloudRunsSettingsUpdate,
   ChatPromptContextMode,
   ChatPromptContextScopeSettings,
   ChatPromptContextSettings,
@@ -32,7 +30,6 @@ import {
   CHAT_PROMPT_CONTEXT_LIMIT_MAX,
   normalizeChatPromptContextSettings
 } from "../../../shared/chatPromptContext";
-import { AwsWorkerPanel as SharedAwsWorkerPanel } from "./aws-worker-panel";
 import { DevicePairingSection } from "./device-pairing-section";
 import { MachinesSection } from "./machines-section";
 import { cliProviderMetadata, deriveAgentReadiness } from "../../../shared/cliReadiness";
@@ -70,7 +67,6 @@ export function GeneralSettingsSection(props: {
   chatParticipantRequestPromptMaxChars: number;
   chatAutoWatchWakeLimit: number;
   chatPromptContext: ChatPromptContextSettings;
-  cloudRuns: CloudRunsSettings;
   mobileControl?: MobileControlSettings;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
@@ -82,7 +78,6 @@ export function GeneralSettingsSection(props: {
   setChatParticipantRequestPromptMaxChars: (maxChars: number) => Promise<void>;
   setChatAutoWatchWakeLimit: (limit: number) => Promise<void>;
   setChatPromptContext: (settings: ChatPromptContextSettings) => Promise<void>;
-  saveCloudRunsSettings: (update: CloudRunsSettingsUpdate) => Promise<void>;
 }): JSX.Element {
   const [hostEditor, setHostEditor] = useState<ProviderHostEditorState | undefined>();
   const readyCount = props.providers.filter(
@@ -171,7 +166,8 @@ export function GeneralSettingsSection(props: {
               placeholder="Choose provider"
               ariaLabel="Assistant provider"
               testId="assistant-provider-select"
-              className="assistant-provider-select"
+              size="sm"
+              className="assistant-provider-select min-h-7 data-[size=sm]:rounded-[10px] border-[var(--app-hairline)] bg-[var(--app-surface)] text-[14px] dark:bg-[var(--app-surface)]"
               onValueChange={(value) => {
                 if (isChatProviderKind(value)) {
                   void props.setAssistantProviderKind(value);
@@ -286,26 +282,7 @@ export function GeneralSettingsSection(props: {
       <DevicePairingSection mobileControl={props.mobileControl} />
 
       {SHOW_MACHINES_SETTINGS && <MachinesSection />}
-
-      <section className="gen-section">
-        <h2 className="gen-section-title gen-section-title-solo">AWS</h2>
-        <CloudRunsControl settings={props.cloudRuns} onSave={props.saveCloudRunsSettings} />
-      </section>
     </>
-  );
-}
-
-function CloudRunsControl(props: {
-  settings: CloudRunsSettings;
-  onSave: (update: CloudRunsSettingsUpdate) => Promise<void>;
-}): JSX.Element {
-  return (
-    <div className="gen-card" data-testid="machine-instance-settings">
-      <SharedAwsWorkerPanel
-        settings={props.settings}
-        onDeleted={() => props.onSave({ mode: "aws" })}
-      />
-    </div>
   );
 }
 

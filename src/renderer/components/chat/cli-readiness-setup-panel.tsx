@@ -309,6 +309,7 @@ function SetupCommand(props: {
       <IconButton
         size="xs"
         label={`Copy ${props.label} command`}
+        tooltip={props.copiedValue === props.command ? "Copied" : "Copy"}
         icon={props.copiedValue === props.command ? Check : Copy}
         onClick={() => void props.onCopy(props.command as string)}
       />

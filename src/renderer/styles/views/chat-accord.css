@@ -108,8 +108,8 @@
 }
 
 .chat-accord-target-main:focus-visible {
-  outline: 2px solid var(--app-accent);
-  outline-offset: 2px;
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .chat-accord-target .mini-avatar {
@@ -209,8 +209,8 @@
 }
 
 .chat-accord-dialog .chat-accord-subject:focus-visible {
-  border-color: var(--app-border-strong) !important;
-  box-shadow: 0 0 0 3px var(--app-accent-soft) !important;
+  border-color: var(--app-focus-border) !important;
+  box-shadow: none !important;
 }
 
 .chat-accord-subject-history {
@@ -246,8 +246,8 @@
 }
 
 .chat-accord-subject-chip:focus-visible {
-  outline: 2px solid var(--app-accent);
-  outline-offset: 2px;
+  outline: none;
+  border-color: var(--app-focus-border);
 }
 
 .chat-accord-subject-chip:disabled {

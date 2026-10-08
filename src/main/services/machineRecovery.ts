@@ -28,7 +28,7 @@ export interface MachineRecoveryInspection {
   agentsRunning: boolean;
 }
 
-/** Why the program is still not back, for Settings → AWS → Diagnostics.
+/** Why the program is still not back, for Settings → AWS → Cloud program.
  *  - `check`: the machine could not be asked;
  *  - `setup`: setting the program up again failed;
  *  - `agents`: it is not running, but agents it started still are;

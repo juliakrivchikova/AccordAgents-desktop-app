@@ -18,6 +18,8 @@ export function AppSelect(props: {
   options: AppSelectOption[];
   placeholder: string;
   disabled?: boolean;
+  /** "sm" is the 28px control of a settings row. */
+  size?: "sm" | "default";
   className?: string;
   ariaLabel?: string;
   testId?: string;
@@ -30,7 +32,7 @@ export function AppSelect(props: {
       disabled={props.disabled}
       onValueChange={props.onValueChange}
     >
-      <SelectTrigger className={`app-select-trigger ${props.className ?? ""}`} aria-label={props.ariaLabel ?? props.placeholder} data-testid={props.testId}>
+      <SelectTrigger size={props.size} className={`app-select-trigger ${props.className ?? ""}`} aria-label={props.ariaLabel ?? props.placeholder} data-testid={props.testId}>
         <SelectValue placeholder={props.placeholder} />
       </SelectTrigger>
       <SelectContent>
