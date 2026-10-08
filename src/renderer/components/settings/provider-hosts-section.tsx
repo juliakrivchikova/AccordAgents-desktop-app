@@ -51,7 +51,8 @@ export function ProviderHostRows(props: {
       ))}
       <div className="gen-card-divider" />
       <div className="gen-host-add-row">
-        <Button type="button" variant="outline" size="sm" data-testid="provider-host-add" onClick={props.onAdd}>
+        <Button type="button" variant="outline" size="sm" data-testid="provider-host-add" onClick={props.onAdd}
+          className="rounded-[10px] border-[var(--app-hairline)] text-[14px] font-normal dark:border-[var(--app-hairline)]">
           <Plus size={14} aria-hidden />
           Add provider
         </Button>

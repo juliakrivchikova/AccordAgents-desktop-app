@@ -223,7 +223,8 @@ export interface AwsWorkerStatus {
    *  instance from stopping by itself. Absent when it could not be read. */
   autoStop?: AwsWorkerAutoStop;
   /** The program on the running instance is still not back although the
-   *  app tried to bring it back itself, in plain words; for Diagnostics. */
+   *  app tried to bring it back itself, in plain words; shown in the Cloud
+   *  program section's Connection row. */
   machineProblem?: string;
 }
 
@@ -234,7 +235,7 @@ export interface AwsWorkerAutoStop {
   enabled: boolean;
   /** Turning the switch on first needs the setup command: there is no stop key. */
   needsSetup: boolean;
-  /** Shown in Diagnostics only. Agents working is not a problem. */
+  /** Shown in the Automatic stop row. Agents working is not a problem. */
   problem?: AwsWorkerAutoStopProblem;
 }
 
@@ -247,6 +248,79 @@ export interface AwsWorkerAutoStopProblem {
   actionLabel?: string;
   /** The machine the fix acts on. */
   machineId?: string;
+}
+
+/** What fills the AWS instance's disk, measured on the instance. */
+export type AwsDiskCategoryId =
+  | "system" | "other-programs" | "cloud-runs" | "agent-tools" | "program-logs"
+  | "project-copies" | "program-data" | "caches" | "program-versions" | "system-logs" | "swap";
+
+export interface AwsDiskCategory {
+  id: AwsDiskCategoryId;
+  bytes: number;
+  /** What "Clean up" frees; absent where nothing can be cleaned. */
+  cleanableBytes?: number;
+  /** Program versions kept, or other programs on the instance. */
+  count?: number;
+  /** Program versions the running program uses. */
+  inUse?: number;
+  /** Other programs that are running. */
+  running?: number;
+  /** Log files kept. */
+  files?: number;
+  /** Project copies by folder name. */
+  projects?: string[];
+}
+
+export interface AwsDiskReport extends AwsDiskSpace {
+  categories: AwsDiskCategory[];
+  measuredAt: number;
+}
+
+export type AwsDiskCleanCategory = "program-logs" | "caches" | "program-versions" | "system-logs";
+
+/** Why a file on the instance cannot be removed from Settings. */
+export type AwsDiskLockReason =
+  | "system" | "sign-ins" | "agent-tools" | "program" | "running-version" | "qa-browser"
+  | "other-program" | "in-use" | "worktree" | "changes" | "unpushed" | "repository";
+
+/** What a folder on the instance is to the User, when its name alone does
+ *  not say; decided on the instance, which knows its layout. */
+export type AwsDiskEntryRole =
+  | "program" | "other-program" | "idle-program" | "program-data" | "cloud-runs" | "project-copies"
+  | "versions" | "agent-tools" | "sign-ins" | "logs" | "cache" | "mailbox-runners";
+
+export interface AwsDiskEntry {
+  name: string;
+  path: string;
+  bytes: number;
+  dir: boolean;
+  lock: AwsDiskLockReason | null;
+  role?: AwsDiskEntryRole;
+}
+
+export interface AwsDiskListing {
+  path: string;
+  home: string;
+  /** This desktop's program folder on the instance. */
+  own: string;
+  entries: AwsDiskEntry[];
+  /** Entries left out after the largest ones. */
+  truncated: number;
+}
+
+export interface AwsDiskSpace {
+  totalBytes: number;
+  usedBytes: number;
+  availableBytes: number;
+}
+
+export interface AwsDiskChangeResult {
+  freedBytes: number;
+  removed?: number;
+  failed: Array<{ path: string; reason: AwsDiskLockReason | "error"; message?: string }>;
+  /** The disk right after the change; categories are measured again later. */
+  space: AwsDiskSpace;
 }
 
 /** The automatic-stop switch. Turning it on with a pasted setup result also
@@ -2804,6 +2878,15 @@ export interface AppBridge {
   /** Sets the program on the instance's cloud machine up again, the way
    *  choosing Cloud run does, so it can stop the instance by itself. */
   reconnectAwsMachine(machineId?: string): Promise<AwsWorkerStatus>;
+  /** The running instance's disk, measured on it (a slow, low-priority pass)
+   *  or the last measurement when it is recent; never starts the instance. */
+  getAwsInstanceDisk(options?: { refresh?: boolean }): Promise<AwsDiskReport>;
+  cleanAwsInstanceDisk(category: AwsDiskCleanCategory): Promise<AwsDiskChangeResult>;
+  /** A folder on the instance, largest first. "@runs" and "@mirrors" name the
+   *  cloud run files and the project copies; nothing means the home folder. */
+  listAwsInstanceFiles(path?: string): Promise<AwsDiskListing>;
+  /** Removes only what the instance itself confirms is safe at that moment. */
+  deleteAwsInstanceFiles(paths: string[]): Promise<AwsDiskChangeResult>;
   stopAwsWorker(): Promise<AwsWorkerStatus>;
   deleteAwsWorker(): Promise<AwsWorkerStatus>;
   getAgentEnvironment(): Promise<AgentEnvironmentSnapshot>;

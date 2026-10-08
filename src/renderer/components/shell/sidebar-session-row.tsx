@@ -50,7 +50,7 @@ export const SidebarSessionRow = ({
             "border border-transparent transition-colors hover:bg-[var(--app-surface-hover)]",
             selected && "is-selected text-[var(--app-text-strong)]",
             pending && "is-loading",
-            "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
+            "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]"
           )}
         >
           <span className="flex w-full min-w-0 items-center gap-1.5 text-[13px] leading-tight">

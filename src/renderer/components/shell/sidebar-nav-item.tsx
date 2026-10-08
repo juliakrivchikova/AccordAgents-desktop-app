@@ -29,7 +29,7 @@ export function SidebarNavItem({
       className={cn(
         "inline-flex h-8 w-full items-center justify-start gap-2 rounded-md px-2.5 text-[13px] font-medium",
         "transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-        "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45",
+        "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]",
         "text-[var(--app-text)] hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)]"
       )}
     >

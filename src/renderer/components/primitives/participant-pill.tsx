@@ -51,7 +51,7 @@ export const ParticipantPill = React.forwardRef<HTMLButtonElement, ParticipantPi
       "text-foreground transition-colors",
       padding,
       isInteractive &&
-        "cursor-pointer hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+        "cursor-pointer hover:bg-muted/60 focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]",
       selected && "border-[var(--app-accent)] bg-[var(--app-accent-soft)] text-[var(--app-text-strong)]",
       disabled && "cursor-not-allowed opacity-50 hover:bg-background",
       className

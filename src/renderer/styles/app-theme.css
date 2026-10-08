@@ -36,6 +36,27 @@
   --app-accord-icon-right: #447bf3;
   --app-border: #e7e9ee;
   --app-border-strong: #d7dae1;
+  /* Settings, after the ChatGPT desktop app: hairline card edges and rows,
+     a darker secondary line, a light switch track when off. */
+  --app-hairline: #ededed;
+  --app-text-secondary: #6b6c6e;
+  --app-toggle-off: #e8e8e9;
+  --app-toggle-knob: #ffffff;
+  /* Keyboard focus: the control's own 1px edge darkens; no outer ring. */
+  --app-focus-border: #787b82;
+  /* Settings → AWS disk bar: one quiet hue per kind of thing on the disk. */
+  --app-disk-1: #8b93a7;
+  --app-disk-2: #b6bcc9;
+  --app-disk-3: #d6a54a;
+  --app-disk-4: #6f8fd6;
+  --app-disk-5: #e07b57;
+  --app-disk-6: #59a98a;
+  --app-disk-7: #a58ad6;
+  --app-disk-8: #d3b78a;
+  --app-disk-9: #9cc2d8;
+  --app-disk-10: #c49bb5;
+  --app-disk-swap: #c3c8d1;
+  --app-disk-swap-gap: #e4e7ec;
   --app-shell-border: #e7e9ee;
   --app-primary: #16191f;
   --app-primary-hover: #04060a;
@@ -158,10 +179,10 @@
   --radius-shell: 16px;
   --radius-pill: 999px;
 
-  /* One focus ring, reused everywhere (color follows themed --ring) */
-  --focus-ring-width: 3px;
-  --focus-ring-color: color-mix(in srgb, var(--ring) 45%, transparent);
-  --focus-ring: 0 0 0 var(--focus-ring-width) var(--focus-ring-color);
+  /* One focus mark, reused everywhere: a thin neutral edge inside the
+     control, so borderless controls show focus the way bordered ones do
+     (their border darkens). No outer ring, no accent colour. */
+  --focus-ring: inset 0 0 0 1px var(--app-focus-border);
 
   --background: #f6f6f6;
   --foreground: #1a1c1f;
@@ -180,7 +201,7 @@
   --destructive: #b3352d;
   --border: #e7e9ee;
   --input: #d7dae1;
-  --ring: #7d5fd3;
+  --ring: var(--app-focus-border);
   --chart-1: #7d5fd3;
   --chart-2: #08794e;
   --chart-3: #d59200;
@@ -194,7 +215,7 @@
   --sidebar-accent: #eceff3;
   --sidebar-accent-foreground: #1a1c1f;
   --sidebar-border: #e7e9ee;
-  --sidebar-ring: #7d5fd3;
+  --sidebar-ring: var(--app-focus-border);
 }
 
 .dark {
@@ -220,6 +241,23 @@
   --app-accord-icon-right: #447bf3;
   --app-border: #282d36;
   --app-border-strong: #353c47;
+  --app-hairline: #2c2c2c;
+  --app-text-secondary: #a1a1a1;
+  --app-toggle-off: #3a3a3a;
+  --app-toggle-knob: #d9d9d9;
+  --app-focus-border: #858b96;
+  --app-disk-1: #6f778a;
+  --app-disk-2: #4f5563;
+  --app-disk-3: #b88a35;
+  --app-disk-4: #5677c0;
+  --app-disk-5: #c4643f;
+  --app-disk-6: #3f8f72;
+  --app-disk-7: #8a6fc0;
+  --app-disk-8: #a8906a;
+  --app-disk-9: #6f9bb5;
+  --app-disk-10: #a07b93;
+  --app-disk-swap: #4a505c;
+  --app-disk-swap-gap: #30343c;
   --app-shell-border: #282d36;
   --app-primary: #f1f3f7;
   --app-primary-hover: #ffffff;
@@ -292,7 +330,7 @@
   --destructive: #ff8b7e;
   --border: #282d36;
   --input: #353c47;
-  --ring: #b39ef0;
+  --ring: var(--app-focus-border);
   --sidebar: #141414;
   --sidebar-foreground: #dfdfdf;
   --sidebar-primary: #f1f3f7;
@@ -300,7 +338,7 @@
   --sidebar-accent: #282828;
   --sidebar-accent-foreground: #dfdfdf;
   --sidebar-border: #282d36;
-  --sidebar-ring: #b39ef0;
+  --sidebar-ring: var(--app-focus-border);
   --chart-1: #b39ef0;
   --chart-2: #78d9aa;
   --chart-3: #f1c86c;
@@ -428,7 +466,7 @@ button:not([class]):not([data-slot="button"]) {
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border outline-ring;
   }
 
   body {

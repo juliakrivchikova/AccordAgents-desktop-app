@@ -42,7 +42,7 @@
 }
 .provider-device-auth-open { padding: 6px 12px; font-weight: 600; }
 .provider-device-auth-open:hover { border-color: var(--app-border-strong); }
-.provider-device-auth-open:focus-visible { outline: 2px solid var(--app-accent); outline-offset: 2px; }
+.provider-device-auth-open:focus-visible { outline: none; border-color: var(--app-focus-border); }
 .provider-device-auth-error { color: var(--app-danger); }
 .provider-device-auth-code-row > [role="status"] { color: var(--app-success); }
 .provider-auth-form { display: grid; gap: 10px; width: 100%; }

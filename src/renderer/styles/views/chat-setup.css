@@ -1324,7 +1324,7 @@
 }
 
 .avatar-choice:hover {
-  border-color: var(--app-accent-border);
+  border-color: var(--app-border-strong);
   background: color-mix(in srgb, var(--app-surface-hover) 58%, transparent);
 }
 

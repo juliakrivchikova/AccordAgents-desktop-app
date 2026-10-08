@@ -124,7 +124,7 @@ export const Sidebar = ({
             "flex h-8 w-full items-center gap-2 rounded-md border border-[var(--app-border)] bg-[var(--app-workspace-bg)] px-2.5",
             "text-left text-[13px] text-muted-foreground transition-colors",
             "hover:border-[var(--app-border-strong)] hover:text-[var(--app-text)]",
-            "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
+            "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]"
           )}
         >
           <Search className="size-[15px] shrink-0" aria-hidden />
@@ -182,7 +182,7 @@ export const Sidebar = ({
                       className={cn(
                         "flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left text-sm",
                         "text-[var(--app-text)] transition-colors hover:bg-[var(--app-surface-hover)]",
-                        "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
+                        "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]"
                       )}
                     >
                       {collapsed ? <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden /> : <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
@@ -229,7 +229,7 @@ export const Sidebar = ({
                           className={cn(
                             "w-full rounded-md px-2 py-1.5 text-left text-[12px] text-muted-foreground",
                             "transition-colors hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text)]",
-                            "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
+                            "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]"
                           )}
                         >
                           Show {hiddenCount} more
@@ -252,7 +252,7 @@ export const Sidebar = ({
                 className={cn(
                   "flex min-w-0 w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-sm",
                   "text-[var(--app-text)] transition-colors hover:bg-[var(--app-surface-hover)]",
-                  "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/45"
+                  "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]"
                 )}
               >
                 {archivedCollapsed ? <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden /> : <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}

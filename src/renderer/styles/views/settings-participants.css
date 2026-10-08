@@ -24,8 +24,7 @@
 }
 
 .participants-search:focus-within {
-  border-color: var(--app-border-strong);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--shadow-color) 6%, transparent);
+  border-color: var(--app-focus-border);
 }
 
 .participants-search svg {
@@ -126,12 +125,23 @@
   box-shadow: none !important;
 }
 
-.participants-settings-new-button:hover:not(:disabled),
-.participants-settings-new-button:focus-visible {
+.participants-settings-new-button:hover:not(:disabled) {
   border: 0 !important;
   background: var(--app-primary-hover) !important;
   color: var(--app-primary-fg) !important;
   box-shadow: none !important;
+}
+
+/* The primary button's own focus mark: a thin light edge inside it. */
+.participants-settings-new-button:focus-visible,
+.participants-editor-footer [data-variant="default"]:focus-visible {
+  background: var(--app-primary-hover) !important;
+  box-shadow: inset 0 0 0 1px var(--app-primary-fg) !important;
+}
+
+.participants-editor-footer [data-variant="outline"]:focus-visible,
+.participants-editor-footer [data-slot="dialog-close"]:focus-visible {
+  border-color: var(--app-focus-border) !important;
 }
 
 .participants-role-accordion {
@@ -165,8 +175,8 @@
 }
 
 .participants-role-row-head:focus-visible {
-  outline: 2px solid var(--app-accent);
-  outline-offset: -2px;
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .participants-role-chevron {
@@ -246,8 +256,8 @@
 }
 
 .participant-preset-card:focus-visible {
-  outline: 2px solid var(--app-accent);
-  outline-offset: 2px;
+  outline: none;
+  border-color: var(--app-focus-border);
 }
 
 .participant-preset-card-head {
@@ -493,7 +503,7 @@
 
 .participants-editor-avatar-marker:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 1px var(--app-border-strong), 0 1px 3px color-mix(in srgb, var(--app-text-strong) 18%, transparent);
+  border-color: var(--app-focus-border);
 }
 
 .participants-editor-avatar-popover {
@@ -870,8 +880,8 @@
 }
 
 .participants-editor-switch input:focus-visible + span {
-  outline: 2px solid var(--app-accent);
-  outline-offset: 2px;
+  outline: none;
+  border-color: var(--app-focus-border);
 }
 
 .participants-editor-empty-row {
@@ -969,11 +979,7 @@
 }
 
 .participants-editor-footer [data-slot="button"][data-variant="default"] {
-  padding: 9px 17px !important;
-  border: 0 !important;
-  background: var(--app-primary) !important;
-  color: var(--app-primary-fg) !important;
-  opacity: 1 !important;
+  padding: 8px 16px !important;
 }
 
 .participants-editor-footer [data-variant="destructive"] {

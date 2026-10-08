@@ -287,8 +287,8 @@
 
 .decision-compose textarea:focus,
 .plan-correction-composer textarea:focus {
-  border-color: var(--app-accent);
-  box-shadow: var(--focus-ring);
+  border-color: var(--app-focus-border);
+  box-shadow: none;
 }
 
 .decision-compose textarea:disabled,

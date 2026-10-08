@@ -29,8 +29,7 @@
 }
 
 .roles-search:focus-within {
-  border-color: var(--app-border-strong);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-accent) 13%, transparent);
+  border-color: var(--app-focus-border);
 }
 
 .roles-search input {
@@ -95,8 +94,8 @@
 .roles-new-button:focus-visible,
 .roles-card:focus-visible,
 .roles-preview-toggle button:focus-visible {
-  outline: 2px solid var(--app-accent);
-  outline-offset: 2px;
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 .roles-new-button {
@@ -531,8 +530,8 @@ body:has(.roles-editor-dialog) [data-slot="dialog-overlay"] {
 .roles-editor-input:focus-visible,
 .roles-editor-description:focus-visible,
 .roles-editor-textarea:focus-visible {
-  border-color: var(--app-border-strong);
-  box-shadow: 0 0 0 3px var(--app-accent-soft);
+  border-color: var(--app-focus-border);
+  box-shadow: none;
 }
 
 .roles-preview-box {
@@ -695,4 +694,9 @@ body:has(.roles-editor-dialog) [data-slot="dialog-overlay"] {
     flex: 1;
     justify-content: center;
   }
+}
+
+/* The primary button's own focus mark: a thin light edge inside it. */
+.roles-duplicate-button:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--app-primary-fg) !important;
 }

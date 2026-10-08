@@ -16,8 +16,8 @@
 }
 
 .app-select-trigger:focus-visible {
-  border-color: var(--app-accent);
-  box-shadow: var(--focus-ring);
+  border-color: var(--app-focus-border);
+  box-shadow: none;
 }
 
 .participant-pill {
@@ -756,8 +756,8 @@ img.chat-draft-plugin-token-icon {
 }
 
 .chat-choice-text-panel textarea:focus {
-  border-color: var(--app-accent);
-  box-shadow: 0 0 0 1px var(--app-accent);
+  border-color: var(--app-focus-border);
+  box-shadow: none;
 }
 
 .sidebar-history-item.is-selected {
@@ -926,8 +926,23 @@ img.chat-draft-plugin-token-icon {
   opacity: 0.88;
 }
 
-.chat-choice-submit:disabled {
-  opacity: 0.45;
+/* The primary button's own focus mark: a thin light edge inside it. */
+.chat-choice-submit:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--app-on-dark) !important;
+}
+
+/* Disabled is the shared calm light button, not the dark one faded grey. */
+.chat-choice-submit:disabled,
+.dark .chat-choice-submit:disabled {
+  opacity: 1;
+  border-color: var(--app-border) !important;
+  background: var(--app-surface-subtle) !important;
+  color: var(--app-muted) !important;
+}
+
+.chat-choice-submit:disabled span,
+.chat-choice-submit:disabled kbd {
+  color: var(--app-muted) !important;
 }
 
 /* Keep the submit a dark button with white text in dark mode too, instead of

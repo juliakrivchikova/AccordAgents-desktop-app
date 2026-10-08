@@ -27,8 +27,9 @@ import { SavedPromptsSettingsSection } from "./saved-prompts-settings-section";
 import { EnvironmentSettingsSection } from "./environment-settings-section";
 import { PluginsSettingsSection } from "./plugins/plugins-settings-section";
 import { X } from "lucide-react";
+import { AwsSettingsPage } from "./aws-settings-page";
 
-export type SettingsSection = "general" | "environment" | "roles" | "behavior-rules" | "saved-prompts" | "participants" | "plugins";
+export type SettingsSection = "general" | "aws" | "environment" | "roles" | "behavior-rules" | "saved-prompts" | "participants" | "plugins";
 
 export function SettingsView(props: {
   section: SettingsSection;
@@ -66,6 +67,8 @@ export function SettingsView(props: {
   const [pluginHeaderAction, setPluginHeaderAction] = useState<ReactNode>();
   const title = props.section === "general"
     ? "General"
+    : props.section === "aws"
+      ? "AWS"
     : props.section === "environment"
       ? "Environment"
       : props.section === "roles"
@@ -169,8 +172,12 @@ export function SettingsView(props: {
             setChatParticipantRequestPromptMaxChars={props.setChatParticipantRequestPromptMaxChars}
             setChatAutoWatchWakeLimit={props.setChatAutoWatchWakeLimit}
             setChatPromptContext={props.setChatPromptContext}
-            cloudRuns={props.settings.cloudRuns}
-            saveCloudRunsSettings={props.saveCloudRunsSettings}
+          />
+        )}
+        {props.section === "aws" && (
+          <AwsSettingsPage
+            settings={props.settings.cloudRuns}
+            onDeleted={() => props.saveCloudRunsSettings({ mode: "aws" })}
           />
         )}
       </div>

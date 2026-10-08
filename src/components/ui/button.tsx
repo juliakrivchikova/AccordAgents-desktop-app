@@ -5,20 +5,20 @@ import { Slot } from "radix-ui"
 import { cn } from "@/lib/utils"
 
 const buttonVariants = cva(
-  "group/button inline-flex shrink-0 items-center justify-center rounded-lg border border-[var(--app-border-strong)] bg-clip-padding text-sm font-medium whitespace-nowrap transition-all outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  "group/button inline-flex shrink-0 items-center justify-center rounded-lg border border-[var(--app-border-strong)] bg-clip-padding text-sm font-medium whitespace-nowrap transition-all outline-none select-none focus-visible:border-[var(--app-focus-border)] active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {
         default:
-          "border-[color-mix(in_srgb,var(--app-primary)_24%,var(--app-border-strong))] bg-primary text-primary-foreground shadow-[0_1px_1px_color-mix(in_srgb,#000_12%,transparent)] hover:border-[color-mix(in_srgb,var(--app-primary-hover)_36%,var(--app-border-strong))] hover:bg-[var(--app-primary-hover)] [a]:hover:bg-primary/80",
+          "border-[var(--app-primary)] bg-primary text-primary-foreground hover:border-[var(--app-primary-hover)] hover:bg-[var(--app-primary-hover)] focus-visible:border-[var(--app-primary)] focus-visible:shadow-[inset_0_0_0_1px_var(--app-primary-fg)] [a]:hover:bg-primary/80 disabled:opacity-100 disabled:border-[var(--app-border)] disabled:bg-[var(--app-surface-subtle)] disabled:text-[var(--app-muted)]",
         outline:
-          "border-[var(--app-border-strong)] bg-[var(--app-surface)] text-[var(--app-text)] hover:border-[var(--app-accent-border)] hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)] aria-expanded:bg-[var(--app-surface-hover)] aria-expanded:text-[var(--app-text-strong)] dark:border-[var(--app-border-strong)] dark:bg-[var(--app-surface)] dark:hover:bg-[var(--app-surface-hover)]",
+          "border-[var(--app-border-strong)] bg-[var(--app-surface)] text-[var(--app-text)] hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)] aria-expanded:bg-[var(--app-surface-hover)] aria-expanded:text-[var(--app-text-strong)] dark:border-[var(--app-border-strong)] dark:bg-[var(--app-surface)] dark:hover:bg-[var(--app-surface-hover)]",
         secondary:
           "border-[var(--app-border)] bg-secondary text-secondary-foreground hover:border-[var(--app-border-strong)] hover:bg-[var(--app-surface-hover)] aria-expanded:bg-secondary aria-expanded:text-secondary-foreground",
         ghost:
           "border-[var(--app-border)] bg-transparent hover:border-[var(--app-border-strong)] hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)] aria-expanded:bg-[var(--app-surface-hover)] aria-expanded:text-[var(--app-text-strong)] dark:hover:bg-[var(--app-surface-hover)]",
         destructive:
-          "border-destructive/45 bg-transparent text-destructive hover:border-destructive/65 hover:bg-destructive/10 hover:text-destructive focus-visible:border-destructive/50 focus-visible:ring-destructive/20 dark:border-destructive/50 dark:hover:bg-destructive/20 dark:focus-visible:ring-destructive/40",
+          "border-destructive/45 bg-transparent text-destructive hover:border-destructive/65 hover:bg-destructive/10 hover:text-destructive focus-visible:border-destructive dark:border-destructive/50 dark:hover:bg-destructive/20",
         link: "border-transparent text-primary underline-offset-4 hover:underline",
       },
       size: {

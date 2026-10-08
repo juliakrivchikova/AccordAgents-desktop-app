@@ -5,11 +5,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { CommandError } from "./command";
+import { CommandError, commandFailureDetail, isDiskSpaceFailure } from "./command";
 import type { CloudRunWorkerDoctorReport } from "../../shared/types";
 import type { MachineInstallRecord, MachineInstallSnapshot, MachineSshTarget } from "../../shared/machineInstall";
 import { MACHINE_POWER_REFUSED_EXIT_CODE, type AwsMachinePowerConfig } from "../../shared/machinePower";
 import {
+  MACHINE_DISK_FULL_MESSAGE,
   MachineInstallerService,
   compareVersions,
   machinePowerNeedsDelivery,
@@ -125,7 +126,7 @@ function harness(options: {
   bundleDir?: string;
   doctor?: CloudRunWorkerDoctorReport;
   ownerFailure?: string | Error;
-  probeFailure?: string;
+  probeFailure?: string | Error;
   getEnrollmentJson?: () => Promise<string>;
   restoreEnrollment?: (machineId: string, requested: string, installed: string, installedMachineId?: string) => Promise<string | void>;
   recoveryOutput?: string;
@@ -196,7 +197,7 @@ function harness(options: {
       }
       if (options.revertFailure && request.script.includes("--revert-power")) throw new Error("ssh: connection reset");
       if (request.script.includes("printf 'home=%s")) {
-        if (options.probeFailure) throw new Error(options.probeFailure);
+        if (options.probeFailure) throw typeof options.probeFailure === "string" ? new Error(options.probeFailure) : options.probeFailure;
         if (activated) {
           return options.probeAfter ?? probeOutput({
             state: JSON.stringify({ version: "1.4.0", digest: "new" }),
@@ -676,6 +677,43 @@ test("a machine that cannot compile node-pty fails with a message that says so",
   assert.match(result.snapshot.error ?? "", /gyp ERR/);
   assert.equal(result.snapshot.recovery?.kind, "old-runtime-still-installed");
   assert.ok(!h.calls.some((call) => call.script.includes("mv -Tf")), "nothing may be switched");
+});
+
+test("an update that runs out of disk says the disk is full, not that build tools are missing", async () => {
+  const h = harness({ dependenciesFail: "npm ERR! code ENOSPC\nnpm ERR! nospc ENOSPC: no space left on device, write" });
+  const result = await h.service.install({ machineId: "m1", operationId: "op-disk", target: TARGET });
+  assert.equal(result.snapshot.phase, "error");
+  assert.equal(result.snapshot.error, MACHINE_DISK_FULL_MESSAGE);
+  assert.doesNotMatch(result.snapshot.error ?? "", /build tools/);
+});
+
+test("a failed command keeps the last line it printed instead of only its exit code", () => {
+  const failure = new CommandError("ssh exited with code 1", {
+    command: "ssh", args: [], stdout: "", exitCode: 1, timedOut: false,
+    stderr: "Warning: Permanently added 'x' to the list of known hosts.\n\u001b[31mnpm ERR! network timeout at registry\u001b[0m\n"
+  });
+  assert.equal(commandFailureDetail(failure), "npm ERR! network timeout at registry");
+  assert.equal(isDiskSpaceFailure(failure), false);
+  assert.equal(isDiskSpaceFailure(new CommandError("x", { ...failure.result, stderr: "write: No space left on device" })), true);
+});
+
+test("the last line a failed step printed is kept, without anything shaped like a key", async () => {
+  const token = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4";
+  const h = harness({ probeFailure: new CommandError("ssh exited with code 1", {
+    command: "ssh", args: [], stdout: "", exitCode: 1, timedOut: false, stderr: `curl: (22) refused: Authorization: Bearer ${token}\n`
+  }) });
+  const result = await h.service.install({ machineId: "m1", operationId: "op-detail", target: TARGET });
+  assert.equal(result.snapshot.phase, "error");
+  assert.match(result.snapshot.error ?? "", /ssh exited with code 1: curl: \(22\) refused: Authorization: Bearer \[redacted\]/);
+  assert.doesNotMatch(result.snapshot.error ?? "", new RegExp(token));
+});
+
+test("running out of file watchers is not a full disk", () => {
+  const watchers = new CommandError("x", { command: "node", args: [], stdout: "", exitCode: 1, timedOut: false,
+    stderr: "Error: ENOSPC: System limit for number of file watchers reached, watch '/home/ubuntu/app'" });
+  assert.equal(isDiskSpaceFailure(watchers), false);
+  assert.equal(isDiskSpaceFailure(new Error("ENOSPC: no space left on device, write")), true);
+  assert.equal(isDiskSpaceFailure(new Error("npm ERR! code ENOSPC")), true);
 });
 
 test("a deployment in its own directory gets its own unit, not the default one", async () => {

@@ -1,5 +1,6 @@
 import path from "node:path";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
+import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { parseCustomAvatarId, type AvatarStudioTurnRequest, type SaveCustomAvatarRequest } from "../shared/avatarStudio";
@@ -26,6 +27,7 @@ import type {
   RevokeMobilePairingResult,
   StoredPendingMailboxRevocation,
   AwsWorkerStartRequest,
+  AwsDiskCleanCategory,
   SetAwsAutoStopRequest,
   CompactChatParticipantRequest,
   ChatParticipantConfigUpdate,
@@ -2554,7 +2556,7 @@ function registerIpc(): void {
     // making the switch wait behind replication. One that is offline gets the
     // switch with the settings it receives on connecting.
     // Then ask the machine to report in: its answer confirms what it has, or
-    // shows in Diagnostics that the change did not arrive.
+    // shows in the Automatic stop row that the change did not arrive.
     void (async () => {
       await machineLinkService?.syncSettings();
       // A moment later, so the answer follows the settings it was sent.
@@ -2604,6 +2606,22 @@ function registerIpc(): void {
     sendToMainWindow("machines:updated", await machineListResult());
     return cloudRunAwsService.status();
   });
+  const awsInstanceDisk = new AwsInstanceDiskService({
+    worker: () => cloudRunAwsService.workerForInspection(),
+    // A desktop set up before per-desktop folders keeps its recorded ones.
+    program: async () => {
+      const folder = cloudEnvironmentDirectory((await chatEventLogService.getOrCreateDeviceIdentity()).originId);
+      const recorded = await cloudRunAwsService.programFoldersOnInstance();
+      const root = recorded?.installRoot ?? `~/${folder}`;
+      const name = root.replace(/\/+$/, "").split("/").pop() ?? folder;
+      return { root, data: recorded?.userDataDir ?? `~/.accordagents/${name === "accordagents-machine" ? "machine" : name}` };
+    },
+    log: (event, data) => { void debugLogService.write(event, data); }
+  });
+  ipcMain.handle("cloud-runs:aws-disk", (_event, options?: { refresh?: boolean }) => awsInstanceDisk.report(options));
+  ipcMain.handle("cloud-runs:aws-disk-clean", (_event, category: AwsDiskCleanCategory) => awsInstanceDisk.clean(category));
+  ipcMain.handle("cloud-runs:aws-disk-list", (_event, path?: string) => awsInstanceDisk.list(path));
+  ipcMain.handle("cloud-runs:aws-disk-delete", (_event, paths: string[]) => awsInstanceDisk.remove(paths));
   ipcMain.handle("cloud-runs:aws-stop", () => cloudRunAwsService.stopWorker());
   ipcMain.handle("cloud-runs:aws-delete", () => cloudRunAwsService.deleteWorker());
   ipcMain.handle("settings:get-agent-environment", () => agentEnvironmentService.snapshot());

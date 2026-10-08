@@ -4,6 +4,15 @@ export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX = 1024;
 export const AWS_WORKER_ROOT_VOLUME_SIZE_GB_OPTIONS = [8, 16, 20, 32, 64, 128, 256] as const;
 export const AWS_WORKER_INSTANCE_TYPE_DEFAULT = "t3.small";
 export const AWS_WORKER_INSTANCE_TYPE_OPTIONS = ["t3.small", "t3.medium", "t3.large", "t3.xlarge"] as const;
+/** Processors and memory of each offered type, as AWS lists them. */
+export const AWS_WORKER_INSTANCE_TYPE_SPECS: Record<(typeof AWS_WORKER_INSTANCE_TYPE_OPTIONS)[number], string> = {
+  "t3.small": "2 vCPU · 2 GB RAM",
+  "t3.medium": "2 vCPU · 4 GB RAM",
+  "t3.large": "2 vCPU · 8 GB RAM",
+  "t3.xlarge": "4 vCPU · 16 GB RAM"
+};
+/** What the system log clean-up on the instance trims the log to. */
+export const AWS_DISK_JOURNAL_KEEP_BYTES = 200_000_000;
 
 /** Validate deliberate input; normalization is only for older stored settings. */
 export function awsRootVolumeSizeError(value: unknown): string | undefined {

@@ -448,8 +448,9 @@
 }
 
 .chat-mention:focus-visible {
-  outline: 1px solid var(--app-warning);
-  outline-offset: 2px;
+  outline: none;
+  border-radius: 4px;
+  box-shadow: var(--focus-ring);
 }
 
 .chat-mention-card {
@@ -883,11 +884,14 @@ ul.markdown-list {
   line-height: 1.35;
 }
 
+/* The switch, as small as the ChatGPT app's: 32 by 20 with a light track
+   when off. */
 .toggle {
   position: relative;
   display: inline-flex;
-  width: 44px;
-  height: 26px;
+  flex: none;
+  width: 32px;
+  height: 20px;
 }
 
 .toggle input {
@@ -900,32 +904,48 @@ ul.markdown-list {
   position: absolute;
   inset: 0;
   border-radius: var(--radius-pill);
-  background: var(--app-border);
+  background: var(--app-surface-muted);
   cursor: pointer;
 }
 
 .toggle input:not(:checked):not(:disabled) + span {
-  background: var(--app-muted);
+  background: var(--app-toggle-off);
 }
 
 .toggle input:disabled + span {
   cursor: default;
 }
 
+/* An off switch that cannot be changed now is faded, so it does not read as
+   one that can. */
+.toggle input:disabled:not(:checked) + span {
+  opacity: 0.5;
+}
+
 .toggle span::before {
   content: "";
   position: absolute;
-  width: 20px;
-  height: 20px;
-  left: 3px;
-  top: 3px;
+  width: 16px;
+  height: 16px;
+  left: 2px;
+  top: 2px;
   border-radius: 50%;
-  background: var(--app-surface);
+  background: var(--app-toggle-knob);
   transition: transform 120ms ease;
 }
 
 .toggle input:checked + span {
   background: var(--app-success);
+}
+
+/* The switch's input is invisible, so focus shows on its track: a thin
+   edge inside it, light on a switched-on track as on the primary button. */
+.toggle input:focus-visible + span {
+  box-shadow: var(--focus-ring);
+}
+
+.toggle input:checked:focus-visible + span {
+  box-shadow: inset 0 0 0 1px var(--app-surface);
 }
 
 .toggle input:checked:disabled + span {
@@ -937,7 +957,8 @@ ul.markdown-list {
 }
 
 .toggle input:checked + span::before {
-  transform: translateX(18px);
+  transform: translateX(12px);
+  background: var(--app-surface);
 }
 
 .spin {
