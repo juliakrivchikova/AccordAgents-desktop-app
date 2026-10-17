@@ -305,6 +305,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         throw new Error("Chat was not found.");
       }
       const wasActive = state.conversation?.id === conversationId;
+      state.clearChatMessageDraft(conversationId);
       state.archivedConversationIdsRef.current.delete(conversationId);
       state.setUnreadConversationIds((current) => {
         const next = new Set(current);
@@ -333,6 +334,9 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
 
   async function sendChatMessage(options: SendChatMessageOptions = {}): Promise<boolean> {
     if (!state.conversation || state.conversation.kind !== "chat") return false;
+    // The draft belongs to the chat it was typed in; by the time the send
+    // settles the User may have opened another chat.
+    const conversationId = state.conversation.id;
     const draftBeforeSend = state.chatMessageDraft;
     const content = (options.content ?? state.chatMessageDraft).trim();
     const imageAttachments = options.imageAttachments ?? [];
@@ -349,11 +353,11 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     state.setError(undefined);
     state.setWarnings([]);
     if (!options.chatThreadRootId) {
-      state.setChatMessageDraft("");
+      state.setChatMessageDraftForConversation(conversationId, "");
     }
     try {
       const result = await window.consensus.sendChatMessage({
-        conversationId: state.conversation.id,
+        conversationId,
         runId,
         content,
         skillMentions,
@@ -380,7 +384,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       return true;
     } catch (caught) {
       if (!options.chatThreadRootId) {
-        state.setChatMessageDraft((current) => current || draftBeforeSend);
+        state.setChatMessageDraftForConversation(conversationId, (current) => current || draftBeforeSend);
       }
       const message = errorText(caught);
       if (message.toLowerCase().includes("cancel")) {

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type {
   AgentHealth,
   AppSettings,
@@ -19,6 +19,12 @@ import type { ChatParticipantDraft, ChatParticipantRuntimeOverride } from "../co
 import type { DraftPluginMention } from "../components/chat/chat-composer-draft-utils";
 import type { PendingChatImage } from "../components/chat/use-chat-composer-images";
 import { DEFAULT_SETTINGS } from "./constants";
+import {
+  applyChatMessageDraft,
+  chatMessageDraftFor,
+  withoutChatMessageDraft,
+  type ChatMessageDrafts
+} from "./chat-message-drafts";
 import {
   persistChatSidebarWidth,
   persistSettingsSidebarWidth,
@@ -116,8 +122,14 @@ export interface AppState {
   setSelectedChatParticipantConfigIds: StateSetter<Set<string>>;
   selectedChatParticipantRuntimeOverrides: Record<string, ChatParticipantRuntimeOverride>;
   setSelectedChatParticipantRuntimeOverrides: StateSetter<Record<string, ChatParticipantRuntimeOverride>>;
+  /** Unsent composer text of the open chat; each chat keeps its own. */
   chatMessageDraft: string;
+  /** Changes the open chat's unsent text; does nothing when no chat is open. */
   setChatMessageDraft: StateSetter<string>;
+  /** Changes one chat's unsent text, whichever chat is open by then. */
+  setChatMessageDraftForConversation: (conversationId: string, value: React.SetStateAction<string>) => void;
+  /** Forgets a chat's unsent text, for a chat that no longer exists. */
+  clearChatMessageDraft: (conversationId: string) => void;
   chatAddParticipantDraft: ChatParticipantDraft | undefined;
   setChatAddParticipantDraft: StateSetter<ChatParticipantDraft | undefined>;
   chatMessageFocusRequest: ChatMessageFocusRequest | undefined;
@@ -192,7 +204,23 @@ export function useAppState(): AppState {
   const [planCorrectionDraft, setPlanCorrectionDraft] = useState("");
   const [selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds] = useState<Set<string>>(new Set());
   const [selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides] = useState<Record<string, ChatParticipantRuntimeOverride>>({});
-  const [chatMessageDraft, setChatMessageDraft] = useState("");
+  const [chatMessageDrafts, setChatMessageDrafts] = useState<ChatMessageDrafts>({});
+  const openConversationId = conversation?.id;
+  const chatMessageDraft = chatMessageDraftFor(chatMessageDrafts, openConversationId);
+  const setChatMessageDraftForConversation = useCallback(
+    (conversationId: string, value: React.SetStateAction<string>) => {
+      setChatMessageDrafts((current) => applyChatMessageDraft(current, conversationId, value));
+    },
+    []
+  );
+  const setChatMessageDraft = useCallback<StateSetter<string>>((value) => {
+    if (openConversationId) {
+      setChatMessageDraftForConversation(openConversationId, value);
+    }
+  }, [openConversationId, setChatMessageDraftForConversation]);
+  const clearChatMessageDraft = useCallback((conversationId: string) => {
+    setChatMessageDrafts((current) => withoutChatMessageDraft(current, conversationId));
+  }, []);
   const [chatAddParticipantDraft, setChatAddParticipantDraft] = useState<ChatParticipantDraft | undefined>();
   const [chatMessageFocusRequest, setChatMessageFocusRequest] = useState<ChatMessageFocusRequest | undefined>();
   const [error, setError] = useState<string | undefined>();
@@ -246,7 +274,7 @@ export function useAppState(): AppState {
     setPendingClarifications, planItemReviewDrafts, setPlanItemReviewDrafts, planCorrectionDraft,
     setPlanCorrectionDraft, selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds,
     selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides,
-    chatMessageDraft, setChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
+    chatMessageDraft, setChatMessageDraft, setChatMessageDraftForConversation, clearChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
     setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,
     activityRefreshRequestRef, summaryRefreshRequestRef, agentRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,

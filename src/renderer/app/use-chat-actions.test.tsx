@@ -311,6 +311,10 @@ test("existing chat send clears immediately and restores the composer draft on f
       draft = typeof value === "function" ? value(draft) : value;
       state.chatMessageDraft = draft;
     },
+    setChatMessageDraftForConversation: (conversationId: string, value: SetStateAction<string>) => {
+      assert.equal(conversationId, "conversation-1");
+      state.setChatMessageDraft(value);
+    },
     setConversation: () => undefined,
     setError: (value: string | undefined) => { error = value; },
     setWarnings: () => undefined
