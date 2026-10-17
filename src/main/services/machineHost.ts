@@ -1489,13 +1489,23 @@ export class MachineHostService {
     const previous = this.commandTasks.get(request.runId);
     if (previous) return previous;
     const scope = `${request.conversationId}:${request.participantId}`;
-    const task = (this.commandSessions.get(scope) ?? Promise.resolve()).catch(() => undefined).then(() => this.admitTurn(request));
-    this.commandSessions.set(scope, task);
+    // A Claude Code member takes the next message while it is still working,
+    // as its dedicated CLI does (ChatService.reserveParticipantTurn): its
+    // turns are admitted one after another, but each runs as soon as it is
+    // admitted instead of waiting for the previous one to finish.
+    const shared = request.participant.kind === "claude-code";
+    let markAdmitted!: () => void;
+    const admitted = new Promise<void>((resolve) => { markAdmitted = resolve; });
+    const task = (this.commandSessions.get(scope) ?? Promise.resolve()).catch(() => undefined)
+      .then(() => this.admitTurn(request, shared ? markAdmitted : undefined))
+      .finally(markAdmitted);
+    const sessionTail = shared ? admitted : task;
+    this.commandSessions.set(scope, sessionTail);
     this.commandTasks.set(request.runId, task);
     this.turnTasks.add(task);
     void task.finally(() => {
       this.turnTasks.delete(task); this.commandTasks.delete(request.runId);
-      if (this.commandSessions.get(scope) === task) this.commandSessions.delete(scope);
+      if (this.commandSessions.get(scope) === sessionTail) this.commandSessions.delete(scope);
     }).catch((error) => {
       void this.debugLogs.write("machine-host.turn.not-stored", { runId: request.runId, message: errorMessage(error) });
       this.retryCommands();
@@ -1531,7 +1541,7 @@ export class MachineHostService {
     return identity;
   }
 
-  private async admitTurn(request: MachineTurnRequestBody): Promise<void> {
+  private async admitTurn(request: MachineTurnRequestBody, onAdmitted?: () => void): Promise<void> {
     if (this.closed) return;
     // Recheck at admission, after any earlier turn in this participant's
     // queue. The receive-time check may have preceded deletion by minutes.
@@ -1578,6 +1588,7 @@ export class MachineHostService {
     await this.send({ type: "machine.turn.started", conversationId: request.conversationId, runId: request.runId, startedAt: this.now().toISOString() });
     if (this.closed) return;
     if ((await commands.forRun(request.runId))?.cancelled) return this.finishQueuedTurn(request, "interrupted");
+    onAdmitted?.();
     return this.executeTurn(request);
   }
 
