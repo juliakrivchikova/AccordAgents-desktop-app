@@ -2355,6 +2355,282 @@ test("running participant cancellation preserves a successful reply returned aft
   assert.equal(stopped?.content, "Reply already delivered.");
 });
 
+test("a Claude member takes the next message while its previous reply is still running, without resending that reply's context", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const prompts: string[] = [];
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let markSecondStarted!: () => void;
+  const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, prompt: string, _repoPath: unknown, _diffMode: unknown, _kind: unknown, _signal: unknown, runOptions: any) => {
+      runOptions?.warm?.onMessageWritten?.();
+      runOptions?.warm?.onReplyStarted?.();
+      prompts.push(prompt);
+      if (prompts.length === 1) {
+        await firstBlocked;
+        return { participant: runParticipant, ok: true, content: "First done.", durationMs: 1 };
+      }
+      markSecondStarted();
+      return { participant: runParticipant, ok: true, content: "Second done.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "send-first", content: `@${participant.handle} first task alpha` });
+  await waitFor(() => prompts.length === 1);
+  await service.sendMessage({ conversationId: conversation.id, runId: "send-second", content: `@${participant.handle} second question beta` });
+  await secondStarted;
+  assert.equal(prompts.length, 2, "the second message reached the member while the first reply was still running");
+  assert.match(prompts[1], /second question beta/);
+  assert.doesNotMatch(prompts[1], /first task alpha/, "context the running turn already delivered is not sent again");
+  const queued = storage.current.messages.filter((message: ChatMessage) => message.metadata?.queuedBehind);
+  assert.equal(queued.length, 0, "nothing waits behind the running reply");
+  releaseFirst();
+  await waitFor(() => storage.current.messages.filter((message: ChatMessage) =>
+    message.role === "participant" && message.status === "done").length === 2);
+});
+
+test("a Claude reply that ends when the next message joins its step is stored as finished while that message's reply still runs", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  let calls = 0;
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let releaseSecond!: () => void;
+  const secondBlocked = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, runOptions: any) => {
+      runOptions?.warm?.onMessageWritten?.();
+      calls += 1;
+      if (calls === 1) {
+        runOptions.onOutput?.({ kind: "tool", text: "Using Bash\n", activityKind: "command", activityStatus: "started" });
+        await firstBlocked;
+        return { participant: runParticipant, ok: true, content: "", durationMs: 1 };
+      }
+      await secondBlocked;
+      return { participant: runParticipant, ok: true, content: "TWO", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "fold-first", content: `@${participant.handle} count files` });
+  await waitFor(() => calls === 1);
+  await service.sendMessage({ conversationId: conversation.id, runId: "fold-second", content: `@${participant.handle} reply TWO` });
+  await waitFor(() => calls === 2);
+  releaseFirst();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.role === "participant" && message.status === "done" && message.content === ""));
+  const first = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "participant" && message.status === "done" && message.content === "");
+  assert.equal(typeof first.metadata?.workedMs, "number", "the finished reply keeps its worked time");
+  assert.ok(first.metadata?.activityEvents?.some((event: { label: string }) => event.label === "Using Bash"));
+  releaseSecond();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "TWO" && message.status === "done"));
+  await waitFor(() => !storage.current.metadata.running);
+  const after = storage.current.messages.find((message: ChatMessage) => message.id === first.id);
+  assert.equal(after?.status, "done");
+  assert.equal(typeof after?.metadata?.workedMs, "number", "the other turn's stale copy does not strip the finished reply");
+});
+
+test("a Claude member's app tools keep acting for the running reply until the CLI hands it the next message", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const appMcp = new AppMcpService();
+  (appMcp as any).url = "http://127.0.0.1:1/mcp";
+  const runs: any[] = [];
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let releaseSecond!: () => void;
+  const secondBlocked = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    appMcp,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, runOptions: any) => {
+      runOptions?.warm?.onMessageWritten?.();
+      runs.push(runOptions);
+      if (runs.length === 1) {
+        await firstBlocked;
+        return { participant: runParticipant, ok: true, content: "First done.", durationMs: 1 };
+      }
+      await secondBlocked;
+      return { participant: runParticipant, ok: true, content: "Second done.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const actorRunId = (token: string): string | undefined => (appMcp as any).tokens.get(token)?.runId;
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "grant-first", content: `@${participant.handle} first` });
+  await waitFor(() => runs.length === 1);
+  const token = runs[0].appMcp.token;
+  assert.equal(actorRunId(token), runs[0].warm.origin.runId);
+  await service.sendMessage({ conversationId: conversation.id, runId: "grant-second", content: `@${participant.handle} second` });
+  await waitFor(() => runs.length === 2);
+  assert.equal(runs[1].appMcp.token, token, "both messages go to the same CLI process and token");
+  assert.equal(actorRunId(token), runs[0].warm.origin.runId, "the running reply keeps its tools until the next message reaches a step");
+  assert.equal(typeof runs[1].warm.onReplyStarted, "function");
+  runs[1].warm.onReplyStarted();
+  assert.equal(actorRunId(token), runs[1].warm.origin.runId);
+
+  releaseFirst();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "First done." && message.status === "done"));
+  assert.equal(actorRunId(token), runs[1].warm.origin.runId, "the first reply ending does not take the tools back");
+  releaseSecond();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "Second done." && message.status === "done"));
+});
+
+test("only the User's own messages reach a busy Claude member at once; a member request, a resume or a goal waits", () => {
+  const { service } = testService();
+  const claude = chatParticipant("claude-code");
+  const codex = chatParticipant("codex-cli");
+  const user = { id: "u", role: "user", content: "hi", createdAt: NOW, status: "done" } as ChatMessage;
+  const system = { id: "s", role: "system", content: "Auto-resumed", createdAt: NOW, status: "done" } as ChatMessage;
+  const request = { id: "r", role: "participant", participantId: "other", content: "@claude do it", createdAt: NOW, status: "done" } as ChatMessage;
+  const goal = { ...user, metadata: { nativeCommand: { name: "goal" } } } as unknown as ChatMessage;
+  const mode = (participant: ChatParticipant, trigger: ChatMessage): string => (service as any).participantTurnMode(participant, trigger);
+  assert.equal(mode(claude, user), "shared");
+  assert.equal(mode(claude, system), "exclusive");
+  assert.equal(mode(claude, request), "exclusive");
+  assert.equal(mode(claude, goal), "exclusive");
+  assert.equal(mode(codex, user), "exclusive");
+});
+
+test("overlapping messages to a Claude member reach its CLI in the order they were sent", async () => {
+  const { service } = testService();
+  const first = (service as any).openClaudeWriteGate("conversation", "member");
+  const second = (service as any).openClaudeWriteGate("conversation", "member");
+  const third = (service as any).openClaudeWriteGate("conversation", "member");
+  const order: string[] = [];
+  void second.previous.then(() => order.push("second may write"));
+  void third.previous.then(() => order.push("third may write"));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(order, [], "nothing is written before the first message");
+  second.markWritten();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(order, [], "the third waits for the first as well");
+  first.markWritten();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(order, ["second may write", "third may write"]);
+});
+
+test("a once-only approval applied by a running turn is not applied again by an overlapping one", () => {
+  const { service } = testService();
+  (service as any).chatRunControllers.set("run-a", new Set([new AbortController()]));
+  (service as any).oneTimeApprovalClaims.set("approval-1", "run-a");
+  assert.equal((service as any).oneTimeApprovalClaimedByOtherRun("approval-1", "run-b"), true);
+  assert.equal((service as any).oneTimeApprovalClaimedByOtherRun("approval-1", "run-a"), false);
+  (service as any).chatRunControllers.delete("run-a");
+  assert.equal((service as any).oneTimeApprovalClaimedByOtherRun("approval-1", "run-b"), false, "a finished run's claim lapses");
+});
+
+test("a Codex member's next message still waits for its running turn", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  let calls = 0;
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      calls += 1;
+      if (calls === 1) {
+        await firstBlocked;
+      }
+      return { participant: runParticipant, ok: true, content: `Reply ${calls}.`, durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "codex-first", content: `@${participant.handle} one` });
+  await waitFor(() => calls === 1);
+  await service.sendMessage({ conversationId: conversation.id, runId: "codex-second", content: `@${participant.handle} two` });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.metadata?.queuedBehind));
+  assert.equal(calls, 1);
+  releaseFirst();
+  await waitFor(() => calls === 2);
+});
+
+test("a reply the Claude CLI starts on its own after background work becomes a new message next to the reply that started the work", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  let warmOptions: any;
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, runOptions: any) => {
+      warmOptions = runOptions.warm;
+      runOptions.onOutput?.({ kind: "tool", text: "Running in the background: soak\n", activityKind: "status", activityStatus: "started" });
+      return { participant: runParticipant, ok: true, content: "Started the soak.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "send-soak", content: `@${participant.handle} run the soak in the background` });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.role === "participant" && message.status === "done" && message.content === "Started the soak."));
+  const origin = storage.current.messages.find((message: ChatMessage) => message.content === "Started the soak.");
+  assert.equal(warmOptions.origin.runId, origin.metadata.runId);
+  assert.equal(warmOptions.origin.messageId, origin.id);
+  assert.equal(warmOptions.origin.threadId, origin.metadata.threadId);
+  assert.equal(typeof warmOptions.onSelfResumedTurn, "function");
+
+  let finish!: (result: unknown) => void;
+  let attachedSignal: AbortSignal | undefined;
+  warmOptions.onSelfResumedTurn({
+    origin: warmOptions.origin,
+    attach: (handlers: any) => {
+      attachedSignal = handlers.signal;
+      handlers.onOutput?.({ kind: "tool", text: "Background task finished: soak\n", activityKind: "status", activityStatus: "completed" });
+      handlers.onOutput?.({ kind: "text", text: "The soak passed.", cumulative: "The soak passed." });
+      return new Promise((resolve) => { finish = resolve; });
+    }
+  });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.role === "participant" && message.status === "pending" && message.id !== origin.id));
+  const pending = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "participant" && message.status === "pending");
+  assert.equal(pending.metadata.parentMessageId, origin.id, "it sits next to the reply that started the work");
+  assert.equal(pending.metadata.threadId, origin.metadata.threadId);
+  assert.ok(storage.current.metadata.activeRunIds?.includes(pending.metadata.runId), "it is a live run with its own Stop");
+  assert.ok(attachedSignal);
+
+  finish({ participant, ok: true, content: "The soak passed.", durationMs: 1 });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.id === pending.id && message.status === "done"));
+  const done = storage.current.messages.find((message: ChatMessage) => message.id === pending.id);
+  assert.equal(done.content, "The soak passed.");
+  assert.ok(done.metadata.activityEvents?.some((event: { label: string }) => /Background task finished: soak/.test(event.label)));
+  await waitFor(() => !(storage.current.metadata.activeRunIds ?? []).includes(pending.metadata.runId));
+});
+
+test("Stop on a reply the Claude CLI started on its own interrupts it", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  let warmOptions: any;
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, runOptions: any) => {
+      warmOptions = runOptions.warm;
+      return { participant: runParticipant, ok: true, content: "Started.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "send-start", content: `@${participant.handle} start` });
+  await waitFor(() => Boolean(warmOptions) && storage.current.messages.some((message: ChatMessage) => message.content === "Started."));
+  warmOptions.onSelfResumedTurn({
+    origin: warmOptions.origin,
+    attach: (handlers: any) => new Promise((_resolve, reject) => {
+      handlers.signal?.addEventListener("abort", () => reject(new Error("claude warm process was cancelled")), { once: true });
+    })
+  });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.role === "participant" && message.status === "pending"));
+  const pending = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "participant" && message.status === "pending");
+  assert.equal(service.cancelRun(pending.metadata.runId), true);
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.id === pending.id && message.metadata?.terminalReason === "user-stopped"));
+});
+
 test("stored participant stop preserves nonblank pending and diagnostic content", () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
@@ -2535,8 +2811,9 @@ test("approved permission resume ignores duplicate concurrent resume attempts", 
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].consumedAt.length > 0, true);
 });
 
-test("permission resume waits behind an in-flight same-participant turn", async () => {
-  const participant = chatParticipant("claude-code");
+for (const kind of ["codex-cli", "claude-code"] as const) {
+test(`permission resume waits behind an in-flight same-participant ${kind === "codex-cli" ? "turn" : "exclusive operation"} (${kind})`, async () => {
+  const participant = chatParticipant(kind);
   const approval = permissionApproval(participant, {
     kind: "portable",
     permissions: ["webAccess"]
@@ -2566,12 +2843,18 @@ test("permission resume waits behind an in-flight same-participant turn", async 
   (service as any).ensureHistoryFiles = async () => tempRoot;
 
   // Simulate an in-flight turn for the same participant holding the per-participant
-  // serialization queue; the resume must serialize behind it via participantTurnQueues.
+  // serialization queue; the resume must serialize behind it. A Claude Code
+  // member takes messages while it works (as its CLI does), so for it only an
+  // exclusive operation such as compaction holds the resume back.
   const queueKey = `${conversation.id}:${participant.id}`;
   let releaseInFlight!: () => void;
-  (service as any).participantTurnQueues.set(queueKey, new Promise<void>((resolve) => {
+  const inFlight = new Promise<void>((resolve) => {
     releaseInFlight = resolve;
-  }));
+  });
+  (service as any).participantTurnQueues.set(queueKey, inFlight);
+  if (kind === "claude-code") {
+    (service as any).participantExclusiveTurnQueues.set(queueKey, inFlight);
+  }
 
   const resume = (service as any).autoResumePermissionApproval(conversation.id, approval.id);
   // Allow the resume to reach the queue wait; it must not start the run while blocked.
@@ -2586,6 +2869,7 @@ test("permission resume waits behind an in-flight same-participant turn", async 
   assert.equal(storage.current.metadata.running, false);
   assert.equal(storage.current.metadata.runId, undefined);
 });
+}
 
 test("duplicate chat run ids stay active until every owner ends", async () => {
   const participant = chatParticipant("claude-code");
@@ -4483,8 +4767,11 @@ test("Claude prompt describes the background-work execution model on first and r
 
   for (const prompt of [firstTurn, resumedTurn]) {
     assert.match(prompt, /Claude Code execution model in AccordAgents Chat/);
-    assert.match(prompt, /Your turn ends when you send the final chat message and nothing you started in the background is still running/);
-    assert.match(prompt, /resumed on the same session with the task notification when it finishes/);
+    assert.match(prompt, /Your reply ends when your turn ends\. Background Bash jobs and background `Agent`\/`Task` subagents keep running after it/);
+    assert.match(prompt, /User can message you while you work and while your background work runs/);
+    assert.match(prompt, /resumed on the same session with the task notification; what you write then is posted as a new message/);
+    assert.match(prompt, /Stop by User interrupts only your current step; background work keeps running/);
+    assert.doesNotMatch(prompt, /appended to the same reply/);
     assert.match(prompt, /never say you are waiting for something that is not a tracked background task/);
     assert.doesNotMatch(prompt, /This chat turn is one-shot/);
   }
@@ -4494,7 +4781,7 @@ test("Claude prompt describes the background-work execution model on first and r
   // A member on a machine runs the same runtime as one here, so it is told the
   // same thing: there is no one-shot contract left to describe.
   const machineTurn = promptFor("claude-code", false, true);
-  assert.match(machineTurn, /Your turn ends when you send the final chat message and nothing you started in the background is still running/);
+  assert.match(machineTurn, /Your reply ends when your turn ends\. Background Bash jobs/);
   assert.doesNotMatch(machineTurn, /This chat turn is one-shot/);
 });
 

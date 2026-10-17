@@ -415,3 +415,57 @@ test("a member request from this machine reaches the desktop as one durable dele
     await host.eventChannel.flush().catch(() => undefined);
   }
 });
+
+test("a Claude member's turns on a machine run as soon as they are admitted; another member's turns wait for the previous one", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  for (const kind of ["claude-code", "codex-cli"]) {
+    const client = stubClient();
+    const started = [];
+    const store = new Map();
+    let releaseFirst;
+    const firstBlocked = new Promise((resolve) => { releaseFirst = resolve; });
+    const host = new MachineHostService(
+      {
+        runMachineHostedTurn: async (request) => {
+          started.push(request.runId);
+          if (request.runId.endsWith("-1")) await firstBlocked;
+          return { messages: [], warnings: [] };
+        },
+        cancelRun: () => true,
+        respondToAppToolApproval: async () => undefined,
+        applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) store.set(id, next); }
+      },
+      { getConversation: async (id) => store.get(id) },
+      { importMachineSettingsSnapshot: async () => undefined },
+      { write: async () => undefined },
+      { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
+    );
+    await host.start();
+    await settle();
+    const inbound = async (body) => {
+      client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
+      await host.inbound;
+      await host.outbound;
+      await host.eventChannel.flush();
+    };
+    const conversationId = `conv-concurrent-${kind}`;
+    const member = { id: "p1", handle: "bot", kind, homeMachineId: "test-home" };
+    await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
+    const shell = { id: conversationId, kind: "chat", title: "t", createdAt: "2026-10-17T00:00:00.000Z", updatedAt: "2026-10-17T00:00:00.000Z", metadata: { participants: [member] }, messages: [], findings: [] };
+    await inbound({ type: "machine.conversation.sync", conversation: shell });
+    await inbound({ type: "machine.conversation.sync.done", conversationId });
+    for (const index of [1, 2]) {
+      await inbound({ type: "machine.turn.request", conversationId, participantId: "p1", participant: member, messageId: `m${index}`, runId: `${kind}-run-${index}`, pendingMessageId: `pending-${index}`, requestedAt: new Date().toISOString() });
+    }
+    await settle(400);
+    if (kind === "claude-code") {
+      assert.deepEqual(started, [`${kind}-run-1`, `${kind}-run-2`], "the second message reached the Claude member while the first was still running");
+    } else {
+      assert.deepEqual(started, [`${kind}-run-1`], "a non-Claude member's next turn waits for the running one");
+    }
+    releaseFirst();
+    await settle(400);
+    assert.deepEqual(started, [`${kind}-run-1`, `${kind}-run-2`]);
+    host.close();
+  }
+});

@@ -171,7 +171,7 @@ import {
 } from "../../shared/chatDeliveryPolicy";
 import { chatActionOperationId } from "./chatActionEmitter";
 import type { ChatEventMirrorService } from "./chatEventMirror";
-import { CliAgentRunner, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentRoleOptions } from "./cliAgents";
+import { CliAgentRunner, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
@@ -274,6 +274,18 @@ interface PreparedPromptContext {
   block: string;
   resumeFallbackBlock: string;
   pointerAdvance?: ChatPromptContextPointerAdvance;
+}
+
+interface InFlightPromptContext {
+  runId: string;
+  entry: ChatPromptContextPointerEntry;
+}
+
+/** Orders a Claude Code member's overlapping messages into its CLI. */
+interface ClaudeWriteGate {
+  /** Settles once every earlier message of the member reached its CLI. */
+  previous: Promise<void>;
+  markWritten: () => void;
 }
 
 interface PreparedImageAttachments {
@@ -861,6 +873,25 @@ export class ChatService {
   private readonly backgroundRunnerCounts = new Map<string, number>();
   private readonly deletedConversationIds = new Set<string>();
   private readonly appMcpTokens = new Map<string, string>();
+  /** The last app tool grant issued to each member's CLI process, so a reply
+   *  the CLI starts on its own can be given its own run and thread. */
+  private readonly lastAppMcpGrants = new Map<string, ChatAppMcpTokenGrant>();
+  /** The connection (url, token) each member's CLI was given, reused by a
+   *  Claude Code turn that must not retarget the token before its message
+   *  reaches the step (see runParticipantTurn). */
+  private readonly appMcpConnections = new Map<string, { url: string; token: string }>();
+  /** Chat context already sent to a member by a turn that is still running.
+   *  A message the member takes while it works (a Claude Code member, see
+   *  reserveParticipantTurn) must not send that context to it a second time. */
+  private readonly inFlightPromptContext = new Map<string, InFlightPromptContext[]>();
+  /** Once-only permission approvals applied by a turn still running, by run. */
+  private readonly oneTimeApprovalClaims = new Map<string, string>();
+  /** Per member: settles when the latest dispatched Claude Code message has
+   *  been written to its CLI, so messages reach the CLI in the order sent. */
+  private readonly claudeMessageWriteOrder = new Map<string, Promise<void>>();
+  /** Concurrent turns of one member share its executor lease (see
+   *  reserveParticipantTurn); it is released when the last of them ends. */
+  private readonly executorLeaseHolds = new Map<string, number>();
   private readonly participantRequestRunners = new Map<string, Promise<ParticipantRequestRunResult>>();
   private readonly participantRequestAutoResumes = new Set<string>();
   private readonly permissionApprovalAutoResumes = new Set<string>();
@@ -868,6 +899,8 @@ export class ChatService {
   private readonly toolPermissionResolvers = new Map<string, Set<(decision: ToolPermissionDecision) => void>>();
   private readonly codexApprovalResolvers = new Map<string, CodexApprovalResolver>();
   private readonly participantTurnQueues = new Map<string, Promise<void>>();
+  /** Exclusive same-participant operations only (see reserveParticipantTurn). */
+  private readonly participantExclusiveTurnQueues = new Map<string, Promise<void>>();
   private readonly chatRunControllers = new Map<string, Set<AbortController>>();
   private readonly chatRunMeta = new Map<string, { conversationId: string; participantId: string; participantHandle: string; pendingMessageId?: string }>();
   private readonly chatMutationQueues = new Map<string, Promise<void>>();
@@ -5664,6 +5697,11 @@ export class ChatService {
     } = {}
   ): Promise<void> {
     if (conversation.metadata.archived === true) throw new Error("Unarchive the chat before starting a member.");
+    // Taken before anything awaits, in the order the User sent the messages:
+    // a Claude Code member gets them in that order even when they overlap.
+    const writeGates = new Map(participants
+      .filter((participant) => this.participantTurnMode(participant, triggerMessage) === "shared")
+      .map((participant) => [participant.id, this.openClaudeWriteGate(conversation.id, participant.id)] as const));
     let completed = 0;
     const turnSnapshot = this.clone(conversation);
     const workspacePath = await this.ensureHistoryFiles(turnSnapshot);
@@ -5713,6 +5751,7 @@ export class ChatService {
             this.queueSnapshot(conversation);
           });
           this.unregisterTargetRun(targetRunId, targetController);
+          writeGates.get(participant.id)?.markWritten();
           await this.clearAutoTitleEligibilityForTerminalRun(conversation, targetRunId);
           signal?.removeEventListener("abort", onParentAbort);
           completed += 1;
@@ -5723,7 +5762,7 @@ export class ChatService {
           });
           return;
         }
-        const turnReservation = this.reserveParticipantTurn(conversation.id, participant.id);
+        const turnReservation = this.reserveParticipantTurn(conversation.id, participant.id, this.participantTurnMode(participant, triggerMessage));
         // Pre-create the pending message inside the shared mutation queue, before
         // the per-participant turn queue wait, so the queued/streaming bubble is
         // visible immediately even if a prior same-participant turn is still running.
@@ -5776,7 +5815,8 @@ export class ChatService {
             workspacePath,
             promptContextScope: this.promptContextScopeForTrigger(triggerMessage),
             existingPendingMessage: pendingMessage,
-            turnReservation
+            turnReservation,
+            writeGate: writeGates.get(participant.id)
           });
           if (targetController.signal.aborted) {
             await this.discardStoppedTargetRun(conversation, targetRunId, participant, pendingMessage.id);
@@ -5792,6 +5832,7 @@ export class ChatService {
           }
         } finally {
           signal?.removeEventListener("abort", onParentAbort);
+          writeGates.get(participant.id)?.markWritten();
           if (!reservationHandedOff) {
             turnReservation.release();
           }
@@ -6484,6 +6525,7 @@ export class ChatService {
       turnSegmentId: string;
       queuedBehindHandle?: string;
       existingPendingMessage?: ChatMessage;
+      writeGate?: ClaudeWriteGate;
     }
   ): Promise<ChatMessage[]> {
     this.assertOwnsParticipant(participant);
@@ -6507,16 +6549,24 @@ export class ChatService {
       : sourcePromptConversation;
     const workspacePath = options.workspacePath ?? await this.ensureHistoryFiles(promptConversation);
     const isResumingSession = Boolean(session.sessionId);
+    // A Claude Code member may take this message while an earlier one is
+    // still waiting in its CLI; context counts as delivered only once the CLI
+    // has handed that message to a step (onReplyStarted below).
+    const sharedClaudeTurn = this.participantTurnMode(participant, triggerMessage) === "shared";
     const preparedPromptContext = await this.preparePromptContextForRun(
       conversation,
       promptConversation,
       participant,
       promptTriggerMessage,
       options.promptContextScope ?? this.promptContextScopeForTrigger(promptTriggerMessage),
-      isResumingSession
+      isResumingSession,
+      sharedClaudeTurn ? undefined : runId
     );
     const agentMode = this.agentModeForSession(session, participant);
-    const oneTimePermissionApprovals = this.oneTimePermissionApprovalsForParticipant(conversation, participant);
+    // A once-only approval is used by one turn: one that another turn of the
+    // member still running has already applied is not applied again.
+    const oneTimePermissionApprovals = this.oneTimePermissionApprovalsForParticipant(conversation, participant)
+      .filter((approval) => !this.oneTimeApprovalClaimedByOtherRun(approval.id, runId));
     const appliedOneTimePermissionApprovalIds: string[] = [];
     const permissions = this.participantPermissionsForRun(
       conversation,
@@ -6524,6 +6574,9 @@ export class ChatService {
       oneTimePermissionApprovals,
       appliedOneTimePermissionApprovalIds
     );
+    for (const approvalId of appliedOneTimePermissionApprovalIds) {
+      this.oneTimeApprovalClaims.set(approvalId, runId);
+    }
     session.participantPermissions = normalizeChatAgentPermissions(permissions);
     const usePromptRole = session.roleRuntime === "prompt-fallback";
     const includeRefreshedRoleInstructions = isResumingSession && sessionState.instructionsRefreshed;
@@ -6653,7 +6706,32 @@ export class ChatService {
       historyMarkdownPath: path.join(workspacePath, "history.md"),
       historyJsonPath: path.join(workspacePath, "history.json")
     };
-    const appMcp = this.issueAppMcpConnection(conversation, participant, appMcpGrant);
+    // A Claude Code member's warm process takes this message while it may
+    // still be working on an earlier one (or on a step it started itself), and
+    // the member has one app tool token. Its grant names the run and thread the
+    // tools act for, so it moves to this run only when the CLI hands this
+    // message to a step; until then the earlier work keeps acting for itself.
+    const memberKey = `${conversation.id}:${participant.id}`;
+    const existingConnection = this.appMcpTokens.has(memberKey) ? this.appMcpConnections.get(memberKey) : undefined;
+    const grantAtReplyStart = participant.kind === "claude-code" && !nativeGoal && Boolean(existingConnection);
+    const grantThisRun = (): void => {
+      this.issueAppMcpConnection(conversation, participant, appMcpGrant);
+      if (participant.kind === "claude-code") {
+        this.lastAppMcpGrants.set(memberKey, appMcpGrant);
+      }
+    };
+    const onReplyStarted = (): void => {
+      if (grantAtReplyStart) {
+        grantThisRun();
+      }
+      if (sharedClaudeTurn && preparedPromptContext.pointerAdvance) {
+        this.registerInFlightPromptContext(conversation.id, participant.id, preparedPromptContext.pointerAdvance, runId);
+      }
+    };
+    const appMcp = grantAtReplyStart ? existingConnection : this.issueAppMcpConnection(conversation, participant, appMcpGrant);
+    if (!grantAtReplyStart && participant.kind === "claude-code") {
+      this.lastAppMcpGrants.set(memberKey, appMcpGrant);
+    }
     const triggerAttachments = this.imageAttachments(triggerMessage);
     if (triggerAttachments.length > 0) {
       void this.debugLogs.write("chat.attachments.direct-delivery-skipped", {
@@ -6723,6 +6801,9 @@ export class ChatService {
         ...pendingMessage.metadata,
         executionLease
       };
+      if (options.writeGate) {
+        await this.waitForEarlierClaudeMessages(options.writeGate, signal);
+      }
       let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
         persistSession: true,
         sessionId: session.sessionId,
@@ -6757,7 +6838,16 @@ export class ChatService {
           conversationId: conversation.id,
           participantId: participant.id,
           contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
-          idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
+          idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS,
+          origin: {
+            runId,
+            messageId: pendingMessage.id,
+            threadId: pendingMessage.metadata?.threadId,
+            chatThreadRootId: pendingMessage.metadata?.chatThreadRootId
+          },
+          onSelfResumedTurn: (turn) => this.handleSelfResumedTurn(conversation.id, participant.id, turn),
+          onReplyStarted: grantAtReplyStart || sharedClaudeTurn ? onReplyStarted : undefined,
+          onMessageWritten: options.writeGate?.markWritten
         }
       });
       this.applyCliRunMetadata(session, result, participant, options.warnings);
@@ -6769,8 +6859,8 @@ export class ChatService {
       this.updateParticipantContextUsage(conversation, participant.id, result.contextUsage);
       pendingMessage.content = result.content;
       if (signal?.aborted) {
-        // A Stop that lands while the turn waits on background work still has
-        // the reply the member already delivered; keep it, as the CLI does.
+        // A Stop that lands as the reply finishes keeps the reply the member
+        // already delivered, as the CLI does.
         this.markParticipantMessageStoppedByUser(pendingMessage, participant, {
           preserveContent: result.ok && result.content.trim().length > 0
         });
@@ -6832,6 +6922,13 @@ export class ChatService {
       throw error;
     } finally {
       unregisterRunProgressCallback();
+      options.writeGate?.markWritten();
+      this.releaseInFlightPromptContext(runId);
+      for (const [approvalId, claimRunId] of this.oneTimeApprovalClaims) {
+        if (claimRunId === runId) {
+          this.oneTimeApprovalClaims.delete(approvalId);
+        }
+      }
       if (pendingMessage.status === "pending") {
         if (signal?.aborted) {
           this.markParticipantMessageStoppedByUser(pendingMessage, participant);
@@ -6868,6 +6965,225 @@ export class ChatService {
         this.releaseParticipantExecutorLease(conversation, executionLease);
       }
       progressSink.finish();
+    }
+  }
+
+  /** A Claude Code member's CLI started a reply on its own: background work
+   *  the member started earlier finished while it was idle. The dedicated CLI
+   *  shows that continuation as a new turn of its transcript; here it becomes a
+   *  new reply next to the reply that started the work, with the same Stop,
+   *  live progress and persistence as any other reply. */
+  private handleSelfResumedTurn(conversationId: string, participantId: string, turn: CliAgentSelfResumedTurn): void {
+    // Called as the CLI starts the step: its app tool calls act for this new
+    // reply from the first one on, before the reply is even stored.
+    const runId = randomUUID();
+    this.grantAppToolsToSelfResumedTurn(conversationId, participantId, runId, turn.origin);
+    void this.runSelfResumedTurn(conversationId, participantId, turn, runId).catch((error) => {
+      void this.debugLogs.write("chat.self-resumed-turn.error", {
+        conversationId,
+        participantId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    });
+  }
+
+  private async runSelfResumedTurn(conversationId: string, participantId: string, turn: CliAgentSelfResumedTurn, runId: string): Promise<void> {
+    const drain = async (reason: string): Promise<void> => {
+      void this.debugLogs.write("chat.self-resumed-turn.dropped", { conversationId, participantId, reason });
+      await turn.attach({}).catch(() => undefined);
+    };
+    if (this.deletedConversationIds.has(conversationId)) {
+      await drain("chat-deleted");
+      return;
+    }
+    const controller = new AbortController();
+    const progress = this.onReviewProgress;
+    let begunIn: Conversation | undefined;
+    const ingest = await this.withChatRunLock(conversationId, async () => {
+      const conversation = await this.requireChat(conversationId);
+      const participant = this.chatParticipants(conversation).find((candidate) => candidate.id === participantId);
+      if (!participant || !this.ownsParticipant(participant) || conversation.metadata.archived === true) {
+        return undefined;
+      }
+      const originMessageId = turn.origin?.messageId;
+      const origin = originMessageId ? conversation.messages.find((message) => message.id === originMessageId) : undefined;
+      const pendingMessage = this.message(
+        "participant",
+        "",
+        { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
+        {
+          threadId: origin ? origin.metadata?.threadId ?? origin.id : undefined,
+          parentMessageId: origin?.id,
+          chatThreadRootId: origin?.metadata?.chatThreadRootId,
+          sourceMessageId: origin?.id,
+          runId
+        },
+        "pending"
+      );
+      this.registerTargetRun(runId, controller, { conversationId, participantId, participantHandle: participant.handle });
+      this.setTargetRunPendingMessageId(runId, pendingMessage.id);
+      await this.beginChatRun(conversation, runId);
+      begunIn = conversation;
+      await this.withChatMutation(conversation, async () => {
+        conversation.messages.push(pendingMessage);
+        this.recordLastMessageByParticipant(conversation, pendingMessage);
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+      return { conversation, participant, origin, pendingMessage };
+    }).catch(async (error) => {
+      void this.debugLogs.write("chat.self-resumed-turn.ingest-failed", {
+        conversationId,
+        participantId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      if (begunIn) {
+        await this.endChatRun(begunIn, runId).catch(() => undefined);
+      }
+      this.unregisterTargetRun(runId, controller);
+      return undefined;
+    });
+    if (!ingest) {
+      await drain("not-shown-here");
+      return;
+    }
+    const { conversation, participant, origin, pendingMessage } = ingest;
+    const reservation = this.reserveParticipantTurn(conversationId, participantId, "shared");
+    const progressSink = this.createAgentProgressSink(runId, progress, participant, pendingMessage.id);
+    const unregisterRunProgressCallback = this.registerRunProgressCallback(runId, progress);
+    const session = this.chatSessions(conversation).find((candidate) => candidate.participantId === participantId);
+    let executionLease: ChatExecutionLeaseMetadata | undefined;
+    try {
+      if (session) {
+        try {
+          // The step runs on the member's session like any other turn of it.
+          executionLease = this.acquireParticipantExecutorLease(conversation, participant, session, "desktop");
+        } catch (error) {
+          void this.debugLogs.write("chat.self-resumed-turn.lease-unavailable", {
+            conversationId,
+            participantId,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+      this.emitProgress(runId, progress, "debate", `@${participant.handle} is responding.`, {
+        participantLabel: `@${participant.handle}`,
+        agentProgress: {
+          participantId: participant.id,
+          participantLabel: `@${participant.handle}`,
+          state: "running",
+          messageId: pendingMessage.id
+        }
+      });
+      progressSink.beginAttempt();
+      const result = await turn.attach({
+        signal: controller.signal,
+        onOutput: progressSink.emit,
+        onSessionId: (sessionId) => {
+          if (session) {
+            this.persistParticipantSessionId(conversation, session, sessionId);
+          }
+        }
+      });
+      const now = new Date().toISOString();
+      this.updateParticipantContextUsage(conversation, participant.id, result.contextUsage);
+      pendingMessage.content = result.content;
+      if (controller.signal.aborted) {
+        this.markParticipantMessageStoppedByUser(pendingMessage, participant, {
+          preserveContent: result.ok && result.content.trim().length > 0
+        });
+      } else if (result.ok) {
+        pendingMessage.status = "done";
+      } else {
+        pendingMessage.status = "error";
+        pendingMessage.content = result.error
+          ? `@${participant.handle}: ${sanitizeWarningText(result.error)}`
+          : `@${participant.handle} run failed.`;
+        this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, pendingMessage.content);
+      }
+      const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
+      if (Number.isFinite(workedMs) && workedMs >= 0) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
+      }
+      const pendingChoice = !controller.signal.aborted && result.ok && result.content.trim()
+        ? this.pendingChoiceFromAgentReply(result.content)
+        : undefined;
+      if (pendingChoice) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, pendingChoice };
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        this.markParticipantMessageStoppedByUser(pendingMessage, participant);
+      } else {
+        pendingMessage.status = "error";
+        pendingMessage.content = this.failedPrecreatedPendingMessageContent(participant, error);
+      }
+    } finally {
+      unregisterRunProgressCallback();
+      if (pendingMessage.status === "pending") {
+        pendingMessage.status = "error";
+      }
+      const activityEvents = progressSink.activityEvents();
+      if (activityEvents.length > 0) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, activityEvents };
+      }
+      const capturedAt = new Date().toISOString();
+      let processingTranscript = progressSink.processingTranscript(capturedAt);
+      if (processingTranscript && controller.signal.aborted) {
+        processingTranscript = this.processingTranscriptWithTerminalMessage(processingTranscript, pendingMessage.content);
+      }
+      if (processingTranscript) {
+        pendingMessage.metadata = { ...pendingMessage.metadata, processingTranscript };
+      }
+      if (session) {
+        session.updatedAt = capturedAt;
+      }
+      this.releaseParticipantExecutorLease(conversation, executionLease);
+      try {
+        await this.finalizePendingParticipantMessage(conversation, participant, pendingMessage);
+      } finally {
+        progressSink.finish();
+        reservation.release();
+        await this.endChatRun(conversation, runId);
+        this.unregisterTargetRun(runId, controller);
+      }
+    }
+  }
+
+  /** App tools the CLI calls during a reply it started itself act for that
+   *  reply: its run, in the thread where the finished work was started. The
+   *  member's last grant supplies its tools and permissions; nothing of the
+   *  turn it belonged to (a member request, a continuation) carries over. */
+  private grantAppToolsToSelfResumedTurn(
+    conversationId: string,
+    participantId: string,
+    runId: string,
+    origin: CliAgentReplyOrigin | undefined
+  ): void {
+    const key = `${conversationId}:${participantId}`;
+    const previous = this.lastAppMcpGrants.get(key);
+    const token = this.appMcpTokens.get(key);
+    if (!previous || !token || !this.appMcp?.updateToken) {
+      return;
+    }
+    const grant: ChatAppMcpTokenGrant = {
+      ...previous,
+      runId,
+      turnSegmentId: randomUUID(),
+      continuation: false,
+      participantRequestDepth: 0,
+      participantRequestBatchId: undefined,
+      chainRootId: undefined,
+      snapshotMaxSequence: undefined,
+      triggerMessageId: origin?.messageId,
+      triggerThreadId: origin ? origin.threadId ?? origin.messageId : undefined,
+      triggerParentMessageId: origin?.messageId,
+      triggerChatThreadRootId: origin?.chatThreadRootId
+    };
+    const updated = this.appMcp.updateToken(token, grant);
+    if (updated) {
+      this.appMcpConnections.set(key, updated);
+      this.lastAppMcpGrants.set(key, grant);
     }
   }
 
@@ -7122,10 +7438,11 @@ export class ChatService {
     }
     return [
       "Claude Code execution model in AccordAgents Chat:",
-      "- Your turn ends when you send the final chat message and nothing you started in the background is still running.",
-      "- Background Bash jobs and background `Agent`/`Task` subagents keep running after your message, as in the Claude Code CLI: the turn stays active, the chat shows the pending background work, and you are resumed on the same session with the task notification when it finishes. What you write after the notification is appended to the same reply.",
-      "- Stop by User cancels the turn and ends that background work.",
-      "- If work cannot be completed in this turn and nothing is running in the background, report the concrete partial result or blocker and ask User for the next message to continue; never say you are waiting for something that is not a tracked background task."
+      "- Your reply ends when your turn ends. Background Bash jobs and background `Agent`/`Task` subagents keep running after it, as in the Claude Code CLI.",
+      "- User can message you while you work and while your background work runs; a message sent while you are working reaches you with your next tool result, as in the CLI.",
+      "- When background work finishes you are resumed on the same session with the task notification; what you write then is posted as a new message next to the reply that started the work.",
+      "- Stop by User interrupts only your current step; background work keeps running. Stop background work yourself (TaskStop) when User asks for it.",
+      "- If work cannot be completed and nothing is running in the background, report the concrete partial result or blocker and ask User for the next message to continue; never say you are waiting for something that is not a tracked background task."
     ].join("\n");
   }
 
@@ -7594,13 +7911,16 @@ export class ChatService {
     if (existingToken && this.appMcp.updateToken) {
       const updated = this.appMcp.updateToken(existingToken, grant);
       if (updated) {
+        this.appMcpConnections.set(key, updated);
         return updated;
       }
       this.appMcpTokens.delete(key);
+      this.appMcpConnections.delete(key);
     }
     const issued = this.appMcp.issueToken(grant);
     if (issued) {
       this.appMcpTokens.set(key, issued.token);
+      this.appMcpConnections.set(key, issued);
     }
     return issued;
   }
@@ -8250,6 +8570,7 @@ export class ChatService {
             [storageKey]: renewed
           }
         };
+        this.executorLeaseHolds.set(`${conversation.id}|${storageKey}`, (this.executorLeaseHolds.get(`${conversation.id}|${storageKey}`) ?? 0) + 1);
         return renewed;
       }
       throw new Error(`@${participant.handle} is waiting for current executor ${previous.holderId} until ${previous.expiresAt}.`);
@@ -8272,6 +8593,8 @@ export class ChatService {
         [storageKey]: lease
       }
     };
+    // Another turn of the member may hold it through another copy of the chat.
+    this.executorLeaseHolds.set(`${conversation.id}|${storageKey}`, (this.executorLeaseHolds.get(`${conversation.id}|${storageKey}`) ?? 0) + 1);
     return lease;
   }
 
@@ -8283,6 +8606,14 @@ export class ChatService {
       return;
     }
     const storageKey = this.executorLeaseStorageKey(lease);
+    const holdKey = `${conversation.id}|${storageKey}`;
+    const holds = (this.executorLeaseHolds.get(holdKey) ?? 1) - 1;
+    if (holds > 0) {
+      // Another turn of the same member still runs on this lease.
+      this.executorLeaseHolds.set(holdKey, holds);
+      return;
+    }
+    this.executorLeaseHolds.delete(holdKey);
     const leases = this.executorLeasesByKey(conversation);
     const current = leases[storageKey];
     if (!current || current.leaseId !== lease.leaseId || current.generation !== lease.generation) {
@@ -8501,6 +8832,13 @@ export class ChatService {
   ): ChatMessage {
     const chosen = this.preferredChatMessageForRefresh(stored, current);
     const preferred = chosen === stored ? adopt(stored) : chosen;
+    if (chosen === stored && stored.status !== current.status) {
+      // The stored copy is the finished message and the current one a stale
+      // in-flight copy (another turn's view of it): the finished message's own
+      // metadata (worked time, transcript, choices) is the truth. Merging the
+      // stale copy's metadata in dropped those fields.
+      return preferred;
+    }
     const metadata = this.mergeStoredChatMessageMetadata(stored.metadata, current.metadata);
     if (metadata) {
       preferred.metadata = metadata;
@@ -12955,10 +13293,11 @@ export class ChatService {
       queuedBehindHandle?: string;
       existingPendingMessage?: ChatMessage;
       turnReservation?: ParticipantTurnReservation;
+      writeGate?: ClaudeWriteGate;
     }
   ): Promise<ChatMessage[]> {
     const turnSegmentId = randomUUID();
-    const reservation = options.turnReservation ?? this.reserveParticipantTurn(conversation.id, participant.id);
+    const reservation = options.turnReservation ?? this.reserveParticipantTurn(conversation.id, participant.id, this.participantTurnMode(participant, triggerMessage));
     let turnController: { signal: AbortSignal; cleanup: () => void } | undefined;
     try {
       turnController = this.ensureChatTurnController(conversation, participant, runId, signal);
@@ -12993,7 +13332,8 @@ export class ChatService {
     participant: ChatParticipant,
     triggerMessage: ChatMessage,
     scope: ChatPromptContextScope,
-    isResumingSession: boolean
+    isResumingSession: boolean,
+    runId?: string
   ): Promise<PreparedPromptContext> {
     const settings = await this.settings.getPublicSettings();
     const policy = scope.type === "thread"
@@ -13005,7 +13345,10 @@ export class ChatService {
     await this.withChatMutation(conversation, async () => {
       const pointers = this.normalizedPromptContextPointers(conversation.metadata.promptContextPointers);
       const participantPointers = pointers[participant.id] ?? {};
-      const pointer = this.promptContextPointerForScope(participantPointers, scope);
+      const committed = this.promptContextPointerForScope(participantPointers, scope);
+      const inFlightKey = this.inFlightPromptContextKey(conversation.id, participant.id, scope);
+      const inFlight = this.inFlightPromptContextFloor(inFlightKey);
+      const pointer = inFlight && !this.promptContextPointerAtOrAfter(committed, inFlight) ? inFlight : committed;
       const records = this.promptContextRecordsAfterPointer(promptConversation.messages, scope, pointer, triggerMessage.id);
       const renderCandidates = records.filter((record) => record.message.id !== triggerMessage.id);
       const resumedRenderCandidates = isResumingSession
@@ -13034,9 +13377,103 @@ export class ChatService {
               : {})
           }
         };
+        if (runId) {
+          this.registerInFlightPromptContext(conversation.id, participant.id, pointerAdvance, runId);
+        }
       }
     });
     return { block, resumeFallbackBlock, pointerAdvance };
+  }
+
+  private registerInFlightPromptContext(
+    conversationId: string,
+    participantId: string,
+    advance: ChatPromptContextPointerAdvance,
+    runId: string
+  ): void {
+    const key = this.inFlightPromptContextKey(conversationId, participantId, advance.scope);
+    const entries = (this.inFlightPromptContext.get(key) ?? []).filter((item) => item.runId !== runId);
+    this.inFlightPromptContext.set(key, [...entries, { runId, entry: advance.entry }]);
+  }
+
+  private async waitForEarlierClaudeMessages(gate: ClaudeWriteGate, signal: AbortSignal | undefined): Promise<void> {
+    let onAbort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        gate.previous,
+        new Promise<never>((_, reject) => {
+          if (signal?.aborted) {
+            reject(new Error("Chat run cancelled."));
+            return;
+          }
+          onAbort = () => reject(new Error("Chat run cancelled."));
+          signal?.addEventListener("abort", onAbort, { once: true });
+        })
+      ]);
+    } finally {
+      if (onAbort) {
+        signal?.removeEventListener("abort", onAbort);
+      }
+    }
+  }
+
+  private openClaudeWriteGate(conversationId: string, participantId: string): ClaudeWriteGate {
+    const key = `${conversationId}:${participantId}`;
+    const previous = this.claudeMessageWriteOrder.get(key) ?? Promise.resolve();
+    let markWritten!: () => void;
+    const written = new Promise<void>((resolve) => { markWritten = resolve; });
+    const tail = Promise.all([previous, written]).then(() => undefined);
+    this.claudeMessageWriteOrder.set(key, tail);
+    void tail.then(() => {
+      if (this.claudeMessageWriteOrder.get(key) === tail) {
+        this.claudeMessageWriteOrder.delete(key);
+      }
+    });
+    return { previous, markWritten };
+  }
+
+  private oneTimeApprovalClaimedByOtherRun(approvalId: string, runId: string): boolean {
+    const claimRunId = this.oneTimeApprovalClaims.get(approvalId);
+    if (!claimRunId || claimRunId === runId) {
+      return false;
+    }
+    if (!this.chatRunControllers.has(claimRunId)) {
+      this.oneTimeApprovalClaims.delete(approvalId);
+      return false;
+    }
+    return true;
+  }
+
+  private inFlightPromptContextKey(conversationId: string, participantId: string, scope: ChatPromptContextScope): string {
+    return `${conversationId}:${participantId}:${scope.type === "thread" ? `thread:${scope.threadRootId}` : "timeline"}`;
+  }
+
+  /** The furthest context sent by a turn of this member that is still running. */
+  private inFlightPromptContextFloor(key: string): ChatPromptContextPointerEntry | undefined {
+    const live = (this.inFlightPromptContext.get(key) ?? []).filter((item) => this.chatRunControllers.has(item.runId));
+    if (live.length === 0) {
+      this.inFlightPromptContext.delete(key);
+      return undefined;
+    }
+    this.inFlightPromptContext.set(key, live);
+    let floor: ChatPromptContextPointerEntry | undefined;
+    for (const item of live) {
+      if (!floor || !this.promptContextPointerAtOrAfter(floor, item.entry)) {
+        floor = item.entry;
+      }
+    }
+    return floor;
+  }
+
+  private releaseInFlightPromptContext(runId: string): void {
+    for (const [key, entries] of this.inFlightPromptContext) {
+      const remaining = entries.filter((item) => item.runId !== runId);
+      if (remaining.length === 0) {
+        this.inFlightPromptContext.delete(key);
+      } else if (remaining.length !== entries.length) {
+        this.inFlightPromptContext.set(key, remaining);
+      }
+    }
   }
 
   private isParticipantOwnPromptContextMessage(message: ChatMessage, participantId: string): boolean {
@@ -13317,9 +13754,49 @@ export class ChatService {
     }
   }
 
-  private reserveParticipantTurn(conversationId: string, participantId: string): ParticipantTurnReservation {
+  /** Same-participant turns are serialized, except that a Claude Code member
+   *  takes a message while it is working or while its background work runs,
+   *  exactly as its dedicated CLI does: the CLI queues the message itself and
+   *  hands it to the running step (`shared` turns). Exclusive operations such
+   *  as compaction still wait for every earlier turn, and shared turns wait for
+   *  an earlier exclusive one. */
+  private reserveParticipantTurn(
+    conversationId: string,
+    participantId: string,
+    mode: "exclusive" | "shared" = "exclusive"
+  ): ParticipantTurnReservation {
     const key = `${conversationId}:${participantId}`;
-    const previous = this.participantTurnQueues.get(key);
+    if (mode === "shared") {
+      const exclusiveTail = this.participantExclusiveTurnQueues.get(key);
+      const exclusiveReady = (exclusiveTail ?? Promise.resolve()).catch(() => undefined);
+      const all = this.chainParticipantTurn(this.participantTurnQueues, key);
+      return {
+        queued: Boolean(exclusiveTail),
+        wait: async () => {
+          await exclusiveReady;
+        },
+        release: all.release
+      };
+    }
+    const all = this.chainParticipantTurn(this.participantTurnQueues, key);
+    const exclusive = this.chainParticipantTurn(this.participantExclusiveTurnQueues, key);
+    return {
+      queued: all.queued,
+      wait: async () => {
+        await all.previousReady;
+      },
+      release: () => {
+        all.release();
+        exclusive.release();
+      }
+    };
+  }
+
+  private chainParticipantTurn(
+    queues: Map<string, Promise<void>>,
+    key: string
+  ): { queued: boolean; previousReady: Promise<void>; release: () => void } {
+    const previous = queues.get(key);
     const previousTurn = previous ?? Promise.resolve();
     let releaseCurrent!: () => void;
     let released = false;
@@ -13332,16 +13809,14 @@ export class ChatService {
     });
     const chained = previousReady.then(() => current);
     const clearQueueIfTail = (): void => {
-      if (this.participantTurnQueues.get(key) === chained) {
-        this.participantTurnQueues.delete(key);
+      if (queues.get(key) === chained) {
+        queues.delete(key);
       }
     };
-    this.participantTurnQueues.set(key, chained);
+    queues.set(key, chained);
     return {
       queued: Boolean(previous),
-      wait: async () => {
-        await previousReady;
-      },
+      previousReady,
       release: () => {
         if (released) {
           return;
@@ -13355,6 +13830,19 @@ export class ChatService {
         }
       }
     };
+  }
+
+  /** A Claude Code member takes the User's new messages while it works (see
+   *  reserveParticipantTurn), wherever it runs. A native goal runs in a process
+   *  of its own on the member's session, so it stays exclusive. */
+  private participantTurnMode(participant: ChatParticipant, triggerMessage: ChatMessage): "exclusive" | "shared" {
+    // Only the User's own messages: a request from another member, a resume
+    // after an approval or a continuation is not something the User types
+    // into the CLI, and it still waits for the member's running turn.
+    if (participant.kind !== "claude-code" || triggerMessage.role !== "user") {
+      return "exclusive";
+    }
+    return triggerMessage.metadata?.nativeCommand?.name === "goal" ? "exclusive" : "shared";
   }
 
   private ensureChatTurnController(
