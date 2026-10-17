@@ -141,6 +141,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     }
     const fileMentionsToSend = mentions.selectedFileMentions;
     const skillMentionsToSend = mentions.selectedSkillMentions;
+    const pluginMentionsToRestore = mentions.selectedPluginMentions;
     const pendingImagesToSend = images.pendingImages;
     const imageInputs = images.readyImages.map((image): ChatImageInput => ({
       filename: image.filename,
@@ -154,6 +155,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     if (sent === false) {
       mentions.setSelectedFileMentions(fileMentionsToSend);
       mentions.setSelectedSkillMentions(skillMentionsToSend);
+      mentions.setSelectedPluginMentions(pluginMentionsToRestore);
       images.setPendingImages(pendingImagesToSend);
       return;
     }

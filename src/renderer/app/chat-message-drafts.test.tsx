@@ -48,6 +48,14 @@ test("per-chat values keep one entry per chat and drop emptied ones", () => {
   assert.equal(perChatValue(ab, undefined, ""), "");
   assert.equal(perChatValue(ab, "missing", ""), "");
   assert.equal(perChatValue({}, "constructor", ""), "", "an id that names an Object prototype key is still an empty chat");
+  const isEmptyList = (value: readonly unknown[]) => value.length === 0;
+  const pick = { path: "src/a.ts" };
+  const picks = applyPerChatValue<{ path: string }[]>({}, "a", [pick], [], isEmptyList);
+  assert.equal(
+    applyPerChatValue(picks, "a", (current) => current.filter(() => true), [], isEmptyList),
+    picks,
+    "a filtered copy with the same picks keeps the same map, so typing does not re-render the app"
+  );
 });
 
 test("each chat keeps its own unsent text while the User switches between chats", () => {

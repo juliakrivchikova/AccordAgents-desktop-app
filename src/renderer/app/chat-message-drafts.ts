@@ -22,13 +22,24 @@ export function applyPerChatValue<T>(
 ): PerChat<T> {
   const previous = perChatValue(values, conversationId, empty);
   const next = typeof value === "function" ? (value as (current: T) => T)(previous) : value;
-  if (Object.is(next, previous)) {
+  if (sameValue(next, previous)) {
+    // Keep the map, so an update that changes nothing (a pick list filtered
+    // on every keystroke) does not re-render the whole app.
     return values;
   }
   if (isEmpty(next)) {
     return withoutPerChatValue(values, conversationId);
   }
   return { ...values, [conversationId]: next };
+}
+
+function sameValue(next: unknown, previous: unknown): boolean {
+  if (Object.is(next, previous)) {
+    return true;
+  }
+  return Array.isArray(next) && Array.isArray(previous) &&
+    next.length === previous.length &&
+    next.every((item, index) => Object.is(item, previous[index]));
 }
 
 export function withoutPerChatValue<T>(values: PerChat<T>, conversationId: string): PerChat<T> {
