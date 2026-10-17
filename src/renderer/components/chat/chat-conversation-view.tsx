@@ -198,6 +198,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     const sent = await props.onSend(repoFileMentions, imageAttachments, skillMentions, content);
     if (sent) {
       viewport.scrollToChatBottom();
+    } else {
+      promptSuggestions.reload();
     }
     return sent;
   }

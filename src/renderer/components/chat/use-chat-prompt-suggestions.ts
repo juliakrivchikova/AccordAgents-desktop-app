@@ -15,8 +15,9 @@ interface LoadedSuggestions {
 export function useChatPromptSuggestions(
   conversationId: string,
   participants: ChatParticipant[]
-): { suggestions: ChatComposerSuggestion[]; dismiss: () => void } {
+): { suggestions: ChatComposerSuggestion[]; dismiss: () => void; reload: () => void } {
   const [loaded, setLoaded] = useState<LoadedSuggestions | undefined>();
+  const [reloads, setReloads] = useState(0);
   useEffect(() => {
     let cancelled = false;
     let updated = false;
@@ -37,7 +38,7 @@ export function useChatPromptSuggestions(
       cancelled = true;
       unsubscribe?.();
     };
-  }, [conversationId]);
+  }, [conversationId, reloads]);
   const own = loaded?.conversationId === conversationId ? loaded.suggestions : undefined;
   const suggestions = useMemo(() => {
     const handles = new Map(participants.map((participant) => [participant.id, participant.handle]));
@@ -50,6 +51,8 @@ export function useChatPromptSuggestions(
     suggestions,
     // Sending clears them in the main process too; this only spares the
     // emptied composer from showing them until that update arrives.
-    dismiss: () => setLoaded({ conversationId, suggestions: [] })
+    dismiss: () => setLoaded({ conversationId, suggestions: [] }),
+    // After a send that did not go through, show what is still on offer.
+    reload: () => setReloads((value) => value + 1)
   };
 }

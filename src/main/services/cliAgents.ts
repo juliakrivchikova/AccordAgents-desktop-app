@@ -5,6 +5,7 @@ import { constants, type Dirent } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { readCliHelpText } from "./cliHelpText";
 import type {
   AgentContextUsage,
   AgentContextUsageSource,
@@ -5419,8 +5420,11 @@ export class CliAgentRunner {
     const newSessionId = options.persistSession && !options.sessionId ? randomUUID() : undefined;
     const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
     const toolConfig = this.claudeToolConfig(kind, repoPath, extraReadableDirs, options);
-    const promptSuggestions = Boolean(options.warm?.onPromptSuggestion) &&
-      await this.claudeSupportsPromptSuggestions(claudeExecutable);
+    const promptSuggestionsRequested = Boolean(options.warm?.onPromptSuggestion);
+    const promptSuggestions = promptSuggestionsRequested && await this.claudeSupportsPromptSuggestions(claudeExecutable);
+    if (promptSuggestionsRequested && !promptSuggestions) {
+      void this.writeDebugLog("cli.claude.prompt-suggestions-unsupported", { participantId: participant.id });
+    }
     const args = this.claudeLaunchArgs(
       participant,
       kind,
@@ -6595,6 +6599,11 @@ export class CliAgentRunner {
     const target = state.promptSuggestionTarget;
     state.promptSuggestionTarget = undefined;
     const suggestion = this.stringField(record, "suggestion")?.trim();
+    void this.writeDebugLog("cli.claude.prompt-suggestion", {
+      participantId: participant.id,
+      delivered: Boolean(target && suggestion),
+      chars: suggestion?.length ?? 0
+    });
     if (!target || !suggestion) {
       return;
     }
@@ -7577,12 +7586,25 @@ export class CliAgentRunner {
   private claudeSupportsPromptSuggestions(claudeExecutable: string): Promise<boolean> {
     let request = this.claudePromptSuggestionsSupport.get(claudeExecutable);
     if (!request) {
-      request = runCommand(claudeExecutable, ["--help"], {
-        timeoutMs: CLAUDE_MODEL_PROBE_TIMEOUT_MS,
-        envOptions: CLAUDE_CODE_COMMAND_ENV_OPTIONS
-      })
-        .then((result) => /(^|\s)--prompt-suggestions\b/m.test(result.stdout))
-        .catch(() => {
+      request = readCliHelpText(
+        claudeExecutable,
+        commandEnvironment({}, CLAUDE_CODE_COMMAND_ENV_OPTIONS),
+        CLAUDE_MODEL_PROBE_TIMEOUT_MS
+      )
+        .then((help) => {
+          const supported = /(^|\s)--prompt-suggestions\b/m.test(help);
+          void this.writeDebugLog("cli.claude.prompt-suggestions-probe", {
+            executable: claudeExecutable,
+            supported,
+            helpChars: help.length
+          });
+          return supported;
+        })
+        .catch((error: unknown) => {
+          void this.writeDebugLog("cli.claude.prompt-suggestions-probe-failed", {
+            executable: claudeExecutable,
+            message: error instanceof Error ? error.message.slice(0, 300) : String(error)
+          });
           // Ask again next time rather than keep suggestions off for the session.
           this.claudePromptSuggestionsSupport.delete(claudeExecutable);
           return false;

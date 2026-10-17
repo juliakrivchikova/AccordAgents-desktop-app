@@ -26,26 +26,28 @@ interface EarlySuggestion {
   receivedAt: number;
 }
 
-interface AwaitedReply {
-  runId: string;
-  source: string;
-}
-
 interface ConversationSuggestions {
+  /** Counts the User's messages in this chat; a reply that ended before the
+   *  latest one is not followed by a suggestion. */
+  userMessages: number;
   /** The suggestion on offer per member; at most one each. */
   shown: Map<string, ChatPromptSuggestion & { order: number }>;
+  /** Per member, its newest reply: only that reply's suggestion is wanted. */
+  latestRun: Map<string, string>;
+  /** Per member, how many User messages there were when its newest reply ended. */
+  ended: Map<string, { runId: string; userMessages: number }>;
   /** Per member, the reply to the User whose suggestion may still arrive. */
-  awaiting: Map<string, AwaitedReply>;
-  /** Suggestions that arrived before their reply's end was known, by run. */
+  awaiting: Map<string, { runId: string; source: string }>;
+  /** Suggestions whose reply is not known here to have ended yet, by run. */
   early: Map<string, EarlySuggestion>;
 }
 
 /**
  * The next-prompt suggestions Claude Code members' CLIs send after a reply
  * (`--prompt-suggestions`), kept per chat in memory as the dedicated CLI keeps
- * its one. A suggestion is offered only for a reply to the User's own message,
- * only while the User has sent nothing in that chat since the reply ended, and
- * only until the member starts another reply. Nothing here is stored on disk.
+ * its one. A suggestion is offered only for a member's newest reply, only for
+ * a reply to the User's own message, and only while the User has sent nothing
+ * in that chat since the reply ended. Nothing here is stored on disk.
  */
 export class ChatPromptSuggestionStore {
   private readonly conversations = new Map<string, ConversationSuggestions>();
@@ -68,32 +70,39 @@ export class ChatPromptSuggestionStore {
 
   /** The User sent a message in this chat: every suggestion there is stale. */
   userMessageSent(conversationId: string): void {
-    const state = this.conversations.get(conversationId);
-    if (!state) {
-      return;
-    }
+    const state = this.state(conversationId);
+    state.userMessages += 1;
     const changed = state.shown.size > 0;
     state.shown.clear();
     state.awaiting.clear();
     state.early.clear();
-    this.dropIfEmpty(conversationId, state);
     if (changed) {
       this.emit(conversationId);
     }
   }
 
-  /** A member started a reply: what it suggested after its previous one no
-   *  longer follows its latest reply (the CLI drops it the same way). */
-  replyStarted(conversationId: string, participantId: string): void {
-    const state = this.conversations.get(conversationId);
-    if (!state) {
+  /** A member started a reply (the same run again is not a new reply): what
+   *  it suggested after an earlier one no longer follows its newest reply,
+   *  and the CLI drops a pending one the same way. */
+  replyStarted(conversationId: string, participantId: string, runId: string): void {
+    const state = this.state(conversationId);
+    if (state.latestRun.get(participantId) === runId) {
       return;
     }
+    state.latestRun.set(participantId, runId);
+    state.ended.delete(participantId);
     state.awaiting.delete(participantId);
-    const changed = state.shown.delete(participantId);
-    this.dropIfEmpty(conversationId, state);
-    if (changed) {
+    if (state.shown.delete(participantId)) {
       this.emit(conversationId);
+    }
+  }
+
+  /** The member's reply ended (its result is known here), whatever comes of
+   *  it; called before the result is stored, which can take a while. */
+  replyEnded(conversationId: string, participantId: string, runId: string): void {
+    const state = this.state(conversationId);
+    if (state.latestRun.get(participantId) === runId) {
+      state.ended.set(participantId, { runId, userMessages: state.userMessages });
     }
   }
 
@@ -101,8 +110,15 @@ export class ChatPromptSuggestionStore {
    *  may now send a suggestion for it. */
   replyFinished(conversationId: string, participantId: string, runId: string, source: string): void {
     const state = this.state(conversationId);
-    state.awaiting.set(participantId, { runId, source });
     this.expireEarly(state);
+    if (state.latestRun.get(participantId) !== runId) {
+      return;
+    }
+    const ended = state.ended.get(participantId);
+    if (ended?.runId === runId && ended.userMessages !== state.userMessages) {
+      return;
+    }
+    state.awaiting.set(participantId, { runId, source });
     const early = state.early.get(runId);
     if (early && early.participantId === participantId && early.source === source) {
       state.early.delete(runId);
@@ -120,14 +136,12 @@ export class ChatPromptSuggestionStore {
     const state = this.state(conversationId);
     this.expireEarly(state);
     const awaited = state.awaiting.get(participantId);
-    if (awaited) {
-      if (awaited.runId === runId && awaited.source === source) {
-        this.accept(conversationId, state, participantId, suggestion);
-      }
-    } else {
-      state.early.set(runId, { participantId, text: suggestion, source, receivedAt: this.now() });
+    if (awaited?.runId === runId && awaited.source === source) {
+      this.accept(conversationId, state, participantId, suggestion);
+      return;
     }
-    this.dropIfEmpty(conversationId, state);
+    // Its reply's end may not be known here yet (a member on a machine).
+    state.early.set(runId, { participantId, text: suggestion, source, receivedAt: this.now() });
   }
 
   forgetParticipant(conversationId: string, participantId: string): void {
@@ -135,15 +149,15 @@ export class ChatPromptSuggestionStore {
     if (!state) {
       return;
     }
+    state.latestRun.delete(participantId);
+    state.ended.delete(participantId);
     state.awaiting.delete(participantId);
     for (const [runId, early] of state.early) {
       if (early.participantId === participantId) {
         state.early.delete(runId);
       }
     }
-    const changed = state.shown.delete(participantId);
-    this.dropIfEmpty(conversationId, state);
-    if (changed) {
+    if (state.shown.delete(participantId)) {
       this.emit(conversationId);
     }
   }
@@ -153,9 +167,8 @@ export class ChatPromptSuggestionStore {
     if (!state) {
       return;
     }
-    const changed = state.shown.size > 0;
     this.conversations.delete(conversationId);
-    if (changed) {
+    if (state.shown.size > 0) {
       this.emit(conversationId);
     }
   }
@@ -175,7 +188,14 @@ export class ChatPromptSuggestionStore {
   private state(conversationId: string): ConversationSuggestions {
     let state = this.conversations.get(conversationId);
     if (!state) {
-      state = { shown: new Map(), awaiting: new Map(), early: new Map() };
+      state = {
+        userMessages: 0,
+        shown: new Map(),
+        latestRun: new Map(),
+        ended: new Map(),
+        awaiting: new Map(),
+        early: new Map()
+      };
       this.conversations.set(conversationId, state);
     }
     return state;
@@ -187,12 +207,6 @@ export class ChatPromptSuggestionStore {
       if (early.receivedAt < cutoff) {
         state.early.delete(runId);
       }
-    }
-  }
-
-  private dropIfEmpty(conversationId: string, state: ConversationSuggestions): void {
-    if (state.shown.size === 0 && state.awaiting.size === 0 && state.early.size === 0) {
-      this.conversations.delete(conversationId);
     }
   }
 

@@ -17,7 +17,10 @@ const { writeFileSync } = require("node:fs");
 const readline = require("node:readline");
 const argv = process.argv.slice(2);
 if (argv.includes("--help")) {
-  process.stdout.write("Options:\\n  --print\\n" + (${JSON.stringify(withFlag)} ? "  --prompt-suggestions [value]  Enable prompt suggestions.\\n" : ""));
+  // Like the real help, the flag sits past the first pipe-buffer's worth of
+  // text, and the CLI exits right after writing it.
+  const filler = Array.from({ length: 600 }, (_, index) => "  --option-" + index + "  An option that is not the one looked for.").join("\\n");
+  process.stdout.write("Options:\\n  --print\\n" + filler + "\\n" + (${JSON.stringify(withFlag)} ? "  --prompt-suggestions [value]  Enable prompt suggestions.\\n" : ""));
   process.exit(0);
 }
 writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(argv));

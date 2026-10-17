@@ -89,9 +89,6 @@ export interface MachineApprovalEvent {
   decisionId?: string;
 }
 
-/** A turn result for a run this desktop no longer tracks (it restarted
- *  meanwhile), any status. The listener stores it; the machine is told to
- *  drop the result (and a held stop is dropped) only after that. */
 /** The machine that sent it is named: the desktop offers a suggestion only
  *  for a reply it dispatched to that machine. */
 export interface MachinePromptSuggestionEvent {
@@ -102,6 +99,9 @@ export interface MachinePromptSuggestionEvent {
   suggestion: string;
 }
 
+/** A turn result for a run this desktop no longer tracks (it restarted
+ *  meanwhile), any status. The listener stores it; the machine is told to
+ *  drop the result (and a held stop is dropped) only after that. */
 export interface MachineLateTerminalEvent {
   machineId: string;
   machineName: string;
@@ -1378,6 +1378,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
         await this.finishTurn(connection, body);
         return;
       case "machine.turn.suggestion":
+        if (typeof body.suggestion !== "string" || typeof body.participantId !== "string" || typeof body.runId !== "string") {
+          return;
+        }
         for (const listener of this.suggestionListeners) {
           listener({
             machineId: connection.record.id,

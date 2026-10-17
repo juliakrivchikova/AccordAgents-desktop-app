@@ -6093,6 +6093,7 @@ export class ChatService {
           });
         }
       });
+      this.promptSuggestions.replyEnded(conversation.id, participant.id, runId);
       clearStopPending();
       dispatchResult = result;
       for (const warning of result.warnings) {
@@ -6321,6 +6322,12 @@ export class ChatService {
         }
         if (incoming.role === "participant") {
           this.recordLastMessageByParticipant(conversation, incoming);
+          // A reply the member started on its machine (its runs this desktop
+          // dispatched are already its newest).
+          const replyRunId = incoming.metadata?.runId;
+          if (index < 0 && incoming.participantId && replyRunId) {
+            this.promptSuggestions.replyStarted(conversation.id, incoming.participantId, replyRunId);
+          }
         }
         changed = true;
       }
@@ -6903,6 +6910,9 @@ export class ChatService {
           })
         }
       });
+      if (!this.machineRuntime) {
+        this.promptSuggestions.replyEnded(conversation.id, participant.id, runId);
+      }
       this.applyCliRunMetadata(session, result, participant, options.warnings);
       if (!signal?.aborted) {
         this.consumeOneTimePermissionApprovals(conversation, participant, appliedOneTimePermissionApprovalIds);
@@ -7030,6 +7040,10 @@ export class ChatService {
     // Called as the CLI starts the step: its app tool calls act for this new
     // reply from the first one on, before the reply is even stored.
     const runId = randomUUID();
+    if (!this.machineRuntime) {
+      // A reply the member starts on its own replaces the one a suggestion follows.
+      this.promptSuggestions.replyStarted(conversationId, participantId, runId);
+    }
     this.grantAppToolsToSelfResumedTurn(conversationId, participantId, runId, turn.origin);
     void this.runSelfResumedTurn(conversationId, participantId, turn, runId).catch((error) => {
       void this.debugLogs.write("chat.self-resumed-turn.error", {
@@ -13359,7 +13373,7 @@ export class ChatService {
         throw new Error("Chat run cancelled.");
       }
       if (!this.machineRuntime) {
-        this.promptSuggestions.replyStarted(conversation.id, participant.id);
+        this.promptSuggestions.replyStarted(conversation.id, participant.id, runId);
       }
       // Machines transport: every path that runs a member's turn (first turn,
       // continuations, request runners, resumes) goes through here, so a member
@@ -13898,11 +13912,8 @@ export class ChatService {
     };
   }
 
-  /** A Claude Code member takes the User's new messages while it works (see
-   *  reserveParticipantTurn), wherever it runs. A native goal runs in a process
-   *  of its own on the member's session, so it stays exclusive. */
   /** As in the dedicated CLI, a suggestion follows a reply to what the User
-   *  typed: not a member's request, a continuation or a reply that failed. */
+   *  typed or chose: not a member's request or a reply that failed. */
   private offersPromptSuggestionAfter(
     participant: ChatParticipant,
     triggerMessage: ChatMessage,
@@ -13916,6 +13927,9 @@ export class ChatService {
     return reply?.status === "done";
   }
 
+  /** A Claude Code member takes the User's new messages while it works (see
+   *  reserveParticipantTurn), wherever it runs. A native goal runs in a process
+   *  of its own on the member's session, so it stays exclusive. */
   private participantTurnMode(participant: ChatParticipant, triggerMessage: ChatMessage): "exclusive" | "shared" {
     // Only the User's own messages: a request from another member, a resume
     // after an approval or a continuation is not something the User types
