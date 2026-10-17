@@ -5,7 +5,7 @@ import { act, create } from "react-test-renderer";
 
 import type { Conversation } from "../../shared/types";
 import { useAppState, type AppState } from "./app-state";
-import { applyChatMessageDraft, chatMessageDraftFor, withoutChatMessageDraft } from "./chat-message-drafts";
+import { applyPerChatValue, perChatValue, withoutPerChatValue } from "./chat-message-drafts";
 import { useChatActions, type ChatActions } from "./use-chat-actions";
 import type { ConversationActions } from "./use-conversation-actions";
 
@@ -34,18 +34,20 @@ function installMemoryLocalStorage(): void {
   };
 }
 
-test("draft map keeps one entry per chat and drops emptied ones", () => {
+test("per-chat values keep one entry per chat and drop emptied ones", () => {
+  const isEmpty = (value: string) => value.length === 0;
   const empty = {};
-  const a = applyChatMessageDraft(empty, "a", "hello");
+  const a = applyPerChatValue(empty, "a", "hello", "", isEmpty);
   assert.deepEqual(a, { a: "hello" });
-  const ab = applyChatMessageDraft(a, "b", (current) => current + "world");
+  const ab = applyPerChatValue(a, "b", (current) => current + "world", "", isEmpty);
   assert.deepEqual(ab, { a: "hello", b: "world" });
-  assert.equal(applyChatMessageDraft(ab, "a", "hello"), ab, "an unchanged draft keeps the same map");
-  assert.deepEqual(applyChatMessageDraft(ab, "a", ""), { b: "world" }, "an emptied draft leaves no entry behind");
-  assert.deepEqual(withoutChatMessageDraft(ab, "b"), { a: "hello" });
-  assert.equal(withoutChatMessageDraft(ab, "missing"), ab);
-  assert.equal(chatMessageDraftFor(ab, undefined), "");
-  assert.equal(chatMessageDraftFor(ab, "missing"), "");
+  assert.equal(applyPerChatValue(ab, "a", "hello", "", isEmpty), ab, "an unchanged value keeps the same map");
+  assert.deepEqual(applyPerChatValue(ab, "a", "", "", isEmpty), { b: "world" }, "an emptied value leaves no entry behind");
+  assert.deepEqual(withoutPerChatValue(ab, "b"), { a: "hello" });
+  assert.equal(withoutPerChatValue(ab, "missing"), ab);
+  assert.equal(perChatValue(ab, undefined, ""), "");
+  assert.equal(perChatValue(ab, "missing", ""), "");
+  assert.equal(perChatValue({}, "constructor", ""), "", "an id that names an Object prototype key is still an empty chat");
 });
 
 test("each chat keeps its own unsent text while the User switches between chats", () => {
@@ -71,6 +73,11 @@ test("each chat keeps its own unsent text while the User switches between chats"
 
   act(() => { current().setConversation(chat("chat-a")); });
   assert.equal(current().chatMessageDraft, "typed in A", "coming back shows the text typed there");
+  act(() => { current().setChatComposerFileMentions([{ path: "src/a.ts" }]); });
+  act(() => { current().setConversation(chat("chat-b")); });
+  assert.deepEqual(current().chatComposerFileMentions, [], "another chat has none of A's picks");
+  act(() => { current().setConversation(chat("chat-a")); });
+  assert.deepEqual(current().chatComposerFileMentions, [{ path: "src/a.ts" }], "A's picks come back with its text");
 
   act(() => { current().setConversation(undefined); });
   assert.equal(current().chatMessageDraft, "", "no open chat has no draft");
@@ -80,9 +87,12 @@ test("each chat keeps its own unsent text while the User switches between chats"
   assert.equal(current().chatMessageDraft, "typed in B", "text typed with no chat open never lands in a chat");
 
   act(() => { current().setChatMessageDraftForConversation("chat-a", "set for A while B is open"); });
+  act(() => { current().setChatComposerSkillMentions([{ frontmatterName: "review-skill" } as never]); });
   assert.equal(current().chatMessageDraft, "typed in B");
+  assert.equal(current().chatComposerSkillMentions.length, 1);
   act(() => { current().clearChatMessageDraft("chat-b"); });
   assert.equal(current().chatMessageDraft, "");
+  assert.equal(current().chatComposerSkillMentions.length, 0, "deleting a chat forgets its picks too");
   act(() => { current().setConversation(chat("chat-a")); });
   assert.equal(current().chatMessageDraft, "set for A while B is open");
   renderer.unmount();

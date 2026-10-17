@@ -67,6 +67,14 @@ export function ConversationPanel({
           hasOlderMessages={Boolean(state.messagePage?.hasMoreBefore)}
           olderMessagesLoading={state.olderMessagesLoading}
           draft={state.chatMessageDraft}
+          composerPicks={{
+            skillMentions: state.chatComposerSkillMentions,
+            onSkillMentionsChange: state.setChatComposerSkillMentions,
+            pluginMentions: state.chatComposerPluginMentions,
+            onPluginMentionsChange: state.setChatComposerPluginMentions,
+            fileMentions: state.chatComposerFileMentions,
+            onFileMentionsChange: state.setChatComposerFileMentions
+          }}
           onDraftChange={state.setChatMessageDraft}
           onLoadOlderMessages={() => void conversationActions.loadOlderConversationMessages()}
           onLoadMessagePageForMessage={conversationActions.loadConversationMessagePageForMessage}
