@@ -81,6 +81,8 @@ import type {
   CompactChatParticipantRequest,
   Conversation,
   ConversationUpdate,
+  ChatPromptSuggestion,
+  ChatPromptSuggestionsUpdate,
   CloudRunsSettings,
   CloudRunStatus,
   CloudRunWorkerDoctorReport,
@@ -171,6 +173,7 @@ import {
 } from "../../shared/chatDeliveryPolicy";
 import { chatActionOperationId } from "./chatActionEmitter";
 import type { ChatEventMirrorService } from "./chatEventMirror";
+import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
 import { CliAgentRunner, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
@@ -918,6 +921,9 @@ export class ChatService {
   private cloudRunDoctor?: CloudRunDoctorProbe;
   private artifactCleanup?: (conversationId: string) => Promise<void>;
   private codexApprovalWaitMs = CHAT_CODEX_APPROVAL_WAIT_MS;
+  private promptSuggestionsListener?: (update: ChatPromptSuggestionsUpdate) => void;
+  private promptSuggestionForwarder?: (suggestion: ChatMemberPromptSuggestion) => void;
+  private readonly promptSuggestions = new ChatPromptSuggestionStore((update) => this.promptSuggestionsListener?.(update));
 
   constructor(
     private readonly storage: StorageService,
@@ -1028,6 +1034,42 @@ export class ChatService {
 
   setMachineLink(link: MachineTurnDispatcher | undefined): void {
     this.machineLink = link;
+  }
+
+  /** Desktop: where changes to a chat's next-prompt suggestions are pushed. */
+  setPromptSuggestionsListener(listener: ((update: ChatPromptSuggestionsUpdate) => void) | undefined): void {
+    this.promptSuggestionsListener = listener;
+  }
+
+  /** Machines transport, machine side: hands a member's next-prompt
+   *  suggestion to the desktop, which decides whether it is still on offer. */
+  setPromptSuggestionForwarder(forwarder: ((suggestion: ChatMemberPromptSuggestion) => void) | undefined): void {
+    this.promptSuggestionForwarder = forwarder;
+  }
+
+  listPromptSuggestions(conversationId: string): ChatPromptSuggestion[] {
+    return this.promptSuggestions.list(conversationId);
+  }
+
+  /** A member's CLI predicted the User's next prompt after the reply of
+   *  `runId`: kept on the desktop, forwarded there from a machine. `sourceMachineId`
+   *  names the machine it came from; without it, the CLI ran here. */
+  receiveMemberPromptSuggestion(suggestion: ChatMemberPromptSuggestion, sourceMachineId?: string): void {
+    if (this.machineRuntime) {
+      try {
+        this.promptSuggestionForwarder?.(suggestion);
+      } catch {
+        // A suggestion is optional; losing one must not disturb the turn.
+      }
+      return;
+    }
+    this.promptSuggestions.suggestionReceived(
+      suggestion.conversationId,
+      suggestion.participantId,
+      suggestion.runId,
+      suggestion.text,
+      sourceMachineId ?? CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE
+    );
   }
 
   /** Machines transport, machine side: hands a member request to the desktop,
@@ -1401,6 +1443,7 @@ export class ChatService {
       }
       await this.cliRunner.closeConversationSessions(conversation.id);
       this.deletedConversationIds.add(conversation.id);
+      this.promptSuggestions.forgetConversation(conversation.id);
       this.snapshotRowStates.delete(conversation.id);
       this.lastSavedSnapshots.delete(conversation.id);
       try {
@@ -1714,6 +1757,7 @@ export class ChatService {
       };
       conversation.metadata = this.metadataWithAutoWatchDisabled(conversation.metadata, target.id);
       this.cleanupRemovedParticipantState(conversation, target, now);
+      this.promptSuggestions.forgetParticipant(conversation.id, target.id);
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
       return conversation;
@@ -4808,6 +4852,7 @@ export class ChatService {
         });
         userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
         conversation.messages.push(userMessage);
+        this.promptSuggestions.userMessageSent(conversation.id);
         this.advanceAutoWatchCursorForDirectTargets(conversation, [updatedFacilitator], userMessage);
         conversation.updatedAt = nowIso;
         await this.saveConversation(conversation);
@@ -5084,6 +5129,7 @@ export class ChatService {
         userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
       }
       conversation.messages.push(userMessage);
+      this.promptSuggestions.userMessageSent(conversation.id);
       this.resetAutoWatchDepthForUserMessage(conversation);
       for (const unknown of dispatch.unknownHandles) {
         const warning = `No member named @${unknown}.`;
@@ -5348,6 +5394,7 @@ export class ChatService {
             sourceMessageId: sourceMessage.id, hiddenFromTimeline: true
           });
           conversation.messages.push(userMessage);
+          this.promptSuggestions.userMessageSent(conversation.id);
         }
         if (execution) {
           Object.assign(sourceMessage.metadata!.pendingChoice!, {
@@ -6847,7 +6894,13 @@ export class ChatService {
           },
           onSelfResumedTurn: (turn) => this.handleSelfResumedTurn(conversation.id, participant.id, turn),
           onReplyStarted: grantAtReplyStart || sharedClaudeTurn ? onReplyStarted : undefined,
-          onMessageWritten: options.writeGate?.markWritten
+          onMessageWritten: options.writeGate?.markWritten,
+          onPromptSuggestion: (text) => this.receiveMemberPromptSuggestion({
+            conversationId: conversation.id,
+            participantId: participant.id,
+            runId,
+            text
+          })
         }
       });
       this.applyCliRunMetadata(session, result, participant, options.warnings);
@@ -13305,21 +13358,34 @@ export class ChatService {
       if (turnController.signal.aborted) {
         throw new Error("Chat run cancelled.");
       }
+      if (!this.machineRuntime) {
+        this.promptSuggestions.replyStarted(conversation.id, participant.id);
+      }
       // Machines transport: every path that runs a member's turn (first turn,
       // continuations, request runners, resumes) goes through here, so a member
       // whose home is a machine is dispatched there from exactly one place.
-      if ((participant.cloudRun || participant.homeMachineId) && !this.machineRuntime) {
-        return await this.runParticipantTurnOnMachine(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
+      const onMachine = Boolean(participant.cloudRun || participant.homeMachineId) && !this.machineRuntime;
+      const messages = onMachine
+        ? await this.runParticipantTurnOnMachine(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
           warnings: options.warnings,
           existingPendingMessage: options.existingPendingMessage,
           continuation: options.continuation,
           turnSegmentId
+        })
+        : await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
+          ...options,
+          turnSegmentId
         });
+      if (!this.machineRuntime && this.offersPromptSuggestionAfter(participant, triggerMessage, messages, turnController.signal)) {
+        // A cloud member's machine is chosen while its turn is prepared.
+        const machineId = this.chatParticipants(conversation).find((item) => item.id === participant.id)?.homeMachineId
+          ?? participant.homeMachineId;
+        const source = onMachine ? machineId : CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE;
+        if (source) {
+          this.promptSuggestions.replyFinished(conversation.id, participant.id, runId, source);
+        }
       }
-      return await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
-        ...options,
-        turnSegmentId
-      });
+      return messages;
     } finally {
       reservation.release();
       turnController?.cleanup();
@@ -13835,6 +13901,21 @@ export class ChatService {
   /** A Claude Code member takes the User's new messages while it works (see
    *  reserveParticipantTurn), wherever it runs. A native goal runs in a process
    *  of its own on the member's session, so it stays exclusive. */
+  /** As in the dedicated CLI, a suggestion follows a reply to what the User
+   *  typed: not a member's request, a continuation or a reply that failed. */
+  private offersPromptSuggestionAfter(
+    participant: ChatParticipant,
+    triggerMessage: ChatMessage,
+    messages: ChatMessage[],
+    signal: AbortSignal
+  ): boolean {
+    if (participant.kind !== "claude-code" || triggerMessage.role !== "user" || signal.aborted) {
+      return false;
+    }
+    const reply = [...messages].reverse().find((message) => message.role === "participant" && message.participantId === participant.id);
+    return reply?.status === "done";
+  }
+
   private participantTurnMode(participant: ChatParticipant, triggerMessage: ChatMessage): "exclusive" | "shared" {
     // Only the User's own messages: a request from another member, a resume
     // after an approval or a continuation is not something the User types

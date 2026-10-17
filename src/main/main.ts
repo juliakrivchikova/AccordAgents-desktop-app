@@ -604,6 +604,7 @@ chatService.setCloudRunPreparation(async (selection, provider, progress) => {
   return result.machine.id;
 });
 chatService.setCloudRunAwsService(cloudRunAwsService);
+chatService.setPromptSuggestionsListener((update) => sendToMainWindow("chat:prompt-suggestions", update));
 chatService.setMachineProjectPreparation((machineId, localPath, signal, progress) => cloudRunPreparation.prepareProject(machineId, localPath, signal, progress));
 chatService.setCloudRunDoctorService(cloudRunDoctorService);
 wireChatAppToolHandlers(appMcpService, chatService);
@@ -2956,6 +2957,8 @@ function registerIpc(): void {
       activeReviews.delete(runId);
     }
   });
+  ipcMain.handle("chat:get-prompt-suggestions", (_event, conversationId: unknown) =>
+    typeof conversationId === "string" ? chatService.listPromptSuggestions(conversationId) : []);
   ipcMain.handle("chat:send", async (_event, request: SendChatMessageRequest) => {
     const runId = request.runId ?? randomUUID();
     const controller = new AbortController();
@@ -3613,6 +3616,12 @@ void app.whenReady().then(async () => {
       })
     );
     machineLinkService.onRunStarted((event) => chatService.applyMachineRunStarted(event));
+    machineLinkService.onPromptSuggestion((event) => chatService.receiveMemberPromptSuggestion({
+      conversationId: event.conversationId,
+      participantId: event.participantId,
+      runId: event.runId,
+      text: event.suggestion
+    }, event.machineId));
     machineLinkService.onProgress(emitReviewProgress);
     machineLinkService.onLateTerminal((event) =>
       chatService.applyMachineLateTerminal({

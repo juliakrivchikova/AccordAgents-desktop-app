@@ -376,6 +376,17 @@ export interface MachineTrustRosterBody {
   roster: MachineTrustRoster;
 }
 
+/** A Claude Code member's next-prompt suggestion, sent by its CLI after a
+ *  reply that ran on this machine. Live only: one lost on the way is simply
+ *  not offered, as a suggestion the CLI skipped. */
+export interface MachineTurnSuggestionBody {
+  type: "machine.turn.suggestion";
+  conversationId: string;
+  runId: string;
+  participantId: string;
+  suggestion: string;
+}
+
 export type MachineLinkMessage =
   | MachineHelloBody
   | MachineHelloAckBody
@@ -406,7 +417,8 @@ export type MachineLinkMessage =
   | MachineChoiceAnswerBody
   | MachineChoiceResultBody
   | MachineAttachmentRequestBody
-  | MachineAttachmentResultBody;
+  | MachineAttachmentResultBody
+  | MachineTurnSuggestionBody;
 
 export type MachineLinkMessageType = MachineLinkMessage["type"];
 
@@ -460,6 +472,7 @@ const MESSAGE_TYPE_TABLE: Record<MachineLinkMessageType, true> = {
   "machine.choice.answer": true,
   "machine.attachment.request": true,
   "machine.attachment.result": true,
+  "machine.turn.suggestion": true,
 };
 
 const MESSAGE_TYPES: ReadonlySet<string> = new Set<string>(Object.keys(MESSAGE_TYPE_TABLE));

@@ -10,6 +10,7 @@ await build({
     "participant-run-location.test": path.join(process.cwd(), "src/renderer/components/chat/participant-run-location.test.tsx"),
     "new-chat-screen.test": path.join(process.cwd(), "src/renderer/components/chat/new-chat-screen.test.tsx"),
     "use-chat-actions.test": path.join(process.cwd(), "src/renderer/app/use-chat-actions.test.tsx"),
+    "use-chat-composer-suggestions.test": path.join(process.cwd(), "src/renderer/components/chat/use-chat-composer-suggestions.test.tsx"),
     "chat-active-run-popover.test": path.join(process.cwd(), "src/renderer/components/chat/chat-active-run-popover.test.tsx")
   },
   outdir,

@@ -2283,6 +2283,21 @@ export interface ChatParticipantWatcherState {
   updatedAt: string;
 }
 
+/** A Claude Code member's guess at the User's next prompt, sent by its CLI
+ *  after a reply (`--prompt-suggestions`) and offered in the chat composer as
+ *  the dedicated CLI offers it in its input. Kept in memory per chat only. */
+export interface ChatPromptSuggestion {
+  participantId: string;
+  text: string;
+  createdAt: string;
+}
+
+export interface ChatPromptSuggestionsUpdate {
+  conversationId: string;
+  /** Newest first, at most one per member. */
+  suggestions: ChatPromptSuggestion[];
+}
+
 export type ConversationMetadata = Record<string, unknown> & {
   machineRepository?: { sourcePath: string; paths: Record<string, string> };
   activationProviderKind?: ChatProviderKind;
@@ -3001,4 +3016,7 @@ export interface AppBridge {
   onReviewProgress(callback: (progress: ReviewProgress) => void): () => void;
   onConversationDeleted(callback: (conversationId: string) => void): () => void;
   onConversationUpdated(callback: (conversation: ConversationUpdate) => void): () => void;
+  /** The next-prompt suggestions on offer in a chat (newest first). */
+  getChatPromptSuggestions(conversationId: string): Promise<ChatPromptSuggestion[]>;
+  onChatPromptSuggestions(callback: (update: ChatPromptSuggestionsUpdate) => void): () => void;
 }

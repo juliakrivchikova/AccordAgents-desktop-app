@@ -68,6 +68,7 @@ import type {
   ConversationMessagePageRequest,
   Conversation,
   ConversationUpdate,
+  ChatPromptSuggestionsUpdate,
   CreateChatConversationRequest,
   DeleteChatConversationRequest,
   DismissConversationWarningsRequest,
@@ -300,6 +301,12 @@ const bridge: AppBridge = {
     const listener = (_event: Electron.IpcRendererEvent, conversation: ConversationUpdate) => callback(conversation);
     ipcRenderer.on("conversations:updated", listener);
     return () => ipcRenderer.removeListener("conversations:updated", listener);
+  },
+  getChatPromptSuggestions: (conversationId: string) => ipcRenderer.invoke("chat:get-prompt-suggestions", conversationId),
+  onChatPromptSuggestions: (callback: (update: ChatPromptSuggestionsUpdate) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, update: ChatPromptSuggestionsUpdate) => callback(update);
+    ipcRenderer.on("chat:prompt-suggestions", listener);
+    return () => ipcRenderer.removeListener("chat:prompt-suggestions", listener);
   }
 };
 

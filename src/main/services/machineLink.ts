@@ -92,6 +92,16 @@ export interface MachineApprovalEvent {
 /** A turn result for a run this desktop no longer tracks (it restarted
  *  meanwhile), any status. The listener stores it; the machine is told to
  *  drop the result (and a held stop is dropped) only after that. */
+/** The machine that sent it is named: the desktop offers a suggestion only
+ *  for a reply it dispatched to that machine. */
+export interface MachinePromptSuggestionEvent {
+  machineId: string;
+  conversationId: string;
+  runId: string;
+  participantId: string;
+  suggestion: string;
+}
+
 export interface MachineLateTerminalEvent {
   machineId: string;
   machineName: string;
@@ -207,6 +217,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private readonly lateTerminalListeners: Array<(event: MachineLateTerminalEvent) => Promise<void> | void> = [];
   private readonly runStartedListeners: Array<(event: { conversationId: string; runId: string }) => Promise<void> | void> = [];
   private readonly progressListeners: Array<(progress: ReviewProgress) => void> = [];
+  private readonly suggestionListeners: Array<(event: MachinePromptSuggestionEvent) => void> = [];
   private readonly participantRequestListeners: Array<(request: { machineId: string; conversationId: string; requestMessageId: string; depth: number; targetParticipantIds?: string[] }) => Promise<void> | void> = [];
   private readonly deletionListeners: Array<(event: MachineConversationDeletedBody) => Promise<void>> = [];
   private readonly backDeltaListeners: Array<(delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void> = [];
@@ -235,6 +246,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
   onRunStarted(listener: (event: { conversationId: string; runId: string }) => Promise<void> | void): () => void {
     this.runStartedListeners.push(listener);
     return () => { const index = this.runStartedListeners.indexOf(listener); if (index >= 0) this.runStartedListeners.splice(index, 1); };
+  }
+
+  /** A member's next-prompt suggestion from the machine that ran its reply. */
+  onPromptSuggestion(listener: (event: MachinePromptSuggestionEvent) => void): () => void {
+    this.suggestionListeners.push(listener);
+    return () => { const index = this.suggestionListeners.indexOf(listener); if (index >= 0) this.suggestionListeners.splice(index, 1); };
   }
 
   onProgress(listener: (progress: ReviewProgress) => void): () => void {
@@ -1359,6 +1376,17 @@ export class MachineLinkService implements MachineTurnDispatcher {
       }
       case "machine.turn.finished":
         await this.finishTurn(connection, body);
+        return;
+      case "machine.turn.suggestion":
+        for (const listener of this.suggestionListeners) {
+          listener({
+            machineId: connection.record.id,
+            conversationId: body.conversationId,
+            runId: body.runId,
+            participantId: body.participantId,
+            suggestion: body.suggestion
+          });
+        }
         return;
       case "machine.conversation.backdelta": {
         // The machine already holds these; do not echo them back on the next delta.
