@@ -12735,8 +12735,7 @@ export class ChatService {
       .then(async () => {
         await this.waitForQueuedSave(conversationId);
         const runner = this.startParticipantRequestRunner(conversationId, requestMessageId, depth);
-        await runner;
-        await this.autoResumeParticipantRequest(conversationId, requestMessageId, this.onReviewProgress);
+        this.resumeRequesterWhenRunnerSettles(conversationId, requestMessageId, runner, this.onReviewProgress);
       })
       .catch((error) => {
         void this.debugLogs.write("chat.participant-request.background-run.error", {
@@ -12814,6 +12813,8 @@ export class ChatService {
       let participantRequestsToRun: Array<{ requestMessageId: string; depth: number; source: ChatParticipantRequestBatch["source"] }> = [];
       let targetRunId: string | undefined;
       let targetRunBegun = false;
+      let targetController: AbortController | undefined;
+      const abortFromInlineParent = (): void => targetController?.abort();
       try {
         const requestRootId = participantRequestVisibleRootId(conversation.messages, requestMessage);
         const targetTriggerMessage: ChatMessage = {
@@ -12827,10 +12828,23 @@ export class ChatService {
         // member, and nothing the requester does reaches it. It is a real
         // chat run from the start, so Stop all and a Stop from another window
         // reach it even while it still waits behind the member's own turn.
+        // As in a mention fan-out, the run's Stop control exists before the
+        // run is announced as active, so a Stop in between is never lost.
         targetRunId = randomUUID();
+        targetController = new AbortController();
+        if (inlineParentSignal?.aborted) {
+          targetController.abort();
+        } else {
+          inlineParentSignal?.addEventListener("abort", abortFromInlineParent, { once: true });
+        }
+        this.registerTargetRun(targetRunId, targetController, {
+          conversationId: conversation.id,
+          participantId: target.id,
+          participantHandle: target.handle
+        });
         await this.beginChatRun(conversation, targetRunId);
         targetRunBegun = true;
-        const messages = await this.runParticipantTurnSerialized(conversation, target, targetTriggerMessage, targetRunId, inlineParentSignal, progress, {
+        const messages = await this.runParticipantTurnSerialized(conversation, target, targetTriggerMessage, targetRunId, targetController.signal, progress, {
           warnings,
           participantRequestDepth: depth,
           participantRequestBatchId: batch.id,
@@ -12878,9 +12892,9 @@ export class ChatService {
           error: reply?.status === "error" ? reply.content : undefined
         });
       } catch (error) {
-        // A Stop that lands while the member still waits for its turn ends
-        // here, before any reply exists.
-        const stoppedBeforeStart = targetRunId !== undefined && error instanceof Error && error.message === "Chat run cancelled.";
+        // A Stop that lands before any reply exists (the member still waits
+        // for its turn, or its machine is still being prepared) ends here.
+        const stoppedBeforeStart = targetController?.signal.aborted === true;
         const message = stoppedBeforeStart
           ? PARTICIPANT_REQUEST_STOPPED_BY_USER
           : error instanceof Error ? error.message : String(error);
@@ -12894,8 +12908,12 @@ export class ChatService {
         }));
         replies.push({ targetHandle: target.handle, error: message });
       } finally {
+        inlineParentSignal?.removeEventListener("abort", abortFromInlineParent);
         if (targetRunBegun && targetRunId) {
           await this.endChatRun(conversation, targetRunId);
+        }
+        if (targetRunId && targetController) {
+          this.unregisterTargetRun(targetRunId, targetController);
         }
       }
       conversation.updatedAt = new Date().toISOString();
@@ -12957,6 +12975,8 @@ export class ChatService {
           conversation.updatedAt = now;
           this.queueSnapshot(conversation);
         });
+        // The resume reads stored state; it must see these items closed.
+        await this.waitForQueuedSave(conversationId);
       })
       .then(() => this.autoResumeParticipantRequest(conversationId, requestMessageId, progress))
       .catch((error) => {

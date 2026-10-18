@@ -569,7 +569,6 @@ export class MachineHostService {
     if (this.closed || this.draining || this.activeTurns.size || this.turnTasks.size || this.commandTasks.size ||
         this.settlingRuns.size || this.settlingInFlight.size || this.turnsAwaitingCopy.size || this.syncing.size ||
         (this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork()) || (this.chat.activeParticipantRuns?.().length ?? 0) ||
-        (this.chat.liveRunIds?.().length ?? 0) ||
         this.outboxError || this.progressErrors.size || [...this.progressSenders.values()].some(sender => sender.hasPending())) return true;
     if ([...this.pendingTerminals.values()].some(terminal => !this.durableTerminalIds.has(terminalEventId(terminal)))) return true;
     return (await this.options.eventStorage.nativeCommands().pending()).length > 0;
