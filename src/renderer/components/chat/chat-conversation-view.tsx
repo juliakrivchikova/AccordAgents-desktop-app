@@ -383,6 +383,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               conversationId={props.conversation.id}
               repoPath={props.conversation.repoPath}
               draft={props.draft}
+              picks={props.composerPicks}
               onDraftChange={props.onDraftChange}
               onSend={sendDraft}
               accordDisabledReason={props.accordDisabledReason}

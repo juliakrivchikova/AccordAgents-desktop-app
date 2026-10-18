@@ -626,7 +626,7 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setPendingClarifications({});
     state.setPlanItemReviewDrafts({});
     state.setPlanCorrectionDraft("");
-    state.setChatMessageDraft("");
+    // Unsent text stays with its chat: leaving for a new chat must not erase it.
     state.setChatAddParticipantDraft(defaultChatParticipantDraft(state.settings));
     state.setSelectedChatParticipantConfigIds(defaultSelectedChatParticipantConfigIds());
     state.setQuestion("");

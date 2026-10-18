@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type {
   AgentHealth,
   AppSettings,
@@ -19,6 +19,7 @@ import type { ChatParticipantDraft, ChatParticipantRuntimeOverride } from "../co
 import type { DraftPluginMention } from "../components/chat/chat-composer-draft-utils";
 import type { PendingChatImage } from "../components/chat/use-chat-composer-images";
 import { DEFAULT_SETTINGS } from "./constants";
+import { usePerChatState } from "./chat-message-drafts";
 import {
   persistChatSidebarWidth,
   persistSettingsSidebarWidth,
@@ -116,8 +117,24 @@ export interface AppState {
   setSelectedChatParticipantConfigIds: StateSetter<Set<string>>;
   selectedChatParticipantRuntimeOverrides: Record<string, ChatParticipantRuntimeOverride>;
   setSelectedChatParticipantRuntimeOverrides: StateSetter<Record<string, ChatParticipantRuntimeOverride>>;
+  /** Unsent composer text of the open chat; each chat keeps its own. */
   chatMessageDraft: string;
+  /** Changes the open chat's unsent text; does nothing when no chat is open. */
   setChatMessageDraft: StateSetter<string>;
+  /** Changes one chat's unsent text, whichever chat is open by then. */
+  setChatMessageDraftForConversation: (conversationId: string, value: React.SetStateAction<string>) => void;
+  /**
+   * Skills, plugins and files picked in the open chat's composer. They belong
+   * to the unsent text's tokens, so each chat keeps its own as well.
+   */
+  chatComposerSkillMentions: ChatSkillMention[];
+  setChatComposerSkillMentions: StateSetter<ChatSkillMention[]>;
+  chatComposerPluginMentions: DraftPluginMention[];
+  setChatComposerPluginMentions: StateSetter<DraftPluginMention[]>;
+  chatComposerFileMentions: RepoFileMention[];
+  setChatComposerFileMentions: StateSetter<RepoFileMention[]>;
+  /** Forgets a chat's unsent text and picks, for a chat that no longer exists. */
+  clearChatMessageDraft: (conversationId: string) => void;
   chatAddParticipantDraft: ChatParticipantDraft | undefined;
   setChatAddParticipantDraft: StateSetter<ChatParticipantDraft | undefined>;
   chatMessageFocusRequest: ChatMessageFocusRequest | undefined;
@@ -145,6 +162,19 @@ export interface AppState {
   // updatedAt of each chat when it loaded as an Activity preview: dropping it
   // gives the sidebar dot only for news that came in after that.
   previewLoadedAtRef: React.MutableRefObject<Record<string, string>>;
+}
+
+const NO_DRAFT_TEXT = "";
+const NO_SKILL_MENTIONS: ChatSkillMention[] = [];
+const NO_PLUGIN_MENTIONS: DraftPluginMention[] = [];
+const NO_FILE_MENTIONS: RepoFileMention[] = [];
+
+function isEmptyDraftText(value: string): boolean {
+  return value.length === 0;
+}
+
+function isEmptyList(value: readonly unknown[]): boolean {
+  return value.length === 0;
 }
 
 export function useAppState(): AppState {
@@ -192,7 +222,30 @@ export function useAppState(): AppState {
   const [planCorrectionDraft, setPlanCorrectionDraft] = useState("");
   const [selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds] = useState<Set<string>>(new Set());
   const [selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides] = useState<Record<string, ChatParticipantRuntimeOverride>>({});
-  const [chatMessageDraft, setChatMessageDraft] = useState("");
+  const openConversationId = conversation?.id;
+  const messageDrafts = usePerChatState<string>(openConversationId, NO_DRAFT_TEXT, isEmptyDraftText);
+  const skillMentionDrafts = usePerChatState<ChatSkillMention[]>(openConversationId, NO_SKILL_MENTIONS, isEmptyList);
+  const pluginMentionDrafts = usePerChatState<DraftPluginMention[]>(openConversationId, NO_PLUGIN_MENTIONS, isEmptyList);
+  const fileMentionDrafts = usePerChatState<RepoFileMention[]>(openConversationId, NO_FILE_MENTIONS, isEmptyList);
+  const chatMessageDraft = messageDrafts.value;
+  const setChatMessageDraft = messageDrafts.setForOpenChat;
+  const setChatMessageDraftForConversation = messageDrafts.setForChat;
+  const chatComposerSkillMentions = skillMentionDrafts.value;
+  const setChatComposerSkillMentions = skillMentionDrafts.setForOpenChat;
+  const chatComposerPluginMentions = pluginMentionDrafts.value;
+  const setChatComposerPluginMentions = pluginMentionDrafts.setForOpenChat;
+  const chatComposerFileMentions = fileMentionDrafts.value;
+  const setChatComposerFileMentions = fileMentionDrafts.setForOpenChat;
+  const clearMessageDraft = messageDrafts.clear;
+  const clearSkillMentionDraft = skillMentionDrafts.clear;
+  const clearPluginMentionDraft = pluginMentionDrafts.clear;
+  const clearFileMentionDraft = fileMentionDrafts.clear;
+  const clearChatMessageDraft = useCallback((conversationId: string) => {
+    clearMessageDraft(conversationId);
+    clearSkillMentionDraft(conversationId);
+    clearPluginMentionDraft(conversationId);
+    clearFileMentionDraft(conversationId);
+  }, [clearMessageDraft, clearSkillMentionDraft, clearPluginMentionDraft, clearFileMentionDraft]);
   const [chatAddParticipantDraft, setChatAddParticipantDraft] = useState<ChatParticipantDraft | undefined>();
   const [chatMessageFocusRequest, setChatMessageFocusRequest] = useState<ChatMessageFocusRequest | undefined>();
   const [error, setError] = useState<string | undefined>();
@@ -246,7 +299,9 @@ export function useAppState(): AppState {
     setPendingClarifications, planItemReviewDrafts, setPlanItemReviewDrafts, planCorrectionDraft,
     setPlanCorrectionDraft, selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds,
     selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides,
-    chatMessageDraft, setChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
+    chatMessageDraft, setChatMessageDraft, setChatMessageDraftForConversation, chatComposerSkillMentions,
+    setChatComposerSkillMentions, chatComposerPluginMentions, setChatComposerPluginMentions, chatComposerFileMentions,
+    setChatComposerFileMentions, clearChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
     setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,
     activityRefreshRequestRef, summaryRefreshRequestRef, agentRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,

@@ -52,12 +52,12 @@ export function useAppEffects(
     state.setSummaries(current => current.filter(summary => summary.id !== conversationId));
     state.setActivityItems(current => current.filter(item => item.conversationId !== conversationId));
     state.setSelectedActivityItem(current => current?.conversationId === conversationId ? undefined : current);
+    state.clearChatMessageDraft(conversationId);
     if (state.conversation?.id === conversationId) {
       state.setConversation(undefined);
       state.setMessagePage(undefined);
       state.setSelectedThreadId(undefined);
       state.setFocusedThreadId(undefined);
-      state.setChatMessageDraft("");
     }
   }), [state.conversation?.id]);
 

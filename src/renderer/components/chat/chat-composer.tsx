@@ -15,7 +15,8 @@ import { ChatComposerAttachmentChips } from "./chat-composer-attachment-chips";
 import {
   CHAT_COMPOSER_TEXTAREA_STYLE,
   draftStartsWithPluginMention,
-  serializeComposerDraft
+  serializeComposerDraft,
+  type DraftPluginMention
 } from "./chat-composer-draft-utils";
 import { renderSlashHighlightedDraft } from "./chat-composer-draft-highlights";
 import { ChatActiveRunPopover, type ChatActiveRunParticipantRow } from "./chat-active-run-popover";
@@ -27,12 +28,27 @@ import {
 import { useChatComposerMentions } from "./use-chat-composer-mentions";
 import { useComposerNoticeClearance } from "./use-composer-notice-clearance";
 
+/**
+ * Skills, plugins and files picked for the draft's tokens. When the owner
+ * keeps them, they live as long as the owner's draft; otherwise the composer
+ * keeps its own and drops them whenever the chat changes.
+ */
+export interface ChatComposerPicks {
+  skillMentions: ChatSkillMention[];
+  onSkillMentionsChange: React.Dispatch<React.SetStateAction<ChatSkillMention[]>>;
+  pluginMentions: DraftPluginMention[];
+  onPluginMentionsChange: React.Dispatch<React.SetStateAction<DraftPluginMention[]>>;
+  fileMentions: RepoFileMention[];
+  onFileMentionsChange: React.Dispatch<React.SetStateAction<RepoFileMention[]>>;
+}
+
 export interface ChatComposerProps {
   participants: ChatParticipant[];
   savedPrompts: ChatSavedPromptConfig[];
   conversationId?: string;
   repoPath?: string;
   draft: string;
+  picks?: ChatComposerPicks;
   placeholder: string;
   isRunning: boolean;
   activeRunCount?: number;
@@ -77,7 +93,13 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     searchSource,
     onDraftChange: props.onDraftChange,
     participants: props.participants,
-    savedPrompts: props.savedPrompts
+    savedPrompts: props.savedPrompts,
+    selectedSkillMentions: props.picks?.skillMentions,
+    onSelectedSkillMentionsChange: props.picks?.onSkillMentionsChange,
+    selectedPluginMentions: props.picks?.pluginMentions,
+    onSelectedPluginMentionsChange: props.picks?.onPluginMentionsChange,
+    selectedFileMentions: props.picks?.fileMentions,
+    onSelectedFileMentionsChange: props.picks?.onFileMentionsChange
   });
   const images = useChatComposerImages(props.conversationId);
   const canSend = !images.hasInvalidImages && (
@@ -119,6 +141,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     }
     const fileMentionsToSend = mentions.selectedFileMentions;
     const skillMentionsToSend = mentions.selectedSkillMentions;
+    const pluginMentionsToRestore = mentions.selectedPluginMentions;
     const pendingImagesToSend = images.pendingImages;
     const imageInputs = images.readyImages.map((image): ChatImageInput => ({
       filename: image.filename,
@@ -132,6 +155,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     if (sent === false) {
       mentions.setSelectedFileMentions(fileMentionsToSend);
       mentions.setSelectedSkillMentions(skillMentionsToSend);
+      mentions.setSelectedPluginMentions(pluginMentionsToRestore);
       images.setPendingImages(pendingImagesToSend);
       return;
     }
