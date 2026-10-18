@@ -69,6 +69,15 @@ export interface DeferredWithDependency {
 /** A durable device channel, independent of desktop/phone/machine roles.
  * Presence is separate. Events retain their signed identity across live, mailbox,
  * reconnect and repair paths; transport writes never delete retained events. */
+/** The channel was closed (a shutdown, a reconnect): whoever delivered an
+ *  event offers it again later. */
+export class DeviceEventChannelClosedError extends Error {
+  constructor() {
+    super("The device event channel is closed.");
+    this.name = "DeviceEventChannelClosedError";
+  }
+}
+
 export class DeviceEventChannel {
   private readonly mailbox?: DeviceEventMailbox;
   private inbound: Promise<void> = Promise.resolve();
@@ -436,9 +445,9 @@ export class DeviceEventChannel {
     return { protocol: DEVICE_EVENT_CHANNEL_PROTOCOL, from: this.options.localDeviceId, to: this.options.peerDeviceId, ...body };
   }
 
-  private enqueue(task: () => Promise<void>): Promise<void> {
+  private enqueue<T>(task: () => Promise<T>): Promise<T> {
     const next = this.inbound.then(task);
-    this.inbound = next.catch(() => undefined);
+    this.inbound = next.then(() => undefined, () => undefined);
     return next;
   }
 
@@ -481,31 +490,40 @@ export class DeviceEventChannel {
 
   /**
    * An event the hub's order delivered. Checked like one from the peer (its
-   * own signature, this channel's scope, a chat change also when another of
-   * the owner's machines wrote it), stored once, then applied by the same
-   * drain, so deferral and dependencies behave as before.
+   * own signature, this channel's scope; second-hand only a chat change),
+   * stored once, then applied by the same drain, so deferral and
+   * dependencies behave as before. Once stored the event is this channel's:
+   * an event the drain holds (its own or an earlier one) is retried by the
+   * channel, not by whoever delivered it.
    */
-  receiveFromHub(event: ChatEventEnvelope): Promise<void> {
+  receiveFromHub(event: ChatEventEnvelope): Promise<"stored" | "conflict"> {
     return this.enqueue(async () => {
-      if (this.stopped) return;
-      const originKey = this.originKey(event.originId, event.logScopeId, this.options.peerDeviceId);
+      if (this.stopped) throw new DeviceEventChannelClosedError();
+      const originKey = this.hubOriginKey(event);
       if (!originKey || !this.inScope(event.logScopeId) || !verifySignedChatEvent(event, originKey)) {
         throw new DevicePacketAuthenticationError("Device event signature or channel scope is invalid.");
       }
       const stored = await this.options.storage.appendChatEvent(event, {
         ingress: { deviceId: this.options.peerDeviceId, channelId: this.options.channelId }
       });
-      if (stored.status === "conflict") throw new Error(`Conflicting device event ${event.eventId}.`);
+      if (stored.status === "conflict") return "conflict";
       this.receivePending = true;
-      try { await this.drain(); }
-      catch (error) { throw new DeviceEventProjectionPendingError(error); }
+      await this.drain().catch((error: unknown) => this.report(error instanceof Error ? error : new Error(String(error))));
+      return "stored";
     });
   }
 
   /** True for an event this channel takes from the hub: its scope, and its
    *  author is the peer (or another machine's chat change the peer would forward). */
   accepts(event: ChatEventEnvelope): boolean {
-    return this.inScope(event.logScopeId) && Boolean(this.originKey(event.originId, event.logScopeId, this.options.peerDeviceId));
+    return this.inScope(event.logScopeId) && Boolean(this.hubOriginKey(event));
+  }
+
+  /** Second-hand, only a chat change is accepted, never a command: the rule
+   *  the peer path applies, for the hub's order. */
+  private hubOriginKey(event: ChatEventEnvelope): string | undefined {
+    if (event.originId !== this.options.peerDeviceId && event.kind !== CHAT_CHANGES_EVENT_KIND) return undefined;
+    return this.originKey(event.originId, event.logScopeId, this.options.peerDeviceId);
   }
 
   private async repeatReceipt(receipt: DeviceEventReceipt): Promise<void> {

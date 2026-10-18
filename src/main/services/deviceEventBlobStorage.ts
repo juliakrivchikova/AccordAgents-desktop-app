@@ -151,5 +151,8 @@ function hash(bytes: Uint8Array): string {
 }
 
 function quote(value: string): string {
+  // The sqlite3 shell reads statements line by line and a NUL ends a line:
+  // the rest of the literal would leak into the statement.
+  if (value.includes("\u0000")) throw new Error("A value with a NUL character cannot be stored.");
   return `'${value.replace(/'/g, "''")}'`;
 }

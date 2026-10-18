@@ -53,6 +53,8 @@ function vapidJwt(audience: string, subject: string, privateJwk: JsonWebKey, now
 export class HubPush {
   private timer?: ReturnType<typeof setTimeout>;
   private lastSentAt = 0;
+  /** What arrived since the last ring: the newest position and who wrote. */
+  private window?: { head: number; origins: Set<string> };
 
   constructor(private readonly options: {
     storage: StorageService;
@@ -66,32 +68,43 @@ export class HubPush {
 
   /** New events landed up to `head`, written by `originId`. */
   noteAppended(head: number, originId: string): void {
+    this.window ??= { head, origins: new Set() };
+    this.window.head = Math.max(this.window.head, head);
+    this.window.origins.add(originId);
     if (this.timer) return;
     const now = this.options.now?.() ?? Date.now();
     const wait = Math.max(0, (this.options.minIntervalMs ?? 10_000) - (now - this.lastSentAt));
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      void this.ring(head, originId).catch((error) => this.options.log?.("hub.push.error", { message: error instanceof Error ? error.message : String(error) }));
+      const window = this.window;
+      this.window = undefined;
+      if (window) void this.ring(window.head, window.origins).catch((error) => this.options.log?.("hub.push.error", { message: error instanceof Error ? error.message : String(error) }));
     }, wait);
     this.timer.unref?.();
   }
 
-  private async ring(head: number, originId: string): Promise<void> {
+  private async ring(head: number, origins: Set<string>): Promise<void> {
     const hub = this.options.storage.hub();
     const subscriptions = await hub.pushSubscriptions();
     this.lastSentAt = this.options.now?.() ?? Date.now();
     for (const subscription of subscriptions) {
-      // The phone that wrote the news is not rung for it, nor one that already read it.
-      if (subscription.deviceId === originId || await hub.cursor(subscription.deviceId) >= head) continue;
-      const audience = new URL(subscription.endpoint).origin;
-      const jwt = vapidJwt(audience, this.options.subject, this.options.keys.privateJwk, this.lastSentAt);
-      const response = await (this.options.fetchImpl ?? fetch)(subscription.endpoint, {
-        method: "POST",
-        headers: { TTL: "300", Urgency: "normal", "content-length": "0", Authorization: `vapid t=${jwt}, k=${this.options.keys.publicKey}` },
-        signal: AbortSignal.timeout(5_000)
-      });
-      if (response.status === 404 || response.status === 410) await hub.deletePushSubscription(subscription.deviceId, subscription.endpoint);
-      this.options.log?.("hub.push.sent", { deviceId: subscription.deviceId, status: response.status });
+      // A phone that wrote all of the news is not rung for it, nor one that
+      // already read it.
+      if ((origins.size === 1 && origins.has(subscription.deviceId)) || await hub.cursor(subscription.deviceId) >= head) continue;
+      try {
+        const audience = new URL(subscription.endpoint).origin;
+        const jwt = vapidJwt(audience, this.options.subject, this.options.keys.privateJwk, this.lastSentAt);
+        const response = await (this.options.fetchImpl ?? fetch)(subscription.endpoint, {
+          method: "POST",
+          headers: { TTL: "300", Urgency: "normal", "content-length": "0", Authorization: `vapid t=${jwt}, k=${this.options.keys.publicKey}` },
+          signal: AbortSignal.timeout(5_000)
+        });
+        if (response.status === 404 || response.status === 410) await hub.deletePushSubscription(subscription.deviceId, subscription.endpoint);
+        this.options.log?.("hub.push.sent", { deviceId: subscription.deviceId, status: response.status });
+      } catch (error) {
+        // One push service that does not answer does not keep the others quiet.
+        this.options.log?.("hub.push.error", { deviceId: subscription.deviceId, message: error instanceof Error ? error.message : String(error) });
+      }
     }
   }
 

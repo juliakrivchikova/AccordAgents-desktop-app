@@ -1,27 +1,26 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { signHubRequest, type HubSigningIdentity } from "./hubAuth";
-import type { RelayTunnelMessage, RelayTunnelPeer, RelayTunnelPeerEvent, RelayTunnelRole, RelayTunnelState } from "./relayTunnelClient";
+import type { RelayTunnelEvents as Events, RelayTunnelMessage, RelayTunnelPeer, RelayTunnelPeerEvent, RelayTunnelRole, RelayTunnelState, TunnelClient } from "./relayTunnelClient";
 import type { RelayChunkFrame } from "../../shared/relayProtocol";
+import { HUB_ROOM_REPLACED_CLOSE_CODE, hubWebSocketUrl } from "../../shared/hubProtocol";
 
 interface MinimalWebSocket {
   readyState: number;
   send(data: string): void;
   close(code?: number, reason?: string): void;
-  on(event: "open", listener: () => void): this;
+  terminate(): void;
+  ping(): void;
+  on(event: "open" | "pong", listener: () => void): this;
   on(event: "message", listener: (data: unknown) => void): this;
   on(event: "close", listener: (code: number) => void): this;
   on(event: "error", listener: (error: Error) => void): this;
 }
 const OPEN = 1;
 const WebSocketClient = require("ws") as new (url: string) => MinimalWebSocket;
-
-interface Events {
-  message: [RelayTunnelMessage];
-  state: [RelayTunnelState];
-  peer: [RelayTunnelPeerEvent];
-  error: [Error];
-}
+/** A room link pings this often and is given up when a ping goes unanswered:
+ *  a machine that slept or lost its network must not look connected. */
+const ROOM_PING_MS = 25_000;
 
 /**
  * The same room a relay gave, served by the User's own hub: a device joins a
@@ -29,9 +28,10 @@ interface Events {
  * the hub forwards without keeping. Drop-in for RelayTunnelClient, so the
  * sealing and signing above it do not change.
  */
-export class HubTunnelClient {
+export class HubTunnelClient implements TunnelClient {
   private readonly emitter = new EventEmitter();
   private socket?: MinimalWebSocket;
+  private heartbeat?: ReturnType<typeof setInterval>;
   private state: RelayTunnelState = "idle";
   private closed = false;
   private attempt = 0;
@@ -68,6 +68,8 @@ export class HubTunnelClient {
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
     this.socket?.close(1000, "closed");
     this.socket = undefined;
     this.setState("closed");
@@ -88,12 +90,25 @@ export class HubTunnelClient {
     this.ownId = identity.originId;
     const pathWithQuery = `/v1/room?rid=${encodeURIComponent(this.options.rendezvousId)}&role=${this.options.role}`;
     const auth = signHubRequest(identity, { method: "GET", pathWithQuery });
-    const url = `${this.options.hubUrl.replace(/\/+$/, "").replace(/^http/, "ws")}${pathWithQuery}&auth=${encodeURIComponent(auth)}`;
+    const url = hubWebSocketUrl(this.options.hubUrl, `${pathWithQuery}&auth=${encodeURIComponent(auth)}`);
     const socket = new WebSocketClient(url);
     this.socket = socket;
+    let answered = true;
+    socket.on("pong", () => { answered = true; });
     socket.on("open", () => {
       this.attempt = 0;
       this.setState("connected");
+      if (this.heartbeat) clearInterval(this.heartbeat);
+      this.heartbeat = setInterval(() => {
+        if (this.socket !== socket) return;
+        if (!answered) {
+          socket.terminate();
+          return;
+        }
+        answered = false;
+        try { socket.ping(); } catch { socket.terminate(); }
+      }, ROOM_PING_MS);
+      this.heartbeat.unref?.();
     });
     socket.on("message", (data) => this.handle(data));
     socket.on("error", (error) => {
@@ -102,8 +117,10 @@ export class HubTunnelClient {
     socket.on("close", (code) => {
       if (this.socket !== socket) return;
       this.socket = undefined;
+      if (this.heartbeat) clearInterval(this.heartbeat);
+      this.heartbeat = undefined;
       // Replaced by a newer connection of this device: that one carries on.
-      if (this.closed || code === 4001) {
+      if (this.closed || code === HUB_ROOM_REPLACED_CLOSE_CODE) {
         if (!this.closed) this.setState("closed");
         return;
       }

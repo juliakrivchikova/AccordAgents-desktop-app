@@ -1,4 +1,5 @@
 import { assertMachinePowerHandoff, type MachinePowerHandoff } from "./machinePowerHandoff";
+import { isAcceptableHubUrl } from "./hubProtocol";
 export const MOBILE_PAIRING_VERSION = 1;
 
 /** phone-control: a phone drives this desktop; person-invite: another person
@@ -286,8 +287,8 @@ export function assertMobilePairingPackage(value: unknown, now?: Date): asserts 
   if (typeof value.staticOriginUrl === "string") {
     assertHttpsUrl(value.staticOriginUrl, "staticOriginUrl");
   }
-  if (value.hubUrl !== undefined && (typeof value.hubUrl !== "string" || !/^https?:\/\/[^\s]+$/.test(value.hubUrl))) {
-    throw new Error("Mobile pairing hubUrl must be an http(s) URL.");
+  if (value.hubUrl !== undefined && (typeof value.hubUrl !== "string" || !/^https?:\/\/[^\s]+$/.test(value.hubUrl) || !isAcceptableHubUrl(value.hubUrl))) {
+    throw new Error("Mobile pairing hubUrl must be an https URL (plain http only on this computer).");
   }
   if (value.power !== undefined) {
     assertMachinePowerHandoff(value.power);

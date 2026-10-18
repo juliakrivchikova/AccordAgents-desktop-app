@@ -1025,3 +1025,35 @@ test("a machine's capability recorded at its setup reaches the other machines' r
     link.close();
   }
 });
+
+test("another machine meeting this one in its room does not make it look present or absent", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const pairing = machinePairing("ws://127.0.0.1:1/v1/relay");
+  const record = { id: "machine-presence", name: "Presence", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId, chatChanges: true,
+    createdAt: new Date().toISOString() };
+  const settings = {
+    listMachines: async () => [record], getMachinePairing: async () => pairing,
+    saveMachine: async next => { Object.assign(record, next); return [record]; },
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: "{}", agentEnvironment: [] })
+  };
+  const listeners = new Map();
+  const client = {
+    on(event, listener) { listeners.set(event, [...(listeners.get(event) ?? []), listener]); return () => undefined; },
+    emit(event, payload) { for (const listener of listeners.get(event) ?? []) listener(payload); },
+    currentState: () => "connected", deviceId: () => DESKTOP_ID,
+    async connect() {}, close() {}, async sendCiphertext() { return []; }
+  };
+  const link = new MachineLinkService(settings, { write: async () => undefined }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, createClient: () => client });
+  try {
+    await link.start();
+    const other = "device-" + "f".repeat(32);
+    client.emit("peer", { type: "ready", deviceId: DESKTOP_ID, peerConnected: true, peers: [{ role: "machine", deviceId: other }] });
+    assert.equal(link.isMachineConnected(record.id), false, "another machine is not this one");
+    client.emit("peer", { type: "peer-connected", peer: { role: "machine", deviceId: MACHINE_ID } });
+    assert.equal(link.isMachineConnected(record.id), true);
+    client.emit("peer", { type: "peer-disconnected", peer: { role: "machine", deviceId: other } });
+    assert.equal(link.isMachineConnected(record.id), true, "the other one leaving does not take this one away");
+    client.emit("peer", { type: "peer-disconnected", peer: { role: "machine", deviceId: MACHINE_ID } });
+    assert.equal(link.isMachineConnected(record.id), false);
+  } finally { link.close(); }
+});

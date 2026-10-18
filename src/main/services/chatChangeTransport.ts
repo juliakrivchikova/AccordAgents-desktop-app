@@ -58,16 +58,12 @@ function turnNeverSent(message: ChatMessage | undefined): boolean {
   return message?.metadata?.machineTurnNotSent === true;
 }
 
-export function createChatChangeTransport(options: ChatChangeTransportOptions): ChatChangeTransport {
-  const ownsMessage = (conversation: Conversation, message: ChatMessage): boolean => {
-    if (message.role === "participant" && message.participantId) {
-      if (turnNeverSent(message)) return options.role === "desktop";
-      const home = participantHome(conversation, message.participantId);
-      if (options.role === "desktop") return !home;
-      return Boolean(home) && home === options.hostMachineId?.();
-    }
-    return !remoteAuthor(message);
-  };
+/**
+ * Which device may write what in a chat it receives: the shared fields come
+ * from the desktop, a member's messages from where the member runs. Pure, so
+ * the hub folds by exactly the rules a machine applies.
+ */
+export function createChatChangeApplyPolicy(options: Pick<ChatChangeTransportOptions, "role" | "desktopOriginId" | "hostMachineId" | "machineOriginId">): ChatChangeApplyPolicy {
   const expectedWriter = (conversation: Conversation, message: ChatMessage): string | undefined => {
     if (message.role === "participant" && message.participantId) {
       if (turnNeverSent(message)) return options.role === "machine" ? options.desktopOriginId?.() : undefined;
@@ -79,6 +75,49 @@ export function createChatChangeTransport(options: ChatChangeTransportOptions): 
       return options.role === "machine" ? options.desktopOriginId?.() : undefined;
     }
     return remoteAuthor(message);
+  };
+  const fromDesktop = (originId: string): boolean => options.role === "machine" && originId === options.desktopOriginId?.();
+  return {
+    acceptsConversationFields: fromDesktop,
+    acceptsMessageUpdate: (existing, conversation, originId, incoming) => {
+      const writer = expectedWriter(conversation, existing);
+      if (writer && writer === originId) return true;
+      // The desktop settles a turn it never sent, whatever the bubble
+      // became here meanwhile (swept as interrupted, say).
+      return fromDesktop(originId) && turnNeverSent(incoming) && existing.role === "participant";
+    },
+    acceptsMessageCreate: (message, conversation, originId) => {
+      if (message.role !== "participant") return true;
+      if (!message.participantId) return fromDesktop(originId);
+      // A member's message comes from where it runs, or from the desktop
+      // that dispatches it (the pending bubble of a member on a machine).
+      if (fromDesktop(originId)) return true;
+      const participants = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as ChatParticipant[] : [];
+      if (!participants.some((participant) => participant?.id === message.participantId)) return false;
+      const home = participantHome(conversation, message.participantId);
+      if (!home) return false;
+      if (options.role === "machine" && home === options.hostMachineId?.()) return false;
+      return options.machineOriginId?.(home) === originId;
+    },
+    acceptsMessageRemoval: (existing, conversation, originId) => {
+      if (fromDesktop(originId)) return true;
+      if (!existing) return false;
+      const writer = expectedWriter(conversation, existing);
+      return Boolean(writer) && writer === originId;
+    },
+    holdsUnknownChats: options.role === "machine"
+  };
+}
+
+export function createChatChangeTransport(options: ChatChangeTransportOptions): ChatChangeTransport {
+  const ownsMessage = (conversation: Conversation, message: ChatMessage): boolean => {
+    if (message.role === "participant" && message.participantId) {
+      if (turnNeverSent(message)) return options.role === "desktop";
+      const home = participantHome(conversation, message.participantId);
+      if (options.role === "desktop") return !home;
+      return Boolean(home) && home === options.hostMachineId?.();
+    }
+    return !remoteAuthor(message);
   };
   return {
     hasRecipients: () => options.recipients().length > 0 || options.alwaysEmit?.() === true,
@@ -92,39 +131,7 @@ export function createChatChangeTransport(options: ChatChangeTransportOptions): 
       emitsConversationFields: options.role === "desktop",
       ownsMessage: (message) => ownsMessage(conversation, message)
     }),
-    applyPolicy: (): ChatChangeApplyPolicy => {
-      const fromDesktop = (originId: string): boolean => options.role === "machine" && originId === options.desktopOriginId?.();
-      return {
-        acceptsConversationFields: fromDesktop,
-        acceptsMessageUpdate: (existing, conversation, originId, incoming) => {
-          const writer = expectedWriter(conversation, existing);
-          if (writer && writer === originId) return true;
-          // The desktop settles a turn it never sent, whatever the bubble
-          // became here meanwhile (swept as interrupted, say).
-          return fromDesktop(originId) && turnNeverSent(incoming) && existing.role === "participant";
-        },
-        acceptsMessageCreate: (message, conversation, originId) => {
-          if (message.role !== "participant") return true;
-          if (!message.participantId) return fromDesktop(originId);
-          // A member's message comes from where it runs, or from the desktop
-          // that dispatches it (the pending bubble of a member on a machine).
-          if (fromDesktop(originId)) return true;
-          const participants = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as ChatParticipant[] : [];
-          if (!participants.some((participant) => participant?.id === message.participantId)) return false;
-          const home = participantHome(conversation, message.participantId);
-          if (!home) return false;
-          if (options.role === "machine" && home === options.hostMachineId?.()) return false;
-          return options.machineOriginId?.(home) === originId;
-        },
-        acceptsMessageRemoval: (existing, conversation, originId) => {
-          if (fromDesktop(originId)) return true;
-          if (!existing) return false;
-          const writer = expectedWriter(conversation, existing);
-          return Boolean(writer) && writer === originId;
-        },
-        holdsUnknownChats: options.role === "machine"
-      };
-    },
+    applyPolicy: (): ChatChangeApplyPolicy => createChatChangeApplyPolicy(options),
     dependency: async (payload) => {
       const after = payload.after;
       if (!after || typeof after.originId !== "string" || !Number.isSafeInteger(after.originSeq) || after.originSeq < 1) return undefined;
@@ -186,7 +193,7 @@ export function scheduleChatChangePruning(options: {
     running = true;
     try {
       const cutoff = new Date((options.now?.() ?? Date.now()) - graceMs).toISOString();
-      const pruned = await options.storage.deviceEvents().pruneConfirmedChatChanges(await options.originId(), cutoff, undefined, await options.unpushedAfter?.());
+      const pruned = await options.storage.deviceEvents().pruneConfirmedChatChanges(await options.originId(), cutoff, { keepOwnAfterRowid: await options.unpushedAfter?.() });
       if (pruned.events || pruned.blobs) options.log("chat.changes.pruned", pruned);
     } catch (error) {
       options.log("chat.changes.prune-error", { message: error instanceof Error ? error.message : String(error) });

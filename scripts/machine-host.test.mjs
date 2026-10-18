@@ -643,3 +643,32 @@ test("a phone cannot approve a machine script that runs code; the desktop can, a
   assert.deepEqual(answered, [["pause", true], ["install", false], ["install", true]]);
   assert.equal(published.length, 6, "every decision has a published outcome; the refusal is not retried forever");
 });
+
+test("through the hub two machines name their channel after the pair, never after the room the desktop also uses", async () => {
+  const { MachinePeerFabric } = await import("../dist/main/main/services/machinePeerFabric.js");
+  const home = pairing();
+  const otherRoom = "rv-other-machine";
+  const other = { deviceId: DESKTOP_ID, publicKeyDerBase64: desktopEvents.identity.publicKeyDerBase64, role: "machine", name: "Other",
+    machineId: "machine-2", relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: otherRoom, fingerprint: "F", chatChanges: true };
+  const fabric = (hubMode) => new MachinePeerFabric({
+    ...(hubMode ? { hubMode: true } : {}),
+    selfDeviceId: MACHINE_ID, storage: hostEvents.eventStorage, eventLog: hostEvents.eventLog, home,
+    homeClient: stubClient(), createClient: () => stubClient(), isPeerConnected: () => false,
+    apply: async () => "applied", onError: () => undefined, logger: () => undefined
+  });
+  const viaRelay = fabric(false);
+  await viaRelay.reconcile([other]);
+  const viaHub = fabric(true);
+  await viaHub.reconcile([other]);
+  try {
+    const relayName = viaRelay.roomFor(DESKTOP_ID);
+    const hubName = viaHub.roomFor(DESKTOP_ID);
+    assert.ok([home.rendezvousId, otherRoom].includes(relayName), "through a relay, the room they meet in");
+    assert.ok(hubName.startsWith("pair-"), "through the hub, a name of the pair");
+    assert.notEqual(hubName, home.rendezvousId);
+    assert.notEqual(hubName, otherRoom);
+  } finally {
+    viaRelay.close();
+    viaHub.close();
+  }
+});

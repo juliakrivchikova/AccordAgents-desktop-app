@@ -66,6 +66,11 @@ function sqlString(value: string | undefined | null): string {
   if (value === undefined || value === null) {
     return "NULL";
   }
+  // The sqlite3 shell reads statements line by line and a NUL ends a line:
+  // the rest of the literal would leak into the statement.
+  if (value.includes("\u0000")) {
+    throw new Error("A value with a NUL character cannot be stored.");
+  }
   return `'${value.replace(/'/g, "''")}'`;
 }
 
@@ -347,6 +352,7 @@ const CHAT_COPY_STATE_TABLES = [
 export class StorageService {
   private sqliteSession?: SqliteSession;
   private machineProgressStore?: MachineProgressStore;
+  private hubStorage?: HubStorage;
   private savedMessageStateCache: Map<string, SavedMessageState> | undefined;
   private readonly dbPath: string;
   private readonly sqliteExecutable: string;
@@ -1879,14 +1885,15 @@ export class StorageService {
     return new MachinePowerStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
   }
 
-  /** The hub's own tables (its order, roster, push subscriptions). Only the
-   *  hub process uses them. */
+  /** The hub's tables: on the hub, its order, roster and push subscriptions;
+   *  on a device that uses one, its two cursors and the places it holds. */
   hub(): HubStorage {
-    return new HubStorage({
+    this.hubStorage ??= new HubStorage({
       init: () => this.init(),
       query: <T>(sql: string) => this.queryJson<T>(sql),
       execute: (sql: string) => this.runSql(sql)
     });
+    return this.hubStorage;
   }
 
   deviceEventBlobs(): DeviceEventBlobStorage {

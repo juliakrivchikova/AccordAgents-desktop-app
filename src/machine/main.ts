@@ -35,7 +35,6 @@ import { setCommandDebugLogger } from "../main/services/command";
 import { DebugLogService } from "../main/services/debugLogs";
 import { MachineHostService } from "../main/services/machineHost";
 import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
-import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload } from "../main/services/chatChanges";
 import { ChatActionApplier } from "../main/services/chatActionApplier";
 import { ChatActionEmitter } from "../main/services/chatActionEmitter";
 import { createChatActionEffects } from "../main/services/chatActionEffects";
@@ -54,7 +53,7 @@ import { StorageService } from "../main/services/storage";
 import { UserSkillsService } from "../main/services/userSkills";
 import { ScriptService, handleScriptsOperation } from "../main/services/scripts";
 import { HubTunnelClient } from "../main/services/hubTunnelClient";
-import { HubSync, hubPushedThrough } from "../main/services/hubSync";
+import { HUB_SCOPE_PREFIXES, HubSync, hubChatChangeApplier, hubPushedThrough } from "../main/services/hubSync";
 import { HubClient } from "../main/services/hubClient";
 import { ScriptSecretStore, ScriptStore } from "../main/services/scriptStore";
 import { machineScriptHostPhrase } from "../shared/scripts";
@@ -434,6 +433,11 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     .then((text) => (JSON.parse(text) as { name?: unknown }).name)
     .then((name) => typeof name === "string" && name.trim() ? name.trim() : undefined)
     .catch(() => undefined);
+  const hubUrl = enrollment.hubUrl;
+  const hubRoom = (url: string, rendezvousId: string) => new HubTunnelClient({
+    hubUrl: url, rendezvousId, role: "machine",
+    identity: () => chatEventLogService.getOrCreateDeviceIdentity()
+  });
   const host: MachineHostService = new MachineHostService(chatService, storageService, settingsService, debugLogService, {
     // A signature or a superseded change that arrives here has to become part
     // of this machine's own state, not just a stored event.
@@ -456,16 +460,10 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     pairing: enrollment,
     // With the User's hub, this machine meets its devices in the hub's rooms
     // and its events travel in the hub's order (no relay, no mailbox).
-    ...(enrollment.hubUrl ? {
+    ...(hubUrl ? {
       hubMode: true,
-      createClient: (pairing: MobilePairingPackage) => new HubTunnelClient({
-        hubUrl: enrollment.hubUrl!, rendezvousId: pairing.rendezvousId, role: "machine",
-        identity: () => chatEventLogService.getOrCreateDeviceIdentity()
-      }),
-      createPeerClient: (room: { rendezvousId: string }) => new HubTunnelClient({
-        hubUrl: enrollment.hubUrl!, rendezvousId: room.rendezvousId, role: "machine",
-        identity: () => chatEventLogService.getOrCreateDeviceIdentity()
-      })
+      createClient: (pairing: MobilePairingPackage) => hubRoom(hubUrl, pairing.rendezvousId),
+      createPeerClient: (room: { rendezvousId: string }) => hubRoom(hubUrl, room.rendezvousId)
     } : {}),
     deviceId: identity.originId,
     machineName: args.machineName,
@@ -615,14 +613,9 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     localOriginId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
     trustedKey: async (originId) => host.trustedKey(originId),
     deliver: (event) => host.receiveFromHub(event),
-    apply: async (event) => {
-      if (event.kind !== CHAT_CHANGES_EVENT_KIND) return "ignored";
-      const payload = await storageService.deviceEventBlobs().hydrate(event.payload);
-      if (!isChatChangesPayload(payload)) return "ignored";
-      return (await chatService.applyRemoteChatChanges(event, payload)) === "applied" ? "applied" : "ignored";
-    },
+    applyChatChange: hubChatChangeApplier(storageService, chatService),
     onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString()),
-    scopePrefixes: ["chat-changes:", "device:", CHAT_ACTION_LOG_SCOPE],
+    scopePrefixes: HUB_SCOPE_PREFIXES,
     log: (event, payload) => { void debugLogService.write(event, payload); }
   }) : undefined;
   if (hubSync) {
@@ -667,6 +660,9 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       void debugLogService.write("machine.host-power.shutdown-claim-failed", { message: String(error) });
     }
     await scriptService.stop();
+    // The channels close with the host: nothing is read into them any more,
+    // so nothing read now is lost; it is read again on the next start.
+    hubSync?.pausePulls();
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
     if (hubSync) {
       // What the shutdown itself wrote (interrupted turns) goes up before the

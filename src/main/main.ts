@@ -105,9 +105,10 @@ import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolH
 import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
-import { HubSync, hubPushedThrough } from "./services/hubSync";
+import { HUB_SCOPE_PREFIXES, HubSync, hubChatChangeApplier, hubPushedThrough } from "./services/hubSync";
+import { deviceIdForPublicKey } from "./services/hubAuth";
+import { machineSigningKey } from "../shared/machineLink";
 import { HubTunnelClient } from "./services/hubTunnelClient";
-import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload } from "./services/chatChanges";
 import { ScriptSecretStore, ScriptStore } from "./services/scriptStore";
 import { hostPlatform } from "./platform";
 import {
@@ -414,6 +415,8 @@ let hubSync: HubSync | undefined;
 let hubClient: HubClient | undefined;
 let hubRosterPublish: Promise<void> | undefined;
 let hubRosterAgain = false;
+let hubRosterRetry: ReturnType<typeof setTimeout> | undefined;
+let hubRosterRetryMs = 5_000;
 
 /**
  * Tells the hub which devices are the User's: this desktop and every machine
@@ -428,21 +431,35 @@ function publishHubRoster(): void {
     return;
   }
   const client = hubClient;
+  if (hubRosterRetry) clearTimeout(hubRosterRetry);
+  hubRosterRetry = undefined;
   hubRosterPublish = (async () => {
     const identity = await chatEventLogService.getOrCreateDeviceIdentity();
     const machines = (await settingsService.listMachines()).flatMap((machine) => {
-      const publicKeyDerBase64 = machine.lastHello?.publicKeyDerBase64 ?? machine.devicePublicKeyDerBase64;
-      return machine.deviceId && publicKeyDerBase64
-        ? [{ deviceId: machine.deviceId, publicKeyDerBase64, role: "machine" as const, name: machine.name, machineId: machine.id }]
-        : [];
+      const publicKeyDerBase64 = machineSigningKey(machine);
+      // An entry whose id does not derive from its key would make the hub
+      // refuse the whole list: it is left out, and said so.
+      if (!machine.deviceId || !publicKeyDerBase64) return [];
+      if (deviceIdForPublicKey(publicKeyDerBase64) !== machine.deviceId) {
+        void debugLogService.write("hub.roster.inconsistent-machine", { machineId: machine.id });
+        return [];
+      }
+      return [{ deviceId: machine.deviceId, publicKeyDerBase64, role: "machine" as const, name: machine.name, machineId: machine.id }];
     });
     await client.setRoster([
       { deviceId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64, role: "desktop", name: "This computer" },
       ...machines
     ]);
+    hubRosterRetryMs = 5_000;
     void debugLogService.write("hub.roster.published", { machines: machines.length });
+    hubSync?.nudgeHeld();
   })().catch((error: unknown) => {
-    void debugLogService.write("hub.roster.error", { message: error instanceof Error ? error.message : String(error) });
+    // A machine set up while the hub was away would be refused by it: the
+    // list goes up again until the hub has it.
+    void debugLogService.write("hub.roster.error", { message: error instanceof Error ? error.message : String(error), retryMs: hubRosterRetryMs });
+    hubRosterRetry = setTimeout(() => { hubRosterRetry = undefined; publishHubRoster(); }, hubRosterRetryMs);
+    hubRosterRetry.unref?.();
+    hubRosterRetryMs = Math.min(5 * 60_000, hubRosterRetryMs * 2);
   }).finally(() => {
     hubRosterPublish = undefined;
     if (hubRosterAgain) {
@@ -464,31 +481,38 @@ async function startHubLink(): Promise<void> {
     // Only the User's own devices: its machines and the phones it trusts.
     trustedKey: async (originId) => {
       const machine = (await settingsService.listMachines()).find((item) => item.deviceId === originId);
-      const machineKey = machine?.lastHello?.publicKeyDerBase64 ?? machine?.devicePublicKeyDerBase64;
+      const machineKey = machine ? machineSigningKey(machine) : undefined;
       if (machineKey) return machineKey;
       return (await settingsService.listTrustedDevices()).find((device) => device.deviceId === originId)?.publicKeyDerBase64;
     },
     // A machine's event goes to that machine's channel, which applies it as
-    // if the machine had sent it; the rest (a phone's chat change) here.
-    deliver: async (event) => (await machineLinkService?.receiveFromHub(event)) ?? false,
-    apply: async (event) => {
-      if (event.kind !== CHAT_CHANGES_EVENT_KIND) return "ignored";
-      const payload = await storageService.deviceEventBlobs().hydrate(event.payload);
-      if (!isChatChangesPayload(payload)) return "ignored";
-      return (await chatService.applyRemoteChatChanges(event, payload)) === "applied" ? "applied" : "ignored";
-    },
+    // if the machine had sent it; a phone's chat change is applied here.
+    // Without the machine link (it failed to start) nothing is passed over:
+    // the event is held until it is there.
+    deliver: async (event) => machineLinkService ? machineLinkService.receiveFromHub(event) : "not-ready",
+    applyChatChange: hubChatChangeApplier(storageService, chatService),
     onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString()),
-    // Chat changes, the machines' channels and chat actions; never what this
-    // desktop wrote for the old phone mailbox.
-    scopePrefixes: ["chat-changes:", "device:", CHAT_ACTION_LOG_SCOPE],
+    scopePrefixes: HUB_SCOPE_PREFIXES,
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
   // Whatever this desktop writes (a chat change, an action, a command for a
   // machine) goes up at once.
   chatEventLogService.onLocalAppend(() => hubSync?.nudgePush());
-  hubSync.start();
+  // After sleep the live link may be dead without knowing it: catch up now.
+  powerMonitor.on("resume", () => {
+    hubSync?.nudgePush();
+    hubSync?.nudgePull();
+  });
   publishHubRoster();
+  // Reading starts once the machines' channels exist (startHubReading), so
+  // nothing a machine wrote meanwhile arrives before its channel does.
   void debugLogService.write("hub.link.started", { url: config.url });
+}
+
+/** The hub link reads from here on: called once the machine link is up (or
+ *  could not start). */
+function startHubReading(): void {
+  hubSync?.start();
 }
 
 /** The AWS instance a worker target names (its host key alias carries it). */
@@ -3833,13 +3857,18 @@ void app.whenReady().then(async () => {
     machineLinkService = new MachineLinkService(settingsService, debugLogService, {
       // With the User's hub, machines are met in its rooms and their events
       // travel in its order.
+      // A machine enrolled with the hub is met in its rooms; one enrolled
+      // with the relay keeps the relay until it is moved.
       ...(hubConfig ? {
         hubMode: true,
-        onDevicesChanged: () => publishHubRoster(),
-        createClient: (pairing: MobilePairingPackage) => new HubTunnelClient({
-          hubUrl: hubConfig.url, rendezvousId: pairing.rendezvousId, role: "desktop",
+        onDevicesChanged: () => {
+          publishHubRoster();
+          hubSync?.nudgeHeld();
+        },
+        createClient: (pairing: MobilePairingPackage) => pairing.hubUrl ? new HubTunnelClient({
+          hubUrl: pairing.hubUrl, rendezvousId: pairing.rendezvousId, role: "desktop",
           identity: () => chatEventLogService.getOrCreateDeviceIdentity()
-        })
+        }) : undefined
       } : {}),
       chatActions: chatActionApplier,
       repositoryPaths: (sourcePath) => cloudRunPreparation.repositoryPaths(sourcePath),
@@ -3903,7 +3932,6 @@ void app.whenReady().then(async () => {
       recipients: () => machineLinkService?.chatChangeRecipients() ?? [],
       onCommitted: () => {
         machineLinkService?.nudgeEventChannels();
-        hubSync?.nudgePush();
       },
       machineOriginId: (machineId) => machineLinkService?.machineDeviceId(machineId),
       alwaysEmit: () => Boolean(hubSync)
@@ -4096,7 +4124,11 @@ void app.whenReady().then(async () => {
     const autoUpgradeTimer = setInterval(() => { if (autoUpgrade.hasWaiting()) void autoUpgrade.evaluate(); }, ACTIVITY_RECHECK_MS);
     autoUpgradeTimer.unref?.();
     machineLinkStartedAt = Date.now();
-    void machineLinkService.start().then(() => autoUpgrade.evaluate()).catch((error) => {
+    void machineLinkService.start().then(() => {
+      startHubReading();
+      return autoUpgrade.evaluate();
+    }).catch((error) => {
+      startHubReading();
       void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });
     });
     // While a machine stays away, this desktop keeps every chat change for it.
@@ -4122,6 +4154,7 @@ void app.whenReady().then(async () => {
     link.onHello((event) => withdrawMachineInactivityQuestion(event.machineId));
   } catch (error) {
     void debugLogService.write("machine-link.init.error", { message: error instanceof Error ? error.message : String(error) });
+    startHubReading();
   }
   // After the machines are known: what these save or re-emit is addressed to them.
   void recoverLocalChoiceActions().catch(error => {

@@ -624,6 +624,12 @@ export interface AnswerMachineInactivityRequest {
 
 /** An enrolled machine as the desktop stores it. The pairing package carries
  *  the relay room, the seal key, and the capability fingerprint. */
+/** The key a machine signs with: from its hello, or recorded at setup
+ *  before it first connected. */
+export function machineSigningKey(record: Pick<MachineRecord, "lastHello" | "devicePublicKeyDerBase64">): string | undefined {
+  return record.lastHello?.publicKeyDerBase64 ?? record.devicePublicKeyDerBase64;
+}
+
 export interface MachineRecord {
   id: string;
   name: string;

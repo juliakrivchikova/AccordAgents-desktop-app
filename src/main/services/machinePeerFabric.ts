@@ -18,7 +18,7 @@
  * A device that is not in the roster gets no channel, so its packets are
  * dropped before any signature or command is considered.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { stableJson } from "../../shared/stableJson";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { DeviceEventApplyOutcome } from "../../shared/deviceEventDelivery";
@@ -29,6 +29,7 @@ import type { TrustedPeerAccess } from "../../shared/machineTrust";
 import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
 import type { ChatEventLogService } from "./chatEventLog";
 import type { TunnelClient } from "./relayTunnelClient";
+import { deliverToChannel, type HubDeliverOutcome } from "./hubSync";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
 import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
 import type { StorageService } from "./storage";
@@ -66,18 +67,9 @@ interface PeerConnection {
 
 export class MachinePeerFabric {
   private readonly connections = new Map<string, PeerConnection>();
-
-  /** Hands an event from the hub's order to the channel of the peer that wrote it. */
-  async receiveFromHub(event: import("../../shared/chatEvents").ChatEventEnvelope): Promise<boolean> {
-    for (const connection of this.connections.values()) {
-      if (connection.channel.accepts(event)) {
-        await connection.channel.receiveFromHub(event);
-        return true;
-      }
-    }
-    return false;
-  }
   private readonly rooms = new Map<string, TunnelClient>();
+  /** The roster's devices, including those whose channel is being set up. */
+  private wanted = new Map<string, TrustedPeerAccess>();
   private started = false;
   private shareTimer?: ReturnType<typeof setInterval>;
   private sharing?: Promise<void>;
@@ -148,6 +140,7 @@ export class MachinePeerFabric {
    */
   async reconcile(peers: readonly TrustedPeerAccess[]): Promise<void> {
     const wanted = new Map(peers.filter((peer) => peer.deviceId !== this.options.selfDeviceId).map((peer) => [peer.deviceId, peer]));
+    this.wanted = wanted;
     for (const [deviceId, connection] of this.connections) {
       if (!wanted.has(deviceId) || stableJson(wanted.get(deviceId)) !== stableJson(connection.peer)) {
         connection.channel.close();
@@ -282,14 +275,37 @@ export class MachinePeerFabric {
    * device id — otherwise each would speak in its own room and neither would
    * recognise the other's scope.
    */
-  private channelIdFor(peer: TrustedPeerAccess): string {
+  private meetingRoomFor(peer: TrustedPeerAccess): string {
     if (peer.role !== "machine") return this.options.home.rendezvousId;
     return this.options.selfDeviceId < peer.deviceId ? this.options.home.rendezvousId : peer.rendezvousId;
   }
 
+  /**
+   * The name of this pair's events. Through a relay it is the room they meet
+   * in, since the relay delivers by address. The hub's order reaches every
+   * device, so there two pairs must never share a name: the room of a
+   * machine also names its channel with the desktop, and a channel of two
+   * machines named after it would take the desktop's traffic as its own.
+   */
+  private channelIdFor(peer: TrustedPeerAccess): string {
+    if (!this.options.hubMode) return this.meetingRoomFor(peer);
+    const [first, second] = [this.options.selfDeviceId, peer.deviceId].sort();
+    return `pair-${createHash("sha256").update(`${first}\n${second}`).digest("hex").slice(0, 32)}`;
+  }
+
+  /** Hands an event from the hub's order to the channel of the peer that
+   *  wrote it; a peer on the roster whose channel is still being set up has
+   *  the event held for it. */
+  async receiveFromHub(event: ChatEventEnvelope): Promise<HubDeliverOutcome> {
+    for (const connection of this.connections.values()) {
+      if (connection.channel.accepts(event)) return deliverToChannel(connection.channel, event);
+    }
+    return this.wanted.has(event.originId) && !this.connections.has(event.originId) ? "not-ready" : "not-mine";
+  }
+
   /** The room, sealing key and capability a peer is met with. */
   private async meetingRoom(peer: TrustedPeerAccess): Promise<{ rendezvousId: string; relayUrl: string; sealKeyBase64: string; fingerprint?: string; here: boolean }> {
-    const room = this.channelIdFor(peer);
+    const room = this.meetingRoomFor(peer);
     const here = room === this.options.home.rendezvousId;
     return {
       rendezvousId: room,

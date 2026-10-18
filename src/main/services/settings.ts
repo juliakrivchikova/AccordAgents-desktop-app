@@ -111,6 +111,7 @@ import { CLI_PROVIDER_SETUP, preferredReadyAssistantProviderKind } from "../../s
 import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import { readCrashReportsChoice, writeCrashReportsChoice } from "./crashReportPreferences";
+import { isAcceptableHubUrl } from "../../shared/hubProtocol";
 
 type StoredProviderSettings = ProviderSettings & {
   encryptedApiKey?: string;
@@ -188,11 +189,11 @@ interface StoredSettings {
    *  up before the switch existed keeps working. Shared with machines in the
    *  settings snapshot: the machine's runtime is what decides to stop. */
   machineAutoStopEnabled?: boolean;
-  /** The User's own server (hub), once it is set up. */
-  hub?: { url: string; hubId?: string };
   /** When the User last changed the switch: a machine's report older than
    *  this predates the change and says nothing about whether it arrived. */
   machineAutoStopChangedAt?: string;
+  /** The User's own server (hub), once it is set up. */
+  hub?: { url: string; hubId?: string };
   /** Who holds a copy of the phone's start key. Records only, never the
    *  secret, and never sent to a machine: they name the User's devices. */
   machinePowerHandoffs?: MachinePowerHandoffRecord[];
@@ -3566,17 +3567,19 @@ export class SettingsService {
     return this.readMachinePairings(stored)[pairingKey];
   }
 
-  /** Whether the User left automatic stop on; the stop key is separate. */
   /** The hub this desktop syncs with. `ACCORDAGENTS_HUB_URL` points a local
-   *  run at a test hub. */
+   *  run at a test hub. An address that is neither HTTPS nor on this
+   *  computer is not used. */
   async getHubConfig(): Promise<{ url: string; hubId?: string } | undefined> {
     const override = process.env.ACCORDAGENTS_HUB_URL?.trim();
-    if (override) return { url: override };
+    if (override) return isAcceptableHubUrl(override) ? { url: override } : undefined;
     const stored = (await this.readStored()).hub;
-    return stored && typeof stored.url === "string" && stored.url ? stored : undefined;
+    return stored && typeof stored.url === "string" && isAcceptableHubUrl(stored.url) ? stored : undefined;
   }
 
+  /** Setup writes this once the User's hub answers (the hub setup flow). */
   async saveHubConfig(config: { url: string; hubId?: string } | undefined): Promise<void> {
+    if (config && !isAcceptableHubUrl(config.url)) throw new Error("A hub is reached over HTTPS.");
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
     if (config) stored.hub = { url: config.url, ...(config.hubId ? { hubId: config.hubId } : {}) };
@@ -3584,6 +3587,7 @@ export class SettingsService {
     await this.writeStored(stored, true);
   }
 
+  /** Whether the User left automatic stop on; the stop key is separate. */
   async getMachineAutoStopEnabled(): Promise<boolean> {
     const stored = await this.readStored();
     // An unreadable file is not a switch left on: the machine must not stop

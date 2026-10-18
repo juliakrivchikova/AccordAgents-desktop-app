@@ -11,6 +11,8 @@ export const HUB_SCHEMA_SQL = `
     kind text not null,
     accepted_at text not null
   );
+  -- Folding reads one chat's changes from a position.
+  create index if not exists hub_log_conversation on hub_log(conversation_id, kind, hub_seq);
   create table if not exists hub_devices (
     device_id text primary key,
     public_key text not null,
@@ -40,7 +42,26 @@ export const HUB_SCHEMA_SQL = `
     key text primary key,
     value text not null
   );
+  -- On a device: places in the order it read but could not take yet (an
+  -- author it does not know yet, a channel not set up yet, a chat it does
+  -- not hold yet). Read again from the hub until taken.
+  create table if not exists hub_client_held (
+    hub_seq integer primary key,
+    event_id text not null,
+    origin_id text not null,
+    reason text not null,
+    held_at text not null
+  );
 `;
+
+/** A held place in the order, as the device keeps it. */
+export interface HubHeldEvent {
+  hubSeq: number;
+  eventId: string;
+  originId: string;
+  reason: string;
+  heldAt: string;
+}
 
 interface Database {
   init(): Promise<void>;
@@ -50,6 +71,8 @@ interface Database {
 
 /** One pull reads at most this much envelope JSON. */
 const PULL_PAGE_BYTES = 4 * 1024 * 1024;
+/** No page of the hub's tables is longer than this. */
+const HUB_STORAGE_PAGE_MAX = 1000;
 
 export class HubStorage {
   private ready?: Promise<void>;
@@ -69,18 +92,30 @@ export class HubStorage {
     }
   }
 
-  /** Gives an accepted event its place in the order (once; a repeat keeps the first). */
-  async log(event: ChatEventEnvelope, acceptedAt: string): Promise<number> {
+  /** Gives accepted events their places in the order, in the order given
+   *  (once each; a repeat keeps the first). `placed` says whether this call
+   *  gave the place. */
+  async logMany(events: ChatEventEnvelope[], acceptedAt: string): Promise<Map<string, { hubSeq: number; placed: boolean }>> {
+    const places = new Map<string, { hubSeq: number; placed: boolean }>();
+    if (events.length === 0) return places;
     await this.init();
-    const rows = await this.database.query<{ hubSeq: number }>(`
-      insert into hub_log(event_id, origin_id, conversation_id, kind, accepted_at)
-        select ${quote(event.eventId)}, ${quote(event.originId)}, ${quote(event.conversationId)}, ${quote(event.kind)}, ${quote(acceptedAt)}
-        where not exists (select 1 from hub_log where event_id = ${quote(event.eventId)});
-      select hub_seq as hubSeq from hub_log where event_id = ${quote(event.eventId)};
+    const ids = events.map((event) => quote(event.eventId)).join(", ");
+    const before = new Set((await this.database.query<{ eventId: string }>(`select event_id as eventId from hub_log where event_id in (${ids});`)).map((row) => row.eventId));
+    const rows = await this.database.query<{ eventId: string; hubSeq: number }>(`
+      begin immediate;
+      ${events.filter((event) => !before.has(event.eventId)).map((event) => `
+        insert into hub_log(event_id, origin_id, conversation_id, kind, accepted_at)
+          select ${quote(event.eventId)}, ${quote(event.originId)}, ${quote(event.conversationId)}, ${quote(event.kind)}, ${quote(acceptedAt)}
+          where not exists (select 1 from hub_log where event_id = ${quote(event.eventId)});`).join("")}
+      commit;
+      select event_id as eventId, hub_seq as hubSeq from hub_log where event_id in (${ids});
     `);
-    const hubSeq = Number(rows[0]?.hubSeq);
-    if (!Number.isSafeInteger(hubSeq) || hubSeq < 1) throw new Error("The hub could not place an accepted event.");
-    return hubSeq;
+    for (const row of rows) {
+      const hubSeq = Number(row.hubSeq);
+      if (!Number.isSafeInteger(hubSeq) || hubSeq < 1) throw new Error("The hub could not place an accepted event.");
+      places.set(row.eventId, { hubSeq, placed: !before.has(row.eventId) });
+    }
+    return places;
   }
 
   /** Where a chain stood in the desktop's first copy of the chats: the hub
@@ -101,31 +136,50 @@ export class HubStorage {
     return Number(rows[0]?.head ?? 0) || 0;
   }
 
-  /** Events after `afterSeq`, in the hub's order, bounded by count and bytes. */
-  async pull(afterSeq: number, limit: number): Promise<HubLoggedEvent[]> {
+  /**
+   * Events after `afterSeq`, in the hub's order, bounded by count and bytes;
+   * without those `skipOriginId` wrote (a device does not read its own back).
+   * `through` is how far the page covers, skipped events included.
+   */
+  async pull(afterSeq: number, limit: number, skipOriginId?: string): Promise<{ events: HubLoggedEvent[]; through: number }> {
     await this.init();
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("Invalid hub position.");
+    const count = Math.max(1, Math.min(limit, HUB_STORAGE_PAGE_MAX));
+    // Read up to where the order stood when the page began: a later event
+    // is never jumped over by `through`.
+    const head = await this.head();
+    const skip = skipOriginId ? `and origin_id != ${quote(skipOriginId)}` : "";
+    const places = (await this.database.query<{ hubSeq: number }>(`
+      select hub_seq as hubSeq from hub_log
+      where hub_seq > ${afterSeq} and hub_seq <= ${head} ${skip}
+      order by hub_seq limit ${count};
+    `)).map((row) => Number(row.hubSeq));
+    if (places.length === 0) return { events: [], through: Math.max(afterSeq, head) };
     const rows = await this.database.query<{ hubSeq: number; envelope: string }>(`
       with page as (
         select l.hub_seq as hubSeq, e.envelope_json as envelope,
           sum(length(cast(e.envelope_json as blob))) over (order by l.hub_seq) as bytes,
           row_number() over (order by l.hub_seq) as ordinal
         from hub_log l join chat_events e on e.event_id = l.event_id
-        where l.hub_seq > ${afterSeq}
-        order by l.hub_seq limit ${Math.max(1, Math.min(limit, 1000))}
+        where l.hub_seq in (${places.join(", ")})
       ) select hubSeq, envelope from page where bytes <= ${PULL_PAGE_BYTES} or ordinal = 1 order by hubSeq;
     `);
-    return rows.map((row) => ({ hubSeq: Number(row.hubSeq), event: JSON.parse(row.envelope) as ChatEventEnvelope }));
+    const events = rows.map((row) => ({ hubSeq: Number(row.hubSeq), event: JSON.parse(row.envelope) as ChatEventEnvelope }));
+    // A whole short page covers everything up to the head; a full or
+    // byte-cut one stops at its last event.
+    const complete = places.length < count && events.length === places.length;
+    const last = events.length > 0 ? events[events.length - 1].hubSeq : places[places.length - 1];
+    return { events, through: complete ? head : last };
   }
 
-  /** Accepted events of one chat after a position, for folding. */
-  async conversationEvents(conversationId: string, afterSeq: number, limit: number): Promise<HubLoggedEvent[]> {
+  /** One chat's accepted changes of `kind` after a position, for folding. */
+  async conversationEvents(conversationId: string, kind: string, afterSeq: number, limit: number): Promise<HubLoggedEvent[]> {
     await this.init();
     const rows = await this.database.query<{ hubSeq: number; envelope: string }>(`
       select l.hub_seq as hubSeq, e.envelope_json as envelope
       from hub_log l join chat_events e on e.event_id = l.event_id
-      where l.conversation_id = ${quote(conversationId)} and l.hub_seq > ${afterSeq}
-      order by l.hub_seq limit ${Math.max(1, Math.min(limit, 1000))};
+      where l.conversation_id = ${quote(conversationId)} and l.kind = ${quote(kind)} and l.hub_seq > ${afterSeq}
+      order by l.hub_seq limit ${Math.max(1, Math.min(limit, HUB_STORAGE_PAGE_MAX))};
     `);
     return rows.map((row) => ({ hubSeq: Number(row.hubSeq), event: JSON.parse(row.envelope) as ChatEventEnvelope }));
   }
@@ -144,12 +198,13 @@ export class HubStorage {
     `);
   }
 
-  /** Chats with accepted events not yet folded. */
-  async unfoldedConversations(): Promise<string[]> {
+  /** Chats with accepted changes of `kind` not yet folded. */
+  async unfoldedConversations(kind: string): Promise<string[]> {
     await this.init();
     const rows = await this.database.query<{ conversationId: string }>(`
       select l.conversation_id as conversationId from hub_log l
       left join hub_fold_state f on f.conversation_id = l.conversation_id
+      where l.kind = ${quote(kind)}
       group by l.conversation_id
       having max(l.hub_seq) > coalesce(max(f.hub_seq), 0);
     `);
@@ -217,10 +272,16 @@ export class HubStorage {
     const scopes = scopePrefixes?.length
       ? `and (${scopePrefixes.map((prefix) => `substr(log_scope_id, 1, ${prefix.length}) = ${quote(prefix)}`).join(" or ")})`
       : "";
+    // The rowids first, the envelopes after: sorting whole envelopes to keep
+    // a hundred of them took seconds on a desktop's real log.
     const rows = await this.database.query<{ rowid: number; envelope: string }>(`
       select rowid, envelope_json as envelope from chat_events
-      where origin_id = ${quote(originId)} and rowid > ${afterRowid} ${scopes}
-      order by rowid limit ${Math.max(1, Math.min(limit, 500))};
+      where rowid in (
+        select rowid from chat_events
+        where origin_id = ${quote(originId)} and rowid > ${Math.max(0, Math.floor(afterRowid))} ${scopes}
+        order by rowid limit ${Math.max(1, Math.min(limit, HUB_STORAGE_PAGE_MAX))}
+      )
+      order by rowid;
     `);
     return rows.map((row) => ({ rowid: Number(row.rowid), event: JSON.parse(row.envelope) as ChatEventEnvelope }));
   }
@@ -231,9 +292,54 @@ export class HubStorage {
     const rows = await this.database.query<{ envelope: string }>(`
       select envelope_json as envelope from chat_events
       where origin_id = ${quote(originId)} and log_scope_id = ${quote(logScopeId)} and origin_seq >= ${fromSeq}
-      order by origin_seq limit ${Math.max(1, Math.min(limit, 500))};
+      order by origin_seq limit ${Math.max(1, Math.min(limit, HUB_STORAGE_PAGE_MAX))};
     `);
     return rows.map((row) => JSON.parse(row.envelope) as ChatEventEnvelope);
+  }
+
+  async holdEvent(held: HubHeldEvent): Promise<void> {
+    await this.init();
+    await this.database.execute(`
+      insert into hub_client_held(hub_seq, event_id, origin_id, reason, held_at)
+        values (${held.hubSeq}, ${quote(held.eventId)}, ${quote(held.originId)}, ${quote(held.reason)}, ${quote(held.heldAt)})
+      on conflict(hub_seq) do update set reason = excluded.reason;
+    `);
+  }
+
+  async heldEvents(limit: number): Promise<HubHeldEvent[]> {
+    await this.init();
+    const rows = await this.database.query<HubHeldEvent>(`
+      select hub_seq as hubSeq, event_id as eventId, origin_id as originId, reason, held_at as heldAt
+      from hub_client_held order by hub_seq limit ${Math.max(1, Math.min(limit, HUB_STORAGE_PAGE_MAX))};
+    `);
+    return rows.map((row) => ({ ...row, hubSeq: Number(row.hubSeq) }));
+  }
+
+  async releaseHeld(hubSeq: number): Promise<void> {
+    await this.init();
+    await this.database.execute(`delete from hub_client_held where hub_seq = ${Math.floor(hubSeq)};`);
+  }
+
+  /** Forgets places held since before `beforeIso` (their author is gone). */
+  async dropHeldBefore(beforeIso: string): Promise<number> {
+    await this.init();
+    const rows = await this.database.query<{ dropped: number }>(`
+      delete from hub_client_held where held_at < ${quote(beforeIso)};
+      select changes() as dropped;
+    `);
+    return Number(rows[0]?.dropped ?? 0) || 0;
+  }
+
+  /** On the hub: a body still being uploaded gets this fragment, replacing
+   *  a different one (a complete, verified body is never touched). */
+  async replaceBlobFragment(blobHash: string, index: number, byteLength: number, fragments: number): Promise<void> {
+    await this.init();
+    await this.database.execute(`
+      begin immediate;
+      delete from device_event_blob_fragments where blob_hash = ${quote(blobHash)} and fragment_index = ${Math.floor(index)};
+      update device_event_blobs set byte_length = ${Math.floor(byteLength)}, fragments = ${Math.floor(fragments)} where blob_hash = ${quote(blobHash)};
+      commit;
+    `);
   }
 
   /** The hub holds these events now: every device they waited for is served
@@ -244,7 +350,7 @@ export class HubStorage {
     await this.database.execute(`
       update device_event_outbox set acknowledged_at = coalesce(acknowledged_at, ${quote(at)}), outcome = coalesce(outcome, 'applied')
       where event_id in (${eventIds.map(quote).join(", ")});
-    `).catch(() => undefined);
+    `);
   }
 
   async savePushSubscription(deviceId: string, endpoint: string, subscriptionJson: string, now: string): Promise<void> {
@@ -270,7 +376,7 @@ export class HubStorage {
     await this.init();
     await this.database.execute(`
       insert into hub_device_cursors(device_id, hub_seq, updated_at) values (${quote(deviceId)}, ${hubSeq}, ${quote(now)})
-      on conflict(device_id) do update set hub_seq = max(hub_seq, excluded.hub_seq), updated_at = excluded.updated_at;
+      on conflict(device_id) do update set hub_seq = excluded.hub_seq, updated_at = excluded.updated_at;
     `);
   }
 
@@ -282,5 +388,8 @@ export class HubStorage {
 }
 
 function quote(value: string): string {
+  // The sqlite3 shell reads statements line by line and a NUL ends a line:
+  // the rest of the literal would leak into the statement.
+  if (value.includes("\u0000")) throw new Error("A value with a NUL character cannot be stored.");
   return `'${value.replace(/'/g, "''")}'`;
 }

@@ -149,9 +149,9 @@ test("with the hub, own chat changes it has not received are kept, and forgotten
     const own = await storage.hub().ownEventsAfter(originId, 0, 10);
     assert.equal(own.length, 3);
     // Nothing pushed yet: all kept, although no recipient is waiting.
-    assert.deepEqual(await storage.deviceEvents().pruneConfirmedChatChanges(originId, FUTURE, undefined, 0), { events: 0, blobs: 0 });
+    assert.deepEqual(await storage.deviceEvents().pruneConfirmedChatChanges(originId, FUTURE, { keepOwnAfterRowid: 0 }), { events: 0, blobs: 0 });
     // The hub holds the first: that one may go; the second has not reached it.
-    assert.deepEqual(await storage.deviceEvents().pruneConfirmedChatChanges(originId, FUTURE, undefined, own[0].rowid), { events: 1, blobs: 0 });
+    assert.deepEqual(await storage.deviceEvents().pruneConfirmedChatChanges(originId, FUTURE, { keepOwnAfterRowid: own[0].rowid }), { events: 1, blobs: 0 });
     assert.equal((await storage.listChatEvents("chat-1", chatChangesLogScope("chat-1"))).length, 2);
   } finally {
     await rm(directory, { recursive: true, force: true });

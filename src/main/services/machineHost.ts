@@ -34,6 +34,7 @@ import { openMobileRelayPayload } from "./mobileRelaySealing";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
 import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
 import { RelayTunnelClient, type TunnelClient } from "./relayTunnelClient";
+import { deliverToChannel, type HubDeliverOutcome } from "./hubSync";
 import { MachinePeerFabric } from "./machinePeerFabric";
 import { MachineTrustStore } from "./machineTrustStore";
 import { signMachineControl, verifyMachineControl, machineControlSender } from "./machineControlAuthentication";
@@ -73,7 +74,7 @@ export interface MachineHostOptions {
    *  A command that arrives then stays in the durable inbox rather than being
    *  started into an instance that is going away or failed as a turn. */
   hostStopCommitted?: () => boolean;
-  /** Test seam: opens a connection to another device's room. */
+  /** Opens a connection to another device's room (the hub's rooms, a test stand-in). */
   createPeerClient?: (room: { relayUrl: string; rendezvousId: string; sealKeyBase64: string; fingerprint?: string; deviceId: string }) => TunnelClient;
   pairing: MobilePairingPackage;
   deviceId: string;
@@ -296,12 +297,11 @@ export class MachineHostService {
   /** An event the hub's order brought: to the desktop's channel when the
    *  desktop (or a machine's chat change it would forward) wrote it, else to
    *  the channel of the peer that did. */
-  async receiveFromHub(event: ChatEventEnvelope): Promise<boolean> {
+  /** An event the hub's order brought: to the owner's channel, or to the
+   *  channel of another of the owner's devices. */
+  async receiveFromHub(event: ChatEventEnvelope): Promise<HubDeliverOutcome> {
     await this.initializeOwnerChannel();
-    if (this.eventChannel?.accepts(event)) {
-      await this.eventChannel.receiveFromHub(event);
-      return true;
-    }
+    if (this.eventChannel?.accepts(event)) return deliverToChannel(this.eventChannel, event);
     return this.peers.receiveFromHub(event);
   }
 
@@ -381,7 +381,7 @@ export class MachineHostService {
     this.loadOutbox();
     const pairing = options.pairing;
     if (!pairing.relayUrl && !pairing.hubUrl) {
-      throw new Error("Machine enrollment has no relay URL.");
+      throw new Error("Machine enrollment names neither a relay nor a hub.");
     }
     this.client = options.createClient?.(pairing) ?? new RelayTunnelClient({
       relayUrl: pairing.relayUrl ?? "",

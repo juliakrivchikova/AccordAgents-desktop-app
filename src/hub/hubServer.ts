@@ -5,14 +5,20 @@ import path from "node:path";
 import type { Duplex } from "node:stream";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import {
+  HUB_AUTH_MAX_SKEW_MS,
   HUB_MAX_BODY_BYTES,
+  HUB_MAX_SMALL_BODY_BYTES,
   HUB_PROTOCOL_VERSION,
+  HUB_ROOM_MAX_MESSAGE_BYTES,
+  HUB_ROOM_REPLACED_CLOSE_CODE,
+  HUB_ROSTER_ROLES,
+  hubRoomRole,
   type HubDevice,
   type HubHealth,
   type HubLiveHead,
   type HubRosterRequest
 } from "../shared/hubProtocol";
-import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, verifyHubRequest } from "../main/services/hubAuth";
+import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, verifyHubRequest, type ParsedHubAuthorization } from "../main/services/hubAuth";
 import type { ChatSearchService } from "../main/services/chatSearch";
 import type { StorageService } from "../main/services/storage";
 import { HubRequestError, type HubLog } from "./hubLog";
@@ -37,12 +43,25 @@ const BLOB_PATH = /^\/v1\/blobs\/(sha256:[0-9a-f]{64})$/;
 interface LiveSocket {
   readonly readyState: number;
   readonly OPEN: number;
+  readonly bufferedAmount: number;
   send(data: string): void;
   close(code?: number, reason?: string): void;
   terminate(): void;
-  on(event: "close" | "error", listener: () => void): void;
+  ping(): void;
+  on(event: "close" | "error" | "pong", listener: () => void): void;
   on(event: "message", listener: (data: unknown) => void): void;
 }
+
+/** A socket that did not answer the last ping by the next one is dead (a
+ *  laptop that slept, a phone that lost its network) and is closed. */
+const HEARTBEAT_MS = 30_000;
+/** A device that cannot keep up with its room is disconnected rather than
+ *  buffered without end; it reconnects and continues. */
+const ROOM_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+/** Requests slower than this are logged; the rest only count. */
+const SLOW_REQUEST_MS = 500;
+/** Search text and cursors are plain text. */
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 
 /** One device in a room: the live, unstored path for messages that only
  *  matter while both ends are there (greetings, requests answered at once). */
@@ -53,7 +72,6 @@ interface RoomMember {
 }
 
 const ROOM_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-const ROOM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 interface LiveSocketServer {
   handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer, done: (socket: LiveSocket) => void): void;
 }
@@ -61,14 +79,18 @@ const { WebSocketServer } = require("ws") as { WebSocketServer: new (options: { 
 
 /**
  * The hub's HTTP surface. Every route but the health check and the VAPID key
- * is signed by a device on the roster; the live socket only says where the
- * order's head is, and devices read the rest over HTTP.
+ * is signed by a device on the roster. The live socket only says where the
+ * order's head is, and devices read the rest over HTTP; rooms forward live
+ * messages between the User's devices without keeping them.
  */
 export class HubServer {
   private readonly nonces = new HubNonceCache();
-  private readonly live = new Set<LiveSocket>();
+  /** Live head sockets and the device each one belongs to. */
+  private readonly live = new Map<LiveSocket, string>();
   private readonly sockets: LiveSocketServer = new WebSocketServer({ noServer: true, maxPayload: 1024 });
-  private readonly roomSockets: LiveSocketServer = new WebSocketServer({ noServer: true, maxPayload: ROOM_MAX_MESSAGE_BYTES });
+  private readonly roomSockets: LiveSocketServer = new WebSocketServer({ noServer: true, maxPayload: HUB_ROOM_MAX_MESSAGE_BYTES });
+  private readonly answered = new WeakSet<LiveSocket>();
+  private heartbeat?: ReturnType<typeof setInterval>;
   private readonly rooms = new Map<string, Map<string, RoomMember>>();
   private servers: Server[] = [];
   private roster?: Promise<Map<string, HubDevice>>;
@@ -76,7 +98,7 @@ export class HubServer {
 
   constructor(private readonly options: HubServerOptions) {
     this.now = options.now ?? Date.now;
-    options.log.onAppended((head) => this.broadcastHead(head));
+    options.log.onAppended(({ head }) => this.broadcastHead(head));
   }
 
   /** The roster changed (or may have): read it again on the next request. */
@@ -139,6 +161,8 @@ export class HubServer {
   }
 
   private listen(server: Server, port: number, host?: string): Promise<Server> {
+    this.heartbeat ??= setInterval(() => this.beat(), HEARTBEAT_MS);
+    this.heartbeat.unref?.();
     return new Promise((resolve, reject) => {
       server.once("error", reject);
       server.listen(port, host, () => {
@@ -149,8 +173,37 @@ export class HubServer {
     });
   }
 
+  private watch(socket: LiveSocket): void {
+    this.answered.add(socket);
+    socket.on("pong", () => this.answered.add(socket));
+  }
+
+  private beat(): void {
+    const sockets = [...this.live.keys(), ...[...this.rooms.values()].flatMap((members) => [...members.values()].map((member) => member.socket))];
+    for (const socket of sockets) {
+      if (!this.answered.has(socket)) {
+        socket.terminate();
+        continue;
+      }
+      this.answered.delete(socket);
+      try { socket.ping(); } catch { socket.terminate(); }
+    }
+  }
+
+  /** A device taken off the roster keeps nothing open: its live link and its
+   *  seats in rooms close now, not when it next disconnects. */
+  private async disconnectRemoved(): Promise<void> {
+    const kept = new Set((await this.options.storage.hub().devices()).map((device) => device.deviceId));
+    for (const [socket, deviceId] of this.live) if (!kept.has(deviceId)) socket.terminate();
+    for (const members of this.rooms.values()) {
+      for (const member of members.values()) if (!kept.has(member.deviceId)) member.socket.terminate();
+    }
+  }
+
   async close(): Promise<void> {
-    for (const socket of this.live) socket.terminate();
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
+    for (const socket of this.live.keys()) socket.terminate();
     this.live.clear();
     for (const members of this.rooms.values()) for (const member of members.values()) member.socket.terminate();
     this.rooms.clear();
@@ -160,17 +213,26 @@ export class HubServer {
 
   private broadcastHead(head: number): void {
     const frame = JSON.stringify({ type: "head", head } satisfies HubLiveHead);
-    for (const socket of this.live) {
+    for (const socket of this.live.keys()) {
       if (socket.readyState === socket.OPEN) socket.send(frame);
     }
   }
 
-  private async authenticate(method: string, body: Buffer, header: string | undefined, pathWithQuery: string): Promise<HubDevice> {
+  /** What can be checked before the body is read: a signature header from a
+   *  device on the roster, with a fresh clock. Nobody else makes the hub
+   *  read a body. */
+  private async preauthenticate(header: string | undefined): Promise<{ auth: ParsedHubAuthorization; device: HubDevice }> {
     const auth = parseHubAuthorization(header);
     if (!auth) throw new HubRequestError(401, "The request is not signed.");
     const device = await this.device(auth.deviceId);
+    if (!device || Math.abs(this.now() - auth.timestampMs) > HUB_AUTH_MAX_SKEW_MS) throw new HubRequestError(401, "The request's signature is not accepted.");
+    return { auth, device };
+  }
+
+  private async authenticate(method: string, body: Buffer, header: string | undefined, pathWithQuery: string, checked?: { auth: ParsedHubAuthorization; device: HubDevice }): Promise<HubDevice> {
+    const { auth, device } = checked ?? await this.preauthenticate(header);
     const now = this.now();
-    if (!device || !verifyHubRequest(auth, {
+    if (!verifyHubRequest(auth, {
       method, pathWithQuery, body, publicKeyDerBase64: device.publicKeyDerBase64, now,
       seenNonce: (deviceId, nonce, timestampMs) => this.nonces.checkAndRemember(deviceId, nonce, timestampMs, now)
     })) {
@@ -186,9 +248,10 @@ export class HubServer {
       if (url.pathname !== "/v1/live") throw new HubRequestError(404, "Not found.");
       // A browser cannot set headers on a WebSocket: the signature of
       // "GET /v1/live" travels in the query instead.
-      await this.authenticate("GET", Buffer.alloc(0), url.searchParams.get("auth") ?? undefined, "/v1/live");
+      const device = await this.authenticate("GET", Buffer.alloc(0), url.searchParams.get("auth") ?? undefined, "/v1/live");
       this.sockets.handleUpgrade(request, socket, head, (ws) => {
-        this.live.add(ws);
+        this.live.set(ws, device.deviceId);
+        this.watch(ws);
         ws.on("close", () => this.live.delete(ws));
         ws.on("error", () => this.live.delete(ws));
         void this.options.log.head().then((value) => {
@@ -197,7 +260,7 @@ export class HubServer {
       });
     } catch (error) {
       const status = error instanceof HubRequestError ? error.status : 500;
-      socket.end(`HTTP/1.1 ${status} ${status === 401 ? "Unauthorized" : status === 404 ? "Not Found" : "Error"}\r\n\r\n`);
+      socket.end(`HTTP/1.1 ${status} ${status === 401 ? "Unauthorized" : status === 403 ? "Forbidden" : status === 404 ? "Not Found" : "Error"}\r\n\r\n`);
     }
   }
 
@@ -212,14 +275,17 @@ export class HubServer {
     const role = url.searchParams.get("role") ?? "";
     if (!ROOM_ID.test(rid) || !["desktop", "phone", "machine"].includes(role)) throw new HubRequestError(400, "Invalid room.");
     const device = await this.authenticate("GET", Buffer.alloc(0), url.searchParams.get("auth") ?? undefined, `/v1/room?rid=${encodeURIComponent(rid)}&role=${role}`);
+    // A device sits in a room as what the roster says it is.
+    if (role !== hubRoomRole(device.role)) throw new HubRequestError(403, "A device joins a room only as what it is.");
     this.roomSockets.handleUpgrade(request, socket, head, (ws) => {
+      this.watch(ws);
       const members = this.rooms.get(rid) ?? new Map<string, RoomMember>();
       this.rooms.set(rid, members);
       // The newest connection of a device takes its seat.
       const previous = members.get(device.deviceId);
       const member: RoomMember = { deviceId: device.deviceId, role, socket: ws };
       members.set(device.deviceId, member);
-      if (previous) previous.socket.close(4001, "replaced");
+      if (previous) previous.socket.close(HUB_ROOM_REPLACED_CLOSE_CODE, "replaced");
       const others = [...members.values()].filter((item) => item !== member);
       ws.send(JSON.stringify({ type: "ready", deviceId: device.deviceId, peers: others.map((item) => ({ deviceId: item.deviceId, role: item.role })) }));
       if (!previous) for (const other of others) sendJson(other.socket, { type: "peer-connected", peer: { deviceId: device.deviceId, role } });
@@ -254,7 +320,13 @@ export class HubServer {
       sendJson(sender.socket, { type: "error", code: "peer-not-connected", ...(to ? { to } : {}) });
       return;
     }
-    for (const target of targets) sendJson(target.socket, { type: "message", from: sender.deviceId, id: frame.id, data: frame.data });
+    for (const target of targets) {
+      if (target.socket.bufferedAmount > ROOM_MAX_BUFFERED_BYTES) {
+        target.socket.terminate();
+        continue;
+      }
+      sendJson(target.socket, { type: "message", from: sender.deviceId, id: frame.id, data: frame.data });
+    }
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse, openOnly = false): Promise<void> {
@@ -281,8 +353,10 @@ export class HubServer {
         return json(response, 200, { ok: true, publicKey: this.options.vapidPublicKey });
       }
       if (openOnly) throw new HubRequestError(403, "Use HTTPS.");
-      const body = await readBody(request);
-      const device = await this.authenticate(request.method ?? "GET", body, request.headers.authorization, pathWithQuery);
+      const checked = await this.preauthenticate(request.headers.authorization);
+      const large = (request.method === "POST" && url.pathname === "/v1/events") || (request.method === "PUT" && BLOB_PATH.test(url.pathname));
+      const body = await readBody(request, large ? HUB_MAX_BODY_BYTES : HUB_MAX_SMALL_BODY_BYTES);
+      const device = await this.authenticate(request.method ?? "GET", body, request.headers.authorization, pathWithQuery, checked);
       if (request.method === "POST" && url.pathname === "/v1/events") {
         const parsed = parseJson(body) as { events?: unknown };
         return json(response, 200, await this.options.log.push(device, parsed?.events));
@@ -315,13 +389,19 @@ export class HubServer {
       if (request.method === "GET" && url.pathname === "/v1/search") {
         if (device.role === "machine") throw new HubRequestError(403, "Machines do not search the User's chats.");
         const cursor = url.searchParams.get("cursor") ?? undefined;
-        return json(response, 200, await this.options.search.search({ requester: { kind: "user" }, query: url.searchParams.get("q") ?? "", ...(cursor ? { cursor } : {}) }));
+        const query = url.searchParams.get("q") ?? "";
+        if (query.length > 1_000 || CONTROL_CHARACTER.test(query) || (cursor && (cursor.length > 4_096 || CONTROL_CHARACTER.test(cursor)))) {
+          throw new HubRequestError(400, "Invalid search.");
+        }
+        return json(response, 200, await this.options.search.search({ requester: { kind: "user" }, query, ...(cursor ? { cursor } : {}) }));
       }
       if (request.method === "POST" && url.pathname === "/v1/push-subscription") {
         const parsed = parseJson(body) as { subscription?: { endpoint?: unknown } };
         const endpoint = parsed?.subscription?.endpoint;
         if (!isAllowedPushEndpoint(endpoint)) throw new HubRequestError(400, "That push endpoint is not accepted.");
-        await this.options.storage.hub().savePushSubscription(device.deviceId, endpoint, JSON.stringify(parsed.subscription), new Date(this.now()).toISOString());
+        // Stored as the URL parser wrote it, never as sent.
+        const normalized = new URL(endpoint).href;
+        await this.options.storage.hub().savePushSubscription(device.deviceId, normalized, JSON.stringify({ ...parsed.subscription, endpoint: normalized }), new Date(this.now()).toISOString());
         return json(response, 200, { ok: true });
       }
       if (url.pathname === "/v1/roster") {
@@ -331,16 +411,18 @@ export class HubServer {
           const devices = validRoster(parseJson(body));
           await this.options.storage.hub().replaceRoster(devices, new Date(this.now()).toISOString());
           this.invalidateRoster();
+          await this.disconnectRemoved();
           return json(response, 200, { devices: await this.options.storage.hub().devices() });
         }
       }
       throw new HubRequestError(404, "Not found.");
     } catch (error) {
       status = error instanceof HubRequestError ? error.status : 500;
-      if (status === 500) this.options.debugLog?.("hub.request.error", { url: request.url, message: error instanceof Error ? error.message : String(error) });
+      if (status === 500) this.options.debugLog?.("hub.request.error", { path: (request.url ?? "").split("?")[0], message: error instanceof Error ? error.message : String(error) });
       if (!response.headersSent) json(response, status, { ok: false, error: error instanceof Error && status !== 500 ? error.message : "The hub could not answer." });
     } finally {
-      this.options.debugLog?.("hub.request", { method: request.method, path: (request.url ?? "").split("?")[0], status, ms: this.now() - started });
+      const ms = this.now() - started;
+      if (status >= 500 || ms > SLOW_REQUEST_MS) this.options.debugLog?.("hub.request", { method: request.method, path: (request.url ?? "").split("?")[0], status, ms });
     }
   }
 
@@ -375,13 +457,13 @@ function json(response: ServerResponse, status: number, value: unknown): void {
   response.end(body);
 }
 
-function readBody(request: IncomingMessage): Promise<Buffer> {
+function readBody(request: IncomingMessage, limit: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     request.on("data", (chunk: Buffer) => {
       size += chunk.length;
-      if (size > HUB_MAX_BODY_BYTES) {
+      if (size > limit) {
         reject(new HubRequestError(413, "The request is too large."));
         request.destroy();
         return;
@@ -411,7 +493,7 @@ function validRoster(value: unknown): HubDevice[] {
   if (!Array.isArray(devices) || devices.length > 200) throw new HubRequestError(400, "Invalid roster.");
   return devices.map((device) => {
     if (!device || typeof device.publicKeyDerBase64 !== "string" || deviceIdForPublicKey(device.publicKeyDerBase64) !== device.deviceId ||
-        !["desktop", "machine", "phone"].includes(device.role) || typeof device.name !== "string" || device.name.length > 200 ||
+        !(HUB_ROSTER_ROLES as readonly string[]).includes(device.role) || typeof device.name !== "string" || device.name.length > 200 || CONTROL_CHARACTER.test(device.name) ||
         (device.machineId !== undefined && (typeof device.machineId !== "string" || device.machineId.length > 128))) {
       throw new HubRequestError(400, "Invalid roster entry.");
     }

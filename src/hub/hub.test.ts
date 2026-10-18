@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { CHAT_CHANGES_EVENT_KIND, chatChangesLogScope, type ChatChangesPayload } from "../main/services/chatChanges";
-import { createChatChangeTransport } from "../main/services/chatChangeTransport";
 import { ChatSearchService } from "../main/services/chatSearch";
 import { createChatEventDeviceIdentity, createSignedChatEvent } from "../main/services/chatEventLog";
 import { signHubRequest, type HubSigningIdentity } from "../main/services/hubAuth";
@@ -14,6 +13,7 @@ import type { ChatEventEnvelope } from "../shared/chatEvents";
 import type { HubEventPullResponse, HubEventPushResponse } from "../shared/hubProtocol";
 import type { ChatMessage } from "../shared/types";
 import { HubFolder } from "./hubFolder";
+import { hubApplyPolicy } from "./hubPolicy";
 import { HubLog } from "./hubLog";
 import { HubServer } from "./hubServer";
 
@@ -26,16 +26,9 @@ async function hub(t: test.TestContext) {
   const owner = createChatEventDeviceIdentity(new Date().toISOString());
   await storage.hub().setOwner({ deviceId: owner.originId, publicKeyDerBase64: owner.publicKeyDerBase64, name: "Desktop", addedAt: new Date().toISOString() });
   const log = new HubLog(storage);
-  const policy = async () => {
-    const roster = await storage.hub().devices();
-    return createChatChangeTransport({
-      role: "machine", storage: storage as never, log: undefined as never, recipients: () => [],
-      desktopOriginId: () => roster.find((device) => device.role === "owner")?.deviceId,
-      machineOriginId: (machineId) => roster.find((device) => device.machineId === machineId)?.deviceId
-    }).applyPolicy(undefined);
-  };
+  const policy = hubApplyPolicy(storage);
   const folder = new HubFolder(storage, policy);
-  log.onAppended((_head, conversationIds) => folder.enqueue(conversationIds));
+  log.onAppended(({ changedConversationIds }) => folder.enqueue(changedConversationIds));
   const server = new HubServer({ hubId: "hub-test", version: "test", storage, log, search: new ChatSearchService(storage), vapidPublicKey: "BPUB" });
   const http = await server.listenHttp(0, "127.0.0.1");
   const base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
@@ -166,7 +159,101 @@ test("a change to a chat the hub does not hold yet waits until the chat arrives"
   await h.call(h.owner, "POST", "/v1/events", { events: [changesEvent(h.owner, "chat-3", 1, undefined, [created("chat-3")])] });
   await h.folder.idle();
   // The machine's change is folded behind the chat's creation, in the hub's order.
-  assert.equal((await h.storage.getConversation("chat-3"))?.title, "Alerts");
+  const folded = await h.storage.getConversation("chat-3");
+  assert.equal(folded?.title, "Alerts");
+  assert.deepEqual(folded?.messages.map((item) => item.id), ["n1"], "the change that waited is in it");
+});
+
+test("more changes than one fold reads wait for a chat whose creation comes after them", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [{ deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Box", machineId: "machine-1" }] });
+  let prev: string | undefined;
+  const early: ChatEventEnvelope[] = [];
+  for (let n = 1; n <= 205; n += 1) {
+    const event = changesEvent(machine, "chat-many", n, prev, [{ type: "message.created", message: message(`w${n}`, `waiting ${n}`) }]);
+    early.push(event);
+    prev = event.eventHash;
+  }
+  await h.call(machine, "POST", "/v1/events", { events: early.slice(0, 200) });
+  await h.call(machine, "POST", "/v1/events", { events: early.slice(200) });
+  await h.folder.idle();
+  await h.call(h.owner, "POST", "/v1/events", { events: [changesEvent(h.owner, "chat-many", 1, undefined, [created("chat-many")])] });
+  await h.folder.idle();
+  assert.equal((await h.storage.getConversation("chat-many"))?.messages.length, 205);
+});
+
+test("names with control characters and commands under a chat change's scope are refused", async (t) => {
+  const h = await hub(t);
+  const valid = changesEvent(h.owner, "chat-n", 1, undefined, [created("chat-n")]);
+  const withNul = { ...valid, eventId: `${valid.eventId}\u0000x` };
+  const asCommand = createSignedChatEvent(h.owner, { conversationId: "chat-n", logScopeId: chatChangesLogScope("chat-n"), kind: "machine.trust.roster", payload: {}, originSeq: 1, createdAt: new Date().toISOString() });
+  const results = ((await h.call(h.owner, "POST", "/v1/events", { events: [withNul, asCommand] })).body as unknown as HubEventPushResponse).results;
+  assert.deepEqual(results.map((result) => result.status), ["rejected", "rejected"]);
+  assert.equal((await h.call(h.owner, "GET", "/v1/events?after=0")).body.head, 0);
+});
+
+test("events the first copy already holds are not placed again; one stored before a crash is placed and announced", async (t) => {
+  const h = await hub(t);
+  const first = changesEvent(h.owner, "chat-c", 1, undefined, [created("chat-c")]);
+  const second = changesEvent(h.owner, "chat-c", 2, first.eventHash, []);
+  await h.storage.applyChatCopyMarks([{ originId: h.owner.originId, logScopeId: chatChangesLogScope("chat-c"), originSeq: 2, eventHash: second.eventHash }], new Date().toISOString());
+  let results = ((await h.call(h.owner, "POST", "/v1/events", { events: [first, second] })).body as unknown as HubEventPushResponse).results;
+  assert.deepEqual(results.map((result) => result.status), ["duplicate", "duplicate"], "covered by the copy");
+  assert.equal((await h.call(h.owner, "GET", "/v1/events?after=0")).body.head, 0, "and not in the order");
+  // The hub stored an event but stopped before giving it its place.
+  const third = changesEvent(h.owner, "chat-c", 3, second.eventHash, []);
+  await h.storage.appendChatEvents([third]);
+  const announced: number[] = [];
+  h.log.onAppended(({ head }) => announced.push(head));
+  results = ((await h.call(h.owner, "POST", "/v1/events", { events: [third] })).body as unknown as HubEventPushResponse).results;
+  assert.equal(results[0].hubSeq, 1);
+  assert.deepEqual(announced, [1], "devices are told about it");
+});
+
+test("a device's own events are not read back to it, and the page says how far it covers", async (t) => {
+  const h = await hub(t);
+  const phone = createChatEventDeviceIdentity(new Date().toISOString());
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [{ deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone", name: "iPhone" }] });
+  await h.call(h.owner, "POST", "/v1/events", { events: [changesEvent(h.owner, "chat-o", 1, undefined, [created("chat-o")])] });
+  await h.call(phone, "POST", "/v1/events", { events: [changesEvent(phone, "chat-o", 1, undefined, [])] });
+  const forOwner = (await h.call(h.owner, "GET", "/v1/events?after=0")).body as unknown as HubEventPullResponse;
+  assert.deepEqual(forOwner.events.map((item) => item.event.originId), [phone.originId]);
+  assert.equal(forOwner.through, 2);
+  const forPhone = (await h.call(phone, "GET", "/v1/events?after=0")).body as unknown as HubEventPullResponse;
+  assert.deepEqual(forPhone.events.map((item) => item.event.originId), [h.owner.originId]);
+  assert.equal(forPhone.through, 2);
+});
+
+test("a device sits in a room only as what it is, and leaves when taken off the roster", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [{ deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Box", machineId: "machine-1" }] });
+  const open = (identity: HubSigningIdentity, role: string) => {
+    const pathWithQuery = `/v1/room?rid=rv-roles&role=${role}`;
+    const auth = signHubRequest(identity, { method: "GET", pathWithQuery });
+    const socket = new WebSocket(`${h.base.replace("http", "ws")}${pathWithQuery}&auth=${encodeURIComponent(auth)}`);
+    return new Promise<{ socket: WebSocket; outcome: string }>((resolve) => {
+      socket.addEventListener("open", () => resolve({ socket, outcome: "open" }));
+      socket.addEventListener("error", () => resolve({ socket, outcome: "refused" }));
+    });
+  };
+  assert.equal((await open(machine, "desktop")).outcome, "refused", "a machine cannot pose as a desktop");
+  const seated = await open(machine, "machine");
+  assert.equal(seated.outcome, "open");
+  const closed = new Promise<void>((resolve) => seated.socket.addEventListener("close", () => resolve()));
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [] });
+  await closed;
+});
+
+test("a small request with a large body is refused before it is read in full", async (t) => {
+  const h = await hub(t);
+  const body = JSON.stringify({ devices: [], padding: "x".repeat(300 * 1024) });
+  const response = await fetch(`${h.base}/v1/roster`, { method: "PUT", body, headers: { "content-type": "application/json", authorization: signHubRequest(h.owner, { method: "PUT", pathWithQuery: "/v1/roster", body }) } }).catch(() => undefined);
+  assert.ok(!response || response.status === 413, `refused (${response?.status})`);
+  const stranger = createChatEventDeviceIdentity(new Date().toISOString());
+  const unknown = await fetch(`${h.base}/v1/events`, { method: "POST", body: "{}", headers: { authorization: signHubRequest(stranger, { method: "POST", pathWithQuery: "/v1/events", body: "{}" }) } });
+  assert.equal(unknown.status, 401);
 });
 
 test("the live socket says where the head is, at once and after every push", async (t) => {

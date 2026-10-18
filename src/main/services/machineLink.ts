@@ -36,9 +36,10 @@ import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelay
 import { RelayTunnelClient, type TunnelClient } from "./relayTunnelClient";
 import { signMachineControl, verifyMachineControl } from "./machineControlAuthentication";
 import type { SettingsService } from "./settings";
-import { isMachineDurableMessage, machineCommandId } from "../../shared/machineLink";
+import { isMachineDurableMessage, machineCommandId, machineSigningKey } from "../../shared/machineLink";
 import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
+import { deliverToChannel, type HubDeliverOutcome } from "./hubSync";
 import type { ChatEventLogService } from "./chatEventLog";
 import type { StorageService } from "./storage";
 import type { ChatActionApplier } from "./chatActionApplier";
@@ -55,10 +56,12 @@ export interface MachineLinkOptions {
   eventStorage: StorageService;
   eventLog: ChatEventLogService;
   reconnectDelayMs?: number;
-  /** Test seam: builds the relay client for one machine room. */
-  createClient?: (pairing: MobilePairingPackage) => TunnelClient;
-  /** The User's hub carries the machines' events: channels deliver nothing
-   *  themselves and forward nothing (every device reads the hub's order). */
+  /** Builds the client for one machine's room (the hub's rooms, a test
+   *  stand-in); undefined leaves that machine on the relay. */
+  createClient?: (pairing: MobilePairingPackage) => TunnelClient | undefined;
+  /** The User's hub carries the events of machines enrolled with it: their
+   *  channels deliver nothing themselves and forward nothing (every device
+   *  reads the hub's order). A machine enrolled with the relay keeps it. */
   hubMode?: boolean;
   /** The set of machines (or their keys) changed: whoever admits devices by
    *  key, the User's hub, is told again. */
@@ -497,10 +500,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (!pairing) {
       throw new Error(`Machine ${record.name} has no pairing package.`);
     }
-    if (!pairing.relayUrl && !this.options.createClient) {
-      throw new Error(`Machine ${record.name} pairing has no relay URL.`);
+    const injected = this.options.createClient?.(pairing);
+    if (!injected && !pairing.relayUrl) {
+      throw new Error(`Machine ${record.name} pairing has neither a relay nor a hub.`);
     }
-    const client = this.options.createClient?.(pairing) ?? new RelayTunnelClient({
+    const client = injected ?? new RelayTunnelClient({
       relayUrl: pairing.relayUrl ?? "",
       rendezvousId: pairing.rendezvousId,
       role: "desktop",
@@ -544,12 +548,16 @@ export class MachineLinkService implements MachineTurnDispatcher {
         ...(event.type === "ready" ? { peers: event.peers.map((peer) => `${peer.role}:${peer.deviceId ?? ""}`) } : {}),
         ...(event.type === "peer-connected" || event.type === "peer-disconnected" ? { peer: `${event.peer.role}:${event.peer.deviceId ?? ""}` } : {})
       });
+      // Other machines meet this one in its room too: only this machine's
+      // own device decides whether it is here.
+      const isThisMachine = (peer: { role: string; deviceId?: string }) => peer.role === "machine" &&
+        (!connection.record.deviceId || peer.deviceId === connection.record.deviceId);
       if (event.type === "ready") {
-        const machine = event.peers.find((peer) => peer.role === "machine");
+        const machine = event.peers.find(isThisMachine);
         this.setMachinePeer(connection, machine?.deviceId);
-      } else if (event.type === "peer-connected" && event.peer.role === "machine") {
+      } else if (event.type === "peer-connected" && isThisMachine(event.peer)) {
         this.setMachinePeer(connection, event.peer.deviceId);
-      } else if (event.type === "peer-disconnected" && event.peer.role === "machine") {
+      } else if (event.type === "peer-disconnected" && isThisMachine(event.peer)) {
         this.setMachinePeer(connection, undefined);
       }
     });
@@ -636,15 +644,25 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return answer;
   }
 
-  /** An event the hub's order brought, to the channel of the machine that wrote it. */
-  async receiveFromHub(event: ChatEventEnvelope): Promise<boolean> {
+  /** A machine enrolled with the User's hub, which carries its events. */
+  private viaHub(connection: MachineConnection): boolean {
+    return Boolean(this.options.hubMode && connection.pairing.hubUrl);
+  }
+
+  /**
+   * An event the hub's order brought, to the channel of the machine that
+   * wrote it. A machine whose channel is not set up yet (this desktop just
+   * started, the machine has not greeted it) has the event held for it;
+   * traffic between two other devices is not this desktop's.
+   */
+  async receiveFromHub(event: ChatEventEnvelope): Promise<HubDeliverOutcome> {
     for (const connection of this.connections.values()) {
-      if (connection.eventChannel?.accepts(event)) {
-        await connection.eventChannel.receiveFromHub(event);
-        return true;
-      }
+      if (!connection.eventChannel?.accepts(event)) continue;
+      return await deliverToChannel(connection.eventChannel, event);
     }
-    return false;
+    const waiting = [...this.connections.values()].some((connection) => !connection.eventChannel &&
+      (connection.record.deviceId === event.originId || event.logScopeId.startsWith(`device:${connection.pairing.rendezvousId}:`)));
+    return waiting ? "not-ready" : "not-mine";
   }
 
   /** Every machine whose scripts this desktop manages, with whether it is
@@ -842,7 +860,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       for (const machine of machines) {
         if (machine.id === connection.record.id || !machine.deviceId) continue;
         const pairing = await this.settings.getMachinePairing(machine.pairingKey);
-        const publicKeyDerBase64 = machine.lastHello?.publicKeyDerBase64;
+        const publicKeyDerBase64 = machineSigningKey(machine);
         if (!pairing || !meetingUrl(pairing) || !publicKeyDerBase64) continue;
         peers.push({
           deviceId: machine.deviceId,
@@ -1677,7 +1695,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         storage: this.options.eventStorage, eventLog: this.options.eventLog,
         pairing: { ...connection.pairing, relaySealKeyBase64: deriveMachineChannelKey(identity, publicKeyDerBase64, connection.pairing.rendezvousId) },
         isPeerConnected: () => Boolean(connection.machineDeviceId),
-        ...(this.options.hubMode ? { hubMode: true } : {}),
+        ...(this.viaHub(connection) ? { hubMode: true } : {}),
         channelId: connection.pairing.rendezvousId, localDeviceId: this.options.desktopDeviceId,
         peerDeviceId: deviceId, peerPublicKeyDerBase64: publicKeyDerBase64,
         send: async (packet) => {
@@ -1690,7 +1708,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         },
         // Every chat is on every machine: a chat change this machine wrote
         // goes on, unchanged and signed by it, to every other machine.
-        forwardTo: (event) => !this.options.hubMode && event.kind === CHAT_CHANGES_EVENT_KIND && isChatChangesLogScope(event.logScopeId) && event.originId === deviceId
+        forwardTo: (event) => !this.viaHub(connection) && event.kind === CHAT_CHANGES_EVENT_KIND && isChatChangesLogScope(event.logScopeId) && event.originId === deviceId
           ? this.chatChangeRecipients().filter((recipient) => recipient.deviceId !== deviceId)
           : [],
         peerHoldsEveryChat: true,

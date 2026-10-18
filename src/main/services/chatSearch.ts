@@ -185,11 +185,14 @@ export class ChatSearchService {
     const staleSnapshots = scope.filter((snapshot) =>
       !chatSearchStateMatchesSnapshot(stateByConversationId.get(snapshot.conversationId), snapshot)
     );
-    const reads: ChatSearchConversationRead[] = [];
+    // Read, index and write one batch at a time: holding every stale chat at
+    // once (a whole account on its first search) can exhaust a small hub.
+    const indexedAt = new Date().toISOString();
     for (const batch of chunks(staleSnapshots, SOURCE_READ_BATCH_SIZE)) {
       const batchIds = batch.map((snapshot) => snapshot.conversationId);
       const batchReads = await atStage("source-read", false, () => this.storage.readChatSearchConversations(batchIds));
       const readById = new Map(batchReads.map((read) => [read.snapshot.conversationId, read]));
+      const reads: ChatSearchConversationRead[] = [];
       for (const planned of batch) {
         const read = readById.get(planned.conversationId);
         if (!read) {
@@ -205,18 +208,16 @@ export class ChatSearchService {
         }
         reads.push(read);
       }
-    }
-
-    const indexedAt = new Date().toISOString();
-    const replacements: ChatSearchDocumentReplacement[] = reads.map((read) => ({
-      snapshot: read.snapshot,
-      documents: buildChatSearchDocuments({ ...read.conversation, title: read.snapshot.title }),
-      indexedAt
-    }));
-    for (const batch of replacementChunks(replacements)) {
-      await atStage("index-write", true, () => this.storage.replaceChatSearchDocumentsBatch(batch));
-      for (const replacement of batch) {
-        stateByConversationId.set(replacement.snapshot.conversationId, stateFromReplacement(replacement));
+      const replacements: ChatSearchDocumentReplacement[] = reads.map((read) => ({
+        snapshot: read.snapshot,
+        documents: buildChatSearchDocuments({ ...read.conversation, title: read.snapshot.title }),
+        indexedAt
+      }));
+      for (const replacementBatch of replacementChunks(replacements)) {
+        await atStage("index-write", true, () => this.storage.replaceChatSearchDocumentsBatch(replacementBatch));
+        for (const replacement of replacementBatch) {
+          stateByConversationId.set(replacement.snapshot.conversationId, stateFromReplacement(replacement));
+        }
       }
     }
 

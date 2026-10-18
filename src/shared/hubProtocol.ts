@@ -3,9 +3,10 @@
  * the User's devices, the chats it folds into, and the search over them.
  *
  * Devices write their events to the hub and read everyone else's back from
- * it by position. There is no per-peer outbox, no forwarding between
- * devices, and no device that has to be awake for another one to see news:
- * the hub is always on and holds the one order everybody reads.
+ * it by position. There is no per-peer outbox for durable events and no
+ * device that has to be awake for another one to see news: the hub is
+ * always on and holds the one order everybody reads. Live traffic that is
+ * not kept (progress, presence) passes through the hub's rooms.
  *
  * Every request is signed by the device's own Ed25519 key (the same identity
  * its chat events are signed with); the hub answers only devices on its
@@ -18,7 +19,16 @@ export const HUB_PROTOCOL_VERSION = 1;
 
 /** What a device is to the hub. The owner is the desktop that set it up and
  *  the only device that may change the roster. */
-export type HubDeviceRole = "owner" | "desktop" | "machine" | "phone";
+export const HUB_DEVICE_ROLES = ["owner", "desktop", "machine", "phone"] as const;
+export type HubDeviceRole = typeof HUB_DEVICE_ROLES[number];
+/** The roles a roster entry may name (the owner is set once, at setup). */
+export const HUB_ROSTER_ROLES = ["desktop", "machine", "phone"] as const;
+/** The side a device takes in a room. */
+export type HubRoomRole = "desktop" | "machine" | "phone";
+
+export function hubRoomRole(role: HubDeviceRole): HubRoomRole {
+  return role === "owner" ? "desktop" : role;
+}
 
 export interface HubDevice {
   deviceId: string;
@@ -84,7 +94,8 @@ export interface HubEventPushResult {
 }
 
 /** POST /v1/events. A payload over the inline limit travels as a blob
- *  reference; its fragments go first, each as PUT /v1/blobs/<hash>/<index>. */
+ *  reference; the hub answers "blob-missing" until its fragments are there,
+ *  each uploaded as hubBlobFragmentPath() names. */
 export interface HubEventPushRequest {
   events: ChatEventEnvelope[];
 }
@@ -94,10 +105,14 @@ export interface HubEventPushResponse {
   head: number;
 }
 
-/** GET /v1/events?after=<hubSeq>&limit=<n> */
+/** GET /v1/events?after=<hubSeq>&limit=<n>: the order without the asking
+ *  device's own events. */
 export interface HubEventPullResponse {
   events: HubLoggedEvent[];
-  /** The hub's newest position; more to read while the last event is below it. */
+  /** How far this page covers, past the asker's own events too: the next
+   *  read starts here. */
+  through: number;
+  /** The hub's newest position; more to read while `through` is below it. */
   head: number;
 }
 
@@ -121,8 +136,37 @@ export interface HubRosterRequest {
   devices: Array<Omit<HubDevice, "addedAt">>;
 }
 
-/** Largest request body the hub reads. */
+/** Largest request body the hub reads: a push of events, or a fragment. */
 export const HUB_MAX_BODY_BYTES = 16 * 1024 * 1024;
+/** Largest body of any other request (roster, push subscription). */
+export const HUB_MAX_SMALL_BODY_BYTES = 256 * 1024;
+/** Largest message a room forwards (live, unstored traffic). */
+export const HUB_ROOM_MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
+/** The room closes a device's older connection with this code when a newer
+ *  one takes its seat. */
+export const HUB_ROOM_REPLACED_CLOSE_CODE = 4001;
+
+/** A hub address a device may use: HTTPS, or plain HTTP only on this
+ *  computer (a local test hub). Everything a device sends travels to it. */
+export function isAcceptableHubUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:") return true;
+    return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** Where one fragment of a large event body is uploaded and read. */
+export function hubBlobFragmentPath(reference: { blobHash: string; byteLength: number; fragments: number }, index: number): string {
+  return `/v1/blobs/${reference.blobHash}?bytes=${reference.byteLength}&fragments=${reference.fragments}&index=${index}`;
+}
+
+/** The WebSocket address of a hub route. */
+export function hubWebSocketUrl(hubUrl: string, pathWithQuery: string): string {
+  return `${hubUrl.replace(/\/+$/, "").replace(/^http/, "ws")}${pathWithQuery}`;
+}
 /** Events one pull returns at most. */
 export const HUB_PULL_MAX_EVENTS = 200;
 /** Events one push may carry. */

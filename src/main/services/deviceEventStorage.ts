@@ -419,7 +419,9 @@ export class DeviceEventStorage {
    * stored separately goes with its event unless another kept event of that
    * chat still points to the same bytes.
    */
-  async pruneConfirmedChatChanges(localOriginId: string, cutoffIso: string, limit = 2_000, keepOwnAfterRowid?: number): Promise<{ events: number; blobs: number }> {
+  async pruneConfirmedChatChanges(localOriginId: string, cutoffIso: string, options: { limit?: number; keepOwnAfterRowid?: number } = {}): Promise<{ events: number; blobs: number }> {
+    const limit = options.limit ?? 2_000;
+    const keepOwnAfterRowid = options.keepOwnAfterRowid;
     const unpushed = keepOwnAfterRowid === undefined ? ""
       : `and not (e.origin_id = ${quote(localOriginId)} and e.rowid > ${Math.max(0, Math.floor(keepOwnAfterRowid))})`;
     await this.database.init();
@@ -682,6 +684,9 @@ export class DeviceEventStorage {
 }
 
 function quote(value: string): string {
+  // The sqlite3 shell reads statements line by line and a NUL ends a line:
+  // the rest of the literal would leak into the statement.
+  if (value.includes("\u0000")) throw new Error("A value with a NUL character cannot be stored.");
   return `'${value.replace(/'/g, "''")}'`;
 }
 

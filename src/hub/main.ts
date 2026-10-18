@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { createChatChangeTransport } from "../main/services/chatChangeTransport";
 import { importChatCopy } from "../main/services/chatCopy";
 import { ChatSearchService } from "../main/services/chatSearch";
 import { deviceIdForPublicKey } from "../main/services/hubAuth";
 import { StorageService } from "../main/services/storage";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
 import { HubFolder } from "./hubFolder";
+import { hubApplyPolicy } from "./hubPolicy";
 import { HubLog } from "./hubLog";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
 import { HubServer } from "./hubServer";
@@ -106,43 +106,35 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
     return finish({ ok: true, ...summary });
   }
 
-  const devices = async () => storage.hub().devices();
-  // The hub folds chats by the same rules a machine does: shared fields from
-  // the desktop, a member's replies from where the member runs.
-  const policy = async () => {
-    const roster = await devices();
-    const owner = roster.find((device) => device.role === "owner");
-    return createChatChangeTransport({
-      role: "machine",
-      storage: storage as never,
-      log: undefined as never,
-      recipients: () => [],
-      desktopOriginId: () => owner?.deviceId,
-      machineOriginId: (machineId) => roster.find((device) => device.machineId === machineId)?.deviceId
-    }).applyPolicy(undefined);
-  };
+  const policy = hubApplyPolicy(storage);
   const hubLog = new HubLog(storage);
   const folder = new HubFolder(storage, policy, log);
   const search = new ChatSearchService(storage);
   const keys = loadOrCreateVapidKeys(path.join(userDataPath(), "vapid.json"));
   const push = new HubPush({ storage, keys, subject: "mailto:push@accordagents.com", log });
-  hubLog.onAppended((head, conversationIds, originId) => {
-    folder.enqueue(conversationIds);
-    push.noteAppended(head, originId);
+  hubLog.onAppended(({ head, changedConversationIds, originId }) => {
+    folder.enqueue(changedConversationIds);
+    // A phone is rung when a chat's content changed, not for every progress
+    // frame a running turn writes.
+    if (changedConversationIds.length > 0) push.noteAppended(head, originId);
   });
   const server = new HubServer({ hubId: hubId(), version: HUB_VERSION, storage, log: hubLog, search, vapidPublicKey: keys.publicKey, acmeWebroot: args.acmeWebroot, debugLog: log });
-  if (args.cert && args.key && existsSync(args.cert) && existsSync(args.key)) {
-    await server.listenHttps(args.httpsPort, { cert: args.cert, key: args.key }, args.host);
+  const https = Boolean(args.cert && args.key && existsSync(args.cert) && existsSync(args.key));
+  if (https) {
+    await server.listenHttps(args.httpsPort, { cert: args.cert!, key: args.key! }, args.host);
+  } else if (args.cert) {
+    log("hub.tls.missing", { cert: args.cert });
   }
   // Plain HTTP serves the certificate challenge and, before there is a
   // certificate, the health check the setup reads.
   await server.listenHttp(args.httpPort, args.host, { openOnly: !args.insecureHttp });
   await folder.start();
-  log("hub.started", { version: HUB_VERSION, https: Boolean(args.cert), httpPort: args.httpPort });
+  log("hub.started", { version: HUB_VERSION, https, httpPort: args.httpPort });
   return async () => {
     push.close();
     await server.close();
     await folder.idle();
+    folder.close();
   };
 }
 
