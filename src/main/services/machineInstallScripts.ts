@@ -551,6 +551,41 @@ export function machineInstallServiceScript(layout: MachineInstallLayout, user: 
   ].join("\n");
 }
 
+/** Prints the identity the staged runtime signs its events with (created once,
+ *  kept in the machine's own database). The private key is never printed. */
+export function machineDeviceIdentityScript(layout: MachineInstallLayout, runtimePath: string, nodePath = "node"): string {
+  return [
+    PREAMBLE,
+    `${shellQuotePosix(nodePath)} ${shellQuotePosix(runtimePath)} --device-identity --user-data ${shellQuotePosix(layout.userDataDir)}`
+  ].join("\n");
+}
+
+/** Merges the desktop's chat copy into the machine's database with the staged
+ *  runtime, then removes the copy: it is chat content and has no other use. */
+export function machineImportChatCopyScript(
+  layout: MachineInstallLayout,
+  runtimePath: string,
+  copyDir: string,
+  machineId: string,
+  nodePath = "node"
+): string {
+  const dir = shellQuotePosix(copyDir);
+  return [
+    PREAMBLE,
+    `status=0`,
+    `${shellQuotePosix(nodePath)} ${shellQuotePosix(runtimePath)} --import-chat-copy ${dir} --user-data ${shellQuotePosix(layout.userDataDir)} --machine-id ${shellQuotePosix(machineId)} || status=$?`,
+    `rm -rf ${dir}`,
+    `exit $status`
+  ].join("\n");
+}
+
+/** The last JSON line a setup command printed. */
+export function parseSetupCommandJson<T>(output: string): T {
+  const line = output.trim().split("\n").reverse().find((candidate) => candidate.trim().startsWith("{"));
+  if (!line) throw new Error("The machine did not report a result.");
+  return JSON.parse(line) as T;
+}
+
 export function machineStartServiceScript(layout: MachineInstallLayout): string {
   const unit = shellQuotePosix(`${layout.serviceName}.service`);
   const sudo = layout.serviceScope === "system" ? "sudo -n " : "";

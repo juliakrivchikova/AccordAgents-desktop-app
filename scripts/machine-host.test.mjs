@@ -85,7 +85,7 @@ function settle(ms = 150) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-test("a turn waiting for a chat copy counts as held, and a stop removes it before the copy completes", async () => {
+test("a turn waiting for its chat state counts as held, and a stop removes it before the chat arrives", async () => {
   const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
   const client = stubClient();
   const runs = [];
@@ -112,12 +112,12 @@ test("a turn waiting for a chat copy counts as held, and a stop removes it befor
     await host.eventChannel.flush();
   };
   await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
-  const shell = { id: "conv-1", kind: "chat", title: "t", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] };
-  await inbound({ type: "machine.conversation.sync", conversation: shell });
-  // The copy is still arriving: the turn waits instead of running or failing.
-  await inbound({ type: "machine.turn.request", conversationId: "conv-1", participantId: "p1", participant: { id: "p1", handle: "bot", homeMachineId: "test-home" }, messageId: "m1", runId: "run-wait", pendingMessageId: "pending-wait", requestedAt: new Date().toISOString() });
+  store.set("conv-1", { id: "conv-1", kind: "chat", title: "t", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] });
+  // The desktop's chat change the request names has not arrived: the turn waits instead of running or failing.
+  const chatHead = { originId: DESKTOP_ID, logScopeId: "chat-changes:conv-1", originSeq: 3 };
+  await inbound({ type: "machine.turn.request", conversationId: "conv-1", participantId: "p1", participant: { id: "p1", handle: "bot", homeMachineId: "test-home" }, messageId: "m1", runId: "run-wait", pendingMessageId: "pending-wait", chatHead, requestedAt: new Date().toISOString() });
   assert.deepEqual(runs, []);
-  assert.ok(logs.some((entry) => entry.event === "machine-host.turn.awaiting-copy" && entry.payload?.runId === "run-wait"));
+  assert.ok(logs.some((entry) => entry.event === "machine-host.turn.awaiting-chat" && entry.payload?.runId === "run-wait"));
   // Asked about it, the machine holds it: no "unknown".
   await inbound({ type: "machine.turn.query", conversationId: "conv-1", runId: "run-wait" });
   let bodies = await sentBodies(client, host.options.pairing);
@@ -128,9 +128,8 @@ test("a turn waiting for a chat copy counts as held, and a stop removes it befor
   const terminal = bodies.find((body) => body.type === "machine.turn.finished" && body.runId === "run-wait");
   assert.ok(terminal, "a stopped waiting turn reports a result");
   assert.equal(terminal.status, "interrupted");
-  await inbound({ type: "machine.conversation.sync.done", conversationId: "conv-1" });
-  await settle(300);
-  assert.deepEqual(runs, [], "the copy completing never starts a stopped turn");
+  await settle(1_500);
+  assert.deepEqual(runs, [], "a stopped waiting turn never starts");
   host.close();
 });
 
@@ -185,7 +184,7 @@ test("a picture arrives in parts and is reassembled; a desktop that leaves fails
   host.close();
 });
 
-test("the machine's hello lists turns waiting for a copy as active", async () => {
+test("the machine's hello lists turns waiting for their chat as active", async () => {
   const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
   const client = stubClient();
   const store = new Map();
@@ -210,8 +209,9 @@ test("the machine's hello lists turns waiting for a copy as active", async () =>
     await host.eventChannel.flush();
   };
   await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
-  await inbound({ type: "machine.conversation.sync", conversation: { id: "conv-2", kind: "chat", title: "t", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] } });
-  await inbound({ type: "machine.turn.request", conversationId: "conv-2", participantId: "p1", participant: { id: "p1", handle: "bot", homeMachineId: "test-home" }, messageId: "m1", runId: "run-listed", pendingMessageId: "pending-listed", requestedAt: new Date().toISOString() });
+  store.set("conv-2", { id: "conv-2", kind: "chat", title: "t", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] });
+  await inbound({ type: "machine.turn.request", conversationId: "conv-2", participantId: "p1", participant: { id: "p1", handle: "bot", homeMachineId: "test-home" }, messageId: "m1", runId: "run-listed", pendingMessageId: "pending-listed",
+    chatHead: { originId: DESKTOP_ID, logScopeId: "chat-changes:conv-2", originSeq: 2 }, requestedAt: new Date().toISOString() });
   // A fresh link announces itself again; the hello must list the waiting turn.
   client.emit("peer", { type: "ready", deviceId: MACHINE_ID, peerConnected: true, peers: [{ role: "desktop", deviceId: DESKTOP_ID }] });
   await settle();
@@ -221,77 +221,49 @@ test("the machine's hello lists turns waiting for a copy as active", async () =>
   host.close();
 });
 
-test("a desktop sweep never overrides an outcome the machine produced", async () => {
-  const { mergeReplicatedMessages } = await import("../dist/main/main/services/machineHost.js");
-  const done = { id: "bubble", role: "participant", participantId: "p1", content: "The page title is Example Domain.", createdAt: "2026-09-06T09:04:38.000Z", status: "done", metadata: { runId: "run-x" } };
-  const swept = { ...done, content: "Interrupted before completion.", status: "error", metadata: { runId: "run-x", staleRunRecovery: { runId: "run-x", at: "2026-09-06T09:04:38.002Z" } } };
-  const owned = new Set(["p1"]);
-  const merged = mergeReplicatedMessages([done], [swept], [], owned);
-  assert.equal(merged[0].status, "done");
-  assert.equal(merged[0].content, "The page title is Example Domain.");
-  // The same holds for a bubble the machine is still filling in.
-  const partial = { ...done, content: "half", status: "pending" };
-  assert.equal(mergeReplicatedMessages([partial], [swept], [], owned)[0].status, "pending");
-  // The desktop is authoritative for its local member: its genuine recovery
-  // must reach the machine's replica rather than leave a permanent pending row.
-  assert.equal(mergeReplicatedMessages([partial], [swept], [], new Set(["other-member"]))[0].status, "error");
-  // A genuine later edit by the desktop (no sweep marker) still wins.
-  const edited = { ...done, content: "edited on the desktop", metadata: { runId: "run-x" } };
-  assert.equal(mergeReplicatedMessages([done], [edited])[0].content, "edited on the desktop");
-});
-
-test("restarting between acknowledged copy batches preserves the barrier and never echoes earlier rows", async () => {
+test("a turn waits for the chat change it names and then runs on the whole chat", async () => {
   const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const chatChanges = await import("../dist/main/main/services/chatChanges.js");
   const enrollment = pairing();
   const store = new Map();
   const runs = [];
-  const watchReady = [];
-  let host;
-  const createHost = () => new MachineHostService({
-    runMachineHostedTurn: async (request) => { runs.push(store.get(request.conversationId).messages.map(m => m.id)); return { messages: [], warnings: [] }; },
+  const host = new MachineHostService({
+    runMachineHostedTurn: async (request) => { runs.push(store.get(request.conversationId).messages.map((message) => message.id)); return { messages: [], warnings: [] }; },
     cancelRun: () => true,
-    onReplicatedConversationReady: id => watchReady.push(id),
     respondToAppToolApproval: async () => undefined,
-    applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) { store.set(id, next); host.noteConversationSnapshot(next); } }
-  }, { getConversation: async id => store.get(id) }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
-  { ...hostEvents, pairing: enrollment, deviceId: MACHINE_ID, appVersion: "test", createClient: stubClient });
-  const send = async body => {
-    const event = (await desktopEvents.eventLog.appendLocalEvent({ conversationId: "copy-restart", kind: body.type, payload: body,
-      logScopeId: `device:${enrollment.rendezvousId}:${JSON.stringify(["copy-restart", "actions"])}` })).event;
-    await host.eventChannel.receive({ protocol: "accord-device-events-v1", from: DESKTOP_ID, to: MACHINE_ID, type: "event", event });
-    assert.ok(await hostEvents.eventStorage.deviceEvents().receipt(event.eventId));
-  };
-  const shell = { id: "copy-restart", kind: "chat", title: "restart", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] };
-  const row = id => ({ id, role: "user", content: id, createdAt: shell.createdAt });
+    applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) store.set(id, next); }
+  }, { getConversation: async (id) => store.get(id) }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
+  { ...hostEvents, pairing: enrollment, deviceId: MACHINE_ID, appVersion: "test", createClient: stubClient,
+    applyChatChanges: async (event, payload) => {
+      const result = chatChanges.applyChatChanges(store.get(payload.conversationId), payload, event.originId, { acceptsConversationFields: () => true, acceptsMessageUpdate: () => true, acceptsMessageCreate: () => true, acceptsMessageRemoval: () => true, holdsUnknownChats: true });
+      if (result.status !== "applied") return "missing-conversation";
+      store.set(payload.conversationId, result.conversation);
+      return "applied";
+    } });
+  const conversationId = "chat-head-" + Date.now();
+  const scope = chatChanges.chatChangesLogScope(conversationId);
+  const at = "2026-09-24T12:00:00.000Z";
+  const change = async (changes) => (await desktopEvents.eventLog.appendLocalEvent({ conversationId, logScopeId: scope, kind: chatChanges.CHAT_CHANGES_EVENT_KIND,
+    payload: { version: 1, conversationId, updatedAt: at, changes } })).event;
+  const receive = (event) => host.eventChannel.receive({ protocol: "accord-device-events-v1", from: DESKTOP_ID, to: MACHINE_ID, type: "event", event });
   try {
-    host = createHost();
     await host.start();
-    await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, machineId: "copy-home", appVersion: "test" });
-    await send({ type: "machine.conversation.sync", conversation: shell });
-    await send({ type: "machine.conversation.delta", conversationId: shell.id, messages: [row("first")], updatedAt: shell.updatedAt });
-    host.close();
-    host = createHost();
-    await host.start();
-    assert.equal(host.syncing.has(shell.id), true, "an acknowledged shell remains incomplete after the process restarts");
-    await send({ type: "machine.conversation.delta", conversationId: shell.id, messages: [row("second")], updatedAt: shell.updatedAt });
-    await host.handleBody({ type: "machine.turn.request", conversationId: shell.id, participantId: "p1", participant: { id: "p1", handle: "bot" }, messageId: "first", runId: "copy-resumed-run", pendingMessageId: "pending", requestedAt: shell.createdAt });
-    assert.deepEqual(runs, []);
-    assert.deepEqual(watchReady, [], "auto-watch cannot bypass the incomplete copy barrier, including after restart");
-    await send({ type: "machine.conversation.sync.done", conversationId: shell.id });
-    await host.outbound;
-    assert.deepEqual(runs, [["first", "second"]]);
-    assert.deepEqual(watchReady, [shell.id]);
-    assert.equal((await hostEvents.eventStorage.deviceEvents().listPending(enrollment.rendezvousId)).filter(entry => entry.event.kind === "machine.conversation.backdelta").length, 0, "neither pre-restart nor post-restart incoming rows become backdelta events");
-  } finally { host?.close(); }
-});
-
-test("the owner's watcher cursor survives a stale desktop metadata refresh", () => {
-  const { MachineHostService } = require("../dist/main/main/services/machineHost.js");
-  const host = Object.create(MachineHostService.prototype);
-  const cursor = { lastSeenMessageId: "new-reply", lastRunId: "watch-run", wakeChainDepth: 1, updatedAt: "2026-09-11T07:03:00Z" };
-  const existing = { metadata: { participantWatchers: { watcher: cursor } } };
-  const merged = host.mergeMetadata(existing, { participantWatchers: { watcher: { ...cursor, lastSeenMessageId: "old-reply" } } });
-  assert.deepEqual(merged.participantWatchers, existing.metadata.participantWatchers);
+    await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, machineId: "head-home", appVersion: "test" });
+    const first = await change([
+      { type: "conversation.created", conversation: { title: "t", kind: "chat", createdAt: at, metadata: { participants: [] } } },
+      { type: "message.created", message: { id: "m1", role: "user", content: "one", createdAt: at, status: "done" } }
+    ]);
+    const second = await change([{ type: "message.created", message: { id: "m2", role: "user", content: "two", createdAt: "2026-09-24T12:00:01.000Z", status: "done" } }]);
+    await receive(first);
+    await host.handleBody({ type: "machine.turn.request", conversationId, participantId: "p1", participant: { id: "p1", handle: "bot" }, messageId: "m2", runId: "head-run",
+      pendingMessageId: "pending", chatHead: { originId: DESKTOP_ID, logScopeId: scope, originSeq: second.originSeq }, requestedAt: at });
+    await settle(1_300);
+    assert.deepEqual(runs, [], "the chat has only its first change here: the member does not start on it");
+    await receive(second);
+    const deadline = Date.now() + 5_000;
+    while (!runs.length && Date.now() < deadline) await settle(100);
+    assert.deepEqual(runs, [["m1", "m2"]], "the turn runs once the named change is applied, on the whole chat");
+  } finally { host.close(); }
 });
 
 test("a ChatService native resume is listed, stopped and delivered through the host's result outbox", async (t) => {

@@ -7,7 +7,9 @@ import type {
   MachineListResult,
   MachineTrustedDevicesResult,
   SaveTrustedDeviceRequest,
-  RemoveMachineRequest
+  RemoveMachineRequest,
+  MachineInactivityQuestion,
+  AnswerMachineInactivityRequest
 } from "./machineLink";
 import type {
   MachineInstallRecord,
@@ -1438,6 +1440,10 @@ export interface ChatMessageMetadata {
    *  kept apart from the content so delivered text is never overwritten. */
   stopPending?: { machineName: string; at: string };
   machinePending?: { machineName: string; at: string; reason?: string };
+  /** Machines transport: this member's turn never left the desktop (stopped
+   *  while preparing, or refused before it was sent), so the desktop, not the
+   *  member's home machine, settles the bubble. */
+  machineTurnNotSent?: boolean;
   cloudRunPreparation?: import("./cloudRunPreparation").CloudRunPreparationProgress;
   /** Machines transport: the result already folded into this bubble
    *  (identified by the machine's finishedAt), so a redelivery of the same
@@ -3022,6 +3028,10 @@ export interface AppBridge {
   removeMachine(request: RemoveMachineRequest): Promise<MachineListResult>;
   machineEnrollment(request: MachineEnrollmentRequest): Promise<CreateMachineResult>;
   onMachinesUpdated(callback: (result: MachineListResult) => void): () => void;
+  /** Machines the User is asked about because they stopped being used. */
+  listMachineInactivityQuestions(): Promise<MachineInactivityQuestion[]>;
+  answerMachineInactivity(request: AnswerMachineInactivityRequest): Promise<MachineInactivityQuestion[]>;
+  onMachineInactivityQuestions(callback: (questions: MachineInactivityQuestion[]) => void): () => void;
   // Machines transport: installing and upgrading the runtime on a machine.
   // This is the only SSH path to a machine; messaging always uses the relay.
   probeMachineInstall(request: { machineId: string; target: MachineSshTarget }): Promise<MachineRuntimeProbe>;

@@ -99,6 +99,8 @@ import { stableJson } from "../shared/stableJson";
 import { ArtifactService } from "./services/artifacts";
 import { ArtifactStore } from "./services/artifactStore";
 import { artifactEventWriter, artifactProjectionPort } from "./services/artifactReplication";
+import { createChatChangeTransport, scheduleChatChangePruning } from "./services/chatChangeTransport";
+import { machineChatCopyProvider } from "./services/chatCopy";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "./appToolWiring";
 import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
@@ -128,7 +130,7 @@ import { MachineApprovalExecutor, machineApprovalResultId } from "./services/mac
 import { readPosixProcessTableAsync } from "./services/processTermination";
 import { createChatActionEffects } from "./services/chatActionEffects";
 import { MachineChoiceExecutor, machineChoiceResultId } from "./services/chatActionNativeClaims";
-import type { CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineListResult, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
+import type { AnswerMachineInactivityRequest, CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineInactivityQuestion, MachineListResult, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
   MachineInstallRequest,
@@ -188,6 +190,7 @@ import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashRepo
 import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
 import { MachineRecoveryService } from "./services/machineRecovery";
+import { MachineInactivityCheck, type MachineInactivityOutcome } from "./services/machineInactivity";
 import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, isMachineRecoveryOperation } from "../shared/machineInstall";
 import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
@@ -369,7 +372,6 @@ const chatService = new ChatService(storageService, settingsService, cliAgentRun
   for (const control of mobileRelayControls.values()) {
     control.pushConversationSnapshot(conversation);
   }
-  void machineLinkService?.replicateConversation(conversation).catch(() => undefined);
 }, userSkillsService, (progress) => emitReviewProgress(progress), chatEventMirrorService, (conversation, messages) => {
   // W-C: an interrupted run's recovered terminals are the only thing that will
   // ever tell a paired phone that run is over.
@@ -459,6 +461,87 @@ function machineRuntimePayload(): MachineRuntimePayloadLocation {
   }
   return { dir: path.join(app.getAppPath(), "dist", "machine"), source: "checkout", expectVersion: app.getVersion() };
 }
+/** Questions about machines that stopped being used, waiting for the User. */
+const machineInactivityAnswers = new Map<string, {
+  question: MachineInactivityQuestion;
+  resolve: (outcome: MachineInactivityOutcome) => void;
+  answering?: boolean;
+}>();
+/** A machine that connects again is in use: its open question goes away. */
+function withdrawMachineInactivityQuestion(machineId: string): void {
+  const entry = machineInactivityAnswers.get(machineId);
+  if (!entry || entry.answering) return;
+  machineInactivityAnswers.delete(machineId);
+  entry.resolve("active");
+  sendToMainWindow("machines:inactivity-questions", machineInactivityQuestions());
+}
+function machineInactivityQuestions(): MachineInactivityQuestion[] {
+  return [...machineInactivityAnswers.values()].map((entry) => entry.question);
+}
+
+/** Removes a machine from this desktop: Settings > Remove, and the answer
+ *  "no longer in use" to the inactive-machine question. The cloud instance
+ *  itself is not deleted. */
+async function removeMachine(id: string): Promise<MachineListResult> {
+  const record = (await settingsService.listMachines()).find((machine) => machine.id === id);
+  await machineLinkService?.disconnectMachine(id);
+  try {
+    // Every device that was handed this machine's power key loses the handoff
+    // with the machine; the key itself still needs rotating, and the outcome
+    // is written to the debug log rather than lost.
+    for (const outcome of await machinePowerHandoffService.revokeForMachine(id, "machine-removed")) {
+      void debugLogService.write("machine.power.handoff.revoked", {
+        handoffId: outcome.handoffId, keyRotationRequired: outcome.keyRotationRequired, detail: outcome.detail
+      });
+    }
+    await settingsService.removeMachine(id);
+  } catch (error) {
+    // Not removed: it stays a machine of this desktop, connected again, and
+    // nothing kept for it is dropped.
+    if (record) await machineLinkService?.connectMachine(record).catch(() => undefined);
+    throw error;
+  }
+  await machineLinkService?.forgetMachine(id);
+  // What was kept for it until it confirmed is no longer kept, and what it
+  // wrote is no longer offered to the machines that remain. Saves that chose
+  // it as a recipient before it was forgotten are waited for, and a second
+  // pass catches a forward or a repair that was already under way.
+  if (record?.deviceId) {
+    const deviceId = record.deviceId;
+    const forget = async (pass: string): Promise<void> => {
+      await chatService.settleChatSaves();
+      await forgetRemovedMachineOutbox({ pairingKey: record.pairingKey, deviceId }, id, pass);
+    };
+    // A failure here is logged; settings keeps the removal, so the next start
+    // drops what is left.
+    await forget("now").catch(() => undefined);
+    setTimeout(() => {
+      void forget("later").then(() => settingsService.clearRemovedMachineOutbox(deviceId)).catch(() => undefined);
+    }, 10_000).unref?.();
+  }
+  // The other machines drop it from their rosters, and what they kept for it.
+  await machineLinkService?.refreshTrustRosters().catch((error: unknown) => {
+    void debugLogService.write("machine.remove.roster-error", { machineId: id, message: error instanceof Error ? error.message : String(error) });
+  });
+  const result = await machineListResult();
+  sendToMainWindow("machines:updated", result);
+  return result;
+}
+
+/** Drops what this desktop kept for a removed machine, and stops offering the
+ *  machines that remain what it wrote. Errors are logged; the next start tries
+ *  again from the record settings keeps of the removal. */
+async function forgetRemovedMachineOutbox(outbox: { pairingKey: string; deviceId: string }, machineId: string, pass: string): Promise<void> {
+  try {
+    const forgotten = await storageService.deviceEvents().forgetRecipient(outbox.pairingKey, outbox.deviceId);
+    const forwarded = await storageService.deviceEvents().forgetOrigin(outbox.deviceId);
+    void debugLogService.write("machine.remove.forgotten", { machineId, pass, events: forgotten, forwarded });
+  } catch (error) {
+    void debugLogService.write("machine.remove.forget-error", { machineId, pass, message: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+}
+
 async function createMachine(request: CreateMachineRequest, awsInstanceId?: string): Promise<CreateMachineResult> {
   const name = typeof request?.name === "string" ? request.name.trim() : "";
   if (!name) {
@@ -516,6 +599,16 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
   payload: machineRuntimePayload,
   machineName: async (machineId) => (await settingsService.listMachines()).find((machine) => machine.id === machineId)?.name,
   prepareProfile: prepareMachineProfile,
+  chatCopy: machineChatCopyProvider({
+    storage: storageService,
+    desktopOriginId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+    adoptMachineIdentity: (machineId, identity) => requireMachineLink().adoptMachineIdentity(machineId, identity),
+    settleChatSaves: () => chatService.settleChatSaves(),
+    shareAfterCopy: (machineId, marks) => requireMachineLink().shareChatChangesAfterCopy(machineId, marks),
+    confirmCopied: (machineId, marks) => requireMachineLink().confirmChatCopy(machineId, marks),
+    attachmentsDir: path.join(app.getPath("userData"), "chats"),
+    tempDir: app.getPath("temp")
+  }),
   // Minutes pass between the preflight and the drain; a member may have
   // started on the machine meanwhile. Asked afresh, and a stale answer is not
   // taken as idle.
@@ -3176,24 +3269,31 @@ function registerIpc(): void {
   ipcMain.handle("machines:create", async (_event, request: CreateMachineRequest): Promise<CreateMachineResult> => {
     return createMachine(request);
   });
+  ipcMain.handle("machines:inactivity-questions", (): MachineInactivityQuestion[] => machineInactivityQuestions());
+  ipcMain.handle("machines:inactivity-answer", async (_event, request: AnswerMachineInactivityRequest): Promise<MachineInactivityQuestion[]> => {
+    const id = typeof request?.machineId === "string" ? request.machineId : "";
+    const entry = machineInactivityAnswers.get(id);
+    if (entry && !entry.answering && (request.answer === "keep" || request.answer === "remove")) {
+      // Removing is carried out before the question goes: when it fails, the
+      // window says so and the question stays to be answered again.
+      entry.answering = true;
+      try {
+        if (request.answer === "remove") await removeMachine(id);
+      } finally {
+        entry.answering = false;
+      }
+      machineInactivityAnswers.delete(id);
+      entry.resolve(request.answer);
+      sendToMainWindow("machines:inactivity-questions", machineInactivityQuestions());
+    }
+    return machineInactivityQuestions();
+  });
   ipcMain.handle("machines:remove", async (_event, request: RemoveMachineRequest): Promise<MachineListResult> => {
     const id = typeof request?.id === "string" ? request.id.trim() : "";
     if (!id) {
       throw new Error("Machine id is required.");
     }
-    await machineLinkService?.disconnectMachine(id);
-    // Every device that was handed this machine's power key loses the handoff
-    // with the machine; the key itself still needs rotating, and the outcome
-    // is written to the debug log rather than lost.
-    for (const outcome of await machinePowerHandoffService.revokeForMachine(id, "machine-removed")) {
-      void debugLogService.write("machine.power.handoff.revoked", {
-        handoffId: outcome.handoffId, keyRotationRequired: outcome.keyRotationRequired, detail: outcome.detail
-      });
-    }
-    await settingsService.removeMachine(id);
-    const result = await machineListResult();
-    sendToMainWindow("machines:updated", result);
-    return result;
+    return removeMachine(id);
   });
   ipcMain.handle("machines:install-probe", async (_event, request: { machineId: string; target: MachineSshTarget }): Promise<MachineRuntimeProbe> => {
     return machineInstallerService.probe(assertMachineSshTarget(request?.target));
@@ -3632,30 +3732,6 @@ void app.whenReady().then(async () => {
     void debugLogService.write("mobile.pairing.revocation-restore-error",
       { message: error instanceof Error ? error.message : String(error) });
   });
-  void recoverLocalChoiceActions().catch(error => {
-    void debugLogService.write("chat.choice.recovery-pending", { message: error instanceof Error ? error.message : String(error) });
-  });
-  void recoverLocalApprovalActions().catch(error => {
-    void debugLogService.write("chat.approval.recovery-error", { message: error instanceof Error ? error.message : String(error) });
-  });
-  // A change committed here whose outgoing event did not survive would leave
-  // peers permanently unaware of it. Recovery is idempotent: the operation ids
-  // come from the immutable revision identity, so this is safe every start.
-  void (async () => {
-    try {
-      const summaries = await storageService.listConversations();
-      let recovered = 0;
-      for (const summary of summaries) {
-        if (summary.kind !== "chat") continue;
-        recovered += await artifactService.recoverActionEvents(summary.id);
-      }
-      if (recovered) await debugLogService.write("artifact.action.recovered-at-start", { recovered });
-    } catch (error) {
-      await debugLogService.write("artifact.action.recover-failed", {
-        message: error instanceof Error ? error.message : String(error)
-      });
-    }
-  })();
   try {
     const desktopIdentity = await chatEventLogService.getOrCreateDeviceIdentity();
     machineLinkService = new MachineLinkService(settingsService, debugLogService, {
@@ -3672,6 +3748,10 @@ void app.whenReady().then(async () => {
       // A member on a machine reads the User's pictures from here: a chat's
       // text is replicated to that machine, its attachment files are not.
       readChatAttachment: (request) => chatService.readChatAttachment(request),
+      // A machine's own changes (its members' replies, messages typed into it
+      // while this desktop was away) arrive as chat change events.
+      applyChatChanges: (event, payload) => chatService.applyRemoteChatChanges(event, payload),
+      chatChangeHead: (conversationId) => chatService.chatChangeHead(conversationId),
       // Every device the User has trusted is named to each machine, in the
       // room that machine is met in. That is what lets a machine keep working
       // when this desktop is closed.
@@ -3684,6 +3764,59 @@ void app.whenReady().then(async () => {
         rendezvousId: room.rendezvousId,
         fingerprint: room.fingerprint
       }))
+    });
+    // Every chat goes to every enrolled machine, as one change event per save.
+    // The machines are read before any chat is saved, so a save made while
+    // they are still connecting is addressed to them too.
+    // Until they are read, a save has no machine to go to and what it changed
+    // never reaches them; a passing failure to read is tried again first.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await machineLinkService.loadMachines();
+        break;
+      } catch (error) {
+        void debugLogService.write("machine-link.load-error", { attempt, message: error instanceof Error ? error.message : String(error) });
+        if (attempt >= 3) break;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    // A removal the app stopped in the middle of: drop what was kept for that
+    // machine now, unless the same machine has since been enrolled again.
+    const enrolledDevices = new Set((await settingsService.listMachines()).map((machine) => machine.deviceId).filter(Boolean));
+    for (const outbox of await settingsService.listRemovedMachineOutboxes()) {
+      if (!enrolledDevices.has(outbox.deviceId)) {
+        const done = await forgetRemovedMachineOutbox(outbox, "", "start").then(() => true, () => false);
+        if (!done) continue;
+      }
+      await settingsService.clearRemovedMachineOutbox(outbox.deviceId);
+    }
+    chatService.setChatChangeTransport(createChatChangeTransport({
+      role: "desktop",
+      storage: storageService,
+      log: chatEventLogService,
+      recipients: () => machineLinkService?.chatChangeRecipients() ?? [],
+      onCommitted: () => machineLinkService?.nudgeEventChannels(),
+      machineOriginId: (machineId) => machineLinkService?.machineDeviceId(machineId)
+    }));
+    // Chat change events every device has confirmed are forgotten.
+    scheduleChatChangePruning({
+      storage: storageService,
+      originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+      log: (event, payload) => { void debugLogService.write(event, payload); }
+    });
+    // A saved setting (an environment value, a role, a rule, a prompt, a
+    // member preset) reaches the machines at once, not only on their next
+    // connection. Bursts of writes are sent once.
+    let machineSettingsSync: ReturnType<typeof setTimeout> | undefined;
+    settingsService.onStoredChange(() => {
+      if (machineSettingsSync) clearTimeout(machineSettingsSync);
+      machineSettingsSync = setTimeout(() => {
+        machineSettingsSync = undefined;
+        void machineLinkService?.syncSettings().catch((error) => {
+          void debugLogService.write("machine-link.settings.sync-error", { message: error instanceof Error ? error.message : String(error) });
+        });
+      }, 500);
+      machineSettingsSync.unref?.();
     });
     machineLinkService.onStatus(() => {
       void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
@@ -3703,8 +3836,14 @@ void app.whenReady().then(async () => {
     machineLinkService.onHello((event) => broadcastScripts([event.machineId]));
     machineLinkService.onConversationDeleted((event) => chatService.applyReplicatedConversationDeletion(event.conversationId, event.deletedAt));
     machineLinkService.onConversationBackDelta((delta) => {
-      // The machine keeps the result until the desktop has stored it.
-      return chatService.applyMachineBackDelta({ conversationId: delta.conversationId, messages: delta.messages })
+      // The machine keeps the result until the desktop has stored it. It may
+      // write only its own members' messages and what it created itself.
+      return chatService.applyMachineBackDelta({
+        conversationId: delta.conversationId,
+        messages: delta.messages,
+        machineId: delta.machineId,
+        machineOriginId: machineLinkService?.machineDeviceId(delta.machineId)
+      })
         .then((conversation) => {
           if (!conversation) throw new Error("The desktop chat is unavailable; machine messages remain unacknowledged.");
           delta.acknowledge?.();
@@ -3846,9 +3985,55 @@ void app.whenReady().then(async () => {
     void machineLinkService.start().then(() => autoUpgrade.evaluate()).catch((error) => {
       void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });
     });
+    // While a machine stays away, this desktop keeps every chat change for it.
+    // Once every 10 days the User is asked about machines inactive that long,
+    // in the window's notice stack; the answers come back over IPC.
+    new MachineInactivityCheck({
+      listMachines: () => settingsService.listMachines(),
+      isConnected: (machineId) => link.isMachineConnected(machineId),
+      lastAcknowledgedAt: async (machine) => machine.deviceId
+        ? storageService.deviceEvents().lastAcknowledgedAt(machine.pairingKey, machine.deviceId)
+        : undefined,
+      lastCheckAt: () => settingsService.getMachineInactivityCheckAt(),
+      saveLastCheckAt: (at) => settingsService.saveMachineInactivityCheckAt(at),
+      ask: (machine) => new Promise((resolve) => {
+        machineInactivityAnswers.set(machine.id, {
+          question: { machineId: machine.id, name: machine.name, inactiveDays: machine.inactiveDays },
+          resolve
+        });
+        sendToMainWindow("machines:inactivity-questions", machineInactivityQuestions());
+      }),
+      log: (event, payload) => { void debugLogService.write(event, payload); }
+    }).start();
+    link.onHello((event) => withdrawMachineInactivityQuestion(event.machineId));
   } catch (error) {
     void debugLogService.write("machine-link.init.error", { message: error instanceof Error ? error.message : String(error) });
   }
+  // After the machines are known: what these save or re-emit is addressed to them.
+  void recoverLocalChoiceActions().catch(error => {
+    void debugLogService.write("chat.choice.recovery-pending", { message: error instanceof Error ? error.message : String(error) });
+  });
+  void recoverLocalApprovalActions().catch(error => {
+    void debugLogService.write("chat.approval.recovery-error", { message: error instanceof Error ? error.message : String(error) });
+  });
+  // A change committed here whose outgoing event did not survive would leave
+  // peers permanently unaware of it. Recovery is idempotent: the operation ids
+  // come from the immutable revision identity, so this is safe every start.
+  void (async () => {
+    try {
+      const summaries = await storageService.listConversations();
+      let recovered = 0;
+      for (const summary of summaries) {
+        if (summary.kind !== "chat") continue;
+        recovered += await artifactService.recoverActionEvents(summary.id);
+      }
+      if (recovered) await debugLogService.write("artifact.action.recovered-at-start", { recovered });
+    } catch (error) {
+      await debugLogService.write("artifact.action.recover-failed", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  })();
   // Deliberately not awaited: each paired phone reconnects through the relay
   // with its own connect timeout, and blocking here left the app with no
   // window at all while the relay was slow or unreachable.

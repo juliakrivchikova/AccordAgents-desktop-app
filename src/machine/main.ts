@@ -25,6 +25,8 @@ import { AppSkillsService } from "../main/services/appSkills";
 import { ArtifactService } from "../main/services/artifacts";
 import { ArtifactStore } from "../main/services/artifactStore";
 import { artifactEventWriter, artifactProjectionPort } from "../main/services/artifactReplication";
+import { createChatChangeTransport, scheduleChatChangePruning } from "../main/services/chatChangeTransport";
+import { importChatCopy } from "../main/services/chatCopy";
 import { ChatEventLogService } from "../main/services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "../main/services/chatEventMirror";
 import { ChatService } from "../main/services/chat";
@@ -64,6 +66,12 @@ interface MachineArgs {
    *  runtime that did not come back after the handover). */
   revertPower?: boolean;
   maintenanceCommand?: string[];
+  /** Setup only: print this machine's device identity (creating it once). */
+  deviceIdentity?: boolean;
+  /** Setup only: import a chat copy the desktop exported into this directory. */
+  importChatCopy?: string;
+  /** The desktop's id for this machine, for which members' replies are its own. */
+  machineId?: string;
 }
 
 function parseArgs(argv: string[]): MachineArgs {
@@ -73,6 +81,9 @@ function parseArgs(argv: string[]): MachineArgs {
   let configurePower = false;
   let checkPower = false;
   let revertPower = false;
+  let deviceIdentity = false;
+  let importChatCopy: string | undefined;
+  let machineId: string | undefined;
   let maintenance = false;
   let maintenanceCommand: string[] | undefined;
   for (let index = 0; index < argv.length; index += 1) {
@@ -102,6 +113,12 @@ function parseArgs(argv: string[]): MachineArgs {
       checkPower = true;
     } else if (arg === "--revert-power") {
       revertPower = true;
+    } else if (arg === "--device-identity") {
+      deviceIdentity = true;
+    } else if (arg === "--import-chat-copy") {
+      importChatCopy = next();
+    } else if (arg === "--machine-id") {
+      machineId = next();
     } else if (arg === "--help" || arg === "-h") {
       console.log("Usage: accordagents-machine --enrollment <pairing.json> [--user-data <dir>] [--name <machine name>]\nSetup only: accordagents-machine --check-power (bounded JSON on stdin; asks AWS, writes nothing)\nSetup only: accordagents-machine --configure-power --user-data <dir> (bounded JSON on stdin; keys never in argv)\nSetup only: accordagents-machine --revert-power --user-data <dir> (puts back the key the last --configure-power replaced)");
       process.exit(0);
@@ -111,10 +128,14 @@ function parseArgs(argv: string[]): MachineArgs {
   if (maintenance && (!maintenanceCommand?.length || !userDataDir || configurePower || revertPower || checkPower)) {
     throw new Error("Maintenance requires --user-data <dir> -- <command> [args] and cannot configure power at the same time.");
   }
-  if (!enrollmentPath && !configurePower && !revertPower && !checkPower && !maintenance) {
+  if ((deviceIdentity || importChatCopy) && !userDataDir) {
+    throw new Error("Setup commands require --user-data <dir>.");
+  }
+  if (!enrollmentPath && !configurePower && !revertPower && !checkPower && !maintenance && !deviceIdentity && !importChatCopy) {
     throw new Error("A machine enrollment file is required (--enrollment <pairing.json> or ACCORDAGENTS_MACHINE_ENROLLMENT).");
   }
-  return { enrollmentPath: path.resolve(enrollmentPath), userDataDir, machineName, configurePower, checkPower, revertPower, maintenanceCommand };
+  return { enrollmentPath: path.resolve(enrollmentPath || "."), userDataDir, machineName, configurePower, checkPower, revertPower, maintenanceCommand,
+    deviceIdentity, importChatCopy: importChatCopy ? path.resolve(importChatCopy) : undefined, machineId };
 }
 
 async function runMachineMaintenance(args: MachineArgs): Promise<void> {
@@ -151,6 +172,38 @@ async function runMachineMaintenance(args: MachineArgs): Promise<void> {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exit(1);
   }
+}
+
+/** Setup only: the identity this machine signs its events with, created once
+ *  and kept in its own database, so the desktop can address chat changes to
+ *  it before the runtime first connects. The private key never leaves. */
+async function printDeviceIdentity(args: MachineArgs): Promise<void> {
+  setHostPlatform(createHeadlessPlatform({ userDataDir: args.userDataDir }));
+  const storage = new StorageService({ sqliteExecutable: "sqlite3" });
+  await storage.init();
+  const identity = await new ChatEventLogService(storage).getOrCreateDeviceIdentity();
+  await finishSetupCommand({ originId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64 });
+}
+
+/** The storage keeps a sqlite3 process open; a setup command prints its one
+ *  JSON line and exits instead of waiting for it. */
+function finishSetupCommand(result: unknown): Promise<never> {
+  return new Promise(() => {
+    process.stdout.write(`${JSON.stringify(result)}\n`, () => process.exit(0));
+  });
+}
+
+/** Setup only: merges the desktop's chat copy into this machine's database.
+ *  Runs while the runtime is stopped; nothing it writes is emitted. */
+async function runChatCopyImport(args: MachineArgs): Promise<void> {
+  setHostPlatform(createHeadlessPlatform({ userDataDir: args.userDataDir }));
+  const storage = new StorageService({ sqliteExecutable: "sqlite3" });
+  await storage.init();
+  // The artifact tables the copy fills are created by the artifact store.
+  await new ArtifactStore(path.join(userDataPath(), "accordagents.sqlite3"), "sqlite3").init();
+  const identity = await new ChatEventLogService(storage).getOrCreateDeviceIdentity();
+  const summary = await importChatCopy(storage, args.importChatCopy!, { hostMachineId: args.machineId, localOriginId: identity.originId });
+  await finishSetupCommand({ ok: true, ...summary });
 }
 
 const POWER_KEY_CHECK_RETRY_MS = 5_000;
@@ -444,9 +497,29 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       handle: (operation) => handleScriptsOperation(scriptService, operation),
       keepsHostAwake: () => scriptService.keepsHostAwake(),
       scheduledCount: () => scriptService.scheduledCount()
-    }
+    },
+    // Chats reach this machine as change events from the desktop.
+    applyChatChanges: (event, payload) => chatService.applyRemoteChatChanges(event, payload)
   });
   hostRef = host;
+  // This machine's own changes (its members' replies, messages typed into it
+  // while the desktop is away) go to the desktop and the other machines the
+  // same way.
+  chatService.setChatChangeTransport(createChatChangeTransport({
+    role: "machine",
+    storage: storageService,
+    log: chatEventLogService,
+    recipients: () => host.chatChangeRecipients(),
+    onCommitted: () => host.nudgeEventChannel(),
+    hostMachineId: () => host.enrolledMachineId(),
+    desktopOriginId: () => enrollment.issuer.originId,
+    machineOriginId: (machineId) => host.machineOriginId(machineId)
+  }));
+  const stopChatChangePruning = scheduleChatChangePruning({
+    storage: storageService,
+    originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+    log: (event, payload) => { void debugLogService.write(event, payload); }
+  });
   // Scheduled scripts that live on this machine: they run here with the lid
   // of the laptop closed, keep the instance awake while one is switched on,
   // and wake the members that run here.
@@ -548,6 +621,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
 
   return async () => {
     presenceClosed = true;
+    stopChatChangePruning();
     if (presenceTimer) clearInterval(presenceTimer);
     await presenceRefresh;
     try { presence?.publish(true); } catch (error) {
@@ -572,6 +646,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
 if (require.main === module) {
   const args = parseArgs(process.argv.slice(2));
   (args.maintenanceCommand ? runMachineMaintenance(args).then(() => undefined) :
+    args.deviceIdentity ? printDeviceIdentity(args).then(() => undefined) :
+    args.importChatCopy ? runChatCopyImport(args).then(() => undefined) :
     args.configurePower ? configureMachinePower(args).then(() => undefined) :
     args.checkPower ? checkMachinePower().then(() => undefined) :
     args.revertPower ? revertMachinePower(args).then(() => undefined) : startMachine(args))

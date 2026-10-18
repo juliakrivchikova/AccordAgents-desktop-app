@@ -74,6 +74,10 @@ export interface MachineHelloBody {
   keepAwake?: boolean;
   /** How many switched-on scripts keep it awake ("Kept on by 2 scheduled scripts"). */
   keepAwakeScripts?: number;
+  /** The chat change version this runtime folds (1 and up). A runtime from
+   *  before chat change events leaves it out: it is sent no chat changes and
+   *  runs no turns until it is updated. */
+  chatChanges?: number;
 }
 
 export interface MachineHelloAckBody {
@@ -129,6 +133,12 @@ export interface MachineTurnRequestBody {
   /** Sealed before entering the immutable log: environment values must not
    * become plaintext chat history or blob fragments on either endpoint. */
   sealedSettings?: string;
+  /** The last chat change the desktop committed for this chat before the
+   *  request. The machine runs the turn only once it has applied that event,
+   *  so a member never answers a chat that has not fully arrived. */
+  chatHead?: { originId: string; logScopeId: string; originSeq: number };
+  /** Where the chat's project lives on each machine (the member's cwd). */
+  machineRepository?: { sourcePath: string; paths: Record<string, string> };
 }
 
 export interface MachineTurnCancelBody {
@@ -598,6 +608,20 @@ export interface RemoveMachineRequest {
   id: string;
 }
 
+/** A machine that has not been active for 10 days or more. While it is kept,
+ *  the desktop keeps every chat change for it, so the User is asked whether it
+ *  is still in use. */
+export interface MachineInactivityQuestion {
+  machineId: string;
+  name: string;
+  inactiveDays: number;
+}
+
+export interface AnswerMachineInactivityRequest {
+  machineId: string;
+  answer: "keep" | "remove";
+}
+
 /** An enrolled machine as the desktop stores it. The pairing package carries
  *  the relay room, the seal key, and the capability fingerprint. */
 export interface MachineRecord {
@@ -619,4 +643,8 @@ export interface MachineRecord {
    *  yet: kept across desktop restarts, so a restarted desktop asks the
    *  machine about them instead of leaving their bubbles pending forever. */
   pendingRuns?: Array<{ runId: string; conversationId: string }>;
+  /** The machine runs a runtime that folds chat change events: known from its
+   *  hello, or from setup, which installs such a runtime and copies every
+   *  chat to it. Until then it is sent no chat changes. */
+  chatChanges?: boolean;
 }

@@ -4,9 +4,10 @@ import {
   type ChatActionDependency, type DeviceEventPacket
 } from "../../shared/deviceEventChannel";
 import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
+import { CHAT_CHANGES_EVENT_KIND, isChatChangesLogScope } from "./chatChanges";
 import { DEVICE_EVENT_INLINE_BYTES, isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import type { DeviceEventApplyOutcome, DeviceEventGap, DeviceEventReceipt } from "../../shared/deviceEventDelivery";
+import type { DeviceEventApplyOutcome, DeviceEventGap, DeviceEventReceipt, DeviceEventRecipient } from "../../shared/deviceEventDelivery";
 import { DEVICE_EVENT_PROBE_LIMIT, DeviceEventProjectionPendingError } from "../../shared/deviceEventDelivery";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import { ChatEventLogService, verifySignedChatEvent } from "./chatEventLog";
@@ -36,6 +37,21 @@ interface DeviceEventChannelOptions {
   /** The peer cannot produce something a held action needs. Reported, because
    *  a deferred action that can never apply is not a transient state. */
   onDependencyUnavailable?(dependency: ChatActionDependency): void;
+  /** Desktop: who else should hold a chat change this peer wrote. Recorded
+   *  with its arrival, so the other machines get it unchanged, signed by its
+   *  author, whether or not that author is online later. */
+  forwardTo?(event: ChatEventEnvelope): DeviceEventRecipient[];
+  /** Machine: the signing key of another of the owner's machines whose chat
+   *  changes this peer may forward. Undefined refuses the forward. */
+  forwardedOriginKey?(originId: string): string | undefined;
+  /** This peer is a device that holds every chat (a machine, or the desktop
+   *  that enrolled this machine), so it may be served any chat change it
+   *  asks for. Other peers are served only what was addressed to them. */
+  peerHoldsEveryChat?: boolean;
+  /** Kinds of events kept for this peer but not sent to it yet (a runtime
+   *  that cannot read them): they stay queued, in order, and go once this no
+   *  longer names them. */
+  heldKinds?(): readonly string[];
   onError(error: Error): void;
 }
 
@@ -73,6 +89,7 @@ export class DeviceEventChannel {
       this.mailbox = new DeviceEventMailbox({
         storage: options.storage, pairing: options.pairing,
         localDeviceId: options.localDeviceId, peerDeviceId: options.peerDeviceId,
+        ...(options.heldKinds ? { heldKinds: options.heldKinds } : {}),
         authenticate: packet => this.authenticate(packet),
         receive: (packet) => this.receive(packet), onError: options.onError
       });
@@ -139,9 +156,12 @@ export class DeviceEventChannel {
         case "event": {
           this.receivePending = true;
           const event = value.event;
-          if (!event || Buffer.byteLength(JSON.stringify(event), "utf8") > DEVICE_EVENT_INLINE_BYTES * 2 || event.originId !== value.from ||
+          // Second-hand, only a chat change is accepted, never a command.
+          const originKey = event && (event.originId === value.from || event.kind === CHAT_CHANGES_EVENT_KIND)
+            ? this.originKey(event.originId, event.logScopeId, value.from) : undefined;
+          if (!event || Buffer.byteLength(JSON.stringify(event), "utf8") > DEVICE_EVENT_INLINE_BYTES * 2 || !originKey ||
               !this.inScope(event.logScopeId) ||
-              !verifySignedChatEvent(event, this.options.peerPublicKeyDerBase64)) {
+              !verifySignedChatEvent(event, originKey)) {
             throw new DevicePacketAuthenticationError("Device event signature or channel scope is invalid.");
           }
           const remembered = this.received.get(event.eventId);
@@ -155,8 +175,10 @@ export class DeviceEventChannel {
             return;
           }
           if (remembered) break; // Stored but unapplied: retry the domain below.
+          const forward = event.originId === value.from ? this.options.forwardTo?.(event) ?? [] : [];
           const stored = await this.options.storage.appendChatEvent(event, {
-            ingress: { deviceId: value.from, channelId: this.options.channelId }
+            ingress: { deviceId: value.from, channelId: this.options.channelId },
+            ...(forward.length ? { recipients: forward } : {})
           });
           if (stored.status === "conflict") throw new Error(`Conflicting device event ${event.eventId}.`);
           const receipt = await this.options.storage.deviceEvents().receipt(event.eventId);
@@ -174,7 +196,9 @@ export class DeviceEventChannel {
           return;
         }
         case "resend":
-          for (const event of await this.options.storage.deviceEvents().repair(this.options.channelId, value.from, value.gap)) {
+          for (const event of await this.options.storage.deviceEvents().repair(this.options.channelId, value.from, value.gap,
+            { anyChatChange: this.options.peerHoldsEveryChat === true })) {
+            if (this.options.heldKinds?.().includes(event.kind)) continue;
             await this.sendEvent(event, value.requestId);
           }
           return;
@@ -196,11 +220,16 @@ export class DeviceEventChannel {
         case "probe":
           if (!Array.isArray(value.events) || value.events.length > DEVICE_EVENT_PROBE_LIMIT) throw new Error("Invalid device event receipt probe.");
           for (const header of value.events) {
-            if (!header || header.originId !== value.from || typeof header.eventId !== "string" ||
+            if (!header || typeof header.originId !== "string" || typeof header.eventId !== "string" ||
                 typeof header.eventHash !== "string" || typeof header.logScopeId !== "string" ||
-                !this.inScope(header.logScopeId) || !Number.isSafeInteger(header.originSeq) || header.originSeq < 1) {
+                !Number.isSafeInteger(header.originSeq) || header.originSeq < 1) {
               throw new Error("Invalid device event receipt probe identity.");
             }
+            // An event this device would not accept (a scope it does not
+            // take, an author it does not know yet) is skipped: refusing the
+            // whole probe would stop the mailbox at it, and every packet
+            // behind it with it.
+            if (!this.originKey(header.originId, header.logScopeId, value.from) || !this.inScope(header.logScopeId)) continue;
             const receipt = await this.options.storage.deviceEvents().receipt(header.eventId);
             if (receipt) {
               if (receipt.eventHash !== header.eventHash) throw new Error("Conflicting device receipt probe.");
@@ -255,10 +284,12 @@ export class DeviceEventChannel {
       // Identities first; an envelope is read only for an event that is due.
       // Re-reading every waiting envelope on each pass kept the database busy
       // for everything else while the peer was unreachable.
-      const page = await this.options.storage.deviceEvents().listPendingHeaders(this.options.channelId, cursor, this.options.peerDeviceId);
+      const page = await this.options.storage.deviceEvents().listPendingHeaders(this.options.channelId, cursor, this.options.peerDeviceId,
+        { excludeKinds: this.options.heldKinds?.() ?? [] });
       if (!page.length) return;
       for (const entry of page) {
         if (this.stopped) return;
+        cursor = entry.rowId;
         const previous = this.lastSent.get(entry.eventId);
         const delay = previous ? Math.min(5_000 * 2 ** previous.attempts, 300_000) : 0;
         if (!previous || performance.now() - previous.at >= delay) {
@@ -268,7 +299,6 @@ export class DeviceEventChannel {
             this.lastSent.set(entry.eventId, { at: performance.now(), attempts: Math.min((previous?.attempts ?? -1) + 1, 6) });
           }
         }
-        cursor = entry.rowId;
       }
     }
   }
@@ -299,6 +329,12 @@ export class DeviceEventChannel {
     // was waiting for usually arrives in the same delivery, and waiting for the
     // next timer would make an answered dependency look like a stuck one.
     let appliedSinceHold = false;
+    // Events a chat copy already contained are confirmed, not applied again.
+    for (const receipt of await this.options.storage.deviceEvents().settleCovered(this.options.channelId, this.options.peerDeviceId, new Date().toISOString())) {
+      if (this.stopped) return;
+      remember(this.received, receipt.eventId, { hash: receipt.eventHash, receipt });
+      await this.sendControl(this.packet({ type: "ack", receipt }));
+    }
     while (!this.stopped) {
       const ready = await this.options.storage.deviceEvents().ready(this.options.channelId, this.options.peerDeviceId, [...held]);
       if (!ready.length) {
@@ -366,10 +402,25 @@ export class DeviceEventChannel {
     if (applyError !== undefined) throw applyError;
   }
 
+  /** The key an event arriving from `from` must be signed with: the peer's own
+   *  for its own events, and for a chat change it forwards, the key of the
+   *  machine that wrote it. Nothing else is accepted second-hand. */
+  private originKey(originId: string, logScopeId: unknown, from: string): string | undefined {
+    if (originId === from) return this.options.peerPublicKeyDerBase64;
+    if (typeof logScopeId !== "string" || !isChatChangesLogScope(logScopeId) || originId === this.options.localDeviceId) return undefined;
+    return this.options.forwardedOriginKey?.(originId);
+  }
+
   /** Chat actions share one log across every machine, so one decision is one
    *  event with many recipients rather than a separate copy per channel. */
   private inScope(logScopeId: string): boolean {
-    return logScopeId === CHAT_ACTION_LOG_SCOPE || logScopeId.startsWith(`device:${this.options.channelId}:`);
+    return logScopeId === CHAT_ACTION_LOG_SCOPE || isChatChangesLogScope(logScopeId) || logScopeId.startsWith(`device:${this.options.channelId}:`);
+  }
+
+  /** Sends whatever this device committed for the peer outside `publish`
+   *  (a chat save's change event) without waiting for the next retry tick. */
+  nudge(): void {
+    this.scheduleFlush();
   }
 
   private scope(conversationId: string, scope: string): string {

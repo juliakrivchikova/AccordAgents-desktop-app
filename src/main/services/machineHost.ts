@@ -1,4 +1,3 @@
-import { conversationOnMachine } from "../../shared/machineRepository";
 /**
  * Machine link, machine side (machines transport, work items 2 and 5).
  *
@@ -30,7 +29,6 @@ import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type { AgentHealth, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
 import type { ChatParticipantRun, ChatService } from "./chat";
 import type { DebugLogService } from "./debugLogs";
-import { messageBatches, messageStamp } from "./machineLink";
 import { advanceInstanceSequence, isStoredTerminal } from "./machineTurnOutcome";
 import { openMobileRelayPayload } from "./mobileRelaySealing";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
@@ -51,6 +49,7 @@ import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { isMachineDurableMessage } from "../../shared/machineLink";
 import { NativeProcessUnavailableError } from "./nativeProcess";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload, type ChatChangesPayload, isSafeChatId, CHAT_CHANGES_VERSION } from "./chatChanges";
 import { machineProgressEventId } from "../../shared/machineProgress";
 import { MachineProgressSender } from "./machineProgressSender";
 import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
@@ -113,12 +112,11 @@ export interface MachineHostOptions {
     /** How many switched-on scripts keep it awake, for the desktop to show. */
     scheduledCount?(): number;
   };
+  /** Folds a `chat.changes` event into this machine's copy of the chat.
+   *  "missing-conversation" holds the event until the chat arrives. */
+  applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation" | "waiting">;
 }
 
-/** Conversation metadata the machine owns and never takes from the desktop:
- *  its own provider sessions, run bookkeeping, and the approvals its members
- *  raised (the desktop shows those and sends decisions back). */
-const MACHINE_OWNED_METADATA_KEYS = ["participantSessions", "participantWatchers", "activeRunIds", "running", "runId", "pendingAppToolApprovals"] as const;
 /** How soon a failed outbox write is tried again. */
 const OUTBOX_RETRY_MS = 30_000;
 /** How long one part of a picture may take to arrive from the desktop before
@@ -146,11 +144,11 @@ interface MachineAttachmentWaiter {
   mediaType?: string;
   fileName?: string;
 }
-/** How many times an incomplete first copy is requested again. */
-const MAX_RESYNC_ATTEMPTS = 3;
+/** How long a turn request waits for the chat state it names before it fails
+ *  honestly instead of running a member on a chat that has not arrived. */
+const MACHINE_CHAT_WAIT_MS = 10 * 60 * 1000;
 
 export class MachineHostService {
-  private readonly failedDeltaWasSyncing = new Map<string, boolean>();
   private eventChannel!: DeviceEventChannel;
   private readonly client: RelayTunnelClient;
   private readonly now: () => Date;
@@ -168,18 +166,11 @@ export class MachineHostService {
   /** Monotonic start counter kept next to the outbox; undefined when it
    *  could not be read or advanced reliably (never published then). */
   private readonly instanceSequence?: number;
-  /** Conversations whose first copy (shell + batches) is still arriving:
-   *  own rows are compared against the desktop's only once it is complete. */
-  private readonly syncing = new Set<string>();
-  /** Conversations with a batch of the first copy that could not be stored;
-   *  the copy is requested again instead of being declared complete. */
-  private readonly failedSync = new Set<string>();
-  /** How many times the first copy was requested again per conversation;
-   *  a copy that keeps failing (a full disk) is not requested forever. */
-  private readonly resyncAttempts = new Map<string, number>();
-  /** Turn requests that arrived while a copy of their chat was still being
-   *  received: they run once the copy is complete, or fail if it is not. */
-  private readonly turnsAwaitingCopy = new Map<string, MachineTurnRequestBody[]>();
+  /** Turn requests that arrived before the chat state they name (the
+   *  desktop's last chat change event) was applied here. They run once it
+   *  is, or fail honestly if it never arrives. */
+  private readonly turnsAwaitingChat = new Map<string, Array<{ request: MachineTurnRequestBody; since: number }>>();
+  private awaitingChatTimer?: ReturnType<typeof setTimeout>;
   /** True when the outbox file exists but could not be read: it is then
    *  never overwritten, so a result on disk is not lost to a bad read. */
   /** Applies an incoming chat action, or undefined when the event is not one.
@@ -339,13 +330,10 @@ export class MachineHostService {
 
   /** approval id -> last status + updatedAt forwarded to the desktop. */
   private readonly forwardedApprovals = new Map<string, string>();
-  /** conversation id -> message id -> stamp the desktop is known to hold, so
-   *  only changes made on this machine travel back. */
-  private readonly knownMessages = new Map<string, Map<string, string>>();
 
   constructor(
-    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady" | "setPromptSuggestionForwarder">>,
-    private readonly storage: Pick<StorageService, "getConversation"> & Partial<Pick<StorageService, "deleteConversation">>,
+    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady" | "setPromptSuggestionForwarder" | "applyMachineRepository">>,
+    private readonly storage: Pick<StorageService, "getConversation"> & Partial<Pick<StorageService, "deleteConversation" | "conversationPresence">>,
     private readonly settings: Pick<SettingsService, "importMachineSettingsSnapshot">,
     private readonly debugLogs: Pick<DebugLogService, "write">,
     private readonly options: MachineHostOptions
@@ -491,6 +479,13 @@ export class MachineHostService {
         void this.debugLogs.write("machine-host.action.dependency-unavailable", { ...dependency });
       },
       apply: (event, body) => this.applyDeviceEvent(event, body, this.eventChannel),
+      peerHoldsEveryChat: true,
+      // The desktop forwards what the owner's other machines wrote in chats,
+      // unchanged: accepted when its author is one of them.
+      forwardedOriginKey: (originId) => {
+        const peer = this.trust.peer(originId);
+        return peer?.role === "machine" ? peer.publicKeyDerBase64 : undefined;
+      },
       onError: (error) => { void this.debugLogs.write("machine-host.events.error", { message: error.message }); }
     });
   }
@@ -500,10 +495,6 @@ export class MachineHostService {
     this.closed = false;
     for (const eventId of await this.options.eventStorage.storedChatEventIds([...this.pendingTerminals.values()].map(terminalEventId))) {
       this.durableTerminalIds.add(eventId);
-    }
-    for (const state of await this.options.eventStorage.deviceEvents().replicaState(this.options.pairing.rendezvousId)) {
-      this.knownMessages.set(state.conversationId, state.messages);
-      if (state.syncing) this.syncing.add(state.conversationId);
     }
     const roster = await this.trust.load();
     if (roster) {
@@ -553,10 +544,11 @@ export class MachineHostService {
    * has entered the durable channel. */
   async shutdown(stopProviders: () => Promise<void>, closeLink = true): Promise<void> {
     this.draining = true;
-    for (const waiting of this.turnsAwaitingCopy.values()) {
-      for (const request of waiting) await this.finishQueuedTurn(request, "failed", "The machine shut down before this turn started.");
+    for (const waiting of this.turnsAwaitingChat.values()) {
+      for (const { request } of waiting) await this.finishQueuedTurn(request, "failed", "The machine shut down before this turn started.");
     }
-    this.turnsAwaitingCopy.clear();
+    this.turnsAwaitingChat.clear();
+    if (this.awaitingChatTimer) clearTimeout(this.awaitingChatTimer);
     await stopProviders();
     while (this.turnTasks.size || (this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork()) || this.settlingInFlight.size || (this.chat.activeParticipantRuns?.().length ?? 0)) {
       // A turn may still be preparing its workspace when shutdown begins.
@@ -591,7 +583,7 @@ export class MachineHostService {
     // update gate (hello run ids) does not wait for it.
     if (this.options.scripts?.keepsHostAwake()) return true;
     if (this.closed || this.draining || this.activeTurns.size || this.turnTasks.size || this.commandTasks.size ||
-        this.settlingRuns.size || this.settlingInFlight.size || this.turnsAwaitingCopy.size || this.syncing.size ||
+        this.settlingRuns.size || this.settlingInFlight.size || this.turnsAwaitingChat.size ||
         (this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork()) || (this.chat.activeParticipantRuns?.().length ?? 0) ||
         this.outboxError || this.progressErrors.size || [...this.progressSenders.values()].some(sender => sender.hasPending())) return true;
     if ([...this.pendingTerminals.values()].some(terminal => !this.durableTerminalIds.has(terminalEventId(terminal)))) return true;
@@ -656,7 +648,6 @@ export class MachineHostService {
    *  here (permission prompts, Codex approvals, member requests) are shown on
    *  the desktop, and their outcome travels back the same way. */
   noteConversationSnapshot(conversation: Conversation): void {
-    this.forwardMachineMessages(conversation);
     const approvals = (conversation.metadata as { pendingAppToolApprovals?: unknown }).pendingAppToolApprovals;
     if (!Array.isArray(approvals)) {
       return;
@@ -713,21 +704,11 @@ export class MachineHostService {
     }
   }
 
-  /** Rows this machine changed while the desktop was away (a reply from a
-   *  resume the machine started itself, a note) are offered again on
-   *  reconnect; the inventory of what the desktop holds decides what goes. */
+  /** Runs this machine finished while the desktop was away are closed on
+   *  reconnect. Their messages already travel as chat change events. */
   private async reforwardMachineMessages(): Promise<void> {
     for (const run of this.settlingRuns.values()) {
       await this.finishNativeRun(run);
-    }
-    for (const conversationId of [...this.knownMessages.keys()]) {
-      if (this.syncing.has(conversationId)) {
-        continue;
-      }
-      const conversation = await this.storage.getConversation(conversationId);
-      if (conversation && conversation.kind === "chat") {
-        this.forwardMachineMessages(conversation);
-      }
     }
   }
 
@@ -776,7 +757,8 @@ export class MachineHostService {
         scriptsSupported: true,
         keepAwake: this.options.scripts.keepsHostAwake(),
         keepAwakeScripts: this.options.scripts.scheduledCount?.() ?? 0
-      } : {})
+      } : {}),
+      chatChanges: CHAT_CHANGES_VERSION
     }, to);
   }
 
@@ -855,6 +837,13 @@ export class MachineHostService {
     // before any application when the machine becomes available again.
     if (this.idleFenced || this.options.hostStopCommitted?.()) return "deferred";
     if (peer && stableJson(this.trust.peer(peer.deviceId) ?? null) !== stableJson(peer)) throw new Error("Machine controller authorization changed.");
+    if (event.kind === CHAT_CHANGES_EVENT_KIND) {
+      if (!this.options.applyChatChanges || !isChatChangesPayload(body)) throw new Error("Unexpected chat change event.");
+      const outcome = await this.options.applyChatChanges(event, body);
+      // A turn may be waiting for exactly this change.
+      if (outcome === "applied") this.scheduleAwaitingChatCheck(100);
+      return outcome === "applied" ? "applied" : "deferred";
+    }
     if (this.options.chatActions?.handles(event, body) && await this.isConversationDeleted(event.conversationId)) return "applied";
     if ((event.kind === "permission.decided" || event.kind === "choice.answered") && this.options.chatActions?.handles(event, body)) {
       // Delivery to a provider may wait; keep Stop and other chats moving.
@@ -897,8 +886,8 @@ export class MachineHostService {
       return "deferred";
     } else if (envelope.body.type === "machine.turn.cancel") {
       await this.options.eventStorage.nativeCommands().cancel(envelope.body.runId, conversationId, event.eventId);
-      await this.handleBody(envelope.body, true, event);
-    } else await this.handleBody(envelope.body, true, event);
+      await this.handleBody(envelope.body, event);
+    } else await this.handleBody(envelope.body, event);
     return "applied";
   }
 
@@ -924,7 +913,8 @@ export class MachineHostService {
         // only from another machine acting for a member of its own.
         return role === "machine";
       case "machine.turn.request":
-        return !peer || !body.sealedSettings;
+        // Where the member works here is the enrolling desktop's to say.
+        return !peer || (!body.sealedSettings && !body.machineRepository);
       default:
         return true;
     }
@@ -962,7 +952,7 @@ export class MachineHostService {
         this.seenMessageIds.delete(first);
       }
     }
-    await this.handleBody(payload.body, false, undefined, from);
+    await this.handleBody(payload.body, undefined, from);
   }
 
   private async openHomeFrame(ciphertext: string): Promise<unknown> {
@@ -993,7 +983,7 @@ export class MachineHostService {
     }
   }
 
-  private async handleBody(body: MachineLinkMessage, durable = false, event?: ChatEventEnvelope, replyTo = event?.originId): Promise<void> {
+  private async handleBody(body: MachineLinkMessage, event?: ChatEventEnvelope, replyTo = event?.originId): Promise<void> {
     if (this.idleFenced && body.type === "machine.turn.query") return;
     // Old, ephemeral frames cannot bypass the idle fence either. Current
     // peers use the durable inbox and retain these actions until apply.
@@ -1049,65 +1039,36 @@ export class MachineHostService {
       }
       case "machine.conversation.deleted": {
         // The owner deleted the chat. Nothing here may keep running against
-        // it, and nothing that arrives later may write it back.
+        // it, and nothing that arrives later may write it back. The id names
+        // the chat's directory here, so it must be a plain token.
+        if (!isSafeChatId(body.conversationId)) {
+          void this.debugLogs.write("machine-host.conversation.unsafe-id-refused", { length: String(body.conversationId).length });
+          return;
+        }
         await this.deleteReplicatedConversation(body.conversationId, body.deletedAt);
         return;
       }
       case "machine.conversation.sync":
-        // A snapshot of a chat the owner deleted is stale by definition; it
-        // cannot be told apart from a new one except by the tombstone.
-        if (await this.isConversationDeleted(body.conversation.id)) {
-          void this.debugLogs.write("machine-host.conversation.deleted-copy-refused",
-            { conversationId: body.conversation.id, type: body.type });
-          return;
-        }
-        // A fresh copy starts clean: a previous copy's failure is forgotten
-        // (the retry budget is not).
-        this.failedSync.delete(body.conversation.id);
-        this.syncing.add(body.conversation.id);
-        if (durable) await this.options.eventStorage.deviceEvents().saveReplicaState(this.options.pairing.rendezvousId, body.conversation.id, { syncing: true });
-        await this.applyConversationSync(body.conversation, durable);
+      case "machine.conversation.sync.done":
+        // Chats reach this machine as chat change events now. A copy from a
+        // desktop that has not been updated yet is not applied: it would
+        // overwrite this machine's own replies with a stale copy.
+        void this.debugLogs.write("machine-host.conversation.legacy-copy-ignored", { type: body.type });
         return;
-      case "machine.conversation.sync.done": {
-        if (await this.isConversationDeleted(body.conversationId)) return;
-        if (this.failedSync.has(body.conversationId)) {
-          // A batch of this copy was not stored: the copy is not complete,
-          // and comparing against it would send stale rows back. Ask again,
-          // a bounded number of times; a copy that keeps failing stays
-          // incomplete (turns on it fail honestly) instead of looping.
-          await this.requestResync(body.conversationId);
-          return;
-        }
-        if (durable) await this.options.eventStorage.deviceEvents().saveReplicaState(this.options.pairing.rendezvousId, body.conversationId, { syncing: false });
-        this.resyncAttempts.delete(body.conversationId);
-        this.syncing.delete(body.conversationId);
-        for (const waiting of this.turnsAwaitingCopy.get(body.conversationId) ?? []) {
-          void this.runTurn(waiting);
-        }
-        this.turnsAwaitingCopy.delete(body.conversationId);
-        // Everything the desktop holds is registered now: rows this machine
-        // made on its own (offline replies) travel back, nothing else does.
-        const stored = await this.storage.getConversation(body.conversationId);
-        if (stored && stored.kind === "chat") {
-          this.forwardMachineMessages(stored);
-        }
-        this.chat.onReplicatedConversationReady?.(body.conversationId);
-        return;
-      }
       case "machine.conversation.delta":
+        if (replyTo === undefined || replyTo === this.options.pairing.issuer.originId) {
+          void this.debugLogs.write("machine-host.conversation.legacy-copy-ignored", { type: body.type });
+          return;
+        }
         if (await this.isConversationDeleted(body.conversationId)) {
           void this.debugLogs.write("machine-host.conversation.deleted-copy-refused",
             { conversationId: body.conversationId, type: body.type });
           return;
         }
-        // Only the desktop's own copy tells this machine what the desktop
-        // already holds. A message the phone delivered here is new to the
-        // desktop, and recording it as known would mean the desktop never
-        // learns what the User asked while it was closed.
-        await this.applyConversationDelta(body, durable, replyTo === undefined || replyTo === this.options.pairing.issuer.originId);
-        if (!this.syncing.has(body.conversationId) && !this.failedSync.has(body.conversationId)) {
-          this.chat.onReplicatedConversationReady?.(body.conversationId);
-        }
+        // A phone talking to this machine while the desktop is away: its
+        // message becomes this machine's own new message, and reaches the
+        // desktop as this machine's chat change.
+        await this.applyPhoneMessages(body);
         return;
       case "machine.participants.delegate":
         if (await this.isConversationDeleted(body.conversationId)) return;
@@ -1130,19 +1091,15 @@ export class MachineHostService {
           await this.finishQueuedTurn(body, "failed", "The machine is shutting down; this turn did not start.");
           return;
         }
-        if (this.failedSync.has(body.conversationId)) {
-          // A batch of this chat's copy could not be stored; an honest
-          // failure beats running a member against half a chat.
-          await this.failTurnOnIncompleteCopy(body);
-          return;
-        }
-        if (this.syncing.has(body.conversationId)) {
-          // The copy is still arriving (a reconnect re-sent it while this
-          // request was in flight): the turn runs when the copy is complete.
-          const waiting = this.turnsAwaitingCopy.get(body.conversationId) ?? [];
-          waiting.push(body);
-          this.turnsAwaitingCopy.set(body.conversationId, waiting);
-          void this.debugLogs.write("machine-host.turn.awaiting-copy", { conversationId: body.conversationId, runId: body.runId });
+        if (!(await this.chatReadyFor(body))) {
+          // The chat state this request was made against has not been applied
+          // here yet (its change events are still arriving): the turn runs
+          // once it is.
+          const waiting = this.turnsAwaitingChat.get(body.conversationId) ?? [];
+          waiting.push({ request: body, since: Date.now() });
+          this.turnsAwaitingChat.set(body.conversationId, waiting);
+          void this.debugLogs.write("machine-host.turn.awaiting-chat", { conversationId: body.conversationId, runId: body.runId, chatHead: body.chatHead });
+          this.scheduleAwaitingChatCheck(1_000);
           return;
         }
         void this.runTurn(body);
@@ -1278,91 +1235,6 @@ export class MachineHostService {
     }
   }
 
-  /** Messages created or changed by turns that started on this machine
-   *  (resumes after approvals, member-request runs) reach the desktop as a
-   *  back delta; messages the desktop sent here are never echoed. */
-  private forwardMachineMessages(conversation: Conversation): void {
-    const known = this.knownMessages.get(conversation.id);
-    if (!known || this.syncing.has(conversation.id)) {
-      return;
-    }
-    const changed = conversation.messages.filter((message) => known.get(message.id) !== messageStamp(message));
-    if (changed.length === 0) {
-      return;
-    }
-    for (const message of changed) {
-      known.set(message.id, messageStamp(message));
-    }
-    // Bounded batches, like every other message list on this link.
-    for (const batch of messageBatches(changed)) {
-      void this.send({
-        type: "machine.conversation.backdelta",
-        conversationId: conversation.id,
-        messages: batch,
-        updatedAt: conversation.updatedAt
-      }).catch((error) => {
-        for (const message of batch) {
-          known.delete(message.id);
-        }
-        void this.debugLogs.write("machine-host.backdelta.error", { conversationId: conversation.id, message: errorMessage(error) });
-      });
-    }
-  }
-
-  /** Registers what the desktop holds; returns the previous stamps of the
-   *  touched ids so a failed apply can put the inventory back. */
-  private rememberDesktopMessages(conversationId: string, messages: ChatMessage[], removedIds: string[] = []): Map<string, string | undefined> {
-    const known = this.knownMessages.get(conversationId) ?? new Map<string, string>();
-    const previous = new Map<string, string | undefined>();
-    for (const message of messages) {
-      previous.set(message.id, known.get(message.id));
-      known.set(message.id, messageStamp(message));
-    }
-    for (const id of removedIds) {
-      previous.set(id, known.get(id));
-      known.delete(id);
-    }
-    this.knownMessages.set(conversationId, known);
-    return previous;
-  }
-
-  private async saveIncomingInventory(conversationId: string, messages: ChatMessage[], removedIds?: string[]): Promise<void> {
-    await this.options.eventStorage.deviceEvents().saveReplicaState(this.options.pairing.rendezvousId, conversationId, {
-      stamps: new Map(messages.map((message) => [message.id, messageStamp(message)])), removedIds
-    });
-  }
-
-  private async applyConversationSync(incoming: Conversation, durable = false): Promise<void> {
-    // The desktop's copy is registered before it is applied, so the snapshot
-    // the apply emits never echoes it back as a back delta. The inventory of
-    // what the desktop holds is kept across syncs: a fresh copy after a
-    // reconnect arrives as a shell plus batches, and a shell must not make
-    // every stored row look new.
-    const previousStamps = this.rememberDesktopMessages(incoming.id, incoming.messages);
-    try {
-      await this.applyConversationShell(incoming);
-      if (durable) await this.saveIncomingInventory(incoming.id, incoming.messages);
-    } catch (error) {
-      this.restoreInventory(incoming.id, previousStamps);
-      this.failedSync.add(incoming.id);
-      void this.debugLogs.write("machine-host.sync.batch-failed", { conversationId: incoming.id, stage: "shell", message: errorMessage(error) });
-      if (durable) throw error;
-      return;
-    }
-    void this.debugLogs.write("machine-host.conversation.synced", { conversationId: incoming.id, messages: incoming.messages.length });
-  }
-
-  private async applyConversationShell(incoming: Conversation): Promise<void> {
-    await this.chat.applyReplicatedConversation(incoming.id, (existing) => {
-      const metadata = existing ? this.mergeMetadata(existing, incoming.metadata) : this.stripMachineOwned(incoming.metadata);
-      // A fresh copy after a reconnect must not erase what this machine
-      // produced meanwhile: the desktop's messages win by id, ours are kept,
-      // and a reply finished here is never demoted by a stale pending bubble.
-      const messages = mergeReplicatedMessages(existing?.messages ?? [], incoming.messages, [], this.ownedParticipantIds(existing ?? incoming));
-      return conversationOnMachine({ ...incoming, messages, metadata }, this.homeMachineId);
-    });
-  }
-
   /**
    * Deletes this machine's copy of a chat the owner deleted.
    *
@@ -1375,11 +1247,8 @@ export class MachineHostService {
     this.deletingConversationIds.add(conversationId);
     const tombstones = this.options.eventStorage.conversationTombstones();
     await tombstones.mark(conversationId, deletedAt);
-    this.syncing.delete(conversationId);
-    this.failedSync.delete(conversationId);
-    const waiting = this.turnsAwaitingCopy.get(conversationId) ?? [];
-    this.turnsAwaitingCopy.delete(conversationId);
-    this.knownMessages.delete(conversationId);
+    const waiting = (this.turnsAwaitingChat.get(conversationId) ?? []).map((entry) => entry.request);
+    this.turnsAwaitingChat.delete(conversationId);
     // Anything of this chat still in flight is stopped and waited for. A
     // provider left running against a deleted chat is exactly the process
     // nobody would ever come looking for.
@@ -1420,78 +1289,93 @@ export class MachineHostService {
     }
   }
 
-  private async applyConversationDelta(delta: MachineConversationDeltaBody, durable = false, fromDesktop = true): Promise<void> {
-    const previousStamps = fromDesktop
-      ? this.rememberDesktopMessages(delta.conversationId, delta.messages, delta.removedMessageIds ?? [])
-      : new Map<string, string | undefined>();
-    let missing = false;
-    try {
-      await this.chat.applyReplicatedConversation(delta.conversationId, (existing) => {
-        if (!existing) {
-          missing = true;
-          return undefined;
+  /** Adds messages a phone delivered straight to this machine. They are
+   *  this machine's own from here on: the save emits them to the desktop. */
+  private async applyPhoneMessages(delta: MachineConversationDeltaBody): Promise<void> {
+    // A chat whose first change has not reached this machine yet: the phone's
+    // message is held (and tried again) rather than dropped.
+    if ((await this.chatPresence(delta.conversationId))?.kind !== "chat") {
+      if (!this.phoneMessagesWaiting.has(delta.conversationId)) {
+        this.phoneMessagesWaiting.add(delta.conversationId);
+        void this.debugLogs.write("machine-host.phone-message.unknown-chat", { conversationId: delta.conversationId });
+      }
+      throw new Error("The chat has not reached this machine yet; the phone's message waits for it.");
+    }
+    this.phoneMessagesWaiting.delete(delta.conversationId);
+    // What a phone types is the User's message, nothing else: this machine
+    // signs it as its own change, so a member's reply or a system line from
+    // a phone would reach every device with this machine's authority.
+    const typed = delta.messages.flatMap((message): ChatMessage[] =>
+      message && typeof message.id === "string" && message.id && message.role === "user" && typeof message.content === "string"
+        && typeof message.createdAt === "string"
+        ? [{ id: message.id, role: "user", content: message.content, createdAt: message.createdAt, status: "done" }]
+        : []);
+    if (typed.length < delta.messages.length) {
+      void this.debugLogs.write("machine-host.phone-message.refused", { conversationId: delta.conversationId, refused: delta.messages.length - typed.length });
+    }
+    await this.chat.applyReplicatedConversation(delta.conversationId, (existing) => {
+      if (!existing) return undefined;
+      const known = new Set(existing.messages.map((message) => message.id));
+      const added = typed.filter((message) => !known.has(message.id));
+      if (!added.length) return undefined;
+      const messages = [...existing.messages, ...added]
+        .map((message, index) => ({ message, index }))
+        .sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.index - right.index)
+        .map((entry) => entry.message);
+      const updatedAt = delta.updatedAt && delta.updatedAt > existing.updatedAt ? delta.updatedAt : existing.updatedAt;
+      return { ...existing, messages, updatedAt };
+    });
+    this.chat.onReplicatedConversationReady?.(delta.conversationId);
+  }
+
+  /** Chats a phone's message is waiting for, so that is logged once. */
+  private readonly phoneMessagesWaiting = new Set<string>();
+
+  private async chatPresence(conversationId: string, messageId?: string): Promise<{ kind: string; hasMessage: boolean } | undefined> {
+    if (this.storage.conversationPresence) return this.storage.conversationPresence(conversationId, messageId);
+    const conversation = await this.storage.getConversation(conversationId);
+    return conversation && { kind: conversation.kind, hasMessage: !messageId || conversation.messages.some((message) => message.id === messageId) };
+  }
+
+  /** True once this machine holds the chat state a turn request was made
+   *  against: the chat itself, and the desktop's last change event it names.
+   *  A phone names no change; the message its member answers is enough. */
+  private async chatReadyFor(request: MachineTurnRequestBody): Promise<boolean> {
+    const presence = await this.chatPresence(request.conversationId, request.messageId);
+    if (presence?.kind !== "chat") return false;
+    if (!request.chatHead || request.chatHead.originSeq < 1) return presence.hasMessage;
+    const applied = await this.options.eventStorage.deviceEvents().appliedHead(request.chatHead.originId, request.chatHead.logScopeId);
+    return applied >= request.chatHead.originSeq;
+  }
+
+  /** Runs the turns whose chat has arrived; fails the ones that waited too
+   *  long for it, so a member never hangs on a chat that never comes. */
+  private scheduleAwaitingChatCheck(delayMs: number): void {
+    if (this.closed || this.awaitingChatTimer || !this.turnsAwaitingChat.size) return;
+    this.awaitingChatTimer = setTimeout(() => {
+      this.awaitingChatTimer = undefined;
+      void this.releaseTurnsAwaitingChat().catch((error) => {
+        void this.debugLogs.write("machine-host.turn.awaiting-chat-error", { message: errorMessage(error) });
+      }).finally(() => this.scheduleAwaitingChatCheck(1_000));
+    }, delayMs);
+    this.awaitingChatTimer.unref?.();
+  }
+
+  private async releaseTurnsAwaitingChat(): Promise<void> {
+    for (const [conversationId, waiting] of [...this.turnsAwaitingChat.entries()]) {
+      const remaining: Array<{ request: MachineTurnRequestBody; since: number }> = [];
+      for (const entry of waiting) {
+        if (await this.chatReadyFor(entry.request)) {
+          void this.runTurn(entry.request);
+        } else if (Date.now() - entry.since > MACHINE_CHAT_WAIT_MS) {
+          await this.finishQueuedTurn(entry.request, "failed", "The chat has not reached this machine yet, so the member did not start. Send the message again once the machine is connected.");
+        } else {
+          remaining.push(entry);
         }
-        const messages = mergeReplicatedMessages(existing.messages, delta.messages, delta.removedMessageIds ?? [], this.ownedParticipantIds(existing));
-        const metadata = delta.metadata ? this.mergeMetadata(existing, delta.metadata) : existing.metadata;
-        return conversationOnMachine({ ...existing, messages, metadata, updatedAt: delta.updatedAt }, this.homeMachineId);
-      });
-      if (durable && !missing) await this.saveIncomingInventory(delta.conversationId, delta.messages, delta.removedMessageIds);
-    } catch (error) {
-      // The inventory must describe what is stored, not what was attempted:
-      // the batch's stamps are reverted, and a first copy in progress is
-      // asked for again when its sync.done arrives.
-      this.restoreInventory(delta.conversationId, previousStamps);
-      void this.debugLogs.write("machine-host.sync.batch-failed", { conversationId: delta.conversationId, stage: "delta", messages: delta.messages.length, message: errorMessage(error) });
-      // The copy is incomplete from now on, whether or not a first copy was
-      // in progress: turns on it fail until a fresh copy completes. Outside
-      // a first copy there is no sync.done to trigger the request, so it is
-      // made here (same bounded budget).
-      this.failedSync.add(delta.conversationId);
-      if (durable) {
-        if (!this.failedDeltaWasSyncing.has(delta.conversationId)) this.failedDeltaWasSyncing.set(delta.conversationId, this.syncing.has(delta.conversationId));
-        this.syncing.add(delta.conversationId);
-        throw error;
       }
-      if (!this.syncing.has(delta.conversationId)) {
-        this.syncing.add(delta.conversationId);
-        await this.requestResync(delta.conversationId);
-      }
-      return;
+      if (remaining.length) this.turnsAwaitingChat.set(conversationId, remaining);
+      else this.turnsAwaitingChat.delete(conversationId);
     }
-    if (missing) {
-      void this.debugLogs.write("machine-host.conversation.delta-without-copy", { conversationId: delta.conversationId });
-      if (durable) throw new Error("The replicated chat shell is missing.");
-    }
-    if (durable) {
-      this.failedSync.delete(delta.conversationId);
-      if (this.failedDeltaWasSyncing.get(delta.conversationId) === false) this.syncing.delete(delta.conversationId);
-      this.failedDeltaWasSyncing.delete(delta.conversationId);
-    }
-  }
-
-  private async requestResync(conversationId: string): Promise<void> {
-    // Turns waiting for this copy cannot run on it any more.
-    for (const waiting of this.turnsAwaitingCopy.get(conversationId) ?? []) {
-      await this.failTurnOnIncompleteCopy(waiting);
-    }
-    this.turnsAwaitingCopy.delete(conversationId);
-    const attempts = (this.resyncAttempts.get(conversationId) ?? 0) + 1;
-    this.resyncAttempts.set(conversationId, attempts);
-    if (attempts > MAX_RESYNC_ATTEMPTS) {
-      void this.debugLogs.write("machine-host.sync.gave-up", { conversationId, attempts });
-      return;
-    }
-    void this.debugLogs.write("machine-host.sync.resync", { conversationId, attempt: attempts });
-    await this.send({ type: "machine.conversation.resync", conversationId }).catch(() => undefined);
-  }
-
-  private ownedParticipantIds(conversation: Conversation): ReadonlySet<string> {
-    const participants = (conversation.metadata as { participants?: Array<{ id: string; homeMachineId?: string }> }).participants ?? [];
-    return new Set(participants.filter((participant) => this.homeMachineId && participant.homeMachineId === this.homeMachineId).map((participant) => participant.id));
-  }
-
-  private async failTurnOnIncompleteCopy(request: MachineTurnRequestBody): Promise<void> {
-    await this.finishQueuedTurn(request, "failed", "This machine's copy of the chat is not complete yet (a sync batch could not be stored); try again once it has synced.");
   }
 
   /** A turn that never started (stopped while waiting for the copy, or the
@@ -1529,7 +1413,7 @@ export class MachineHostService {
   }
 
   private queuedRunIds(): string[] {
-    return [...this.turnsAwaitingCopy.values()].flat().map((request) => request.runId);
+    return [...this.turnsAwaitingChat.values()].flat().map((entry) => entry.request.runId);
   }
 
   private isQueuedRun(runId: string): boolean {
@@ -1537,66 +1421,17 @@ export class MachineHostService {
   }
 
   private takeQueuedRun(runId: string): MachineTurnRequestBody | undefined {
-    for (const [conversationId, waiting] of this.turnsAwaitingCopy.entries()) {
-      const index = waiting.findIndex((request) => request.runId === runId);
+    for (const [conversationId, waiting] of this.turnsAwaitingChat.entries()) {
+      const index = waiting.findIndex((entry) => entry.request.runId === runId);
       if (index >= 0) {
-        const [request] = waiting.splice(index, 1);
+        const [{ request }] = waiting.splice(index, 1);
         if (waiting.length === 0) {
-          this.turnsAwaitingCopy.delete(conversationId);
+          this.turnsAwaitingChat.delete(conversationId);
         }
         return request;
       }
     }
     return undefined;
-  }
-
-  private restoreInventory(conversationId: string, previous: Map<string, string | undefined>): void {
-    const known = this.knownMessages.get(conversationId);
-    if (!known) {
-      return;
-    }
-    for (const [id, stamp] of previous) {
-      if (stamp === undefined) {
-        known.delete(id);
-      } else {
-        known.set(id, stamp);
-      }
-    }
-  }
-
-  private mergeMetadata(existing: Conversation, incoming: Conversation["metadata"]): Conversation["metadata"] {
-    const merged: Record<string, unknown> = { ...this.stripMachineOwned(incoming) };
-    const own = existing.metadata as unknown as Record<string, unknown>;
-    for (const key of MACHINE_OWNED_METADATA_KEYS) {
-      if (own[key] !== undefined) {
-        merged[key] = own[key];
-      }
-    }
-    // Chat-wide approval policies granted on either side apply on both:
-    // union by id, the newer record wins.
-    const incomingPolicies = Array.isArray((incoming as { appToolApprovalPolicies?: unknown }).appToolApprovalPolicies)
-      ? (incoming as { appToolApprovalPolicies: ChatAppToolApprovalPolicy[] }).appToolApprovalPolicies
-      : [];
-    const ownPolicies = Array.isArray(own.appToolApprovalPolicies) ? own.appToolApprovalPolicies as ChatAppToolApprovalPolicy[] : [];
-    if (incomingPolicies.length > 0 || ownPolicies.length > 0) {
-      const byId = new Map<string, ChatAppToolApprovalPolicy>();
-      for (const policy of [...incomingPolicies, ...ownPolicies]) {
-        const current = byId.get(policy.id);
-        if (!current || (policy.updatedAt ?? "") > (current.updatedAt ?? "")) {
-          byId.set(policy.id, policy);
-        }
-      }
-      merged.appToolApprovalPolicies = [...byId.values()];
-    }
-    return merged as Conversation["metadata"];
-  }
-
-  private stripMachineOwned(metadata: Conversation["metadata"]): Conversation["metadata"] {
-    const copy: Record<string, unknown> = { ...(metadata as unknown as Record<string, unknown>) };
-    for (const key of MACHINE_OWNED_METADATA_KEYS) {
-      delete copy[key];
-    }
-    return copy as Conversation["metadata"];
   }
 
   private runTurn(request: MachineTurnRequestBody): Promise<void> {
@@ -1642,7 +1477,7 @@ export class MachineHostService {
     }
     // Admission is durable before acknowledging the event. Execution is
     // independent of the receiver queue, so Stop can arrive during the turn.
-    await this.handleBody(request, true);
+    await this.handleBody(request);
   }
 
   private getRuntimeIdentity(): Promise<NativeRuntimeIdentity> {
@@ -1717,7 +1552,7 @@ export class MachineHostService {
         const body = await this.options.eventStorage.deviceEventBlobs().hydrate(event.payload) as MachineTurnRequestBody;
         if (body.type !== "machine.turn.request" || body.runId !== command.runId) throw new Error("The retained native command is corrupt.");
         if (!this.activeTurns.has(body.runId) && !this.commandTasks.has(body.runId) && !this.isQueuedRun(body.runId)) {
-          await this.handleBody(body, true);
+          await this.handleBody(body);
         }
       }
       if (commands.length < 100) break;
@@ -1770,6 +1605,8 @@ export class MachineHostService {
       if (controller.signal.aborted || await this.isConversationDeleted(request.conversationId)) {
         throw new Error("This chat was deleted or its turn was cancelled before admission.");
       }
+      // The member works in this machine's copy of the project.
+      await this.chat.applyMachineRepository?.(request.conversationId, request.machineRepository);
       const result = await this.chat.runMachineHostedTurn(
         {
           conversationId: request.conversationId,
@@ -1814,9 +1651,6 @@ export class MachineHostService {
     terminal.receiptId = (await this.options.eventStorage.nativeCommands().forRun(request.runId))?.commandId ?? randomUUID();
     this.pendingTerminals.set(request.runId, terminal);
     this.persistOutbox();
-    // The finished messages travel in the result; they are not echoed again
-    // as a back delta by the snapshot that saved them.
-    this.rememberDesktopMessages(request.conversationId, terminal.messages);
     await this.flushPendingTerminals();
   }
 
@@ -2109,6 +1943,30 @@ export class MachineHostService {
     return [issuer, ...peers];
   }
 
+  /** Where this machine's own chat changes go: the desktop that installed it,
+   *  and every other machine of the owner it knows (each holds every chat).
+   *  Phones are not addressed; they read the chat from the desktop. */
+  chatChangeRecipients(): Array<{ deviceId: string; channelId: string }> {
+    return [
+      { deviceId: this.options.pairing.issuer.originId, channelId: this.options.pairing.rendezvousId },
+      ...this.peers.machineRecipients()
+    ];
+  }
+
+  /** The device identity of another of the owner's machines, by machine id:
+   *  the only device that may change its members' replies. */
+  machineOriginId(machineId: string): string | undefined {
+    return this.trust.peers().find((peer) => peer.role === "machine" && peer.machineId === machineId)?.deviceId;
+  }
+
+  /** A chat save committed change events: send them now. */
+  nudgeEventChannel(): void {
+    // A save during startup can commit before the channel exists; the
+    // channel sends what is waiting when it starts.
+    if (this.eventChannel) this.eventChannel.nudge();
+    this.peers.nudge();
+  }
+
   /** Recipients for artifact actions committed directly with their store write. */
   chatActionRecipients(): Array<{ deviceId: string; channelId: string }> {
     return this.resultRecipients();
@@ -2223,29 +2081,6 @@ function terminalEventId(body: MachineTurnFinishedBody): string {
 
 export function machineMessagesForRun(conversation: Conversation, participantId: string, runId: string): ChatMessage[] {
   return conversation.messages.filter((message) => message.participantId === participantId && message.metadata?.runId === runId);
-}
-
-/** Desktop messages win by id, this machine's own are kept, and a message
- *  finished here is never replaced by a stale pending copy of itself. */
-export function mergeReplicatedMessages(own: ChatMessage[], incoming: ChatMessage[], removedIds: string[] = [], ownedParticipantIds: ReadonlySet<string> = new Set()): ChatMessage[] {
-  const byId = new Map(own.map((message) => [message.id, message]));
-  for (const message of incoming) {
-    const current = byId.get(message.id);
-    if (current && current.status !== "pending" && message.status === "pending") {
-      continue;
-    }
-    // A desktop that swept a bubble as "interrupted" (its stale-run sweep
-    // found no live run for it) never overrides this machine's own row for
-    // that bubble, finished or still running: the machine runs it and knows.
-    if (current && current.participantId && ownedParticipantIds.has(current.participantId) && message.metadata?.staleRunRecovery) {
-      continue;
-    }
-    byId.set(message.id, message);
-  }
-  for (const id of removedIds) {
-    byId.delete(id);
-  }
-  return [...byId.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 }
 
 function errorMessage(error: unknown): string {

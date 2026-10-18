@@ -1621,6 +1621,32 @@
       await render("synced");
       return "applied";
     }
+    if (event.kind === "chat.changes") {
+      // A machine writes its members' messages as chat change events. With the
+      // desktop away they reach this phone directly, and are shown the way the
+      // back delta that carried them before was shown, choice cards included.
+      const changed = (Array.isArray(body.changes) ? body.changes : [])
+        .filter(function (change) { return change && (change.type === "message.created" || change.type === "message.updated") && change.message; })
+        .map(function (change) { return change.message; });
+      // Shown as they arrive, so never older text over newer.
+      const orderKey = MACHINE_CHANGE_ORDER_META_PREFIX + event.originId + ":" + conversationId;
+      const order = globalThis.AccordMachineChannel.newerMachineMessages(await readMetaRecord(orderKey), event.originSeq, changed);
+      const messages = order.fresh;
+      if (messages.length) {
+        await handleRelayTimelinePayload({
+          type: "mobile.timeline.events",
+          conversationId: conversationId,
+          events: messages.map(function (message) { return machineTimelineEvent(message, "done"); })
+        }, conversationId);
+        for (const message of messages) {
+          const card = machineChoiceCard(conversationId, message);
+          if (card) mergeControlCard(conversationId, card);
+        }
+        await writeMetaRecord(orderKey, order.record);
+        await render("synced");
+      }
+      return "applied";
+    }
     if (body.type === "machine.approval.requested" || body.type === "machine.approval.updated") {
       mergeControlCard(conversationId, machineApprovalCard(conversationId, body.approval, machine && machine.name));
       await render("synced");
@@ -1989,6 +2015,9 @@
    * reload rebuilds the Stop controls from the rows, and a run whose terminal
    * only ever lived in memory would be offered for stopping again.
    */
+  /** Per machine and chat: the change that last set each message shown here. */
+  const MACHINE_CHANGE_ORDER_META_PREFIX = "machine-change-order:";
+
   async function rememberMachineTerminal(conversationId, body) {
     const record = (await readMetaRecord(MACHINE_TERMINALS_META_KEY)) || {};
     const terminals = record.terminals || {};

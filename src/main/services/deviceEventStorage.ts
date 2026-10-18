@@ -1,4 +1,5 @@
 import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
+import { isChatChangesLogScope } from "./chatChanges";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { decideChatEventRetention, type ChatEventRetentionDecision } from "../../shared/chatEventRetention";
 import {
@@ -10,10 +11,13 @@ import {
   type DeviceEventDelivery,
   type DeviceEventGap,
   type DeviceEventPendingHeader,
-  type DeviceEventReceipt
+  type DeviceEventReceipt,
+  type DeviceEventRecipient
 } from "../../shared/deviceEventDelivery";
 
 export const DEVICE_EVENT_SCHEMA_SQL = `
+  -- The copy-and-diff replication that used these is retired (chats travel as
+  -- chat change events). They stay for an older version opening this file.
   create table if not exists device_replica_copies (
     channel_id text not null,
     conversation_id text not null,
@@ -98,46 +102,6 @@ interface Database {
 export class DeviceEventStorage {
   constructor(private readonly database: Database) {}
 
-  async replicaState(channelId: string): Promise<Array<{ conversationId: string; syncing: boolean; messages: Map<string, string> }>> {
-    await this.database.init();
-    const copies = await this.database.query<{ conversationId: string; syncing: number }>(`
-      select conversation_id as conversationId, syncing from device_replica_copies where channel_id = ${quote(channelId)};
-    `);
-    const states = new Map(copies.map((copy) => [copy.conversationId, { ...copy, syncing: copy.syncing === 1, messages: new Map<string, string>() }]));
-    let cursor = 0;
-    for (;;) {
-      const rows = await this.database.query<{ rowId: number; conversationId: string; messageId: string; stamp: string }>(`
-        select rowid as rowId, conversation_id as conversationId, message_id as messageId, stamp
-        from device_replica_inventory where channel_id = ${quote(channelId)} and rowid > ${cursor} order by rowid limit 500;
-      `);
-      if (!rows.length) break;
-      for (const row of rows) {
-        const state = states.get(row.conversationId) ?? { conversationId: row.conversationId, syncing: false, messages: new Map<string, string>() };
-        state.messages.set(row.messageId, row.stamp);
-        states.set(row.conversationId, state);
-        cursor = row.rowId;
-      }
-    }
-    return [...states.values()];
-  }
-
-  /** A replica's inventory is domain state, not socket state. Persist only
-   * touched ids after the chat write, before acknowledging its event. */
-  async saveReplicaState(channelId: string, conversationId: string, changes: { stamps?: Map<string, string>; removedIds?: string[]; syncing?: boolean }): Promise<void> {
-    await this.database.init();
-    const predicate = `channel_id = ${quote(channelId)} and conversation_id = ${quote(conversationId)}`;
-    await this.database.execute(durable(`begin immediate;
-      ${changes.syncing === undefined ? "" : `insert into device_replica_copies(channel_id, conversation_id, syncing)
-        values (${quote(channelId)}, ${quote(conversationId)}, ${changes.syncing ? 1 : 0})
-        on conflict(channel_id, conversation_id) do update set syncing = excluded.syncing;`}
-      ${[...(changes.stamps ?? [])].map(([id, stamp]) => `insert into device_replica_inventory(channel_id, conversation_id, message_id, stamp)
-        values (${quote(channelId)}, ${quote(conversationId)}, ${quote(id)}, ${quote(stamp)})
-        on conflict(channel_id, conversation_id, message_id) do update set stamp = excluded.stamp;`).join("\n")}
-      ${(changes.removedIds ?? []).map((id) => `delete from device_replica_inventory where ${predicate} and message_id = ${quote(id)};`).join("\n")}
-      commit;
-    `));
-  }
-
   async hostMachineId(channelId: string): Promise<string | undefined> {
     await this.database.init();
     return (await this.database.query<{ value: string }>(
@@ -175,9 +139,12 @@ export class DeviceEventStorage {
 
   /** Include a cursor when draining: an offline first peer or a missing ACK must
    * not starve later events. A new retry pass starts without a cursor. */
-  async listPending(channelId: string, afterRowId = 0, deviceId?: string): Promise<Array<DeviceEventDelivery & { rowId: number }>> {
+  /** `excludeKinds`: events kept for the peer but not sent to it yet. They
+   *  are left out here rather than read and skipped on every pass. */
+  async listPending(channelId: string, afterRowId = 0, deviceId?: string, options: { excludeKinds?: readonly string[] } = {}): Promise<Array<DeviceEventDelivery & { rowId: number }>> {
     await this.database.init();
     requireCursor(afterRowId);
+    const excluded = (options.excludeKinds ?? []).filter((kind) => typeof kind === "string" && kind.length > 0);
     const rows = await this.database.query<{
       rowId: number; envelope: string; deviceId: string; channelId: string; deliveredAt: string | null;
     }>(`
@@ -187,6 +154,7 @@ export class DeviceEventStorage {
         from device_event_outbox o join chat_events e on e.event_id = o.event_id
         where o.channel_id = ${quote(channelId)} and o.acknowledged_at is null and o.rowid > ${afterRowId}
           ${deviceId ? `and o.device_id = ${quote(deviceId)}` : ""}
+          ${excluded.length ? `and e.kind not in (${excluded.map(quote).join(", ")})` : ""}
         order by o.rowid limit ${DEVICE_EVENT_PAGE_COUNT}
       ), page as (
         select *, sum(length(cast(envelope as blob))) over (order by rowId) as bytes,
@@ -209,15 +177,17 @@ export class DeviceEventStorage {
    * every retained envelope on each five-second pass kept the one database
    * connection busy for everything else the User did.
    */
-  async listPendingHeaders(channelId: string, afterRowId = 0, deviceId?: string): Promise<DeviceEventPendingHeader[]> {
+  async listPendingHeaders(channelId: string, afterRowId = 0, deviceId?: string, options: { excludeKinds?: readonly string[] } = {}): Promise<DeviceEventPendingHeader[]> {
     await this.database.init();
     requireCursor(afterRowId);
+    const excluded = (options.excludeKinds ?? []).filter((kind) => typeof kind === "string" && kind.length > 0);
     return this.database.query<DeviceEventPendingHeader>(`
       select o.rowid as rowId, e.event_id as eventId, e.event_hash as eventHash, e.origin_id as originId,
         e.origin_seq as originSeq, e.log_scope_id as logScopeId, o.delivered_at as deliveredAt
       from device_event_outbox o join chat_events e on e.event_id = o.event_id
       where o.channel_id = ${quote(channelId)} and o.acknowledged_at is null and o.rowid > ${afterRowId}
         ${deviceId ? `and o.device_id = ${quote(deviceId)}` : ""}
+        ${excluded.length ? `and e.kind not in (${excluded.map(quote).join(", ")})` : ""}
       order by o.rowid limit ${DEVICE_EVENT_HEADER_PAGE_COUNT};
     `);
   }
@@ -373,6 +343,128 @@ export class DeviceEventStorage {
     return rows[0];
   }
 
+  /** The last contiguous event of one origin and scope this device applied (0 when none). */
+  async appliedHead(originId: string, logScopeId: string): Promise<number> {
+    await this.database.init();
+    const rows = await this.database.query<{ originSeq: number }>(`
+      select origin_seq as originSeq from device_event_applied_heads
+      where origin_id = ${quote(originId)} and log_scope_id = ${quote(logScopeId)};
+    `);
+    return rows[0]?.originSeq ?? 0;
+  }
+
+  /**
+   * Chat change events that a chat copy already contained.
+   *
+   * The copy moved this device's position in their log past them, so they can
+   * never be the next event and would wait unapplied for ever, holding the
+   * sender's outbox with them. They are recorded as applied without being
+   * applied again: an older change put over the copy could take a message back
+   * to an earlier text. Returns the receipts to acknowledge.
+   */
+  async settleCovered(channelId: string, deviceId: string | undefined, at: string): Promise<DeviceEventReceipt[]> {
+    await this.database.init();
+    const inbound = `i.channel_id = ${quote(channelId)} ${deviceId ? `and i.device_id = ${quote(deviceId)}` : ""}`;
+    const covered = `substr(e.log_scope_id, 1, 13) = 'chat-changes:' and e.origin_seq <= (
+      select h.origin_seq from device_event_applied_heads h where h.origin_id = e.origin_id and h.log_scope_id = e.log_scope_id)`;
+    return this.database.query<DeviceEventReceipt>(durable(`
+      begin immediate;
+      update device_event_inbox set applied_at = ${quote(at)}, outcome = 'applied' where event_id in (
+        select i.event_id from device_event_inbox i join chat_events e on e.event_id = i.event_id
+        where ${inbound} and i.applied_at is null and ${covered} limit ${DEVICE_EVENT_PAGE_COUNT});
+      select i.event_id as eventId, e.event_hash as eventHash, i.outcome, i.applied_at as appliedAt
+        from device_event_inbox i join chat_events e on e.event_id = i.event_id
+        where ${inbound} and i.applied_at = ${quote(at)} and ${covered};
+      commit;
+    `));
+  }
+
+  /**
+   * Gives `to` every chat change of `originId` this device holds beyond the
+   * given marks (all of them in a chat without a mark). Delivery rows only:
+   * the events themselves are the author's, unchanged.
+   */
+  async shareChatChangesAfter(originId: string, marks: Array<{ logScopeId: string; originSeq: number }>, to: DeviceEventRecipient): Promise<number> {
+    if (!to.deviceId.trim() || !to.channelId.trim()) throw new Error("Device event delivery requires a device and channel identity.");
+    await this.database.init();
+    const known = marks.filter((mark) => isChatChangesLogScope(mark.logScopeId) && Number.isSafeInteger(mark.originSeq));
+    const values = known.length
+      ? known.map((mark) => `(${quote(mark.logScopeId)}, ${Math.floor(mark.originSeq)})`).join(", ")
+      : "(null, 0)";
+    const rows = await this.database.query<{ eventId: string }>(durable(`
+      with marks(log_scope_id, origin_seq) as (values ${values})
+      insert or ignore into device_event_outbox(event_id, device_id, channel_id)
+        select e.event_id, ${quote(to.deviceId)}, ${quote(to.channelId)} from chat_events e
+        left join marks m on m.log_scope_id = e.log_scope_id
+        where e.origin_id = ${quote(originId)} and e.log_scope_id >= 'chat-changes:' and e.log_scope_id < 'chat-changes;'
+          and e.origin_seq > coalesce(m.origin_seq, 0)
+      returning event_id as eventId;
+    `));
+    return rows.length;
+  }
+
+  /**
+   * Forgets chat change events every recipient has confirmed.
+   *
+   * A chat change only carries a chat's content from one device to another;
+   * once every device it was meant for has it, and this device applied it (if
+   * it came from elsewhere), it has no reader left. A device that needs those
+   * chats later gets them from a copy, not from old events.
+   *
+   * Kept: the newest event of each chat and author, because the next event
+   * continues its sequence; anything not yet confirmed or applied; and the
+   * last `graceMs` of events, for a copy being taken at this moment. A body
+   * stored separately goes with its event unless another kept event of that
+   * chat still points to the same bytes.
+   */
+  async pruneConfirmedChatChanges(localOriginId: string, cutoffIso: string, limit = 2_000): Promise<{ events: number; blobs: number }> {
+    await this.database.init();
+    const origins = new Set([localOriginId, ...(await this.database.query<{ originId: string }>(`
+      select distinct origin_id as originId from device_event_applied_heads
+      where log_scope_id >= 'chat-changes:' and log_scope_id < 'chat-changes;';
+    `)).map((row) => row.originId)]);
+    let events = 0;
+    let blobs = 0;
+    for (const originId of origins) {
+      if (events >= limit) break;
+      const rows = await this.database.query<{ events: number; blobs: number }>(durable(`
+        begin immediate;
+        create temp table if not exists chat_changes_pruned(event_id text primary key, log_scope_id text, blob_hash text);
+        delete from temp.chat_changes_pruned;
+        insert into temp.chat_changes_pruned(event_id, log_scope_id, blob_hash)
+          select e.event_id, e.log_scope_id,
+            case when json_extract(e.payload_json, '$.type') = 'device.event.blob' then json_extract(e.payload_json, '$.blobHash') end
+          from chat_events e
+          where e.origin_id = ${quote(originId)} and e.log_scope_id >= 'chat-changes:' and e.log_scope_id < 'chat-changes;'
+            and e.received_at < ${quote(cutoffIso)}
+            and e.origin_seq < (select max(n.origin_seq) from chat_events n where n.origin_id = e.origin_id and n.log_scope_id = e.log_scope_id)
+            and not exists (select 1 from device_event_outbox o where o.event_id = e.event_id and o.acknowledged_at is null)
+            and not exists (select 1 from device_event_inbox i where i.event_id = e.event_id and i.applied_at is null)
+          limit ${Math.max(1, Math.floor(limit - events))};
+        delete from device_event_outbox where event_id in (select event_id from temp.chat_changes_pruned);
+        delete from device_event_inbox where event_id in (select event_id from temp.chat_changes_pruned);
+        delete from chat_events where event_id in (select event_id from temp.chat_changes_pruned);
+        create temp table if not exists chat_changes_unreferenced(blob_hash text primary key);
+        delete from temp.chat_changes_unreferenced;
+        insert or ignore into temp.chat_changes_unreferenced(blob_hash)
+          select p.blob_hash from temp.chat_changes_pruned p
+          where p.blob_hash is not null and not exists (
+            select 1 from chat_events r
+            where r.origin_id = ${quote(originId)} and r.log_scope_id = p.log_scope_id
+              and json_extract(r.payload_json, '$.blobHash') = p.blob_hash);
+        delete from device_event_blob_fragments where blob_hash in (select blob_hash from temp.chat_changes_unreferenced);
+        delete from device_event_blobs where blob_hash in (select blob_hash from temp.chat_changes_unreferenced);
+        select (select count(*) from temp.chat_changes_pruned) as events, (select count(*) from temp.chat_changes_unreferenced) as blobs;
+        delete from temp.chat_changes_pruned;
+        delete from temp.chat_changes_unreferenced;
+        commit;
+      `));
+      events += rows[0]?.events ?? 0;
+      blobs += rows[0]?.blobs ?? 0;
+    }
+    return { events, blobs };
+  }
+
   async gaps(channelId: string, deviceId?: string): Promise<DeviceEventGap[]> {
     await this.database.init();
     return this.database.query<DeviceEventGap>(`
@@ -467,6 +559,15 @@ export class DeviceEventStorage {
     `))[0]?.shared ?? 0;
   }
 
+  /** When `deviceId` last confirmed something this device sent it. */
+  async lastAcknowledgedAt(channelId: string, deviceId: string): Promise<string | undefined> {
+    await this.database.init();
+    return (await this.database.query<{ at: string | null }>(`
+      select max(acknowledged_at) as at from device_event_outbox
+      where channel_id = ${quote(channelId)} and device_id = ${quote(deviceId)} and acknowledged_at is not null;
+    `))[0]?.at ?? undefined;
+  }
+
   /**
    * Stops holding anything for a device the owner has taken off the roster.
    *
@@ -481,6 +582,42 @@ export class DeviceEventStorage {
     await this.database.init();
     const rows = await this.database.query<{ eventId: string }>(durable(`
       delete from device_event_outbox where channel_id = ${quote(channelId)} and device_id = ${quote(deviceId)}
+      returning event_id as eventId;`));
+    return rows.length;
+  }
+
+  /**
+   * A machine imported a chat copy covering every chat change up to `marks`:
+   * the rows kept for it up to them are confirmed, not sent. Only chat change
+   * scopes; the chat-action log's mark says how far it was seen, not applied.
+   */
+  async confirmCopied(channelId: string, deviceId: string, marks: ReadonlyArray<{ originId: string; logScopeId: string; originSeq: number }>, at: string): Promise<number> {
+    await this.database.init();
+    const covered = marks.filter((mark) => isChatChangesLogScope(mark.logScopeId) && typeof mark.originId === "string"
+      && Number.isSafeInteger(mark.originSeq) && mark.originSeq > 0);
+    let confirmed = 0;
+    for (let index = 0; index < covered.length; index += 100) {
+      const chunk = covered.slice(index, index + 100);
+      const rows = await this.database.query<{ eventId: string }>(durable(`
+        update device_event_outbox set acknowledged_at = ${quote(at)}, outcome = 'applied'
+        where channel_id = ${quote(channelId)} and device_id = ${quote(deviceId)} and acknowledged_at is null
+          and event_id in (${chunk.map((mark) => `select event_id from chat_events where origin_id = ${quote(mark.originId)}
+            and log_scope_id = ${quote(mark.logScopeId)} and origin_seq <= ${Math.floor(mark.originSeq)}`).join(" union all ")})
+        returning event_id as eventId;`));
+      confirmed += rows.length;
+    }
+    return confirmed;
+  }
+
+  /**
+   * Stops forwarding what a removed device wrote. The remaining machines drop
+   * it from their rosters and refuse its signature from then on, so a row
+   * that still offers one of its events to them would never be confirmed.
+   */
+  async forgetOrigin(originId: string): Promise<number> {
+    await this.database.init();
+    const rows = await this.database.query<{ eventId: string }>(durable(`
+      delete from device_event_outbox where event_id in (select event_id from chat_events where origin_id = ${quote(originId)})
       returning event_id as eventId;`));
     return rows.length;
   }
@@ -507,13 +644,19 @@ export class DeviceEventStorage {
    * this it would sit behind a gap it can never close, and no action would
    * ever apply there. The rows it is served are recorded as deliveries, so
    * retention still waits for its acknowledgement.
+   *
+   * Chat changes are the same for a device that holds every chat (a machine,
+   * or the desktop that enrolled it): it is a recipient of every chat change,
+   * including one written before it was known, and one written by another
+   * machine that this device holds (served unchanged, signed by its author).
+   * Any other peer (a phone) is served only what was addressed to it.
    */
-  async repair(channelId: string, deviceId: string, gap: DeviceEventGap): Promise<ChatEventEnvelope[]> {
+  async repair(channelId: string, deviceId: string, gap: DeviceEventGap, options: { anyChatChange?: boolean } = {}): Promise<ChatEventEnvelope[]> {
     requireCursor(gap.fromSeq);
     requireCursor(gap.toSeq);
     if (gap.fromSeq < 1 || gap.toSeq < gap.fromSeq) throw new Error("Invalid device event repair range.");
     await this.database.init();
-    const broadcast = gap.logScopeId === CHAT_ACTION_LOG_SCOPE;
+    const broadcast = gap.logScopeId === CHAT_ACTION_LOG_SCOPE || (options.anyChatChange === true && isChatChangesLogScope(gap.logScopeId));
     const rows = await this.database.query<{ envelope: string }>(`
       with candidates as (
       select e.envelope_json as envelope, e.origin_seq from ${broadcast ? "chat_events e" : `device_event_outbox o join chat_events e on e.event_id = o.event_id`}

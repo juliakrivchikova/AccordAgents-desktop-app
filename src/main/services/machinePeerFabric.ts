@@ -32,6 +32,7 @@ import type { RelayTunnelClient } from "./relayTunnelClient";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
 import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
 import type { StorageService } from "./storage";
+import { CHAT_CHANGES_EVENT_KIND } from "./chatChanges";
 
 export interface MachinePeerFabricOptions {
   selfDeviceId: string;
@@ -92,6 +93,18 @@ export class MachinePeerFabric {
       deviceId: connection.peer.deviceId,
       channelId: this.channelIdFor(connection.peer)
     }));
+  }
+
+  /** Sends what was just committed for the peers without waiting for the timer. */
+  nudge(): void {
+    for (const connection of this.connections.values()) connection.channel.nudge();
+  }
+
+  /** The owner's other machines among them, each in the room it is met in. */
+  machineRecipients(): Array<{ deviceId: string; channelId: string }> {
+    return [...this.connections.values()]
+      .filter((connection) => connection.peer.role === "machine")
+      .map((connection) => ({ deviceId: connection.peer.deviceId, channelId: this.channelIdFor(connection.peer) }));
   }
 
   start(): void {
@@ -297,6 +310,12 @@ export class MachinePeerFabric {
       peerDeviceId: peer.deviceId,
       peerPublicKeyDerBase64: peer.publicKeyDerBase64,
       isPeerConnected: () => this.options.isPeerConnected(peer.deviceId),
+      // Another machine holds every chat too; a phone or a second desktop
+      // is served only what was addressed to it.
+      peerHoldsEveryChat: peer.role === "machine",
+      // Another machine whose runtime cannot fold chat changes yet keeps them
+      // queued here until the roster says it can.
+      heldKinds: () => peer.role === "machine" && peer.chatChanges !== true ? [CHAT_CHANGES_EVENT_KIND] : [],
       send,
       apply: (event, payload) => {
         if (this.connections.get(peer.deviceId)?.peer !== peer) throw new Error("Machine peer authorization changed.");

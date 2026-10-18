@@ -34,6 +34,7 @@ import { normalizeInferredParticipantRequestThreads as normalizeInferredParticip
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import { sanitizeConversationWarnings } from "../../shared/warnings";
 import { formatHlcKey, logicalOrderKey, parseHlcKey, type HlcParts } from "../../shared/hlc";
+import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import type { DeviceEventAppendOptions } from "../../shared/deviceEventDelivery";
 import { DEVICE_EVENT_SCHEMA_SQL, DeviceEventStorage, deviceEventAppendSql } from "./deviceEventStorage";
 import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEventBlobStorage";
@@ -314,6 +315,33 @@ export interface StoredChatSearchQueryResult {
   messageMatchCount: number;
   matchedChatCount: number;
 }
+
+/** One chat's newest change event a chat copy covers, by origin. */
+export interface ChatCopyMark {
+  originId: string;
+  logScopeId: string;
+  originSeq: number;
+  eventHash: string;
+}
+
+/** Shared state a new machine gets with its chat copy: artifacts, and which
+ *  chats were deleted. The artifact delivery outbox is device-local, and the
+ *  pre-revision tables (`artifact_versions`, `artifact_signatures`,
+ *  `artifact_version_sources`) are read-only history that a current store
+ *  refuses writes to; their content lives in the revision tables below. */
+const CHAT_COPY_STATE_TABLES = [
+  "deleted_conversations",
+  "artifact_conversation_tombstones",
+  "artifacts",
+  "artifact_drafts",
+  "artifact_operations",
+  "artifact_revisions",
+  "artifact_state_events",
+  "artifact_version_projection",
+  "artifact_bound_signatures",
+  "artifact_bound_sources",
+  "artifact_revision_migration"
+] as const;
 
 export class StorageService {
   private sqliteSession?: SqliteSession;
@@ -681,6 +709,19 @@ export class StorageService {
   async getConversation(id: string): Promise<Conversation | undefined> {
     await this.init();
     return this.readWholeConversation(id);
+  }
+
+  /** Whether a chat is stored here (and holds one message), without reading
+   *  a conversation that can be thousands of messages long. */
+  async conversationPresence(id: string, messageId?: string): Promise<{ kind: Conversation["kind"]; hasMessage: boolean } | undefined> {
+    await this.init();
+    const hasMessage = messageId
+      ? `exists(select 1 from conversation_messages where conversation_id = ${sqlString(id)} and message_id = ${sqlString(messageId)})`
+      : "0";
+    const [row] = await this.queryJson<{ kind: Conversation["kind"]; hasMessage: number }>(
+      `select kind, ${hasMessage} as hasMessage from conversations where id = ${sqlString(id)} limit 1;`
+    );
+    return row ? { kind: row.kind, hasMessage: Boolean(row.hasMessage) } : undefined;
   }
 
   // The conversation is assembled from its body plus its message rows. The old
@@ -1415,7 +1456,13 @@ export class StorageService {
    *  that already serialized and hashed the messages for this exact snapshot
    *  passes them as `rows`; they are used only when they line up with the
    *  messages one to one, otherwise the messages are serialized here. */
-  async saveConversation(conversation: Conversation, options: { rows?: SavedMessageRow[] } = {}): Promise<string> {
+  async saveConversation(conversation: Conversation, options: {
+    rows?: SavedMessageRow[];
+    /** Statements that must commit in the same transaction as this save, or
+     *  not at all: the chat's outgoing change event. `onlyIfSql` receives the
+     *  condition the incremental write is gated on. */
+    alsoCommit?: { sql: string; onlyIfSql(condition: string): string };
+  } = {}): Promise<string> {
     await this.init();
     const rows: SavedMessageRow[] = rowsMatchMessages(options.rows, conversation.messages)
       ? options.rows
@@ -1439,7 +1486,7 @@ export class StorageService {
     let claimed = false;
     if (previous) {
       try {
-        claimed = await this.writeConversationIncrementally(conversation, rows, previous, nextToken);
+        claimed = await this.writeConversationIncrementally(conversation, rows, previous, nextToken, options.alsoCommit);
       } catch (error) {
         // A failed partial write leaves this process unable to say what the row
         // holds, so the cache is worthless and the next save must rewrite
@@ -1456,7 +1503,7 @@ export class StorageService {
       return nextToken;
     }
     this.savedMessageState.delete(conversation.id);
-    await this.writeConversationInFull(conversation, rows, nextToken);
+    await this.writeConversationInFull(conversation, rows, nextToken, options.alsoCommit?.sql);
     this.savedMessageState.set(conversation.id, {
       token: nextToken,
       rows: rows.map((row) => ({ id: row.id, hash: row.hash }))
@@ -1483,7 +1530,8 @@ export class StorageService {
   private async writeConversationInFull(
     conversation: Conversation,
     rows: SavedMessageRow[],
-    token: string
+    token: string,
+    alsoCommitSql = ""
   ): Promise<void> {
     const bodyPayload = JSON.stringify(conversationBody(conversation));
     // `payload_json` used to hold a second, complete copy of the conversation —
@@ -1525,6 +1573,7 @@ export class StorageService {
         where id = ${sqlString(conversation.id)};
       delete from conversation_messages where conversation_id = ${sqlString(conversation.id)};
       ${messageRows}
+      ${alsoCommitSql}
       commit;
     `);
   }
@@ -1535,7 +1584,8 @@ export class StorageService {
     conversation: Conversation,
     rows: SavedMessageRow[],
     previous: SavedMessageState,
-    token: string
+    token: string,
+    alsoCommit?: { sql: string; onlyIfSql(condition: string): string }
   ): Promise<boolean> {
     const bodyPayload = JSON.stringify(conversationBody(conversation));
     const payload = bodyPayload;
@@ -1591,6 +1641,7 @@ export class StorageService {
         payload_json = ${sqlString(payload)}
       where id = ${sqlString(conversation.id)} and save_token = ${sqlString(previous.token)};
       ${statements.join("\n")}
+      ${alsoCommit ? alsoCommit.onlyIfSql(owned) : ""}
       update conversations set save_token = ${sqlString(token)}
         where id = ${sqlString(conversation.id)} and save_token = ${sqlString(previous.token)};
       commit;
@@ -1599,6 +1650,154 @@ export class StorageService {
       `select save_token from conversations where id = ${sqlString(conversation.id)} limit 1;`
     );
     return observed === token;
+  }
+
+  /**
+   * The newest chat change of every chat this device holds: its own events,
+   * and the ones it applied from other devices. A chat copy made right after
+   * this read covers at least these, so the receiving machine continues from
+   * them instead of asking for history the relay no longer has.
+   *
+   * The chat-action log is marked too, per author: the copy carries its
+   * artifact actions, and the rest of it (choices, approvals, stops) is about
+   * runs elsewhere that a new machine has no use for.
+   */
+  async chatChangeMarks(localOriginId: string): Promise<ChatCopyMark[]> {
+    await this.init();
+    return this.queryJson<ChatCopyMark>(`
+      select originId, logScopeId, originSeq, eventHash from (
+        select e.origin_id as originId, e.log_scope_id as logScopeId, e.origin_seq as originSeq, e.event_hash as eventHash,
+          row_number() over (partition by e.origin_id order by e.origin_seq desc) as rn
+        from chat_events e where e.log_scope_id = ${sqlString(CHAT_ACTION_LOG_SCOPE)}
+      ) where rn = 1
+      union all
+      select originId, logScopeId, originSeq, eventHash from (
+        select e.origin_id as originId, e.log_scope_id as logScopeId, e.origin_seq as originSeq, e.event_hash as eventHash,
+          row_number() over (partition by e.origin_id, e.log_scope_id order by e.origin_seq desc) as rn
+        from chat_events e
+        -- A range, so the (origin, scope, seq) index is read only for chat
+        -- change scopes, not for every event this device ever wrote.
+        where e.origin_id = ${sqlString(localOriginId)} and e.log_scope_id >= 'chat-changes:' and e.log_scope_id < 'chat-changes;'
+      ) where rn = 1
+      union all
+      select origin_id as originId, log_scope_id as logScopeId, origin_seq as originSeq, event_hash as eventHash
+      from device_event_applied_heads
+      where substr(log_scope_id, 1, 13) = 'chat-changes:' and origin_id <> ${sqlString(localOriginId)};
+    `);
+  }
+
+  /** Copies artifact and deletion state into a separate SQLite file, so a new
+   *  machine gets it over the setup connection instead of as events. Device-
+   *  local delivery queues are not part of it. */
+  async exportChatCopyState(targetPath: string): Promise<{ tables: string[] }> {
+    await this.init();
+    const existing = new Set((await this.queryJson<{ name: string }>(
+      "select name from sqlite_master where type = 'table';"
+    )).map((row) => row.name));
+    const tables = CHAT_COPY_STATE_TABLES.filter((table) => existing.has(table));
+    await this.runSql(`
+      attach database ${sqlString(targetPath)} as copy;
+      begin immediate;
+      ${tables.map((table) => `create table copy.${table} as select * from main.${table};`).join("\n")}
+      create table copy.chat_events as select * from main.chat_events
+        where log_scope_id = ${sqlString(CHAT_ACTION_LOG_SCOPE)} and substr(kind, 1, 9) = 'artifact.';
+      create table copy.device_event_blobs as select * from main.device_event_blobs where blob_hash in (
+        select json_extract(payload_json, '$.blobHash') from copy.chat_events where json_extract(payload_json, '$.type') = 'device.event.blob');
+      create table copy.device_event_blob_fragments as select * from main.device_event_blob_fragments
+        where blob_hash in (select blob_hash from copy.device_event_blobs);
+      commit;
+      detach database copy;
+    `);
+    return { tables };
+  }
+
+  /** Merges artifact and deletion state from an exported file. Rows already
+   *  here win; running it twice changes nothing. */
+  async importChatCopyState(sourcePath: string): Promise<{ tables: Record<string, number> }> {
+    await this.init();
+    await this.runSql(`attach database ${sqlString(sourcePath)} as copy; detach database copy;`);
+    const counts: Record<string, number> = {};
+    const statements: string[] = [];
+    const sourceTables = new Set((await this.queryJson<{ name: string }>(
+      `attach database ${sqlString(sourcePath)} as copy; select name from copy.sqlite_master where type = 'table'; detach database copy;`
+    )).map((row) => row.name));
+    const localTables = new Set((await this.queryJson<{ name: string }>(
+      "select name from sqlite_master where type = 'table';"
+    )).map((row) => row.name));
+    // The artifact actions behind that state come along as the events they
+    // are, unchanged: without them this device would announce the same
+    // history again as its own and every peer would refuse it as a conflict.
+    for (const table of [...CHAT_COPY_STATE_TABLES, "chat_events", "device_event_blobs", "device_event_blob_fragments"]) {
+      if (!sourceTables.has(table) || !localTables.has(table)) continue;
+      const sourceColumns = new Set((await this.queryJson<{ name: string }>(
+        `attach database ${sqlString(sourcePath)} as copy; select name from pragma_table_info('${table}', 'copy'); detach database copy;`
+      )).map((row) => row.name));
+      const columns = (await this.queryJson<{ name: string }>(`select name from pragma_table_info('${table}');`))
+        .map((row) => row.name).filter((name) => sourceColumns.has(name));
+      if (!columns.length) continue;
+      const list = columns.map((column) => `"${column}"`).join(", ");
+      statements.push(`insert or ignore into main.${table} (${list}) select ${list} from copy.${table};`);
+      counts[table] = columns.length;
+    }
+    if (statements.length) {
+      await this.runSql(`
+        attach database ${sqlString(sourcePath)} as copy;
+        begin immediate;
+        ${statements.join("\n")}
+        commit;
+        detach database copy;
+      `);
+    }
+    // Events minted here from now on are ordered after everything copied.
+    await this.getChatEventClock();
+    const latest = (await this.queryJson<{ logicalTs: string | null }>(
+      `select max(logical_ts) as logicalTs from chat_events where log_scope_id = ${sqlString(CHAT_ACTION_LOG_SCOPE)};`
+    ))[0]?.logicalTs;
+    const clock = latest ? parseHlcKey(latest) : undefined;
+    if (clock) {
+      await this.runSql(`update schema_meta set value = max(value, ${sqlString(formatHlcKey({ ...clock, originId: "clock" }))})
+        where key = ${sqlString(CHAT_EVENT_CLOCK_META_KEY)};`);
+    }
+    return { tables: counts };
+  }
+
+  /** Records that this device's copy covers every chat change up to `marks`:
+   *  later events continue from there, and events up to them that already
+   *  arrived are acknowledged without being applied again. */
+  async applyChatCopyMarks(marks: ChatCopyMark[], at: string, localOriginId?: string): Promise<void> {
+    await this.init();
+    // The chat-action log is folded rather than replayed in sequence, so its
+    // mark only says how far its history was already seen: later actions
+    // still apply one by one, and none of them is confirmed unapplied.
+    const rows = marks.filter((mark) => mark.originId !== localOriginId && mark.originSeq > 0 &&
+      typeof mark.logScopeId === "string" && (mark.logScopeId.startsWith("chat-changes:") || mark.logScopeId === CHAT_ACTION_LOG_SCOPE));
+    const chunks: ChatCopyMark[][] = [];
+    for (let index = 0; index < rows.length; index += 200) chunks.push(rows.slice(index, index + 200));
+    for (const chunk of chunks) {
+      await this.runSql(`
+        begin immediate;
+        ${chunk.map((mark) => `insert into device_event_applied_heads(origin_id, log_scope_id, origin_seq, event_hash)
+          values (${sqlString(mark.originId)}, ${sqlString(mark.logScopeId)}, ${Math.floor(mark.originSeq)}, ${sqlString(mark.eventHash)})
+          on conflict(origin_id, log_scope_id) do update set
+            event_hash = case when excluded.origin_seq > device_event_applied_heads.origin_seq
+              then excluded.event_hash else device_event_applied_heads.event_hash end,
+            origin_seq = max(excluded.origin_seq, device_event_applied_heads.origin_seq);`).join("\n")}
+        commit;
+      `);
+    }
+    // Received but not applied yet, and contained in the copy: confirmed
+    // without being applied (the channel acknowledges them on its next pass).
+    await this.runSql(`
+      begin immediate;
+      update device_event_inbox set applied_at = ${sqlString(at)}, outcome = 'applied'
+        where applied_at is null and exists(
+          select 1 from chat_events e join device_event_applied_heads h
+            on h.origin_id = e.origin_id and h.log_scope_id = e.log_scope_id
+          where e.event_id = device_event_inbox.event_id
+            and substr(e.log_scope_id, 1, 13) = 'chat-changes:' and e.origin_seq <= h.origin_seq
+        );
+      commit;
+    `);
   }
 
   deviceEvents(): DeviceEventStorage {

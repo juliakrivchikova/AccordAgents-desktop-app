@@ -28,3 +28,20 @@ export function isChatMessageHiddenFromTimeline(
   }
   return options.showSystemMessages !== true;
 }
+
+/** A message an auto-watching member reacts to: a finished user message, or
+ *  another member's finished reply, shown on the timeline. */
+export function isAutoWatchStableMessage(
+  message: Pick<ChatMessage, "role" | "content" | "metadata" | "status" | "participantId">,
+  participantId: string
+): boolean {
+  if (message.metadata?.autoWatchTrigger || isChatMessageHiddenFromTimeline(message)) {
+    return false;
+  }
+  if (message.role === "user") {
+    return message.status !== "pending";
+  }
+  return message.role === "participant" &&
+    message.participantId !== participantId &&
+    message.status !== "pending";
+}
