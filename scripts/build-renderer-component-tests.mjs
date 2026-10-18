@@ -28,6 +28,7 @@ await build({
     "renderer/components/content/markdown-headings.test.tsx",
     "renderer/components/chat/cli-readiness-setup-panel.test.tsx",
     "renderer/components/settings/device-pairing-revoke.test.tsx",
+    "renderer/components/settings/hub-server-section.test.tsx",
     "renderer/components/settings/aws-settings-page.test.tsx",
     "renderer/components/settings/aws-settings-actions.test.tsx",
     "renderer/components/settings/aws-settings-text.test.ts",

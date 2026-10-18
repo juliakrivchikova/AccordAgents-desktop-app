@@ -377,3 +377,25 @@ test("only the scopes the device names at each pass go to the hub (a relay machi
   const scopes = (await s.hubStore.storage.hub().pull(0, 10)).events.map((item) => item.event.logScopeId);
   assert.deepEqual(scopes.sort(), ["chat-changes:shared", "device:room-hub:[\"c\",\"actions\"]"]);
 });
+
+test("a hub read without the live link still counts as reached, and one that stops answering does not", async (t) => {
+  const s = await setup(t);
+  const client = new HubClient({ url: s.url, identity: async () => s.desktop.identity, storage: s.desktop.storage });
+  // A network that lets requests through and not the live socket.
+  client.live = () => () => undefined;
+  const sync = new HubSync({
+    client,
+    storage: s.desktop.storage,
+    localOriginId: async () => s.desktop.identity.originId,
+    trustedKey: async () => undefined,
+    applyChatChange: async () => "applied"
+  });
+  t.after(() => sync.stop());
+  assert.equal(sync.isReachable(), false, "nothing read yet");
+  sync.start();
+  await until(() => sync.isReachable());
+  assert.equal(sync.isConnected(), false);
+  await s.server.close();
+  sync.nudgePull();
+  await until(() => !sync.isReachable());
+});

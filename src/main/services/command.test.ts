@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createReadStream } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -442,3 +443,12 @@ async function waitForPidFile(pidFile: string): Promise<number> {
   }
   throw new Error(`fixture did not write helper pid to ${pidFile}`);
 }
+
+test("an input stream that cannot be read ends the child's input instead of holding it open", async () => {
+  const started = Date.now();
+  await assert.rejects(
+    runCommand("cat", [], { inputStream: createReadStream(path.join(tmpdir(), "accordagents-missing-input", "chats.tgz")), timeoutMs: 20_000 }),
+    /ENOENT/
+  );
+  assert.ok(Date.now() - started < 5_000, "the child saw the end of its input");
+});

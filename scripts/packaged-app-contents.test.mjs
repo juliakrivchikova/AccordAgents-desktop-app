@@ -48,8 +48,8 @@ test("packaged Windows application excludes generated renderer test bundles", (t
 
   // The Linux machine payload must NOT be in the asar: rsync copies real files
   // to a machine, and nothing inside an asar has a path on disk.
-  const payloadEntries = entries.filter((entry) => /\/dist\/machine(?:\/|$)/.test(entry));
-  assert.deepEqual(payloadEntries, [], "the machine payload must ship as a loose resource, not inside the asar");
+  const payloadEntries = entries.filter((entry) => /\/dist\/(?:machine|hub)(?:\/|$)/.test(entry));
+  assert.deepEqual(payloadEntries, [], "the machine and hub programs must ship as loose resources, not inside the asar");
 });
 
 // Every packaged application must be able to install a machine without a
@@ -79,6 +79,19 @@ for (const resourcesDir of packagedResourceDirs()) {
     const payloadVersion = JSON.parse(readFileSync(path.join(payloadDir, "package.json"), "utf8")).version;
     assert.equal(payloadVersion, appVersion, "the packaged runtime payload is from a different build than the app");
     assert.equal(manifest.version, appVersion);
+  });
+}
+
+// The User's own server is installed from the app the same way.
+for (const resourcesDir of packagedResourceDirs()) {
+  test(`${packageLabel(resourcesDir)} carries the hub program`, () => {
+    const hubDir = path.join(resourcesDir, "hub");
+    for (const required of ["accordagents-hub.cjs", "package.json"]) {
+      assert.equal(existsSync(path.join(hubDir, required)), true, `hub program is missing ${required}`);
+    }
+    assert.deepEqual(nonRegularEntries(hubDir), [], "the packaged hub program must contain only regular files");
+    const appVersion = JSON.parse(readFileSync(path.join(rootDir, "package.json"), "utf8")).version;
+    assert.equal(JSON.parse(readFileSync(path.join(hubDir, "package.json"), "utf8")).version, appVersion, "the packaged hub program is from a different build than the app");
   });
 }
 

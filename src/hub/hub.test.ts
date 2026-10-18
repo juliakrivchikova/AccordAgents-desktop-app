@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -15,7 +15,7 @@ import type { ChatMessage } from "../shared/types";
 import { HubFolder } from "./hubFolder";
 import { hubApplyPolicy } from "./hubPolicy";
 import { HubLog } from "./hubLog";
-import { HubServer } from "./hubServer";
+import { HubServer, certStamp } from "./hubServer";
 
 type Identity = ReturnType<typeof createChatEventDeviceIdentity>;
 
@@ -340,4 +340,17 @@ test("rooms pass live messages between the User's devices and keep nothing", asy
   assert.ok(desktopPeers.includes(`-${machine.originId}`), "and leave");
   // Nothing was stored: the order is still empty.
   assert.equal((await h.call(h.owner, "GET", "/v1/events?after=0")).body.head, 0);
+});
+
+test("a renewed certificate is noticed though its chain ends the same as before", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-cert-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const files = { cert: path.join(dir, "fullchain.pem"), key: path.join(dir, "privkey.pem") };
+  const intermediate = "-----BEGIN CERTIFICATE-----\nINTERMEDIATE\n-----END CERTIFICATE-----\n";
+  await writeFile(files.cert, `-----BEGIN CERTIFICATE-----\nLEAF-ONE\n-----END CERTIFICATE-----\n${intermediate}`);
+  await writeFile(files.key, "KEY-ONE");
+  const before = certStamp(files);
+  await writeFile(files.cert, `-----BEGIN CERTIFICATE-----\nLEAF-TWO\n-----END CERTIFICATE-----\n${intermediate}`);
+  await writeFile(files.key, "KEY-TWO");
+  assert.notEqual(certStamp(files), before);
 });

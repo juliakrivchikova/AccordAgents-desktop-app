@@ -74,6 +74,11 @@ function finish(result: unknown): Promise<never> {
   });
 }
 
+/** Present once the desktop's first copy of the chats is in. */
+function chatCopyMark(): string {
+  return path.join(userDataPath(), "chat-copy.json");
+}
+
 function hubId(): string {
   const file = path.join(userDataPath(), "hub-id.json");
   if (existsSync(file)) {
@@ -104,11 +109,13 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
       return finish({ ok: false, reason: "another-owner", hubId: hubId() });
     }
     await storage.hub().setOwner({ deviceId: owner.deviceId, publicKeyDerBase64: owner.publicKeyDerBase64, name: owner.name || "Desktop", addedAt: new Date().toISOString() });
-    // Already this desktop's: its chats are there, and its cursors stand.
-    return finish({ ok: true, hubId: hubId(), alreadyOwner: Boolean(before) });
+    // Already this desktop's, and its chats copied: its cursors stand.
+    return finish({ ok: true, hubId: hubId(), alreadyOwner: Boolean(before), chatsCopied: existsSync(chatCopyMark()) });
   }
   if (args.importChatCopy) {
     const summary = await importChatCopy(storage, args.importChatCopy, {});
+    // Written last: a copy that stopped half way is copied again.
+    writeFileSync(chatCopyMark(), JSON.stringify({ at: new Date().toISOString(), ...summary }), { mode: 0o600 });
     return finish({ ok: true, ...summary });
   }
 

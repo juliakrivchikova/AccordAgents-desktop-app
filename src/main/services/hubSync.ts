@@ -8,9 +8,10 @@ import { DevicePacketAuthenticationError } from "./devicePacketAuthentication";
 import { HubHttpError, HubTransientError, type HubClient } from "./hubClient";
 import type { StorageService } from "./storage";
 
-const PUSHED_KEY = "pushed-rowid";
-const PULLED_KEY = "pulled-hub-seq";
-const HUB_ID_KEY = "hub-id";
+/** Where this device keeps its place with the hub (setup moves them). */
+export const PUSHED_KEY = "pushed-rowid";
+export const PULLED_KEY = "pulled-hub-seq";
+export const HUB_ID_KEY = "hub-id";
 const PUSH_BATCH = Math.min(100, HUB_PUSH_MAX_EVENTS);
 /** Without the live link nothing announces new events: read anyway. With
  *  it, read now and then as well, in case it died without a word. */
@@ -112,6 +113,8 @@ export class HubSync {
   private retryDelay = RETRY_MIN_MS;
   private poll?: ReturnType<typeof setTimeout>;
   private connected = false;
+  /** Whether the last read reached the hub (unset before the first). */
+  private lastPullOk?: boolean;
   private heldRetryAt = 0;
   /** Chains the hub cannot continue from what this device still holds:
    *  reported once per run. */
@@ -185,6 +188,12 @@ export class HubSync {
     return this.connected;
   }
 
+  /** Whether the hub answers: the live link is up, or the last read reached
+   *  it (without the live link the hub is still read every few seconds). */
+  isReachable(): boolean {
+    return this.connected || this.lastPullOk === true;
+  }
+
   /** This device wrote an event: send it now. */
   nudgePush(): void {
     if (!this.pushStarted || this.stopped) return;
@@ -210,7 +219,11 @@ export class HubSync {
       this.pullAgain = true;
       return;
     }
-    this.pulling = this.pullAll().then(() => this.succeeded(), (error) => {
+    this.pulling = this.pullAll().then(() => {
+      this.lastPullOk = true;
+      this.succeeded();
+    }, (error) => {
+      this.lastPullOk = false;
       this.options.log?.("hub.sync.pull-error", { message: errorMessage(error) });
       this.scheduleRetry();
     }).finally(() => {
@@ -274,6 +287,8 @@ export class HubSync {
     let cursor = await hubPushedThrough(this.options.storage);
     const scopes = typeof this.options.scopePrefixes === "function" ? await this.options.scopePrefixes() : this.options.scopePrefixes;
     for (;;) {
+      // Stopped (a shutdown, another hub): the rest is sent by the next link.
+      if (this.stopped) return;
       const page = await hub.ownEventsAfter(originId, cursor, PUSH_BATCH, scopes ? [...scopes] : undefined);
       if (page.length === 0) return;
       const events = page.map((item) => item.event);

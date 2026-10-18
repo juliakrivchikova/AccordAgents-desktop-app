@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
@@ -502,9 +503,11 @@ function validRoster(value: unknown): HubDevice[] {
   });
 }
 
-function certStamp(files: { cert: string; key: string }): string {
+/** Changes whenever either file does. The whole files: a renewed chain
+ *  ends in the same intermediate certificate as the one before. */
+export function certStamp(files: { cert: string; key: string }): string {
   try {
-    return readFileSync(files.cert).subarray(-64).toString("hex");
+    return createHash("sha256").update(readFileSync(files.cert)).update(readFileSync(files.key)).digest("hex");
   } catch {
     return "";
   }

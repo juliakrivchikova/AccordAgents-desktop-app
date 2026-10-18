@@ -27,12 +27,19 @@ export function instanceTypeSpecs(instanceType: string, actual?: AwsWorkerActual
 }
 
 /** The box for the setup command's result. */
-export function AwsPasteField(props: { value: string; disabled?: boolean; onChange: (value: string) => void }): JSX.Element {
+export function AwsPasteField(props: {
+  value: string;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  ariaLabel?: string;
+  placeholder?: string;
+  testId?: string;
+}): JSX.Element {
   return (
     <label className="gen-aws-field">
       <span>Paste the result</span>
-      <textarea className="gen-input gen-aws-paste" aria-label="AWS setup result" placeholder="accord-aws-v1:…"
-        value={props.value} disabled={props.disabled} onChange={(event) => props.onChange(event.target.value)} />
+      <textarea className="gen-input gen-aws-paste" aria-label={props.ariaLabel ?? "AWS setup result"} placeholder={props.placeholder ?? "accord-aws-v1:…"}
+        data-testid={props.testId} value={props.value} disabled={props.disabled} onChange={(event) => props.onChange(event.target.value)} />
     </label>
   );
 }

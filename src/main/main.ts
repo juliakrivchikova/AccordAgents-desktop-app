@@ -1,7 +1,7 @@
 import path from "node:path";
 import fsPromises from "node:fs/promises";
 import os from "node:os";
-import { HubInstaller } from "./services/hubInstaller";
+import { HUB_COPY_TEMP_PREFIX, HubInstaller, removeStaleHubTemp } from "./services/hubInstaller";
 import { exportChatCopy } from "./services/chatCopy";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
@@ -109,7 +109,7 @@ import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolH
 import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
-import { HUB_SHARED_SCOPE_PREFIXES, HubSync, hubChatChangeApplier, hubPushedThrough } from "./services/hubSync";
+import { HUB_ID_KEY, HUB_SHARED_SCOPE_PREFIXES, HubSync, PULLED_KEY, PUSHED_KEY, hubChatChangeApplier, hubPushedThrough } from "./services/hubSync";
 import { deviceIdForPublicKey } from "./services/hubAuth";
 import { machineSigningKey } from "../shared/machineLink";
 import { HubTunnelClient } from "./services/hubTunnelClient";
@@ -416,6 +416,11 @@ const cloudRunDoctorService: CloudRunDoctorService = new CloudRunDoctorService({
 const cloudRunSetupSession = new CloudRunSetupSession();
 /** The link to the User's own server, when one is set up. */
 let hubSync: HubSync | undefined;
+let hubListenersAdded = false;
+/** From the moment the copy of the chats is taken until the setup ends,
+ *  every save emits its chat change (there may be no other reader yet), so
+ *  nothing saved meanwhile is missing from the hub. */
+let hubLinking = false;
 let hubClient: HubClient | undefined;
 let hubRosterPublish: Promise<void> | undefined;
 let hubRosterAgain = false;
@@ -501,10 +506,12 @@ async function startHubLink(): Promise<void> {
     // A machine on the relay is sent its channel the relay way: only the
     // channels of machines that read the hub go there. Read from settings,
     // so a machine whose link has not started yet is not passed over.
+    // A pairing that cannot be read fails the pass (and the cursor stays):
+    // taking that machine for a relay one would pass its events over.
     scopePrefixes: async () => {
       const rooms: string[] = [];
       for (const machine of await settingsService.listMachines()) {
-        const pairing = await settingsService.getMachinePairing(machine.pairingKey).catch(() => undefined);
+        const pairing = await settingsService.getMachinePairing(machine.pairingKey);
         if (pairing?.hubUrl) rooms.push(`device:${pairing.rendezvousId}:`);
       }
       return [...HUB_SHARED_SCOPE_PREFIXES, ...rooms];
@@ -514,14 +521,17 @@ async function startHubLink(): Promise<void> {
   // What this desktop writes goes up at once; reading waits for the
   // machines' channels (startHubReading).
   hubSync.startPushing();
-  // Whatever this desktop writes (a chat change, an action, a command for a
-  // machine) goes up at once.
-  chatEventLogService.onLocalAppend(() => hubSync?.nudgePush());
-  // After sleep the live link may be dead without knowing it: catch up now.
-  powerMonitor.on("resume", () => {
-    hubSync?.nudgePush();
-    hubSync?.nudgePull();
-  });
+  if (!hubListenersAdded) {
+    hubListenersAdded = true;
+    // Whatever this desktop writes (a chat change, an action, a command for
+    // a machine) goes up at once.
+    chatEventLogService.onLocalAppend(() => hubSync?.nudgePush());
+    // After sleep the live link may be dead without knowing it: catch up now.
+    powerMonitor.on("resume", () => {
+      hubSync?.nudgePush();
+      hubSync?.nudgePull();
+    });
+  }
   publishHubRoster();
   void debugLogService.write("hub.link.started", { url: config.url });
 }
@@ -558,38 +568,77 @@ const hubInstaller = new HubInstaller({
   },
   exportChatCopy: async () => {
     const identity = await chatEventLogService.getOrCreateDeviceIdentity();
-    // Read before the copy: whatever this desktop writes from here on is
-    // sent to the hub as events (and what the copy also holds is told apart
-    // there), so nothing falls between the two.
+    // From here every save emits its change, and the saves begun before do
+    // so first; only then is the cursor read: whatever this desktop writes
+    // from here on is sent to the hub as events (and what the copy also
+    // holds is told apart there), so nothing falls between the two.
+    hubLinking = true;
+    await chatService.settleChatSaves();
     const pushedThrough = await storageService.hub().newestOwnRowid(identity.originId);
-    const root = await fsPromises.mkdtemp(path.join(os.tmpdir(), "accordagents-hub-copy-"));
+    const root = await fsPromises.mkdtemp(path.join(os.tmpdir(), HUB_COPY_TEMP_PREFIX));
     const dir = path.join(root, "copy");
-    const manifest = await exportChatCopy(storageService, dir, { desktopOriginId: identity.originId });
-    return { dir, pushedThrough, conversations: manifest.conversations, cleanup: () => fsPromises.rm(root, { recursive: true, force: true }) };
+    const cleanup = () => fsPromises.rm(root, { recursive: true, force: true });
+    try {
+      const manifest = await exportChatCopy(storageService, dir, { desktopOriginId: identity.originId });
+      return { dir, pushedThrough, conversations: manifest.conversations, cleanup };
+    } catch (error) {
+      // A copy that stopped half way holds her chats too.
+      await cleanup().catch(() => undefined);
+      throw error;
+    }
   },
   link: async ({ url, hubId, server, pushedThrough }) => {
-    // The old link (another hub, or none) stops before the cursors move.
-    hubSync?.stop();
+    // While no link runs, saves still emit their changes: the new link sends
+    // them (the setup's end clears this).
+    hubLinking = true;
+    // The old link (another hub, or none) stops, and what it was sending
+    // ends, before the cursors move.
+    const previous = hubSync;
+    previous?.stop();
+    await previous?.idle();
     hubSync = undefined;
     hubClient = undefined;
     const hub = storageService.hub();
-    if (pushedThrough !== undefined) {
-      await hub.setClientState("pushed-rowid", String(pushedThrough));
-      await hub.setClientState("pulled-hub-seq", "0");
-      await hub.clearHeld();
+    const keys = [PUSHED_KEY, PULLED_KEY, HUB_ID_KEY] as const;
+    const before = await Promise.all(keys.map((key) => hub.clientState(key)));
+    try {
+      if (pushedThrough !== undefined) {
+        await hub.setClientState(PUSHED_KEY, String(pushedThrough));
+        await hub.setClientState(PULLED_KEY, "0");
+        await hub.clearHeld();
+      }
+      await hub.setClientState(HUB_ID_KEY, hubId);
+      await settingsService.saveHubConfig({ url, hubId, server });
+    } catch (error) {
+      // The cursors belong to the hub the settings name: the values that
+      // were there are put back. One written for the first time stays, and
+      // is not read while no hub is set up (the next setup writes it again);
+      // events held back are read from the hub again.
+      for (const [index, key] of keys.entries()) {
+        const value = before[index];
+        if (value !== undefined) await hub.setClientState(key, value).catch(() => undefined);
+      }
+      await startHubLink().catch(() => undefined);
+      resumeHubReading();
+      throw error;
     }
-    await hub.setClientState("hub-id", hubId);
-    await settingsService.saveHubConfig({ url, hubId, server });
     await startHubLink();
     resumeHubReading();
   },
-  currentLink: async () => {
-    const config = await settingsService.getHubConfig().catch(() => undefined);
-    return config ? { url: config.url, ...(config.server ? { server: config.server } : {}) } : undefined;
-  },
+  currentLink: () => settingsService.getHubConfig().catch(() => undefined),
+  reachable: () => hubSync ? hubSync.isReachable() : undefined,
+  defaultRegion: async () => (await settingsService.getPublicSettings()).cloudRuns.awsRegion,
   log: (event, payload) => { void debugLogService.write(event, payload); }
 });
-hubInstaller.onProgress((state) => { sendToMainWindow("hub:setup-progress", state); });
+hubInstaller.onProgress((state) => {
+  // A setup that ended (linked, or stopped before) no longer needs every
+  // save to emit: a running link does that by itself.
+  if (state.status !== "installing") hubLinking = false;
+  sendToMainWindow("hub:setup-progress", state);
+});
+void removeStaleHubTemp().then((removed) => {
+  if (removed) void debugLogService.write("hub.setup.temp-removed", { removed });
+});
 
 /** The AWS instance a worker target names (its host key alias carries it). */
 function awsInstanceOfWorker(worker: { hostKeyAlias?: string }): string | undefined {
@@ -3565,7 +3614,10 @@ function registerIpc(): void {
     const region = typeof request?.region === "string" ? request.region.trim() : "";
     return { command: await hubInstaller.command(region), region };
   });
-  ipcMain.handle("hub:install", (_event, request: import("../shared/hubSetup").HubInstallRequest) => hubInstaller.install(typeof request?.blob === "string" ? request.blob : ""));
+  ipcMain.handle("hub:install", (_event, request: import("../shared/hubSetup").HubInstallRequest) => hubInstaller.install({
+    ...(typeof request?.blob === "string" ? { blob: request.blob } : {}),
+    ...(request?.startOver === true ? { startOver: true } : {})
+  }));
   ipcMain.handle("mobile:create-pairing", async (_event, request: CreateMobilePairingRequest) => {
     const settings = await settingsService.getPublicSettings();
     const minted = await mobilePairingService.createPairing(
@@ -4013,7 +4065,7 @@ void app.whenReady().then(async () => {
         machineLinkService?.nudgeEventChannels();
       },
       machineOriginId: (machineId) => machineLinkService?.machineDeviceId(machineId),
-      alwaysEmit: () => Boolean(hubSync)
+      alwaysEmit: () => Boolean(hubSync) || hubLinking
     }));
     await startHubLink().catch((error: unknown) => {
       void debugLogService.write("hub.link.start-error", { message: error instanceof Error ? error.message : String(error) });

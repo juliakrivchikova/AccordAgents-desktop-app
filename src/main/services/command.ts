@@ -333,8 +333,17 @@ export async function runCommand(command: string, args: string[], options: Comma
         }
       });
     }
-    if (options.inputStream) options.inputStream.pipe(child.stdin);
-    else child.stdin.end();
+    if (options.inputStream) {
+      // pipe() leaves its destination open when the source fails: the child
+      // would wait for more input until the timeout.
+      options.inputStream.once("error", (error) => {
+        stdinError ??= error;
+        child.stdin.end();
+      });
+      options.inputStream.pipe(child.stdin);
+    } else {
+      child.stdin.end();
+    }
   });
 }
 
