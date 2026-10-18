@@ -17,8 +17,11 @@ export interface ChatComposerSuggestionsState {
   handleKey: (event: Pick<KeyboardEvent, "key" | "shiftKey" | "altKey" | "ctrlKey" | "metaKey">) => "accept" | "cycle" | undefined;
 }
 
+/** The CLI predicts what the User would type, so a suggestion that already
+ *  addresses members (the User wrote `@a @b …` last time) is used as it is;
+ *  otherwise it goes to the member that suggested it. */
 export function chatComposerSuggestionText(suggestion: ChatComposerSuggestion): string {
-  return `@${suggestion.handle} ${suggestion.text}`;
+  return suggestion.text.trimStart().startsWith("@") ? suggestion.text.trim() : `@${suggestion.handle} ${suggestion.text}`;
 }
 
 /**

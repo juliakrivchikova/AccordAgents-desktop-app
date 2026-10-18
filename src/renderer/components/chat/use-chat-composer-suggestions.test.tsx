@@ -3,6 +3,7 @@ import test from "node:test";
 import { act, create } from "react-test-renderer";
 
 import {
+  chatComposerSuggestionText,
   useChatComposerSuggestions,
   type ChatComposerSuggestion,
   type ChatComposerSuggestionsState
@@ -19,6 +20,11 @@ const key = (name: string, modifiers: Partial<Record<"shiftKey" | "altKey" | "ct
 
 const taylor: ChatComposerSuggestion = { participantId: "p-taylor", handle: "taylor", text: "run the tests" };
 const drew: ChatComposerSuggestion = { participantId: "p-drew", handle: "drew", text: "commit this" };
+
+test("a suggestion that already addresses members is offered as the CLI wrote it", () => {
+  assert.equal(chatComposerSuggestionText({ participantId: "p-rex", handle: "rex", text: "@claude @rex Now do step 3 only" }), "@claude @rex Now do step 3 only");
+  assert.equal(chatComposerSuggestionText({ participantId: "p-rex", handle: "rex", text: "now do step 3" }), "@rex now do step 3");
+});
 
 test("an empty composer offers the newest suggestion, addressed to its member; Tab or → takes it, ↑/↓ switch", () => {
   let state: ChatComposerSuggestionsState | undefined;
