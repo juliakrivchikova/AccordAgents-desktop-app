@@ -11,6 +11,12 @@ const POLL_WITHOUT_LIVE_MS = 15_000;
 
 export type HubApplyOutcome = "applied" | "ignored";
 
+/** Where this device's own events stop being held by the hub: those after
+ *  this position have not reached it yet. */
+export async function hubPushedThrough(storage: Pick<StorageService, "hub">): Promise<number> {
+  return Number(await storage.hub().clientState(PUSHED_KEY) ?? "0") || 0;
+}
+
 /**
  * One device's link to the hub: its own events go up in the order they were
  * written, and everyone else's come down in the hub's order, each applied
@@ -143,7 +149,7 @@ export class HubSync {
   private async pushAll(): Promise<void> {
     const hub = this.options.storage.hub();
     const originId = await this.options.localOriginId();
-    let cursor = Number(await hub.clientState(PUSHED_KEY) ?? "0") || 0;
+    let cursor = await hubPushedThrough(this.options.storage);
     for (;;) {
       const page = await hub.ownEventsAfter(originId, cursor, PUSH_BATCH, this.options.scopePrefixes);
       if (page.length === 0) return;

@@ -54,7 +54,7 @@ import { StorageService } from "../main/services/storage";
 import { UserSkillsService } from "../main/services/userSkills";
 import { ScriptService, handleScriptsOperation } from "../main/services/scripts";
 import { HubTunnelClient } from "../main/services/hubTunnelClient";
-import { HubSync } from "../main/services/hubSync";
+import { HubSync, hubPushedThrough } from "../main/services/hubSync";
 import { HubClient } from "../main/services/hubClient";
 import { ScriptSecretStore, ScriptStore } from "../main/services/scriptStore";
 import { machineScriptHostPhrase } from "../shared/scripts";
@@ -536,6 +536,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   const stopChatChangePruning = scheduleChatChangePruning({
     storage: storageService,
     originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+    unpushedAfter: async () => enrollment.hubUrl ? hubPushedThrough(storageService) : undefined,
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
   // Scheduled scripts that live on this machine: they run here with the lid

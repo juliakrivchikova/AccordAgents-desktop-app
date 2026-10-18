@@ -172,6 +172,9 @@ export function scheduleChatChangePruning(options: {
   log(event: string, payload: Record<string, unknown>): void;
   /** Events younger than this are kept whatever their state. */
   graceMs?: number;
+  /** With the User's hub: this device's own events after this position have
+   *  not reached it and are kept. */
+  unpushedAfter?: () => Promise<number | undefined>;
   intervalMs?: number;
   firstRunMs?: number;
   now?: () => number;
@@ -183,7 +186,7 @@ export function scheduleChatChangePruning(options: {
     running = true;
     try {
       const cutoff = new Date((options.now?.() ?? Date.now()) - graceMs).toISOString();
-      const pruned = await options.storage.deviceEvents().pruneConfirmedChatChanges(await options.originId(), cutoff);
+      const pruned = await options.storage.deviceEvents().pruneConfirmedChatChanges(await options.originId(), cutoff, undefined, await options.unpushedAfter?.());
       if (pruned.events || pruned.blobs) options.log("chat.changes.pruned", pruned);
     } catch (error) {
       options.log("chat.changes.prune-error", { message: error instanceof Error ? error.message : String(error) });

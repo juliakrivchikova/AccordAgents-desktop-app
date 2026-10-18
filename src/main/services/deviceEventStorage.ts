@@ -413,11 +413,15 @@ export class DeviceEventStorage {
    *
    * Kept: the newest event of each chat and author, because the next event
    * continues its sequence; anything not yet confirmed or applied; and the
-   * last `graceMs` of events, for a copy being taken at this moment. A body
+   * last `graceMs` of events, for a copy being taken at this moment. With the
+   * User's hub, this device's own events past `keepOwnAfterRowid` have not
+   * reached it yet and are kept too, confirmed or not. A body
    * stored separately goes with its event unless another kept event of that
    * chat still points to the same bytes.
    */
-  async pruneConfirmedChatChanges(localOriginId: string, cutoffIso: string, limit = 2_000): Promise<{ events: number; blobs: number }> {
+  async pruneConfirmedChatChanges(localOriginId: string, cutoffIso: string, limit = 2_000, keepOwnAfterRowid?: number): Promise<{ events: number; blobs: number }> {
+    const unpushed = keepOwnAfterRowid === undefined ? ""
+      : `and not (e.origin_id = ${quote(localOriginId)} and e.rowid > ${Math.max(0, Math.floor(keepOwnAfterRowid))})`;
     await this.database.init();
     const origins = new Set([localOriginId, ...(await this.database.query<{ originId: string }>(`
       select distinct origin_id as originId from device_event_applied_heads
@@ -440,6 +444,7 @@ export class DeviceEventStorage {
             and e.origin_seq < (select max(n.origin_seq) from chat_events n where n.origin_id = e.origin_id and n.log_scope_id = e.log_scope_id)
             and not exists (select 1 from device_event_outbox o where o.event_id = e.event_id and o.acknowledged_at is null)
             and not exists (select 1 from device_event_inbox i where i.event_id = e.event_id and i.applied_at is null)
+            ${unpushed}
           limit ${Math.max(1, Math.floor(limit - events))};
         delete from device_event_outbox where event_id in (select event_id from temp.chat_changes_pruned);
         delete from device_event_inbox where event_id in (select event_id from temp.chat_changes_pruned);

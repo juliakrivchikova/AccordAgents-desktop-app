@@ -105,7 +105,7 @@ import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolH
 import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
-import { HubSync } from "./services/hubSync";
+import { HubSync, hubPushedThrough } from "./services/hubSync";
 import { HubTunnelClient } from "./services/hubTunnelClient";
 import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload } from "./services/chatChanges";
 import { ScriptSecretStore, ScriptStore } from "./services/scriptStore";
@@ -3915,6 +3915,7 @@ void app.whenReady().then(async () => {
     scheduleChatChangePruning({
       storage: storageService,
       originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+      unpushedAfter: async () => (await settingsService.getHubConfig()) ? hubPushedThrough(storageService) : undefined,
       log: (event, payload) => { void debugLogService.write(event, payload); }
     });
     // A saved setting (an environment value, a role, a rule, a prompt, a

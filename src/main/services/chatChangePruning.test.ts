@@ -134,3 +134,26 @@ test("a receiver forgets what it applied, and an old event delivered again after
     assert.deepEqual((await machine.storage.getConversation("chat-1"))?.messages.map((message) => message.id), ["m1", "m2", "m3"]);
   } finally { await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
+
+test("with the hub, own chat changes it has not received are kept, and forgotten once it holds them", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-chat-prune-hub-"));
+  try {
+    // A device whose only reader is the hub: no outbox rows to wait for.
+    const storage = new StorageService({ dbPath: path.join(directory, "desktop.sqlite3") });
+    const log = new ChatEventLogService(storage);
+    const { originId } = await log.getOrCreateDeviceIdentity();
+    for (const n of [1, 2, 3]) {
+      await log.appendLocalEvent({ conversationId: "chat-1", logScopeId: chatChangesLogScope("chat-1"), kind: "chat.changes",
+        payload: { version: 1, conversationId: "chat-1", updatedAt: "2026-10-01T09:00:00.000Z", changes: [] } });
+    }
+    const own = await storage.hub().ownEventsAfter(originId, 0, 10);
+    assert.equal(own.length, 3);
+    // Nothing pushed yet: all kept, although no recipient is waiting.
+    assert.deepEqual(await storage.deviceEvents().pruneConfirmedChatChanges(originId, FUTURE, undefined, 0), { events: 0, blobs: 0 });
+    // The hub holds the first: that one may go; the second has not reached it.
+    assert.deepEqual(await storage.deviceEvents().pruneConfirmedChatChanges(originId, FUTURE, undefined, own[0].rowid), { events: 1, blobs: 0 });
+    assert.equal((await storage.listChatEvents("chat-1", chatChangesLogScope("chat-1"))).length, 2);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
