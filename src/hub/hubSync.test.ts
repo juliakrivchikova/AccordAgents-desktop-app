@@ -355,3 +355,25 @@ test("the hub's holding an event lets go only of the devices that read the hub",
   const outbox = await rows(`select device_id as deviceId, acknowledged_at as acknowledged from device_event_outbox where event_id = '${event.eventId}' order by device_id;`);
   assert.deepEqual(outbox.map((row) => [row.deviceId, Boolean(row.acknowledged)]), [["device-hub", true], ["device-relay", false]]);
 });
+
+test("only the scopes the device names at each pass go to the hub (a relay machine's channel stays off it)", async (t) => {
+  const s = await setup(t);
+  const rooms = ["device:room-hub:"];
+  await s.desktop.log.appendLocalEvent({ conversationId: "c", logScopeId: "device:room-hub:[\"c\",\"actions\"]", kind: "machine.turn.request", payload: { n: 1 } });
+  await s.desktop.log.appendLocalEvent({ conversationId: "c", logScopeId: "device:room-relay:[\"c\",\"actions\"]", kind: "machine.turn.request", payload: { n: 2 } });
+  await s.desktop.log.appendLocalEvent(change("shared", 1));
+  const sync = new HubSync({
+    client: new HubClient({ url: s.url, identity: async () => s.desktop.identity, storage: s.desktop.storage }),
+    storage: s.desktop.storage,
+    localOriginId: async () => s.desktop.identity.originId,
+    trustedKey: async () => undefined,
+    applyChatChange: async () => "applied",
+    scopePrefixes: async () => ["chat-changes:", ...rooms]
+  });
+  t.after(() => sync.stop());
+  sync.startPushing();
+  await until(async () => (await s.hubStore.storage.hub().head()) === 2);
+  await sync.idle();
+  const scopes = (await s.hubStore.storage.hub().pull(0, 10)).events.map((item) => item.event.logScopeId);
+  assert.deepEqual(scopes.sort(), ["chat-changes:shared", "device:room-hub:[\"c\",\"actions\"]"]);
+});

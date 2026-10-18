@@ -9,7 +9,7 @@
   "repository": "https://github.com/juliakrivchikova/AccordAgents-desktop-app.git",
   "main": "dist/main/main/launcher.js",
   "scripts": {
-    "build": "npm run build:main && vite build && npm run build:mobile && node scripts/build-machine-bundle.mjs",
+    "build": "npm run build:main && vite build && npm run build:mobile && node scripts/build-machine-bundle.mjs && node scripts/build-hub-bundle.mjs",
     "build:main": "tsc -p tsconfig.main.json && node scripts/copy-main-assets.mjs",
     "build:mobile": "node scripts/build-mobile-shell.mjs",
     "build:machine": "npm run build:main && node scripts/build-machine-bundle.mjs",
@@ -106,7 +106,7 @@
     "test:worker-relay": "npm run build:main && node --test scripts/worker-relay-chat-read.test.mjs",
     "test:avatar-studio": "npm run build:main && node --require ./scripts/electron-stub.cjs --test dist/main/shared/chatAvatarCatalog.test.js dist/main/main/services/avatarStudio.test.js dist/main/main/services/settings.customAvatars.test.js && npm run build:renderer-tests && node --test --test-force-exit --import ./scripts/renderer-jsdom-setup.mjs dist/renderer-tests/renderer/components/avatar/avatar-studio-dialog.test.mjs",
     "build:hub": "node scripts/build-hub-bundle.mjs",
-    "test:hub": "npm run build:main && node --test --test-force-exit dist/main/hub/hub.test.js dist/main/hub/hubSync.test.js"
+    "test:hub": "npm run build:main && node --test --test-force-exit dist/main/hub/hub.test.js dist/main/hub/hubSync.test.js dist/main/main/services/hubSetup.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-ec2": "^3.1079.0",

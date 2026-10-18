@@ -28,8 +28,9 @@ const RETRY_MAX_MS = 5 * 60_000;
 
 /** The log scopes a device sends to the hub: chat changes, its channels'
  *  events and chat actions; never what a desktop wrote for the old phone
- *  mailbox. */
+ *  mailbox. A desktop narrows `device:` to the machines that read the hub. */
 export const HUB_SCOPE_PREFIXES = ["chat-changes:", "device:", CHAT_ACTION_LOG_SCOPE] as const;
+export const HUB_SHARED_SCOPE_PREFIXES = ["chat-changes:", CHAT_ACTION_LOG_SCOPE] as const;
 
 /** What a channel did with an event from the hub's order. */
 export type HubDeliverOutcome =
@@ -128,8 +129,10 @@ export class HubSync {
     /** Applies a chat change no channel took. */
     applyChatChange: (event: ChatEventEnvelope) => Promise<HubApplyOutcome>;
     log?: (event: string, payload: Record<string, unknown>) => void;
-    /** Log scopes (by prefix) whose events this device sends; all when unset. */
-    scopePrefixes?: readonly string[];
+    /** Log scopes (by prefix) whose events this device sends, read at each
+     *  pass (a desktop sends a machine's channel only while that machine
+     *  reads the hub); all when unset. */
+    scopePrefixes?: readonly string[] | (() => Promise<readonly string[]>);
     /** These own events are now held by the hub, so whoever waited to hand
      *  them over may let go of them. */
     onPushed?: (eventIds: string[]) => Promise<void>;
@@ -269,8 +272,9 @@ export class HubSync {
     const hub = this.options.storage.hub();
     const originId = await this.options.localOriginId();
     let cursor = await hubPushedThrough(this.options.storage);
+    const scopes = typeof this.options.scopePrefixes === "function" ? await this.options.scopePrefixes() : this.options.scopePrefixes;
     for (;;) {
-      const page = await hub.ownEventsAfter(originId, cursor, PUSH_BATCH, this.options.scopePrefixes ? [...this.options.scopePrefixes] : undefined);
+      const page = await hub.ownEventsAfter(originId, cursor, PUSH_BATCH, scopes ? [...scopes] : undefined);
       if (page.length === 0) return;
       const events = page.map((item) => item.event);
       let results = (await this.options.client.push(events)).results;

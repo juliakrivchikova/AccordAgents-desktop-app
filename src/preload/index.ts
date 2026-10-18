@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { ScriptsUpdatedEvent } from "../shared/scripts";
 import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
+import type { HubInstallRequest, HubSetupCommandRequest, HubSetupState } from "../shared/hubSetup";
 import type {
   CreateMachineRequest,
   CreateMachineResult,
@@ -222,6 +223,14 @@ const bridge: AppBridge = {
   respondToChatChoice: (request: RespondToChatChoiceRequest) => ipcRenderer.invoke("chat:respond-to-choice", request),
   respondToChatAppToolApproval: (request: RespondToChatAppToolApprovalRequest) => ipcRenderer.invoke("chat:respond-to-app-tool-approval", request),
   createMobilePairing: (request: CreateMobilePairingRequest) => ipcRenderer.invoke("mobile:create-pairing", request),
+  getHubSetupState: () => ipcRenderer.invoke("hub:setup-state"),
+  getHubSetupCommand: (request: HubSetupCommandRequest) => ipcRenderer.invoke("hub:setup-command", request),
+  installHub: (request: HubInstallRequest) => ipcRenderer.invoke("hub:install", request),
+  onHubSetupProgress: (callback: (state: HubSetupState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: HubSetupState) => callback(state);
+    ipcRenderer.on("hub:setup-progress", listener);
+    return () => ipcRenderer.removeListener("hub:setup-progress", listener);
+  },
   revokeMobilePairing: (request: RevokeMobilePairingRequest) => ipcRenderer.invoke("mobile:revoke-pairing", request),
   startReview: (request: ReviewRequest) => ipcRenderer.invoke("conversations:start-review", request),
   continueReview: (request: ContinueReviewRequest) => ipcRenderer.invoke("conversations:continue-review", request),

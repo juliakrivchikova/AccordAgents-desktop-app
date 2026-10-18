@@ -1,4 +1,8 @@
 import path from "node:path";
+import fsPromises from "node:fs/promises";
+import os from "node:os";
+import { HubInstaller } from "./services/hubInstaller";
+import { exportChatCopy } from "./services/chatCopy";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomUUID } from "node:crypto";
@@ -105,7 +109,7 @@ import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolH
 import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
-import { HUB_SCOPE_PREFIXES, HubSync, hubChatChangeApplier, hubPushedThrough } from "./services/hubSync";
+import { HUB_SHARED_SCOPE_PREFIXES, HubSync, hubChatChangeApplier, hubPushedThrough } from "./services/hubSync";
 import { deviceIdForPublicKey } from "./services/hubAuth";
 import { machineSigningKey } from "../shared/machineLink";
 import { HubTunnelClient } from "./services/hubTunnelClient";
@@ -494,7 +498,17 @@ async function startHubLink(): Promise<void> {
     // Only machines that read the hub stop waiting; one still on the relay
     // is sent the event the relay way.
     onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString(), machineLinkService?.hubReaders() ?? []),
-    scopePrefixes: HUB_SCOPE_PREFIXES,
+    // A machine on the relay is sent its channel the relay way: only the
+    // channels of machines that read the hub go there. Read from settings,
+    // so a machine whose link has not started yet is not passed over.
+    scopePrefixes: async () => {
+      const rooms: string[] = [];
+      for (const machine of await settingsService.listMachines()) {
+        const pairing = await settingsService.getMachinePairing(machine.pairingKey).catch(() => undefined);
+        if (pairing?.hubUrl) rooms.push(`device:${pairing.rendezvousId}:`);
+      }
+      return [...HUB_SHARED_SCOPE_PREFIXES, ...rooms];
+    },
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
   // What this desktop writes goes up at once; reading waits for the
@@ -514,9 +528,68 @@ async function startHubLink(): Promise<void> {
 
 /** The hub link reads from here on: called once the machine link is up (or
  *  could not start). */
+let hubReadingAllowed = false;
 function startHubReading(): void {
+  hubReadingAllowed = true;
   hubSync?.start();
 }
+
+/** A link made after startup (setup) reads at once if reading has begun. */
+function resumeHubReading(): void {
+  if (hubReadingAllowed) hubSync?.start();
+}
+
+/** The hub program this app installs: beside the asar when packaged (scp
+ *  reads real files), what `npm run build` produced in a checkout. */
+function hubPayloadDir(): string {
+  const override = process.env.ACCORDAGENTS_HUB_BUNDLE_DIR?.trim();
+  if (override) return override;
+  if (app.isPackaged) return path.join(process.resourcesPath, "hub");
+  return path.join(app.getAppPath(), "dist", "hub");
+}
+
+const hubInstaller = new HubInstaller({
+  keyDir: path.join(app.getPath("userData"), "hub"),
+  payloadDir: hubPayloadDir,
+  bundledVersion: app.getVersion(),
+  identity: async () => {
+    const identity = await chatEventLogService.getOrCreateDeviceIdentity();
+    return { originId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64 };
+  },
+  exportChatCopy: async () => {
+    const identity = await chatEventLogService.getOrCreateDeviceIdentity();
+    // Read before the copy: whatever this desktop writes from here on is
+    // sent to the hub as events (and what the copy also holds is told apart
+    // there), so nothing falls between the two.
+    const pushedThrough = await storageService.hub().newestOwnRowid(identity.originId);
+    const root = await fsPromises.mkdtemp(path.join(os.tmpdir(), "accordagents-hub-copy-"));
+    const dir = path.join(root, "copy");
+    const manifest = await exportChatCopy(storageService, dir, { desktopOriginId: identity.originId });
+    return { dir, pushedThrough, conversations: manifest.conversations, cleanup: () => fsPromises.rm(root, { recursive: true, force: true }) };
+  },
+  link: async ({ url, hubId, server, pushedThrough }) => {
+    // The old link (another hub, or none) stops before the cursors move.
+    hubSync?.stop();
+    hubSync = undefined;
+    hubClient = undefined;
+    const hub = storageService.hub();
+    if (pushedThrough !== undefined) {
+      await hub.setClientState("pushed-rowid", String(pushedThrough));
+      await hub.setClientState("pulled-hub-seq", "0");
+      await hub.clearHeld();
+    }
+    await hub.setClientState("hub-id", hubId);
+    await settingsService.saveHubConfig({ url, hubId, server });
+    await startHubLink();
+    resumeHubReading();
+  },
+  currentLink: async () => {
+    const config = await settingsService.getHubConfig().catch(() => undefined);
+    return config ? { url: config.url, ...(config.server ? { server: config.server } : {}) } : undefined;
+  },
+  log: (event, payload) => { void debugLogService.write(event, payload); }
+});
+hubInstaller.onProgress((state) => { sendToMainWindow("hub:setup-progress", state); });
 
 /** The AWS instance a worker target names (its host key alias carries it). */
 function awsInstanceOfWorker(worker: { hostKeyAlias?: string }): string | undefined {
@@ -3487,6 +3560,12 @@ function registerIpc(): void {
     }
     return { machine, enrollmentJson: JSON.stringify(pairing, null, 2) };
   });
+  ipcMain.handle("hub:setup-state", () => hubInstaller.state());
+  ipcMain.handle("hub:setup-command", async (_event, request: import("../shared/hubSetup").HubSetupCommandRequest) => {
+    const region = typeof request?.region === "string" ? request.region.trim() : "";
+    return { command: await hubInstaller.command(region), region };
+  });
+  ipcMain.handle("hub:install", (_event, request: import("../shared/hubSetup").HubInstallRequest) => hubInstaller.install(typeof request?.blob === "string" ? request.blob : ""));
   ipcMain.handle("mobile:create-pairing", async (_event, request: CreateMobilePairingRequest) => {
     const settings = await settingsService.getPublicSettings();
     const minted = await mobilePairingService.createPairing(
@@ -3856,23 +3935,20 @@ void app.whenReady().then(async () => {
   });
   try {
     const desktopIdentity = await chatEventLogService.getOrCreateDeviceIdentity();
-    const hubConfig = await settingsService.getHubConfig().catch(() => undefined);
     machineLinkService = new MachineLinkService(settingsService, debugLogService, {
-      // With the User's hub, machines are met in its rooms and their events
-      // travel in its order.
-      // A machine enrolled with the hub is met in its rooms; one enrolled
-      // with the relay keeps the relay until it is moved.
-      ...(hubConfig ? {
-        hubMode: true,
-        onDevicesChanged: () => {
-          publishHubRoster();
-          hubSync?.nudgeHeld();
-        },
-        createClient: (pairing: MobilePairingPackage) => pairing.hubUrl ? new HubTunnelClient({
-          hubUrl: pairing.hubUrl, rendezvousId: pairing.rendezvousId, role: "desktop",
-          identity: () => chatEventLogService.getOrCreateDeviceIdentity()
-        }) : undefined
-      } : {}),
+      // A machine enrolled with the User's hub is met in its rooms; one
+      // enrolled with the relay keeps the relay until it is moved. Decided per
+      // machine by its enrollment, so a hub set up while the app runs is used
+      // by the machines made after it without a restart.
+      hubMode: true,
+      onDevicesChanged: () => {
+        publishHubRoster();
+        hubSync?.nudgeHeld();
+      },
+      createClient: (pairing: MobilePairingPackage) => pairing.hubUrl ? new HubTunnelClient({
+        hubUrl: pairing.hubUrl, rendezvousId: pairing.rendezvousId, role: "desktop",
+        identity: () => chatEventLogService.getOrCreateDeviceIdentity()
+      }) : undefined,
       chatActions: chatActionApplier,
       repositoryPaths: (sourcePath) => cloudRunPreparation.repositoryPaths(sourcePath),
       // A machine that held an action back because it lacked the revision it

@@ -193,7 +193,7 @@ interface StoredSettings {
    *  this predates the change and says nothing about whether it arrived. */
   machineAutoStopChangedAt?: string;
   /** The User's own server (hub), once it is set up. */
-  hub?: { url: string; hubId?: string };
+  hub?: { url: string; hubId?: string; server?: import("../../shared/hubSetup").HubServerRecord };
   /** Who holds a copy of the phone's start key. Records only, never the
    *  secret, and never sent to a machine: they name the User's devices. */
   machinePowerHandoffs?: MachinePowerHandoffRecord[];
@@ -1813,6 +1813,25 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
 /** `encryptedMachinePowerPrevious` when the key a save replaced was none. */
 const NO_MACHINE_POWER = "none";
 
+/** The hub this desktop syncs with, as read back from disk. */
+function normalizeHubSetting(value: unknown): StoredSettings["hub"] {
+  if (!value || typeof value !== "object") return undefined;
+  const hub = value as { url?: unknown; hubId?: unknown; server?: unknown };
+  if (typeof hub.url !== "string" || !isAcceptableHubUrl(hub.url)) return undefined;
+  let server: import("../../shared/hubSetup").HubServerRecord | undefined;
+  if (hub.server && typeof hub.server === "object") {
+    const record = hub.server as Record<string, unknown>;
+    if (record.version === 1 && typeof record.region === "string" && typeof record.instanceName === "string" && typeof record.ip === "string" && typeof record.user === "string") {
+      server = {
+        version: 1, region: record.region, instanceName: record.instanceName, ip: record.ip, user: record.user,
+        ...(typeof record.installedAt === "string" ? { installedAt: record.installedAt } : {}),
+        ...(typeof record.installedVersion === "string" ? { installedVersion: record.installedVersion } : {})
+      };
+    }
+  }
+  return { url: hub.url, ...(typeof hub.hubId === "string" && hub.hubId ? { hubId: hub.hubId } : {}), ...(server ? { server } : {}) };
+}
+
 export class SettingsService {
   private readonly settingsPath: string;
   private readonly mobilePairedDevicesPath: string;
@@ -2922,6 +2941,7 @@ export class SettingsService {
         ? settings.encryptedMachinePowerPrevious : undefined,
       ...(typeof settings.machineAutoStopEnabled === "boolean" ? { machineAutoStopEnabled: settings.machineAutoStopEnabled } : {}),
       ...(typeof settings.machineAutoStopChangedAt === "string" ? { machineAutoStopChangedAt: settings.machineAutoStopChangedAt } : {}),
+      ...(normalizeHubSetting(settings.hub) ? { hub: normalizeHubSetting(settings.hub) } : {}),
       machinePowerHandoffs: normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs).length
         ? normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs)
         : undefined,
@@ -2992,6 +3012,7 @@ export class SettingsService {
         pendingRuns: this.normalizeMachineRunRecords(record.pendingRuns),
         pendingCancels: this.normalizeMachineRunRecords(record.pendingCancels),
         ...(record.lastHello && typeof record.lastHello === "object" ? { lastHello: record.lastHello } : {}),
+        ...(typeof record.devicePublicKeyDerBase64 === "string" && record.devicePublicKeyDerBase64 ? { devicePublicKeyDerBase64: record.devicePublicKeyDerBase64 } : {}),
         ...(record.chatChanges === true ? { chatChanges: true } : {})
       }];
     });
@@ -3570,7 +3591,7 @@ export class SettingsService {
   /** The hub this desktop syncs with. `ACCORDAGENTS_HUB_URL` points a local
    *  run at a test hub. An address that is neither HTTPS nor on this
    *  computer is not used. */
-  async getHubConfig(): Promise<{ url: string; hubId?: string } | undefined> {
+  async getHubConfig(): Promise<{ url: string; hubId?: string; server?: import("../../shared/hubSetup").HubServerRecord } | undefined> {
     const override = process.env.ACCORDAGENTS_HUB_URL?.trim();
     if (override) return isAcceptableHubUrl(override) ? { url: override } : undefined;
     const stored = (await this.readStored()).hub;
@@ -3578,11 +3599,11 @@ export class SettingsService {
   }
 
   /** Setup writes this once the User's hub answers (the hub setup flow). */
-  async saveHubConfig(config: { url: string; hubId?: string } | undefined): Promise<void> {
+  async saveHubConfig(config: { url: string; hubId?: string; server?: import("../../shared/hubSetup").HubServerRecord } | undefined): Promise<void> {
     if (config && !isAcceptableHubUrl(config.url)) throw new Error("A hub is reached over HTTPS.");
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
-    if (config) stored.hub = { url: config.url, ...(config.hubId ? { hubId: config.hubId } : {}) };
+    if (config) stored.hub = { url: config.url, ...(config.hubId ? { hubId: config.hubId } : {}), ...(config.server ? { server: config.server } : {}) };
     else delete stored.hub;
     await this.writeStored(stored, true);
   }

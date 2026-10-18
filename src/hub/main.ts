@@ -98,8 +98,14 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
     if (typeof owner.publicKeyDerBase64 !== "string" || deviceIdForPublicKey(owner.publicKeyDerBase64) !== owner.deviceId) {
       throw new Error("The owner identity is invalid.");
     }
+    const before = (await storage.hub().devices()).find((device) => device.role === "owner");
+    if (before && before.deviceId !== owner.deviceId) {
+      // Said in a line the setup reads, so it can offer to start over.
+      return finish({ ok: false, reason: "another-owner", hubId: hubId() });
+    }
     await storage.hub().setOwner({ deviceId: owner.deviceId, publicKeyDerBase64: owner.publicKeyDerBase64, name: owner.name || "Desktop", addedAt: new Date().toISOString() });
-    return finish({ ok: true, hubId: hubId() });
+    // Already this desktop's: its chats are there, and its cursors stand.
+    return finish({ ok: true, hubId: hubId(), alreadyOwner: Boolean(before) });
   }
   if (args.importChatCopy) {
     const summary = await importChatCopy(storage, args.importChatCopy, {});

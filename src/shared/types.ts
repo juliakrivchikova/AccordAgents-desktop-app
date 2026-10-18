@@ -2980,6 +2980,12 @@ export interface AppBridge {
   respondToChatChoice(request: RespondToChatChoiceRequest): Promise<StartReviewResult>;
   respondToChatAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;
   createMobilePairing(request: CreateMobilePairingRequest): Promise<CreateMobilePairingResult>;
+  /** The User's own hub: what is set up, the command that creates its server,
+   *  and the installation from the line that command prints. */
+  getHubSetupState(): Promise<import("./hubSetup").HubSetupState>;
+  getHubSetupCommand(request: import("./hubSetup").HubSetupCommandRequest): Promise<import("./hubSetup").HubSetupCommandResult>;
+  installHub(request: import("./hubSetup").HubInstallRequest): Promise<import("./hubSetup").HubSetupState>;
+  onHubSetupProgress(callback: (state: import("./hubSetup").HubSetupState) => void): () => void;
   revokeMobilePairing(request: RevokeMobilePairingRequest): Promise<RevokeMobilePairingResult>;
   startReview(request: ReviewRequest): Promise<StartReviewResult>;
   continueReview(request: ContinueReviewRequest): Promise<StartReviewResult>;

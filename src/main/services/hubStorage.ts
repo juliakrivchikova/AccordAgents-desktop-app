@@ -289,6 +289,13 @@ export class HubStorage {
     return rows.map((row) => ({ rowid: Number(row.rowid), event: JSON.parse(row.envelope) as ChatEventEnvelope }));
   }
 
+  /** The newest of this device's own events, as a local position. */
+  async newestOwnRowid(originId: string): Promise<number> {
+    await this.init();
+    const rows = await this.database.query<{ rowid: number | null }>(`select max(rowid) as rowid from chat_events where origin_id = ${quote(originId)};`);
+    return Number(rows[0]?.rowid ?? 0) || 0;
+  }
+
   /** One chain of this device's events from a sequence number, for a hub that reports a gap. */
   async chainFrom(originId: string, logScopeId: string, fromSeq: number, limit: number): Promise<ChatEventEnvelope[]> {
     await this.init();
