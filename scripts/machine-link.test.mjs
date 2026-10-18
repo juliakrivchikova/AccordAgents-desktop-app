@@ -875,3 +875,67 @@ test("trust changes queue while a known machine is offline and outbox failures r
     link.close();
   }
 });
+
+test("script requests go to the one machine, resolve on its answer, and refuse an older or absent machine", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const record = { id: "machine-s", name: "Box", deviceId: "dev-s", pairingKey: "rv-s", createdAt: new Date().toISOString(),
+    lastHello: { protocol: "accord-machine-link-v1", deviceId: "dev-s", instanceId: "run-7", scriptsSupported: true, keepAwake: true } };
+  const link = new MachineLinkService({
+    listMachines: async () => [record],
+    saveMachine: async () => [record],
+    removeMachine: async () => [],
+    getMachinePairing: async () => undefined,
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
+  }, { write: async () => undefined }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID });
+  const sent = [];
+  const connection = { record, machineDeviceId: "dev-s", pendingScripts: new Map(), client: { close() {} }, pairing: { issuer: { originId: DESKTOP_ID } } };
+  link.connections.set(record.id, connection);
+  link.send = async (_connection, body) => { sent.push(body); };
+
+  const listed = link.scriptsRequest("machine-s", { op: "setSecret", scriptId: "s1", name: "SLACK_TOKEN", value: "xoxb-1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, "machine.scripts.request");
+  assert.deepEqual(sent[0].operation, { op: "setSecret", scriptId: "s1", name: "SLACK_TOKEN", value: "xoxb-1" });
+  assert.equal(sent[0].instanceId, "run-7", "the request names the run of the machine it was made for");
+  assert.ok(Date.parse(sent[0].expiresAt) > Date.now(), "and when the desktop stops waiting for it");
+  await link.handleBody(connection, { type: "machine.scripts.result", requestId: sent[0].requestId, ok: true, result: { id: "s1" } });
+  assert.deepEqual(await listed, { id: "s1" });
+
+  const refused = link.scriptsRequest("machine-s", { op: "runNow", scriptId: "s1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await link.handleBody(connection, { type: "machine.scripts.result", requestId: sent[1].requestId, ok: false, error: "That script is switched off." });
+  await assert.rejects(refused, /switched off/);
+
+  const changed = [];
+  link.onScriptsChanged((machineId) => changed.push(machineId));
+  await link.handleBody(connection, { type: "machine.scripts.changed" });
+  assert.deepEqual(changed, ["machine-s"]);
+
+  assert.equal(link.machineKeepsAwake(), true, "switched-on scripts keep the box from the AWS idle stop");
+  assert.equal(link.hasActiveMachineWork(), false, "but they are not a run");
+  assert.deepEqual(link.scriptHosts(), [{ machineId: "machine-s", name: "Box", connected: true, supported: true }]);
+
+  const waiting = link.scriptsRequest("machine-s", { op: "list" });
+  await new Promise((resolve) => setImmediate(resolve));
+  link.rejectPendingScripts(connection, "The machine went away.");
+  await assert.rejects(waiting, /went away/);
+
+  connection.machineDeviceId = undefined;
+  await assert.rejects(link.scriptsRequest("machine-s", { op: "list" }), /not connected/);
+  assert.equal(link.machineKeepsAwake(), false, "a machine that is away is not counted");
+  record.awsInstanceId = "i-box";
+  assert.equal(link.machineKeepsAwake("i-box"), true, "for its own AWS instance, what it last said counts even while the link is down");
+  assert.equal(link.machineKeepsAwake("i-other"), false, "another instance is not kept on by this machine's scripts");
+  delete record.awsInstanceId;
+  connection.machineDeviceId = "dev-s";
+  record.lastHello = { ...record.lastHello, scriptsSupported: undefined };
+  await assert.rejects(link.scriptsRequest("machine-s", { op: "list" }), /older runtime/);
+  await assert.rejects(link.scriptsRequest("missing", { op: "list" }), /not set up/);
+  // A machine set up by another desktop takes no script requests from this one.
+  record.lastHello = { ...record.lastHello, scriptsSupported: true };
+  connection.pairing = { issuer: { originId: "device-another-desktop" } };
+  await assert.rejects(link.scriptsRequest("machine-s", { op: "list" }), /managed from the desktop that set it up/);
+  assert.deepEqual(link.scriptHosts(), [], "and Settings does not list it as one of this desktop's script hosts");
+  link.close();
+});

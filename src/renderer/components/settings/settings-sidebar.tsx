@@ -1,4 +1,4 @@
-import { ArrowLeft, Circle, Cloud, FileText, KeyRound, ListChecks, Plug, SlidersHorizontal, Users } from "lucide-react";
+import { ArrowLeft, CalendarClock, Circle, Cloud, FileText, KeyRound, ListChecks, Plug, SlidersHorizontal, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -13,6 +13,7 @@ const SETTINGS_NAV: Array<{ section: SettingsSection; label: string; icon: Lucid
   { section: "general", label: "General", icon: SlidersHorizontal },
   { section: "aws", label: "AWS", icon: Cloud },
   { section: "environment", label: "Environment", icon: KeyRound },
+  { section: "scripts", label: "Scripts", icon: CalendarClock },
   { section: "roles", label: "Roles", icon: Circle },
   { section: "behavior-rules", label: "Rules", icon: ListChecks },
   { section: "saved-prompts", label: "Prompts", icon: FileText },

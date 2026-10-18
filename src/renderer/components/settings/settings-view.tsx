@@ -28,8 +28,9 @@ import { EnvironmentSettingsSection } from "./environment-settings-section";
 import { PluginsSettingsSection } from "./plugins/plugins-settings-section";
 import { X } from "lucide-react";
 import { AwsSettingsPage } from "./aws-settings-page";
+import { ScriptsSettingsSection } from "./scripts-settings-section";
 
-export type SettingsSection = "general" | "aws" | "environment" | "roles" | "behavior-rules" | "saved-prompts" | "participants" | "plugins";
+export type SettingsSection = "general" | "aws" | "environment" | "scripts" | "roles" | "behavior-rules" | "saved-prompts" | "participants" | "plugins";
 
 export function SettingsView(props: {
   section: SettingsSection;
@@ -71,6 +72,8 @@ export function SettingsView(props: {
       ? "AWS"
     : props.section === "environment"
       ? "Environment"
+    : props.section === "scripts"
+      ? "Scripts"
       : props.section === "roles"
         ? "Roles"
         : props.section === "behavior-rules"
@@ -138,6 +141,7 @@ export function SettingsView(props: {
             deleteAgentEnvironmentVariable={props.deleteAgentEnvironmentVariable}
           />
         )}
+        {props.section === "scripts" && <ScriptsSettingsSection />}
         {props.section === "plugins" && (
           <PluginsSettingsSection
             repoPath={props.settings.lastRepoPath}

@@ -13,6 +13,7 @@ import type {
   ChatToolPermissionRequest,
   Conversation
 } from "../../../shared/types";
+import { isChatScriptChangeRequest, type ChatScriptChangeRequest } from "../../../shared/scripts";
 import { chatParticipantReference } from "../conversation/conversation-display";
 import { CODEX_APPROVAL_TOOL_NAME, chatCodexApprovalRequest } from "./chat-codex-approval-presentation";
 
@@ -36,6 +37,14 @@ export const APP_PARTICIPANTS_REQUEST_CHANGE_TOOL = "app_participants_request_ch
 export const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
 export const APP_CHAT_REQUEST_COMPACTION_TOOL = "app_chat_request_compaction";
 export const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
+export const APP_SCRIPTS_REQUEST_CHANGE_TOOL = "app_scripts_request_change";
+
+/** A scheduled-script proposal, when this approval is one. */
+export function chatScriptChangeRequest(approval: ChatAppToolApproval): ChatScriptChangeRequest | undefined {
+  return approval.toolName === APP_SCRIPTS_REQUEST_CHANGE_TOOL && isChatScriptChangeRequest(approval.request)
+    ? approval.request
+    : undefined;
+}
 
 export function chatAppToolApprovals(conversation: Conversation | undefined): ChatAppToolApproval[] {
   const value = conversation?.metadata.pendingAppToolApprovals;
@@ -73,12 +82,13 @@ export function chatAppToolApprovals(conversation: Conversation | undefined): Ch
     const isCodexApprovalRequest =
       approval.toolName === CODEX_APPROVAL_TOOL_NAME &&
       Boolean(chatCodexApprovalRequest(approval as ChatAppToolApproval));
+    const isScriptRequest = Boolean(chatScriptChangeRequest(approval as ChatAppToolApproval));
     return (
       typeof approval.id === "string" &&
       typeof approval.requesterHandle === "string" &&
       typeof approval.summary === "string" &&
       (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "cancelled" || approval.status === "expired" || approval.status === "auto-applied") &&
-      (isRosterRequest || isRoleRequest || isParticipantChangeRequest || isPermissionRequest || isToolPermissionRequest || isParticipantRequest || isSelfCompactionRequest || isCodexApprovalRequest)
+      (isRosterRequest || isRoleRequest || isParticipantChangeRequest || isPermissionRequest || isToolPermissionRequest || isParticipantRequest || isSelfCompactionRequest || isCodexApprovalRequest || isScriptRequest)
     );
   });
 }

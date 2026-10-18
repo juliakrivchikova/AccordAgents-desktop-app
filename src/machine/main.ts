@@ -13,6 +13,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { artifactMembersForConversation } from "../shared/artifacts";
 import { assertMobilePairingPackage, type MobilePairingPackage } from "../shared/mobilePairing";
@@ -36,9 +37,9 @@ import { ChatActionApplier } from "../main/services/chatActionApplier";
 import { ChatActionEmitter } from "../main/services/chatActionEmitter";
 import { createChatActionEffects } from "../main/services/chatActionEffects";
 import { MachineIdlePower, assertNativeRegistryClosed } from "../main/services/machineIdlePower";
-import { MachineHostPowerRegistry } from "../main/services/machineHostPower";
+import { MachineHostPowerRegistry, type MachineHostAdmission } from "../main/services/machineHostPower";
 import { NATIVE_PROCESS_REGISTRY_FILE } from "../main/services/nativeProcessRegistry";
-import { uptime } from "node:os";
+import { hostname, uptime } from "node:os";
 import { MachineMaintenance } from "../main/services/machineMaintenance";
 import { nativeHostIdentity } from "../main/services/nativeHostIdentity";
 import { assertAwsMachinePowerConfig, MACHINE_POWER_KEY_CHECK_MS, MACHINE_POWER_REFUSED_EXIT_CODE, MachinePowerRefusal, type AwsMachinePowerConfig } from "../shared/machinePower";
@@ -48,6 +49,9 @@ import { PluginService } from "../main/services/plugins";
 import { SettingsService } from "../main/services/settings";
 import { StorageService } from "../main/services/storage";
 import { UserSkillsService } from "../main/services/userSkills";
+import { ScriptService, handleScriptsOperation } from "../main/services/scripts";
+import { ScriptSecretStore, ScriptStore } from "../main/services/scriptStore";
+import { machineScriptHostPhrase } from "../shared/scripts";
 
 interface MachineArgs {
   enrollmentPath: string;
@@ -360,9 +364,19 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       void debugLogService.write("machine.host-power.unavailable", { message: error instanceof Error ? error.message : String(error) });
     }
   }
-  // Refused before a provider is started, not discovered when the instance
-  // disappears underneath a running turn.
-  cliAgentRunner.setHostAdmission(presence ? (what) => presence!.admit(what) : () => ({ admitted: false, reason: presenceWarning }));
+  // Refused before a provider (or a scheduled script) is started, not
+  // discovered when the instance disappears underneath a running turn.
+  const admitHostWork = (what: string): MachineHostAdmission | Promise<MachineHostAdmission> => presence
+    ? presence.admit(what)
+    : { admitted: false, reason: presenceWarning || "This machine cannot confirm it is staying awake." };
+  cliAgentRunner.setHostAdmission(admitHostWork);
+  // The name the desktop last gave this machine, kept for a restart while the
+  // desktop is away; the host name only until it first greets this machine.
+  const machineLabelPath = path.join(userDataPath(), "machine-label.json");
+  let storedMachineLabel = await readFile(machineLabelPath, "utf8")
+    .then((text) => (JSON.parse(text) as { name?: unknown }).name)
+    .then((name) => typeof name === "string" && name.trim() ? name.trim() : undefined)
+    .catch(() => undefined);
   const host: MachineHostService = new MachineHostService(chatService, storageService, settingsService, debugLogService, {
     // A signature or a superseded change that arrives here has to become part
     // of this machine's own state, not just a stored event.
@@ -416,9 +430,58 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     },
     onDesktopMachineId: (machineId) => {
       chatService.setHostMachineId(machineId);
+    },
+    // These two reach `scriptService`, built below: the desktop's greeting and
+    // its requests arrive only after host.start(), further down.
+    onDesktopMachineName: (name) => {
+      scriptService.setHostName(name, machineScriptHostPhrase(name));
+      if (name !== storedMachineLabel) {
+        storedMachineLabel = name;
+        void writeFile(machineLabelPath, JSON.stringify({ name }), "utf8").catch(() => undefined);
+      }
+    },
+    scripts: {
+      handle: (operation) => handleScriptsOperation(scriptService, operation),
+      keepsHostAwake: () => scriptService.keepsHostAwake(),
+      scheduledCount: () => scriptService.scheduledCount()
     }
   });
   hostRef = host;
+  // Scheduled scripts that live on this machine: they run here with the lid
+  // of the laptop closed, keep the instance awake while one is switched on,
+  // and wake the members that run here.
+  const machineLabel = storedMachineLabel ?? args.machineName ?? hostname();
+  let scriptsAwake = "";
+  const scriptService: ScriptService = new ScriptService({
+    store: new ScriptStore(path.join(userDataPath(), "scripts")),
+    secrets: new ScriptSecretStore(path.join(userDataPath(), "script-secrets.json"), platform.secrets),
+    hostId: `machine:${identity.originId}`,
+    hostLabel: machineLabel,
+    hostPhrase: machineScriptHostPhrase(machineLabel),
+    tokens: appMcpService,
+    chat: {
+      describeChat: (chatId) => chatService.describeChatForScripts(chatId),
+      postScriptMessage: (input) => chatService.postScriptMessage({ ...input, progress: (progress) => host.noteNativeProgress(progress) })
+    },
+    node: { command: process.execPath, env: {} },
+    admit: admitHostWork,
+    localMembersOnly: true,
+    debugLog: (event, payload) => {
+      void debugLogService.write(event, payload);
+    },
+    onChanged: () => {
+      host.noteScriptsChanged();
+      // Whether it must stay awake, and for how many scripts, is part of
+      // what the desktop shows and what its automatic stop asks.
+      const awake = `${scriptService.keepsHostAwake()}:${scriptService.scheduledCount()}`;
+      if (awake !== scriptsAwake) {
+        scriptsAwake = awake;
+        void host.publishPowerStatus().catch(() => undefined);
+      }
+    }
+  });
+  chatService.setScriptHost(scriptService);
+  appMcpService.setScriptApiHandler((context, _route, body) => scriptService.postFromScript(context, body));
   // A member here asking other members goes through the desktop: it owns the
   // roster and runs each target where that member lives.
   chatService.setParticipantRequestDelegate({
@@ -454,6 +517,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await idlePower.start();
   }
   await host.start();
+  void scriptService.start().catch((error) => debugLogService.write("scripts.start.error", { message: String(error) }));
   // Repair artifact actions written by runtimes whose event writer was absent.
   // The ids are immutable, so a restart cannot create another version or signature.
   void (async () => {
@@ -489,6 +553,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     try { presence?.publish(true); } catch (error) {
       void debugLogService.write("machine.host-power.shutdown-claim-failed", { message: String(error) });
     }
+    await scriptService.stop();
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
     idlePower?.close();
     await idlePower?.releaseAfterShutdown();

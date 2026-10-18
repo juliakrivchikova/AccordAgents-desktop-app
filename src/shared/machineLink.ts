@@ -67,6 +67,13 @@ export interface MachineHelloBody {
   /** Set when the machine cannot keep its outbox on disk: results are held
    *  in memory only and would not survive a restart of the runtime. */
   outboxError?: string;
+  /** This runtime hosts scheduled scripts (absent before scripts existed). */
+  scriptsSupported?: boolean;
+  /** An enabled scheduled script keeps this machine from stopping when idle.
+   *  Not a run: the desktop's update gate does not wait on it. */
+  keepAwake?: boolean;
+  /** How many switched-on scripts keep it awake ("Kept on by 2 scheduled scripts"). */
+  keepAwakeScripts?: number;
 }
 
 export interface MachineHelloAckBody {
@@ -76,6 +83,9 @@ export interface MachineHelloAckBody {
   /** The desktop's record id for this machine: the value members carry as
    *  `homeMachineId`, so the runtime knows which members are its own. */
   machineId?: string;
+  /** The name the User gave this machine on the desktop, so what the machine
+   *  writes about itself (a script card's "Runs on") uses the same name. */
+  machineName?: string;
 }
 
 export interface MachineSettingsSyncBody {
@@ -387,7 +397,50 @@ export interface MachineTurnSuggestionBody {
   suggestion: string;
 }
 
+/** One operation on this machine's scheduled scripts, asked by the desktop
+ *  that enrolled it. Ephemeral and addressed to one machine: a key value in
+ *  setSecret never enters the durable event log, a mailbox or settings. */
+export type MachineScriptsOperation =
+  | { op: "list" }
+  | { op: "revision"; scriptId: string; revisionId?: string }
+  | { op: "runs"; scriptId: string }
+  | { op: "setSecret"; scriptId: string; name: string; value: string }
+  | { op: "deleteSecret"; scriptId: string; name: string }
+  | { op: "setEnabled"; scriptId: string; enabled: boolean }
+  | { op: "runNow"; scriptId: string }
+  | { op: "delete"; scriptId: string }
+  | { op: "releaseHeld"; scriptId: string }
+  | { op: "discardHeld"; scriptId: string };
+
+export interface MachineScriptsRequestBody {
+  type: "machine.scripts.request";
+  requestId: string;
+  /** The runtime instance the desktop last heard from (hello `instanceId`):
+   *  the machine refuses a request made for an earlier run of itself. */
+  instanceId?: string;
+  /** When the desktop stops waiting. The machine refuses the request after
+   *  this, so a change the User was told timed out never happens later. */
+  expiresAt?: string;
+  operation: MachineScriptsOperation;
+}
+
+export interface MachineScriptsResultBody {
+  type: "machine.scripts.result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  result?: unknown;
+}
+
+/** Machine -> desktop: its scheduled scripts changed; ask for the list again. */
+export interface MachineScriptsChangedBody {
+  type: "machine.scripts.changed";
+}
+
 export type MachineLinkMessage =
+  | MachineScriptsRequestBody
+  | MachineScriptsResultBody
+  | MachineScriptsChangedBody
   | MachineHelloBody
   | MachineHelloAckBody
   | MachineSettingsSyncBody
@@ -473,6 +526,9 @@ const MESSAGE_TYPE_TABLE: Record<MachineLinkMessageType, true> = {
   "machine.attachment.request": true,
   "machine.attachment.result": true,
   "machine.turn.suggestion": true,
+  "machine.scripts.request": true,
+  "machine.scripts.result": true,
+  "machine.scripts.changed": true,
 };
 
 const MESSAGE_TYPES: ReadonlySet<string> = new Set<string>(Object.keys(MESSAGE_TYPE_TABLE));

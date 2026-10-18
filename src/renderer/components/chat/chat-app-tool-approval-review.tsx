@@ -233,6 +233,8 @@ function roleResultSummary(request: ChatRoleChangeRequest | undefined): { title:
 export function ChatAppToolReviewFooter(props: {
   primaryLabel: string;
   submitting: boolean;
+  approveDisabled?: boolean;
+  cancelLabel?: string;
   onCancel: () => void;
   onApprove: () => void;
 }): JSX.Element {
@@ -244,14 +246,14 @@ export function ChatAppToolReviewFooter(props: {
         disabled={props.submitting}
         onClick={props.onCancel}
       >
-        Cancel
+        {props.cancelLabel ?? "Cancel"}
       </button>
       <Button
         type="button"
         variant="default"
         size="sm"
         className="chat-app-tool-review-submit"
-        disabled={props.submitting}
+        disabled={props.submitting || props.approveDisabled === true}
         onClick={props.onApprove}
       >
         {props.primaryLabel}
