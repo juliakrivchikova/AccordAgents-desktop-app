@@ -52,6 +52,11 @@ interface DeviceEventChannelOptions {
    *  that cannot read them): they stay queued, in order, and go once this no
    *  longer names them. */
   heldKinds?(): readonly string[];
+  /** The User's hub carries this channel's events: they are delivered by the
+   *  hub's order (HubSync hands each in through `receiveFromHub`), so the
+   *  channel sends no events, acknowledgements or repair requests itself,
+   *  and keeps no mailbox. */
+  hubMode?: boolean;
   onError(error: Error): void;
 }
 
@@ -85,7 +90,7 @@ export class DeviceEventChannel {
     if (options.peerDeviceId !== `device-${hash.slice(0, 32)}`) {
       throw new Error("Device event peer identity does not match its enrolled signing key.");
     }
-    if (options.pairing?.outboxUrl) {
+    if (options.pairing?.outboxUrl && !options.hubMode) {
       this.mailbox = new DeviceEventMailbox({
         storage: options.storage, pairing: options.pairing,
         localDeviceId: options.localDeviceId, peerDeviceId: options.peerDeviceId,
@@ -278,7 +283,7 @@ export class DeviceEventChannel {
   }
 
   private async flushPending(): Promise<void> {
-    if (this.options.isPeerConnected?.() === false) return;
+    if (this.options.hubMode || this.options.isPeerConnected?.() === false) return;
     let cursor = 0;
     while (!this.stopped) {
       // Identities first; an envelope is read only for an event that is due.
@@ -459,6 +464,8 @@ export class DeviceEventChannel {
   }
 
   private async sendControl(packet: DeviceEventPacket): Promise<void> {
+    // Through a hub, delivery is the hub's acceptance: no receipts travel.
+    if (this.options.hubMode) return;
     packet = await this.authenticate(packet);
     const writes: Promise<void>[] = this.options.isPeerConnected?.() === false ? [] : [this.options.send(packet)];
     if (this.mailbox) writes.push(this.mailbox.sendPacket(packet));
@@ -470,6 +477,35 @@ export class DeviceEventChannel {
 
   private async authenticate(packet: DeviceEventPacket): Promise<DeviceEventPacket> {
     return signDevicePacket(packet, await this.options.eventLog.getOrCreateDeviceIdentity());
+  }
+
+  /**
+   * An event the hub's order delivered. Checked like one from the peer (its
+   * own signature, this channel's scope, a chat change also when another of
+   * the owner's machines wrote it), stored once, then applied by the same
+   * drain, so deferral and dependencies behave as before.
+   */
+  receiveFromHub(event: ChatEventEnvelope): Promise<void> {
+    return this.enqueue(async () => {
+      if (this.stopped) return;
+      const originKey = this.originKey(event.originId, event.logScopeId, this.options.peerDeviceId);
+      if (!originKey || !this.inScope(event.logScopeId) || !verifySignedChatEvent(event, originKey)) {
+        throw new DevicePacketAuthenticationError("Device event signature or channel scope is invalid.");
+      }
+      const stored = await this.options.storage.appendChatEvent(event, {
+        ingress: { deviceId: this.options.peerDeviceId, channelId: this.options.channelId }
+      });
+      if (stored.status === "conflict") throw new Error(`Conflicting device event ${event.eventId}.`);
+      this.receivePending = true;
+      try { await this.drain(); }
+      catch (error) { throw new DeviceEventProjectionPendingError(error); }
+    });
+  }
+
+  /** True for an event this channel takes from the hub: its scope, and its
+   *  author is the peer (or another machine's chat change the peer would forward). */
+  accepts(event: ChatEventEnvelope): boolean {
+    return this.inScope(event.logScopeId) && Boolean(this.originKey(event.originId, event.logScopeId, this.options.peerDeviceId));
   }
 
   private async repeatReceipt(receipt: DeviceEventReceipt): Promise<void> {

@@ -37,6 +37,12 @@ export class HubSync {
     onConnectionChange?: (connected: boolean) => void;
     /** Log scopes (by prefix) whose events this device sends; all when unset. */
     scopePrefixes?: string[];
+    /** Hands an event to the channel it belongs to (which stores and applies
+     *  it itself); false leaves it to `apply`. */
+    deliver?: (event: ChatEventEnvelope) => Promise<boolean>;
+    /** These own events are now held by the hub, so whoever waited to hand
+     *  them over may let go of them. */
+    onPushed?: (eventIds: string[]) => Promise<void>;
   }) {}
 
   start(): void {
@@ -131,6 +137,7 @@ export class HubSync {
       if (page.length === 0) return;
       const response = await this.options.client.push(page.map((item) => item.event));
       let advanced = cursor;
+      const delivered: string[] = [];
       for (const [index, result] of response.results.entries()) {
         if (result.status === "gap") {
           // The hub misses earlier events of this chain (written before it
@@ -145,6 +152,7 @@ export class HubSync {
           this.options.log?.("hub.sync.push-refused", { eventId: result.eventId, status: result.status, error: result.error ?? "" });
         }
         advanced = page[index].rowid;
+        delivered.push(page[index].event.eventId);
       }
       if (advanced === cursor) {
         // Nothing moved this pass (a gap was filled, or a body is missing):
@@ -154,7 +162,9 @@ export class HubSync {
         const settled = firstStuck === -1 ? page.length : firstStuck;
         if (settled === 0) throw new Error(`The hub cannot place event ${page[0].event.eventId} (${again.results[0]?.status}).`);
         advanced = page[settled - 1].rowid;
+        delivered.push(...page.slice(0, settled).map((item) => item.event.eventId));
       }
+      if (delivered.length) await this.options.onPushed?.(delivered);
       cursor = advanced;
       await hub.setClientState(PUSHED_KEY, String(cursor));
       if (page.length < PUSH_BATCH) return;
@@ -198,6 +208,7 @@ export class HubSync {
       return;
     }
     await this.options.client.fetchBlob(event);
+    if (await this.options.deliver?.(event)) return;
     const [stored] = await this.options.storage.appendChatEvents([event]);
     if (stored?.status === "conflict") {
       this.options.log?.("hub.sync.conflict", { eventId: event.eventId, reason: stored.conflictReason ?? "" });

@@ -170,7 +170,9 @@ export class HubStorage {
   /** Replaces the roster in one transaction. The owner row is kept as it is. */
   async replaceRoster(devices: HubDevice[], now: string): Promise<void> {
     await this.init();
-    const values = devices.filter((device) => device.role !== "owner").map((device) =>
+    // The owner is in the list it sends (as a desktop) and stays the owner.
+    const owners = new Set((await this.database.query<{ deviceId: string }>(`select device_id as deviceId from hub_devices where role = 'owner';`)).map((row) => row.deviceId));
+    const values = devices.filter((device) => device.role !== "owner" && !owners.has(device.deviceId)).map((device) =>
       `(${quote(device.deviceId)}, ${quote(device.publicKeyDerBase64)}, ${quote(device.role)}, ${quote(device.name)}, ${device.machineId ? quote(device.machineId) : "null"}, ${quote(device.addedAt || now)})`);
     await this.database.execute(`
       begin immediate;
@@ -232,6 +234,17 @@ export class HubStorage {
       order by origin_seq limit ${Math.max(1, Math.min(limit, 500))};
     `);
     return rows.map((row) => JSON.parse(row.envelope) as ChatEventEnvelope);
+  }
+
+  /** The hub holds these events now: every device they waited for is served
+   *  by it, so the outbox lets go of them (and retention may prune them). */
+  async acknowledgeOutbox(eventIds: string[], at: string): Promise<void> {
+    if (eventIds.length === 0) return;
+    await this.init();
+    await this.database.execute(`
+      update device_event_outbox set acknowledged_at = coalesce(acknowledged_at, ${quote(at)}), outcome = coalesce(outcome, 'applied')
+      where event_id in (${eventIds.map(quote).join(", ")});
+    `).catch(() => undefined);
   }
 
   async savePushSubscription(deviceId: string, endpoint: string, subscriptionJson: string, now: string): Promise<void> {

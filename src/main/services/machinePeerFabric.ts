@@ -35,6 +35,8 @@ import type { StorageService } from "./storage";
 import { CHAT_CHANGES_EVENT_KIND } from "./chatChanges";
 
 export interface MachinePeerFabricOptions {
+  /** The User's hub carries every channel's events (see DeviceEventChannel). */
+  hubMode?: boolean;
   selfDeviceId: string;
   storage: StorageService;
   eventLog: ChatEventLogService;
@@ -64,6 +66,17 @@ interface PeerConnection {
 
 export class MachinePeerFabric {
   private readonly connections = new Map<string, PeerConnection>();
+
+  /** Hands an event from the hub's order to the channel of the peer that wrote it. */
+  async receiveFromHub(event: import("../../shared/chatEvents").ChatEventEnvelope): Promise<boolean> {
+    for (const connection of this.connections.values()) {
+      if (connection.channel.accepts(event)) {
+        await connection.channel.receiveFromHub(event);
+        return true;
+      }
+    }
+    return false;
+  }
   private readonly rooms = new Map<string, TunnelClient>();
   private started = false;
   private shareTimer?: ReturnType<typeof setInterval>;
@@ -316,6 +329,7 @@ export class MachinePeerFabric {
       // Another machine whose runtime cannot fold chat changes yet keeps them
       // queued here until the roster says it can.
       heldKinds: () => peer.role === "machine" && peer.chatChanges !== true ? [CHAT_CHANGES_EVENT_KIND] : [],
+      ...(this.options.hubMode ? { hubMode: true } : {}),
       send,
       apply: (event, payload) => {
         if (this.connections.get(peer.deviceId)?.peer !== peer) throw new Error("Machine peer authorization changed.");

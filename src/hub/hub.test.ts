@@ -93,11 +93,14 @@ test("the owner keeps the roster; a phone it adds can read, and a machine cannot
   const machine = createChatEventDeviceIdentity(new Date().toISOString());
   assert.equal((await h.call(phone, "GET", "/v1/events?after=0")).status, 401);
   const roster = await h.call(h.owner, "PUT", "/v1/roster", { devices: [
+    // The owner sends itself too (as the desktop it is); it stays the owner.
+    { deviceId: h.owner.originId, publicKeyDerBase64: h.owner.publicKeyDerBase64, role: "desktop", name: "Mac" },
     { deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone", name: "iPhone" },
     { deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Box", machineId: "machine-1" }
   ] });
   assert.equal(roster.status, 200);
   assert.equal((roster.body.devices as unknown[]).length, 3, "owner kept");
+  assert.equal((roster.body.devices as Array<{ deviceId: string; role: string }>).find((device) => device.deviceId === h.owner.originId)?.role, "owner");
   assert.equal((await h.call(phone, "GET", "/v1/events?after=0")).status, 200);
   assert.equal((await h.call(phone, "PUT", "/v1/roster", { devices: [] })).status, 403, "only the owner changes the roster");
   assert.equal((await h.call(machine, "GET", "/v1/search?q=x")).status, 403);

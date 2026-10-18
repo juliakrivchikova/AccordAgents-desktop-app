@@ -106,6 +106,7 @@ import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
 import { HubSync } from "./services/hubSync";
+import { HubTunnelClient } from "./services/hubTunnelClient";
 import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload } from "./services/chatChanges";
 import { ScriptSecretStore, ScriptStore } from "./services/scriptStore";
 import { hostPlatform } from "./platform";
@@ -410,31 +411,83 @@ const cloudRunDoctorService: CloudRunDoctorService = new CloudRunDoctorService({
 const cloudRunSetupSession = new CloudRunSetupSession();
 /** The link to the User's own server, when one is set up. */
 let hubSync: HubSync | undefined;
+let hubClient: HubClient | undefined;
+let hubRosterPublish: Promise<void> | undefined;
+let hubRosterAgain = false;
+
+/**
+ * Tells the hub which devices are the User's: this desktop and every machine
+ * whose key it knows. The hub admits nobody else, so a machine set up here
+ * can reach it before its first hello. Coalesced: a change during a publish
+ * is sent once more after it.
+ */
+function publishHubRoster(): void {
+  if (!hubClient) return;
+  if (hubRosterPublish) {
+    hubRosterAgain = true;
+    return;
+  }
+  const client = hubClient;
+  hubRosterPublish = (async () => {
+    const identity = await chatEventLogService.getOrCreateDeviceIdentity();
+    const machines = (await settingsService.listMachines()).flatMap((machine) => {
+      const publicKeyDerBase64 = machine.lastHello?.publicKeyDerBase64 ?? machine.devicePublicKeyDerBase64;
+      return machine.deviceId && publicKeyDerBase64
+        ? [{ deviceId: machine.deviceId, publicKeyDerBase64, role: "machine" as const, name: machine.name, machineId: machine.id }]
+        : [];
+    });
+    await client.setRoster([
+      { deviceId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64, role: "desktop", name: "This computer" },
+      ...machines
+    ]);
+    void debugLogService.write("hub.roster.published", { machines: machines.length });
+  })().catch((error: unknown) => {
+    void debugLogService.write("hub.roster.error", { message: error instanceof Error ? error.message : String(error) });
+  }).finally(() => {
+    hubRosterPublish = undefined;
+    if (hubRosterAgain) {
+      hubRosterAgain = false;
+      publishHubRoster();
+    }
+  });
+}
 
 async function startHubLink(): Promise<void> {
   const config = await settingsService.getHubConfig();
   if (!config || hubSync) return;
   const identity = () => chatEventLogService.getOrCreateDeviceIdentity();
+  hubClient = new HubClient({ url: config.url, identity, storage: storageService });
   hubSync = new HubSync({
-    client: new HubClient({ url: config.url, identity, storage: storageService }),
+    client: hubClient,
     storage: storageService,
     localOriginId: async () => (await identity()).originId,
     // Only the User's own devices: its machines and the phones it trusts.
     trustedKey: async (originId) => {
       const machine = (await settingsService.listMachines()).find((item) => item.deviceId === originId);
-      if (machine?.lastHello?.publicKeyDerBase64) return machine.lastHello.publicKeyDerBase64;
+      const machineKey = machine?.lastHello?.publicKeyDerBase64 ?? machine?.devicePublicKeyDerBase64;
+      if (machineKey) return machineKey;
       return (await settingsService.listTrustedDevices()).find((device) => device.deviceId === originId)?.publicKeyDerBase64;
     },
+    // A machine's event goes to that machine's channel, which applies it as
+    // if the machine had sent it; the rest (a phone's chat change) here.
+    deliver: async (event) => (await machineLinkService?.receiveFromHub(event)) ?? false,
     apply: async (event) => {
       if (event.kind !== CHAT_CHANGES_EVENT_KIND) return "ignored";
       const payload = await storageService.deviceEventBlobs().hydrate(event.payload);
       if (!isChatChangesPayload(payload)) return "ignored";
       return (await chatService.applyRemoteChatChanges(event, payload)) === "applied" ? "applied" : "ignored";
     },
-    scopePrefixes: ["chat-changes:"],
+    onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString()),
+    // Chat changes, the machines' channels and chat actions; never what this
+    // desktop wrote for the old phone mailbox.
+    scopePrefixes: ["chat-changes:", "device:", CHAT_ACTION_LOG_SCOPE],
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
+  // Whatever this desktop writes (a chat change, an action, a command for a
+  // machine) goes up at once.
+  chatEventLogService.onLocalAppend(() => hubSync?.nudgePush());
   hubSync.start();
+  publishHubRoster();
   void debugLogService.write("hub.link.started", { url: config.url });
 }
 
@@ -581,23 +634,32 @@ async function createMachine(request: CreateMachineRequest, awsInstanceId?: stri
     throw new Error("A machine needs a name.");
   }
   const settings = await settingsService.getPublicSettings();
-  // Machines use the same live room and sealed durable buffer as the phone.
-  // The static PWA origin and the old command mailbox are not needed here.
-  const pairing = await mobilePairingService.createPairing({
+  const hub = await settingsService.getHubConfig();
+  // With the User's hub, the machine meets this desktop there and every
+  // durable event goes through the hub's order: no relay, no mailbox.
+  // Without it, machines use the same live room and sealed durable buffer as
+  // the phone.
+  const pairing = await mobilePairingService.createPairing(hub ? {
+    purpose: "machine-host",
+    ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES,
+    hubUrl: hub.url
+  } : {
     purpose: "machine-host",
     ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES,
     relayUrl: settings.mobileControl.defaults.relayUrl,
     outboxUrl: settings.mobileControl.defaults.outboxUrl
   });
-  if (!pairing.package.relayUrl) {
-    throw new Error("Machines need a relay URL; set the mobile control relay in Settings first.");
-  }
-  if (!pairing.package.outboxUrl) {
-    throw new Error("Machines need a sealed mailbox URL; set the mobile control mailbox in Settings first.");
-  }
-  // Reserve the sealed mailbox before exposing its enrollment credentials.
-  if (!await ensureMailboxRegisteredForPairing(pairing.package)) {
-    throw new Error("The machine's relay mailbox could not be registered. Try adding the machine again.");
+  if (!hub) {
+    if (!pairing.package.relayUrl) {
+      throw new Error("Machines need a relay URL; set the mobile control relay in Settings first.");
+    }
+    if (!pairing.package.outboxUrl) {
+      throw new Error("Machines need a sealed mailbox URL; set the mobile control mailbox in Settings first.");
+    }
+    // Reserve the sealed mailbox before exposing its enrollment credentials.
+    if (!await ensureMailboxRegisteredForPairing(pairing.package)) {
+      throw new Error("The machine's relay mailbox could not be registered. Try adding the machine again.");
+    }
   }
   const record = {
     id: randomUUID(),
@@ -3767,7 +3829,18 @@ void app.whenReady().then(async () => {
   });
   try {
     const desktopIdentity = await chatEventLogService.getOrCreateDeviceIdentity();
+    const hubConfig = await settingsService.getHubConfig().catch(() => undefined);
     machineLinkService = new MachineLinkService(settingsService, debugLogService, {
+      // With the User's hub, machines are met in its rooms and their events
+      // travel in its order.
+      ...(hubConfig ? {
+        hubMode: true,
+        onDevicesChanged: () => publishHubRoster(),
+        createClient: (pairing: MobilePairingPackage) => new HubTunnelClient({
+          hubUrl: hubConfig.url, rendezvousId: pairing.rendezvousId, role: "desktop",
+          identity: () => chatEventLogService.getOrCreateDeviceIdentity()
+        })
+      } : {}),
       chatActions: chatActionApplier,
       repositoryPaths: (sourcePath) => cloudRunPreparation.repositoryPaths(sourcePath),
       // A machine that held an action back because it lacked the revision it

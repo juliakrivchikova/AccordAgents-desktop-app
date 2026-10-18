@@ -74,7 +74,7 @@ export interface MachineHostOptions {
    *  started into an instance that is going away or failed as a turn. */
   hostStopCommitted?: () => boolean;
   /** Test seam: opens a connection to another device's room. */
-  createPeerClient?: (room: { relayUrl: string; rendezvousId: string; sealKeyBase64: string; fingerprint?: string; deviceId: string }) => RelayTunnelClient;
+  createPeerClient?: (room: { relayUrl: string; rendezvousId: string; sealKeyBase64: string; fingerprint?: string; deviceId: string }) => TunnelClient;
   pairing: MobilePairingPackage;
   deviceId: string;
   machineName?: string;
@@ -103,6 +103,9 @@ export interface MachineHostOptions {
   idleStopWarning?: () => string | undefined;
   /** The User's automatic-stop switch as this machine has it. */
   autoStopEnabled?: () => boolean | undefined;
+  /** The User's hub carries this machine's events instead of the relay's
+   *  per-peer delivery (see DeviceEventChannel.hubMode). */
+  hubMode?: boolean;
   /** Scheduled scripts on this machine, operated by the enrolling desktop. */
   scripts?: {
     handle(operation: MachineScriptsOperation): Promise<unknown>;
@@ -271,6 +274,24 @@ export class MachineHostService {
     });
   }
 
+  /** The signing key of one of the owner's devices this machine trusts. */
+  trustedKey(originId: string): string | undefined {
+    if (originId === this.options.pairing.issuer.originId) return this.options.pairing.issuer.publicKeyDerBase64;
+    return this.trust.peers().find((peer) => peer.deviceId === originId)?.publicKeyDerBase64;
+  }
+
+  /** An event the hub's order brought: to the desktop's channel when the
+   *  desktop (or a machine's chat change it would forward) wrote it, else to
+   *  the channel of the peer that did. */
+  async receiveFromHub(event: ChatEventEnvelope): Promise<boolean> {
+    await this.initializeOwnerChannel();
+    if (this.eventChannel?.accepts(event)) {
+      await this.eventChannel.receiveFromHub(event);
+      return true;
+    }
+    return this.peers.receiveFromHub(event);
+  }
+
   applyApprovalAction(event: ChatEventEnvelope, payload: import("../../shared/chatActionEvents").ChatActionPayload): Promise<import("../../shared/machineLink").MachineApprovalResultBody> {
     return this.approvalExecutor.applyAction(event, payload);
   }
@@ -346,11 +367,11 @@ export class MachineHostService {
     }
     this.loadOutbox();
     const pairing = options.pairing;
-    if (!pairing.relayUrl) {
+    if (!pairing.relayUrl && !pairing.hubUrl) {
       throw new Error("Machine enrollment has no relay URL.");
     }
     this.client = options.createClient?.(pairing) ?? new RelayTunnelClient({
-      relayUrl: pairing.relayUrl,
+      relayUrl: pairing.relayUrl ?? "",
       rendezvousId: pairing.rendezvousId,
       role: "machine",
       deviceId: options.deviceId,
@@ -366,6 +387,7 @@ export class MachineHostService {
     // The owner's other devices reach this machine here. Each gets its own
     // sealed channel with its own signing key; anyone else is not answered.
     this.peers = new MachinePeerFabric({
+      ...(options.hubMode ? { hubMode: true } : {}),
       selfDeviceId: options.deviceId,
       storage: options.eventStorage,
       eventLog: options.eventLog,
@@ -465,6 +487,7 @@ export class MachineHostService {
       storage: options.eventStorage, eventLog: options.eventLog,
       pairing: { ...pairing, relaySealKeyBase64: deriveMachineChannelKey(identity, pairing.issuer.publicKeyDerBase64, pairing.rendezvousId) },
       isPeerConnected: () => Boolean(this.desktopDeviceId),
+      ...(options.hubMode ? { hubMode: true } : {}),
       channelId: pairing.rendezvousId, localDeviceId: options.deviceId,
       peerDeviceId: pairing.issuer.originId, peerPublicKeyDerBase64: pairing.issuer.publicKeyDerBase64,
       send: async (packet) => {

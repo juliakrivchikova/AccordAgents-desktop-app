@@ -35,6 +35,7 @@ import { setCommandDebugLogger } from "../main/services/command";
 import { DebugLogService } from "../main/services/debugLogs";
 import { MachineHostService } from "../main/services/machineHost";
 import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
+import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload } from "../main/services/chatChanges";
 import { ChatActionApplier } from "../main/services/chatActionApplier";
 import { ChatActionEmitter } from "../main/services/chatActionEmitter";
 import { createChatActionEffects } from "../main/services/chatActionEffects";
@@ -52,6 +53,9 @@ import { SettingsService } from "../main/services/settings";
 import { StorageService } from "../main/services/storage";
 import { UserSkillsService } from "../main/services/userSkills";
 import { ScriptService, handleScriptsOperation } from "../main/services/scripts";
+import { HubTunnelClient } from "../main/services/hubTunnelClient";
+import { HubSync } from "../main/services/hubSync";
+import { HubClient } from "../main/services/hubClient";
 import { ScriptSecretStore, ScriptStore } from "../main/services/scriptStore";
 import { machineScriptHostPhrase } from "../shared/scripts";
 
@@ -450,6 +454,19 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     serveChatActionDependency: async (dependency) => dependency.targetKey.startsWith("artifact:")
       && artifactService.emitRevisionActionFor(dependency.targetKey.slice("artifact:".length), dependency.stateId),
     pairing: enrollment,
+    // With the User's hub, this machine meets its devices in the hub's rooms
+    // and its events travel in the hub's order (no relay, no mailbox).
+    ...(enrollment.hubUrl ? {
+      hubMode: true,
+      createClient: (pairing: MobilePairingPackage) => new HubTunnelClient({
+        hubUrl: enrollment.hubUrl!, rendezvousId: pairing.rendezvousId, role: "machine",
+        identity: () => chatEventLogService.getOrCreateDeviceIdentity()
+      }),
+      createPeerClient: (room: { rendezvousId: string }) => new HubTunnelClient({
+        hubUrl: enrollment.hubUrl!, rendezvousId: room.rendezvousId, role: "machine",
+        identity: () => chatEventLogService.getOrCreateDeviceIdentity()
+      })
+    } : {}),
     deviceId: identity.originId,
     machineName: args.machineName,
     appVersion: platform.appVersion(),
@@ -513,7 +530,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     onCommitted: () => host.nudgeEventChannel(),
     hostMachineId: () => host.enrolledMachineId(),
     desktopOriginId: () => enrollment.issuer.originId,
-    machineOriginId: (machineId) => host.machineOriginId(machineId)
+    machineOriginId: (machineId) => host.machineOriginId(machineId),
+    alwaysEmit: () => Boolean(enrollment.hubUrl)
   }));
   const stopChatChangePruning = scheduleChatChangePruning({
     storage: storageService,
@@ -590,6 +608,26 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await idlePower.start();
   }
   await host.start();
+  const hubSync = enrollment.hubUrl ? new HubSync({
+    client: new HubClient({ url: enrollment.hubUrl, identity: () => chatEventLogService.getOrCreateDeviceIdentity(), storage: storageService }),
+    storage: storageService,
+    localOriginId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+    trustedKey: async (originId) => host.trustedKey(originId),
+    deliver: (event) => host.receiveFromHub(event),
+    apply: async (event) => {
+      if (event.kind !== CHAT_CHANGES_EVENT_KIND) return "ignored";
+      const payload = await storageService.deviceEventBlobs().hydrate(event.payload);
+      if (!isChatChangesPayload(payload)) return "ignored";
+      return (await chatService.applyRemoteChatChanges(event, payload)) === "applied" ? "applied" : "ignored";
+    },
+    onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString()),
+    scopePrefixes: ["chat-changes:", "device:", CHAT_ACTION_LOG_SCOPE],
+    log: (event, payload) => { void debugLogService.write(event, payload); }
+  }) : undefined;
+  if (hubSync) {
+    chatEventLogService.onLocalAppend(() => hubSync.nudgePush());
+    hubSync.start();
+  }
   void scriptService.start().catch((error) => debugLogService.write("scripts.start.error", { message: String(error) }));
   // Repair artifact actions written by runtimes whose event writer was absent.
   // The ids are immutable, so a restart cannot create another version or signature.
@@ -617,7 +655,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     }).finally(() => { refreshing = false; });
   }, 30_000) : undefined;
   presenceTimer?.unref();
-  console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.relayUrl} (user data: ${userDataPath()})`);
+  console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.hubUrl ?? enrollment.relayUrl} (user data: ${userDataPath()})`);
 
   return async () => {
     presenceClosed = true;
@@ -629,6 +667,13 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     }
     await scriptService.stop();
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
+    if (hubSync) {
+      // What the shutdown itself wrote (interrupted turns) goes up before the
+      // link closes; an unreachable hub gets it on the next start instead.
+      hubSync.nudgePush();
+      await Promise.race([hubSync.idle(), new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
+      hubSync.stop();
+    }
     idlePower?.close();
     await idlePower?.releaseAfterShutdown();
     // The registration outlives the idle scheduler: it is released only once

@@ -43,6 +43,9 @@ export interface MobilePairingPackage {
   mailboxUrl?: string;
   outboxUrl?: string;
   staticOriginUrl?: string;
+  /** The User's own server: when set, rooms and every durable event go
+   *  through it instead of the relay and its mailboxes. */
+  hubUrl?: string;
   capabilities: MobilePairingCapability[];
   /** Rule 3: the phone's start key, which lets this device start a stopped
    *  AWS machine by itself. Only while the link is built: the key reaches the
@@ -61,6 +64,7 @@ export interface MobilePairingPackage {
 export interface CreateMobilePairingRequest {
   conversationId?: string;
   purpose?: MobilePairingPurpose;
+  hubUrl?: string;
   relayUrl?: string;
   mailboxUrl?: string;
   outboxUrl?: string;
@@ -281,6 +285,9 @@ export function assertMobilePairingPackage(value: unknown, now?: Date): asserts 
   }
   if (typeof value.staticOriginUrl === "string") {
     assertHttpsUrl(value.staticOriginUrl, "staticOriginUrl");
+  }
+  if (value.hubUrl !== undefined && (typeof value.hubUrl !== "string" || !/^https?:\/\/[^\s]+$/.test(value.hubUrl))) {
+    throw new Error("Mobile pairing hubUrl must be an http(s) URL.");
   }
   if (value.power !== undefined) {
     assertMachinePowerHandoff(value.power);

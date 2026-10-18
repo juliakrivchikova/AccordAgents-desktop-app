@@ -632,6 +632,9 @@ export interface MachineRecord {
   /** Relay device id of the machine (its chat-event origin id) once it has
    *  connected; empty until the first hello. */
   deviceId: string;
+  /** The key the machine signs with, recorded at setup: the User's hub admits
+   *  the machine by it before its first hello. */
+  devicePublicKeyDerBase64?: string;
   pairingKey: string;
   createdAt: string;
   lastSeenAt?: string;
