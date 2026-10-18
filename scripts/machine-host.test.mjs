@@ -424,8 +424,9 @@ test("a Claude member's turns on a machine run as soon as they are admitted; ano
     const member = { id: "p1", handle: "bot", kind, homeMachineId: "test-home" };
     await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
     const shell = { id: conversationId, kind: "chat", title: "t", createdAt: "2026-10-17T00:00:00.000Z", updatedAt: "2026-10-17T00:00:00.000Z", metadata: { participants: [member] }, messages: [], findings: [] };
-    await inbound({ type: "machine.conversation.sync", conversation: shell });
-    await inbound({ type: "machine.conversation.sync.done", conversationId });
+    // The chat, with the messages the member answers, is already on the
+    // machine (chats arrive as change events).
+    store.set(conversationId, { ...shell, messages: [1, 2].map((index) => ({ id: `m${index}`, role: "user", content: `hi ${index}`, createdAt: shell.createdAt })) });
     for (const index of [1, 2]) {
       await inbound({ type: "machine.turn.request", conversationId, participantId: "p1", participant: member, messageId: `m${index}`, runId: `${kind}-run-${index}`, pendingMessageId: `pending-${index}`, requestedAt: new Date().toISOString() });
     }
