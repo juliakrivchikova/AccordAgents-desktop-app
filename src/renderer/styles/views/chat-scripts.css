@@ -2,6 +2,8 @@
 
 .chat-script-approval-content {
   display: grid;
+  /* A long code line scrolls inside its block; it must not widen the card. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   padding: 4px 15px 12px;
   min-width: 0;
@@ -151,6 +153,7 @@
 
 .chat-script-approval-files {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   margin-top: 8px;
 }

@@ -24,7 +24,7 @@ import {
   type MachineRecord,
   type MachineTurnFinishedBody
 } from "../../shared/machineLink";
-import type { MachineAttachmentRequestBody } from "../../shared/machineLink";
+import type { MachineAttachmentRequestBody, MachineScriptsOperation } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
 import type { ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatAppToolApprovalRequest, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
@@ -166,6 +166,19 @@ interface MachineConnection {
   /** Monotonic start counter of the newest runtime instance seen (preferred
    *  over the wall-clock start time). */
   latestInstanceSequence?: number;
+  /** Scheduled-script requests waiting for the machine's answer. */
+  pendingScripts: Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>;
+}
+
+/** How long a scheduled-script request waits for the machine's answer. */
+const SCRIPTS_REQUEST_TIMEOUT_MS = 20_000;
+
+/** A machine as Settings → Scripts sees it. */
+export interface MachineScriptHost {
+  machineId: string;
+  name: string;
+  connected: boolean;
+  supported: boolean;
 }
 
 /** How long a delivered Stop may go unconfirmed before the User is told the
@@ -204,6 +217,7 @@ export function machineActivityIsBusy(activity: MachineActivity): boolean {
 export class MachineLinkService implements MachineTurnDispatcher {
   private readonly emitter = new EventEmitter();
   private readonly approvalListeners: Array<(event: MachineApprovalEvent) => Promise<void> | void> = [];
+  private readonly scriptsChangedListeners: Array<(machineId: string) => void> = [];
   private readonly lateTerminalListeners: Array<(event: MachineLateTerminalEvent) => Promise<void> | void> = [];
   private readonly runStartedListeners: Array<(event: { conversationId: string; runId: string }) => Promise<void> | void> = [];
   private readonly progressListeners: Array<(progress: ReviewProgress) => void> = [];
@@ -466,7 +480,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
       pendingTurnConversations: new Map(),
       inbound: Promise.resolve(),
       outbound: Promise.resolve(),
-      helloSeen: false
+      helloSeen: false,
+      pendingScripts: new Map()
     };
     this.connections.set(record.id, connection);
     if (record.deviceId && record.lastHello?.publicKeyDerBase64) {
@@ -530,9 +545,81 @@ export class MachineLinkService implements MachineTurnDispatcher {
       pending.resolve({ status: "failed", messages: [], warnings: [], error: "The machine was removed while the turn was running." });
     }
     connection.pendingTurns.clear();
+    this.rejectPendingScripts(connection, "The machine was removed.");
     connection.eventChannel?.close();
     connection.client.close();
     this.emitStatus();
+  }
+
+  /** Ask a machine to do something with its scheduled scripts and wait for
+   *  the answer. Ephemeral and sealed to that machine: a key value travels
+   *  only here, never in the durable event log, a mailbox or settings. */
+  async scriptsRequest(machineId: string, operation: MachineScriptsOperation, timeoutMs = SCRIPTS_REQUEST_TIMEOUT_MS): Promise<unknown> {
+    const connection = this.connections.get(machineId);
+    if (!connection) throw new Error("That machine is not set up on this computer.");
+    if (!this.managesScripts(connection)) {
+      throw new Error(`Scheduled scripts on ${connection.record.name} are managed from the desktop that set it up.`);
+    }
+    if (!connection.machineDeviceId) throw new Error(`${connection.record.name} is not connected right now.`);
+    const hello = connection.record.lastHello;
+    if (!hello) throw new Error(`${connection.record.name} has not greeted this desktop yet; try again in a moment.`);
+    if (hello.scriptsSupported !== true) {
+      throw new Error(`${connection.record.name} runs an older runtime without scheduled scripts; upgrade it in Settings → Machines.`);
+    }
+    const requestId = randomUUID();
+    const answer = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        connection.pendingScripts.delete(requestId);
+        reject(new Error(`${connection.record.name} did not answer in time.`));
+      }, timeoutMs);
+      timer.unref?.();
+      connection.pendingScripts.set(requestId, { resolve, reject, timer });
+    });
+    try {
+      await this.send(connection, { type: "machine.scripts.request", requestId,
+        ...(hello.instanceId ? { instanceId: hello.instanceId } : {}),
+        expiresAt: new Date(this.now().getTime() + timeoutMs).toISOString(), operation });
+    } catch (error) {
+      const pending = connection.pendingScripts.get(requestId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        connection.pendingScripts.delete(requestId);
+      }
+      throw error;
+    }
+    return answer;
+  }
+
+  /** Every machine whose scripts this desktop manages, with whether it is
+   *  connected now and runs a runtime that hosts scripts. */
+  scriptHosts(): MachineScriptHost[] {
+    return [...this.connections.values()].filter((connection) => this.managesScripts(connection)).map((connection) => ({
+      machineId: connection.record.id,
+      name: connection.record.name,
+      connected: Boolean(connection.machineDeviceId),
+      supported: connection.record.lastHello?.scriptsSupported === true
+    }));
+  }
+
+  /** A machine takes script requests only from the desktop that set it up. */
+  private managesScripts(connection: MachineConnection): boolean {
+    return this.options.desktopDeviceId === connection.pairing.issuer.originId;
+  }
+
+  onScriptsChanged(listener: (machineId: string) => void): () => void {
+    this.scriptsChangedListeners.push(listener);
+    return () => {
+      const index = this.scriptsChangedListeners.indexOf(listener);
+      if (index >= 0) this.scriptsChangedListeners.splice(index, 1);
+    };
+  }
+
+  private rejectPendingScripts(connection: MachineConnection, reason: string): void {
+    for (const pending of connection.pendingScripts.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+    connection.pendingScripts.clear();
   }
 
   close(): void {
@@ -723,6 +810,21 @@ export class MachineLinkService implements MachineTurnDispatcher {
       if ((hello?.activeRunIds?.length ?? 0) > 0 || (hello?.pendingTerminalRunIds?.length ?? 0) > 0) {
         return true;
       }
+    }
+    return false;
+  }
+
+  /** True while scheduled scripts need a machine awake: the User approved
+   *  them to run on a schedule, so the box stays on for them. Asked about one
+   *  AWS instance, only the machines on it count, by what they last said
+   *  even when the link is down at that moment; otherwise any connected one. */
+  machineKeepsAwake(awsInstanceId?: string): boolean {
+    const onInstance = awsInstanceId
+      ? [...this.connections.values()].filter((connection) => connection.record.awsInstanceId === awsInstanceId)
+      : [];
+    if (onInstance.length > 0) return onInstance.some((connection) => connection.record.lastHello?.keepAwake === true);
+    for (const connection of this.connections.values()) {
+      if (connection.machineDeviceId && connection.record.lastHello?.keepAwake === true) return true;
     }
     return false;
   }
@@ -1378,6 +1480,27 @@ export class MachineLinkService implements MachineTurnDispatcher {
       case "machine.conversation.resync":
         await this.handleResync(connection, body.conversationId);
         return;
+      case "machine.scripts.result": {
+        const pending = connection.pendingScripts.get(body.requestId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          connection.pendingScripts.delete(body.requestId);
+          if (body.ok) pending.resolve(body.result);
+          else pending.reject(new Error(body.error || "The machine refused."));
+        }
+        return;
+      }
+      case "machine.scripts.changed":
+        for (const listener of this.scriptsChangedListeners) {
+          try {
+            listener(connection.record.id);
+          } catch {
+            // A listener failure never breaks the link.
+          }
+        }
+        return;
+      case "machine.scripts.request":
+        return;
       case "machine.attachment.request":
         // Served off the inbound chain: reading a chat and sending a picture
         // takes seconds on a large chat, and the machine's turn results,
@@ -1582,7 +1705,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     };
     await this.persistCancels(connection, true);
     if (this.options.desktopDeviceId === connection.pairing.issuer.originId) {
-      await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion, machineId: connection.record.id });
+      await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion, machineId: connection.record.id, machineName: connection.record.name });
       await this.send(connection, { type: "machine.settings.sync", snapshot: await this.settings.exportMachineSettingsSnapshot() });
       await this.sendTrustRoster(connection);
     }
@@ -1787,6 +1910,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       connection.machineDeviceId = undefined;
       connection.settingsSynced = false;
       connection.replicated.clear();
+      this.rejectPendingScripts(connection, `${connection.record.name} disconnected.`);
     } else if (!connection.machineDeviceId) {
       connection.machineDeviceId = deviceId;
       if (!connection.helloSeen && !connection.helloRequestTimer) {

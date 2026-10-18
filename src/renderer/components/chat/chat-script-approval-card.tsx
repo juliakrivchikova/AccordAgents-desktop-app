@@ -36,7 +36,8 @@ function formatBytes(bytes: number): string {
 
 /** The approval card for a scheduled-script proposal. It always approves
  *  this one proposal: no "for this chat", no editing. Keys are typed here and
- *  saved straight to this computer; they never travel with the decision. */
+ *  saved straight to the computer that runs the script (this one, or the
+ *  member's machine); they never travel with the decision. */
 export function ChatScriptApprovalCard(props: {
   approval: ChatAppToolApproval;
   request: ChatScriptChangeRequest;
@@ -52,6 +53,9 @@ export function ChatScriptApprovalCard(props: {
     ? avatarForChatParticipant(requester, requesterLabel)
     : avatarForParticipant(requesterLabel, approval.requesterParticipantId);
   const pending = approval.status === "pending";
+  // A member on a machine proposed it: the script, its code and its keys
+  // live on that machine.
+  const hostId = approval.homeMachineId;
   const needsKeys = request.op === "create" || request.op === "update";
   const [savedNames, setSavedNames] = useState<string[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -79,7 +83,7 @@ export function ChatScriptApprovalCard(props: {
   useEffect(() => {
     if (!codeOpen || code || !request.revisionId) return;
     let cancelled = false;
-    void window.consensus.getScriptRevision({ scriptId: request.scriptId, revisionId: request.revisionId })
+    void window.consensus.getScriptRevision({ scriptId: request.scriptId, revisionId: request.revisionId, ...(hostId ? { hostId } : {}) })
       .then((content) => {
         if (!cancelled) setCode(content);
       })
@@ -89,7 +93,7 @@ export function ChatScriptApprovalCard(props: {
     return () => {
       cancelled = true;
     };
-  }, [codeOpen, code, request.scriptId, request.revisionId]);
+  }, [codeOpen, code, request.scriptId, request.revisionId, hostId]);
 
   const missing = needsKeys ? request.secretNames.filter((name) => !savedNames.includes(name)) : [];
 
@@ -99,7 +103,7 @@ export function ChatScriptApprovalCard(props: {
     setSavingKey(name);
     setKeyError(undefined);
     try {
-      const summary = await window.consensus.setScriptSecret({ scriptId: request.scriptId, name, value });
+      const summary = await window.consensus.setScriptSecret({ scriptId: request.scriptId, ...(hostId ? { hostId } : {}), name, value });
       setSavedNames(summary.savedSecretNames);
       setDrafts((current) => ({ ...current, [name]: "" }));
     } catch (error) {
@@ -112,6 +116,20 @@ export function ChatScriptApprovalCard(props: {
   const chats = request.permissions.chatIds.map((chatId) => request.chatLabels[chatId] ?? chatId);
   const members = request.permissions.participantIds.map((participantId) => request.participantLabels[participantId] ?? participantId);
   const title = scriptApprovalTitle(approval.requesterHandle, request);
+
+  const queuedDecision = approval.machineDecisionPending;
+  if (queuedDecision) {
+    return (
+      <section className="chat-app-tool-approval-card is-compact-result" aria-label={title}
+        data-app-tool-approval-id={approval.id} tabIndex={-1}>
+        <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+        <div className="chat-app-tool-approval-body">
+          <strong>{queuedDecision.approve ? "Approval saved" : "Refusal saved"}</strong>
+          <p>Waiting for machine {queuedDecision.machineName} to confirm the decision.</p>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section

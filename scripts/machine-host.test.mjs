@@ -469,3 +469,161 @@ test("a Claude member's turns on a machine run as soon as they are admitted; ano
     host.close();
   }
 });
+
+test("the desktop's script requests are answered by the machine's scripts, off the inbound chain, and enabled scripts keep the machine awake", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const handled = [];
+  const names = [];
+  let awake = false;
+  let releaseSlow;
+  const host = new MachineHostService(
+    {
+      runMachineHostedTurn: async () => ({ messages: [], warnings: [] }),
+      cancelRun: () => true,
+      respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined
+    },
+    { getConversation: async () => undefined },
+    { importMachineSettingsSnapshot: async () => undefined },
+    { write: async () => undefined },
+    {
+      ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client,
+      onDesktopMachineName: (name) => names.push(name),
+      scripts: {
+        handle: async (operation) => {
+          handled.push(operation.op);
+          if (operation.op === "releaseHeld") await new Promise((resolve) => { releaseSlow = resolve; });
+          if (operation.op === "runNow") throw new Error("That script is switched off.");
+          return [{ id: "s1", name: "Alerts" }];
+        },
+        keepsHostAwake: () => awake
+      }
+    }
+  );
+  await host.start();
+  await settle();
+  const inbound = async (body) => {
+    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
+    await host.inbound;
+    await host.outbound;
+    await host.eventChannel.flush();
+  };
+  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home", machineName: "  Box  " });
+  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home", machineName: "   " });
+  assert.deepEqual(names, ["Box"], "the name the desktop gave it, trimmed; a blank one is ignored");
+  const instanceId = host.instanceId;
+  const expiresAt = new Date(Date.now() + 20_000).toISOString();
+  // A slow operation (posting held messages into a large chat) does not hold
+  // up the inbound chain: the next frame is handled while it runs.
+  await inbound({ type: "machine.scripts.request", requestId: "slow", instanceId, expiresAt, operation: { op: "releaseHeld", scriptId: "s1" } });
+  await inbound({ type: "machine.scripts.request", requestId: "r1", instanceId, expiresAt, operation: { op: "list" } });
+  await settle(50);
+  assert.deepEqual(handled, ["releaseHeld", "list"], "a read does not wait behind a slow change");
+  assert.ok((await sentBodies(client, host.options.pairing)).some((body) => body.type === "machine.scripts.result" && body.requestId === "r1"),
+    "the list is answered while held messages are still being posted");
+  releaseSlow();
+  await inbound({ type: "machine.scripts.request", requestId: "r2", instanceId, expiresAt, operation: { op: "runNow", scriptId: "s1" } });
+  // A frame made for an earlier run of this runtime changes nothing.
+  await inbound({ type: "machine.scripts.request", requestId: "stale", instanceId: "an-earlier-run", expiresAt, operation: { op: "delete", scriptId: "s1" } });
+  // And one the desktop already gave up on is not done late.
+  await inbound({ type: "machine.scripts.request", requestId: "late", instanceId, expiresAt: new Date(Date.now() - 120_000).toISOString(), operation: { op: "setEnabled", scriptId: "s1", enabled: true } });
+  await settle();
+  let bodies = await sentBodies(client, host.options.pairing);
+  const results = bodies.filter((body) => body.type === "machine.scripts.result");
+  assert.deepEqual(results.map((body) => [body.requestId, body.ok]).sort(), [["late", false], ["r1", true], ["r2", false], ["slow", true], ["stale", false]]);
+  const byId = Object.fromEntries(results.map((body) => [body.requestId, body]));
+  assert.deepEqual(byId.r1.result, [{ id: "s1", name: "Alerts" }]);
+  assert.equal(byId.r2.error, "That script is switched off.");
+  assert.match(byId.stale.error, /restarted/);
+  assert.match(byId.late.error, /too old; nothing was changed/);
+  assert.deepEqual(handled, ["releaseHeld", "list", "runNow"], "the stale and the late requests were never handled");
+  assert.equal(bodies.filter((body) => body.type === "machine.hello").pop().scriptsSupported, true);
+
+  awake = true;
+  assert.equal(await host.hasWorkForIdleStop(), true, "a switched-on script vetoes the idle stop");
+  await host.publishPowerStatus();
+  // Several changes at once reach the desktop as one notice.
+  host.noteScriptsChanged();
+  host.noteScriptsChanged();
+  await settle(400);
+  bodies = await sentBodies(client, host.options.pairing);
+  const hello = bodies.filter((body) => body.type === "machine.hello").pop();
+  assert.equal(hello.keepAwake, true);
+  assert.deepEqual(hello.activeRunIds ?? [], [], "keeping awake is not a run: the update gate does not wait for it");
+  assert.equal(bodies.filter((body) => body.type === "machine.scripts.changed").length, 1);
+  host.close();
+});
+
+test("a runtime without scheduled scripts answers the desktop instead of leaving it waiting", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const host = new MachineHostService(
+    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined },
+    { getConversation: async () => undefined },
+    { importMachineSettingsSnapshot: async () => undefined },
+    { write: async () => undefined },
+    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
+  );
+  await host.start();
+  await settle();
+  client.emit("message", { ciphertext: await envelope({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" }, host.options.pairing) });
+  client.emit("message", { ciphertext: await envelope({ type: "machine.scripts.request", requestId: "r1", instanceId: host.instanceId, expiresAt: new Date(Date.now() + 20_000).toISOString(), operation: { op: "list" } }, host.options.pairing) });
+  await host.inbound;
+  await settle();
+  const result = (await sentBodies(client, host.options.pairing)).find((body) => body.type === "machine.scripts.result");
+  assert.equal(result.ok, false);
+  assert.match(result.error, /does not host scheduled scripts/);
+  assert.equal((await sentBodies(client, host.options.pairing)).find((body) => body.type === "machine.hello").scriptsSupported, undefined);
+  host.close();
+});
+
+test("a phone cannot approve a machine script that runs code; the desktop can, and the phone may still decline", async () => {
+  const { MachineApprovalExecutor } = await import("../dist/main/main/services/machineApprovalExecutor.js");
+  const change = (op) => ({ kind: "script-change", op, scriptId: "s1", name: "Alerts", secretNames: [],
+    schedule: { kind: "interval", everySeconds: 60 }, permissions: { chatIds: ["chat"], participantIds: [] } });
+  const approvals = {
+    install: { id: "install", toolName: "app_scripts_request_change", status: "pending", requesterParticipantId: "p1", request: change("create") },
+    pause: { id: "pause", toolName: "app_scripts_request_change", status: "pending", requesterParticipantId: "p1", request: change("disable") },
+    unreadable: { id: "unreadable", toolName: "app_scripts_request_change", status: "pending", requesterParticipantId: "p1", request: { kind: "script-change" } }
+  };
+  const answered = [];
+  const published = [];
+  const executor = new MachineApprovalExecutor({
+    storage: {
+      getChatEvent: async () => undefined,
+      nativeCommands: () => ({ approvalEffect: async () => undefined, claimApproval: async () => true })
+    },
+    deviceId: MACHINE_ID,
+    chat: {
+      respondToAppToolApproval: async (request, _progress, guard) => {
+        await guard.beforeApply(approvals[request.approvalId]);
+        answered.push([request.approvalId, request.approve]);
+        return { id: "chat" };
+      }
+    },
+    getConversation: async () => ({ id: "chat", metadata: { pendingAppToolApprovals: Object.values(approvals) } }),
+    runtimeIdentity: async () => ({ runtimeId: "rt", instanceId: "i" }),
+    publish: async (body) => { published.push(body); },
+    codeApprover: (event) => event.originId === DESKTOP_ID
+  });
+  const decide = (eventId, originId, approvalId, approve) => executor.apply(
+    { eventId, originId, kind: "machine.approval.decision", conversationId: "chat" },
+    { type: "machine.approval.decision", decisionId: eventId, conversationId: "chat", approvalId, approve, decidedAt: "" }
+  );
+
+  const fromPhone = await decide("e1", "phone-device", "install", true);
+  assert.equal(fromPhone.ok, false);
+  assert.match(fromPhone.error, /approved on the desktop/);
+  assert.deepEqual(answered, [], "nothing was applied for the phone's approval");
+  assert.equal((await decide("e2", "phone-device", "pause", true)).ok, true, "switching a script off is not installing code");
+  assert.equal((await decide("e5", "phone-device", "unreadable", true)).ok, false, "a card it cannot read is treated as installing code");
+  assert.equal((await decide("e3", "phone-device", "install", false)).ok, true, "the phone may decline");
+  // A phone's answer relayed by the desktop is signed by the desktop but says it was given on the phone.
+  const relayed = await executor.applyAction({ eventId: "e6", originId: DESKTOP_ID, kind: "permission.decided", conversationId: "chat" },
+    { targetKey: "approval:install", detail: { approve: true, decidedOn: "phone" } });
+  assert.equal(relayed.ok, false, "a relayed phone approval of code is refused too");
+  assert.equal((await decide("e4", DESKTOP_ID, "install", true)).ok, true, "the desktop that shows the code may approve");
+  assert.deepEqual(answered, [["pause", true], ["install", false], ["install", true]]);
+  assert.equal(published.length, 6, "every decision has a published outcome; the refusal is not retried forever");
+});

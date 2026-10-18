@@ -1,4 +1,5 @@
 import type { ScriptSchedule } from "./scriptSchedule";
+import { APP_SCRIPTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
 
 export type { ScriptSchedule } from "./scriptSchedule";
 
@@ -32,8 +33,16 @@ const RESERVED_SECRET_PREFIXES = ["ACCORD_", "NODE_", "LD_", "DYLD_", "LC_"];
 export function isReservedScriptSecretName(name: string): boolean {
   return RESERVED_SECRET_NAMES.has(name) || RESERVED_SECRET_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
-/** The host id of the desktop app itself; machines use their machine id. */
+/** The host id of the desktop app itself. A machine's own records carry
+ *  `machine:<its device id>`; the desktop shows them under the machine's
+ *  record id (the `homeMachineId` its members carry), and every desktop
+ *  request that names a host uses that record id. */
 export const SCRIPT_DESKTOP_HOST_ID = "desktop";
+
+/** A host named inside a sentence, as cards and agents read it. */
+export function machineScriptHostPhrase(machineName: string): string {
+  return `the machine ${machineName}`;
+}
 
 export interface ScriptFile {
   /** Relative path inside the script's own directory, e.g. "watch.mjs". */
@@ -121,6 +130,9 @@ export interface ScheduledScriptSummary {
   running: boolean;
   heldMessageCount: number;
   lastError?: string;
+  /** False for a machine's script while that machine is away: the summary
+   *  is the last one it gave, and controls wait until it is back. */
+  hostReachable?: boolean;
 }
 
 export type ScriptChangeOperation = "create" | "update" | "delete" | "enable" | "disable";
@@ -198,6 +210,13 @@ export function scriptChangeInstallsCode(request: ChatScriptChangeRequest): bool
   return request.op === "create" || request.op === "update";
 }
 
+/** The one rule for "only the desktop that shows the code may approve this":
+ *  a scripts card that installs code, or one too damaged to tell. */
+export function approvalInstallsScriptCode(approval: { toolName?: string; request?: unknown } | undefined): boolean {
+  return approval?.toolName === APP_SCRIPTS_REQUEST_CHANGE_TOOL &&
+    (!isChatScriptChangeRequest(approval.request) || scriptChangeInstallsCode(approval.request));
+}
+
 export interface ScriptRevisionContent {
   scriptId: string;
   revisionId?: string;
@@ -207,29 +226,36 @@ export interface ScriptRevisionContent {
   contentHash: string;
 }
 
+/** `hostId` says where the script lives: absent or "desktop" for this
+ *  computer, a machine's id for a script on that machine. */
 export interface ScriptIdRequest {
   scriptId: string;
+  hostId?: string;
 }
 
 export interface GetScriptRevisionRequest {
   scriptId: string;
+  hostId?: string;
   /** Omit for the approved (installed) files. */
   revisionId?: string;
 }
 
 export interface SetScriptSecretRequest {
   scriptId: string;
+  hostId?: string;
   name: string;
   value: string;
 }
 
 export interface DeleteScriptSecretRequest {
   scriptId: string;
+  hostId?: string;
   name: string;
 }
 
 export interface SetScriptEnabledRequest {
   scriptId: string;
+  hostId?: string;
   enabled: boolean;
 }
 

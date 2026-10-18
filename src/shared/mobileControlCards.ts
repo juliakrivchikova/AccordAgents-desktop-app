@@ -15,7 +15,7 @@
  */
 
 import type { ChatAppToolApproval, ChatChoiceOption, ChatMessage, Conversation } from "./types";
-import { isChatScriptChangeRequest, scriptChangeInstallsCode } from "./scripts";
+import { approvalInstallsScriptCode } from "./scripts";
 
 export type MobileControlCardKind = "permission" | "choice";
 
@@ -59,7 +59,7 @@ const DENY = { id: "deny", label: "Deny" };
 export function controlCardFromApproval(conversationId: string, approval: ChatAppToolApproval): MobileControlCard {
   // A script that installs code is approved where its code can be read: the
   // phone shows it as a card it may only decline.
-  const desktopOnly = isChatScriptChangeRequest(approval.request) && scriptChangeInstallsCode(approval.request);
+  const desktopOnly = approvalInstallsScriptCode(approval);
   return {
     id: approval.id,
     kind: "permission",

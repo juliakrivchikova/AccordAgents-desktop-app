@@ -31,7 +31,7 @@ class FakeSettings {
   volumeExpansion: { instanceId: string; volumeId: string; targetSizeGb: number; updatedAt: string } | undefined;
   provisioningToken: string | undefined;
   operation: AwsWorkerOperationSnapshot | undefined;
-  machines: Array<{ id: string; awsInstanceId?: string; lastSeenAt?: string; lastHello?: { idleStopWarning?: string; autoStopEnabled?: boolean } }> = [];
+  machines: Array<{ id: string; awsInstanceId?: string; lastSeenAt?: string; lastHello?: { idleStopWarning?: string; autoStopEnabled?: boolean; keepAwakeScripts?: number } }> = [];
   installs: MachineInstallRecord[] = [];
   autoStopEnabled = true;
   changedAt: string | undefined;
@@ -48,7 +48,7 @@ class FakeSettings {
     this.autoStopEnabled = enabled;
   }
 
-  async listMachines(): Promise<Array<{ id: string; awsInstanceId?: string; lastSeenAt?: string; lastHello?: { idleStopWarning?: string; autoStopEnabled?: boolean } }>> {
+  async listMachines(): Promise<Array<{ id: string; awsInstanceId?: string; lastSeenAt?: string; lastHello?: { idleStopWarning?: string; autoStopEnabled?: boolean; keepAwakeScripts?: number } }>> {
     return this.machines;
   }
 
@@ -1163,6 +1163,8 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   assert.deepEqual(await autoStop(), TRY_AGAIN, "after the last automatic try the User is offered one");
   settings.installs = [installFor("cloud", { power: { keyId: POWER_KEY.accessKeyId, configuredAt: "t" } })];
   assert.deepEqual(await autoStop(), ON);
+  settings.machines[0] = { ...settings.machines[0], lastHello: { keepAwakeScripts: 2 } };
+  assert.deepEqual(await autoStop(), { ...ON, keptOnByScripts: 2 }, "switched-on scripts keep it running, and the row says so");
   settings.machines[0] = { ...settings.machines[0], lastHello: { idleStopWarning:
     "The machine stays awake: Another deployment on this machine (/tmp/accord-choice-repro-vYcpVH/machine and 6 more) is running work." } };
   assert.deepEqual(await autoStop(), ON, "an older runtime reporting agents at work is not a problem");

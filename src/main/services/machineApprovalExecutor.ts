@@ -6,6 +6,7 @@ import type { ChatService } from "./chat";
 import type { StorageService } from "./storage";
 import { verifyNativeExecutorGone } from "./nativeExecutorRecovery";
 import type { ChatActionPayload } from "../../shared/chatActionEvents";
+import { approvalInstallsScriptCode } from "../../shared/scripts";
 
 export function machineApprovalResultId(decisionId: string): string { return `machine-approval-result:${decisionId}`; }
 
@@ -27,6 +28,10 @@ export class MachineApprovalExecutor {
     canApply?: () => boolean;
     nativeProcessDbPath?: string;
     publish(body: MachineApprovalResultBody): Promise<void>;
+    /** True when this event was authored by the desktop whose card shows a
+     *  script's code (the enrolling desktop on a machine, this desktop on a
+     *  desktop). Only that desktop may approve a script that installs code. */
+    codeApprover?: (event: ChatEventEnvelope) => boolean;
   }) {}
 
   hasActiveWork(): boolean { return this.active.size > 0; }
@@ -50,6 +55,8 @@ export class MachineApprovalExecutor {
         !payload.targetKey.slice(9) || !detail || typeof detail.approve !== "boolean") {
       throw new Error("The approval action has invalid identities or an invalid answer.");
     }
+    // A phone's answer relayed by the desktop is signed by the desktop and
+    // says so in its detail.
     return this.apply(event, {
       type: "machine.approval.decision", decisionId: event.eventId, conversationId: event.conversationId,
       approvalId: payload.targetKey.slice(9), approve: detail.approve, decidedAt: "",
@@ -57,19 +64,19 @@ export class MachineApprovalExecutor {
       ...(typeof detail.codexDecisionId === "string" ? { codexDecisionId: detail.codexDecisionId } : {}),
       ...(detail.draftOverride && typeof detail.draftOverride === "object"
         ? { draftOverride: detail.draftOverride as MachineApprovalDecisionBody["draftOverride"] } : {})
-    });
+    }, detail.decidedOn === "phone");
   }
 
-  apply(event: ChatEventEnvelope, decision: MachineApprovalDecisionBody): Promise<MachineApprovalResultBody> {
+  apply(event: ChatEventEnvelope, decision: MachineApprovalDecisionBody, decidedOnPhone = false): Promise<MachineApprovalResultBody> {
     const current = this.active.get(event.eventId);
     if (current) return current;
-    const work = this.applyOnce(event, decision);
+    const work = this.applyOnce(event, decision, decidedOnPhone);
     this.active.set(event.eventId, work);
     void work.finally(() => this.active.delete(event.eventId)).catch(() => undefined);
     return work;
   }
 
-  private async applyOnce(event: ChatEventEnvelope, decision: MachineApprovalDecisionBody): Promise<MachineApprovalResultBody> {
+  private async applyOnce(event: ChatEventEnvelope, decision: MachineApprovalDecisionBody, decidedOnPhone: boolean): Promise<MachineApprovalResultBody> {
     if (!decision.decisionId || decision.decisionId !== event.eventId ||
         (event.kind !== decision.type && event.kind !== "permission.decided") || event.conversationId !== decision.conversationId) {
       throw new Error("The approval decision has inconsistent identities.");
@@ -101,6 +108,10 @@ export class MachineApprovalExecutor {
     } else {
       let claimFailure: unknown;
       let claimed = false;
+      // A phone or a second machine cannot approve code it never showed. The
+      // refusal is this decision's final outcome, not a retry, and nothing is
+      // claimed: the card stays pending for the desktop.
+      const mayApproveCode = Boolean(this.options.codeApprover?.(event)) && !decidedOnPhone;
       try {
         const conversation = await this.options.chat.respondToAppToolApproval({
           conversationId: decision.conversationId, approvalId: decision.approvalId,
@@ -108,6 +119,9 @@ export class MachineApprovalExecutor {
         }, this.options.progress, {
           awaitNativeDelivery: true,
           beforeApply: async (approval) => {
+            if (decision.approve && this.options.codeApprover && !mayApproveCode && approvalInstallsScriptCode(approval)) {
+              throw new Error("A script that runs code is approved on the desktop, where its code is shown.");
+            }
             try {
               if (this.options.canApply?.() === false) throw new Error("The machine is shutting down; this decision remains queued.");
               if (approval.homeMachineId) throw new Error("This approval is owned by another machine.");

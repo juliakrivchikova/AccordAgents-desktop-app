@@ -24,7 +24,11 @@ export function ScriptSettingsItem(props: {
   onError: (message: string | undefined) => void;
 }): JSX.Element {
   const { script } = props;
-  const [busy, setBusy] = useState(false);
+  // Where the script lives; a machine's script is controlled on that machine.
+  const target = { scriptId: script.id, hostId: script.hostId };
+  const away = script.hostReachable === false;
+  const [busyState, setBusy] = useState(false);
+  const busy = busyState || away;
   const [runs, setRuns] = useState<ScriptRunRow[] | undefined>();
   const [showRuns, setShowRuns] = useState(false);
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
@@ -48,7 +52,7 @@ export function ScriptSettingsItem(props: {
       return;
     }
     await act(async () => {
-      setRuns(await window.consensus.getScriptRuns({ scriptId: script.id }));
+      setRuns(await window.consensus.getScriptRuns(target));
       setShowRuns(true);
     });
   }
@@ -74,7 +78,7 @@ export function ScriptSettingsItem(props: {
                 aria-label={`Switch ${script.name} ${script.enabled ? "off" : "on"}`}
                 checked={script.enabled}
                 disabled={busy}
-                onChange={(event) => void act(() => window.consensus.setScriptEnabled({ scriptId: script.id, enabled: event.target.checked }))}
+                onChange={(event) => void act(() => window.consensus.setScriptEnabled({ ...target, enabled: event.target.checked }))}
               />
               <span />
             </label>
@@ -92,6 +96,7 @@ export function ScriptSettingsItem(props: {
             {script.createdByLabel ? ` · created by ${script.createdByLabel}` : ""}
           </div>
           {script.lastError && <div className="scripts-settings-error">{script.lastError}</div>}
+          {away && <div className="gen-row-desc" data-testid="script-host-away">{script.hostLabel} is not connected; this is what it last reported.</div>}
         </div>
       </div>
       {script.secretNames.length > 0 && (
@@ -111,7 +116,7 @@ export function ScriptSettingsItem(props: {
                       </button>
                       {saved && (
                         <button type="button" className="chat-script-approval-link" disabled={busy}
-                          onClick={() => void act(() => window.consensus.deleteScriptSecret({ scriptId: script.id, name }))}>
+                          onClick={() => void act(() => window.consensus.deleteScriptSecret({ ...target, name }))}>
                           Remove
                         </button>
                       )}
@@ -122,7 +127,7 @@ export function ScriptSettingsItem(props: {
                         value={draft} onChange={(event) => setKeyDrafts((current) => ({ ...current, [name]: event.target.value }))} />
                       <button type="button" className="chat-script-approval-save-key" disabled={busy || !draft.trim()}
                         onClick={() => void act(async () => {
-                          await window.consensus.setScriptSecret({ scriptId: script.id, name, value: draft });
+                          await window.consensus.setScriptSecret({ ...target, name, value: draft });
                           setKeyDrafts((current) => {
                             const next = { ...current };
                             delete next[name];
@@ -147,9 +152,9 @@ export function ScriptSettingsItem(props: {
           </div>
           <div className="scripts-settings-actions">
             <Button type="button" variant="outline" size="sm" disabled={busy}
-              onClick={() => void act(() => window.consensus.releaseHeldScriptMessages({ scriptId: script.id }))}>Release</Button>
+              onClick={() => void act(() => window.consensus.releaseHeldScriptMessages(target))}>Release</Button>
             <Button type="button" variant="outline" size="sm" disabled={busy}
-              onClick={() => void act(() => window.consensus.discardHeldScriptMessages({ scriptId: script.id }))}>Discard</Button>
+              onClick={() => void act(() => window.consensus.discardHeldScriptMessages(target))}>Discard</Button>
           </div>
         </div>
       )}
@@ -157,7 +162,7 @@ export function ScriptSettingsItem(props: {
         <div className="scripts-settings-actions">
           {script.approved && script.enabled && (
             <Button type="button" variant="outline" size="sm" disabled={busy || script.running}
-              onClick={() => void act(() => window.consensus.runScriptNow({ scriptId: script.id }))}>
+              onClick={() => void act(() => window.consensus.runScriptNow(target))}>
               <Play size={14} aria-hidden /> Run now
             </Button>
           )}
@@ -168,7 +173,7 @@ export function ScriptSettingsItem(props: {
             <>
               <span className="gen-row-desc">Delete the script, its keys and history?</span>
               <Button type="button" variant="destructive" size="sm" disabled={busy}
-                onClick={() => void act(() => window.consensus.deleteScript({ scriptId: script.id }))}>Delete</Button>
+                onClick={() => void act(() => window.consensus.deleteScript(target))}>Delete</Button>
               <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setConfirmDelete(false)}>Keep</Button>
             </>
           ) : (

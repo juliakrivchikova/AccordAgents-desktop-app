@@ -5,7 +5,8 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
 import { AppMcpService } from "./appMcp";
-import { ScriptService, type ScriptChatGateway } from "./scripts";
+import { ScriptService, handleScriptsOperation, type ScriptChatGateway, type ScriptServiceOptions } from "./scripts";
+import { ScriptHub } from "./scriptHub";
 import { ScriptSecretStore, ScriptStore } from "./scriptStore";
 import type { ChatScriptChangeRequest } from "../../shared/scripts";
 
@@ -22,14 +23,15 @@ const plainCipher = {
   decryptString: (cipher: Buffer) => cipher.toString("utf8")
 };
 
-async function harness(t: test.TestContext) {
+async function harness(t: test.TestContext, extra: Partial<ScriptServiceOptions> = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "accord-scripts-"));
   const appMcp = new AppMcpService();
   await appMcp.start();
   const posted: Posted[] = [];
+  const participants: Array<{ id: string; handle: string; runsHere?: boolean }> = [{ id: "p-taylor", handle: "taylor" }, { id: "p-drew", handle: "drew", runsHere: false }];
   const chat: ScriptChatGateway = {
     describeChat: async (chatId) => chatId === "chat-1"
-      ? { id: "chat-1", title: "Alerts", archived: false, participants: [{ id: "p-taylor", handle: "taylor" }, { id: "p-drew", handle: "drew" }] }
+      ? { id: "chat-1", title: "Alerts", archived: false, participants: participants.map((item) => ({ ...item })) }
       : undefined,
     postScriptMessage: async (input) => {
       posted.push({ conversationId: input.conversationId, scriptName: input.scriptName, content: input.content, participantIds: input.participantIds });
@@ -47,7 +49,8 @@ async function harness(t: test.TestContext) {
     tokens: appMcp,
     chat,
     node: { command: process.execPath, env: {} },
-    tickMs: 60_000
+    tickMs: 60_000,
+    ...extra
   });
   appMcp.setScriptApiHandler((context, _route, body) => service.postFromScript(context, body));
   t.after(async () => {
@@ -55,7 +58,7 @@ async function harness(t: test.TestContext) {
     await appMcp.stop();
     await rm(root, { recursive: true, force: true });
   });
-  return { root, appMcp, posted, store, secrets, service };
+  return { root, appMcp, posted, store, secrets, service, participants };
 }
 
 const POSTER = `
@@ -621,4 +624,218 @@ test("declining an outdated card never touches the script that is running", asyn
   assert.equal(summary.enabled, true);
   assert.equal(summary.description, "second");
   await assert.rejects(h.service.applyApproved(first.request), /replaced by a newer one/);
+});
+
+test("on a machine, a script may wake only members that run there, and a host that is stopping skips the run", async (t) => {
+  let admitted = true;
+  const h = await harness(t, {
+    localMembersOnly: true,
+    hostPhrase: "the machine Box",
+    admit: () => admitted ? { admitted: true } : { admitted: false, reason: "The machine is stopping." }
+  });
+  await assert.rejects(h.service.proposeChange({
+    conversationId: "chat-1", requesterParticipantId: "p-taylor", requesterLabel: "@taylor",
+    request: { op: "create", name: "Wakes drew", description: "Wakes drew.", runtime: "node", files: [{ path: "watch.mjs", content: POSTER }],
+      schedule: { kind: "interval", everySeconds: 3600 }, secretNames: [], members: ["@drew"] }
+  }), /does not run on the machine Box/);
+  const request = await approvedScript(h);
+  assert.equal(h.service.keepsHostAwake(), true, "a switched-on script keeps the machine awake");
+  admitted = false;
+  await h.service.runNow(request.scriptId);
+  const runs = await waitFor(async () => {
+    const rows = await h.service.runs(request.scriptId);
+    return rows.some((row) => row.status === "skipped") ? rows : undefined;
+  });
+  assert.equal(runs[0].detail, "The machine is stopping.");
+  assert.equal(h.posted.length, 0, "nothing ran");
+  await h.service.setEnabled(request.scriptId, false);
+  assert.equal(h.service.keepsHostAwake(), false, "a switched-off script lets the machine stop");
+});
+
+test("the desktop lists a machine's scripts beside its own and sends each control to the host that runs the script", async (t) => {
+  const h = await harness(t);
+  const own = await approvedScript(h, { name: "Local one" });
+  const calls: Array<[string, { op: string }]> = [];
+  let connected = true;
+  const remote = { ...(await h.service.summary(own.scriptId)), id: "remote-1", name: "On the box", hostId: "machine:origin", savedSecretNames: [] };
+  const hub = new ScriptHub(h.service, () => ({
+    scriptHosts: () => [{ machineId: "machine-1", name: "Box", connected, supported: true }],
+    scriptsRequest: async (machineId, operation) => {
+      calls.push([machineId, operation]);
+      if (operation.op === "list") return [remote];
+      if (operation.op === "setSecret" || operation.op === "deleteSecret" || operation.op === "setEnabled") return { ...remote, savedSecretNames: [] };
+      if (operation.op === "runs") return [];
+      if (operation.op === "revision") return { scriptId: "remote-1", runtime: "node", entry: "a.mjs", files: [], contentHash: "x" };
+      return undefined;
+    }
+  }));
+  const listed = await hub.list();
+  assert.deepEqual(listed.map((item) => [item.name, item.hostId, item.hostLabel, item.hostPhrase, item.hostReachable]),
+    [["Local one", "desktop", "This Mac", "this Mac", undefined], ["On the box", "machine-1", "Box", "the machine Box", true]]);
+  // Every control on the machine's script goes to the machine, none to this desktop.
+  await hub.setSecret("machine-1", "remote-1", "SLACK_TOKEN", "xoxb-1");
+  await hub.deleteSecret("machine-1", "remote-1", "SLACK_TOKEN");
+  const switched = await hub.setEnabled("machine-1", "remote-1", false);
+  await hub.runs("machine-1", "remote-1");
+  await hub.revision("machine-1", "remote-1");
+  for (const op of ["runNow", "delete", "releaseHeld", "discardHeld"] as const) await hub.control("machine-1", op, "remote-1");
+  assert.deepEqual(calls.slice(1).map(([machineId, operation]) => `${machineId}:${operation.op}`), [
+    "machine-1:setSecret", "machine-1:deleteSecret", "machine-1:setEnabled", "machine-1:runs", "machine-1:revision",
+    "machine-1:runNow", "machine-1:delete", "machine-1:releaseHeld", "machine-1:discardHeld"
+  ]);
+  assert.equal(switched.hostId, "machine-1", "a machine's answer is shown under the machine's record id");
+  assert.equal((await h.secrets.savedNamesByScript())["remote-1"], undefined, "a machine's key is never saved on the desktop");
+  // And the desktop's own script stays on the desktop.
+  const before = calls.length;
+  const local = await hub.setEnabled("desktop", own.scriptId, false);
+  assert.equal(local.enabled, false);
+  await hub.runs(undefined, own.scriptId);
+  assert.equal(calls.length, before, "a local control never goes to a machine");
+  await assert.rejects(hub.runs("machine:origin", "remote-1"), /by its id/, "a machine's own id is not a host name here");
+
+  connected = false;
+  const away = await hub.list();
+  const shown = away.find((item) => item.id === "remote-1");
+  assert.equal(shown?.hostReachable, false, "an away machine's scripts show what it last reported");
+  assert.equal(shown?.running, false);
+  assert.equal(calls.filter(([, operation]) => operation.op === "list").length, 1, "an away machine is not asked");
+});
+
+test("a machine that fails, hangs or never hosted scripts does not hold up the list, and only the machine that changed is asked again", async (t) => {
+  const h = await harness(t);
+  const asked: string[] = [];
+  let failing = false;
+  const base = { id: "", name: "", description: "", hostId: "machine:x", hostLabel: "x", hostPhrase: "x", secretNames: [], savedSecretNames: [], heldMessageCount: 0 };
+  const hub = new ScriptHub(h.service, () => ({
+    scriptHosts: () => [
+      { machineId: "ok", name: "Ok", connected: true, supported: true },
+      { machineId: "hangs", name: "Hangs", connected: true, supported: true },
+      { machineId: "old", name: "Old", connected: true, supported: false }
+    ],
+    scriptsRequest: (machineId: string, _operation: unknown, timeoutMs?: number) => {
+      asked.push(machineId);
+      // The link gives up after the timeout it is given; a machine that never answers.
+      if (machineId === "hangs") return new Promise((_, reject) => setTimeout(() => reject(new Error("did not answer in time")), timeoutMs));
+      if (failing) return Promise.reject(new Error("gone"));
+      // A runtime of another version may leave lists out.
+      return Promise.resolve([{ ...base, id: `${machineId}-s`, name: `${machineId} script`, secretNames: undefined, running: true }]);
+    }
+  }), 50);
+  const started = Date.now();
+  const first = await hub.list();
+  assert.ok(Date.now() - started < 2000, "a hanging machine is given up on");
+  assert.deepEqual(first.map((item) => item.id), ["ok-s"], "the old runtime is not asked and the hanging one has nothing to show yet");
+  assert.deepEqual(first[0].secretNames, [], "missing lists are filled in");
+  assert.deepEqual(asked.sort(), ["hangs", "ok"]);
+
+  asked.length = 0;
+  await hub.list(["hangs"]);
+  assert.deepEqual(asked, ["hangs"], "a machine with a known list is not asked unless it changed");
+
+  failing = true;
+  asked.length = 0;
+  const failed = await hub.list(["ok"]);
+  assert.deepEqual(asked.sort(), ["hangs", "ok"], "a machine that never answered is asked each time until it does");
+  assert.equal(failed[0].hostReachable, false, "a machine that cannot answer shows its last list as not current");
+  assert.equal(failed[0].running, false);
+});
+
+test("a host that cannot say whether it stays awake records the run as skipped instead of dropping it", async (t) => {
+  const h = await harness(t, { admit: async () => { throw new Error("the presence file cannot be read"); } });
+  const request = await approvedScript(h);
+  await h.service.runNow(request.scriptId);
+  const runs = await waitFor(async () => {
+    const rows = await h.service.runs(request.scriptId);
+    return rows.length > 0 ? rows : undefined;
+  });
+  assert.equal(runs[0].status, "skipped");
+  assert.match(runs[0].detail ?? "", /could not admit new work: the presence file cannot be read/);
+  assert.equal(h.posted.length, 0);
+});
+
+test("a member that moved to another host is not woken by a machine's script", async (t) => {
+  const h = await harness(t, { localMembersOnly: true, hostPhrase: "the machine Box" });
+  const request = await approvedScript(h);
+  h.participants[0]!.runsHere = false;
+  await h.service.runNow(request.scriptId);
+  const runs = await finishedRuns(h, request.scriptId);
+  assert.match(runs[0].outputTail ?? "", /no longer runs on the machine Box/);
+  assert.equal(h.posted.length, 0, "nothing was posted and nobody was woken");
+});
+
+test("after a restart, a switched-on script keeps the machine awake from the first check, and deleting it lets the machine stop", async (t) => {
+  const h = await harness(t);
+  const request = await approvedScript(h);
+  let changes = 0;
+  const restarted = new ScriptService({
+    store: h.store, secrets: h.secrets, hostId: "machine:x", hostLabel: "Box", hostPhrase: "the machine Box",
+    tokens: h.appMcp, chat: { describeChat: async () => undefined, postScriptMessage: async () => ({ messageId: "m" }) },
+    node: { command: process.execPath, env: {} }, tickMs: 3_600_000, onChanged: () => { changes += 1; }
+  });
+  t.after(() => restarted.stop());
+  assert.equal(restarted.keepsHostAwake(), false, "nothing is known before the first check");
+  await restarted.start();
+  await waitFor(async () => restarted.keepsHostAwake() || undefined);
+  assert.ok(changes >= 1, "the change is announced, so the machine tells the desktop");
+  await restarted.deleteScript(request.scriptId);
+  assert.equal(restarted.keepsHostAwake(), false);
+});
+
+test("the host's name can arrive later and is used in what the service writes", async (t) => {
+  let changes = 0;
+  const h = await harness(t, { hostLabel: "ip-10-0-0-1", hostPhrase: "the machine ip-10-0-0-1", onChanged: () => { changes += 1; } });
+  h.service.setHostName("Box", "the machine Box");
+  assert.equal(changes, 1);
+  h.service.setHostName("Box", "the machine Box");
+  assert.equal(changes, 1, "an unchanged name is not news");
+  const proposal = await h.service.proposeChange({
+    conversationId: "chat-1", requesterParticipantId: "p-taylor", requesterLabel: "@taylor",
+    request: { op: "create", name: "Named", description: "d", runtime: "node", files: [{ path: "a.mjs", content: "1" }],
+      schedule: { kind: "interval", everySeconds: 3600 }, secretNames: [], members: [] }
+  });
+  assert.equal(proposal.kind, "approval");
+  if (proposal.kind !== "approval") return;
+  assert.equal(proposal.request.hostLabel, "Box");
+  assert.match(proposal.summary, /on the machine Box/);
+});
+
+test("a desktop request on a machine's scripts is checked before it is used", async (t) => {
+  const h = await harness(t);
+  const request = await approvedScript(h);
+  const send = (operation: unknown) => handleScriptsOperation(h.service, operation as never);
+  await assert.rejects(send({ op: "setEnabled", scriptId: request.scriptId }), /on or off/, "a request without on/off does not switch the script off");
+  assert.equal((await h.service.summary(request.scriptId)).enabled, true);
+  await assert.rejects(send({ op: "setSecret", scriptId: request.scriptId, name: "ALERT_KEY" }), /key value/);
+  await assert.rejects(send({ op: "runs" }), /no script/);
+  await assert.rejects(send({ op: "rename", scriptId: request.scriptId }), /does not know the scripts operation rename/);
+  const summary = await send({ op: "setEnabled", scriptId: request.scriptId, enabled: false }) as { enabled: boolean };
+  assert.equal(summary.enabled, false);
+  assert.ok(Array.isArray(await send({ op: "list" })));
+});
+
+test("a held message whose member moved to another host stays held instead of waking it there", async (t) => {
+  const h = await harness(t, { localMembersOnly: true, hostPhrase: "the machine Box" });
+  const request = await approvedScript(h, {
+    maxWakeupsPerHour: 1,
+    files: [{ path: "watch.mjs", content: `
+      for (const n of [1, 2]) {
+        const r = await fetch(process.env.ACCORD_API_URL + "/messages", { method: "POST", headers: { Authorization: "Bearer " + process.env.ACCORD_SCRIPT_TOKEN }, body: JSON.stringify({ chatId: "chat-1", text: "@taylor " + n, mentions: ["@taylor"] }) });
+        console.log((await r.json()).status);
+      }
+    ` }]
+  }, {});
+  await h.service.runNow(request.scriptId);
+  await finishedRuns(h, request.scriptId);
+  assert.equal((await h.service.summary(request.scriptId)).heldMessageCount, 1);
+  h.participants[0]!.runsHere = false;
+  await assert.rejects(h.service.releaseHeld(request.scriptId), /no longer runs on the machine Box/);
+  assert.equal((await h.service.summary(request.scriptId)).heldMessageCount, 1, "it stays held for the User to decide");
+  assert.equal(h.posted.filter((item) => item.participantIds.length > 0).length, 1, "only the first message woke the member");
+});
+
+test("Run now while the service is stopping says so instead of silently doing nothing", async (t) => {
+  const h = await harness(t);
+  const request = await approvedScript(h);
+  await h.service.stop();
+  await assert.rejects(h.service.runNow(request.scriptId), /stopping/);
 });

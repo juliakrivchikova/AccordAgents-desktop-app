@@ -25,7 +25,7 @@ import {
   type MachineTurnFinishedBody,
   type MachineTurnRequestBody
 } from "../../shared/machineLink";
-import type { MachineAttachmentResultBody } from "../../shared/machineLink";
+import type { MachineAttachmentResultBody, MachineScriptsOperation, MachineScriptsRequestBody } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type { AgentHealth, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
 import type { ChatParticipantRun, ChatService } from "./chat";
@@ -90,6 +90,8 @@ export interface MachineHostOptions {
   /** The desktop's record id for this machine (from hello.ack): members
    *  whose home is this id are this runtime's own. */
   onDesktopMachineId?: (machineId: string) => void;
+  /** The name the enrolling desktop gave this machine, from its greeting. */
+  onDesktopMachineName?: (name: string) => void;
   /** File that keeps finished turns until the desktop acknowledges them, so
    *  a result survives a restart of this runtime. In-memory only when unset. */
   outboxPath?: string;
@@ -102,6 +104,15 @@ export interface MachineHostOptions {
   idleStopWarning?: () => string | undefined;
   /** The User's automatic-stop switch as this machine has it. */
   autoStopEnabled?: () => boolean | undefined;
+  /** Scheduled scripts on this machine, operated by the enrolling desktop. */
+  scripts?: {
+    handle(operation: MachineScriptsOperation): Promise<unknown>;
+    /** True while an enabled script needs this machine awake for its next run,
+     *  or a script is running now. */
+    keepsHostAwake(): boolean;
+    /** How many switched-on scripts keep it awake, for the desktop to show. */
+    scheduledCount?(): number;
+  };
 }
 
 /** Conversation metadata the machine owns and never takes from the desktop:
@@ -114,6 +125,14 @@ const OUTBOX_RETRY_MS = 30_000;
  *  the member's read fails. Restarted by every part, so it bounds silence,
  *  not the whole transfer. */
 const ATTACHMENT_PART_TIMEOUT_MS = 120_000;
+/** One run changes several things at once; the desktop hears about them together. */
+const SCRIPTS_CHANGED_COALESCE_MS = 250;
+/** How far the desktop's clock may be ahead of this machine's when it dates a request. */
+const SCRIPTS_REQUEST_CLOCK_SKEW_MS = 30_000;
+
+function changesScripts(operation: MachineScriptsOperation): boolean {
+  return operation.op !== "list" && operation.op !== "revision" && operation.op !== "runs";
+}
 
 interface MachineAttachmentBytes { dataBase64: string; mediaType?: string; fileName?: string }
 
@@ -396,7 +415,8 @@ export class MachineHostService {
       storage: options.eventStorage, deviceId: options.deviceId, chat, getConversation: id => storage.getConversation(id),
       runtimeIdentity: () => this.getRuntimeIdentity(), nativeProcessDbPath: options.nativeProcessDbPath,
       canApply: () => !this.closed && !this.draining && !this.idleFenced,
-      publish: body => this.send(body)
+      publish: body => this.send(body),
+      codeApprover: event => event.originId === options.pairing.issuer.originId
     });
     this.client.on("peer", (event) => {
       if (event.type === "ready") {
@@ -551,6 +571,10 @@ export class MachineHostService {
    * incomplete copies. Stored, acknowledged-later results do not keep an idle
    * EC2 box running indefinitely; an unpersisted result does. */
   async hasWorkForIdleStop(): Promise<boolean> {
+    // An enabled scheduled script must find the machine awake at its next
+    // due time. This vetoes idle stop only; it is not a run, so the desktop's
+    // update gate (hello run ids) does not wait for it.
+    if (this.options.scripts?.keepsHostAwake()) return true;
     if (this.closed || this.draining || this.activeTurns.size || this.turnTasks.size || this.commandTasks.size ||
         this.settlingRuns.size || this.settlingInFlight.size || this.turnsAwaitingCopy.size || this.syncing.size ||
         (this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork()) || (this.chat.activeParticipantRuns?.().length ?? 0) ||
@@ -573,6 +597,9 @@ export class MachineHostService {
     let committed = false;
     try {
       await this.inbound;
+      // A script request already taken (switching one on) is part of what
+      // decides whether this machine may stop.
+      await this.scriptsQueue;
       await this.eventChannel.flush();
       if (await this.hasWorkForIdleStop()) return undefined;
       releaseNative = request.fenceNative();
@@ -729,8 +756,70 @@ export class MachineHostService {
       ...(typeof this.instanceSequence === "number" ? { instanceSequence: this.instanceSequence } : {}),
       ...((this.outboxError || this.progressErrors.size) ? { outboxError: [this.outboxError, ...this.progressErrors.values()].filter(Boolean).join("; ") } : {}),
       ...(this.options.idleStopWarning?.() ? { idleStopWarning: this.options.idleStopWarning() } : {}),
-      ...(typeof this.options.autoStopEnabled?.() === "boolean" ? { autoStopEnabled: this.options.autoStopEnabled() } : {})
+      ...(typeof this.options.autoStopEnabled?.() === "boolean" ? { autoStopEnabled: this.options.autoStopEnabled() } : {}),
+      ...(this.options.scripts ? {
+        scriptsSupported: true,
+        keepAwake: this.options.scripts.keepsHostAwake(),
+        keepAwakeScripts: this.options.scripts.scheduledCount?.() ?? 0
+      } : {})
     }, to);
+  }
+
+  /** Tell the desktop the scripts changed, so its Settings and cards refresh.
+   *  Best effort and coalesced: one run changes several things at once, and
+   *  a desktop that is away asks again when it reconnects. */
+  noteScriptsChanged(): void {
+    if (!this.desktopDeviceId || this.closed || this.scriptsChangedTimer) return;
+    this.scriptsChangedTimer = setTimeout(() => {
+      this.scriptsChangedTimer = undefined;
+      if (!this.desktopDeviceId || this.closed) return;
+      void this.send({ type: "machine.scripts.changed" }).catch(() => undefined);
+    }, SCRIPTS_CHANGED_COALESCE_MS);
+    this.scriptsChangedTimer.unref?.();
+  }
+
+  private scriptsChangedTimer?: ReturnType<typeof setTimeout>;
+  /** Script operations run one at a time, in order, off the inbound chain. */
+  private scriptsQueue: Promise<void> = Promise.resolve();
+
+  /** One desktop request on this machine's scripts, always answered. Served
+   *  off the inbound chain, like a picture request on the desktop: releasing
+   *  held messages posts into large chats, and Stop or a turn must not wait
+   *  behind it. A request made for an earlier run of this runtime is refused,
+   *  so a frame kept and replayed after a restart changes nothing. */
+  private answerScriptsRequest(body: MachineScriptsRequestBody, replyTo: string | undefined): void {
+    const fail = (error: string): MachineLinkMessage => ({ type: "machine.scripts.result", requestId: body.requestId, ok: false, error });
+    const answer = async (): Promise<void> => {
+      const scripts = this.options.scripts;
+      const expiresAt = typeof body.expiresAt === "string" ? Date.parse(body.expiresAt) : Number.NaN;
+      let reply: MachineLinkMessage;
+      if (!scripts) {
+        reply = fail("This machine runtime does not host scheduled scripts; upgrade it.");
+      } else if (body.instanceId !== this.instanceId) {
+        reply = fail("The machine restarted since this was asked; try again.");
+      } else if (!Number.isFinite(expiresAt) || this.now().getTime() > expiresAt + SCRIPTS_REQUEST_CLOCK_SKEW_MS) {
+        // The desktop has stopped waiting for it: doing it now would be a
+        // change the User was told did not happen.
+        reply = fail("This request is too old; nothing was changed.");
+      } else if (changesScripts(body.operation) && (this.idleFenced || this.options.hostStopCommitted?.())) {
+        reply = fail("The machine is stopping after being idle; try again when it is awake.");
+      } else {
+        try {
+          reply = { type: "machine.scripts.result", requestId: body.requestId, ok: true, result: await scripts.handle(body.operation) };
+        } catch (error) {
+          reply = fail(errorMessage(error));
+        }
+      }
+      await this.send(reply, replyTo).catch(() => undefined);
+    };
+    if (!changesScripts(body.operation)) {
+      // Reads need no order: a list must not wait behind held messages
+      // being posted into a large chat.
+      void answer().catch(() => undefined);
+      return;
+    }
+    const run = this.scriptsQueue.then(answer);
+    this.scriptsQueue = run.catch(() => undefined);
   }
 
   /**
@@ -921,6 +1010,7 @@ export class MachineHostService {
           this.homeMachineId = body.machineId;
           this.options.onDesktopMachineId?.(body.machineId);
         }
+        if (body.machineName?.trim()) this.options.onDesktopMachineName?.(body.machineName.trim());
         this.eventChannel.start();
         await this.recoverCommands();
         return;
@@ -1044,6 +1134,15 @@ export class MachineHostService {
         return;
       case "machine.attachment.result":
         this.receiveAttachmentPart(body);
+        return;
+      case "machine.scripts.request":
+        // Only the enrolling desktop reaches here: other peers may send only
+        // hello and turn queries over the ephemeral link, and this type is
+        // never a durable event.
+        this.answerScriptsRequest(body, replyTo);
+        return;
+      case "machine.scripts.result":
+      case "machine.scripts.changed":
         return;
       case "machine.turn.query":
         if (await this.options.eventStorage.nativeCommands().forRun(body.runId)) {

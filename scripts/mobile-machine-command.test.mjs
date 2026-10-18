@@ -316,3 +316,20 @@ test("knowing a room seal cannot replace trust, settings or the machine's home",
     assert.deepEqual(box.host.trust.peers(), [], "revoked room-key holders cannot restore themselves");
   } finally { await box.cleanup(); }
 });
+
+test("a trusted phone cannot operate a machine's scheduled scripts", async () => {
+  const { signMachineControl } = require(path.join(repoRoot, "dist/main/main/services/machineControlAuthentication.js"));
+  const identity = await phone.createIdentity();
+  const handled = [];
+  const box = await machine({ scripts: { handle: async (operation) => { handled.push(operation); return undefined; }, keepsHostAwake: () => false } });
+  try {
+    await box.trust([phonePeer(identity, box.pairing)]);
+    assert.equal(box.host.trust.peers().length, 1);
+    const request = { protocol: "accord-machine-link-v1", messageId: crypto.randomUUID(), sentAt: new Date().toISOString(),
+      body: { type: "machine.scripts.request", requestId: "r1", instanceId: box.host.instanceId, operation: { op: "delete", scriptId: "s1" } } };
+    const signed = signMachineControl(request, { ...identity, originId: identity.deviceId }, box.pairing.rendezvousId, box.identity.originId);
+    await assert.rejects(box.deliver(signed, { publicKeyDerBase64: identity.publicKeyDerBase64, privateKeyDerBase64: identity.privateKeyDerBase64 }));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(handled, [], "a phone's request never reaches the scripts");
+  } finally { await box.cleanup(); }
+});

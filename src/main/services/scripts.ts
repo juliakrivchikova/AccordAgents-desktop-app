@@ -36,6 +36,8 @@ import {
   type ScriptSchedule
 } from "../../shared/scripts";
 import { CommandError, commandEnvironment, runCommand } from "./command";
+import type { MachineHostAdmission } from "./machineHostPower";
+import type { MachineScriptsOperation } from "../../shared/machineLink";
 import {
   newScriptId,
   scriptContentHash,
@@ -77,6 +79,8 @@ export class ScriptApiError extends Error {
 export interface ScriptChatParticipant {
   id: string;
   handle: string;
+  /** False when the member runs on another host than this one. */
+  runsHere?: boolean;
 }
 
 export interface ScriptChatInfo {
@@ -124,6 +128,12 @@ export interface ScriptServiceOptions {
   bootAt?: () => number;
   /** Start time of a live process, for checking a recorded pid before a kill. */
   processStartedAt?: (pid: number) => Promise<number | undefined>;
+  /** Host-wide admission (a cloud machine): refuses new work while the
+   *  instance is committed to stopping. */
+  admit?: (what: string) => Promise<MachineHostAdmission> | MachineHostAdmission;
+  /** A machine can start only its own members; a script there may mention
+   *  only members that run on that machine. */
+  localMembersOnly?: boolean;
   debugLog?: (event: string, payload: Record<string, unknown>) => void;
   onChanged?: () => void;
 }
@@ -267,6 +277,9 @@ export class ScriptService {
   /** Scripts whose run is being prepared: the slot is taken before the
    *  first await, so two starts can never both pass the check. */
   private readonly starting = new Set<string>();
+  /** Approved, switched-on scripts, as of the last tick: they need the host
+   *  awake for their next run. */
+  private readonly scheduledIds = new Set<string>();
   private timer?: ReturnType<typeof setTimeout>;
   private ticking?: Promise<void>;
   /** Timers arm only after start(); runs are refused only after stop(). */
@@ -274,10 +287,23 @@ export class ScriptService {
   private stopped = false;
   private readonly now: () => number;
   private readonly tickMs: number;
+  private hostLabel: string;
+  private hostPhrase: string;
 
   constructor(private readonly options: ScriptServiceOptions) {
     this.now = options.now ?? Date.now;
     this.tickMs = options.tickMs ?? DEFAULT_TICK_MS;
+    this.hostLabel = options.hostLabel;
+    this.hostPhrase = options.hostPhrase;
+  }
+
+  /** The host's name as the User knows it. A machine learns the name the
+   *  desktop gave it only once the desktop greets it. */
+  setHostName(label: string, phrase: string): void {
+    if (label === this.hostLabel && phrase === this.hostPhrase) return;
+    this.hostLabel = label;
+    this.hostPhrase = phrase;
+    this.changed();
   }
 
   private log(event: string, payload: Record<string, unknown>): void {
@@ -381,7 +407,10 @@ export class ScriptService {
     let nextDelay = this.tickMs;
     try {
       const now = this.now();
-      for (const id of await this.options.store.listIds()) {
+      const ids = await this.options.store.listIds();
+      // A script deleted while this pass read it must not keep the host awake.
+      for (const id of [...this.scheduledIds]) if (!ids.includes(id)) this.noteScheduled(id, undefined);
+      for (const id of ids) {
         // One broken script (a corrupt file, a full disk) must not stop the others.
         try {
           const nextAt = await this.tickScript(id, now);
@@ -397,9 +426,31 @@ export class ScriptService {
     }
   }
 
+  /** True while a switched-on script needs this host awake for its next
+   *  run, or a script is running. A cloud machine does not stop when idle then. */
+  keepsHostAwake(): boolean {
+    return this.scheduledIds.size > 0 || this.running.size > 0 || this.starting.size > 0;
+  }
+
+  /** How many switched-on scripts keep the host awake, for "Kept on by …". */
+  scheduledCount(): number {
+    return this.scheduledIds.size;
+  }
+
+  /** Keeps the set behind keepsHostAwake in step with a record; a change is
+   *  announced, so a machine tells the desktop at once whether it may stop. */
+  private noteScheduled(id: string, record: Pick<ScriptRecord, "approvedHash" | "enabled"> | undefined): void {
+    const before = this.scheduledIds.has(id);
+    const after = Boolean(record?.approvedHash && record.enabled);
+    if (after) this.scheduledIds.add(id);
+    else this.scheduledIds.delete(id);
+    if (before !== after) this.changed();
+  }
+
   /** Handle one script at `now`; returns when it is next due, if it is scheduled. */
   private async tickScript(id: string, now: number): Promise<number | undefined> {
     const record = await this.options.store.readRecord(id);
+    this.noteScheduled(id, record);
     if (!record) return undefined;
     if (!record.approvedHash) {
       if (now - Date.parse(record.createdAt) > UNAPPROVED_PROPOSAL_TTL_MS) {
@@ -448,6 +499,7 @@ export class ScriptService {
   /** Start one run now. Throws when it cannot start. */
   async runNow(id: string): Promise<void> {
     const record = await this.requireRecord(id);
+    if (this.stopped) throw new Error(`Scheduled scripts on ${this.hostPhrase} are stopping; try again in a moment.`);
     if (!record.approvedHash) throw new Error("Approve the script before running it.");
     if (this.running.has(id) || this.starting.has(id)) throw new Error("The script is already running.");
     this.launch(id, "Started by hand.");
@@ -507,6 +559,17 @@ export class ScriptService {
       return;
     }
     if (this.stopped) return;
+    if (this.options.admit) {
+      // A host that cannot say whether it is staying awake does not start
+      // work; the run is recorded either way, never dropped in silence.
+      const admission = await Promise.resolve(this.options.admit(`the scheduled script "${record.name}"`))
+        .catch((error): MachineHostAdmission => ({ admitted: false, reason: `This machine could not admit new work: ${errorMessage(error)}` }));
+      if (!admission.admitted) {
+        await this.recordRun(id, { status: "skipped", at: startedAt, messagesSent: 0, detail: admission.reason });
+        this.changed();
+        return;
+      }
+    }
     // Switched off or deleted while the run was being prepared.
     const latest = await this.options.store.readRecord(id).catch(() => undefined);
     if (!latest?.approvedHash || (!latest.enabled && detail !== "Started by hand.")) return;
@@ -892,6 +955,9 @@ export class ScriptService {
       if (!record.permissions.participantIds.includes(participant.id)) {
         throw new ScriptApiError(403, `This script may not mention @${participant.handle}.`);
       }
+      if (this.options.localMembersOnly && participant.runsHere === false) {
+        throw new ScriptApiError(409, `@${participant.handle} no longer runs on ${this.hostPhrase}, so this script cannot wake it.`);
+      }
       if (!ids.includes(participant.id)) ids.push(participant.id);
     }
     return ids;
@@ -919,6 +985,14 @@ export class ScriptService {
           continue;
         }
         try {
+          if (this.options.localMembersOnly && item.participantIds.length > 0) {
+            // Held while the member ran here; it may have moved since.
+            const chat = await this.options.chat.describeChat(item.chatId);
+            const moved = item.participantIds
+              .map((participantId) => chat?.participants.find((participant) => participant.id === participantId))
+              .find((participant) => participant?.runsHere === false);
+            if (moved) throw new Error(`@${moved.handle} no longer runs on ${this.hostPhrase}`);
+          }
           await this.options.chat.postScriptMessage({
             conversationId: item.chatId,
             scriptId: id,
@@ -1078,8 +1152,8 @@ export class ScriptService {
       name,
       description,
       hostId: this.options.hostId,
-      hostLabel: this.options.hostLabel,
-      hostPhrase: this.options.hostPhrase,
+      hostLabel: this.hostLabel,
+      hostPhrase: this.hostPhrase,
       runtime: validated.runtime,
       entry: validated.entry,
       schedule,
@@ -1096,7 +1170,7 @@ export class ScriptService {
     this.changed();
     const verb = op === "create" ? "Add" : "Update";
     const members = permissions.permissions.participantIds.map((pid) => permissions.participantLabels[pid] ?? pid);
-    const summary = `${verb} the scheduled script "${name}": ${describeScriptSchedule(schedule).toLowerCase()} on ${this.options.hostPhrase}`
+    const summary = `${verb} the scheduled script "${name}": ${describeScriptSchedule(schedule).toLowerCase()} on ${this.hostPhrase}`
       + (members.length > 0 ? `, may wake ${members.join(", ")}` : "")
       + (secretNames.length > 0 ? `; needs keys ${secretNames.join(", ")}` : "")
       + ". Review the code and approve it on the desktop";
@@ -1133,6 +1207,9 @@ export class ScriptService {
         const key = ref.replace(/^@/, "").toLowerCase();
         const found = chats.flatMap((chat) => chat.participants).find((item) => item.id === ref || item.handle.toLowerCase() === key);
         if (!found) throw new Error(`@${key} is not a member of the script's chats.`);
+        if (this.options.localMembersOnly && found.runsHere === false) {
+          throw new Error(`@${found.handle} does not run on ${this.hostPhrase}. A script here can wake only members that run here; ask a member on the right host to set it up there.`);
+        }
         if (!participantIds.includes(found.id)) participantIds.push(found.id);
         participantLabels[found.id] = `@${found.handle}`;
       }
@@ -1155,8 +1232,8 @@ export class ScriptService {
       name: record.name,
       description: record.description,
       hostId: record.hostId,
-      hostLabel: this.options.hostLabel,
-      hostPhrase: this.options.hostPhrase,
+      hostLabel: this.hostLabel,
+      hostPhrase: this.hostPhrase,
       runtime: record.runtime,
       entry: record.entry,
       schedule: record.schedule,
@@ -1269,6 +1346,7 @@ export class ScriptService {
       await this.options.store.writeRuntime(id, runtime);
       await this.options.store.writeRecord(next);
       await this.options.store.deleteRevision(id, revision.revisionId);
+      this.noteScheduled(id, next);
     });
     this.changed();
     this.schedule(0);
@@ -1317,6 +1395,7 @@ export class ScriptService {
       if (enabled) runtime.blockedReason = undefined;
       await this.options.store.writeRuntime(id, runtime);
       await this.options.store.writeRecord({ ...current, enabled, updatedAt: iso(this.now()) });
+      this.noteScheduled(id, { ...current, enabled });
     });
     if (!enabled) this.stopRun(id);
     this.changed();
@@ -1333,6 +1412,7 @@ export class ScriptService {
 
   async deleteScript(id: string): Promise<void> {
     await this.requireRecord(id);
+    this.noteScheduled(id, undefined);
     const run = this.running.get(id);
     this.stopRun(id);
     if (run) await Promise.race([run.done, new Promise((resolve) => setTimeout(resolve, STOP_WAIT_MS).unref())]);
@@ -1412,8 +1492,8 @@ export class ScriptService {
       name: shown.name,
       description: shown.description,
       hostId: record.hostId,
-      hostLabel: this.options.hostLabel,
-      hostPhrase: this.options.hostPhrase,
+      hostLabel: this.hostLabel,
+      hostPhrase: this.hostPhrase,
       runtime: shown.runtime,
       entry: shown.entry,
       schedule: shown.schedule,
@@ -1487,5 +1567,44 @@ export class ScriptService {
       maxWakeupsPerHour: item.permissions.maxWakeupsPerHour,
       heldMessages: item.heldMessageCount
     }));
+  }
+}
+
+/** One operation from the desktop on a machine's scripts. The operation
+ *  arrived over the link, so its fields are checked before use. */
+export async function handleScriptsOperation(service: ScriptService, operation: MachineScriptsOperation): Promise<unknown> {
+  const text = (value: unknown, field: string): string => {
+    if (typeof value !== "string" || !value) throw new Error(`The request has no ${field}.`);
+    return value;
+  };
+  switch (operation.op) {
+    case "list": return service.list();
+    case "revision":
+      return service.revisionContent(text(operation.scriptId, "script"), typeof operation.revisionId === "string" ? operation.revisionId : undefined);
+    case "runs": return service.runs(text(operation.scriptId, "script"));
+    case "setSecret": {
+      const scriptId = text(operation.scriptId, "script");
+      await service.setSecret(scriptId, text(operation.name, "key name"), text(operation.value, "key value"));
+      return service.summary(scriptId);
+    }
+    case "deleteSecret": {
+      const scriptId = text(operation.scriptId, "script");
+      await service.deleteSecret(scriptId, text(operation.name, "key name"));
+      return service.summary(scriptId);
+    }
+    case "setEnabled": {
+      const scriptId = text(operation.scriptId, "script");
+      if (typeof operation.enabled !== "boolean") throw new Error("The request does not say on or off.");
+      await service.setEnabled(scriptId, operation.enabled);
+      return service.summary(scriptId);
+    }
+    case "runNow": await service.runNow(text(operation.scriptId, "script")); return undefined;
+    case "delete": await service.deleteScript(text(operation.scriptId, "script")); return undefined;
+    case "releaseHeld": await service.releaseHeld(text(operation.scriptId, "script")); return undefined;
+    case "discardHeld": await service.discardHeld(text(operation.scriptId, "script")); return undefined;
+    default: {
+      const unknown: never = operation;
+      throw new Error(`This machine does not know the scripts operation ${(unknown as { op?: unknown }).op}; upgrade its runtime.`);
+    }
   }
 }

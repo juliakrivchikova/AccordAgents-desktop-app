@@ -4,8 +4,9 @@ import type { ScheduledScriptSummary } from "../../../shared/scripts";
 import { errorText } from "../review/review-conversation-data";
 import { ScriptSettingsItem } from "./scripts-settings-item";
 
-/** Settings → Scripts: every scheduled script on this computer, its state,
- *  history and keys, with the direct controls (on/off, Run now, Delete). */
+/** Settings → Scripts: every scheduled script, on this computer and on its
+ *  machines, its state, history and keys, with the direct controls (on/off,
+ *  Run now, Delete). Each item names the host it runs on. */
 export function ScriptsSettingsSection(): JSX.Element {
   const [scripts, setScripts] = useState<ScheduledScriptSummary[] | undefined>();
   const [error, setError] = useState<string | undefined>();
@@ -33,7 +34,7 @@ export function ScriptsSettingsSection(): JSX.Element {
       <div className="gen-section-head">
         <h2 className="gen-section-title">Scheduled scripts</h2>
         <span className="gen-section-meta">
-          {scripts ? `${scripts.length} on this computer` : "Loading"}
+          {scripts ? `${scripts.length} ${scripts.length === 1 ? "script" : "scripts"}` : "Loading"}
         </span>
       </div>
       <p className="scripts-settings-meta">

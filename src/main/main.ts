@@ -101,13 +101,12 @@ import { ArtifactStore } from "./services/artifactStore";
 import { artifactEventWriter, artifactProjectionPort } from "./services/artifactReplication";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "./appToolWiring";
 import { ScriptService } from "./services/scripts";
-import { APP_SCRIPTS_REQUEST_CHANGE_TOOL } from "../shared/appMcpToolContracts";
+import { ScriptHub } from "./services/scriptHub";
 import { ScriptSecretStore, ScriptStore } from "./services/scriptStore";
 import { hostPlatform } from "./platform";
 import {
   SCRIPT_DESKTOP_HOST_ID,
-  isChatScriptChangeRequest,
-  scriptChangeInstallsCode,
+  approvalInstallsScriptCode,
   type DeleteScriptSecretRequest,
   type GetScriptRevisionRequest,
   type ScriptIdRequest,
@@ -404,6 +403,12 @@ const cloudRunDoctorService: CloudRunDoctorService = new CloudRunDoctorService({
   }
 });
 const cloudRunSetupSession = new CloudRunSetupSession();
+/** The AWS instance a worker target names (its host key alias carries it). */
+function awsInstanceOfWorker(worker: { hostKeyAlias?: string }): string | undefined {
+  const prefix = "accordagents-";
+  return worker.hostKeyAlias?.startsWith(prefix) ? worker.hostKeyAlias.slice(prefix.length) : undefined;
+}
+
 const cloudRunAwsService = new CloudRunAwsService(settingsService, {
   appVersion: app.getVersion(),
   // Unknown while the link is still connecting after this desktop started.
@@ -415,10 +420,12 @@ const cloudRunAwsService = new CloudRunAwsService(settingsService, {
   // machine on it reports its own work over the link, and an idle stop waits
   // while any of it is in flight.
   automaticStopGate: {
-    authorizeAutomaticWorkerStop: async () => machineLinkService?.hasActiveMachineWork()
+    authorizeAutomaticWorkerStop: async (worker) => machineLinkService?.hasActiveMachineWork()
       ? { allowed: false, reason: "A machine is still working." }
-      : { allowed: true, lease: { leaseId: "machine-idle", expiresAt: new Date(Date.now() + 30_000).toISOString() } },
-    renewAutomaticWorkerStopLease: async (_worker, lease) => machineLinkService?.hasActiveMachineWork()
+      : machineLinkService?.machineKeepsAwake(awsInstanceOfWorker(worker))
+        ? { allowed: false, reason: "A machine runs switched-on scheduled scripts." }
+        : { allowed: true, lease: { leaseId: "machine-idle", expiresAt: new Date(Date.now() + 30_000).toISOString() } },
+    renewAutomaticWorkerStopLease: async (worker, lease) => machineLinkService?.hasActiveMachineWork() || machineLinkService?.machineKeepsAwake(awsInstanceOfWorker(worker))
       ? Promise.reject(new Error("A machine started working; the automatic stop is abandoned."))
       : { ...lease, expiresAt: new Date(Date.now() + 30_000).toISOString() },
     releaseAutomaticWorkerStopLease: async () => undefined
@@ -640,16 +647,30 @@ const scriptService: ScriptService = new ScriptService({
   debugLog: (event, payload) => {
     void debugLogService.write(event, payload);
   },
-  onChanged: () => {
-    if (scriptsUpdatedTimer) return;
-    scriptsUpdatedTimer = setTimeout(() => {
-      scriptsUpdatedTimer = undefined;
-      void scriptService.list()
-        .then((scripts) => sendToMainWindow("scripts:updated", { scripts }))
-        .catch(() => undefined);
-    }, 150);
-  }
+  onChanged: () => broadcastScripts([])
 });
+// Every script the desktop can show: its own and those on its machines.
+const scriptHub = new ScriptHub(scriptService, () => machineLinkService);
+/** Machines to ask afresh in the next broadcast; undefined means all. */
+let scriptsRefresh: Set<string> | undefined = new Set();
+/** Lists can take seconds; one that finishes after a newer one is dropped. */
+let scriptsBroadcastSeq = 0;
+/** Tells the window the scripts changed. Only the machines that said so are
+ *  asked again; the rest are shown from their last answer. */
+function broadcastScripts(refresh?: string[]): void {
+  if (!refresh) scriptsRefresh = undefined;
+  else for (const machineId of refresh) scriptsRefresh?.add(machineId);
+  if (scriptsUpdatedTimer) return;
+  scriptsUpdatedTimer = setTimeout(() => {
+    scriptsUpdatedTimer = undefined;
+    const machines = scriptsRefresh ? [...scriptsRefresh] : undefined;
+    scriptsRefresh = new Set();
+    const seq = ++scriptsBroadcastSeq;
+    void scriptHub.list(machines)
+      .then((scripts) => { if (seq === scriptsBroadcastSeq) sendToMainWindow("scripts:updated", { scripts }); })
+      .catch(() => undefined);
+  }, 150);
+}
 chatService.setScriptHost(scriptService);
 appMcpService.setScriptApiHandler((context, _route, body) => scriptService.postFromScript(context, body));
 // Artifacts persist in their own tables of the same SQLite database as
@@ -744,7 +765,12 @@ async function applyMobileDecision(request: {
   payload: { operationId: string; targetKey: string; stateId?: string; detail?: Record<string, unknown> };
 }): Promise<void> {
   await refuseScriptInstallFromPhone(request);
-  await publishChatAction({ conversationId: request.conversationId, kind: request.kind, payload: request.payload });
+  // Re-signed by this desktop, so the answer says where it was given: a
+  // machine refuses a phone's approval of code it never showed, even when
+  // this desktop could not yet see that the card is one (a machine's card
+  // that has not replicated here).
+  const payload = { ...request.payload, detail: { ...request.payload.detail, decidedOn: "phone" } };
+  await publishChatAction({ conversationId: request.conversationId, kind: request.kind, payload });
   const event = await storageService.getChatEvent(`chat-action:${request.payload.operationId}`);
   if (!event) {
     throw new Error("The answer from the phone could not be recorded.");
@@ -779,7 +805,7 @@ async function refuseScriptInstallFromPhone(request: {
   const conversation = await storageService.getConversation(request.conversationId);
   const approvals = (conversation?.metadata?.pendingAppToolApprovals ?? []) as import("../shared/types").ChatAppToolApproval[];
   const approval = approvals.find((item) => item.id === approvalId);
-  if (approval?.toolName === APP_SCRIPTS_REQUEST_CHANGE_TOOL && isChatScriptChangeRequest(approval.request) && scriptChangeInstallsCode(approval.request)) {
+  if (approvalInstallsScriptCode(approval)) {
     throw new Error("Approve scheduled scripts on the desktop, where the card shows their code. You can decline them on the phone.");
   }
 }
@@ -824,6 +850,9 @@ function localApprovalExecutor(): Promise<MachineApprovalExecutor> {
       progress: progress => emitReviewProgress(progress),
       getConversation: id => storageService.getConversation(id), runtimeIdentity: async () => owner,
       nativeProcessDbPath: path.join(app.getPath("userData"), "native-processes.sqlite3"),
+      // This desktop's card shows a script's code: only its own answers (not
+      // a machine's, not a phone's relayed through it) approve code here.
+      codeApprover: event => event.originId === device.originId,
       publish: async body => {
         await chatEventLogService.appendLocalEvent({ conversationId: body.conversationId,
           logScopeId: `approval:${body.approvalId}`, kind: body.type, eventId: machineApprovalResultId(body.decisionId!), payload: body });
@@ -3044,26 +3073,20 @@ function registerIpc(): void {
       activeReviews.delete(runId);
     }
   });
-  ipcMain.handle("scripts:list", () => scriptService.list());
+  ipcMain.handle("scripts:list", () => scriptHub.list());
   ipcMain.handle("scripts:get-revision", (_event, request: GetScriptRevisionRequest) =>
-    scriptService.revisionContent(request.scriptId, request.revisionId));
-  ipcMain.handle("scripts:runs", (_event, request: ScriptIdRequest) => scriptService.runs(request.scriptId));
-  ipcMain.handle("scripts:set-secret", async (_event, request: SetScriptSecretRequest) => {
-    await scriptService.setSecret(request.scriptId, request.name, request.value);
-    return scriptService.summary(request.scriptId);
-  });
-  ipcMain.handle("scripts:delete-secret", async (_event, request: DeleteScriptSecretRequest) => {
-    await scriptService.deleteSecret(request.scriptId, request.name);
-    return scriptService.summary(request.scriptId);
-  });
-  ipcMain.handle("scripts:set-enabled", async (_event, request: SetScriptEnabledRequest) => {
-    await scriptService.setEnabled(request.scriptId, request.enabled);
-    return scriptService.summary(request.scriptId);
-  });
-  ipcMain.handle("scripts:run-now", (_event, request: ScriptIdRequest) => scriptService.runNow(request.scriptId));
-  ipcMain.handle("scripts:delete", (_event, request: ScriptIdRequest) => scriptService.deleteScript(request.scriptId));
-  ipcMain.handle("scripts:release-held", (_event, request: ScriptIdRequest) => scriptService.releaseHeld(request.scriptId));
-  ipcMain.handle("scripts:discard-held", (_event, request: ScriptIdRequest) => scriptService.discardHeld(request.scriptId));
+    scriptHub.revision(request.hostId, request.scriptId, request.revisionId));
+  ipcMain.handle("scripts:runs", (_event, request: ScriptIdRequest) => scriptHub.runs(request.hostId, request.scriptId));
+  ipcMain.handle("scripts:set-secret", (_event, request: SetScriptSecretRequest) =>
+    scriptHub.setSecret(request.hostId, request.scriptId, request.name, request.value));
+  ipcMain.handle("scripts:delete-secret", (_event, request: DeleteScriptSecretRequest) =>
+    scriptHub.deleteSecret(request.hostId, request.scriptId, request.name));
+  ipcMain.handle("scripts:set-enabled", (_event, request: SetScriptEnabledRequest) =>
+    scriptHub.setEnabled(request.hostId, request.scriptId, request.enabled));
+  ipcMain.handle("scripts:run-now", (_event, request: ScriptIdRequest) => scriptHub.control(request.hostId, "runNow", request.scriptId));
+  ipcMain.handle("scripts:delete", (_event, request: ScriptIdRequest) => scriptHub.control(request.hostId, "delete", request.scriptId));
+  ipcMain.handle("scripts:release-held", (_event, request: ScriptIdRequest) => scriptHub.control(request.hostId, "releaseHeld", request.scriptId));
+  ipcMain.handle("scripts:discard-held", (_event, request: ScriptIdRequest) => scriptHub.control(request.hostId, "discardHeld", request.scriptId));
   ipcMain.handle("chat:read-attachment", async (_event, request: ReadChatAttachmentRequest) => {
     return chatService.readChatAttachment(request);
   });
@@ -3662,6 +3685,19 @@ void app.whenReady().then(async () => {
     machineLinkService.onStatus(() => {
       void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
     });
+    // A machine coming or going changes which scripts Settings can reach, and
+    // a machine says when its own scripts changed.
+    let scriptHostsKey = "";
+    machineLinkService.onStatus(() => {
+      const key = JSON.stringify(machineLinkService?.scriptHosts() ?? []);
+      if (key === scriptHostsKey) return;
+      scriptHostsKey = key;
+      broadcastScripts();
+    });
+    machineLinkService.onScriptsChanged((machineId) => broadcastScripts([machineId]));
+    // A restarted runtime greets again with a new instance; until then its
+    // requests are refused, so it is asked again once it has.
+    machineLinkService.onHello((event) => broadcastScripts([event.machineId]));
     machineLinkService.onConversationDeleted((event) => chatService.applyReplicatedConversationDeletion(event.conversationId, event.deletedAt));
     machineLinkService.onConversationBackDelta((delta) => {
       // The machine keeps the result until the desktop has stored it.

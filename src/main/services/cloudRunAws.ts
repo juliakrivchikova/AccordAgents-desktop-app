@@ -557,7 +557,11 @@ export class CloudRunAwsService {
     // A stopped instance has nothing to stop; what keeps a running one up is
     // only worth showing while it runs.
     const problem = state === "running" ? await this.autoStopProblem(power, handle) : undefined;
-    return { enabled: true, needsSetup: false, ...(problem ? { problem } : {}) };
+    // Switched-on scheduled scripts keep it up on purpose, and that costs money: said, not hidden.
+    const keptOnByScripts = state === "running"
+      ? (await this.installsOnInstance(handle)).machines.reduce((sum, machine) => sum + (machine.lastHello?.keepAwakeScripts ?? 0), 0)
+      : 0;
+    return { enabled: true, needsSetup: false, ...(problem ? { problem } : {}), ...(keptOnByScripts > 0 ? { keptOnByScripts } : {}) };
   }
 
   /**

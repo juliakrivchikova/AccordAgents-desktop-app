@@ -238,6 +238,9 @@ export interface AwsWorkerAutoStop {
   needsSetup: boolean;
   /** Shown in the Automatic stop row. Agents working is not a problem. */
   problem?: AwsWorkerAutoStopProblem;
+  /** Switched-on scheduled scripts on the instance: they keep it running so
+   *  each run finds it awake. */
+  keptOnByScripts?: number;
 }
 
 export interface AwsWorkerAutoStopProblem {

@@ -2973,7 +2973,11 @@ export class ChatService {
       id: conversation.id,
       title: conversation.title,
       archived: conversation.metadata.archived === true,
-      participants: this.chatParticipants(conversation).map((participant) => ({ id: participant.id, handle: participant.handle }))
+      participants: this.chatParticipants(conversation).map((participant) => ({
+        id: participant.id,
+        handle: participant.handle,
+        runsHere: this.ownsParticipant(participant)
+      }))
     };
   }
 
