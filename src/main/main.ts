@@ -491,10 +491,15 @@ async function startHubLink(): Promise<void> {
     // the event is held until it is there.
     deliver: async (event) => machineLinkService ? machineLinkService.receiveFromHub(event) : "not-ready",
     applyChatChange: hubChatChangeApplier(storageService, chatService),
-    onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString()),
+    // Only machines that read the hub stop waiting; one still on the relay
+    // is sent the event the relay way.
+    onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString(), machineLinkService?.hubReaders() ?? []),
     scopePrefixes: HUB_SCOPE_PREFIXES,
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
+  // What this desktop writes goes up at once; reading waits for the
+  // machines' channels (startHubReading).
+  hubSync.startPushing();
   // Whatever this desktop writes (a chat change, an action, a command for a
   // machine) goes up at once.
   chatEventLogService.onLocalAppend(() => hubSync?.nudgePush());
@@ -504,8 +509,6 @@ async function startHubLink(): Promise<void> {
     hubSync?.nudgePull();
   });
   publishHubRoster();
-  // Reading starts once the machines' channels exist (startHubReading), so
-  // nothing a machine wrote meanwhile arrives before its channel does.
   void debugLogService.write("hub.link.started", { url: config.url });
 }
 

@@ -114,6 +114,8 @@ export interface HubEventPullResponse {
   through: number;
   /** The hub's newest position; more to read while `through` is below it. */
   head: number;
+  /** Which hub this is: positions mean nothing at another one. */
+  hubId?: string;
 }
 
 /** The live socket says only where the log is; devices then read from there. */

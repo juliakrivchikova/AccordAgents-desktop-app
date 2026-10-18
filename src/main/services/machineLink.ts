@@ -649,6 +649,15 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return Boolean(this.options.hubMode && connection.pairing.hubUrl);
   }
 
+  private readsHub(deviceId: string): boolean {
+    return [...this.connections.values()].some((connection) => connection.record.deviceId === deviceId && this.viaHub(connection));
+  }
+
+  /** The machines that read the hub (the rest are reached by the relay). */
+  hubReaders(): string[] {
+    return [...this.connections.values()].filter((connection) => connection.record.deviceId && this.viaHub(connection)).map((connection) => connection.record.deviceId);
+  }
+
   /**
    * An event the hub's order brought, to the channel of the machine that
    * wrote it. A machine whose channel is not set up yet (this desktop just
@@ -1708,8 +1717,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
         },
         // Every chat is on every machine: a chat change this machine wrote
         // goes on, unchanged and signed by it, to every other machine.
-        forwardTo: (event) => !this.viaHub(connection) && event.kind === CHAT_CHANGES_EVENT_KIND && isChatChangesLogScope(event.logScopeId) && event.originId === deviceId
-          ? this.chatChangeRecipients().filter((recipient) => recipient.deviceId !== deviceId)
+        // Through the hub, only a machine still on the relay needs it passed on.
+        forwardTo: (event) => event.kind === CHAT_CHANGES_EVENT_KIND && isChatChangesLogScope(event.logScopeId) && event.originId === deviceId
+          ? this.chatChangeRecipients().filter((recipient) => recipient.deviceId !== deviceId && !this.readsHub(recipient.deviceId))
           : [],
         peerHoldsEveryChat: true,
         // Kept for a runtime that cannot fold chat changes yet; sent once it can.

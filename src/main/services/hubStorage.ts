@@ -45,13 +45,15 @@ export const HUB_SCHEMA_SQL = `
   -- On a device: places in the order it read but could not take yet (an
   -- author it does not know yet, a channel not set up yet, a chat it does
   -- not hold yet). Read again from the hub until taken.
-  create table if not exists hub_client_held (
+  create table if not exists hub_client_held_events (
     hub_seq integer primary key,
     event_id text not null,
     origin_id text not null,
+    conversation_id text not null,
     reason text not null,
     held_at text not null
   );
+  create index if not exists hub_client_held_chat on hub_client_held_events(origin_id, conversation_id);
 `;
 
 /** A held place in the order, as the device keeps it. */
@@ -59,6 +61,7 @@ export interface HubHeldEvent {
   hubSeq: number;
   eventId: string;
   originId: string;
+  conversationId: string;
   reason: string;
   heldAt: string;
 }
@@ -298,33 +301,55 @@ export class HubStorage {
   }
 
   async holdEvent(held: HubHeldEvent): Promise<void> {
+    if (!Number.isSafeInteger(held.hubSeq) || held.hubSeq < 1) throw new Error("Invalid hub position.");
     await this.init();
     await this.database.execute(`
-      insert into hub_client_held(hub_seq, event_id, origin_id, reason, held_at)
-        values (${held.hubSeq}, ${quote(held.eventId)}, ${quote(held.originId)}, ${quote(held.reason)}, ${quote(held.heldAt)})
+      insert into hub_client_held_events(hub_seq, event_id, origin_id, conversation_id, reason, held_at)
+        values (${held.hubSeq}, ${quote(held.eventId)}, ${quote(held.originId)}, ${quote(held.conversationId)}, ${quote(held.reason)}, ${quote(held.heldAt)})
       on conflict(hub_seq) do update set reason = excluded.reason;
     `);
   }
 
-  async heldEvents(limit: number): Promise<HubHeldEvent[]> {
+  /** Held places after `afterSeq`, oldest first. */
+  async heldEvents(afterSeq: number, limit: number): Promise<HubHeldEvent[]> {
     await this.init();
     const rows = await this.database.query<HubHeldEvent>(`
-      select hub_seq as hubSeq, event_id as eventId, origin_id as originId, reason, held_at as heldAt
-      from hub_client_held order by hub_seq limit ${Math.max(1, Math.min(limit, HUB_STORAGE_PAGE_MAX))};
+      select hub_seq as hubSeq, event_id as eventId, origin_id as originId, conversation_id as conversationId, reason, held_at as heldAt
+      from hub_client_held_events where hub_seq > ${Math.max(0, Math.floor(afterSeq))}
+      order by hub_seq limit ${Math.max(1, Math.min(limit, HUB_STORAGE_PAGE_MAX))};
     `);
     return rows.map((row) => ({ ...row, hubSeq: Number(row.hubSeq) }));
   }
 
-  async releaseHeld(hubSeq: number): Promise<void> {
+  /** Whether an earlier change of this author to this chat is held: a later
+   *  one waits behind it, so their order holds. */
+  async holdsEarlier(originId: string, conversationId: string, hubSeq: number): Promise<boolean> {
     await this.init();
-    await this.database.execute(`delete from hub_client_held where hub_seq = ${Math.floor(hubSeq)};`);
+    const rows = await this.database.query<{ held: number }>(`
+      select exists(select 1 from hub_client_held_events
+        where origin_id = ${quote(originId)} and conversation_id = ${quote(conversationId)} and hub_seq < ${Math.floor(hubSeq)}) as held;
+    `);
+    return Number(rows[0]?.held) === 1;
+  }
+
+  async releaseHeld(hubSeqs: number[]): Promise<void> {
+    const seqs = hubSeqs.filter((seq) => Number.isSafeInteger(seq));
+    if (seqs.length === 0) return;
+    await this.init();
+    await this.database.execute(`delete from hub_client_held_events where hub_seq in (${seqs.join(", ")});`);
+  }
+
+  /** Another hub (set up again): its positions say nothing about these. */
+  async clearHeld(): Promise<void> {
+    await this.init();
+    await this.database.execute(`delete from hub_client_held_events;`);
   }
 
   /** Forgets places held since before `beforeIso` (their author is gone). */
   async dropHeldBefore(beforeIso: string): Promise<number> {
     await this.init();
     const rows = await this.database.query<{ dropped: number }>(`
-      delete from hub_client_held where held_at < ${quote(beforeIso)};
+      delete from hub_client_held_events where held_at < ${quote(beforeIso)};
       select changes() as dropped;
     `);
     return Number(rows[0]?.dropped ?? 0) || 0;
@@ -342,14 +367,18 @@ export class HubStorage {
     `);
   }
 
-  /** The hub holds these events now: every device they waited for is served
-   *  by it, so the outbox lets go of them (and retention may prune them). */
-  async acknowledgeOutbox(eventIds: string[], at: string): Promise<void> {
-    if (eventIds.length === 0) return;
+  /** The hub holds these events now: the devices that read the hub no
+   *  longer wait for them, so their outbox rows let go (and retention may
+   *  prune them). A device still reached another way (a relay) keeps its row
+   *  and is sent the event as before; `hubReaders` names the others, all of
+   *  them when undefined. */
+  async acknowledgeOutbox(eventIds: string[], at: string, hubReaders?: string[]): Promise<void> {
+    if (eventIds.length === 0 || (hubReaders && hubReaders.length === 0)) return;
     await this.init();
+    const readers = hubReaders ? `and device_id in (${hubReaders.map(quote).join(", ")})` : "";
     await this.database.execute(`
       update device_event_outbox set acknowledged_at = coalesce(acknowledged_at, ${quote(at)}), outcome = coalesce(outcome, 'applied')
-      where event_id in (${eventIds.map(quote).join(", ")});
+      where event_id in (${eventIds.map(quote).join(", ")}) ${readers};
     `);
   }
 

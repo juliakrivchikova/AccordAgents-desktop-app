@@ -166,14 +166,14 @@ test("an event from a device not known yet is held, and taken once it is known",
   await s.desktop.log.appendLocalEvent(change("chat-c", 1));
   await pushAll(s.link(s.desktop, []), s, 1);
   phoneSync.start();
-  await until(async () => (await s.phone.storage.hub().heldEvents(10)).length === 1);
+  await until(async () => (await s.phone.storage.hub().heldEvents(0, 10)).length === 1);
   await phoneSync.idle();
   assert.deepEqual(applied, [], "not applied while the author is unknown");
   assert.equal((await s.phone.storage.listChatEvents("chat-c", chatChangesLogScope("chat-c"))).length, 0, "and not stored either");
   known = s.desktop.identity.publicKeyDerBase64;
   phoneSync.nudgeHeld();
   await until(() => applied.length === 1);
-  await until(async () => (await s.phone.storage.hub().heldEvents(10)).length === 0);
+  await until(async () => (await s.phone.storage.hub().heldEvents(0, 10)).length === 0);
 });
 
 test("a chat change that has to wait is held and applied later, not dropped", async (t) => {
@@ -191,7 +191,7 @@ test("a chat change that has to wait is held and applied later, not dropped", as
   await s.desktop.log.appendLocalEvent(change("chat-x", 1));
   await pushAll(s.link(s.desktop, []), s, 2);
   phoneSync.start();
-  await until(async () => (await s.phone.storage.hub().heldEvents(10)).length === 2);
+  await until(async () => (await s.phone.storage.hub().heldEvents(0, 10)).length === 2);
   ready = true;
   phoneSync.nudgeHeld();
   await until(() => applied.length === 2);
@@ -214,7 +214,7 @@ test("an event for a channel not set up yet waits for it; traffic of others is p
   await s.desktop.log.appendLocalEvent({ conversationId: "theirs", logScopeId: "device:room-2:[\"theirs\",\"actions\"]", kind: "machine.turn.request", payload: { n: 2 } });
   await pushAll(s.link(s.desktop, []), s, 2);
   phoneSync.start();
-  await until(async () => (await s.phone.storage.hub().heldEvents(10)).length === 1);
+  await until(async () => (await s.phone.storage.hub().heldEvents(0, 10)).length === 1);
   await phoneSync.idle();
   assert.equal(await s.phone.storage.hub().clientState("pulled-hub-seq"), "2", "the read went on past the held place");
   channelReady = true;
@@ -239,7 +239,7 @@ test("one event that fails to apply does not stop the events after it", async (t
   phoneSync.start();
   await until(() => applied.length === 1);
   assert.deepEqual(applied, ["fine"]);
-  await until(async () => (await s.phone.storage.hub().heldEvents(10))[0]?.reason === "error");
+  await until(async () => (await s.phone.storage.hub().heldEvents(0, 10))[0]?.reason === "error");
 });
 
 test("a large chat change travels through the hub as a body uploaded when the hub asks", async (t) => {
@@ -266,4 +266,92 @@ test("a hub that is behind this device (restored) is read from its own head, not
   await pushAll(s.link(s.desktop, []), s, 1);
   phoneSync.nudgePull();
   await until(() => onPhone.length === 1);
+});
+
+test("a held change of one chat does not keep another chat's held change waiting", async (t) => {
+  const s = await setup(t);
+  const applied: string[] = [];
+  const available = new Set<string>();
+  const phoneSync = s.link(s.phone, [], {
+    applyChatChange: async (event) => {
+      if (!available.has(event.conversationId)) return "held";
+      applied.push(event.conversationId);
+      return "applied";
+    }
+  });
+  await s.desktop.log.appendLocalEvent(change("never", 1));
+  await s.desktop.log.appendLocalEvent(change("later", 1));
+  await pushAll(s.link(s.desktop, []), s, 2);
+  phoneSync.start();
+  await until(async () => (await s.phone.storage.hub().heldEvents(0, 10)).length === 2);
+  available.add("later");
+  phoneSync.nudgeHeld();
+  await until(() => applied.length === 1);
+  assert.deepEqual(applied, ["later"]);
+});
+
+test("a later change of a chat stays behind an earlier one that is held, then both apply in order", async (t) => {
+  const s = await setup(t);
+  const applied: number[] = [];
+  let firstReady = false;
+  const phoneSync = s.link(s.phone, [], {
+    applyChatChange: async (event) => {
+      if (event.originSeq === 1 && !firstReady) throw new Error("not readable yet");
+      applied.push(event.originSeq);
+      return "applied";
+    }
+  });
+  await s.desktop.log.appendLocalEvent(change("ordered", 1));
+  await s.desktop.log.appendLocalEvent(change("ordered", 2));
+  await pushAll(s.link(s.desktop, []), s, 2);
+  phoneSync.start();
+  await until(async () => (await s.phone.storage.hub().heldEvents(0, 10)).length === 2);
+  assert.deepEqual(applied, [], "the second waits behind the first");
+  firstReady = true;
+  phoneSync.nudgeHeld();
+  await until(() => applied.length === 2);
+  assert.deepEqual(applied, [1, 2]);
+});
+
+test("a TypeError from applying one event holds that event; it does not stall the read", async (t) => {
+  const s = await setup(t);
+  const applied: string[] = [];
+  const phoneSync = s.link(s.phone, [], {
+    applyChatChange: async (event) => {
+      if (event.conversationId === "odd") throw new TypeError("Cannot read properties of undefined");
+      applied.push(event.conversationId);
+      return "applied";
+    }
+  });
+  await s.desktop.log.appendLocalEvent(change("odd", 1));
+  await s.desktop.log.appendLocalEvent(change("normal", 1));
+  await pushAll(s.link(s.desktop, []), s, 2);
+  phoneSync.start();
+  await until(() => applied.length === 1);
+  assert.deepEqual(applied, ["normal"]);
+});
+
+test("another hub at the same address is read from its start", async (t) => {
+  const s = await setup(t);
+  const onPhone: ChatEventEnvelope[] = [];
+  await s.phone.storage.hub().setClientState("hub-id", "hub-before");
+  await s.phone.storage.hub().setClientState("pulled-hub-seq", "1");
+  await s.desktop.log.appendLocalEvent(change("fresh", 1));
+  await s.desktop.log.appendLocalEvent(change("fresh", 2));
+  await pushAll(s.link(s.desktop, []), s, 2);
+  const phoneSync = s.link(s.phone, onPhone);
+  phoneSync.start();
+  await until(() => onPhone.length === 2);
+  assert.equal(await s.phone.storage.hub().clientState("hub-id"), "hub-sync");
+});
+
+test("the hub's holding an event lets go only of the devices that read the hub", async (t) => {
+  const s = await setup(t);
+  const { event } = await s.desktop.log.appendLocalEvent(change("outbox", 1));
+  const sql = (text: string) => (s.desktop.storage as unknown as { runSql(sql: string): Promise<void> }).runSql(text);
+  const rows = (text: string) => (s.desktop.storage as unknown as { queryJson<T>(sql: string): Promise<T[]> }).queryJson<{ deviceId: string; acknowledged: string | null }>(text);
+  await sql(`insert into device_event_outbox(event_id, device_id, channel_id) values ('${event.eventId}', 'device-hub', 'room-hub'), ('${event.eventId}', 'device-relay', 'room-relay');`);
+  await s.desktop.storage.hub().acknowledgeOutbox([event.eventId], new Date().toISOString(), ["device-hub"]);
+  const outbox = await rows(`select device_id as deviceId, acknowledged_at as acknowledged from device_event_outbox where event_id = '${event.eventId}' order by device_id;`);
+  assert.deepEqual(outbox.map((row) => [row.deviceId, Boolean(row.acknowledged)]), [["device-hub", true], ["device-relay", false]]);
 });

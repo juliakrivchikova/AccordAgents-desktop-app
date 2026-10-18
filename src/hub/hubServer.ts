@@ -365,7 +365,7 @@ export class HubServer {
         const after = Number(url.searchParams.get("after") ?? "0");
         const limit = Number(url.searchParams.get("limit") ?? "200");
         if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1) throw new HubRequestError(400, "Invalid position.");
-        return json(response, 200, await this.options.log.pull(device, after, limit));
+        return json(response, 200, { ...await this.options.log.pull(device, after, limit), hubId: this.options.hubId });
       }
       const blob = BLOB_PATH.exec(url.pathname);
       if (blob) {

@@ -283,9 +283,11 @@ export class MachinePeerFabric {
   /**
    * The name of this pair's events. Through a relay it is the room they meet
    * in, since the relay delivers by address. The hub's order reaches every
-   * device, so there two pairs must never share a name: the room of a
-   * machine also names its channel with the desktop, and a channel of two
-   * machines named after it would take the desktop's traffic as its own.
+   * device, so there no two pairs may share a name: the room of a machine
+   * also names its channel with the enrolling desktop, and any other peer's
+   * channel (a machine, a phone, another desktop) named after it would take
+   * that desktop's traffic as its own. Every peer met here gets the name of
+   * the pair, which both ends compute alike.
    */
   private channelIdFor(peer: TrustedPeerAccess): string {
     if (!this.options.hubMode) return this.meetingRoomFor(peer);

@@ -5,11 +5,12 @@ import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload, type ChatChangesPayload 
 import { verifySignedChatEvent } from "./chatEventLog";
 import type { DeviceEventChannel } from "./deviceEventChannel";
 import { DevicePacketAuthenticationError } from "./devicePacketAuthentication";
-import { HubHttpError, type HubClient } from "./hubClient";
+import { HubHttpError, HubTransientError, type HubClient } from "./hubClient";
 import type { StorageService } from "./storage";
 
 const PUSHED_KEY = "pushed-rowid";
 const PULLED_KEY = "pulled-hub-seq";
+const HUB_ID_KEY = "hub-id";
 const PUSH_BATCH = Math.min(100, HUB_PUSH_MAX_EVENTS);
 /** Without the live link nothing announces new events: read anyway. With
  *  it, read now and then as well, in case it died without a word. */
@@ -17,7 +18,9 @@ const POLL_WITHOUT_LIVE_MS = 15_000;
 const POLL_WITH_LIVE_MS = 60_000;
 /** Places held back are read again at most this often unless nudged. */
 const HELD_RETRY_MS = 10_000;
-const HELD_RETRY_BATCH = 100;
+/** Held places read again from the hub per pass (the rest wait for the next). */
+const HELD_RETRY_FETCHES = 100;
+const HELD_PAGE = 500;
 /** A place held this long belongs to a device that is gone. */
 const HELD_MAX_AGE_MS = 14 * 24 * 60 * 60_000;
 const RETRY_MIN_MS = 5_000;
@@ -75,16 +78,17 @@ export function hubChatChangeApplier(storage: StorageService, chat: {
 type ReceiveOutcome = "done" | "unknown-origin" | "not-ready" | "waiting" | "blob-missing" | "error";
 
 /** A failure that says nothing about the event: the hub or the network was
- *  away, or a channel was closing. The page is read again later. Anything
- *  else is about the event, which is held while the others go on. */
-export class HubTransientError extends Error {}
-
+ *  away (the client says so), or a channel was closing. The page is read
+ *  again later. Anything else is about the event, which is held while the
+ *  others go on. */
 function isTransient(error: unknown): boolean {
   if (error instanceof HubTransientError || error instanceof HubHttpError) return true;
-  if (error instanceof TypeError) return true;
-  const name = error instanceof Error ? error.name : "";
-  return name === "AbortError" || name === "TimeoutError" || name === "DeviceEventChannelClosedError";
+  return error instanceof Error && error.name === "DeviceEventChannelClosedError";
 }
+
+/** Held because of who wrote it (an author not known, a channel not set up):
+ *  one such place still held means the others of that author are too. */
+const BY_AUTHOR: ReadonlySet<string> = new Set(["unknown-origin", "not-ready"]);
 
 /**
  * One device's link to the hub: its own events go up in the order they were
@@ -100,6 +104,7 @@ export class HubSync {
   private pullAgain = false;
   private stopLive?: () => void;
   private started = false;
+  private pushStarted = false;
   private stopped = false;
   private pullsPaused = false;
   private retry?: ReturnType<typeof setTimeout>;
@@ -131,9 +136,17 @@ export class HubSync {
     now?: () => number;
   }) {}
 
+  /** Sends this device's events from now on; reading waits for `start`. */
+  startPushing(): void {
+    if (this.pushStarted) return;
+    this.pushStarted = true;
+    this.nudgePush();
+  }
+
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.pushStarted = true;
     this.stopped = false;
     this.stopLive = this.options.client.live(
       () => this.nudgePull(),
@@ -171,7 +184,7 @@ export class HubSync {
 
   /** This device wrote an event: send it now. */
   nudgePush(): void {
-    if (!this.started || this.stopped) return;
+    if (!this.pushStarted || this.stopped) return;
     if (this.pushing) {
       this.pushAgain = true;
       return;
@@ -345,6 +358,22 @@ export class HubSync {
     for (;;) {
       if (this.pullsPaused || this.stopped) return;
       const response = await this.options.client.pull(cursor);
+      if (typeof response.hubId === "string" && response.hubId) {
+        const known = await hub.clientState(HUB_ID_KEY);
+        if (known !== response.hubId) {
+          if (known) {
+            // Another hub at this address: its order starts over, and so does
+            // this device's reading of it.
+            this.options.log?.("hub.sync.hub-changed", { from: known, to: response.hubId });
+            await hub.clearHeld();
+            cursor = 0;
+            await hub.setClientState(PULLED_KEY, "0");
+          }
+          await hub.setClientState(HUB_ID_KEY, response.hubId);
+          if (known) continue;
+        }
+      }
+      if (!Number.isSafeInteger(response.head) || response.head < 0) throw new HubTransientError("The hub answered without a position.");
       if (cursor > response.head) {
         // The hub is behind this device (restored, or set up again): what it
         // places from now on would sit below the cursor and be missed.
@@ -353,17 +382,21 @@ export class HubSync {
         await hub.setClientState(PULLED_KEY, String(cursor));
         continue;
       }
+      const taken: number[] = [];
       for (const item of response.events) {
         if (this.pullsPaused || this.stopped) return;
+        if (!Number.isSafeInteger(item.hubSeq)) continue;
         const outcome = await this.receiveOrHold(item);
-        if (outcome !== "done") {
-          await hub.holdEvent({ hubSeq: item.hubSeq, eventId: item.event.eventId, originId: item.event.originId, reason: outcome, heldAt: new Date(this.now()).toISOString() });
-        }
+        if (outcome === "done") taken.push(item.hubSeq);
+        else await this.hold(item, outcome);
       }
+      // Read again after a failure, a place held the first time may be taken
+      // now: it is no longer held.
+      await hub.releaseHeld(taken);
       // A page is taken whole before the cursor moves: taking an event twice
       // (after a restart mid-page) is harmless, skipping one is not.
       const last = response.events.length > 0 ? response.events[response.events.length - 1].hubSeq : cursor;
-      const through = Math.max(cursor, response.through ?? last);
+      const through = Math.max(cursor, Number.isSafeInteger(response.through) ? response.through : last);
       const moved = through !== cursor;
       if (moved) {
         cursor = through;
@@ -374,29 +407,55 @@ export class HubSync {
     await this.retryHeld();
   }
 
-  /** Offers held places again, oldest first; one author still unknown (or
-   *  one channel still missing) is not asked about twice per pass. */
+  private async hold(item: HubLoggedEvent, reason: string): Promise<void> {
+    await this.options.storage.hub().holdEvent({
+      hubSeq: item.hubSeq, eventId: item.event.eventId, originId: item.event.originId,
+      conversationId: item.event.conversationId, reason, heldAt: new Date(this.now()).toISOString()
+    });
+  }
+
+  /** Offers held places again, oldest first. Places held for their author
+   *  (unknown, or its channel not set up) are asked about once per author
+   *  and pass; every other place is tried on its own. */
   private async retryHeld(): Promise<void> {
     if (this.now() < this.heldRetryAt) return;
     this.heldRetryAt = this.now() + HELD_RETRY_MS;
     const hub = this.options.storage.hub();
     const dropped = await hub.dropHeldBefore(new Date(this.now() - HELD_MAX_AGE_MS).toISOString());
     if (dropped > 0) this.options.log?.("hub.sync.held-dropped", { dropped });
-    const stillMissing = new Set<string>();
-    for (const held of await hub.heldEvents(HELD_RETRY_BATCH)) {
-      if (this.pullsPaused || this.stopped) return;
-      const key = `${held.originId}\n${held.reason}`;
-      if (stillMissing.has(key)) continue;
-      const page = await this.options.client.pull(held.hubSeq - 1, 1);
-      const item = page.events[0];
-      if (!item || item.hubSeq !== held.hubSeq) {
-        // The hub no longer has it there (restored without it): nothing to take.
-        await hub.releaseHeld(held.hubSeq);
-        continue;
+    const authorsStillMissing = new Set<string>();
+    let fetches = 0;
+    let after = 0;
+    for (;;) {
+      const page = await hub.heldEvents(after, HELD_PAGE);
+      if (page.length === 0) return;
+      for (const held of page) {
+        after = held.hubSeq;
+        if (this.pullsPaused || this.stopped) return;
+        const author = `${held.originId}\n${held.reason}`;
+        if (BY_AUTHOR.has(held.reason) && authorsStillMissing.has(author)) continue;
+        if (fetches >= HELD_RETRY_FETCHES) {
+          // The rest next pass, soon.
+          this.heldRetryAt = 0;
+          return;
+        }
+        fetches += 1;
+        const read = await this.options.client.pull(held.hubSeq - 1, 1);
+        const item = read.events[0];
+        if (!item || item.hubSeq !== held.hubSeq || item.event.eventId !== held.eventId) {
+          // The hub no longer has that event there: nothing to take.
+          await hub.releaseHeld([held.hubSeq]);
+          continue;
+        }
+        const outcome = await this.receiveOrHold(item);
+        if (outcome === "done") {
+          await hub.releaseHeld([held.hubSeq]);
+          continue;
+        }
+        if (outcome !== held.reason) await this.hold(item, outcome);
+        if (BY_AUTHOR.has(outcome)) authorsStillMissing.add(`${held.originId}\n${outcome}`);
       }
-      const outcome = await this.receiveOrHold(item);
-      if (outcome === "done") await hub.releaseHeld(held.hubSeq);
-      else stillMissing.add(key);
+      if (page.length < HELD_PAGE) return;
     }
   }
 
@@ -413,6 +472,9 @@ export class HubSync {
 
   private async receive(item: HubLoggedEvent): Promise<ReceiveOutcome> {
     const { event } = item;
+    // A hub that sends a device its own events back (an older one) is not
+    // telling it anything.
+    if (event.originId === await this.options.localOriginId()) return "done";
     const key = await this.options.trustedKey(event.originId);
     if (!key) return "unknown-origin";
     if (!verifySignedChatEvent(event, key)) {
@@ -436,6 +498,9 @@ export class HubSync {
     // Only a chat change is anyone's business beyond its channel: the rest
     // (traffic between two other devices) is neither stored nor applied here.
     if (event.kind !== CHAT_CHANGES_EVENT_KIND) return "done";
+    // No channel orders these: an earlier change of this author to this chat
+    // still held keeps this one behind it.
+    if (await this.options.storage.hub().holdsEarlier(event.originId, event.conversationId, item.hubSeq)) return "waiting";
     const [stored] = await this.options.storage.appendChatEvents([event]);
     if (stored?.status === "conflict") {
       this.options.log?.("hub.sync.conflict", { eventId: event.eventId, reason: stored.conflictReason ?? "" });

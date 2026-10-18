@@ -30,6 +30,25 @@ export class HubHttpError extends Error {
   }
 }
 
+/** The hub or the network was not there (no answer, a timeout): nothing is
+ *  known about the request, which is tried again later. */
+export class HubTransientError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "HubTransientError";
+  }
+}
+
+/** A fetch that did not get an answer becomes a HubTransientError; an answer,
+ *  whatever it says, is returned. */
+async function reach(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetchImpl(url, init);
+  } catch (error) {
+    throw new HubTransientError(`The hub could not be reached: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+}
+
 /**
  * Talks to the User's hub as one device: signed requests, the device's own
  * events pushed (blob fragments first), the order read back from a position,
@@ -50,7 +69,7 @@ export class HubClient {
 
   private async request<T>(method: string, pathWithQuery: string, body?: Buffer | string, contentType?: string): Promise<T> {
     const identity = await this.options.identity();
-    const response = await (this.options.fetchImpl ?? fetch)(`${this.base}${pathWithQuery}`, {
+    const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}${pathWithQuery}`, {
       method,
       headers: {
         authorization: signHubRequest(identity, { method, pathWithQuery, body: body ?? "" }),
@@ -67,7 +86,7 @@ export class HubClient {
   }
 
   async health(): Promise<HubHealth> {
-    const response = await (this.options.fetchImpl ?? fetch)(`${this.base}/v1/health`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}/v1/health`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     if (!response.ok) throw new HubHttpError(response.status, `The hub answered ${response.status}.`);
     return await response.json() as HubHealth;
   }
@@ -84,7 +103,12 @@ export class HubClient {
     if (!isDeviceEventBlobReference(event.payload)) return true;
     const reference = event.payload;
     for (let index = 0; index < reference.fragments; index += 1) {
-      const fragment = await this.options.storage.deviceEventBlobs().fragment(reference, index).catch(() => undefined);
+      // Gone (never kept, or spoiled) is final; any other read failure is
+      // not, and fails the push to be tried again.
+      const fragment = await this.options.storage.deviceEventBlobs().fragment(reference, index).catch((error: unknown) => {
+        if (error instanceof Error && /corrupt/i.test(error.message)) return undefined;
+        throw error;
+      });
       if (!fragment) return false;
       await this.request("PUT", hubBlobFragmentPath(reference, index), Buffer.from(fragment.bytesBase64, "base64"), "application/octet-stream");
     }
@@ -104,7 +128,7 @@ export class HubClient {
     const identity = await this.options.identity();
     for (let index = 0; index < reference.fragments; index += 1) {
       const pathWithQuery = hubBlobFragmentPath(reference, index);
-      const response = await (this.options.fetchImpl ?? fetch)(`${this.base}${pathWithQuery}`, {
+      const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}${pathWithQuery}`, {
         headers: { authorization: signHubRequest(identity, { method: "GET", pathWithQuery }) },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
       });
