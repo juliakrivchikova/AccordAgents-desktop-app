@@ -35,6 +35,11 @@ export const HUB_SCHEMA_SQL = `
     conversation_id text primary key,
     hub_seq integer not null
   );
+  -- On a device that uses a hub: how far it pushed its own events and read the order.
+  create table if not exists hub_client_state (
+    key text primary key,
+    value text not null
+  );
 `;
 
 interface Database {
@@ -186,6 +191,42 @@ export class HubStorage {
       insert into hub_devices(device_id, public_key, role, name, added_at)
         values (${quote(device.deviceId)}, ${quote(device.publicKeyDerBase64)}, 'owner', ${quote(device.name)}, ${quote(device.addedAt)});
     `);
+  }
+
+  async clientState(key: string): Promise<string | undefined> {
+    await this.init();
+    const rows = await this.database.query<{ value: string }>(`select value from hub_client_state where key = ${quote(key)};`);
+    return rows[0]?.value;
+  }
+
+  async setClientState(key: string, value: string): Promise<void> {
+    await this.init();
+    await this.database.execute(`
+      insert into hub_client_state(key, value) values (${quote(key)}, ${quote(value)})
+      on conflict(key) do update set value = excluded.value;
+    `);
+  }
+
+  /** This device's own events after a local position, oldest first. */
+  async ownEventsAfter(originId: string, afterRowid: number, limit: number): Promise<Array<{ rowid: number; event: ChatEventEnvelope }>> {
+    await this.init();
+    const rows = await this.database.query<{ rowid: number; envelope: string }>(`
+      select rowid, envelope_json as envelope from chat_events
+      where origin_id = ${quote(originId)} and rowid > ${afterRowid}
+      order by rowid limit ${Math.max(1, Math.min(limit, 500))};
+    `);
+    return rows.map((row) => ({ rowid: Number(row.rowid), event: JSON.parse(row.envelope) as ChatEventEnvelope }));
+  }
+
+  /** One chain of this device's events from a sequence number, for a hub that reports a gap. */
+  async chainFrom(originId: string, logScopeId: string, fromSeq: number, limit: number): Promise<ChatEventEnvelope[]> {
+    await this.init();
+    const rows = await this.database.query<{ envelope: string }>(`
+      select envelope_json as envelope from chat_events
+      where origin_id = ${quote(originId)} and log_scope_id = ${quote(logScopeId)} and origin_seq >= ${fromSeq}
+      order by origin_seq limit ${Math.max(1, Math.min(limit, 500))};
+    `);
+    return rows.map((row) => JSON.parse(row.envelope) as ChatEventEnvelope);
   }
 
   async savePushSubscription(deviceId: string, endpoint: string, subscriptionJson: string, now: string): Promise<void> {
