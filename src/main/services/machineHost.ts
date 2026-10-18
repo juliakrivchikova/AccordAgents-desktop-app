@@ -158,6 +158,8 @@ export class MachineHostService {
   /** How many times the first copy was requested again per conversation;
    *  a copy that keeps failing (a full disk) is not requested forever. */
   private readonly resyncAttempts = new Map<string, number>();
+  /** Events whose deferral was already reported, so a retry is not logged again. */
+  private readonly reportedDeferrals = new Set<string>();
   /** Turn requests that arrived while a copy of their chat was still being
    *  received: they run once the copy is complete, or fail if it is not. */
   private readonly turnsAwaitingCopy = new Map<string, MachineTurnRequestBody[]>();
@@ -170,7 +172,12 @@ export class MachineHostService {
     const applier = this.options.chatActions;
     if (!applier?.handles(event, hydrated)) return undefined;
     const outcome = await applier.apply(event, hydrated);
-    if (outcome.detail) {
+    // A deferral is reported once; it is retried until it applies, and logging
+    // every attempt wrote hundreds of thousands of identical lines a day.
+    const repeatedDeferral = outcome.status === "deferred" && this.reportedDeferrals.has(event.eventId);
+    if (outcome.status === "deferred") rememberBounded(this.reportedDeferrals, event.eventId);
+    else this.reportedDeferrals.delete(event.eventId);
+    if (outcome.detail && !repeatedDeferral) {
       void this.debugLogs.write("machine-host.action.applied", {
         kind: outcome.kind, targetKey: outcome.targetKey, status: outcome.status, detail: outcome.detail
       });
@@ -607,12 +614,21 @@ export class MachineHostService {
       if (!committed) {
         releaseNative?.();
         this.idleFenced = false;
+        this.retryHeldEventsNow();
         void this.eventChannel.flush().catch(error => { void this.debugLogs.write("machine-host.idle.resume-error", { message: errorMessage(error) }); });
       }
     }
   }
 
   private uncertainIdleRelease?: () => void;
+
+  /** Commands held while the idle fence stood are tried now that it is gone,
+   *  on the desktop's channel and on every other device's (the phone, other
+   *  machines) alike. */
+  private retryHeldEventsNow(): void {
+    this.eventChannel.retryHeldNow();
+    for (const deviceId of this.peers.peerDeviceIds()) this.peers.channel(deviceId)?.retryHeldNow();
+  }
 
   /** A failed fence read is recoverable without restarting the runtime. Only
    * a successful read proving absence permits reopening native admission. */
@@ -621,6 +637,7 @@ export class MachineHostService {
     this.uncertainIdleRelease?.();
     this.uncertainIdleRelease = undefined;
     this.idleFenced = false;
+    this.retryHeldEventsNow();
     void this.eventChannel.flush().catch(error => { void this.debugLogs.write("machine-host.idle.resume-error", { message: errorMessage(error) }); });
     return false;
   }
@@ -772,6 +789,7 @@ export class MachineHostService {
       void this.applyChatAction(event, body).then(outcome => {
         if (outcome === "applied") return channel?.confirmApplied(event);
       }).catch(error => {
+        channel?.retryFailedSoon(event.eventId);
         void this.debugLogs.write("machine-host.approval.retry-pending", { eventId: event.eventId, message: errorMessage(error) });
       });
       return "deferred";
@@ -803,6 +821,7 @@ export class MachineHostService {
       // Stop and other conversations must still be able to arrive.
       const decision = envelope.body;
       void this.approvalExecutor.apply(event, decision).then(() => channel?.confirmApplied(event)).catch((error) => {
+        channel?.retryFailedSoon(event.eventId);
         void this.debugLogs.write("machine-host.approval.retry-pending", { approvalId: decision.approvalId, message: errorMessage(error) });
       });
       return "deferred";
@@ -2151,4 +2170,11 @@ export function mergeReplicatedMessages(own: ChatMessage[], incoming: ChatMessag
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Adds to a set that keeps at most `limit` entries, dropping the oldest. */
+function rememberBounded(set: Set<string>, value: string, limit = 5_000): void {
+  set.delete(value);
+  set.add(value);
+  if (set.size > limit) set.delete(set.values().next().value as string);
 }

@@ -223,6 +223,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private readonly backDeltaListeners: Array<(delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void> = [];
   private conversationLoader?: (conversationId: string) => Promise<Conversation | undefined>;
   private readonly connections = new Map<string, MachineConnection>();
+  /** Events whose deferral was already reported, so a retry is not logged again. */
+  private readonly reportedDeferrals = new Set<string>();
   private deletionRetry?: ReturnType<typeof setTimeout>;
   private deletionDelivery?: Promise<number>;
   private deletionDeliveryRequested = false;
@@ -690,7 +692,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
     const applier = this.options.chatActions;
     if (!applier?.handles(event, hydrated)) return undefined;
     const outcome = await applier.apply(event, hydrated);
-    if (outcome.detail) {
+    // A deferral is reported once; it is retried until it applies, and logging
+    // every attempt wrote hundreds of thousands of identical lines a day.
+    const repeatedDeferral = outcome.status === "deferred" && this.reportedDeferrals.has(event.eventId);
+    if (outcome.status === "deferred") rememberBounded(this.reportedDeferrals, event.eventId);
+    else this.reportedDeferrals.delete(event.eventId);
+    if (outcome.detail && !repeatedDeferral) {
       void this.debugLogs.write("machine-link.action.applied", {
         kind: outcome.kind, targetKey: outcome.targetKey, status: outcome.status, detail: outcome.detail
       });
@@ -1963,4 +1970,11 @@ export function messageBatches(messages: ChatMessage[]): ChatMessage[][] {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Adds to a set that keeps at most `limit` entries, dropping the oldest. */
+function rememberBounded(set: Set<string>, value: string, limit = 5_000): void {
+  set.delete(value);
+  set.add(value);
+  if (set.size > limit) set.delete(set.values().next().value as string);
 }

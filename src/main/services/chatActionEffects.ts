@@ -97,7 +97,11 @@ export function createChatActionEffects(deps: {
         // wrong in the other direction: the User answers after the turn has
         // ended, when that run is no longer anywhere.
         const conversation = await deps.storage.getConversation(conversationId);
-        const message = (conversation?.messages ?? []).find((item) => item.metadata?.pendingChoice?.id === choice[1]);
+        // A choice is raised by a member on the peer that holds its chat, so a
+        // peer without the chat can never own it. Waiting for it here kept
+        // every answer from every other chat on a machine forever.
+        if (!conversation) return false;
+        const message = conversation.messages.find((item) => item.metadata?.pendingChoice?.id === choice[1]);
         if (!message) return undefined;
         return ownsMember(conversation, message.participantId);
       }

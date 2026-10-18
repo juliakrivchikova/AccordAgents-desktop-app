@@ -10510,6 +10510,8 @@ test("only the participant's home owns an approval, including completed receipts
   service.setHostMachineId("machine-home");
   assert.equal(await service.ownsAppToolApproval(conversation.id, "owner-card"), true);
   assert.equal(await service.ownsAppToolApproval(conversation.id, "not-arrived"), undefined);
+  assert.equal(await service.ownsAppToolApproval("chat-not-on-this-peer", "owner-card"), false,
+    "a peer without the chat can never own an answer from it");
 });
 
 test("startAccord rejects Chat Assistant as facilitator", async () => {

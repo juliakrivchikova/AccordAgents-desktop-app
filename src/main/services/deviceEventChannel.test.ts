@@ -152,7 +152,11 @@ test("a failing projection in one chat does not prevent another chat's durable a
     const failed = await pair.a.publish({ conversationId: "first", kind: "native.finished", payload: { text: "held" } });
     const other = await pair.a.publish({ conversationId: "other", kind: "message.created", payload: { text: "independent" } });
     await pair.a.flush();
-    for (const packet of pair.sentA.filter(packet => packet.type === "event")) await assert.rejects(pair.b.receive(packet), /disk full/);
+    const packets = pair.sentA.filter(packet => packet.type === "event");
+    await assert.rejects(pair.b.receive(packets[0]), /disk full/);
+    // The failing action now waits out its backoff, so the next delivery is
+    // not failed again by it.
+    await pair.b.receive(packets[1]);
     assert.deepEqual(pair.applied, [other.eventId]);
     assert.ok(!pair.sentB.some(packet => packet.type === "ack" && packet.receipt.eventId === failed.eventId));
     pair.failedKinds.clear();
@@ -190,6 +194,89 @@ test("overlapping live and mailbox copies reuse durable receipts without rewriti
   } finally { await pair.cleanup(); }
 });
 
+test("held actions wait out a backoff instead of being retried on every delivery", async () => {
+  // A cloud machine held ~500 answers to choices from chats it does not host and
+  // re-tried every one on each incoming packet: about 10,000 attempts a minute,
+  // until the runtime ran out of memory and stopped answering the desktop.
+  const pair = await devices();
+  try {
+    pair.deferredKinds.add("choice.answered");
+    pair.failedKinds.add("machine.settings");
+    for (let i = 0; i < 20; i++) await pair.a.publish({ conversationId: `foreign-${i}`, kind: "choice.answered", payload: { i } });
+    for (let i = 0; i < 5; i++) await pair.a.publish({ conversationId: `settings-${i}`, kind: "machine.settings", payload: { i } });
+    await pair.a.flush();
+    for (const packet of pair.sentA.filter(packet => packet.type === "event")) await pair.b.receive(packet).catch(() => undefined);
+    const heldDeferred = pair.attempts.get("choice.answered") ?? 0;
+    const heldFailed = pair.attempts.get("machine.settings") ?? 0;
+    assert.ok(heldDeferred >= 20 && heldFailed >= 5, "every held action was tried once on arrival");
+    pair.sentA.length = 0;
+    for (let i = 0; i < 30; i++) {
+      await pair.a.publish({ conversationId: "busy", kind: "message.created", payload: { text: `chunk ${i}` } });
+      await pair.a.flush();
+      for (const packet of pair.sentA.splice(0).filter(packet => packet.type === "event")) await pair.b.receive(packet).catch(() => undefined);
+    }
+    assert.equal(pair.applied.length, 30, "unrelated traffic still applies");
+    assert.ok((pair.attempts.get("choice.answered") ?? 0) - heldDeferred <= 40,
+      `deferred answers were retried ${(pair.attempts.get("choice.answered") ?? 0) - heldDeferred} times across 30 deliveries`);
+    assert.ok((pair.attempts.get("machine.settings") ?? 0) - heldFailed <= 10,
+      `failing actions were retried ${(pair.attempts.get("machine.settings") ?? 0) - heldFailed} times across 30 deliveries`);
+  } finally { await pair.cleanup(); }
+});
+
+test("a held action is retried once its backoff is due, or at once when the peer redelivers it", async () => {
+  const pair = await devices();
+  try {
+    pair.heldRetryBaseMs.value = 1_500;
+    pair.reopenReceiver();
+    pair.deferredKinds.add("choice.answered");
+    const answer = await pair.a.publish({ conversationId: "late", kind: "choice.answered", payload: { choice: "x" } });
+    await pair.a.flush();
+    const packet = pair.sentA.find(packet => packet.type === "event" && packet.event.eventId === answer.eventId)!;
+    await pair.b.receive(packet);
+    assert.equal(pair.applied.length, 0);
+    pair.deferredKinds.clear();
+    // Inside the backoff an unrelated delivery leaves it alone...
+    const other = await pair.a.publish({ conversationId: "other", kind: "message.created", payload: { text: "x" } });
+    await pair.a.flush();
+    await pair.b.receive(pair.sentA.find(packet => packet.type === "event" && packet.event.eventId === other.eventId)!);
+    assert.deepEqual(pair.applied, [other.eventId]);
+    // ...and once it is due, the next pass applies it.
+    await new Promise(resolve => setTimeout(resolve, 1_600));
+    const later = await pair.a.publish({ conversationId: "other", kind: "message.created", payload: { text: "y" } });
+    await pair.a.flush();
+    await pair.b.receive(pair.sentA.find(packet => packet.type === "event" && packet.event.eventId === later.eventId)!);
+    assert.deepEqual(pair.applied, [other.eventId, answer.eventId, later.eventId]);
+
+    // A redelivered copy of a held action is tried straight away.
+    pair.deferredKinds.add("choice.answered");
+    const second = await pair.a.publish({ conversationId: "late", kind: "choice.answered", payload: { choice: "y" } });
+    await pair.a.flush();
+    const secondPacket = pair.sentA.find(packet => packet.type === "event" && packet.event.eventId === second.eventId)!;
+    pair.heldRetryBaseMs.value = 60_000;
+    pair.reopenReceiver();
+    await pair.b.receive(secondPacket);
+    pair.deferredKinds.clear();
+    await pair.b.receive(secondPacket);
+    assert.ok(pair.applied.includes(second.eventId));
+  } finally { await pair.cleanup(); }
+});
+
+test("an action confirmed by its owner leaves nothing waiting behind", async () => {
+  const pair = await devices();
+  try {
+    pair.deferredKinds.add("machine.turn.finished");
+    const finished = await pair.a.publish({ conversationId: "chat", kind: "machine.turn.finished", payload: { text: "done" } });
+    await pair.a.flush();
+    await pair.b.receive(pair.sentA.find(packet => packet.type === "event" && packet.event.eventId === finished.eventId)!);
+    const channel = pair.b as unknown as { heldRetry: Map<string, unknown>; receivePending: boolean; drain(): Promise<void> };
+    assert.equal(channel.heldRetry.size, 1);
+    await pair.b.confirmApplied(finished);
+    assert.equal(channel.heldRetry.size, 0, "a confirmed action is not kept for retry");
+    await channel.drain();
+    assert.equal(channel.receivePending, false, "nothing keeps the periodic pass busy afterwards");
+  } finally { await pair.cleanup(); }
+});
+
 async function devices() {
   const directory = await mkdtemp(path.join(tmpdir(), "accord-device-channel-"));
   const pathA = path.join(directory, "a.sqlite3");
@@ -206,6 +293,8 @@ async function devices() {
   const failApply = { value: false };
   const deferredKinds = new Set<string>();
   const failedKinds = new Set<string>();
+  const attempts = new Map<string, number>();
+  const heldRetryBaseMs = { value: undefined as number | undefined };
   const lastPayload = { value: undefined as unknown };
   const errors: Error[] = [];
   const makeA = () => {
@@ -218,14 +307,16 @@ async function devices() {
     const storage = new StorageService({ dbPath: pathB });
     return new DeviceEventChannel({ storage, eventLog: new ChatEventLogService(storage), channelId: "room",
       localDeviceId: identityB.originId, peerDeviceId: identityA.originId, peerPublicKeyDerBase64: identityA.publicKeyDerBase64,
+      ...(heldRetryBaseMs.value !== undefined ? { heldRetryBaseMs: heldRetryBaseMs.value } : {}),
       send: async (packet) => { sentB.push(packet); }, apply: async (event, payload) => {
+        attempts.set(event.kind, (attempts.get(event.kind) ?? 0) + 1);
         if (failApply.value || failedKinds.has(event.kind)) throw new Error("disk full while storing projection");
         if (deferredKinds.has(event.kind)) return "deferred";
         applied.push(event.eventId); lastPayload.value = payload; return "applied";
       }, onError: (error) => { errors.push(error); } });
   };
   const pair = {
-    a: makeA(), b: makeB(), sentA, sentB, applied, failApply, deferredKinds, failedKinds, lastPayload, storageA,
+    a: makeA(), b: makeB(), sentA, sentB, applied, failApply, deferredKinds, failedKinds, lastPayload, storageA, attempts, heldRetryBaseMs,
     sqlB: (sql: string): Promise<void> => (storageB as any).runSql(sql),
     reopen: () => { pair.a.close(); pair.b.close(); sentA.length = 0; pair.a = makeA(); pair.b = makeB(); },
     reopenReceiver: () => { pair.b.close(); pair.b = makeB(); },

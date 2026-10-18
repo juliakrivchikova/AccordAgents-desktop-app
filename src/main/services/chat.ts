@@ -3860,7 +3860,9 @@ export class ChatService {
 
   async ownsAppToolApproval(conversationId: string, approvalId: string): Promise<boolean | undefined> {
     const conversation = await this.storage.getConversation(conversationId);
-    if (!conversation || conversation.kind !== "chat") return undefined;
+    // A request is raised by a member on the peer that holds its chat, so a
+    // peer without the chat can never own the answer to it.
+    if (!conversation || conversation.kind !== "chat") return false;
     const approval = this.chatAppToolApprovals(conversation).find(item => item.id === approvalId);
     if (!approval) return undefined;
     if (approval.homeMachineId && approval.homeMachineId !== this.hostMachineId) return false;

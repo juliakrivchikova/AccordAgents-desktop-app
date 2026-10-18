@@ -114,7 +114,7 @@ test("unknown fence writes recover in the same runtime after SQLite becomes read
       throw new Error("SQLITE_IOERR write response");
     };
     const host = Object.create(MachineHostService.prototype);
-    Object.assign(host, { idleFenced: false, inbound: Promise.resolve(), eventChannel: { flush: async () => {} },
+    Object.assign(host, { idleFenced: false, inbound: Promise.resolve(), eventChannel: { flush: async () => {}, retryHeldNow: () => {} }, peers: { peerDeviceIds: () => [], channel: () => undefined },
       options: { eventStorage: storage }, debugLogs: { write: async () => {} },
       hasWorkForIdleStop: async () => false, publishPowerStatus: async () => {}, shutdown: async () => {} });
     const config = { version: 1, instanceId: "i-0123456789abcdef0", credentials: { accessKeyId: "synthetic", secretAccessKey: "synthetic", region: "us-east-1" } };
@@ -161,7 +161,7 @@ test("host stop loss leaves no local fence; failure after local commit keeps adm
   // Exercise the real host preparation method and SQLite fence, with no
   // provider work or relay traffic required for this persistence interleaving.
   const host = Object.create(MachineHostService.prototype);
-  Object.assign(host, { idleFenced: false, inbound: Promise.resolve(), eventChannel: { flush: async () => {} },
+  Object.assign(host, { idleFenced: false, inbound: Promise.resolve(), eventChannel: { flush: async () => {}, retryHeldNow: () => {} }, peers: { peerDeviceIds: () => [], channel: () => undefined },
     options: { eventStorage: storage }, debugLogs: { write: async () => {} }, hasWorkForIdleStop: async () => false });
   const request = commitHostStop => ({ bootId: "boot", uptimeMs: 10000, idleSinceMs: 1,
     fenceNative: () => { nativeFenced = true; return () => { nativeFenced = false; }; }, stopProviders: async () => {}, commitHostStop });
