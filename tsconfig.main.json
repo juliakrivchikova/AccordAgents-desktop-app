@@ -15,6 +15,7 @@
   "include": [
     "src/main/**/*.ts",
     "src/machine/**/*.ts",
+    "src/hub/**/*.ts",
     "src/preload/**/*.ts",
     "src/shared/**/*.ts",
     "src/renderer/app/constants.ts",

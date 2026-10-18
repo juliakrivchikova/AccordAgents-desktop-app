@@ -38,6 +38,7 @@ import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import type { DeviceEventAppendOptions } from "../../shared/deviceEventDelivery";
 import { DEVICE_EVENT_SCHEMA_SQL, DeviceEventStorage, deviceEventAppendSql } from "./deviceEventStorage";
 import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEventBlobStorage";
+import { HubStorage } from "./hubStorage";
 import { NATIVE_COMMAND_SCHEMA_SQL, NativeCommandStore } from "./nativeCommandStore";
 import { MACHINE_PROGRESS_SCHEMA, MachineProgressStore } from "./machineProgressStore";
 import { MACHINE_POWER_SCHEMA, MachinePowerStore } from "./machinePowerStore";
@@ -1876,6 +1877,16 @@ export class StorageService {
 
   machinePower(): MachinePowerStore {
     return new MachinePowerStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
+  }
+
+  /** The hub's own tables (its order, roster, push subscriptions). Only the
+   *  hub process uses them. */
+  hub(): HubStorage {
+    return new HubStorage({
+      init: () => this.init(),
+      query: <T>(sql: string) => this.queryJson<T>(sql),
+      execute: (sql: string) => this.runSql(sql)
+    });
   }
 
   deviceEventBlobs(): DeviceEventBlobStorage {
