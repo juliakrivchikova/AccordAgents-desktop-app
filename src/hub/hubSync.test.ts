@@ -61,6 +61,10 @@ async function until(check: () => boolean | Promise<boolean>, timeoutMs = 5_000)
 }
 
 test("what one device writes reaches another through the hub, live, once, in order", async (t) => {
+  // As in Electron, whose Node has no WebSocket of its own.
+  const builtIn = Object.getOwnPropertyDescriptor(globalThis, "WebSocket");
+  Object.defineProperty(globalThis, "WebSocket", { value: undefined, configurable: true, writable: true });
+  t.after(() => { if (builtIn) Object.defineProperty(globalThis, "WebSocket", builtIn); });
   const s = await setup(t);
   const fromDesktop: ChatEventEnvelope[] = [];
   const onPhone: ChatEventEnvelope[] = [];

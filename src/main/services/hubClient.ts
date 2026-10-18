@@ -6,7 +6,7 @@ import type { StorageService } from "./storage";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
-/** The little of a WebSocket the live link uses (Node 22's global one, or `ws`). */
+/** The little of a WebSocket the live link uses. */
 interface LiveSocket {
   onmessage: ((event: { data: unknown }) => void) | null;
   onclose: (() => void) | null;
@@ -14,6 +14,8 @@ interface LiveSocket {
   onopen: (() => void) | null;
   close(): void;
 }
+/** `ws`, not a global: Electron's Node has no WebSocket of its own. */
+const WebSocketClient = require("ws") as new (url: string) => LiveSocket;
 
 export class HubHttpError extends Error {
   constructor(readonly status: number, message: string) {
@@ -122,7 +124,7 @@ export class HubClient {
         const identity = await this.options.identity();
         const auth = signHubRequest(identity, { method: "GET", pathWithQuery: "/v1/live" });
         const url = `${this.base.replace(/^http/, "ws")}/v1/live?auth=${encodeURIComponent(auth)}`;
-        const created = this.options.createSocket?.(url) ?? (new (globalThis as unknown as { WebSocket: new (url: string) => LiveSocket }).WebSocket(url));
+        const created = this.options.createSocket?.(url) ?? new WebSocketClient(url);
         socket = created;
         created.onopen = () => {
           attempt = 0;

@@ -151,6 +151,19 @@ interface MachineAttachmentWaiter {
  *  honestly instead of running a member on a chat that has not arrived. */
 const MACHINE_CHAT_WAIT_MS = 10 * 60 * 1000;
 
+/**
+ * How a turn ended, as the desktop is told. A Stop reaches the run either
+ * through this host's cancel or through the User's stop action applied by
+ * the chat; either way the chat marks the bubble stopped once the run is
+ * gone, and that is an interruption, not a failure. A stop the chat could not
+ * confirm stays a failure.
+ */
+function finishedTurnStatus(messages: ChatMessage[], aborted: boolean | undefined, failed = messages.some((message) => message.status === "error")): MachineTurnFinishedBody["status"] {
+  if (messages.some((message) => message.metadata?.terminalReason === "stop-unconfirmed")) return "failed";
+  if (aborted || messages.some((message) => message.metadata?.terminalReason === "user-stopped")) return "interrupted";
+  return failed ? "failed" : "completed";
+}
+
 export class MachineHostService {
   private eventChannel!: DeviceEventChannel;
   private readonly client: TunnelClient;
@@ -1646,8 +1659,7 @@ export class MachineHostService {
         conversationId: request.conversationId,
         runId: request.runId,
         participantId: request.participantId,
-        status: result.messages.some((message) => message.metadata?.terminalReason === "stop-unconfirmed") ? "failed"
-          : controller.signal.aborted ? "interrupted" : result.messages.some((message) => message.status === "error") ? "failed" : "completed",
+        status: finishedTurnStatus(result.messages, controller.signal.aborted),
         messages: result.messages,
         warnings: result.warnings,
         finishedAt: this.now().toISOString()
@@ -1689,8 +1701,7 @@ export class MachineHostService {
         type: "machine.turn.finished", conversationId: run.conversationId,
         receiptId: randomUUID(),
         runId: run.runId, participantId: run.participantId,
-        status: result.messages.some((message) => message.metadata?.terminalReason === "stop-unconfirmed") ? "failed"
-          : run.aborted ? "interrupted" : failed ? "failed" : "completed",
+        status: finishedTurnStatus(result.messages, run.aborted, failed),
         ...result, finishedAt: this.now().toISOString()
       };
       this.pendingTerminals.set(run.runId, terminal);

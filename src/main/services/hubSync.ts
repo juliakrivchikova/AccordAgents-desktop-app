@@ -6,6 +6,8 @@ import type { StorageService } from "./storage";
 const PUSHED_KEY = "pushed-rowid";
 const PULLED_KEY = "pulled-hub-seq";
 const PUSH_BATCH = 100;
+/** Without the live link nothing announces new events: read anyway. */
+const POLL_WITHOUT_LIVE_MS = 15_000;
 
 export type HubApplyOutcome = "applied" | "ignored";
 
@@ -23,6 +25,7 @@ export class HubSync {
   private stopLive?: () => void;
   private stopped = false;
   private retry?: ReturnType<typeof setTimeout>;
+  private poll?: ReturnType<typeof setInterval>;
   private connected = false;
 
   constructor(private readonly options: {
@@ -50,6 +53,7 @@ export class HubSync {
     this.stopLive = this.options.client.live(
       () => this.nudgePull(),
       (connected) => {
+        if (connected !== this.connected) this.options.log?.("hub.sync.live", { connected });
         this.connected = connected;
         this.options.onConnectionChange?.(connected);
         if (connected) {
@@ -61,12 +65,20 @@ export class HubSync {
     );
     this.nudgePush();
     this.nudgePull();
+    this.poll = setInterval(() => {
+      if (!this.connected) {
+        this.nudgePush();
+        this.nudgePull();
+      }
+    }, POLL_WITHOUT_LIVE_MS);
+    this.poll.unref?.();
   }
 
   stop(): void {
     this.stopped = true;
     this.stopLive?.();
     if (this.retry) clearTimeout(this.retry);
+    if (this.poll) clearInterval(this.poll);
   }
 
   isConnected(): boolean {

@@ -133,6 +133,49 @@ test("a turn waiting for its chat state counts as held, and a stop removes it be
   host.close();
 });
 
+test("a run the chat stopped on the User's stop action is reported as interrupted, not failed", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const store = new Map();
+  const host = new MachineHostService(
+    {
+      // The stop action reached the chat before this host's cancel: the chat
+      // ended the run and marked the bubble stopped by the User.
+      runMachineHostedTurn: async (request) => ({ messages: [{ id: request.pendingMessageId, role: "participant", participantId: "p1", content: "@bot stopped by user.",
+        createdAt: new Date().toISOString(), status: "error", metadata: { runId: request.runId, terminalReason: "user-stopped" } }], warnings: [] }),
+      cancelRun: () => true,
+      respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) store.set(id, next); }
+    },
+    { getConversation: async (id) => store.get(id) },
+    { importMachineSettingsSnapshot: async () => undefined },
+    { write: async () => undefined },
+    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
+  );
+  await host.start();
+  await settle();
+  const inbound = async (body) => {
+    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
+    await host.inbound;
+    await host.outbound;
+    await host.eventChannel.flush();
+  };
+  const member = { id: "p1", handle: "bot", kind: "claude-code", homeMachineId: "test-home" };
+  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
+  store.set("conv-stop-action", { id: "conv-stop-action", kind: "chat", title: "t", createdAt: "2026-10-18T00:00:00.000Z", updatedAt: "2026-10-18T00:00:00.000Z",
+    metadata: { participants: [member] }, messages: [{ id: "m1", role: "user", content: "hi", createdAt: "2026-10-18T00:00:00.000Z" }], findings: [] });
+  await inbound({ type: "machine.turn.request", conversationId: "conv-stop-action", participantId: "p1", participant: member, messageId: "m1", runId: "run-stop-action", pendingMessageId: "pending-stop-action", requestedAt: new Date().toISOString() });
+  let terminal;
+  for (let attempt = 0; attempt < 40 && !terminal; attempt += 1) {
+    await settle(50);
+    await host.eventChannel.flush();
+    terminal = (await sentBodies(client, host.options.pairing)).find((body) => body.type === "machine.turn.finished" && body.runId === "run-stop-action");
+  }
+  assert.ok(terminal, "the stopped run reports a result");
+  assert.equal(terminal.status, "interrupted", "a stop the chat confirmed is an interruption");
+  host.close();
+});
+
 test("a picture arrives in parts and is reassembled; a desktop that leaves fails the read at once", async () => {
   const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
   const client = stubClient();
