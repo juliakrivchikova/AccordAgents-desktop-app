@@ -68,10 +68,16 @@ export function buildHubSetupCommand(region: string, publicKey: string): string 
     // A server made before (from another computer, or a key since lost): this
     // computer's key is added with the short-lived access AWS gives its owner.
     '  TMP=$(mktemp -d); trap \'rm -rf "$TMP"\' EXIT',
-    '  L get-instance-access-details --instance-name "$NAME" --protocol ssh --query accessDetails.privateKey --output text > "$TMP/key"',
-    '  L get-instance-access-details --instance-name "$NAME" --protocol ssh --query accessDetails.certKey --output text > "$TMP/key-cert.pub"',
+    // One request: each one issues a new key and certificate, and only a
+    // matching pair logs in. perl ships with macOS and Linux.
+    '  L get-instance-access-details --instance-name "$NAME" --protocol ssh --query accessDetails --output json > "$TMP/access.json"',
+    '  umask 077',
+    '  perl -MJSON::PP -0777 -ne \'my $d = decode_json($_); print $d->{privateKey}\' "$TMP/access.json" > "$TMP/key"',
+    '  perl -MJSON::PP -0777 -ne \'my $d = decode_json($_); print $d->{certKey}\' "$TMP/access.json" > "$TMP/key-cert.pub"',
     '  chmod 600 "$TMP/key"',
-    '  ssh -i "$TMP/key" -o CertificateFile="$TMP/key-cert.pub" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 ' +
+    // -n: the script itself arrives on stdin (pasted as a here-document),
+    // and ssh would read the rest of it.
+    '  ssh -n -i "$TMP/key" -o CertificateFile="$TMP/key-cert.pub" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20 ' +
       `"${HUB_SSH_USER}@$IP" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && (grep -qxF '$KEY' ~/.ssh/authorized_keys 2>/dev/null || echo '$KEY' >> ~/.ssh/authorized_keys) && chmod 600 ~/.ssh/authorized_keys"`,
     "fi",
     `BLOB=$(printf '{"version":1,"region":"%s","instanceName":"%s","ip":"%s","user":"${HUB_SSH_USER}"}' "$REGION" "$NAME" "$IP" | base64 | tr -d '\\n')`,

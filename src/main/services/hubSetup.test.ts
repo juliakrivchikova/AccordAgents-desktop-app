@@ -163,8 +163,7 @@ echo "$args" >> "$S/aws.log"
 case "$args" in
   *get-regions*) echo us-east-1a ;;
   *create-instances*) touch "$S/instance" ;;
-  *get-instance-access-details*privateKey*) printf -- '-----BEGIN KEY-----\\nX\\n-----END KEY-----\\n' ;;
-  *get-instance-access-details*certKey*) echo "ssh-ed25519-cert-v01@openssh.com AAAA" ;;
+  *get-instance-access-details*) n=$(( $(cat "$S/access" 2>/dev/null || echo 0) + 1 )); echo $n > "$S/access"; printf '{"privateKey":"%s","certKey":"%s"}' "-----BEGIN KEY-----\\\\nPAIR-$n\\\\n-----END KEY-----\\\\n" "ssh-ed25519-cert-v01@openssh.com PAIR-$n" ;;
   *get-instance*state.name*) [ -f "$S/instance" ] && echo running || exit 254 ;;
   *get-instance*) [ -f "$S/instance" ] || exit 254 ;;
   *allocate-static-ip*) touch "$S/ip" ;;
@@ -176,7 +175,16 @@ case "$args" in
   *) echo "unexpected aws $args" >&2; exit 2 ;;
 esac
 `, { mode: 0o755 });
-  await writeFile(path.join(bin, "ssh"), `#!/bin/bash\necho "$*" >> ${JSON.stringify(path.join(dir, "ssh.log"))}\n`, { mode: 0o755 });
+  // The key and its certificate must come from one AWS answer to log in.
+  await writeFile(path.join(bin, "ssh"), `#!/bin/bash
+echo "$*" >> ${JSON.stringify(path.join(dir, "ssh.log"))}
+key=""; cert=""; nostdin=""
+while [ $# -gt 0 ]; do case "$1" in -n) nostdin=1 ;; -i) key=$2; shift ;; -o) case "$2" in CertificateFile=*) cert=\${2#CertificateFile=} ;; esac; shift ;; esac; shift; done
+k=$(grep -o 'PAIR-[0-9]*' "$key"); c=$(grep -o 'PAIR-[0-9]*' "$cert")
+[ -n "$k" ] && [ "$k" = "$c" ] || { echo "Permission denied (publickey)." >&2; exit 255; }
+# Like the real one: without -n, whatever is on stdin is sent to the server.
+[ -n "$nostdin" ] || cat > /dev/null
+`, { mode: 0o755 });
   const command = buildHubSetupCommand("us-east-1", KEY);
   const runIt = () => execFileSync("zsh", ["-c", command], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, LANG: "C" }, encoding: "utf8" });
   const first = runIt();
