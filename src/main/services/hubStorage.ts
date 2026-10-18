@@ -208,11 +208,16 @@ export class HubStorage {
   }
 
   /** This device's own events after a local position, oldest first. */
-  async ownEventsAfter(originId: string, afterRowid: number, limit: number): Promise<Array<{ rowid: number; event: ChatEventEnvelope }>> {
+  async ownEventsAfter(originId: string, afterRowid: number, limit: number, scopePrefixes?: string[]): Promise<Array<{ rowid: number; event: ChatEventEnvelope }>> {
     await this.init();
+    // Only the scopes the hub carries: a desktop's own log also holds what it
+    // once wrote for other transports (phone mailbox batches), which no hub needs.
+    const scopes = scopePrefixes?.length
+      ? `and (${scopePrefixes.map((prefix) => `substr(log_scope_id, 1, ${prefix.length}) = ${quote(prefix)}`).join(" or ")})`
+      : "";
     const rows = await this.database.query<{ rowid: number; envelope: string }>(`
       select rowid, envelope_json as envelope from chat_events
-      where origin_id = ${quote(originId)} and rowid > ${afterRowid}
+      where origin_id = ${quote(originId)} and rowid > ${afterRowid} ${scopes}
       order by rowid limit ${Math.max(1, Math.min(limit, 500))};
     `);
     return rows.map((row) => ({ rowid: Number(row.rowid), event: JSON.parse(row.envelope) as ChatEventEnvelope }));

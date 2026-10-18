@@ -104,6 +104,9 @@ import { machineChatCopyProvider } from "./services/chatCopy";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "./appToolWiring";
 import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
+import { HubClient } from "./services/hubClient";
+import { HubSync } from "./services/hubSync";
+import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload } from "./services/chatChanges";
 import { ScriptSecretStore, ScriptStore } from "./services/scriptStore";
 import { hostPlatform } from "./platform";
 import {
@@ -405,6 +408,36 @@ const cloudRunDoctorService: CloudRunDoctorService = new CloudRunDoctorService({
   }
 });
 const cloudRunSetupSession = new CloudRunSetupSession();
+/** The link to the User's own server, when one is set up. */
+let hubSync: HubSync | undefined;
+
+async function startHubLink(): Promise<void> {
+  const config = await settingsService.getHubConfig();
+  if (!config || hubSync) return;
+  const identity = () => chatEventLogService.getOrCreateDeviceIdentity();
+  hubSync = new HubSync({
+    client: new HubClient({ url: config.url, identity, storage: storageService }),
+    storage: storageService,
+    localOriginId: async () => (await identity()).originId,
+    // Only the User's own devices: its machines and the phones it trusts.
+    trustedKey: async (originId) => {
+      const machine = (await settingsService.listMachines()).find((item) => item.deviceId === originId);
+      if (machine?.lastHello?.publicKeyDerBase64) return machine.lastHello.publicKeyDerBase64;
+      return (await settingsService.listTrustedDevices()).find((device) => device.deviceId === originId)?.publicKeyDerBase64;
+    },
+    apply: async (event) => {
+      if (event.kind !== CHAT_CHANGES_EVENT_KIND) return "ignored";
+      const payload = await storageService.deviceEventBlobs().hydrate(event.payload);
+      if (!isChatChangesPayload(payload)) return "ignored";
+      return (await chatService.applyRemoteChatChanges(event, payload)) === "applied" ? "applied" : "ignored";
+    },
+    scopePrefixes: ["chat-changes:"],
+    log: (event, payload) => { void debugLogService.write(event, payload); }
+  });
+  hubSync.start();
+  void debugLogService.write("hub.link.started", { url: config.url });
+}
+
 /** The AWS instance a worker target names (its host key alias carries it). */
 function awsInstanceOfWorker(worker: { hostKeyAlias?: string }): string | undefined {
   const prefix = "accordagents-";
@@ -3795,9 +3828,16 @@ void app.whenReady().then(async () => {
       storage: storageService,
       log: chatEventLogService,
       recipients: () => machineLinkService?.chatChangeRecipients() ?? [],
-      onCommitted: () => machineLinkService?.nudgeEventChannels(),
-      machineOriginId: (machineId) => machineLinkService?.machineDeviceId(machineId)
+      onCommitted: () => {
+        machineLinkService?.nudgeEventChannels();
+        hubSync?.nudgePush();
+      },
+      machineOriginId: (machineId) => machineLinkService?.machineDeviceId(machineId),
+      alwaysEmit: () => Boolean(hubSync)
     }));
+    await startHubLink().catch((error: unknown) => {
+      void debugLogService.write("hub.link.start-error", { message: error instanceof Error ? error.message : String(error) });
+    });
     // Chat change events every device has confirmed are forgotten.
     scheduleChatChangePruning({
       storage: storageService,
@@ -4109,6 +4149,7 @@ app.on("before-quit", (event) => {
     return;
   }
   quitCleanupStarted = true;
+  hubSync?.stop();
   const cleanup = Promise.allSettled([
     cliAgentRunner.shutdownWarmAgents(),
     scriptService.stop().then(() => appMcpService.stop())

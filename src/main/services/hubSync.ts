@@ -35,6 +35,8 @@ export class HubSync {
     apply: (event: ChatEventEnvelope) => Promise<HubApplyOutcome>;
     log?: (event: string, payload: Record<string, unknown>) => void;
     onConnectionChange?: (connected: boolean) => void;
+    /** Log scopes (by prefix) whose events this device sends; all when unset. */
+    scopePrefixes?: string[];
   }) {}
 
   start(): void {
@@ -125,7 +127,7 @@ export class HubSync {
     const originId = await this.options.localOriginId();
     let cursor = Number(await hub.clientState(PUSHED_KEY) ?? "0") || 0;
     for (;;) {
-      const page = await hub.ownEventsAfter(originId, cursor, PUSH_BATCH);
+      const page = await hub.ownEventsAfter(originId, cursor, PUSH_BATCH, this.options.scopePrefixes);
       if (page.length === 0) return;
       const response = await this.options.client.push(page.map((item) => item.event));
       let advanced = cursor;

@@ -188,6 +188,8 @@ interface StoredSettings {
    *  up before the switch existed keeps working. Shared with machines in the
    *  settings snapshot: the machine's runtime is what decides to stop. */
   machineAutoStopEnabled?: boolean;
+  /** The User's own server (hub), once it is set up. */
+  hub?: { url: string; hubId?: string };
   /** When the User last changed the switch: a machine's report older than
    *  this predates the change and says nothing about whether it arrived. */
   machineAutoStopChangedAt?: string;
@@ -3565,6 +3567,23 @@ export class SettingsService {
   }
 
   /** Whether the User left automatic stop on; the stop key is separate. */
+  /** The hub this desktop syncs with. `ACCORDAGENTS_HUB_URL` points a local
+   *  run at a test hub. */
+  async getHubConfig(): Promise<{ url: string; hubId?: string } | undefined> {
+    const override = process.env.ACCORDAGENTS_HUB_URL?.trim();
+    if (override) return { url: override };
+    const stored = (await this.readStored()).hub;
+    return stored && typeof stored.url === "string" && stored.url ? stored : undefined;
+  }
+
+  async saveHubConfig(config: { url: string; hubId?: string } | undefined): Promise<void> {
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+    if (config) stored.hub = { url: config.url, ...(config.hubId ? { hubId: config.hubId } : {}) };
+    else delete stored.hub;
+    await this.writeStored(stored, true);
+  }
+
   async getMachineAutoStopEnabled(): Promise<boolean> {
     const stored = await this.readStored();
     // An unreadable file is not a switch left on: the machine must not stop

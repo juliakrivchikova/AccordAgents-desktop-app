@@ -34,6 +34,9 @@ export interface ChatChangeTransportOptions {
   desktopOriginId?(): string | undefined;
   /** The device identity of a machine, by machine id, when known. */
   machineOriginId?(machineId: string): string | undefined;
+  /** True while a hub keeps every change, so changes are written even with
+   *  no other recipient. */
+  alwaysEmit?(): boolean;
 }
 
 function participantHome(conversation: Conversation, participantId: string | undefined): string | undefined {
@@ -78,7 +81,7 @@ export function createChatChangeTransport(options: ChatChangeTransportOptions): 
     return remoteAuthor(message);
   };
   return {
-    hasRecipients: () => options.recipients().length > 0,
+    hasRecipients: () => options.recipients().length > 0 || options.alwaysEmit?.() === true,
     head: async (conversationId) => {
       const { originId } = await options.log.getOrCreateDeviceIdentity();
       const logScopeId = chatChangesLogScope(conversationId);

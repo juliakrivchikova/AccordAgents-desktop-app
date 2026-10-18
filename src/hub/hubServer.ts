@@ -69,9 +69,22 @@ export class HubServer {
     this.roster = undefined;
   }
 
+  private rosterReadAt = 0;
+
   private async device(deviceId: string): Promise<HubDevice | undefined> {
-    this.roster ??= this.options.storage.hub().devices().then((devices) => new Map(devices.map((device) => [device.deviceId, device])));
+    const read = () => {
+      this.rosterReadAt = this.now();
+      return this.options.storage.hub().devices().then((devices) => new Map(devices.map((device) => [device.deviceId, device])));
+    };
+    this.roster ??= read();
     try {
+      const known = (await this.roster).get(deviceId);
+      if (known) return known;
+      // A device added by the setup (another process) is found on a fresh
+      // read; an unknown one cannot make the hub read the roster more than
+      // once a second.
+      if (this.now() - this.rosterReadAt < 1_000) return undefined;
+      this.roster = read();
       return (await this.roster).get(deviceId);
     } catch (error) {
       this.roster = undefined;
