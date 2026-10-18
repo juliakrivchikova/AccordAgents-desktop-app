@@ -102,7 +102,7 @@ DOM/CSS state in the desktop app.
 8. Save screenshots under `screenshots/qa-*.png` and inspect them before
    reporting.
 9. Stop only temporary Electron processes or tool sessions you started. Leave
-   a user-requested detached instance running and report its label, PID, port,
+   a user-requested detached instance running and report its label, port,
    profile directory, and log path.
 
 ## Worktree Electron Check
@@ -158,7 +158,9 @@ ps -axo pid,ppid,command | rg "remote-debugging-port=9223|accordagents-qa-|/path
 ```
 
 Kill only the PIDs that match the isolated instance you started. If in doubt,
-leave the process running and ask the user.
+leave the process running and ask the user. Never stop or restart a
+launchd-detached instance by PID; use `launchctl bootout` or
+`launchctl kickstart -k` from the section below.
 
 ## macOS Electron Launch Repair
 
@@ -207,47 +209,79 @@ QA_DIR="$(mktemp -d /private/tmp/accordagents-qa.XXXXXX)"
 QA_PORT=9340 # Choose a port not used by any existing AccordAgents instance.
 QA_LABEL="com.accordagents.qa-$QA_PORT"
 QA_LOG="$QA_DIR/electron.log"
+QA_PLIST="$QA_DIR/$QA_LABEL.plist"
 NODE_BIN="$(command -v node)"
 ELECTRON_CLI="${ELECTRON_CLI:-$REPO_ROOT/node_modules/electron/cli.js}"
 test -f "$ELECTRON_CLI"
 ```
 
-Before submitting, require both the CDP port and launchd label to be unused.
-Both checks below must fail with connection-refused/not-found. If either
-succeeds, choose another pair; never remove a job you did not start.
+Before loading the job, require both the CDP port and launchd label to be
+unused. Both checks below must fail with connection-refused/not-found. If either
+succeeds, choose another pair; never remove a job you did not start. If the
+label is your own job showing `not running` because the user quit it, reopen it
+with `launchctl kickstart "gui/$(id -u)/$QA_LABEL"`; `launchctl bootstrap`
+fails on a label that is already loaded.
 
 ```bash
 curl -fsS --max-time 2 "http://127.0.0.1:$QA_PORT/json/version"
 launchctl print "gui/$(id -u)/$QA_LABEL"
 ```
 
-Then submit the job:
+Then write the job definition and load it:
 
 ```bash
-launchctl submit -l "$QA_LABEL" -o "$QA_LOG" -e "$QA_LOG" -- \
-  /usr/bin/env ACCORDAGENTS_USER_DATA_DIR="$QA_DIR" \
+"$NODE_BIN" -e '
+  const [label, log, dir, ...args] = process.argv.slice(1);
+  process.stdout.write(JSON.stringify({
+    Label: label,
+    ProgramArguments: args,
+    EnvironmentVariables: { ACCORDAGENTS_USER_DATA_DIR: dir },
+    RunAtLoad: true,
+    KeepAlive: false,
+    ProcessType: "Interactive",
+    ExitTimeOut: 5,
+    StandardOutPath: log,
+    StandardErrorPath: log
+  }));
+' -- "$QA_LABEL" "$QA_LOG" "$QA_DIR" \
   "$NODE_BIN" "$ELECTRON_CLI" \
   --remote-debugging-port="$QA_PORT" "$REPO_ROOT" \
   --user-data-dir="$QA_DIR" \
   --disable-backgrounding-occluded-windows \
   --disable-renderer-backgrounding \
-  --disable-background-timer-throttling
+  --disable-background-timer-throttling \
+  | plutil -convert xml1 -o "$QA_PLIST" -
+launchctl bootstrap "gui/$(id -u)" "$QA_PLIST"
 ```
 
-Never pass `node_modules/.bin/electron` to `launchctl`: its
-`#!/usr/bin/env node` wrapper fails under launchd's restricted `PATH`. `nohup`
-is also not sufficient under provider session cleanup.
+Never start the instance with `launchctl submit`: it always creates a job that
+launchd restarts whenever its process exits, so the instance reopens every time
+the user quits it. With `KeepAlive` off, the app stays closed once it exits for
+any reason, and the job stays loaded as `not running` with its last exit code
+until you boot it out. `ExitTimeOut` force-quits the app 5 seconds after a stop
+request, because it does not reliably exit on SIGTERM alone. Restart it after a
+rebuild with `launchctl kickstart -k "gui/$(id -u)/$QA_LABEL"`. Never pass
+`node_modules/.bin/electron` to `launchctl`: its `#!/usr/bin/env node` wrapper
+fails under launchd's restricted `PATH`. `nohup` is also not sufficient under
+provider session cleanup.
 
 Verify `launchctl print "gui/$(id -u)/$QA_LABEL"`, the CDP version endpoint,
-and an `AccordAgents` page target before reporting success. A submitted job can
-respawn after its process is closed or killed, so those actions do not stop it.
+and an `AccordAgents` page target before reporting success. If the job shows
+`not running`, the app already exited; read `$QA_LOG` and the last exit code.
 The profile can contain provider state and the launch log is not rotated, so do
 not leave a temporary job running longer than the QA session. Stop it only with
-`launchctl remove "$QA_LABEL"`; never use broad Electron kills. Confirm that
-the exact CDP port is closed, then move the recipe-created profile to Trash:
+`launchctl bootout "gui/$(id -u)/$QA_LABEL"`; never use broad Electron kills.
+Confirm that the exact CDP port is closed, then move the recipe-created profile
+to Trash; the block finds the profile from the job itself:
 
 ```bash
-launchctl remove "$QA_LABEL"
+QA_PLIST="$(launchctl print "gui/$(id -u)/$QA_LABEL" | sed -n 's/^[[:space:]]*path = //p' | head -1)"
+QA_DIR="$(dirname "$QA_PLIST")"
+case "$QA_DIR" in
+  /private/tmp/accordagents-qa.*) ;;
+  *) echo "Refusing: $QA_LABEL is not a recipe-created QA job ($QA_PLIST)" >&2; exit 1 ;;
+esac
+launchctl bootout "gui/$(id -u)/$QA_LABEL"
 for attempt in 1 2 3 4 5; do
   curl -fsS --max-time 1 "http://127.0.0.1:$QA_PORT/json/version" >/dev/null 2>&1 || break
   sleep 1
@@ -256,14 +290,12 @@ if curl -fsS --max-time 1 "http://127.0.0.1:$QA_PORT/json/version" >/dev/null 2>
   echo "QA port $QA_PORT is still open; refusing profile cleanup" >&2
   exit 1
 fi
-case "$QA_DIR" in
-  /private/tmp/accordagents-qa.*) mv -- "$QA_DIR" "$HOME/.Trash/" ;;
-  *) echo "Refusing to move unexpected QA_DIR: $QA_DIR" >&2; exit 1 ;;
-esac
+mv -- "$QA_DIR" "$HOME/.Trash/"
 ```
 
 Leave both the job and profile in place when the user asked to keep using the
-instance; run this cleanup only after they say it is no longer needed.
+instance, and tell them that quitting the app closes it for good; run this
+cleanup only after they say it is no longer needed.
 
 ## Blocked Standard
 
