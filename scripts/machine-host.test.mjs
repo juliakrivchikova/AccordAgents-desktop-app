@@ -302,7 +302,7 @@ test("a ChatService native resume is listed, stopped and delivered through the h
   const chat = Object.create(ChatService.prototype);
   Object.assign(chat, {
     chatRunMeta: new Map(), chatRunControllers: new Map(), activeConversationRunIds: new Map(), activeRunIds: new Set(),
-    remoteRunHandlesByRun: new Map(), participantRunSettledListeners: new Set(),
+    participantRequestRunners: new Map(), remoteRunHandlesByRun: new Map(), participantRunSettledListeners: new Set(),
     appSendMessageCountsByRun: new Map(), appSendMessageImageBytesByRun: new Map(), debugLogs: logs,
     settledParticipantRunResult: async () => ({ messages: [{ id: "native-bubble", role: "participant", participantId: "p1", status: "error", content: "partial", createdAt: new Date().toISOString(), metadata: { runId: "native-resume", terminalReason: "user-stopped" } }], warnings: [] })
   });

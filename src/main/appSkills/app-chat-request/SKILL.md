@@ -58,24 +58,29 @@ Call `app_chat_request_participants`:
       "reason": "Optional brief reason this participant input is needed."
     }
   ],
-  "timeoutMs": 120000,
   "resumeRequester": true
 }
 ```
 
 Use the handle with or without `@`. For multiple independent targets, include
-one request item per target. Do not include yourself as a target.
+one request item per target in a single call: a turn can hold only one open
+request. Do not include yourself as a target.
 
 ## After the tool returns
 
-- If the tool returns replies in this turn, use those replies immediately in
-  your answer.
+- With the default `resumeRequester: true` the call returns at once and replies
+  arrive in a fresh turn. Only with `resumeRequester: false` (and an optional
+  `timeoutMs` wait) does the tool return replies in this turn; then use them
+  immediately in your answer.
 - If the tool returns `pending_approval`, end your turn with exactly:
   `Participant request is awaiting User approval.`
 - If the tool returns `running`, end your turn with one short status line that
   says the request is waiting for participant replies.
 - If the tool returns `failed`, explain the failure briefly and do not invent a
   participant answer.
+- Exception: when another active skill tells you to finish specific work in the
+  same turn that does not depend on the answer (Accord's own draft, for
+  example), do that work first, then end the turn as above.
 - Do not repeatedly poll status in the same turn.
 
 Use `app_chat_get_participant_request_status` only to recover a previous

@@ -126,6 +126,9 @@ function invalid<T>(message: string): ArtifactResult<T> {
   return fail<T>({ code: "invalid_request", message });
 }
 
+export const SUBMIT_OWN_DRAFT_FIRST_MESSAGE =
+  "Submit your own draft to this collection before reading other authors' drafts.";
+
 export class ArtifactService {
   // Serializes all artifact mutations per conversation. Combined with the
   // SQL-level expected-head guard in ArtifactStore.appendVersion this makes
@@ -980,7 +983,7 @@ export class ArtifactService {
       return resolved;
     }
     const drafts = await this.deps.store.listDrafts(resolved.value.id);
-    return ok(this.draftViews(context.value.actor, drafts));
+    return ok(this.draftViews(context.value.actor, resolved.value, drafts));
   }
 
   async readDraft(
@@ -1003,6 +1006,11 @@ export class ArtifactService {
       return draft.state === "editing"
         ? fail({ code: "not_found", message: "Draft not found." })
         : fail({ code: "access_denied", message: "This draft's content was not shared with you." });
+    }
+    const { actor } = context.value;
+    if (draft.author !== actor
+      && this.mustSubmitOwnDraftFirst(actor, resolved.value, await this.deps.store.listDrafts(resolved.value.id))) {
+      return fail({ code: "access_denied", message: SUBMIT_OWN_DRAFT_FIRST_MESSAGE });
     }
     return ok(this.draftContent(draft));
   }
@@ -1407,7 +1415,9 @@ export class ArtifactService {
           return invalid("Stored operation result is invalid.");
         }
         const priorDraft = await this.deps.store.getDraft(prior.value.draftId);
-        return priorDraft ? ok(this.draftSummary(priorDraft, this.canReadDraft(actor, priorDraft))) : fail({ code: "not_found", message: "Draft not found." });
+        return priorDraft
+          ? ok(this.draftSummary(priorDraft, this.canReadDraftContent(actor, artifact, priorDraft, await this.deps.store.listDrafts(artifact.id))))
+          : fail({ code: "not_found", message: "Draft not found." });
       }
       const archivedError = this.archivedMutationError(artifact, "withdrawing drafts");
       if (archivedError) {
@@ -1434,7 +1444,7 @@ export class ArtifactService {
         {
           artifactId: artifact.id,
           draftId: current.id,
-          value: this.draftSummary(withdrawn, this.canReadDraft(actor, withdrawn))
+          value: this.draftSummary(withdrawn, this.canReadDraftContent(actor, artifact, withdrawn, await this.deps.store.listDrafts(artifact.id)))
         },
         now,
         artifact.id
@@ -1545,6 +1555,12 @@ export class ArtifactService {
       }
       const now = this.now();
       const drafts = await this.deps.store.listDrafts(artifact.id);
+      if (this.mustSubmitOwnDraftFirst(actor, artifact, drafts) && !rosterResult.requiredDraftAuthors.includes(actor)) {
+        return fail({
+          code: "access_denied",
+          message: "Submit your own draft before removing yourself from the required draft authors."
+        });
+      }
       const updatedRecord: ArtifactRecord = {
         ...artifact,
         ...rosterResult,
@@ -1837,20 +1853,45 @@ export class ArtifactService {
       allowedDraftAuthors: record.allowedDraftAuthors,
       requiredDraftAuthors: record.requiredDraftAuthors,
       audiencePolicyByAuthor: actor === "user" || actor === record.owner ? record.audiencePolicyByAuthor : {},
-      drafts: this.draftViews(actor, drafts),
+      drafts: this.draftViews(actor, record, drafts),
       missingRequiredAuthors,
       readyToPublish: missingRequiredAuthors.length === 0
     };
   }
 
-  private draftViews(actor: string, drafts: ArtifactDraftRecord[]): ArtifactDraftView[] {
+  private draftViews(actor: string, record: ArtifactRecord, drafts: ArtifactDraftRecord[]): ArtifactDraftView[] {
     return drafts.flatMap((draft) => {
-      const readable = this.canReadDraft(actor, draft);
-      if (draft.state === "editing" && !readable) {
+      if (draft.state === "editing" && !this.canReadDraft(actor, draft)) {
         return [];
       }
-      return [readable ? this.draftContent(draft) : this.draftSummary(draft, false)];
+      return [this.canReadDraftContent(actor, record, draft, drafts) ? this.draftContent(draft) : this.draftSummary(draft, false)];
     });
+  }
+
+  // The single rule for whether an actor may see a draft's body: it was shared
+  // with them, and they are not a required author still owing their own draft.
+  private canReadDraftContent(
+    actor: string,
+    record: ArtifactRecord,
+    draft: ArtifactDraftRecord,
+    drafts: ArtifactDraftRecord[]
+  ): boolean {
+    return this.canReadDraft(actor, draft)
+      && (draft.author === actor || !this.mustSubmitOwnDraftFirst(actor, record, drafts));
+  }
+
+  // While a collection gathers drafts, a required author who has never
+  // submitted a draft of their own cannot read anyone else's, so every first
+  // draft stays independent even when authors write at the same time. Any draft
+  // the author ever submitted counts, including one later withdrawn or
+  // replaced: that first draft was already written unseen. Only required
+  // authors are held back, because they must submit anyway; an optional author
+  // is never locked out. User always reads everything shared with them.
+  private mustSubmitOwnDraftFirst(actor: string, record: ArtifactRecord, drafts: ArtifactDraftRecord[]): boolean {
+    return record.lifecycle === "collecting_drafts"
+      && actor !== ARTIFACT_USER_MEMBER
+      && record.requiredDraftAuthors.includes(actor)
+      && !drafts.some((draft) => draft.author === actor && Boolean(draft.submittedAt));
   }
 
   private canReadDraft(actor: string, draft: ArtifactDraftRecord): boolean {

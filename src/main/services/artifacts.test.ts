@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { ArtifactService } from "./artifacts";
+import { ArtifactService, SUBMIT_OWN_DRAFT_FIRST_MESSAGE } from "./artifacts";
 import { ArtifactStore } from "./artifactStore";
 import { artifactRevision, ARTIFACT_REVISION_SCHEMA } from "./artifactRevisions";
 import type { ArtifactDraftRecord, ArtifactOperationRecord } from "./artifactStore";
@@ -1831,6 +1831,152 @@ test("selected readers can inspect editing drafts while unselected members canno
       conversationId: CONVERSATION_ID,
       artifactId: collecting.summary.id
     })).length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a required author cannot read other drafts until their own draft is submitted, so authors can draft in parallel", async () => {
+  const h = await harness();
+  try {
+    const collecting = expectOk(await h.service.create("gera", {
+      conversationId: CONVERSATION_ID,
+      name: "Parallel drafts",
+      initialState: "collecting_drafts",
+      allowedDraftAuthors: ["gera", "codex", "drew"],
+      requiredDraftAuthors: ["gera", "codex", "drew"],
+      audiencePolicyByAuthor: {
+        gera: { allowedReaders: [], requiredReaders: [] },
+        codex: { allowedReaders: ["gera"], requiredReaders: ["gera"] },
+        drew: { allowedReaders: ["gera"], requiredReaders: ["gera"] }
+      },
+      operationId: "parallel:create"
+    }));
+    const artifactId = collecting.summary.id;
+    const ref = { conversationId: CONVERSATION_ID, artifactId };
+    const codexEditing = expectOk(await h.service.saveDraft("codex", {
+      ...ref,
+      expectedEditRevision: 0,
+      content: "CODEX-PARALLEL",
+      readers: ["gera"],
+      operationId: "parallel:codex:save"
+    }));
+    const codexSubmitted = expectOk(await h.service.submitDraft("codex", {
+      ...ref,
+      draftId: codexEditing.id,
+      expectedEditRevision: codexEditing.editRevision,
+      operationId: "parallel:codex:submit"
+    }));
+    const drewEditing = expectOk(await h.service.saveDraft("drew", {
+      ...ref,
+      expectedEditRevision: 0,
+      content: "DREW-IN-PROGRESS",
+      readers: ["gera"],
+      operationId: "parallel:drew:save"
+    }));
+
+    for (const draftId of [codexSubmitted.id, drewEditing.id]) {
+      const denied = expectError(await h.service.readDraft("gera", { ...ref, draftId }), "access_denied");
+      assert.equal(denied.message, SUBMIT_OWN_DRAFT_FIRST_MESSAGE);
+    }
+    const listedBefore = expectOk(await h.service.listDrafts("gera", ref));
+    assert.deepEqual(listedBefore.map((draft) => [draft.author, draft.hasContent]), [["codex", false], ["drew", false]]);
+    const readBefore = expectOk(await h.service.read("gera", ref));
+    assert.equal(readBefore.lifecycle, "collecting_drafts");
+    assert.deepEqual(readBefore.lifecycle === "collecting_drafts" ? readBefore.drafts.map((draft) => draft.hasContent) : [], [false, false]);
+    for (const view of [listedBefore, readBefore]) {
+      assert.ok(!JSON.stringify(view).includes("CODEX-PARALLEL") && !JSON.stringify(view).includes("DREW-IN-PROGRESS"));
+    }
+    assert.equal(expectOk(await h.service.readDraft("user", { ...ref, draftId: codexSubmitted.id })).content, "CODEX-PARALLEL",
+      "User always reads every draft");
+
+    const geraEditing = expectOk(await h.service.saveDraft("gera", {
+      ...ref,
+      expectedEditRevision: 0,
+      content: "GERA-OWN",
+      readers: [],
+      operationId: "parallel:gera:save"
+    }));
+    expectError(await h.service.readDraft("gera", { ...ref, draftId: codexSubmitted.id }), "access_denied");
+    assert.equal(expectOk(await h.service.readDraft("gera", { ...ref, draftId: geraEditing.id })).content, "GERA-OWN",
+      "an author always reads their own work in progress");
+
+    const geraSubmitted = expectOk(await h.service.submitDraft("gera", {
+      ...ref,
+      draftId: geraEditing.id,
+      expectedEditRevision: geraEditing.editRevision,
+      operationId: "parallel:gera:submit"
+    }));
+    assert.equal(expectOk(await h.service.readDraft("gera", { ...ref, draftId: codexSubmitted.id })).content, "CODEX-PARALLEL");
+    assert.equal(expectOk(await h.service.readDraft("gera", { ...ref, draftId: drewEditing.id })).content, "DREW-IN-PROGRESS");
+    const listedAfter = expectOk(await h.service.listDrafts("gera", ref));
+    assert.ok(listedAfter.every((draft) => draft.hasContent));
+    const readAfter = expectOk(await h.service.read("gera", ref));
+    const codexView = readAfter.lifecycle === "collecting_drafts" ? readAfter.drafts.find((draft) => draft.id === codexSubmitted.id) : undefined;
+    assert.equal(codexView && "content" in codexView ? codexView.content : undefined, "CODEX-PARALLEL");
+
+    expectOk(await h.service.withdrawDraft("gera", { ...ref, draftId: geraSubmitted.id, operationId: "parallel:gera:withdraw" }));
+    assert.equal(expectOk(await h.service.readDraft("gera", { ...ref, draftId: codexSubmitted.id })).content, "CODEX-PARALLEL",
+      "a withdrawn draft was still submitted unseen first");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("only required authors are held back, and a held-back owner cannot drop themselves from the roster to read", async () => {
+  const h = await harness();
+  try {
+    const collecting = expectOk(await h.service.create("gera", {
+      conversationId: CONVERSATION_ID,
+      name: "Roster gate",
+      initialState: "collecting_drafts",
+      allowedDraftAuthors: ["gera", "codex", "drew"],
+      requiredDraftAuthors: ["gera", "codex"],
+      audiencePolicyByAuthor: {
+        gera: { allowedReaders: [], requiredReaders: [] },
+        codex: { allowedReaders: ["gera", "drew"], requiredReaders: ["gera"] },
+        drew: { allowedReaders: [], requiredReaders: [] }
+      },
+      operationId: "roster-gate:create"
+    }));
+    const ref = { conversationId: CONVERSATION_ID, artifactId: collecting.summary.id };
+    const codexEditing = expectOk(await h.service.saveDraft("codex", {
+      ...ref,
+      expectedEditRevision: 0,
+      content: "CODEX-BODY",
+      readers: ["gera", "drew"],
+      operationId: "roster-gate:codex:save"
+    }));
+    const codexSubmitted = expectOk(await h.service.submitDraft("codex", {
+      ...ref,
+      draftId: codexEditing.id,
+      expectedEditRevision: codexEditing.editRevision,
+      operationId: "roster-gate:codex:submit"
+    }));
+    assert.equal(expectOk(await h.service.readDraft("drew", { ...ref, draftId: codexSubmitted.id })).content, "CODEX-BODY",
+      "an optional author is never locked out");
+    expectError(await h.service.readDraft("gera", { ...ref, draftId: codexSubmitted.id }), "access_denied");
+
+    const selfRemoval = {
+      ...ref,
+      expectedDraftRosterRevision: collecting.summary.draftRosterRevision,
+      allowedDraftAuthors: ["gera", "codex", "drew"],
+      requiredDraftAuthors: ["codex"],
+      audiencePolicyByAuthor: {
+        gera: { allowedReaders: [], requiredReaders: [] },
+        codex: { allowedReaders: ["gera", "drew"], requiredReaders: ["gera"] },
+        drew: { allowedReaders: [], requiredReaders: [] }
+      }
+    };
+    assert.match(expectError(await h.service.updateDraftRoster("gera", {
+      ...selfRemoval,
+      operationId: "roster-gate:self-removal"
+    }), "access_denied").message, /Submit your own draft before removing yourself/);
+    expectError(await h.service.readDraft("gera", { ...ref, draftId: codexSubmitted.id }), "access_denied");
+
+    expectOk(await h.service.updateDraftRoster("user", { ...selfRemoval, operationId: "roster-gate:user-change" }));
+    assert.equal(expectOk(await h.service.readDraft("gera", { ...ref, draftId: codexSubmitted.id })).content, "CODEX-BODY",
+      "User may still change who must write");
   } finally {
     await h.cleanup();
   }

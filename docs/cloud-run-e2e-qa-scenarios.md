@@ -475,7 +475,7 @@ made realistically tall.
 |---|---|---|---|
 | AC-01 | Trigger an accord from the phone | Facilitator starts, proposes members, pauses for the User's selection card — answerable from the phone. | REAL-WORK (B2 + B3 + B5) |
 | AC-02 | Member selection card | Reaches the phone; the facilitator stops the turn and never requests participants before approval. | REAL-WORK (B3) |
-| AC-03 | Facilitator drafts first | Submits its own draft before requesting anyone. | REAL-WORK (B2) |
+| AC-03 | Facilitator drafts alongside the members | Requests the members first, then writes and submits its own draft in the same turn while they work; the app refuses it any member draft until its own is submitted. | REAL-WORK (B2) |
 | AC-04 | Blind drafts between cloud members | Exactly one explicit reader each; peers cannot read each other. Assert actual `effectiveReaders`. | REAL-WORK (B2) |
 | AC-05 | Chat carries no draft content | The timeline says "submitted" and nothing more. | REAL-WORK (B2) |
 | AC-06 | Stable operation ids on resume | Interrupt and resume: no second artifact, no duplicate draft. | REAL-WORK (B2) |

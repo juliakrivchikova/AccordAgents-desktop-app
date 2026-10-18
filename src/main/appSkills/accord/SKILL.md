@@ -24,7 +24,9 @@ first.
 
 Before anyone sees another participant's proposal, every Accord author must submit
 one frozen, attributable draft to the same collecting artifact. You (the
-facilitator) submit first, before requesting participants. Each selected
+facilitator) write your draft at the same time as the participants: request them
+first, then write and submit your own in that same turn. The app does not show
+you any participant draft until your own is submitted. Each selected
 participant submits independently. Draft bodies are not chat content: User can
 always read every draft; you can read every participant draft because each
 participant explicitly includes you in its audience; peers cannot read one
@@ -53,9 +55,10 @@ sign round — the artifact tracks "who approved the current version" for you.
 
 ## State machine
 
-classify → select → create collection → facilitator draft → blind participant
-drafts → synthesize/publish v1 → sign → verify (→ resume if interrupted). Match
-the resolution's size to the decision; never skip independent draft submission.
+classify → select → create collection → request blind participant drafts, then
+write your facilitator draft while they work → synthesize/publish v1 → sign →
+verify (→ resume if interrupted). Match the resolution's size to the decision;
+never skip independent draft submission.
 
 1. **Classify.** Decide how much analysis and how many correction rounds the
    question needs. Concrete/bounded decisions may produce short drafts, but they
@@ -73,20 +76,29 @@ the resolution's size to the decision; never skip independent draft submission.
    explicit readers, and every selected participant's allowed and required reader
    lists contain exactly you. If any selected participant can read another
    participant's draft, stop and correct the roster policy first.
-4. **Submit your facilitator draft first.** Before asking any participant,
-   formulate your own concrete independent resolution. Save it with no explicit
+4. **Request blind participant drafts.** Once the audience check in Step 3
+   passes, request each selected participant using the Independent Draft Prompt.
+   Each participant must save and submit one proposal whose only explicit reader
+   is you. Keep the default `resumeRequester: true`: the call returns at once
+   and their replies come back in a fresh turn. Do not wait for their replies:
+   go straight to Step 5 in this same turn. A turn can hold only one open request,
+   so with more than four participants request the first four now and the rest
+   when their replies bring you back.
+5. **Submit your facilitator draft in the same turn.** As soon as the request
+   call returns, whatever its status, formulate your own concrete independent
+   resolution while the participants write theirs.
+   Do not read participant drafts or replies first; the app refuses to show you a
+   participant draft until your own draft is submitted. Save it with no explicit
    readers, then submit/freeze it. Use stable operation ids derived from the root,
    such as `accord:<chatThreadRootId>:draft:<facilitator>:save:1` and
    `accord:<chatThreadRootId>:draft:<facilitator>:submit`. Verify your draft is
-   `submitted`. Never paste or summarize its body in chat.
-5. **Collect blind participant drafts.** Only after Step 4 is durable, request
-   each selected participant using the Independent Draft Prompt. Each participant
-   must save and submit one proposal whose only explicit reader is you. A response
-   containing prose without a frozen draft is incomplete. After replies, read the
-   artifact's durable draft state and verify one current submitted draft for every
-   required author. Do not treat chat replies as proposal storage. Do not publish
-   early.
-6. **Synthesize and publish v1.** Read all submitted drafts through the artifact
+   `submitted`. Never paste or summarize its body in chat. Then end the turn as
+   Tool Rules describe; participant replies bring you back.
+6. **Synthesize and publish v1.** When the replies are in, read the artifact's
+   durable draft state and verify one current submitted draft for every required
+   author. A response containing prose without a frozen draft is incomplete. Do
+   not treat chat replies as proposal storage. Do not publish early. Read all
+   submitted drafts through the artifact
    service. Merge your facilitator input and the participant proposals into one
    candidate; keep every substantive concern until it is
    incorporated, or reframed/rejected/User-resolved with visible reasoning (see
@@ -242,9 +254,17 @@ publish, or re-request. Read the original/request threads and request status, th
 read the resolution artifact:
 
 - `collecting_drafts`: roster, current submitted drafts, and missing required
-  authors are the source of truth. Resume from the first incomplete author. A
-  submitted facilitator draft means participant requests may begin. Stable
-  operation ids make lost responses safe to retry.
+  authors are the source of truth. Check two things independently: whether every
+  participant without a submitted draft still has a request running or awaiting
+  approval (request threads and status), and whether your own facilitator draft
+  is submitted. Request again every participant whose request was never sent or
+  ended failed or interrupted without a submitted draft, but re-request a
+  participant at most once; if it fails again, stop and tell User who is
+  blocked and why. If User denied a request or stopped a participant (its
+  request item is `denied` or `interrupted`), that is User's decision: ask User
+  how to proceed instead of re-requesting. Then finish your
+  own draft before reading participant drafts; then wait for the remaining
+  authors. Stable operation ids make lost responses safe to retry.
 - `published`: v1 and its source manifest are the source of truth that synthesis
   completed. `signedCurrent` is the source of truth for current approvals; the
   request thread carries unresolved signing replies.
@@ -283,6 +303,8 @@ Blocking issue / Remaining objection (per participant) / User decision needed.
 - Reach participants only through the participant-request flow: do not rely on
   plain `@mentions`, and put no `@handle` in any accord message (it can trigger an
   unintended extra run) — refer to participants by plain name.
-- If a request returns `pending_approval`, end with exactly:
-  `Participant request is awaiting User approval.` If it returns `running`, end
-  with one short waiting status. Do not poll request status repeatedly in a turn.
+- After the draft request, finish Step 5 before ending the turn; after any other
+  request, end the turn right away. If the request returned `pending_approval`,
+  end with exactly: `Participant request is awaiting User approval.` If it
+  returned `running`, end with one short waiting status. Do not poll request
+  status repeatedly in a turn.

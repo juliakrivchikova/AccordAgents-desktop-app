@@ -70,6 +70,7 @@ import type {
   ProviderSettings
 } from "../../shared/types";
 import { CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID } from "../../shared/codexApproval";
+import { activeRunIdsForConversation } from "../../shared/chatActiveRuns";
 import {
   chatActivityEventsForSegment,
   chatInlineTranscriptParts,
@@ -4898,6 +4899,8 @@ test("static chat instructions include structured participant request and reply 
   assert.match(instructions, /Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message/);
   assert.match(instructions, /When replying to a participant request addressed to you, answer in the active thread/);
   assert.match(instructions, /if request matching is ambiguous, ask for clarification rather than guessing/);
+  assert.match(instructions, /end your turn unless User explicitly asked you to continue without that answer or an active skill gives you work that does not need it/,
+    "a skill such as Accord may finish independent work after a member request starts running");
   assert.doesNotMatch(instructions, /app_chat_reply_to_participant_request/);
 });
 
@@ -10025,8 +10028,182 @@ test("participant request with fast replies auto-resumes requester instead of co
   const requestMessage = storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest);
   const batch = requestMessage?.metadata?.participantRequest;
   assert.deepEqual(runs, [target.id, requester.id]);
-  assert.equal(batch?.completedInToolCall, false);
+  assert.equal(batch?.completedInToolCall, undefined, "the call returned before any reply, not through the inline path");
   assert.equal(batch?.autoResumeMessageId !== undefined, true);
+});
+
+test("a member request returns at once and every target runs on its own, so Stop on the requester or one target leaves the rest running", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "allow" });
+  const first = chatParticipant("claude-code");
+  const second = chatParticipant("gemini-cli");
+  const conversation = chatConversation([requester, first, second]);
+  const release = new Map<string, () => void>();
+  const aborted = new Set<string>();
+  const runs: string[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (participant: any, _prompt: unknown, _path: unknown, _unused: unknown, _mode: unknown, signal?: AbortSignal) => {
+      runs.push(participant.id);
+      if (participant.id !== requester.id) {
+        await new Promise<void>((resolve) => {
+          release.set(participant.id, resolve);
+          signal?.addEventListener("abort", () => {
+            aborted.add(participant.id);
+            resolve();
+          }, { once: true });
+        });
+      }
+      return { participant, ok: true, content: `${participant.id} done.`, durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const requesterTurn = new AbortController();
+  (service as any).registerRunController("requester-run", requesterTurn);
+
+  const startedAt = Date.now();
+  const result = await service.requestParticipantsFromTool({ ...participantRequestActor(requester), runId: "requester-run" }, {
+    requests: [{ target: first.handle, prompt: "Review A." }, { target: second.handle, prompt: "Review B." }],
+    timeoutMs: 5000
+  });
+  assert.ok(Date.now() - startedAt < 1000, "a resumed request does not hold the requester for its wait");
+  assert.equal(result.status, "running", "the call returns while both targets are still working");
+  await waitFor(() => release.size === 2);
+  assert.ok(service.liveRunIds().some((id) => id.startsWith("participant-request:")),
+    "a request still collecting answers counts as live work for restart and idle checks");
+
+  service.cancelRun("requester-run");
+  assert.equal(requesterTurn.signal.aborted, true);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(aborted.size, 0, "stopping the requester does not stop the members it asked");
+
+  const runIdOf = (participantId: string): string | undefined => storage.current.messages
+    .find((message: ChatMessage) => message.participantId === participantId && message.status === "pending")?.metadata?.runId;
+  const firstRunId = runIdOf(first.id);
+  const secondRunId = runIdOf(second.id);
+  assert.ok(firstRunId && secondRunId, "each target shows its own running reply");
+  assert.notEqual(firstRunId, secondRunId);
+  assert.notEqual(firstRunId, "requester-run");
+  service.cancelRun(firstRunId!);
+  await waitFor(() => aborted.has(first.id));
+  assert.equal(aborted.has(second.id), false, "stopping one member leaves the other running");
+
+  release.get(second.id)!();
+  const batchOf = () => storage.current.messages
+    .find((message: ChatMessage) => message.metadata?.participantRequest)?.metadata?.participantRequest;
+  await waitFor(() => batchOf()?.status === "completed" && batchOf()?.autoResumeMessageId !== undefined, 2000);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.deepEqual(runs.filter((id) => id === requester.id), [requester.id], "the requester gets exactly one fresh turn with the replies");
+  const items = batchOf()?.items ?? [];
+  assert.equal(items.find((item: any) => item.targetParticipantId === first.id)?.status, "interrupted",
+    "a member the User stopped is recorded as interrupted, not failed");
+  assert.equal(items.find((item: any) => item.targetParticipantId === second.id)?.status, "answered");
+});
+
+test("an inline member request is the requester's foreground work: stopping the requester stops it", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "allow" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  let targetAborted = false;
+  let targetStarted = false;
+  const { service, tempRoot } = testService({
+    conversation,
+    run: async (participant: any, _prompt: unknown, _path: unknown, _unused: unknown, _mode: unknown, signal?: AbortSignal) => {
+      if (participant.id === target.id) {
+        targetStarted = true;
+        await new Promise<void>((resolve) => signal?.addEventListener("abort", () => {
+          targetAborted = true;
+          resolve();
+        }, { once: true }));
+      }
+      return { participant, ok: true, content: "done.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const requesterTurn = new AbortController();
+  (service as any).registerRunController("requester-run", requesterTurn);
+
+  const call = service.requestParticipantsFromTool({ ...participantRequestActor(requester), runId: "requester-run" }, {
+    requests: [{ target: target.handle, prompt: "Review." }],
+    resumeRequester: false,
+    timeoutMs: 1000
+  });
+  await waitFor(() => targetStarted);
+  service.cancelRun("requester-run");
+  await waitFor(() => targetAborted);
+  await call;
+});
+
+test("a request whose runner fails after its members answered still resumes the requester", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "allow" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  const runs: string[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (participant: any) => {
+      runs.push(participant.id);
+      return { participant, ok: true, content: "done.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  // The answers are in, then the runner's final write fails.
+  (service as any).runParticipantRequest = async (conversationId: string, requestMessageId: string) => {
+    const stored = await (service as any).requireChat(conversationId);
+    await (service as any).withChatMutation(stored, async () => {
+      (service as any).updateParticipantRequestBatch(stored, requestMessageId, (batch: any) => ({
+        ...batch,
+        items: batch.items.map((item: any) => ({ ...item, status: "answered" }))
+      }));
+      (service as any).queueSnapshot(stored);
+    });
+    throw new Error("history write failed");
+  };
+
+  const result = await service.requestParticipantsFromTool(participantRequestActor(requester), {
+    requests: [{ target: target.handle, prompt: "Review." }]
+  });
+  assert.equal(result.status, "running");
+  const batchOf = () => storage.current.messages
+    .find((message: ChatMessage) => message.metadata?.participantRequest)?.metadata?.participantRequest;
+  await waitFor(() => batchOf()?.autoResumeMessageId !== undefined, 2000);
+  assert.equal(batchOf()?.items[0].status, "answered");
+  assert.ok(runs.includes(requester.id));
+});
+
+test("Stop all reaches a requested member that is still queued behind its own turn", async () => {
+  const requester = chatParticipant("gemini-cli", { requestParticipants: "allow" });
+  const target = chatParticipant("codex-cli");
+  const conversation = chatConversation([requester, target]);
+  const runs: string[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (participant: any) => {
+      runs.push(participant.id);
+      return { participant, ok: true, content: "done.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  // The target is busy with a turn of its own, so the request waits its turn.
+  let releaseOwnTurn!: () => void;
+  const ownTurn = new Promise<void>((resolve) => {
+    releaseOwnTurn = resolve;
+  });
+  (service as any).participantTurnQueues.set(`${conversation.id}:${target.id}`, ownTurn);
+
+  const result = await service.requestParticipantsFromTool(participantRequestActor(requester), {
+    requests: [{ target: target.handle, prompt: "Review." }]
+  });
+  assert.equal(result.status, "running");
+  await waitFor(() => activeRunIdsForConversation(storage.current).length > 0);
+  for (const runId of activeRunIdsForConversation(storage.current)) {
+    service.cancelRun(runId);
+  }
+  releaseOwnTurn();
+  const itemStatus = () => storage.current.messages
+    .find((message: ChatMessage) => message.metadata?.participantRequest)?.metadata?.participantRequest?.items[0]?.status;
+  await waitFor(() => itemStatus() !== "running", 2000);
+  assert.equal(runs.includes(target.id), false, "the queued member never starts after Stop all");
+  assert.equal(itemStatus(), "interrupted");
 });
 
 test("participant request permission deny blocks requests even with stale capability", async () => {

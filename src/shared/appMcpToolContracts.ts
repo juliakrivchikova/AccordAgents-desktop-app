@@ -1636,11 +1636,11 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
             "type": "integer",
             "minimum": 1000,
             "maximum": 300000,
-            "description": "Optional bounded wait for replies. Defaults to 120000ms."
+            "description": "Only with resumeRequester false: how long to wait for inline replies. Defaults to 120000ms."
           },
           "resumeRequester": {
             "type": "boolean",
-            "description": "Whether the app should return control in a fresh requester turn. Defaults to true and also applies when replies finish before timeout. Set false to receive completed replies inline."
+            "description": "Defaults to true: the call returns at once and replies arrive in a fresh requester turn. Set false to wait for completed replies inline."
           }
         },
         "required": [

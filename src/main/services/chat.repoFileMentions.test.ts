@@ -2370,7 +2370,7 @@ test("runParticipantRequest roots inferred recipient replies under the source vi
     }];
   };
 
-  await serviceAny.startParticipantRequestRunner(conversation.id, "request-message", "run-1", 1);
+  await serviceAny.startParticipantRequestRunner(conversation.id, "request-message", 1);
 
   const saved = await storage.getConversation(conversation.id);
   const targetReply = saved?.messages.find((message) => message.id === "target-reply");

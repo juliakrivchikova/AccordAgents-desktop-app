@@ -377,6 +377,7 @@ const CHAT_COMPACT_INSTRUCTIONS_MAX_CHARS = 20_000;
 const CHAT_SELF_COMPACTION_COOLDOWN_MS = 5 * 60_000;
 const CHAT_ROSTER_CHANGE_MAX_OPERATIONS = 12;
 const CHAT_PARTICIPANT_REQUEST_MAX_ITEMS = 4;
+const PARTICIPANT_REQUEST_STOPPED_BY_USER = "Stopped by User.";
 const CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN = 4;
 const CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS = 60_000;
 const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
@@ -805,7 +806,10 @@ export class ChatService {
   /** Every run alive here: members' turns and the runs that carry no member
    *  bubble, such as a compaction. Restarting the app kills all of them. */
   liveRunIds(): string[] {
-    return [...new Set([...this.activeRunIds, ...this.chatRunMeta.keys()])];
+    // A member request still collecting answers counts too: its requester
+    // waits for them in the background, and a restart would lose that wait.
+    const requestRunners = [...this.participantRequestRunners.keys()].map((id) => `participant-request:${id}`);
+    return [...new Set([...this.activeRunIds, ...this.chatRunMeta.keys(), ...requestRunners])];
   }
 
   onParticipantRunSettled(listener: (run: ChatParticipantRun) => Promise<void> | void): () => void {
@@ -2586,23 +2590,31 @@ export class ChatService {
 
     const requesterProgress = actor.runId ? this.runProgressCallbacks.get(actor.runId) : undefined;
     // The shared runner handles local targets here and delegates the others
-    // to their homes, for tool requests and inferred requests alike.
+    // to their homes, for tool requests and inferred requests alike. Each
+    // target runs as its own run, so stopping the requester or one target
+    // never stops the others.
+    // An inline request is the requester's foreground work, as a foreground
+    // subagent is in the CLI: stopping the requester stops it too. A request
+    // answered in a fresh turn is background work and outlives the turn.
+    const inlineParentSignal = prepared.batch.resumeRequester || !actor.runId
+      ? undefined
+      : this.firstChatRunController(actor.runId)?.signal;
     const runner = this.startParticipantRequestRunner(
       conversation.id,
       prepared.requestMessage.id,
-      actor.runId ?? randomUUID(),
       prepared.batch.depth,
-      requesterProgress
+      requesterProgress,
+      undefined,
+      inlineParentSignal
     );
-    const result = await this.awaitParticipantRequestRunner(runner, prepared.timeoutMs);
+    // When replies come back in a fresh requester turn, there is nothing to
+    // wait for here: holding the call open would only keep the requester busy
+    // and unreachable. The bounded wait is for inline replies only.
+    const result = prepared.batch.resumeRequester
+      ? { timedOut: true as const }
+      : await this.awaitParticipantRequestRunner(runner, prepared.timeoutMs);
     if (result.timedOut) {
-      void runner.then(() => this.autoResumeParticipantRequest(conversation.id, prepared.requestMessage.id, requesterProgress)).catch((error) => {
-        void this.debugLogs.write("chat.participant-request.auto-resume.error", {
-          conversationId: conversation.id,
-          requestMessageId: prepared.requestMessage.id,
-          message: error instanceof Error ? error.message : String(error)
-        });
-      });
+      this.resumeRequesterWhenRunnerSettles(conversation.id, prepared.requestMessage.id, runner, requesterProgress);
       const latest = await this.requireChat(conversation.id);
       return this.participantRequestToolResult(latest, prepared.requestMessage.id, { status: "running", approvalRequired: false });
     }
@@ -2612,30 +2624,9 @@ export class ChatService {
     const hasUnfinishedItems = latestBatch?.items.some((item) => this.isOpenParticipantRequestStatus(item.status));
     const approvalRequired = latestBatch?.items.some((item) => item.status === "pending_approval") ?? false;
     let status = latestBatch?.status ?? result.result.batch.status;
+    // Only an inline request (resumeRequester false) waits, so finished
+    // replies here are returned in this same call.
     if (!hasUnfinishedItems) {
-      if (latestBatch?.resumeRequester) {
-        this.updateParticipantRequestBatch(latest, prepared.requestMessage.id, (batch) => ({
-          ...batch,
-          completedInToolCall: false,
-          status: "resuming_requester",
-          updatedAt: new Date().toISOString()
-        }));
-        status = "running";
-        await this.saveConversation(latest);
-      void this.autoResumeParticipantRequest(conversation.id, prepared.requestMessage.id, this.onReviewProgress).catch((error) => {
-          void this.debugLogs.write("chat.participant-request.auto-resume.error", {
-            conversationId: conversation.id,
-            requestMessageId: prepared.requestMessage.id,
-            message: error instanceof Error ? error.message : String(error)
-          });
-        });
-        return this.participantRequestToolResult(
-          latest,
-          prepared.requestMessage.id,
-          { status, approvalRequired: false },
-          { includeReplies: false }
-        );
-      }
       const completedBatch = this.updateParticipantRequestBatch(latest, prepared.requestMessage.id, (batch) => ({
         ...batch,
         completedInToolCall: true,
@@ -3990,14 +3981,8 @@ export class ChatService {
       await this.saveConversation(conversation);
       if (requestMessageId) {
         const batch = conversation.messages.find((message) => message.id === requestMessageId)?.metadata?.participantRequest;
-        const runner = this.startParticipantRequestRunner(conversation.id, requestMessageId, randomUUID(), batch?.depth ?? 1, progress);
-        void runner.then(() => this.autoResumeParticipantRequest(conversation.id, requestMessageId, progress)).catch((error) => {
-          void this.debugLogs.write("chat.participant-request.approval-run.error", {
-            conversationId: conversation.id,
-            requestMessageId,
-            message: error instanceof Error ? error.message : String(error)
-          });
-        });
+        const runner = this.startParticipantRequestRunner(conversation.id, requestMessageId, batch?.depth ?? 1, progress);
+        this.resumeRequesterWhenRunnerSettles(conversation.id, requestMessageId, runner, progress);
       }
       return conversation;
     }
@@ -7788,7 +7773,7 @@ export class ChatService {
       "- You may cite participant handles in normal prose for attribution; for cross-participant asks, use `app_chat_request_participants` rather than plain `@mentions` when another participant is expected to answer.",
       "- When replying to a participant request addressed to you, answer in the active thread; if request matching is ambiguous, ask for clarification rather than guessing.",
       "- Do not emit `Participant requests:` or `Return to requester after replies:` protocol blocks. They are legacy text and are not the current dispatch mechanism.",
-      "- When a participant request MCP call returns `pending_approval` or `running`, end your turn unless User explicitly asked you to continue without that answer. The app will return control to you when replies or errors arrive.",
+      "- When a participant request MCP call returns `pending_approval` or `running`, end your turn unless User explicitly asked you to continue without that answer or an active skill gives you work that does not need it. The app will return control to you when replies or errors arrive.",
       "- Do not repeatedly poll participant request status in the same turn. Use the status tool only to recover a previous request after a timeout, interruption, approval delay, or resumed session.",
       ...(session.participantKind === "claude-code" ? ["- Claude Code only: do not use provider-native interactive question, user-input, or structured-question tools to ask User to choose. In AccordAgents Chat, ask choices only by emitting the `User choice:` block format described below."] : []),
       "- When User must pick one option before you can continue, include one dedicated `User choice:` block after your explanation. Format it as lines `T: short title`, `Q: question`, `O1: option label | optional description`, `O2: option label | optional description`, and optionally `R: O1`. Use at least two options. Ask at most one user choice in a message.",
@@ -7844,9 +7829,9 @@ export class ChatService {
       "Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message. To react, call it with the message `id` from `app_chat_read_messages` and an allowed emoji.",
       "Send-message MCP tool: `app_chat_send_message` posts immediately and returns `messageId`; use only for mid-turn visibility, not normal replies. It can attach PNG/JPEG/WebP with `attachments: [{ \"kind\": \"image\", \"sourcePath\": \"path.png\" }]` from image paths inside the selected repository when repoRead is granted.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
-      "Participant request MCP tools: use `app_chat_request_participants` to ask participants; `app_chat_get_participant_request_status` recovers replies. JSON: `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }], \"timeoutMs\": 120000, \"resumeRequester\": true }`.",
+      "Participant request MCP tools: use `app_chat_request_participants` to ask participants; `app_chat_get_participant_request_status` recovers replies. JSON: `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }] }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
-      "With the default `resumeRequester: true`, participant replies return through a fresh auto-resumed requester turn even if targets finish before timeout; stop when the tool returns `pending_approval` or `running`. Use `resumeRequester: false` only when you explicitly need completed target replies inline in the same turn.",
+      "With the default `resumeRequester: true`, the call returns at once and replies arrive in a fresh auto-resumed requester turn, so end your turn as described above. Use `resumeRequester: false` (with an optional `timeoutMs` wait) only when you need completed replies inline in the same turn.",
       ...(canRequestCompaction
         ? ["Compaction MCP tool: `app_chat_request_compaction` requests compaction of this participant's own provider session after the current turn. Call it only when context pressure would materially benefit the ongoing workflow; stop after a queued or pending-approval result."]
         : []),
@@ -12666,8 +12651,9 @@ export class ChatService {
    * runs them here, each where that member lives.
    *
    * Resuming the requester is deliberately not done here: the requester is
-   * that machine's own member and its tool call is still waiting for these
-   * answers. Resuming it from here as well would give it two turns at once.
+   * that machine's own member, and that machine's runner is still waiting for
+   * these answers and resumes it once they arrive. Resuming it from here as
+   * well would give it two turns at once.
    */
   async runDelegatedParticipantRequest(request: {
     conversationId: string;
@@ -12710,7 +12696,6 @@ export class ChatService {
     await this.startParticipantRequestRunner(
       request.conversationId,
       request.requestMessageId,
-      randomUUID(),
       request.depth,
       undefined,
       ownedIds
@@ -12720,10 +12705,10 @@ export class ChatService {
   private startParticipantRequestRunner(
     conversationId: string,
     requestMessageId: string,
-    runId: string,
     depth: number,
     progress?: ProgressCallback,
-    onlyParticipantIds?: ReadonlySet<string>
+    onlyParticipantIds?: ReadonlySet<string>,
+    inlineParentSignal?: AbortSignal
   ): Promise<ParticipantRequestRunResult> {
     const existing = this.participantRequestRunners.get(requestMessageId);
     if (existing) {
@@ -12731,7 +12716,7 @@ export class ChatService {
     }
     const runnerProgress = progress ?? this.onReviewProgress;
     this.incrementBackgroundRunner(conversationId);
-    const runner = this.runParticipantRequest(conversationId, requestMessageId, runId, depth, runnerProgress, onlyParticipantIds)
+    const runner = this.runParticipantRequest(conversationId, requestMessageId, depth, runnerProgress, onlyParticipantIds, inlineParentSignal)
       .finally(() => {
         this.participantRequestRunners.delete(requestMessageId);
         this.decrementBackgroundRunner(conversationId);
@@ -12749,7 +12734,7 @@ export class ChatService {
     void Promise.resolve()
       .then(async () => {
         await this.waitForQueuedSave(conversationId);
-        const runner = this.startParticipantRequestRunner(conversationId, requestMessageId, randomUUID(), depth);
+        const runner = this.startParticipantRequestRunner(conversationId, requestMessageId, depth);
         await runner;
         await this.autoResumeParticipantRequest(conversationId, requestMessageId, this.onReviewProgress);
       })
@@ -12780,12 +12765,14 @@ export class ChatService {
   private async runParticipantRequest(
     conversationId: string,
     requestMessageId: string,
-    runId: string,
     depth: number,
     progress?: ProgressCallback,
     /** When a device was asked for specific members, it runs only those: the
      *  others live elsewhere and are being run there. */
-    onlyParticipantIds?: ReadonlySet<string>
+    onlyParticipantIds?: ReadonlySet<string>,
+    /** Set only for an inline request: the requester's own run, whose Stop
+     *  also stops these targets. */
+    inlineParentSignal?: AbortSignal
   ): Promise<ParticipantRequestRunResult> {
     const warnings: string[] = [];
     const conversation = await this.requireChat(conversationId);
@@ -12825,6 +12812,8 @@ export class ChatService {
         return;
       }
       let participantRequestsToRun: Array<{ requestMessageId: string; depth: number; source: ChatParticipantRequestBatch["source"] }> = [];
+      let targetRunId: string | undefined;
+      let targetRunBegun = false;
       try {
         const requestRootId = participantRequestVisibleRootId(conversation.messages, requestMessage);
         const targetTriggerMessage: ChatMessage = {
@@ -12834,7 +12823,14 @@ export class ChatService {
             chatThreadRootId: requestRootId
           }
         };
-        const messages = await this.runParticipantTurnSerialized(conversation, target, targetTriggerMessage, runId, undefined, progress, {
+        // Every target is its own run: its Stop control stops only this
+        // member, and nothing the requester does reaches it. It is a real
+        // chat run from the start, so Stop all and a Stop from another window
+        // reach it even while it still waits behind the member's own turn.
+        targetRunId = randomUUID();
+        await this.beginChatRun(conversation, targetRunId);
+        targetRunBegun = true;
+        const messages = await this.runParticipantTurnSerialized(conversation, target, targetTriggerMessage, targetRunId, inlineParentSignal, progress, {
           warnings,
           participantRequestDepth: depth,
           participantRequestBatchId: batch.id,
@@ -12851,6 +12847,7 @@ export class ChatService {
         );
         const now = new Date().toISOString();
         const remoteReplyStillRunning = false;
+        const stoppedByUser = reply?.metadata?.terminalReason === "user-stopped";
         this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
           ...current,
           items: current.items.map((candidate) => candidate.targetParticipantId === item.targetParticipantId
@@ -12858,11 +12855,17 @@ export class ChatService {
                 ...candidate,
                 status: waitingOnPermissionApproval || remoteReplyStillRunning
                   ? "running"
-                  : reply?.status === "error"
-                    ? "failed"
-                    : "answered",
+                  : stoppedByUser
+                    ? "interrupted"
+                    : reply?.status === "error"
+                      ? "failed"
+                      : "answered",
                 replyMessageId: reply?.id,
-                error: !waitingOnPermissionApproval && !remoteReplyStillRunning && reply?.status === "error" ? reply.content : undefined,
+                error: waitingOnPermissionApproval || remoteReplyStillRunning
+                  ? undefined
+                  : stoppedByUser
+                    ? PARTICIPANT_REQUEST_STOPPED_BY_USER
+                    : reply?.status === "error" ? reply.content : undefined,
                 updatedAt: now
               }
             : candidate),
@@ -12875,16 +12878,25 @@ export class ChatService {
           error: reply?.status === "error" ? reply.content : undefined
         });
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        // A Stop that lands while the member still waits for its turn ends
+        // here, before any reply exists.
+        const stoppedBeforeStart = targetRunId !== undefined && error instanceof Error && error.message === "Chat run cancelled.";
+        const message = stoppedBeforeStart
+          ? PARTICIPANT_REQUEST_STOPPED_BY_USER
+          : error instanceof Error ? error.message : String(error);
         const now = new Date().toISOString();
         this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
           ...current,
           items: current.items.map((candidate) => candidate.targetParticipantId === item.targetParticipantId
-            ? { ...candidate, status: "failed", error: message, updatedAt: now }
+            ? { ...candidate, status: stoppedBeforeStart ? "interrupted" : "failed", error: message, updatedAt: now }
             : candidate),
           updatedAt: now
         }));
         replies.push({ targetHandle: target.handle, error: message });
+      } finally {
+        if (targetRunBegun && targetRunId) {
+          await this.endChatRun(conversation, targetRunId);
+        }
       }
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
@@ -12917,6 +12929,43 @@ export class ChatService {
     await this.ensureHistoryFiles(conversation);
     await this.saveConversation(conversation);
     return { batch: updatedBatch, replies };
+  }
+
+  /** Background request: once every target is done, the requester gets a
+   *  fresh turn with the answers. If the runner itself fails, the request is
+   *  closed as failed and the requester is still resumed, so it never waits
+   *  on a request that can no longer finish. */
+  private resumeRequesterWhenRunnerSettles(
+    conversationId: string,
+    requestMessageId: string,
+    runner: Promise<ParticipantRequestRunResult>,
+    progress?: ProgressCallback
+  ): void {
+    void runner
+      .catch(async (error) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        void this.debugLogs.write("chat.participant-request.runner.error", { conversationId, requestMessageId, message: reason });
+        const conversation = await this.requireChat(conversationId);
+        await this.withChatMutation(conversation, async () => {
+          const now = new Date().toISOString();
+          this.updateParticipantRequestBatch(conversation, requestMessageId, (batch) => {
+            const items = batch.items.map((item) => this.isOpenParticipantRequestStatus(item.status)
+              ? { ...item, status: "failed" as const, error: item.error ?? reason, updatedAt: now }
+              : item);
+            return { ...batch, items, status: this.rollupParticipantRequestStatus(items), updatedAt: now };
+          });
+          conversation.updatedAt = now;
+          this.queueSnapshot(conversation);
+        });
+      })
+      .then(() => this.autoResumeParticipantRequest(conversationId, requestMessageId, progress))
+      .catch((error) => {
+        void this.debugLogs.write("chat.participant-request.auto-resume.error", {
+          conversationId,
+          requestMessageId,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
   }
 
   private async awaitParticipantRequestRunner(
