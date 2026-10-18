@@ -288,35 +288,65 @@ QA_DIR="$(mktemp -d /private/tmp/accordagents-qa.XXXXXX)"
 QA_PORT=9340 # Choose a port not used by any existing AccordAgents instance.
 QA_LABEL="com.accordagents.qa-$QA_PORT"
 QA_LOG="$QA_DIR/electron.log"
+QA_PLIST="$QA_DIR/$QA_LABEL.plist"
 NODE_BIN="$(command -v node)"
 ELECTRON_CLI="${ELECTRON_CLI:-$REPO_ROOT/node_modules/electron/cli.js}"
 test -f "$ELECTRON_CLI"
 ```
 
-Before submitting, confirm that both the port and label are unused. If either
-command succeeds, choose another port and label; never remove a job you did not
-start:
+Before loading the job, confirm that both the port and label are unused. If
+either command succeeds, choose another port and label; never remove a job you
+did not start:
 
 ```bash
 curl -fsS --max-time 2 "http://127.0.0.1:$QA_PORT/json/version"
 launchctl print "gui/$(id -u)/$QA_LABEL"
 ```
 
-Both checks should fail with connection-refused/not-found. Then submit the job:
+Both checks should fail with connection-refused/not-found. If the label check
+finds your own job as `not running` because the user quit it, reopen that
+instance with `launchctl kickstart "gui/$(id -u)/$QA_LABEL"` instead of loading
+a new one; `launchctl bootstrap` fails on a label that is already loaded.
+Otherwise write the job definition and load it:
 
 ```bash
-launchctl submit -l "$QA_LABEL" -o "$QA_LOG" -e "$QA_LOG" -- \
-  /usr/bin/env ACCORDAGENTS_USER_DATA_DIR="$QA_DIR" \
+"$NODE_BIN" -e '
+  const [label, log, dir, ...args] = process.argv.slice(1);
+  process.stdout.write(JSON.stringify({
+    Label: label,
+    ProgramArguments: args,
+    EnvironmentVariables: { ACCORDAGENTS_USER_DATA_DIR: dir },
+    RunAtLoad: true,
+    KeepAlive: false,
+    ProcessType: "Interactive",
+    ExitTimeOut: 5,
+    StandardOutPath: log,
+    StandardErrorPath: log
+  }));
+' -- "$QA_LABEL" "$QA_LOG" "$QA_DIR" \
   "$NODE_BIN" "$ELECTRON_CLI" \
   --remote-debugging-port="$QA_PORT" "$REPO_ROOT" \
   --user-data-dir="$QA_DIR" \
   --disable-backgrounding-occluded-windows \
   --disable-renderer-backgrounding \
-  --disable-background-timer-throttling
+  --disable-background-timer-throttling \
+  | plutil -convert xml1 -o "$QA_PLIST" -
+launchctl bootstrap "gui/$(id -u)" "$QA_PLIST"
 ```
 
+Never start the instance with `launchctl submit`. That command always creates a
+job that launchd restarts whenever its process exits, so the instance reopens
+every time the user quits it and the user cannot get rid of it. This job has
+`KeepAlive` off: once the app exits, whether the user quit it, it crashed or a
+process was killed, it stays closed. The job stays loaded as `not running`, with
+its last exit code, until you boot it out, so the label stays reserved and a
+failed start leaves evidence. `ExitTimeOut` makes launchd force-quit the app 5
+seconds after a stop request, because the app does not reliably exit on SIGTERM
+alone. To restart it after a rebuild, use
+`launchctl kickstart -k "gui/$(id -u)/$QA_LABEL"`.
+
 Do not pass `node_modules/.bin/electron` to `launchctl`: that wrapper uses
-`#!/usr/bin/env node`, while a submitted job normally has only
+`#!/usr/bin/env node`, while a launchd job normally has only
 `/usr/bin:/bin:/usr/sbin:/sbin` in `PATH`, so it exits `127` with
 `env: node: No such file or directory`.
 
@@ -330,15 +360,25 @@ curl -sS --max-time 2 "http://127.0.0.1:$QA_PORT/json" | \
   jq -r '.[] | select(.type=="page") | .title'
 ```
 
-Report the label, PID, port, profile directory, and log path. Leave the job
-running when the user asked to use it. Because `launchctl submit` can respawn a
-process after the app is closed or killed, neither action stops the job. For a
+If the job shows `not running`, the app already exited; read `$QA_LOG` and the
+last exit code before reporting.
+
+Report the label, port, profile directory, and log path. Leave the job
+running when the user asked to use it, and tell them that quitting the app
+closes it for good. Stop every temporary QA job before you finish. For a
 temporary QA job, remember that the profile can contain provider state and the
 launch log is not rotated. Stop only the exact label, confirm its CDP port is
-closed, then move the recipe-created profile to Trash:
+closed, then move the recipe-created profile to Trash. The block finds the
+profile from the job itself, so it works after the shell variables are gone:
 
 ```bash
-launchctl remove "$QA_LABEL"
+QA_PLIST="$(launchctl print "gui/$(id -u)/$QA_LABEL" | sed -n 's/^[[:space:]]*path = //p' | head -1)"
+QA_DIR="$(dirname "$QA_PLIST")"
+case "$QA_DIR" in
+  /private/tmp/accordagents-qa.*) ;;
+  *) echo "Refusing: $QA_LABEL is not a recipe-created QA job ($QA_PLIST)" >&2; exit 1 ;;
+esac
+launchctl bootout "gui/$(id -u)/$QA_LABEL"
 for attempt in 1 2 3 4 5; do
   curl -fsS --max-time 1 "http://127.0.0.1:$QA_PORT/json/version" >/dev/null 2>&1 || break
   sleep 1
@@ -347,10 +387,7 @@ if curl -fsS --max-time 1 "http://127.0.0.1:$QA_PORT/json/version" >/dev/null 2>
   echo "QA port $QA_PORT is still open; refusing profile cleanup" >&2
   exit 1
 fi
-case "$QA_DIR" in
-  /private/tmp/accordagents-qa.*) mv -- "$QA_DIR" "$HOME/.Trash/" ;;
-  *) echo "Refusing to move unexpected QA_DIR: $QA_DIR" >&2; exit 1 ;;
-esac
+mv -- "$QA_DIR" "$HOME/.Trash/"
 ```
 
 Leave both the job and profile in place when the user asked to keep using the

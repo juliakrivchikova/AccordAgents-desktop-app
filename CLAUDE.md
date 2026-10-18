@@ -44,6 +44,8 @@ Whenever the user asks you to **see**, **screenshot**, **scroll**, **click**, **
 
 In AccordAgents Chat, use the repo-local `/electron-desktop-qa` skill for this workflow. It requires retrying localhost/CDP launch failures with escalation before reporting desktop UI QA as blocked.
 
+**Never leave the user an app instance they cannot close.** Never start a separate test instance of the app with `launchctl submit`: launchd restarts such a job every time it exits, so quitting the app only brings it back. A test instance that must outlive your turn uses only the detached recipe in `docs/inspecting-the-desktop-app.md`, which stays closed once the user quits it. Stop every temporary instance you started before you finish; leave one running only when the user asked to keep using it, and tell them its label and how to stop it. This rule covers separate test instances; it does not change how the user's own running app is restarted.
+
 ## Architecture
 
 This is an Electron desktop app for coordinating AI agents in one shared project workspace. The current product surface is AccordAgents Chat: project chats with local CLI participants backed by Claude Code, Codex CLI, and Gemini (Antigravity CLI, `agy`), reusable roles, behavior rules, decisions, permissions, and history kept together so context can carry across sessions and providers. There are three TS projects compiled separately:
