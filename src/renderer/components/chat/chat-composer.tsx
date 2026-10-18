@@ -26,6 +26,7 @@ import {
   useChatComposerImages
 } from "./use-chat-composer-images";
 import { useChatComposerMentions } from "./use-chat-composer-mentions";
+import { useChatComposerSuggestions, type ChatComposerSuggestion } from "./use-chat-composer-suggestions";
 import { useComposerNoticeClearance } from "./use-composer-notice-clearance";
 
 /**
@@ -49,6 +50,8 @@ export interface ChatComposerProps {
   repoPath?: string;
   draft: string;
   picks?: ChatComposerPicks;
+  /** Members' next-prompt suggestions, newest first (main composer only). */
+  suggestions?: ChatComposerSuggestion[];
   placeholder: string;
   isRunning: boolean;
   activeRunCount?: number;
@@ -102,6 +105,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     onSelectedFileMentionsChange: props.picks?.onFileMentionsChange
   });
   const images = useChatComposerImages(props.conversationId);
+  const suggestions = useChatComposerSuggestions(props.suggestions, props.draft);
   const canSend = !images.hasInvalidImages && (
     Boolean(props.draft.trim()) ||
     images.readyImages.length > 0 ||
@@ -272,6 +276,15 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
               mentions.insertMention(mentions.mentionOptions[mentions.mentionIndex] ?? mentions.mentionOptions[0]);
               return;
             }
+            const suggestionKey = suggestions.handleKey(event);
+            if (suggestionKey) {
+              event.preventDefault();
+              if (suggestionKey === "accept" && suggestions.offered) {
+                mentions.pendingCaretRef.current = { value: suggestions.offered, position: suggestions.offered.length };
+                props.onDraftChange(suggestions.offered);
+              }
+              return;
+            }
             if (event.key === "Escape") {
               mentions.setMentionQuery(undefined);
               mentions.setFileQuery(undefined);
@@ -290,7 +303,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           }, 120)}
           rows={props.rows ?? 1}
           maxHeight={props.maxHeight ?? 160}
-          placeholder={props.placeholder}
+          placeholder={suggestions.offered ?? props.placeholder}
         />
         {mentions.showSkillHighlights && (
           <div ref={highlightRef} className="chat-draft-highlight" aria-hidden="true">
@@ -326,6 +339,17 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
             )}
           </div>
           <div className="chat-composer-actions">
+            {suggestions.offered && (
+              <span className="chat-composer-hint" data-testid="chat-composer-suggestion-hint">
+                <kbd>Tab</kbd> to use
+                {suggestions.count > 1 && (
+                  <>
+                    <em>·</em>
+                    <kbd>↑</kbd><kbd>↓</kbd> {suggestions.position} of {suggestions.count}
+                  </>
+                )}
+              </span>
+            )}
             {props.onOpenAccord && (
               <Tooltip>
                 <TooltipTrigger asChild>

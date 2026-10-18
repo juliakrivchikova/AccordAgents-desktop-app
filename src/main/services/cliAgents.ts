@@ -5,6 +5,7 @@ import { constants, type Dirent } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { readCliHelpText } from "./cliHelpText";
 import type {
   AgentContextUsage,
   AgentContextUsageSource,
@@ -292,6 +293,11 @@ export interface CliAgentWarmOptions {
   /** Claude: this run's message was written to the CLI (it is in the CLI's
    *  queue from now on, in the order messages were written). */
   onMessageWritten?: () => void;
+  /** Claude: after this run's reply ended, the CLI predicted the User's next
+   *  prompt (`--prompt-suggestions`, as the dedicated CLI offers one in its
+   *  input). Given only when the caller shows suggestions; the process is
+   *  started with the flag only then and only when the CLI supports it. */
+  onPromptSuggestion?: (suggestion: string) => void;
 }
 
 /** Opaque to the runner: identifies the chat reply whose run started work. */
@@ -418,6 +424,7 @@ interface ClaudeWarmRunContext {
   onSelfResumedTurn?: (turn: CliAgentSelfResumedTurn) => void;
   onReplyStarted?: () => void;
   onMessageWritten?: () => void;
+  onPromptSuggestion?: (suggestion: string) => void;
   allowEmptyContent?: boolean;
   roleRuntime?: ParticipantRunResult["roleRuntime"];
 }
@@ -461,6 +468,8 @@ interface ClaudeWarmReply {
   buffered?: CliAgentOutputEvent[];
   onStarted?: () => void;
   onWritten?: () => void;
+  /** Receives the CLI's next-prompt suggestion if this reply ends well. */
+  onPromptSuggestion?: (suggestion: string) => void;
   onOutput?: CliAgentOutputCallback;
   onSessionId?: CliAgentSessionIdCallback;
   resolve: (result: ParticipantRunResult) => void;
@@ -499,6 +508,9 @@ interface ClaudeWarmProcessState {
   sessionId?: string;
   model?: string;
   onSelfResumedTurn?: (turn: CliAgentSelfResumedTurn) => void;
+  /** Where the CLI's next `prompt_suggestion` goes: the reply that ended last,
+   *  until a step starts (the CLI drops a pending suggestion then, too). */
+  promptSuggestionTarget?: (suggestion: string) => void;
   /** control_request ids sent for a queued reply's removal. */
   cancelRequests: Map<string, ClaudeWarmReply>;
   /** When the CLI last reported a background task event. */
@@ -1136,6 +1148,9 @@ export class CliAgentRunner {
   private readonly modelCatalogs = new Map<ChatProviderKind, CachedModelCatalog>();
   private readonly modelCatalogRequests = new Map<ChatProviderKind, Promise<ProviderModelCatalog>>();
   private claudeVersionRequest?: Promise<string | undefined>;
+  /** Per Claude executable: whether its CLI has `--prompt-suggestions`. An
+   *  older CLI rejects the unknown flag and would fail every turn. */
+  private readonly claudePromptSuggestionsSupport = new Map<string, Promise<boolean>>();
   // Last-known context usage per Antigravity conversation id. agy reports usage
   // in the print-mode result JSON only, so post-run refreshes read this cache
   // instead of a provider session log.
@@ -5278,6 +5293,7 @@ export class CliAgentRunner {
             onSelfResumedTurn: warm.onSelfResumedTurn,
             onReplyStarted: freshProcess ? undefined : warm.onReplyStarted,
             onMessageWritten: warm.onMessageWritten,
+            onPromptSuggestion: warm.onPromptSuggestion,
             allowEmptyContent: options.allowEmptyContent,
             roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined
           }),
@@ -5404,6 +5420,11 @@ export class CliAgentRunner {
     const newSessionId = options.persistSession && !options.sessionId ? randomUUID() : undefined;
     const extraReadableDirs = this.normalizedExtraReadableDirs(options.extraReadableDirs);
     const toolConfig = this.claudeToolConfig(kind, repoPath, extraReadableDirs, options);
+    const promptSuggestionsRequested = Boolean(options.warm?.onPromptSuggestion);
+    const promptSuggestions = promptSuggestionsRequested && await this.claudeSupportsPromptSuggestions(claudeExecutable);
+    if (promptSuggestionsRequested && !promptSuggestions) {
+      void this.writeDebugLog("cli.claude.prompt-suggestions-unsupported", { participantId: participant.id });
+    }
     const args = this.claudeLaunchArgs(
       participant,
       kind,
@@ -5411,7 +5432,8 @@ export class CliAgentRunner {
       toolConfig,
       extraReadableDirs,
       "warm",
-      newSessionId
+      newSessionId,
+      promptSuggestions
     );
     this.logClaudeLaunch(participant, repoPath, kind, options, args, toolConfig, extraReadableDirs, "warm");
 
@@ -5688,6 +5710,7 @@ export class CliAgentRunner {
             origin: claude?.origin,
             onStarted: claude?.onReplyStarted,
             onWritten: claude?.onMessageWritten,
+            onPromptSuggestion: claude?.onPromptSuggestion,
             roleRuntime: claude?.roleRuntime,
             allowEmptyContent: claude?.allowEmptyContent ?? false,
             sessionId: state.sessionId,
@@ -5743,7 +5766,8 @@ export class CliAgentRunner {
     toolConfig: ClaudeToolConfig,
     extraReadableDirs: string[],
     transport: "one-shot" | "one-shot-stream" | "warm",
-    newSessionId?: string
+    newSessionId?: string,
+    promptSuggestions = false
   ): string[] {
     const args = transport === "warm"
       ? [
@@ -5754,6 +5778,9 @@ export class CliAgentRunner {
           "stream-json",
           "--output-format",
           "stream-json",
+          // The CLI predicts the User's next prompt after each reply, as the
+          // dedicated CLI does in its input (its own setting can turn it off).
+          ...(promptSuggestions ? ["--prompt-suggestions"] : []),
           "--permission-mode",
           toolConfig.permissionMode
         ]
@@ -5848,6 +5875,10 @@ export class CliAgentRunner {
     }
     if (type === "control_response") {
       this.handleClaudeWarmControlResponse(record, state, hooks);
+      return;
+    }
+    if (type === "prompt_suggestion") {
+      this.deliverClaudePromptSuggestion(record, state, participant);
       return;
     }
     if (type === "system") {
@@ -5953,6 +5984,7 @@ export class CliAgentRunner {
    *  with none the CLI started this step on its own. */
   private startClaudeWarmStep(state: ClaudeWarmProcessState, participant: ParticipantConfig, hooks: ClaudeWarmProcessHooks): void {
     state.stepActive = true;
+    state.promptSuggestionTarget = undefined;
     if (state.active && !state.active.settled) {
       return;
     }
@@ -6273,6 +6305,7 @@ export class CliAgentRunner {
       this.finishClaudeWarmReply(state, reply, this.claudeWarmSegmentText(reply, event), event, participant, {
         allowEmpty: reply.allowEmptyContent || state.backgroundTasks.size > 0
       });
+      state.promptSuggestionTarget = reply.onPromptSuggestion;
     }
     hooks.settled();
   }
@@ -6554,6 +6587,34 @@ export class CliAgentRunner {
       status,
       liveTasks: state.backgroundTasks.size
     });
+  }
+
+  /** The CLI sends at most one suggestion per ended reply, a few seconds after
+   *  its result, and only while no new message has started a step. */
+  private deliverClaudePromptSuggestion(
+    record: Record<string, unknown>,
+    state: ClaudeWarmProcessState,
+    participant: ParticipantConfig
+  ): void {
+    const target = state.promptSuggestionTarget;
+    state.promptSuggestionTarget = undefined;
+    const suggestion = this.stringField(record, "suggestion")?.trim();
+    void this.writeDebugLog("cli.claude.prompt-suggestion", {
+      participantId: participant.id,
+      delivered: Boolean(target && suggestion),
+      chars: suggestion?.length ?? 0
+    });
+    if (!target || !suggestion) {
+      return;
+    }
+    try {
+      target(suggestion);
+    } catch (error) {
+      void this.writeDebugLog("cli-agent-claude-prompt-suggestion-handler-failed", {
+        participantId: participant.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
 
   /** Output only a running model step produces: its own text, its stream
@@ -7520,6 +7581,37 @@ export class CliAgentRunner {
 
   private stableToolInventoryHash(toolNames: string[]): string {
     return createHash("sha256").update([...toolNames].sort().join("\0")).digest("hex").slice(0, 16);
+  }
+
+  private claudeSupportsPromptSuggestions(claudeExecutable: string): Promise<boolean> {
+    let request = this.claudePromptSuggestionsSupport.get(claudeExecutable);
+    if (!request) {
+      request = readCliHelpText(
+        claudeExecutable,
+        commandEnvironment({}, CLAUDE_CODE_COMMAND_ENV_OPTIONS),
+        CLAUDE_MODEL_PROBE_TIMEOUT_MS
+      )
+        .then((help) => {
+          const supported = /(^|\s)--prompt-suggestions\b/m.test(help);
+          void this.writeDebugLog("cli.claude.prompt-suggestions-probe", {
+            executable: claudeExecutable,
+            supported,
+            helpChars: help.length
+          });
+          return supported;
+        })
+        .catch((error: unknown) => {
+          void this.writeDebugLog("cli.claude.prompt-suggestions-probe-failed", {
+            executable: claudeExecutable,
+            message: error instanceof Error ? error.message.slice(0, 300) : String(error)
+          });
+          // Ask again next time rather than keep suggestions off for the session.
+          this.claudePromptSuggestionsSupport.delete(claudeExecutable);
+          return false;
+        });
+      this.claudePromptSuggestionsSupport.set(claudeExecutable, request);
+    }
+    return request;
   }
 
   private claudeVersionForDiagnostics(): Promise<string | undefined> {

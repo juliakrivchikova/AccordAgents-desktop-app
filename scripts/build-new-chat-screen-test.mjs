@@ -11,6 +11,7 @@ await build({
     "new-chat-screen.test": path.join(process.cwd(), "src/renderer/components/chat/new-chat-screen.test.tsx"),
     "use-chat-actions.test": path.join(process.cwd(), "src/renderer/app/use-chat-actions.test.tsx"),
     "chat-message-drafts.test": path.join(process.cwd(), "src/renderer/app/chat-message-drafts.test.tsx"),
+    "use-chat-composer-suggestions.test": path.join(process.cwd(), "src/renderer/components/chat/use-chat-composer-suggestions.test.tsx"),
     "chat-active-run-popover.test": path.join(process.cwd(), "src/renderer/components/chat/chat-active-run-popover.test.tsx")
   },
   outdir,

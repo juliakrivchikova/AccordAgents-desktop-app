@@ -325,7 +325,7 @@ export class MachineHostService {
   private readonly knownMessages = new Map<string, Map<string, string>>();
 
   constructor(
-    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady">>,
+    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady" | "setPromptSuggestionForwarder">>,
     private readonly storage: Pick<StorageService, "getConversation"> & Partial<Pick<StorageService, "deleteConversation">>,
     private readonly settings: Pick<SettingsService, "importMachineSettingsSnapshot">,
     private readonly debugLogs: Pick<DebugLogService, "write">,
@@ -432,6 +432,20 @@ export class MachineHostService {
       this.settlingRuns.set(run.runId, run);
       return this.finishNativeRun(run);
     });
+    // The desktop decides whether a member's next-prompt suggestion is still
+    // on offer; with no desktop connected there is nobody to offer it to.
+    this.chat.setPromptSuggestionForwarder?.((suggestion) => {
+      if (this.closed) return;
+      void this.send({
+        type: "machine.turn.suggestion",
+        conversationId: suggestion.conversationId,
+        runId: suggestion.runId,
+        participantId: suggestion.participantId,
+        suggestion: suggestion.text
+      }).catch((error) => {
+        void this.debugLogs.write("machine-host.suggestion.not-sent", { runId: suggestion.runId, message: errorMessage(error) });
+      });
+    });
   }
 
   private async initializeOwnerChannel(): Promise<void> {
@@ -501,6 +515,7 @@ export class MachineHostService {
     this.peers.close();
     this.eventChannel?.close();
     this.unsubscribeRunSettled?.();
+    this.chat.setPromptSuggestionForwarder?.(undefined);
     if (this.commandRetry) clearTimeout(this.commandRetry);
     if (this.outboxRetryTimer) {
       clearTimeout(this.outboxRetryTimer);

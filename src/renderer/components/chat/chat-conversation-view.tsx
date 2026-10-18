@@ -45,6 +45,7 @@ import { useChatActivityDisclosure } from "./use-chat-activity-disclosure";
 import { useChatLocalFileOpen } from "./use-chat-local-file-open";
 import { useSubmittingIdSet } from "./use-submitting-id-set";
 import { useStableChatMessageActions } from "./use-stable-chat-message-actions";
+import { useChatPromptSuggestions } from "./use-chat-prompt-suggestions";
 import {
   CHAT_SIDE_PANEL_MIN_WIDTH,
   CHAT_THREAD_DEFAULT_WIDTH,
@@ -60,6 +61,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     () => chatParticipants(props.conversation),
     [props.conversation.metadata.participants]
   );
+  const promptSuggestions = useChatPromptSuggestions(props.conversation.id, participants);
   const pendingAppToolApprovals = chatAppToolApprovals(props.conversation).filter((approval) => approval.status === "pending");
   const resolvedTimelineApprovals = useMemo(
     () =>
@@ -192,9 +194,12 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     skillMentions: ChatSkillMention[] = [],
     content?: string
   ): Promise<boolean> {
+    promptSuggestions.dismiss();
     const sent = await props.onSend(repoFileMentions, imageAttachments, skillMentions, content);
     if (sent) {
       viewport.scrollToChatBottom();
+    } else {
+      promptSuggestions.reload();
     }
     return sent;
   }
@@ -384,6 +389,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               repoPath={props.conversation.repoPath}
               draft={props.draft}
               picks={props.composerPicks}
+              suggestions={promptSuggestions.suggestions}
               onDraftChange={props.onDraftChange}
               onSend={sendDraft}
               accordDisabledReason={props.accordDisabledReason}
