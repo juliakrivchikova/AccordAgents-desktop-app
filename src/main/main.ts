@@ -2,7 +2,7 @@ import path from "node:path";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomUUID } from "node:crypto";
-import { app, autoUpdater, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, autoUpdater, BrowserWindow, dialog, ipcMain, powerMonitor, shell } from "electron";
 import { parseCustomAvatarId, type AvatarStudioTurnRequest, type SaveCustomAvatarRequest } from "../shared/avatarStudio";
 import { chatMessageHiddenFromTimeline } from "../shared/chatParticipantRequestThreads";
 import type {
@@ -100,6 +100,20 @@ import { ArtifactService } from "./services/artifacts";
 import { ArtifactStore } from "./services/artifactStore";
 import { artifactEventWriter, artifactProjectionPort } from "./services/artifactReplication";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "./appToolWiring";
+import { ScriptService } from "./services/scripts";
+import { APP_SCRIPTS_REQUEST_CHANGE_TOOL } from "../shared/appMcpToolContracts";
+import { ScriptSecretStore, ScriptStore } from "./services/scriptStore";
+import { hostPlatform } from "./platform";
+import {
+  SCRIPT_DESKTOP_HOST_ID,
+  isChatScriptChangeRequest,
+  scriptChangeInstallsCode,
+  type DeleteScriptSecretRequest,
+  type GetScriptRevisionRequest,
+  type ScriptIdRequest,
+  type SetScriptEnabledRequest,
+  type SetScriptSecretRequest
+} from "../shared/scripts";
 import { ChatEventLogService } from "./services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "./services/chatEventMirror";
 import { ChatService } from "./services/chat";
@@ -607,6 +621,37 @@ chatService.setCloudRunAwsService(cloudRunAwsService);
 chatService.setMachineProjectPreparation((machineId, localPath, signal, progress) => cloudRunPreparation.prepareProject(machineId, localPath, signal, progress));
 chatService.setCloudRunDoctorService(cloudRunDoctorService);
 wireChatAppToolHandlers(appMcpService, chatService);
+// Scheduled scripts hosted by this desktop. Files, history and run state live
+// under userData/scripts; key values in their own encrypted file, never in
+// settings.json, so no settings export or machine sync can carry them.
+let scriptsUpdatedTimer: ReturnType<typeof setTimeout> | undefined;
+const scriptService: ScriptService = new ScriptService({
+  store: new ScriptStore(path.join(app.getPath("userData"), "scripts")),
+  secrets: new ScriptSecretStore(path.join(app.getPath("userData"), "script-secrets.json"), hostPlatform().secrets),
+  hostId: SCRIPT_DESKTOP_HOST_ID,
+  hostLabel: process.platform === "darwin" ? "This Mac" : "This computer",
+  hostPhrase: process.platform === "darwin" ? "this Mac" : "this computer",
+  tokens: appMcpService,
+  chat: {
+    describeChat: (chatId) => chatService.describeChatForScripts(chatId),
+    postScriptMessage: (input) => chatService.postScriptMessage({ ...input, progress: (progress) => emitReviewProgress(progress) })
+  },
+  node: { command: "node", env: {} },
+  debugLog: (event, payload) => {
+    void debugLogService.write(event, payload);
+  },
+  onChanged: () => {
+    if (scriptsUpdatedTimer) return;
+    scriptsUpdatedTimer = setTimeout(() => {
+      scriptsUpdatedTimer = undefined;
+      void scriptService.list()
+        .then((scripts) => sendToMainWindow("scripts:updated", { scripts }))
+        .catch(() => undefined);
+    }, 150);
+  }
+});
+chatService.setScriptHost(scriptService);
+appMcpService.setScriptApiHandler((context, _route, body) => scriptService.postFromScript(context, body));
 // Artifacts persist in their own tables of the same SQLite database as
 // conversations, but independently of conversation payloads.
 const artifactStore = new ArtifactStore(path.join(app.getPath("userData"), "accordagents.sqlite3"), sqliteExecutable);
@@ -698,6 +743,7 @@ async function applyMobileDecision(request: {
   kind: "permission.decided" | "choice.answered";
   payload: { operationId: string; targetKey: string; stateId?: string; detail?: Record<string, unknown> };
 }): Promise<void> {
+  await refuseScriptInstallFromPhone(request);
   await publishChatAction({ conversationId: request.conversationId, kind: request.kind, payload: request.payload });
   const event = await storageService.getChatEvent(`chat-action:${request.payload.operationId}`);
   if (!event) {
@@ -718,6 +764,24 @@ async function applyMobileDecision(request: {
     conversationId: request.conversationId, kind: request.kind, targetKey: request.payload.targetKey,
     status: outcome.status, detail: outcome.detail ?? ""
   });
+}
+
+/** The phone cannot show a script's code yet, so it may decline a script
+ *  that installs code but never approve one; the desktop card shows the code. */
+async function refuseScriptInstallFromPhone(request: {
+  conversationId: string;
+  kind: "permission.decided" | "choice.answered";
+  payload: { targetKey: string; stateId?: string; detail?: Record<string, unknown> };
+}): Promise<void> {
+  const approving = request.payload.stateId === "approved" || request.payload.detail?.approve === true;
+  if (request.kind !== "permission.decided" || !approving || !request.payload.targetKey.startsWith("approval:")) return;
+  const approvalId = request.payload.targetKey.slice("approval:".length);
+  const conversation = await storageService.getConversation(request.conversationId);
+  const approvals = (conversation?.metadata?.pendingAppToolApprovals ?? []) as import("../shared/types").ChatAppToolApproval[];
+  const approval = approvals.find((item) => item.id === approvalId);
+  if (approval?.toolName === APP_SCRIPTS_REQUEST_CHANGE_TOOL && isChatScriptChangeRequest(approval.request) && scriptChangeInstallsCode(approval.request)) {
+    throw new Error("Approve scheduled scripts on the desktop, where the card shows their code. You can decline them on the phone.");
+  }
 }
 
 async function chatActionEventExists(eventId: string): Promise<boolean> {
@@ -2980,6 +3044,26 @@ function registerIpc(): void {
       activeReviews.delete(runId);
     }
   });
+  ipcMain.handle("scripts:list", () => scriptService.list());
+  ipcMain.handle("scripts:get-revision", (_event, request: GetScriptRevisionRequest) =>
+    scriptService.revisionContent(request.scriptId, request.revisionId));
+  ipcMain.handle("scripts:runs", (_event, request: ScriptIdRequest) => scriptService.runs(request.scriptId));
+  ipcMain.handle("scripts:set-secret", async (_event, request: SetScriptSecretRequest) => {
+    await scriptService.setSecret(request.scriptId, request.name, request.value);
+    return scriptService.summary(request.scriptId);
+  });
+  ipcMain.handle("scripts:delete-secret", async (_event, request: DeleteScriptSecretRequest) => {
+    await scriptService.deleteSecret(request.scriptId, request.name);
+    return scriptService.summary(request.scriptId);
+  });
+  ipcMain.handle("scripts:set-enabled", async (_event, request: SetScriptEnabledRequest) => {
+    await scriptService.setEnabled(request.scriptId, request.enabled);
+    return scriptService.summary(request.scriptId);
+  });
+  ipcMain.handle("scripts:run-now", (_event, request: ScriptIdRequest) => scriptService.runNow(request.scriptId));
+  ipcMain.handle("scripts:delete", (_event, request: ScriptIdRequest) => scriptService.deleteScript(request.scriptId));
+  ipcMain.handle("scripts:release-held", (_event, request: ScriptIdRequest) => scriptService.releaseHeld(request.scriptId));
+  ipcMain.handle("scripts:discard-held", (_event, request: ScriptIdRequest) => scriptService.discardHeld(request.scriptId));
   ipcMain.handle("chat:read-attachment", async (_event, request: ReadChatAttachmentRequest) => {
     return chatService.readChatAttachment(request);
   });
@@ -3509,6 +3593,13 @@ void app.whenReady().then(async () => {
   bootstrapAppUpdater(debugLogService, betaUpdates, updateRestartGate);
   await appMcpService.start();
   await storageService.init();
+  void scriptService.start().catch((error) => {
+    void debugLogService.write("scripts.start.error", { message: error instanceof Error ? error.message : String(error) });
+  });
+  // A laptop that slept through a due time runs it (or records it missed) on wake.
+  powerMonitor.on("resume", () => {
+    void scriptService.tick();
+  });
   // Before any pairing is restored: a revocation the owner made is a fact
   // about this device, not about the process that was running when it happened.
   await applyStoredMobilePairingRevocations().catch(error => {
@@ -3790,7 +3881,7 @@ app.on("before-quit", (event) => {
   quitCleanupStarted = true;
   const cleanup = Promise.allSettled([
     cliAgentRunner.shutdownWarmAgents(),
-    appMcpService.stop()
+    scriptService.stop().then(() => appMcpService.stop())
   ]);
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, 5_000));
   void Promise.race([cleanup.then(() => undefined), timeout]).finally(() => {

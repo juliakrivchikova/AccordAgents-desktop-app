@@ -1,0 +1,316 @@
+/* Scheduled-script approval card (chat) and the Settings → Scripts page. */
+
+.chat-script-approval-content {
+  display: grid;
+  gap: 10px;
+  padding: 4px 15px 12px;
+  min-width: 0;
+}
+
+.chat-app-tool-approval-panel .chat-script-approval-title,
+.chat-app-tool-approval-panel.is-review-change .chat-script-approval-title {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.chat-script-approval-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.chat-script-approval-description,
+.chat-script-approval-reason {
+  margin: 0;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat-script-approval-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.chat-script-approval-facts dt {
+  color: var(--app-muted);
+}
+
+.chat-script-approval-facts dd {
+  margin: 0;
+  color: var(--app-text);
+  overflow-wrap: anywhere;
+}
+
+.chat-script-approval-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.chat-script-approval-keys {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface-subtle);
+}
+
+.chat-script-approval-key {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.chat-script-approval-key code {
+  font-size: 12px;
+}
+
+.chat-script-approval-key-saved {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--app-status-success-text);
+  font-size: 13px;
+}
+
+.chat-script-approval-key-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 220px;
+  justify-content: flex-end;
+}
+
+.chat-script-approval-key-entry input {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 280px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-size: 13px;
+}
+
+.chat-script-approval-key-entry input:focus {
+  outline: none;
+  border-color: var(--app-focus-border);
+}
+
+.chat-script-approval-save-key,
+.chat-script-approval-link,
+.chat-script-approval-code-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--app-text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chat-script-approval-save-key {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+}
+
+.chat-script-approval-save-key:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.chat-script-approval-link {
+  padding: 0;
+  color: var(--app-text-secondary);
+  text-decoration: underline;
+}
+
+.chat-script-approval-code-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  color: var(--app-text-secondary);
+}
+
+.chat-script-approval-files {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chat-script-approval-file-name {
+  font-size: 12px;
+  color: var(--app-muted);
+  margin-bottom: 4px;
+}
+
+.chat-script-approval-file pre {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+.chat-script-approval-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--app-status-warning-text);
+  font-size: 12px;
+}
+
+.chat-script-approval-hint {
+  margin: 0;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.chat-script-approval-error {
+  margin: 0;
+  color: var(--app-status-danger-text);
+  font-size: 12px;
+}
+
+/* Settings → Scripts */
+
+.scripts-settings-list {
+  display: grid;
+  gap: 12px;
+}
+
+.scripts-settings-item {
+  display: grid;
+  gap: 8px;
+}
+
+.scripts-settings-item-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.scripts-settings-item-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.scripts-settings-item-title strong {
+  font-size: 14px;
+  color: var(--app-text-strong);
+}
+
+.scripts-settings-item-title span,
+.scripts-settings-meta {
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.scripts-settings-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.scripts-settings-head-controls {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.scripts-settings-status {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--app-status-neutral-border);
+  background: var(--app-status-neutral-bg);
+  color: var(--app-status-neutral-text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.scripts-settings-status.is-ok,
+.scripts-settings-status.is-running {
+  border-color: var(--app-status-success-border);
+  background: var(--app-status-success-bg);
+  color: var(--app-status-success-text);
+}
+
+.scripts-settings-status.is-failing,
+.scripts-settings-status.is-blocked {
+  border-color: var(--app-status-danger-border);
+  background: var(--app-status-danger-bg);
+  color: var(--app-status-danger-text);
+}
+
+.scripts-settings-status.is-waiting-for-keys,
+.scripts-settings-status.is-holding-messages,
+.scripts-settings-status.is-needs-approval {
+  border-color: var(--app-status-warning-border);
+  background: var(--app-status-warning-bg);
+  color: var(--app-status-warning-text);
+}
+
+.scripts-settings-runs {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scripts-settings-run {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--app-text);
+}
+
+.scripts-settings-run pre {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--app-surface-muted);
+  white-space: pre-wrap;
+  font-size: 11px;
+}
+
+.scripts-settings-error {
+  color: var(--app-status-danger-text);
+  font-size: 12px;
+}

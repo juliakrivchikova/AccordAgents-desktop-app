@@ -15,6 +15,7 @@
  */
 
 import type { ChatAppToolApproval, ChatChoiceOption, ChatMessage, Conversation } from "./types";
+import { isChatScriptChangeRequest, scriptChangeInstallsCode } from "./scripts";
 
 export type MobileControlCardKind = "permission" | "choice";
 
@@ -56,15 +57,20 @@ const DENY = { id: "deny", label: "Deny" };
  *  is built from. Pending ones only are shown; an answered approval has no
  *  record the phone keeps. */
 export function controlCardFromApproval(conversationId: string, approval: ChatAppToolApproval): MobileControlCard {
+  // A script that installs code is approved where its code can be read: the
+  // phone shows it as a card it may only decline.
+  const desktopOnly = isChatScriptChangeRequest(approval.request) && scriptChangeInstallsCode(approval.request);
   return {
     id: approval.id,
     kind: "permission",
     conversationId,
-    title: approval.summary || "Permission request",
-    summary: approval.summary || "",
+    title: desktopOnly ? `Approve on the desktop: ${approval.summary}` : approval.summary || "Permission request",
+    summary: desktopOnly
+      ? `${approval.summary}. The phone cannot show the script's code yet, so it is approved on the desktop. You can decline it here.`
+      : approval.summary || "",
     requesterLabel: approval.requesterHandle ? `@${approval.requesterHandle}` : undefined,
     machineName: (approval as { machineName?: string }).machineName,
-    options: [ALLOW, DENY],
+    options: desktopOnly ? [DENY] : [ALLOW, DENY],
     allowsCustomAnswer: false,
     allowsCancel: false,
     status: "pending",

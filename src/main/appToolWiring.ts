@@ -63,6 +63,7 @@ export function wireChatAppToolHandlers(appMcpService: AppMcpService, chatServic
   appMcpService.setChatReactHandler((actor, request) => chatService.reactToMessageFromTool(actor, request));
   appMcpService.setChatSendMessageHandler((actor, request) => chatService.sendChatMessageFromTool(actor, request));
   appMcpService.setChatSetTitleHandler((actor, request) => chatService.setChatTitleFromTool(actor, request));
+  appMcpService.setScriptToolHandler((actor, toolName, request) => chatService.scriptToolFromApp(actor, toolName, request));
 }
 
 /** Registers the artifact tool handler: resolves the acting member through the

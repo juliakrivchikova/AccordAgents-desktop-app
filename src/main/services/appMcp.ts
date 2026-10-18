@@ -45,6 +45,7 @@ import {
   APP_ARTIFACT_DRAFT_SET_ROSTER_TOOL,
   APP_ARTIFACT_PUBLISH_TOOL,
   APP_ARTIFACT_TOOL_NAMES,
+  APP_SCRIPT_TOOL_NAMES,
   APP_MCP_TOOL_POLICIES,
   appMcpToolDefinitionsForCapabilities
 } from "../../shared/appMcpToolContracts";
@@ -124,6 +125,15 @@ type AppChatReactHandler = (actor: AppMcpActor, request: unknown) => Promise<unk
 type AppChatSendMessageHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatSetTitleHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppArtifactToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
+type AppScriptToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
+/** A scheduled script's run, identified by its per-run script token. */
+export interface ScriptApiContext {
+  scriptId: string;
+  runId: string;
+}
+/** Answers the plain-HTTP script API; a thrown error with a numeric
+ *  `status` becomes that HTTP status. */
+type ScriptApiHandler = (context: ScriptApiContext, route: "messages", body: unknown) => Promise<unknown>;
 
 interface JsonRpcRequest {
   jsonrpc?: unknown;
@@ -172,6 +182,11 @@ export class AppMcpService {
   private chatSendMessageHandler?: AppChatSendMessageHandler;
   private chatSetTitleHandler?: AppChatSetTitleHandler;
   private artifactToolHandler?: AppArtifactToolHandler;
+  private scriptToolHandler?: AppScriptToolHandler;
+  private scriptApiHandler?: ScriptApiHandler;
+  /** Script tokens live apart from agent tokens: a script token opens only
+   *  the script API, and an agent token never opens it. */
+  private readonly scriptTokens = new Map<string, ScriptApiContext>();
 
   constructor(private readonly debugLogs?: AppMcpDebugLogger) {}
 
@@ -262,6 +277,27 @@ export class AppMcpService {
   setArtifactToolHandler(handler: AppArtifactToolHandler): void {
     this.artifactToolHandler = handler;
   }
+  setScriptToolHandler(handler: AppScriptToolHandler | undefined): void {
+    this.scriptToolHandler = handler;
+  }
+  setScriptApiHandler(handler: ScriptApiHandler | undefined): void {
+    this.scriptApiHandler = handler;
+  }
+
+  /** Base URL of the script API, e.g. http://127.0.0.1:PORT/script-api. */
+  scriptApiUrl(): string | undefined {
+    return this.url ? this.url.replace(/\/mcp$/, "/script-api") : undefined;
+  }
+
+  issueScriptToken(context: ScriptApiContext): string {
+    const token = randomUUID();
+    this.scriptTokens.set(token, { ...context });
+    return token;
+  }
+
+  revokeScriptToken(token: string): void {
+    this.scriptTokens.delete(token);
+  }
 
   async start(): Promise<void> {
     if (this.server) {
@@ -290,6 +326,7 @@ export class AppMcpService {
     this.server = undefined;
     this.url = undefined;
     this.tokens.clear();
+    this.scriptTokens.clear();
     this.clientStates.clear();
     if (!server) {
       return;
@@ -352,6 +389,10 @@ export class AppMcpService {
 
   private async handleHttpRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     const pathname = request.url?.split("?")[0];
+    if (request.method === "POST" && pathname === "/script-api/messages") {
+      await this.handleScriptApiRequest(request, response, "messages");
+      return;
+    }
     if (request.method !== "POST" || pathname !== "/mcp") {
       this.writeHttp(response, 404, "text/plain", "Not found");
       return;
@@ -563,6 +604,12 @@ export class AppMcpService {
         throw new Error("Artifact tools are not available.");
       }
       return this.toolTextResult(await this.artifactToolHandler(actor, record.name, record.arguments));
+    }
+    if (typeof record.name === "string" && (APP_SCRIPT_TOOL_NAMES as readonly string[]).includes(record.name)) {
+      if (!this.scriptToolHandler) {
+        throw new Error("Scheduled scripts are not available on this host yet.");
+      }
+      return this.toolTextResult(await this.scriptToolHandler(actor, record.name, record.arguments));
     }
     if (
       record.name !== APP_ROSTER_DESCRIBE_OPTIONS_TOOL &&
@@ -858,6 +905,46 @@ export class AppMcpService {
           : [])
       ]
     };
+  }
+
+  private async handleScriptApiRequest(request: http.IncomingMessage, response: http.ServerResponse, route: "messages"): Promise<void> {
+    const context = this.scriptContextFromRequest(request);
+    if (!context) {
+      this.writeHttp(response, 401, "application/json", JSON.stringify({ ok: false, error: "Unauthorized" }));
+      return;
+    }
+    const handler = this.scriptApiHandler;
+    if (!handler) {
+      this.writeHttp(response, 503, "application/json", JSON.stringify({ ok: false, error: "Scheduled scripts are not available on this host." }));
+      return;
+    }
+    let body: unknown;
+    try {
+      body = await this.readJsonBody(request);
+    } catch (error) {
+      this.writeHttp(response, 400, "application/json", JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
+    try {
+      const result = await handler(context, route, body);
+      this.writeJson(response, result);
+    } catch (error) {
+      const status = typeof (error as { status?: unknown })?.status === "number" ? (error as { status: number }).status : 500;
+      const message = error instanceof Error ? error.message : String(error);
+      void this.debugLogs?.write("app-mcp.script-api.error", { scriptId: context.scriptId, runId: context.runId, status, message }).catch(() => undefined);
+      this.writeHttp(response, status, "application/json", JSON.stringify({ ok: false, error: message }));
+    }
+  }
+
+  private scriptContextFromRequest(request: http.IncomingMessage): ScriptApiContext | undefined {
+    const authorization = Array.isArray(request.headers.authorization)
+      ? request.headers.authorization[0]
+      : request.headers.authorization;
+    const match = authorization?.match(/^Bearer\s+(.+)$/i);
+    if (!match) {
+      return undefined;
+    }
+    return this.scriptTokens.get(match[1].trim());
   }
 
   private actorFromRequest(request: http.IncomingMessage): AppMcpActor | undefined {

@@ -1,3 +1,4 @@
+import type { ChatScriptChangeRequest } from "./scripts";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import type {
   CreateMachineRequest,
@@ -839,7 +840,7 @@ export interface PluginListResult {
 
 export type ChatRoleRuntime = "claude-agent" | "codex-developer-instructions" | "prompt-fallback";
 
-export type ChatAppToolCapability = "participants.manage" | "participants.request" | "compaction.request" | "permissions.request";
+export type ChatAppToolCapability = "participants.manage" | "participants.request" | "compaction.request" | "permissions.request" | "scripts.request";
 
 export type ChatReactionActorKind = "user" | "participant";
 
@@ -1308,6 +1309,7 @@ export interface ChatPermissionRequestToolResult {
 }
 
 export type ChatAppToolApprovalRequest =
+  | ChatScriptChangeRequest
   | ChatRosterChangeRequest
   | ChatRoleChangeRequest
   | ChatParticipantChangeRequest
@@ -1479,6 +1481,9 @@ export interface ChatMessageMetadata {
   workedMs?: number;
   queuedBehind?: { handle: string };
   appMessageSource?: string;
+  /** Set on messages a scheduled script posted. */
+  scriptId?: string;
+  scriptName?: string;
   artifactEventId?: string;
   activityEvents?: ChatAgentActivityEvent[];
   processingTranscript?: ChatProcessingTranscript;
@@ -2118,7 +2123,9 @@ export interface AgentRunProgress {
 
 export interface ChatMessage {
   id: string;
-  role: "user" | "participant" | "system" | "summary";
+  /** "script": posted by a scheduled script the User approved; its name is
+   *  in participantLabel and metadata.scriptName. */
+  role: "user" | "participant" | "system" | "summary" | "script";
   participantId?: string;
   participantLabel?: string;
   content: string;
@@ -2976,6 +2983,18 @@ export interface AppBridge {
   updateArtifactDraftRoster(request: UpdateArtifactDraftRosterRequest): Promise<ArtifactResult<CollectingArtifactReadResult>>;
   publishArtifact(request: PublishArtifactRequest): Promise<ArtifactResult<PublishedArtifactReadResult>>;
   onArtifactsUpdated(callback: (event: ArtifactsUpdatedEvent) => void): () => void;
+  // Scheduled scripts on this desktop.
+  listScripts(): Promise<import("./scripts").ScheduledScriptSummary[]>;
+  getScriptRevision(request: import("./scripts").GetScriptRevisionRequest): Promise<import("./scripts").ScriptRevisionContent>;
+  getScriptRuns(request: import("./scripts").ScriptIdRequest): Promise<import("./scripts").ScriptRunRow[]>;
+  setScriptSecret(request: import("./scripts").SetScriptSecretRequest): Promise<import("./scripts").ScheduledScriptSummary>;
+  deleteScriptSecret(request: import("./scripts").DeleteScriptSecretRequest): Promise<import("./scripts").ScheduledScriptSummary>;
+  setScriptEnabled(request: import("./scripts").SetScriptEnabledRequest): Promise<import("./scripts").ScheduledScriptSummary>;
+  runScriptNow(request: import("./scripts").ScriptIdRequest): Promise<void>;
+  deleteScript(request: import("./scripts").ScriptIdRequest): Promise<void>;
+  releaseHeldScriptMessages(request: import("./scripts").ScriptIdRequest): Promise<void>;
+  discardHeldScriptMessages(request: import("./scripts").ScriptIdRequest): Promise<void>;
+  onScriptsUpdated(callback: (event: import("./scripts").ScriptsUpdatedEvent) => void): () => void;
   // Machines transport: machines that host participants.
   listMachines(): Promise<MachineListResult>;
   getCloudRunPreparation(request: Pick<import("./cloudRunPreparation").PrepareCloudRunRequest, "provider" | "instanceId">): Promise<import("./cloudRunPreparation").CloudRunPreparationState | undefined>;

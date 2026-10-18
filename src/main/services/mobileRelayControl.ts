@@ -1932,7 +1932,9 @@ function timelineEventFromMessage(
     id: message.id,
     ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
     ...(hidden ? { hidden: true as const } : {}),
-    role: message.role === "participant" ? "participant" : message.role === "system" ? "system" : "you",
+    // A scheduled script's message is not the User's: the phone has no script
+    // author, so it shows as an author named after the script.
+    role: message.role === "participant" || message.role === "script" ? "participant" : message.role === "system" ? "system" : "you",
     ...(message.participantLabel ? { participantLabel: message.participantLabel } : {}),
     content: message.content.trim() || message.role !== "participant" || message.status !== "pending"
       ? message.content
