@@ -33,7 +33,7 @@ import { advanceInstanceSequence, isStoredTerminal } from "./machineTurnOutcome"
 import { openMobileRelayPayload } from "./mobileRelaySealing";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
 import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
-import { RelayTunnelClient } from "./relayTunnelClient";
+import { RelayTunnelClient, type TunnelClient } from "./relayTunnelClient";
 import { MachinePeerFabric } from "./machinePeerFabric";
 import { MachineTrustStore } from "./machineTrustStore";
 import { signMachineControl, verifyMachineControl, machineControlSender } from "./machineControlAuthentication";
@@ -95,7 +95,7 @@ export interface MachineHostOptions {
    *  a result survives a restart of this runtime. In-memory only when unset. */
   outboxPath?: string;
   reconnectDelayMs?: number;
-  createClient?: (pairing: MobilePairingPackage) => RelayTunnelClient;
+  createClient?: (pairing: MobilePairingPackage) => TunnelClient;
   now?: () => Date;
   nativeProcessDbPath?: string;
   /** Commit idle accounting before a completed native run stops being busy. */
@@ -150,7 +150,7 @@ const MACHINE_CHAT_WAIT_MS = 10 * 60 * 1000;
 
 export class MachineHostService {
   private eventChannel!: DeviceEventChannel;
-  private readonly client: RelayTunnelClient;
+  private readonly client: TunnelClient;
   private readonly now: () => Date;
   private readonly seenMessageIds = new Set<string>();
   private readonly activeTurns = new Map<string, AbortController>();

@@ -38,9 +38,22 @@ interface LiveSocket {
   readonly readyState: number;
   readonly OPEN: number;
   send(data: string): void;
+  close(code?: number, reason?: string): void;
   terminate(): void;
   on(event: "close" | "error", listener: () => void): void;
+  on(event: "message", listener: (data: unknown) => void): void;
 }
+
+/** One device in a room: the live, unstored path for messages that only
+ *  matter while both ends are there (greetings, requests answered at once). */
+interface RoomMember {
+  deviceId: string;
+  role: string;
+  socket: LiveSocket;
+}
+
+const ROOM_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const ROOM_MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 interface LiveSocketServer {
   handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer, done: (socket: LiveSocket) => void): void;
 }
@@ -55,6 +68,8 @@ export class HubServer {
   private readonly nonces = new HubNonceCache();
   private readonly live = new Set<LiveSocket>();
   private readonly sockets: LiveSocketServer = new WebSocketServer({ noServer: true, maxPayload: 1024 });
+  private readonly roomSockets: LiveSocketServer = new WebSocketServer({ noServer: true, maxPayload: ROOM_MAX_MESSAGE_BYTES });
+  private readonly rooms = new Map<string, Map<string, RoomMember>>();
   private servers: Server[] = [];
   private roster?: Promise<Map<string, HubDevice>>;
   private readonly now: () => number;
@@ -137,6 +152,8 @@ export class HubServer {
   async close(): Promise<void> {
     for (const socket of this.live) socket.terminate();
     this.live.clear();
+    for (const members of this.rooms.values()) for (const member of members.values()) member.socket.terminate();
+    this.rooms.clear();
     await Promise.all(this.servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     this.servers = [];
   }
@@ -165,6 +182,7 @@ export class HubServer {
   private async upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", "http://hub");
+      if (url.pathname === "/v1/room") return await this.joinRoom(request, socket, head, url);
       if (url.pathname !== "/v1/live") throw new HubRequestError(404, "Not found.");
       // A browser cannot set headers on a WebSocket: the signature of
       // "GET /v1/live" travels in the query instead.
@@ -181,6 +199,62 @@ export class HubServer {
       const status = error instanceof HubRequestError ? error.status : 500;
       socket.end(`HTTP/1.1 ${status} ${status === 401 ? "Unauthorized" : status === 404 ? "Not Found" : "Error"}\r\n\r\n`);
     }
+  }
+
+  /**
+   * A room is where two or more of the User's devices pass messages that are
+   * not kept: the hub forwards each to the device it names (or, without a
+   * name, to the other side of a desktop-phone pair) and stores nothing.
+   * The member's identity is the one its signature proves.
+   */
+  private async joinRoom(request: IncomingMessage, socket: Duplex, head: Buffer, url: URL): Promise<void> {
+    const rid = url.searchParams.get("rid") ?? "";
+    const role = url.searchParams.get("role") ?? "";
+    if (!ROOM_ID.test(rid) || !["desktop", "phone", "machine"].includes(role)) throw new HubRequestError(400, "Invalid room.");
+    const device = await this.authenticate("GET", Buffer.alloc(0), url.searchParams.get("auth") ?? undefined, `/v1/room?rid=${encodeURIComponent(rid)}&role=${role}`);
+    this.roomSockets.handleUpgrade(request, socket, head, (ws) => {
+      const members = this.rooms.get(rid) ?? new Map<string, RoomMember>();
+      this.rooms.set(rid, members);
+      // The newest connection of a device takes its seat.
+      const previous = members.get(device.deviceId);
+      const member: RoomMember = { deviceId: device.deviceId, role, socket: ws };
+      members.set(device.deviceId, member);
+      if (previous) previous.socket.close(4001, "replaced");
+      const others = [...members.values()].filter((item) => item !== member);
+      ws.send(JSON.stringify({ type: "ready", deviceId: device.deviceId, peers: others.map((item) => ({ deviceId: item.deviceId, role: item.role })) }));
+      if (!previous) for (const other of others) sendJson(other.socket, { type: "peer-connected", peer: { deviceId: device.deviceId, role } });
+      ws.on("message", (data) => this.roomMessage(rid, member, data));
+      const leave = () => {
+        if (members.get(device.deviceId) !== member) return;
+        members.delete(device.deviceId);
+        if (members.size === 0) this.rooms.delete(rid);
+        for (const other of members.values()) sendJson(other.socket, { type: "peer-disconnected", peer: { deviceId: device.deviceId, role } });
+      };
+      ws.on("close", leave);
+      ws.on("error", leave);
+    });
+  }
+
+  private roomMessage(rid: string, sender: RoomMember, data: unknown): void {
+    let frame: { type?: unknown; to?: unknown; id?: unknown; data?: unknown };
+    try {
+      frame = JSON.parse(String(data)) as typeof frame;
+    } catch {
+      return;
+    }
+    if (frame.type !== "send" || typeof frame.id !== "string" || typeof frame.data !== "string") return;
+    const members = this.rooms.get(rid);
+    if (!members) return;
+    const to = typeof frame.to === "string" && frame.to ? frame.to : undefined;
+    // Without a name, a desktop and a phone reach each other (the two-party pair).
+    const targets = to
+      ? [members.get(to)].filter((item): item is RoomMember => Boolean(item))
+      : [...members.values()].filter((item) => item !== sender && (sender.role === "phone" ? item.role === "desktop" : item.role === "phone"));
+    if (targets.length === 0) {
+      sendJson(sender.socket, { type: "error", code: "peer-not-connected", ...(to ? { to } : {}) });
+      return;
+    }
+    for (const target of targets) sendJson(target.socket, { type: "message", from: sender.deviceId, id: frame.id, data: frame.data });
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse, openOnly = false): Promise<void> {
@@ -280,6 +354,10 @@ export class HubServer {
     response.writeHead(200, { "content-type": "text/plain" });
     response.end(readFileSync(file));
   }
+}
+
+function sendJson(socket: LiveSocket, value: unknown): void {
+  if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(value));
 }
 
 function cors(response: ServerResponse): void {

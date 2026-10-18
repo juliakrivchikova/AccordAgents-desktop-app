@@ -223,3 +223,31 @@ test("a chain the desktop's first copy anchored continues without its earlier ev
   const skipped = changesEvent(h.owner, "chat-7", 3, "sha256:x", []);
   assert.equal(((await h.call(h.owner, "POST", "/v1/events", { events: [skipped] })).body as unknown as HubEventPushResponse).results[0].status, "gap");
 });
+
+test("rooms pass live messages between the User's devices and keep nothing", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [{ deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Box", machineId: "machine-1" }] });
+  const { HubTunnelClient } = await import("../main/services/hubTunnelClient");
+  const desktopTunnel = new HubTunnelClient({ hubUrl: h.base, rendezvousId: "rv-test", role: "desktop", identity: async () => h.owner, reconnectDelayMs: 50 });
+  const machineTunnel = new HubTunnelClient({ hubUrl: h.base, rendezvousId: "rv-test", role: "machine", identity: async () => machine, reconnectDelayMs: 50 });
+  t.after(() => { desktopTunnel.close(); machineTunnel.close(); });
+  const desktopPeers: string[] = [];
+  const machineReceived: string[] = [];
+  desktopTunnel.on("peer", (event) => desktopPeers.push(event.type === "peer-connected" ? `+${event.peer.deviceId}` : event.type === "peer-disconnected" ? `-${event.peer.deviceId}` : event.type));
+  machineTunnel.on("message", (message) => machineReceived.push(message.ciphertext));
+  await desktopTunnel.connect();
+  const wait = async (check: () => boolean) => { for (let i = 0; i < 100 && !check(); i += 1) await new Promise((resolve) => setTimeout(resolve, 20)); };
+  await wait(() => desktopPeers.includes("ready"));
+  await machineTunnel.connect();
+  await wait(() => desktopPeers.includes(`+${machine.originId}`));
+  assert.ok(desktopPeers.includes(`+${machine.originId}`), "the desktop sees the machine arrive");
+  await desktopTunnel.sendCiphertext({ logicalMessageId: "m1", ciphertext: "sealed-hello", to: machine.originId });
+  await wait(() => machineReceived.length === 1);
+  assert.deepEqual(machineReceived, ["sealed-hello"]);
+  machineTunnel.close();
+  await wait(() => desktopPeers.includes(`-${machine.originId}`));
+  assert.ok(desktopPeers.includes(`-${machine.originId}`), "and leave");
+  // Nothing was stored: the order is still empty.
+  assert.equal((await h.call(h.owner, "GET", "/v1/events?after=0")).body.head, 0);
+});

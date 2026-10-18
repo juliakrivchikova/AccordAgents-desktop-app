@@ -41,12 +41,23 @@ export interface RelayTunnelClientOptions {
   reconnectDelayMs?: number;
 }
 
+/** What the machine link, the machine host and the phone control use of a
+ *  tunnel: a relay room or the same room on the User's hub. */
+export interface TunnelClient {
+  on<EventName extends keyof RelayTunnelEvents>(event: EventName, listener: (...args: RelayTunnelEvents[EventName]) => void): () => void;
+  currentState(): RelayTunnelState;
+  connect(): Promise<void>;
+  close(): void;
+  sendCiphertext(request: { logicalMessageId: string; ciphertext: string; cursor?: string; to?: string }): Promise<unknown>;
+  deviceId(): string;
+}
+
 export interface RelayTunnelMessage {
   logicalMessageId: string;
   ciphertext: string;
 }
 
-interface RelayTunnelEvents {
+export interface RelayTunnelEvents {
   message: [RelayTunnelMessage];
   state: [RelayTunnelState];
   peer: [RelayTunnelPeerEvent];

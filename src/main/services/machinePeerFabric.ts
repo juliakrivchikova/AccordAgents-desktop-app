@@ -28,7 +28,7 @@ import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type { TrustedPeerAccess } from "../../shared/machineTrust";
 import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
 import type { ChatEventLogService } from "./chatEventLog";
-import type { RelayTunnelClient } from "./relayTunnelClient";
+import type { TunnelClient } from "./relayTunnelClient";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
 import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
 import type { StorageService } from "./storage";
@@ -41,9 +41,9 @@ export interface MachinePeerFabricOptions {
   /** This machine's own room: where the owner's devices come to reach it. */
   home: MobilePairingPackage;
   /** The live connection to the home room, owned by the caller. */
-  homeClient: RelayTunnelClient;
+  homeClient: TunnelClient;
   /** Opens a connection to another device's room (another machine). */
-  createClient(room: { relayUrl: string; rendezvousId: string; sealKeyBase64: string; fingerprint?: string }): RelayTunnelClient;
+  createClient(room: { relayUrl: string; rendezvousId: string; sealKeyBase64: string; fingerprint?: string }): TunnelClient;
   isPeerConnected(deviceId: string): boolean;
   apply(event: ChatEventEnvelope, payload: unknown, peer: TrustedPeerAccess): Promise<DeviceEventApplyOutcome | "deferred" | DeferredWithDependency>;
   serveDependency?(dependency: { targetKey: string; stateId: string }): Promise<boolean>;
@@ -59,12 +59,12 @@ interface PeerConnection {
   peer: TrustedPeerAccess;
   channel: DeviceEventChannel;
   /** Undefined for peers met in this machine's own room. */
-  client?: RelayTunnelClient;
+  client?: TunnelClient;
 }
 
 export class MachinePeerFabric {
   private readonly connections = new Map<string, PeerConnection>();
-  private readonly rooms = new Map<string, RelayTunnelClient>();
+  private readonly rooms = new Map<string, TunnelClient>();
   private started = false;
   private shareTimer?: ReturnType<typeof setInterval>;
   private sharing?: Promise<void>;
@@ -158,7 +158,7 @@ export class MachinePeerFabric {
     for (const peer of wanted.values()) {
       if (this.connections.has(peer.deviceId)) continue;
       const room = await this.meetingRoom(peer);
-      let client: RelayTunnelClient | undefined;
+      let client: TunnelClient | undefined;
       let connect = false;
       if (!room.here) {
         const key = `${room.relayUrl} ${room.rendezvousId}`;
@@ -290,7 +290,7 @@ export class MachinePeerFabric {
   private buildChannel(
     peer: TrustedPeerAccess,
     room: { rendezvousId: string; relayUrl: string; sealKeyBase64: string; fingerprint?: string; here: boolean },
-    client: RelayTunnelClient | undefined
+    client: TunnelClient | undefined
   ): DeviceEventChannel {
     const send = async (packet: DeviceEventPacket): Promise<void> => {
       const ciphertext = await sealMachineRelayPayload(packet, await this.options.eventLog.getOrCreateDeviceIdentity(), peer.publicKeyDerBase64, room.rendezvousId);

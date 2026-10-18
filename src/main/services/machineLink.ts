@@ -33,7 +33,7 @@ import type { DebugLogService } from "./debugLogs";
 import { sealMobileRelayPayload } from "./mobileRelaySealing";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
 import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
-import { RelayTunnelClient } from "./relayTunnelClient";
+import { RelayTunnelClient, type TunnelClient } from "./relayTunnelClient";
 import { signMachineControl, verifyMachineControl } from "./machineControlAuthentication";
 import type { SettingsService } from "./settings";
 import { isMachineDurableMessage, machineCommandId } from "../../shared/machineLink";
@@ -56,7 +56,7 @@ export interface MachineLinkOptions {
   eventLog: ChatEventLogService;
   reconnectDelayMs?: number;
   /** Test seam: builds the relay client for one machine room. */
-  createClient?: (pairing: MobilePairingPackage) => RelayTunnelClient;
+  createClient?: (pairing: MobilePairingPackage) => TunnelClient;
   /** Applies chat actions that arrive from a machine. Without it an action is
    *  stored but never reaches this desktop's own state. */
   chatActions?: ChatActionApplier;
@@ -126,7 +126,7 @@ interface MachineConnection {
   eventChannel?: DeviceEventChannel;
   record: MachineRecord;
   pairing: MobilePairingPackage;
-  client: RelayTunnelClient;
+  client: TunnelClient;
   machineDeviceId?: string;
   settingsSynced: boolean;
   /** What the settings last sent to this machine said, so a save that did not
