@@ -104,6 +104,17 @@ test("a busy machine is told to wait once and is upgraded when it becomes idle",
   assert.equal(h.service.hasWaiting(), false);
 });
 
+test("a machine moving to the User's server is updated after the move, not during it", async () => {
+  let moving = true;
+  const h = harness({ isMoving: () => moving });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 0, "an update would restart it in the middle of its move");
+  assert.equal(h.service.hasWaiting(), true, "the periodic re-check asks again");
+  moving = false;
+  await h.service.evaluate("m1");
+  assert.equal(h.upgrades.length, 1);
+});
+
 test("a turn this desktop dispatched counts as busy even when the machine's hello predates it", async () => {
   const h = harness({ activity: () => activity({ dispatchedRunIds: ["run-2"] }) });
   await h.service.evaluate();

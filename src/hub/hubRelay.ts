@@ -61,7 +61,7 @@ const RELAY_EVENT_MAX_BYTES = 2 * 1024 * 1024;
 /** One User's devices, with room to spare, and no one address taking them
  *  all (a desktop, a phone or a machine holds a few at most). */
 const ROOM_MAX_SOCKETS = 2048;
-const ROOM_MAX_SOCKETS_PER_ADDRESS = 64;
+const ROOM_MAX_SOCKETS_PER_ADDRESS = 128;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 
 type RelayRole = "desktop" | "phone" | "machine";
@@ -274,8 +274,9 @@ export class HubRelayMailboxes {
     }
     const storage = this.options.storage;
     // An expired envelope is gone for every purpose, a repeat of its id too.
-    await storage.sweepExpired(mailboxId, new Date(this.now() - this.eventTtlMs()).toISOString());
-    const existing = await storage.existingEventIds(mailboxId, incoming.map((event) => event.eventId));
+    const incomingIds = incoming.map((event) => event.eventId);
+    await storage.sweepExpiredIds(mailboxId, incomingIds, new Date(this.now() - this.eventTtlMs()).toISOString());
+    const existing = await storage.existingEventIds(mailboxId, incomingIds);
     const row = await storage.mailbox(mailboxId);
     let arrivalSeq = row?.arrivalSeq ?? 0;
     const arrivedAt = this.nowIso();

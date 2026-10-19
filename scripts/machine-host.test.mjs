@@ -732,6 +732,8 @@ test("a machine moves to the User's server only when idle and only to a relay's 
   const moved = [];
   let restarted = 0;
   let busy = false;
+  let scriptRunning = false;
+  const fencedDuringProbe = [];
   const host = new MachineHostService(
     {
       runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
@@ -745,7 +747,14 @@ test("a machine moves to the User's server only when idle and only to a relay's 
       ...hostEvents, eventStorage: withoutNativeCommands(hostEvents.eventStorage), pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client,
       moveTransport: async (addresses) => { moved.push(addresses); },
       restartRuntime: () => { restarted += 1; },
-      probeRelay: async (relayUrl) => !relayUrl.includes("unreachable")
+      // A switched-on script keeps the machine awake but does not stop a
+      // move; one running now does.
+      scripts: { handle: async () => undefined, keepsHostAwake: () => true, scheduledCount: () => 1, runningNow: () => scriptRunning },
+      probeRelay: async (relayUrl) => {
+        fencedDuringProbe.push(!host.canApplyNativeEffects());
+        if (relayUrl.includes("starts")) scriptRunning = true;
+        return !relayUrl.includes("unreachable");
+      }
     }
   );
   await host.start();
@@ -767,7 +776,14 @@ test("a machine moves to the User's server only when idle and only to a relay's 
   await inbound(move("plain", { relayUrl: "ws://52.72.175.0/v1/relay", outboxUrl: "http://52.72.175.0/v1/mailbox/events" }));
   await inbound(move("stale", { instanceId: "an-earlier-run" }));
   await inbound(move("unreachable", { relayUrl: "wss://unreachable.example/v1/relay", outboxUrl: "https://unreachable.example/v1/mailbox/events" }));
+  scriptRunning = true;
+  await inbound(move("script"));
+  scriptRunning = false;
+  await inbound(move("script-starts", { relayUrl: "wss://starts.example/v1/relay", outboxUrl: "https://starts.example/v1/mailbox/events" }));
+  scriptRunning = false;
   assert.deepEqual(moved, [], "nothing is saved for a refused move");
+  assert.equal(host.canApplyNativeEffects(), true, "a refused move lets work in again");
+  assert.ok(fencedDuringProbe.length > 0 && fencedDuringProbe.every(Boolean), "no new work starts while the machine checks the server");
   await inbound(move("ok"));
   await settle(700);
   bodies = await sentBodies(client, host.options.pairing);
@@ -777,7 +793,10 @@ test("a machine moves to the User's server only when idle and only to a relay's 
   assert.match(answers.plain.error, /not a relay's addresses/);
   assert.match(answers.stale.error, /restarted/);
   assert.match(answers.unreachable.error, /cannot reach the server/);
+  assert.match(answers.script.error, /busy/, "a script running now is not cut off");
+  assert.match(answers["script-starts"].error, /busy/, "nor one that started while the server was asked");
   assert.equal(answers.ok.ok, true);
+  assert.equal(host.canApplyNativeEffects(), false, "a machine that moved takes no new work before it starts again");
   assert.deepEqual(moved, [{ relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" }]);
   assert.equal(restarted, 1, "it starts again on its new address after answering");
   host.close();

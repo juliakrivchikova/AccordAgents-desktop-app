@@ -193,7 +193,6 @@ interface MachineConnection {
   activityProbe?: Promise<boolean>;
   /** While the runtime is being replaced, turns wait here instead of being
    *  dispatched into a process that is about to be stopped. */
-  turnHold?: { reason: string; released: Promise<void>; release: () => void; holders: number };
   /** Start time of the newest runtime instance seen; a late hello from an
    *  older instance is ignored. */
   latestInstanceStartedAt?: string;
@@ -267,6 +266,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private readonly deletionListeners: Array<(event: MachineConversationDeletedBody) => Promise<void>> = [];
   private conversationLoader?: (conversationId: string) => Promise<Conversation | undefined>;
   private readonly connections = new Map<string, MachineConnection>();
+  /** Turns held for a machine (an update, a move), by machine id. */
+  private readonly turnHolds = new Map<string, { reason: string; released: Promise<void>; release: () => void; holders: number }>();
   /** Every enrolled machine, read from settings before any connects: a chat
    *  saved while the link is still starting (or for a machine whose
    *  connection failed) must still be addressed to it. */
@@ -631,7 +632,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   /** Whether turns for this machine are being held (an update, a move). */
   hasTurnHold(machineId: string): boolean {
-    return Boolean(this.connections.get(machineId)?.turnHold);
+    return this.turnHolds.has(machineId);
   }
 
   /** Whether this machine's runtime can move to another relay address. */
@@ -1181,19 +1182,19 @@ export class MachineLinkService implements MachineTurnDispatcher {
    *  turn that is stopped by the User ends as interrupted without being sent.
    *  Each caller gets its own release; turns go on once every holder let go. */
   holdTurns(machineId: string, reason: string): () => void {
-    const connection = this.connections.get(machineId);
-    if (!connection) return () => undefined;
-    if (!connection.turnHold) {
+    // Kept by machine, not by connection: a hold outlives the connection
+    // being replaced (a machine moving to another address).
+    if (!this.turnHolds.has(machineId)) {
       let resolve!: () => void;
       const released = new Promise<void>((done) => { resolve = done; });
       const created = { reason, released, holders: 0, release: () => {
-        if (connection.turnHold === created) connection.turnHold = undefined;
+        if (this.turnHolds.get(machineId) === created) this.turnHolds.delete(machineId);
         resolve();
       } };
-      connection.turnHold = created;
+      this.turnHolds.set(machineId, created);
       void this.debugLogs.write("machine-link.turns.held", { machineId, reason });
     }
-    const hold = connection.turnHold;
+    const hold = this.turnHolds.get(machineId)!;
     hold.holders += 1;
     let done = false;
     return () => {
@@ -1424,16 +1425,15 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   async runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult> {
     const machineId = request.participant.homeMachineId ?? "";
-    const connection = this.connections.get(machineId);
-    if (!connection) {
-      return { status: "failed", messages: [], warnings: [], sent: false, error: `@${request.participant.handle} is hosted on a machine that is not enrolled on this desktop.` };
-    }
+    const notEnrolled = (): MachineTurnDispatchResult => ({ status: "failed", messages: [], warnings: [], sent: false, error: `@${request.participant.handle} is hosted on a machine that is not enrolled on this desktop.` });
+    if (!this.connections.has(machineId) && !this.turnHolds.has(machineId)) return notEnrolled();
     // Every outcome decided before the request left says so (sent: false).
     const interrupted: MachineTurnDispatchResult = { status: "interrupted", messages: [], warnings: [], sent: false };
-    let hold = connection.turnHold;
+    let hold = this.turnHolds.get(machineId);
     if (hold) {
       void this.debugLogs.write("machine-link.turn.held", { machineId, runId: request.runId, reason: hold.reason });
-      await request.onMachineWaiting?.(connection.record.name, hold.reason).catch(() => undefined);
+      const name = this.connections.get(machineId)?.record.name ?? this.enrolled.get(machineId)?.name ?? "The machine";
+      await request.onMachineWaiting?.(name, hold.reason).catch(() => undefined);
       const aborted = new Promise<boolean>((resolve) => {
         if (request.signal?.aborted) resolve(true);
         else request.signal?.addEventListener("abort", () => resolve(true), { once: true });
@@ -1442,9 +1442,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
       // at once (an update evaluated right after a setup): wait for all.
       while (hold) {
         if (await Promise.race([hold.released.then(() => false), aborted])) return interrupted;
-        hold = connection.turnHold;
+        hold = this.turnHolds.get(machineId);
       }
     }
+    // The connection as it is now: a held turn waited out a reconnect.
+    const connection = this.connections.get(machineId);
+    if (!connection) return notEnrolled();
     if (!connection.eventChannel && !connection.machineDeviceId) {
       return { status: "failed", messages: [], warnings: [], sent: false, error: `@${request.participant.handle} is hosted on ${connection.record.name}, which is not connected.` };
     }

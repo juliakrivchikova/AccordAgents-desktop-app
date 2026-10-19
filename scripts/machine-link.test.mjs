@@ -823,6 +823,12 @@ test("machineActivity asks the machine afresh: a turn that started or ended sinc
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.ok(!hostRuns.includes("run-act-held"), "not dispatched while held");
     assert.deepEqual(waitingMarks, [{ name: "Act box", reason: "updating the runtime" }], "the bubble says why the member has not started");
+    // A move reconnects the machine while its turns are held: the hold is the
+    // machine's, not the connection's, so the turn keeps waiting.
+    await link.reconnectMachine("machine-act");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.ok(!hostRuns.includes("run-act-held"), "a reconnect does not release the hold");
+    assert.equal(link.hasTurnHold("machine-act"), true);
     const stopper = new AbortController();
     const stopped = link.runTurn({ conversation, participant, triggerMessage, runId: "run-act-stopped", pendingMessageId: "pm-act-stopped", signal: stopper.signal });
     stopper.abort();

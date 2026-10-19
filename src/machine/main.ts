@@ -18,7 +18,7 @@ import { spawn } from "node:child_process";
 import { moveEnrollment, shellCommandLine } from "./transportMove";
 import path from "node:path";
 import { artifactMembersForConversation } from "../shared/artifacts";
-import { assertMobilePairingPackage, type MobilePairingPackage } from "../shared/mobilePairing";
+import { ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS, assertMobilePairingPackage, type MobilePairingPackage } from "../shared/mobilePairing";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "../main/appToolWiring";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
 import { AgentEnvironmentService } from "../main/services/agentEnvironment";
@@ -346,8 +346,10 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   // This machine's own mailboxes on the User's server (its rooms with
   // other machines, with the phone) are registered with its signature.
   setMailboxRegistrationSigner(async ({ url, method, pathWithQuery, body }) => {
+    // Only the User's own server takes it; the shared relay never sees it.
     const relay = enrollment.relayUrl ? new URL(enrollment.relayUrl) : undefined;
-    if (!relay || relay.host !== url.host) return undefined;
+    const shared = ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS.relayUrl ? new URL(ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS.relayUrl).host : undefined;
+    if (!relay || relay.host !== url.host || relay.host === shared) return undefined;
     return signHubRequest(await chatEventLogService.getOrCreateDeviceIdentity(), { method, pathWithQuery, body });
   });
   const chatEventMirrorService = new ChatEventMirrorService(
@@ -549,7 +551,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     scripts: {
       handle: (operation) => handleScriptsOperation(scriptService, operation),
       keepsHostAwake: () => scriptService.keepsHostAwake(),
-      scheduledCount: () => scriptService.scheduledCount()
+      scheduledCount: () => scriptService.scheduledCount(),
+      runningNow: () => scriptService.isRunningNow()
     },
     // Chats reach this machine as change events from the desktop.
     applyChatChanges: (event, payload) => chatService.applyRemoteChatChanges(event, payload)
@@ -689,7 +692,11 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   presenceTimer?.unref();
   console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.hubUrl ?? enrollment.relayUrl} (user data: ${userDataPath()})`);
 
-  stopRuntime = async () => {
+  // One stop, whoever asks for it (a move's restart, the service manager's
+  // SIGTERM): a second request waits for the first instead of running the
+  // shutdown again. A stop that failed may be asked for again.
+  let stopping: Promise<void> | undefined;
+  const stopOnce = async (): Promise<void> => {
     presenceClosed = true;
     stopChatChangePruning();
     if (presenceTimer) clearInterval(presenceTimer);
@@ -720,6 +727,13 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       presence.release();
     }
     await appMcpService.stop();
+  };
+  stopRuntime = () => {
+    stopping ??= stopOnce().catch((error: unknown) => {
+      stopping = undefined;
+      throw error;
+    });
+    return stopping;
   };
   return stopRuntime;
 }

@@ -194,6 +194,19 @@ export class HubRelayStorage {
     await this.database.execute(`delete from hub_relay_events where ${scope}(arrived_at < ${quote(cutoffIso)} or arrived_at = '');`);
   }
 
+  /** The same for the given ids only: an append clears just the expired
+   *  copies of what it brings, the periodic sweep the rest. */
+  async sweepExpiredIds(mailboxId: string, eventIds: string[], cutoffIso: string): Promise<void> {
+    await this.init();
+    for (let index = 0; index < eventIds.length; index += ID_BATCH) {
+      const batch = eventIds.slice(index, index + ID_BATCH);
+      await this.database.execute(`
+        delete from hub_relay_events where mailbox_id = ${quote(mailboxId)} and event_id in (${batch.map(quote).join(", ")})
+          and (arrived_at < ${quote(cutoffIso)} or arrived_at = '');
+      `);
+    }
+  }
+
   async sweepExpiredClaims(nowIso: string): Promise<void> {
     await this.init();
     await this.database.execute(`delete from hub_relay_claims where expires_at <= ${quote(nowIso)};`);

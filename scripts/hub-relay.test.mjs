@@ -4,7 +4,9 @@
 // process on plain HTTP; the push service is a stand-in that records rings.
 import assert from "node:assert/strict";
 import { createHash, createHmac, generateKeyPairSync, randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -22,6 +24,7 @@ const { HubRelayMailboxes, HubRelayRooms } = await import(path.join(dist, "hub/h
 const { createChatEventDeviceIdentity } = await import(path.join(dist, "main/services/chatEventLog.js"));
 const { signHubRequest } = await import(path.join(dist, "main/services/hubAuth.js"));
 
+const execFileAsync = promisify(execFile);
 const PUSH_INTERVAL_MS = 1500;
 const PUSH_ORIGIN = "https://fcm.googleapis.com";
 const PUSH_PATH = "/fcm/send/ring-path-suite";
@@ -71,6 +74,7 @@ async function startHub({ eventTtlMs, rings = [], pushStatus = { value: 201 }, o
     baseUrl: `http://127.0.0.1:${port}`,
     roomUrl: `ws://127.0.0.1:${port}/v1/relay`,
     openUrl: `http://127.0.0.1:${open.address().port}`,
+    dbPath: path.join(dir, "hub.sqlite3"),
     close: async () => {
       await server.close();
       await rm(dir, { recursive: true, force: true });
@@ -570,6 +574,30 @@ test("positions beyond any number, and routing fields with quotes, leave the sto
     const deleted = await (await call("/v1/mailbox/delete", { method: "POST", body: { eventIds: [odd] } })).json();
     assert.deepEqual(deleted.deletedEventIds, [odd]);
     assert.equal((await (await call("/v1/mailbox/events", { query: { afterArrival: 0 } })).json()).events.length, 0);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("an append clears only the expired copies of what it brings; the rest stays unseen until the periodic sweep", async () => {
+  let clock = Date.parse("2026-10-19T10:00:00.000Z");
+  const ttl = 60_000;
+  const hub = await startHub({ now: () => clock, eventTtlMs: ttl });
+  const creds = credentials("expiry");
+  const call = caller(hub, creds);
+  const rows = async () => Number((await execFileAsync("sqlite3", [hub.dbPath, "select count(*) from hub_relay_events;"])).stdout.trim());
+  try {
+    assert.equal((await call("/v1/mailbox/register", { method: "POST", body: { tokenHashBase64Url: creds.tokenHashBase64Url } })).status, 200);
+    await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "old-a" }), sealedEvent({ eventId: "old-b" })] } });
+    clock += ttl + 1_000;
+    const fresh = await (await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "new-c" })] } })).json();
+    assert.deepEqual(fresh.appendedEventIds, ["new-c"]);
+    assert.equal(await rows(), 3, "an unrelated expired envelope is not swept by an append");
+    const listed = await (await call("/v1/mailbox/events", { query: { afterArrival: 0 } })).json();
+    assert.deepEqual(listed.events.map((event) => event.eventId), ["new-c"], "an expired envelope is never listed");
+    const again = await (await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "old-a" })] } })).json();
+    assert.deepEqual(again.appendedEventIds, ["old-a"], "a repeat of an expired id is a new envelope");
+    assert.equal(await rows(), 3, "its expired copy went, the other one waits for the sweep");
   } finally {
     await hub.close();
   }

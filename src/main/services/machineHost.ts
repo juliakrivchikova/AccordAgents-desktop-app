@@ -115,6 +115,8 @@ export interface MachineHostOptions {
     keepsHostAwake(): boolean;
     /** How many switched-on scripts keep it awake, for the desktop to show. */
     scheduledCount?(): number;
+    /** True while a script runs now (a move would cut it off). */
+    runningNow?(): boolean;
   };
   /** Moves this machine to another relay address: writes it into the
    *  enrollment. Absent where the runtime cannot (it then says so). */
@@ -339,7 +341,7 @@ export class MachineHostService {
   /** False once this machine is draining or fenced for an idle stop: an answer
    *  stays queued rather than being half-applied by a runtime that is going. */
   canApplyNativeEffects(): boolean {
-    return !this.draining && !this.idleFenced && !this.closed;
+    return !this.draining && !this.fenced && !this.closed;
   }
 
   private outboxUnreadable = false;
@@ -364,6 +366,11 @@ export class MachineHostService {
   private closed = false;
   private draining = false;
   private idleFenced = false;
+  /** Held by a move to another address from its check until the restart
+   *  (or its refusal); kept apart from the idle stop's, so neither releases
+   *  the other's. */
+  private moveFenced = false;
+  private get fenced(): boolean { return this.idleFenced || this.moveFenced; }
   private readonly turnTasks = new Set<Promise<void>>();
   private readonly deletingConversationIds = new Set<string>();
   private readonly activeTurnConversations = new Map<string, string>();
@@ -453,7 +460,7 @@ export class MachineHostService {
     this.approvalExecutor = new MachineApprovalExecutor({
       storage: options.eventStorage, deviceId: options.deviceId, chat, getConversation: id => storage.getConversation(id),
       runtimeIdentity: () => this.getRuntimeIdentity(), nativeProcessDbPath: options.nativeProcessDbPath,
-      canApply: () => !this.closed && !this.draining && !this.idleFenced,
+      canApply: () => !this.closed && !this.draining && !this.fenced,
       publish: body => this.send(body),
       codeApprover: event => event.originId === options.pairing.issuer.originId
     });
@@ -634,6 +641,7 @@ export class MachineHostService {
    *  a scheduled script's next run (it runs after the restart), and a
    *  member's background work besides. */
   private async hasWorkForMove(): Promise<boolean> {
+    if (this.options.scripts?.runningNow?.()) return true;
     if ((this.chat.localBackgroundTasks?.() ?? []).length > 0) return true;
     if (this.queuedRunIds().length > 0 || (this.chat.liveRunIds?.() ?? []).length > 0) return true;
     if (this.closed || this.draining || this.activeTurns.size || this.turnTasks.size || this.commandTasks.size ||
@@ -668,7 +676,7 @@ export class MachineHostService {
     stopProviders(): Promise<void>;
     commitHostStop?(prepareLocal: () => Promise<boolean>): Promise<boolean>;
   }): Promise<(() => Promise<void>) | undefined> {
-    if (this.idleFenced || await this.hasWorkForIdleStop()) return undefined;
+    if (this.fenced || await this.hasWorkForIdleStop()) return undefined;
     this.idleFenced = true;
     let releaseNative: (() => void) | undefined;
     let committed = false;
@@ -900,18 +908,32 @@ export class MachineHostService {
     if (!Number.isFinite(expiresAt) || this.now().getTime() > expiresAt + SCRIPTS_REQUEST_CLOCK_SKEW_MS) return void await fail("This request is too old; nothing was changed.");
     const addresses = relayAddresses(body.relayUrl, body.outboxUrl, this.options.pairing.relayUrl);
     if (!addresses) return void await fail("These are not a relay's addresses.");
-    if (this.idleFenced) return void await fail("The machine is busy; it moves once it is idle.");
+    if (this.fenced) return void await fail("The machine is busy; it moves once it is idle.");
     // From here no new work starts: what arrives waits in the durable inbox
     // (for this runtime if the move does not happen, the next one if it does).
-    this.idleFenced = true;
+    this.moveFenced = true;
     const refuse = async (error: string): Promise<void> => {
-      this.idleFenced = false;
+      this.moveFenced = false;
+      this.retryHeldEventsNow();
+      void this.eventChannel.flush().catch(error => { void this.debugLogs.write("machine-host.move.resume-error", { message: errorMessage(error) }); });
       await fail(error);
     };
-    if (await this.hasWorkForMove()) return void await refuse("The machine is busy; it moves once it is idle.");
+    try {
+      // What was already taken in (a message being read, a script request,
+      // an event being applied) settles before the machine says it is idle.
+      await this.inbound;
+      await this.scriptsQueue;
+      await this.eventChannel.flush();
+    } catch (error) {
+      return void await refuse(`The machine could not settle its current work: ${errorMessage(error)}`);
+    }
+    if (await this.hasWorkForMove().catch(() => true)) return void await refuse("The machine is busy; it moves once it is idle.");
     if (!await (this.options.probeRelay ?? probeRelayManifest)(addresses.relayUrl).catch(() => false)) {
       return void await refuse("This machine cannot reach the server at that address.");
     }
+    // Asked again after the server answered: a scheduled script may have
+    // started meanwhile.
+    if (await this.hasWorkForMove().catch(() => true)) return void await refuse("The machine is busy; it moves once it is idle.");
     try {
       await this.options.moveTransport(addresses);
     } catch (error) {
@@ -942,7 +964,7 @@ export class MachineHostService {
         // The desktop has stopped waiting for it: doing it now would be a
         // change the User was told did not happen.
         reply = fail("This request is too old; nothing was changed.");
-      } else if (changesScripts(body.operation) && (this.idleFenced || this.options.hostStopCommitted?.())) {
+      } else if (changesScripts(body.operation) && (this.fenced || this.options.hostStopCommitted?.())) {
         reply = fail("The machine is stopping after being idle; try again when it is awake.");
       } else {
         try {
@@ -979,7 +1001,7 @@ export class MachineHostService {
   ): Promise<DeviceEventApplyOutcome | "deferred" | DeferredWithDependency> {
     // Hold commands during a committed stop, but still check current authority
     // before any application when the machine becomes available again.
-    if (this.idleFenced || this.options.hostStopCommitted?.()) return "deferred";
+    if (this.fenced || this.options.hostStopCommitted?.()) return "deferred";
     if (peer && stableJson(this.trust.peer(peer.deviceId) ?? null) !== stableJson(peer)) throw new Error("Machine controller authorization changed.");
     if (event.kind === CHAT_CHANGES_EVENT_KIND) {
       if (!this.options.applyChatChanges || !isChatChangesPayload(body)) throw new Error("Unexpected chat change event.");
@@ -1130,11 +1152,11 @@ export class MachineHostService {
   }
 
   private async handleBody(body: MachineLinkMessage, event?: ChatEventEnvelope, replyTo = event?.originId): Promise<void> {
-    if (this.idleFenced && body.type === "machine.turn.query") return;
+    if (this.fenced && body.type === "machine.turn.query") return;
     // Old, ephemeral frames cannot bypass the idle fence either. Current
     // peers use the durable inbox and retain these actions until apply.
-    if (this.idleFenced && (isMachineDurableMessage(body) || body.type === "machine.settings.sync")) {
-      throw new Error("The machine is stopping after idle; this action must remain queued.");
+    if (this.fenced && (isMachineDurableMessage(body) || body.type === "machine.settings.sync")) {
+      throw new Error(this.moveFenced ? "The machine is moving to another address; this action must remain queued." : "The machine is stopping after idle; this action must remain queued.");
     }
     void this.debugLogs.write("machine-host.message", {
       type: body.type,
@@ -1697,7 +1719,7 @@ export class MachineHostService {
   }
 
   private async recoverCommands(): Promise<void> {
-    if (this.closed || this.draining || this.idleFenced || !this.homeMachineId) return;
+    if (this.closed || this.draining || this.fenced || !this.homeMachineId) return;
     let cursor: { commandId: string; logicalTs: string } | undefined;
     for (;;) {
       const commands = await this.options.eventStorage.nativeCommands().pending(cursor);

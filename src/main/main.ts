@@ -792,7 +792,17 @@ async function forgetRemovedMachineOutbox(outbox: { pairingKey: string; deviceId
 let movingMachines = false;
 /** How long a machine that did not answer its move is looked for at the new
  *  address before this desktop concludes it stayed. */
-const MACHINE_MOVE_CONFIRM_MS = 2 * 60_000;
+const MACHINE_MOVE_CONFIRM_MS = 10 * 60_000;
+/** After a machine refused a move (busy, or unable to reach the server), it
+ *  is asked again no sooner than this, doubling up to an hour. */
+const MACHINE_MOVE_RETRY_MS = 5 * 60_000;
+const MACHINE_MOVE_RETRY_MAX_MS = 60 * 60_000;
+const machineMoveRetry = new Map<string, { at: number; delayMs: number }>();
+/** The machine being moved now: its update waits for the move to end. */
+let machineBeingMoved: string | undefined;
+/** Pairings a move could not write yet: the link uses them meanwhile and
+ *  every pass writes them again. */
+const unsavedMovedPairings = new Map<string, { machine: MachineRecord; pairing: MobilePairingPackage }>();
 
 function isLoopbackUrl(value: string): boolean {
   try {
@@ -846,6 +856,9 @@ async function moveMachinesToHub(): Promise<void> {
   if (movingMachines || !link) return;
   movingMachines = true;
   try {
+    for (const [machineId, unsaved] of [...unsavedMovedPairings]) {
+      await settingsService.saveMachinePairing(unsaved.machine.pairingKey, unsaved.pairing).then(() => { unsavedMovedPairings.delete(machineId); }, () => undefined);
+    }
     if (!await hubServesRelay()) return;
     const defaults = (await settingsService.getPublicSettings()).mobileControl.defaults;
     const relayUrl = defaults.relayUrl;
@@ -861,10 +874,15 @@ async function moveMachinesToHub(): Promise<void> {
       // An older runtime moves after its update (which happens on its own);
       // a machine being set up, updated or recovered moves after that.
       if (!link.isMachineConnected(machine.id) || !link.supportsTransportMove(machine.id)) continue;
-      if (link.hasTurnHold(machine.id) || machineInstallerService.activeOperation(machine.id)) continue;
+      if (link.hasTurnHold(machine.id) || machineInstallerService.activeOperation(machine.id) || unsavedMovedPairings.has(machine.id)) continue;
+      const retry = machineMoveRetry.get(machine.id);
+      if (retry && Date.now() < retry.at) continue;
       const activity = await link.machineActivity(machine.id);
       if (!activity?.fresh || activity.activeRunIds.length || activity.pendingTerminalRunIds.length || activity.dispatchedRunIds.length) continue;
+      // One hold from the request to the end, the confirm and any undo
+      // included: it is kept by machine, so it outlives the reconnects.
       const release = link.holdTurns(machine.id, "The machine is moving to your server.");
+      machineBeingMoved = machine.id;
       try {
         if (!await ensureMailboxRegisteredForPairing(next)) {
           void debugLogService.write("machine.transport.mailbox-unregistered", { machineId: machine.id });
@@ -872,24 +890,29 @@ async function moveMachinesToHub(): Promise<void> {
         }
         const outcome = await link.requestTransportMove(machine.id, { relayUrl, outboxUrl });
         if (outcome.status === "refused") {
-          void debugLogService.write("machine.transport.move-refused", { machineId: machine.id, message: outcome.error ?? "" });
+          const delayMs = Math.min(MACHINE_MOVE_RETRY_MAX_MS, (retry?.delayMs ?? MACHINE_MOVE_RETRY_MS / 2) * 2);
+          machineMoveRetry.set(machine.id, { at: Date.now() + delayMs, delayMs });
+          void debugLogService.write("machine.transport.move-refused", { machineId: machine.id, message: outcome.error ?? "", retryMs: delayMs });
           continue;
         }
+        machineMoveRetry.delete(machine.id);
         // Moved, or no answer came and it may have: from here this desktop
-        // looks for it at the new address, turns still waiting.
-        await saveMachinePairingRetrying(machine, next);
-        await link.reconnectMachine(machine.id);
-        const waiting = link.holdTurns(machine.id, "The machine is moving to your server.");
-        let seen: boolean;
-        try {
-          seen = await link.waitForHello(machine.id, MACHINE_MOVE_CONFIRM_MS);
-        } finally {
-          waiting();
-        }
+        // looks for it at the new address. A pairing that cannot be written
+        // now is used anyway and written on a later pass.
+        await saveMachinePairingRetrying(machine, next).catch((error: unknown) => {
+          unsavedMovedPairings.set(machine.id, { machine, pairing: next });
+          void debugLogService.write("machine.transport.save-pending", { machineId: machine.id, message: error instanceof Error ? error.message : String(error) });
+        });
+        await link.reconnectMachine(machine.id, next);
+        const seen = await link.waitForHello(machine.id, MACHINE_MOVE_CONFIRM_MS);
         if (!seen && outcome.status === "unknown") {
-          // It never came there, so it did not move: back to the old address.
-          await saveMachinePairingRetrying(machine, pairing);
-          await link.reconnectMachine(machine.id);
+          // Not there after this long: the request never reached it, so it
+          // did not move. Back to the old address.
+          unsavedMovedPairings.delete(machine.id);
+          await saveMachinePairingRetrying(machine, pairing).catch(() => {
+            unsavedMovedPairings.set(machine.id, { machine, pairing });
+          });
+          await link.reconnectMachine(machine.id, pairing);
           void debugLogService.write("machine.transport.move-reverted", { machineId: machine.id, message: outcome.error ?? "" });
           continue;
         }
@@ -901,6 +924,7 @@ async function moveMachinesToHub(): Promise<void> {
       } catch (error) {
         void debugLogService.write("machine.transport.move-error", { machineId: machine.id, message: error instanceof Error ? error.message : String(error) });
       } finally {
+        machineBeingMoved = undefined;
         release();
       }
     }
@@ -4356,6 +4380,7 @@ void app.whenReady().then(async () => {
       powerRetryMs: MACHINE_POWER_RETRY_MS + 60_000,
       powerMaxAttempts: MACHINE_POWER_MAX_ATTEMPTS,
       holdTurns: (machineId, reason) => link.holdTurns(machineId, reason),
+      isMoving: (machineId) => machineBeingMoved === machineId,
       onProgress: (snapshot) => sendToMainWindow("machines:install-progress", snapshot),
       onChanged: async () => { sendToMainWindow("machines:updated", await machineListResult()); },
       logger: (event, payload) => { void debugLogService.write(event, payload); }
