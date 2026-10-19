@@ -62,6 +62,34 @@ export interface MobilePairingPackage {
   expiresAt: string;
 }
 
+/** What a phone pairing may read on the User's own server: every chat, or
+ *  one. Machines' pairings read nothing there (they have their own way). */
+export type MobilePhoneScope = { scope: "device" } | { scope: "conversation"; conversationId: string };
+
+export function mobilePhoneScopeOfPairing(pairing: Pick<MobilePairingPackage, "purpose" | "capabilities">): MobilePhoneScope | undefined {
+  if (pairing.purpose === "machine-host") return undefined;
+  const capabilities = Array.isArray(pairing.capabilities) ? pairing.capabilities : [];
+  if (capabilities.some((capability) => capability.scope === "device" && capability.canRead && capability.canListConversations)) {
+    return { scope: "device" };
+  }
+  const conversation = capabilities.find((capability): capability is MobilePairingConversationCapability =>
+    capability.scope === "conversation" && capability.canRead && typeof capability.conversationId === "string" && capability.conversationId.length > 0);
+  return conversation ? { scope: "conversation", conversationId: conversation.conversationId } : undefined;
+}
+
+/** A scope as the server stores and checks it; anything else is none. */
+export function parseMobilePhoneScope(value: unknown): MobilePhoneScope | undefined {
+  const parsed = typeof value === "string" ? (() => { try { return JSON.parse(value) as unknown; } catch { return undefined; } })() : value;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const record = parsed as { scope?: unknown; conversationId?: unknown };
+  if (record.scope === "device") return { scope: "device" };
+  if (record.scope === "conversation" && typeof record.conversationId === "string" && record.conversationId.length > 0 && record.conversationId.length <= 200 &&
+    !/[\u0000-\u001f\u007f]/.test(record.conversationId)) {
+    return { scope: "conversation", conversationId: record.conversationId };
+  }
+  return undefined;
+}
+
 export interface CreateMobilePairingRequest {
   conversationId?: string;
   purpose?: MobilePairingPurpose;

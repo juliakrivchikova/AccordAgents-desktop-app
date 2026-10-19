@@ -378,7 +378,20 @@
   let pushEndpointRejected = false;
   const PUSH_ENDPOINT_REJECTED_ERROR = "mailbox_push_endpoint_rejected";
 
-  async function ensurePushSubscription() {
+  // One subscription attempt at a time: the launch and a tap on "Enable"
+  // can ask together, and two attempts post two subscriptions (and undo
+  // each other's).
+  let pushSubscriptionInFlight;
+
+  function ensurePushSubscription() {
+    if (pushSubscriptionInFlight) return pushSubscriptionInFlight;
+    pushSubscriptionInFlight = ensurePushSubscriptionNow().finally(function () {
+      pushSubscriptionInFlight = undefined;
+    });
+    return pushSubscriptionInFlight;
+  }
+
+  async function ensurePushSubscriptionNow() {
     if (pushSubscriptionEnsured) {
       return;
     }
@@ -3780,7 +3793,151 @@
     return openRelayPayload(reply.ciphertext, pairing.relaySealKeyBase64);
   }
 
+  // --- the User's own server ------------------------------------------------
+  // With her own server set up, the phone reads the chat list, a chat's pages
+  // and what changed straight from it, with the pairing's mailbox key: the
+  // desktop does not have to be awake. A server that cannot answer (an older
+  // program, a pairing the desktop has not told it about yet, the shared
+  // relay) leaves the phone asking the desktop as before, and is asked again
+  // a few minutes later.
+
+  const SERVER_READ_RETRY_MS = 5 * 60_000;
+  const SERVER_FETCH_TIMEOUT_MS = 20_000;
+  const SERVER_CHANGES_WAIT_MS = 25_000;
+  let serverReads = "unknown"; // "yes" | "no" | "unknown"
+  let serverReadsCheckedAt = 0;
+
+  function serverReadsAvailable() {
+    return serverReads !== "no" || Date.now() - serverReadsCheckedAt > SERVER_READ_RETRY_MS;
+  }
+
+  async function serverPhoneGet(path, params, options) {
+    const pairing = loadPairing();
+    const endpoint = outboxEndpoint();
+    const access = pairing ? await mailboxAccessForPairing(pairing) : undefined;
+    if (!endpoint || !access) {
+      throw Object.assign(new Error("No server for this pairing"), { serverStatus: 0, unavailable: true });
+    }
+    const url = new URL(path, new URL(endpoint).origin);
+    url.searchParams.set("mailboxId", access.scopeId);
+    for (const [key, value] of Object.entries(params || {})) {
+      if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+    }
+    const response = await fetch(url.toString(), {
+      headers: { authorization: "Bearer " + access.token },
+      cache: "no-store",
+      signal: AbortSignal.timeout((options && options.timeoutMs) || SERVER_FETCH_TIMEOUT_MS)
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(function () { return ""; });
+      throw Object.assign(new Error("The server answered " + response.status), { serverStatus: response.status, serverBody: body });
+    }
+    return response.json();
+  }
+
+  /** One read from the server, or undefined when the phone should ask the
+   *  desktop instead. A server that says it cannot serve this pairing (or
+   *  has no such path) is not asked again for a while. */
+  async function readFromServer(read) {
+    if (!serverReadsAvailable()) return undefined;
+    try {
+      const value = await read();
+      if (serverReads !== "yes") recordRelayDebug({ event: "server-reads", state: "yes" });
+      serverReads = "yes";
+      serverReadsCheckedAt = Date.now();
+      return { value };
+    } catch (error) {
+      const status = error && typeof error === "object" ? error.serverStatus : undefined;
+      if (status === 404 || status === 403 || status === 401 || status === 405 || (error && error.unavailable)) {
+        if (serverReads !== "no") recordRelayDebug({ event: "server-reads", state: "no", status: status || 0 });
+        serverReads = "no";
+        serverReadsCheckedAt = Date.now();
+      }
+      return undefined;
+    }
+  }
+
+  async function requestChatListFromServer() {
+    const payload = await serverPhoneGet("/v1/phone/chats");
+    return handleRelayChatListPayload(payload);
+  }
+
+  async function requestTimelineFromServer(conversationId, options) {
+    const beforeMessageId = options && typeof options.beforeMessageId === "string" && options.beforeMessageId.trim()
+      ? options.beforeMessageId
+      : undefined;
+    const payload = await serverPhoneGet("/v1/phone/timeline", { conversationId, beforeMessageId });
+    return handleRelayTimelinePayload(payload, conversationId, {
+      deferRender: Boolean(options && options.deferRender),
+      historyPage: Boolean(beforeMessageId)
+    });
+  }
+
+  // What changed on the server, asked with a request the server holds open
+  // until something does. Runs while the app is in front; a chat that changed
+  // is read again: the list always, the open chat's newest page when it is
+  // the one.
+  let serverChanges = { instance: "", seq: 0 };
+  let serverChangesRunning = false;
+  let serverChangesStopped = false;
+
+  function startServerChanges() {
+    serverChangesStopped = false;
+    if (serverChangesRunning || serverReads !== "yes") return;
+    serverChangesRunning = true;
+    void (async function () {
+      let failures = 0;
+      try {
+        while (!serverChangesStopped && serverReads === "yes" && document.visibilityState !== "hidden") {
+          let answer;
+          try {
+            answer = await serverPhoneGet("/v1/phone/changes", {
+              instance: serverChanges.instance || "none",
+              after: serverChanges.seq,
+              waitMs: serverChanges.instance ? SERVER_CHANGES_WAIT_MS : 0
+            }, { timeoutMs: SERVER_CHANGES_WAIT_MS + 15_000 });
+            failures = 0;
+          } catch (error) {
+            const status = error && typeof error === "object" ? error.serverStatus : undefined;
+            if (status === 404 || status === 403 || status === 401) {
+              serverReads = "no";
+              serverReadsCheckedAt = Date.now();
+              return;
+            }
+            failures += 1;
+            await new Promise(function (resolve) { setTimeout(resolve, Math.min(30_000, 2_000 * failures)); });
+            continue;
+          }
+          if (!answer || typeof answer.instance !== "string" || typeof answer.seq !== "number") continue;
+          const first = !serverChanges.instance;
+          const reset = answer.reset === true;
+          serverChanges = { instance: answer.instance, seq: answer.seq };
+          if (first) continue;
+          const changed = Array.isArray(answer.conversationIds) ? answer.conversationIds : [];
+          if (!reset && changed.length === 0) continue;
+          const openConversationId = selectedConversationId();
+          await requestChatListFromServer().catch(function () { return []; });
+          if (openConversationId && (reset || changed.indexOf(openConversationId) >= 0)) {
+            await requestTimelineFromServer(openConversationId).catch(function () { return 0; });
+          }
+          await render("synced");
+        }
+      } finally {
+        serverChangesRunning = false;
+      }
+    })();
+  }
+
+  function stopServerChanges() {
+    serverChangesStopped = true;
+  }
+
   async function requestChatListViaRelay(pairing) {
+    const fromServer = await readFromServer(requestChatListFromServer);
+    if (fromServer) {
+      startServerChanges();
+      return fromServer.value;
+    }
     const payload = await sendRelayPayload(pairing, "chat-list-" + createEventId(), {
       type: "mobile.chat-list.request"
     });
@@ -3812,6 +3969,10 @@
   }
 
   async function requestTimelineViaRelay(pairing, conversationId, options) {
+    const fromServer = await readFromServer(function () {
+      return requestTimelineFromServer(conversationId, options);
+    });
+    if (fromServer) return fromServer.value;
     const beforeMessageId = options && typeof options.beforeMessageId === "string" && options.beforeMessageId.trim()
       ? options.beforeMessageId
       : undefined;
@@ -4821,6 +4982,11 @@
   function syncProgressText(startedAt) {
     const started = Date.parse(startedAt || "");
     const seconds = Number.isFinite(started) ? Math.max(0, Math.floor((Date.now() - started) / 1000)) : 0;
+    if (serverReads !== "no") {
+      return seconds < 60
+        ? "Loading your chats… " + seconds + "s"
+        : "Your chats have not loaded in " + Math.floor(seconds / 60) + "m. Check your connection, then pull to refresh.";
+    }
     if (seconds < 20) {
       return "Asking the desktop for your chats… " + seconds + "s";
     }
@@ -9220,6 +9386,7 @@
     document.addEventListener("visibilitychange", function () {
       if (document.hidden) {
         hiddenSince = Date.now();
+        stopServerChanges();
         return;
       }
       void resyncAfterForeground();
@@ -9960,15 +10127,17 @@
     if (pairing && relayCanSync(pairing)) {
       try {
         await requestChatListViaRelay(pairing);
-        // While the desktop is here: register this phone's signing key and
-        // pick up the machines it may reach when the desktop is not.
-        await announceMachineIdentityViaRelay(pairing).catch(function () { return undefined; });
         await render("synced");
         const conversationId = selectedConversationId();
         if (conversationId) {
           await requestTimelineViaRelay(pairing, conversationId);
           await render("synced");
         }
+        // While the desktop is here: register this phone's signing key and
+        // pick up the machines it may reach when the desktop is not. Not
+        // waited for: with the chats read from the server, a desktop that is
+        // asleep must not hold the screen.
+        void announceMachineIdentityViaRelay(pairing).catch(function () { return undefined; });
       } catch {
         await render("tunnel-reconnecting");
       }

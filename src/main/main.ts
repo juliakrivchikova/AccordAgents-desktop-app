@@ -8,7 +8,6 @@ import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, powerMonitor, shell } from "electron";
 import { parseCustomAvatarId, type AvatarStudioTurnRequest, type SaveCustomAvatarRequest } from "../shared/avatarStudio";
-import { chatMessageHiddenFromTimeline } from "../shared/chatParticipantRequestThreads";
 import type {
   AddChatParticipantRequest,
   AgentDetectionRequest,
@@ -16,8 +15,6 @@ import type {
   DeleteAgentEnvironmentVariableRequest,
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
-  ChatMessage,
-  ChatParticipant,
   ChatProviderKind,
   ChatPromptContextSettings,
   ChatSearchRequest,
@@ -140,7 +137,7 @@ import { MachineApprovalExecutor, machineApprovalResultId } from "./services/mac
 import { readPosixProcessTableAsync } from "./services/processTermination";
 import { createChatActionEffects } from "./services/chatActionEffects";
 import { MachineChoiceExecutor, machineChoiceResultId } from "./services/chatActionNativeClaims";
-import type { AnswerMachineInactivityRequest, CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineInactivityQuestion, MachineListResult, MachineRecord, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
+import type { AnswerMachineInactivityRequest, CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineInactivityQuestion, MachineListResult, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
   MachineInstallRequest,
@@ -160,7 +157,6 @@ import {
   type MobileComposerOptions,
   type MobileNoticeKind,
   type MobileRelayChatCatalog,
-  type MobileRelayChatListItem,
   type MobileTimelineEvents,
   type MobileTimelinePage,
   type MobileTimelineSink
@@ -170,7 +166,7 @@ import {
   fulfilledMobileEventKeysFromMailboxEvents,
   mobileMailboxEventScopeKey
 } from "./services/mobileMailboxOutbox";
-import { mobilePairingRequestWithEndpointDefaults, mobilePairingWithStartKey, type MobilePairingPackage } from "../shared/mobilePairing";
+import { mobilePairingRequestWithEndpointDefaults, mobilePairingWithStartKey, mobilePhoneScopeOfPairing, type MobilePairingPackage } from "../shared/mobilePairing";
 import type { ChatEventEnvelope } from "../shared/chatEvents";
 import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
 import { readActiveRunIds } from "../shared/chatRunState";
@@ -179,7 +175,7 @@ import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
 import { acquireMobileMailboxExecutionClaim } from "./services/mobileMailboxClaims";
-import { controlCardFromApproval, controlCardFromChoiceMessage, controlCardsFromConversation, type MobileControlCard } from "../shared/mobileControlCards";
+import { controlCardFromChoiceMessage, controlCardsFromConversation } from "../shared/mobileControlCards";
 import {
   deleteMailboxEvents,
   mailboxAccessForSealKey,
@@ -201,6 +197,7 @@ import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashRepo
 import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
 import { MachineTransportMover } from "./services/machineTransportMoves";
+import { buildMobileChatList, buildMobileTimelinePage, mobileRelayChatMembers } from "./services/mobileChatCatalog";
 import { MachineRecoveryService } from "./services/machineRecovery";
 import { MachineInactivityCheck, type MachineInactivityOutcome } from "./services/machineInactivity";
 import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, isMachineRecoveryOperation } from "../shared/machineInstall";
@@ -537,6 +534,54 @@ async function startHubLink(): Promise<void> {
   }
   publishHubRoster();
   void debugLogService.write("hub.link.started", { url: config.url });
+  scheduleHubProgramUpdate();
+}
+
+/** The program on the User's server follows this desktop: after the desktop
+ *  updates, the server is updated the way the Update button does it, once a
+ *  minute after the link starts, and again later if it did not work (a few
+ *  times per version at most). Settings shows its progress like a press. */
+let hubProgramUpdateTimer: ReturnType<typeof setTimeout> | undefined;
+const hubProgramUpdateTries = new Map<string, number>();
+const HUB_PROGRAM_UPDATE_DELAY_MS = 60_000;
+const HUB_PROGRAM_UPDATE_RETRY_MS = 30 * 60_000;
+const HUB_PROGRAM_UPDATE_MAX_TRIES = 3;
+
+function scheduleHubProgramUpdate(delayMs = HUB_PROGRAM_UPDATE_DELAY_MS): void {
+  if (hubProgramUpdateTimer) return;
+  hubProgramUpdateTimer = setTimeout(() => {
+    hubProgramUpdateTimer = undefined;
+    void updateHubProgramIfBehind();
+  }, delayMs);
+  hubProgramUpdateTimer.unref?.();
+}
+
+async function updateHubProgramIfBehind(): Promise<void> {
+  const config = await settingsService.getHubConfig().catch(() => undefined);
+  const installed = config?.server?.installedVersion;
+  const desktop = app.getVersion();
+  // Only a server this desktop set up (it holds the key to it), and only
+  // when its program is older than this desktop.
+  if (!config?.server || !installed || compareVersions(desktop, installed) <= 0) return;
+  const tries = hubProgramUpdateTries.get(desktop) ?? 0;
+  if (tries >= HUB_PROGRAM_UPDATE_MAX_TRIES) return;
+  hubProgramUpdateTries.set(desktop, tries + 1);
+  void debugLogService.write("hub.program-update.start", { from: installed, to: desktop, attempt: tries + 1 });
+  try {
+    const state = await hubInstaller.install({});
+    void debugLogService.write("hub.program-update.finished", { status: state.status, message: state.message ?? "" });
+    if (state.status !== "ready") {
+      scheduleHubProgramUpdate(HUB_PROGRAM_UPDATE_RETRY_MS);
+      return;
+    }
+    // The phones' pairings were registered when this desktop started, with
+    // the older program that did not keep what a phone may read: told again
+    // now, so the phones read their chats from the server from here on.
+    for (const pairing of mobilePairingsByKey.values()) void ensureMailboxRegisteredForPairing(pairing);
+  } catch (error) {
+    void debugLogService.write("hub.program-update.error", { message: error instanceof Error ? error.message : String(error) });
+    scheduleHubProgramUpdate(HUB_PROGRAM_UPDATE_RETRY_MS);
+  }
 }
 
 /** The hub link reads from here on: called once the machine link is up (or
@@ -1572,7 +1617,8 @@ async function ensureMailboxRegisteredForPairing(pairing: MobilePairingPackage):
     return false;
   }
   try {
-    const result = await registerMailboxForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64);
+    const phoneScope = mobilePhoneScopeOfPairing(pairing);
+    const result = await registerMailboxForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64, fetch, phoneScope ? { phoneScope } : {});
     if (!result.ok) {
       await debugLogService.write("mobile.mailbox.register-error", {
         routingId: pairing.stableRoutingId,
@@ -2639,7 +2685,6 @@ function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: 
 /** How many newest messages the chat list reads per chat to find the last
  *  line with text: a pending or empty row at the end must not blank the
  *  snippet, and the whole history must never be read for it. */
-const MOBILE_CHAT_LIST_SNIPPET_WINDOW = 10;
 /** The window the "/" menu resolves a draft's target in. The desktop composer
  *  resolves against the whole chat; the newest participant message is what
  *  the no-mention rule looks for, and it is in this window unless the last
@@ -2649,8 +2694,6 @@ const MOBILE_COMPOSER_TARGET_WINDOW = 200;
 function mobileRelayChatCatalog(): MobileRelayChatCatalog {
   return {
     async listChats() {
-      const summaries = await storageService.listConversations();
-      const visible = summaries.filter((summary) => summary.kind === "chat" && summary.archived !== true);
       const settings = await settingsService.getPublicSettings();
       const roleLabels = new Map(settings.chatRoleConfigs.map((role) => [
         role.id,
@@ -2659,89 +2702,12 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
           : role.label
       ]));
       const machineNames = new Map((await settingsService.listMachines()).map((machine) => [machine.id, machine.name]));
-      const listed = visible.slice(0, 100);
-      // What waits for the User in each listed chat, so the phone can drop a
-      // pending card the desktop has closed. Pending approvals are in the
-      // metadata opened below; pending choices are one indexed query over
-      // the listed chats, never a chat's history.
-      const pendingChoicesByConversation = new Map<string, MobileControlCard[]>();
-      const pendingChoices = await storageService.listPendingChoiceMessages(listed.map((summary) => summary.id));
-      if (pendingChoices.truncated) {
-        // The phone then reconciles nothing from this list. Said here, or a
-        // desktop that quietly crossed the cap would look like the old defect.
-        void debugLogService.write("mobile.chat-list.pending-cards-truncated", { chats: listed.length });
-      }
-      for (const row of pendingChoices.rows) {
-        const card = controlCardFromChoiceMessage(row.conversationId, row.message);
-        if (!card || card.status !== "pending") continue;
-        const cards = pendingChoicesByConversation.get(row.conversationId) ?? [];
-        cards.push(card);
-        pendingChoicesByConversation.set(row.conversationId, cards);
-      }
-      // An incomplete set must not be offered as the whole: the phone would
-      // drop every card it does not name.
-      const pendingCardsFor = (conversationId: string, conversation: Conversation | undefined): MobileControlCard[] | undefined =>
-        pendingChoices.truncated ? undefined : [
-          ...((conversation?.metadata as { pendingAppToolApprovals?: import("../shared/types").ChatAppToolApproval[] } | undefined)?.pendingAppToolApprovals ?? [])
-            .filter((approval) => approval.status === "pending")
-            .map((approval) => controlCardFromApproval(conversationId, approval)),
-          ...(pendingChoicesByConversation.get(conversationId) ?? [])
-        ].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-      const items: MobileRelayChatListItem[] = [];
-      for (const summary of listed) {
-        // The list needs each chat's members and its last line, not its
-        // history. Reading whole conversations here pulled the newest hundred
-        // chats' messages — tens of megabytes on the User's data — through the
-        // sqlite CLI on every list request, and the phone now asks for the
-        // list on every return to the foreground and every pull to refresh.
-        const opened = await storageService.openConversation(summary.id, MOBILE_CHAT_LIST_SNIPPET_WINDOW);
-        const conversation = opened?.conversation;
-        // The last line the User can see, not the last line stored: an internal
-        // system trigger is hidden on the desktop and must not become the
-        // phone's preview of the chat. When the whole window is internal, a
-        // member's own words the desktop merely tidies away (a waiting status)
-        // may stand in; a system trigger or a control message never does.
-        const newest = conversation?.messages.slice().reverse().filter((message) => message.content.trim()) ?? [];
-        const lastMessage = newest.find((message) => !chatMessageHiddenFromTimeline(conversation as Conversation, message)) ??
-          newest.find((message) => message.role === "participant" && message.metadata?.hiddenFromTimeline !== true);
-        const members = mobileRelayChatMembers(conversation);
-        items.push({
-          id: summary.id,
-          title: summary.title || "Chat",
-          group: mobileChatGroupLabel(summary.repoPath),
-          snippet: mobileSnippet(lastMessage?.content),
-          who: mobileWhoLabel(lastMessage),
-          updatedAt: summary.updatedAt,
-          running: summary.running === true,
-          participants: (summary.chatParticipants ?? [])
-            .map((participant) => participant.handle.startsWith("@") ? participant.handle : `@${participant.handle}`)
-            .slice(0, 4),
-          ...(pendingCardsFor(summary.id, conversation) ? { pendingCards: pendingCardsFor(summary.id, conversation) } : {}),
-          members: members.map((participant) => ({
-            id: participant.id,
-            handle: participant.handle,
-            mentionHandle: mobileParticipantMentionHandle(participant, members),
-            displayName: mobileParticipantDisplayName(participant),
-            roleLabel: roleLabels.get(participant.roleConfigId) ?? participant.roleConfigId,
-            kind: participant.kind,
-            ...(participant.avatarId ? { avatarId: participant.avatarId } : {}),
-            ...(mobileParticipantIsAssistant(participant) ? { isAssistant: true } : {}),
-            // A member that lives on a machine travels with what that machine
-            // needs to run it, so the phone can ask the machine itself when
-            // this desktop is closed. Local members carry nothing extra.
-            ...(participant.homeMachineId
-              ? {
-                homeMachineId: participant.homeMachineId,
-                ...(machineNames.get(participant.homeMachineId)
-                  ? { homeMachineName: machineNames.get(participant.homeMachineId) }
-                  : {}),
-                participant
-              }
-              : {})
-          }))
-        });
-      }
-      return items;
+      return buildMobileChatList(storageService, {
+        roleLabels,
+        machineNames,
+        pendingCards: true,
+        onPendingCardsTruncated: (listed) => { void debugLogService.write("mobile.chat-list.pending-cards-truncated", { chats: listed }); }
+      });
     },
     async readMemberAvatar(request: { conversationId: string; avatarId: string }) {
       const customId = parseCustomAvatarId(request.avatarId);
@@ -2797,22 +2763,7 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
       return opened ? timelineEventsFromSnapshot(opened.conversation, 80) : [];
     },
     async listTimelinePage(conversationId: string, options: { beforeMessageId?: string }): Promise<MobileTimelinePage> {
-      // The same 80-message page the phone always got, or the 80 before a
-      // message it already holds. The cursor is the oldest stored message of
-      // the page, not the oldest visible row: a page of rows the phone does
-      // not show would otherwise be asked for again and again.
-      const opened = await storageService.openConversation(conversationId, 80, options.beforeMessageId
-        ? { beforeMessageId: options.beforeMessageId }
-        : undefined);
-      if (!opened) {
-        return { events: [], hasMoreBefore: false };
-      }
-      const oldest = opened.conversation.messages[0];
-      return {
-        events: timelineEventsFromSnapshot(opened.conversation, 80),
-        hasMoreBefore: opened.messagePage.hasMoreBefore,
-        ...(oldest ? { beforeMessageId: oldest.id } : {})
-      };
+      return buildMobileTimelinePage(storageService, conversationId, options);
     },
     async composerOptions(request: { conversationId: string; query: string; content: string }): Promise<MobileComposerOptions> {
       const opened = await storageService.openConversation(request.conversationId, MOBILE_COMPOSER_TARGET_WINDOW);
@@ -2863,60 +2814,6 @@ async function cancelMobileChatRun(conversationId: string, runId: string): Promi
   return belongsToConversation ? chatService.cancelRun(targetRunId) : false;
 }
 
-function mobileRelayChatMembers(conversation: Conversation | undefined): ChatParticipant[] {
-  const participants = conversation?.metadata.participants;
-  return Array.isArray(participants)
-    ? participants.filter((participant): participant is ChatParticipant => Boolean(
-      participant &&
-      typeof participant === "object" &&
-      typeof participant.id === "string" &&
-      typeof participant.handle === "string" &&
-      typeof participant.roleConfigId === "string" &&
-      (participant.kind === "claude-code" || participant.kind === "codex-cli" || participant.kind === "gemini-cli")
-    ))
-    : [];
-}
-
-function mobileParticipantIsAssistant(participant: Pick<ChatParticipant, "handle" | "roleConfigId">): boolean {
-  return participant.roleConfigId === "administrator" ||
-    participant.handle.trim().replace(/^@/, "").toLowerCase() === "admin";
-}
-
-function mobileParticipantMentionHandle(
-  participant: Pick<ChatParticipant, "handle" | "roleConfigId">,
-  participants: Array<Pick<ChatParticipant, "handle" | "roleConfigId">>
-): string {
-  if (!mobileParticipantIsAssistant(participant)) {
-    return participant.handle;
-  }
-  const normalizedHandle = participant.handle.trim().replace(/^@/, "").toLowerCase();
-  const assistantAliasTaken = participants.some((item) =>
-    item !== participant &&
-    item.handle.trim().replace(/^@/, "").toLowerCase() === "assistant" &&
-    item.roleConfigId !== "administrator"
-  );
-  return normalizedHandle === "admin" && !assistantAliasTaken ? "assistant" : participant.handle;
-}
-
-function mobileParticipantDisplayName(participant: Pick<ChatParticipant, "handle" | "roleConfigId">): string {
-  return mobileParticipantIsAssistant(participant) ? "Chat Assistant" : `@${participant.handle}`;
-}
-
-function mobileChatGroupLabel(repoPath: string | undefined): string {
-  if (!repoPath) {
-    return "AccordAgents";
-  }
-  return path.basename(repoPath) || "AccordAgents";
-}
-
-function mobileSnippet(content: string | undefined): string {
-  const normalized = content?.replace(/\s+/g, " ").trim() ?? "";
-  if (!normalized) {
-    return "No messages yet";
-  }
-  return normalized.length > 84 ? `${normalized.slice(0, 81)}...` : normalized;
-}
-
 /** The same rule as the desktop composer's `compactCommandOption` and
  *  `goalCommandOption`: both commands exist only for one clearly addressed
  *  member, and are offered while the typed word is still a prefix of them. */
@@ -2936,19 +2833,6 @@ function mobileComposerCommandOptions(
     options.push({ id: "goal", label: "/goal", description: "Run the mentioned member until the goal is finished" });
   }
   return options;
-}
-
-function mobileWhoLabel(message: ChatMessage | undefined): string | undefined {
-  if (!message) {
-    return undefined;
-  }
-  if (message.role === "user") {
-    return "you:";
-  }
-  if (message.participantLabel) {
-    return `${message.participantLabel.replace(/^@/, "")}:`;
-  }
-  return message.role === "system" ? "system:" : undefined;
 }
 
 function registerIpc(): void {

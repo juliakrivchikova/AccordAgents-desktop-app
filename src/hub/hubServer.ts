@@ -27,6 +27,7 @@ import type { ChatSearchService } from "../main/services/chatSearch";
 import type { StorageService } from "../main/services/storage";
 import { HubRequestError, type HubLog } from "./hubLog";
 import { isAllowedPushEndpoint } from "./hubPush";
+import { HUB_PHONE_PATHS, type HubPhoneApi } from "./hubPhone";
 
 export interface HubServerOptions {
   hubId: string;
@@ -39,6 +40,8 @@ export interface HubServerOptions {
   acmeWebroot?: string;
   /** The relay the phone and machines speak (sealed mailboxes, live rooms). */
   relay?: { mailboxes: HubRelayMailboxes; rooms: HubRelayRooms };
+  /** The phone's reads: chat list, pages and changes from the server's copy. */
+  phone?: HubPhoneApi;
   now?: () => number;
   debugLog?: (event: string, payload: Record<string, unknown>) => void;
 }
@@ -364,6 +367,10 @@ export class HubServer {
         return json(response, 200, { ok: true, publicKey: this.options.vapidPublicKey });
       }
       if (openOnly) throw new HubRequestError(403, "Use HTTPS.");
+      if (this.options.phone && HUB_PHONE_PATHS.has(url.pathname)) {
+        status = await this.options.phone.handle(request, response, url);
+        return;
+      }
       const relay = this.options.relay;
       if (relay) {
         // The relay's own paths answer as the relay did, with its own keys.
@@ -409,11 +416,11 @@ export class HubServer {
           }
           const answer = await relay.mailboxes.handle(request.method ?? "GET", url.pathname, mailboxId, request.headers.authorization, body, url.searchParams, async () => {
             const header = request.headers[MAILBOX_HUB_AUTHORIZATION_HEADER];
-            if (typeof header !== "string") return false;
+            if (typeof header !== "string") return undefined;
             // Any device the User's server knows: her desktop (pairings),
             // her machines (their rooms with each other and the phone).
             const device = await this.authenticate(request.method ?? "POST", body, header, pathWithQuery).catch(() => undefined);
-            return device?.role === "owner" || device?.role === "desktop" || device?.role === "machine";
+            return device?.role === "owner" || device?.role === "desktop" || device?.role === "machine" ? device.role : undefined;
           });
           status = answer.status;
           return json(response, answer.status, answer.body);

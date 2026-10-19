@@ -26,6 +26,7 @@ import {
   isSealedMailboxPayload
 } from "../shared/mailboxSealedPayload";
 import { HUB_RELAY_MANIFEST } from "../shared/relayProtocol";
+import { parseMobilePhoneScope } from "../shared/mobilePairing";
 import type { HubRelayEventMeta, HubRelayStorage } from "../main/services/hubRelayStorage";
 import { vapidJwt } from "./hubPush";
 
@@ -101,6 +102,9 @@ export interface RelayAnswer {
   status: number;
   body: unknown;
 }
+
+/** Which of the User's devices signed a mailbox request (when one did). */
+export type RelaySignerRole = "owner" | "desktop" | "machine";
 
 export interface HubRelayOptions {
   storage: HubRelayStorage;
@@ -188,13 +192,13 @@ export class HubRelayMailboxes {
   /** One mailbox request: `pathname` is one of RELAY_MAILBOX_PATHS.
    *  `ownerSigned` says whether the request also carries a valid signature
    *  of the server's owner (asked only when a new mailbox is registered). */
-  async handle(method: string, pathname: string, mailboxIdParam: string | null, authorization: string | undefined, body: Buffer, query: URLSearchParams, ownerSigned: () => Promise<boolean> = async () => false): Promise<RelayAnswer> {
+  async handle(method: string, pathname: string, mailboxIdParam: string | null, authorization: string | undefined, body: Buffer, query: URLSearchParams, signer: () => Promise<RelaySignerRole | undefined> = async () => undefined): Promise<RelayAnswer> {
     // No default mailbox: a caller that does not name its own has nothing to talk to.
     const mailboxId = normalizedMailboxId(mailboxIdParam);
     if (!mailboxId) return { status: 400, body: { ok: false, error: "mailboxId required" } };
     return this.serialized(mailboxId, async () => {
       try {
-        return await this.route(method, pathname, mailboxId, bearerToken(authorization), body, query, ownerSigned);
+        return await this.route(method, pathname, mailboxId, bearerToken(authorization), body, query, signer);
       } catch (error) {
         if (error instanceof RelayRequestError) return { status: 400, body: { ok: false, error: error.message } };
         this.log("relay.mailbox.error", { path: pathname, message: errorMessage(error) });
@@ -203,13 +207,13 @@ export class HubRelayMailboxes {
     });
   }
 
-  private async route(method: string, pathname: string, mailboxId: string, token: string, body: Buffer, query: URLSearchParams, ownerSigned: () => Promise<boolean>): Promise<RelayAnswer> {
+  private async route(method: string, pathname: string, mailboxId: string, token: string, body: Buffer, query: URLSearchParams, signer: () => Promise<RelaySignerRole | undefined>): Promise<RelayAnswer> {
     const storage = this.options.storage;
     const row = await storage.mailbox(mailboxId);
     // Terminal by design: a revoked mailbox answers everything, register
     // included, with its own code.
     if (row?.revokedAt) return { status: 401, body: { ok: false, error: MAILBOX_ERROR_REVOKED, revokedAt: row.revokedAt } };
-    if (pathname === MAILBOX_REGISTER_PATH) return method === "POST" ? this.register(mailboxId, token, body, ownerSigned) : notAllowed();
+    if (pathname === MAILBOX_REGISTER_PATH) return method === "POST" ? this.register(mailboxId, token, body, signer) : notAllowed();
     if (pathname === MAILBOX_REVOKE_PATH) return method === "POST" ? this.revoke(mailboxId, token) : notAllowed();
     if (!row?.tokenHash) return { status: 401, body: { ok: false, error: MAILBOX_ERROR_UNREGISTERED } };
     if (!token || !constantTimeEquals(row.tokenHash, sha256Base64Url(token))) return { status: 401, body: { ok: false, error: MAILBOX_ERROR_UNAUTHORIZED } };
@@ -227,29 +231,44 @@ export class HubRelayMailboxes {
   // Trust-on-first-use, and only ever once: the desktop registers the lock
   // before the pairing link leaves it, so the scope id is unknowable to anyone
   // else at registration time.
-  private async register(mailboxId: string, token: string, body: Buffer, ownerSigned: () => Promise<boolean>): Promise<RelayAnswer> {
+  private async register(mailboxId: string, token: string, body: Buffer, signer: () => Promise<RelaySignerRole | undefined>): Promise<RelayAnswer> {
     if (!token) return { status: 401, body: { ok: false, error: MAILBOX_ERROR_UNAUTHORIZED } };
-    const parsed = parseJsonObject(body) as { tokenHashBase64Url?: unknown };
+    const parsed = parseJsonObject(body) as { tokenHashBase64Url?: unknown; phoneScope?: unknown };
     const claimedHash = typeof parsed.tokenHashBase64Url === "string" ? parsed.tokenHashBase64Url.trim() : "";
     const computedHash = sha256Base64Url(token);
     if (!claimedHash || !constantTimeEquals(claimedHash, computedHash)) return { status: 400, body: { ok: false, error: "token hash mismatch" } };
+    // What a phone pairing may read here is said by the desktop that made the
+    // pairing, never by a machine and never by the token's holder.
+    const phoneScope = parseMobilePhoneScope(parsed.phoneScope);
+    let role: RelaySignerRole | undefined;
+    let asked = false;
+    const signerRole = async (): Promise<RelaySignerRole | undefined> => {
+      if (!asked) {
+        asked = true;
+        role = await signer();
+      }
+      return role;
+    };
+    const scopeUpdate = async (): Promise<{ phoneScope?: string | null }> => {
+      if (!phoneScope) return {};
+      const by = await signerRole();
+      return by === "owner" || by === "desktop" ? { phoneScope: JSON.stringify(phoneScope) } : {};
+    };
     const row = await this.options.storage.mailbox(mailboxId);
     if (!row?.tokenHash) {
       // The User's server is hers alone: a new mailbox comes from her
       // desktop (the pairings it makes), never from whoever asks.
-      if (!this.options.openRegistration && !await ownerSigned()) {
+      if (!this.options.openRegistration && !await signerRole()) {
         return { status: 403, body: { ok: false, error: MAILBOX_ERROR_REGISTRATION_REFUSED } };
       }
       const epoch = randomUUID();
-      await this.options.storage.updateMailbox(mailboxId, { tokenHash: computedHash, registeredAt: this.nowIso(), epoch });
+      await this.options.storage.updateMailbox(mailboxId, { tokenHash: computedHash, registeredAt: this.nowIso(), epoch, ...await scopeUpdate() });
       return { status: 200, body: { ok: true, registered: true, epoch } };
     }
     if (constantTimeEquals(row.tokenHash, computedHash)) {
       let epoch = row.epoch;
-      if (!epoch) {
-        epoch = randomUUID();
-        await this.options.storage.updateMailbox(mailboxId, { epoch });
-      }
+      const update = { ...(epoch ? {} : { epoch: epoch = randomUUID() }), ...await scopeUpdate() };
+      if (Object.keys(update).length) await this.options.storage.updateMailbox(mailboxId, update);
       return { status: 200, body: { ok: true, registered: true, epoch } };
     }
     return { status: 401, body: { ok: false, error: MAILBOX_ERROR_UNAUTHORIZED } };
