@@ -7,7 +7,7 @@ import test from "node:test";
 import { HUB_SETUP_BLOB_PREFIX, parseHubServerBlob, type HubLinkConfig, type HubSetupState } from "../../shared/hubSetup";
 import { CommandError, type CommandOptions, type CommandResult } from "./command";
 import { buildHubSetupCommand, hubLaunchScript } from "./hubProvisioning";
-import { HubInstaller, hubActivateScript, hubCertificateScript, hubImportChatsScript, hubPrepareScript, hubServiceScript, hubServiceUnit, hubSetOwnerScript, hubStartOverScript, removeStaleHubTemp, type HubLinkRequest } from "./hubInstaller";
+import { HubInstaller, hubActivateScript, hubCertificateScript, hubImportChatsScript, hubPrepareScript, hubServiceScript, hubServiceUnit, hubSetOwnerScript, hubStartOverScript, removeStaleHubTemp, sshQuoted, type HubLinkRequest } from "./hubInstaller";
 
 const KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG0eZ0lJqBq3mH5w2m7uQx0w8Y7j1o0a2n4b6c8d0e2f accordagents-hub";
 
@@ -58,7 +58,7 @@ test("every script the installer runs on the server is valid bash", () => {
   assert.doesNotMatch(hubPrepareScript(), /setup_22\.x \| bash/, "no script piped to a root shell");
 });
 
-async function fixture(t: test.TestContext, behaviour: { owner: string[]; healthFailures?: number; failOn?: RegExp; linked?: HubLinkConfig; reachable?: boolean; defaultRegion?: string }) {
+async function fixture(t: test.TestContext, behaviour: { owner: string[]; healthFailures?: number; failOn?: RegExp; linked?: HubLinkConfig; reachable?: boolean; defaultRegion?: string; keyDirName?: string }) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-setup-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const payload = path.join(dir, "payload");
@@ -66,12 +66,14 @@ async function fixture(t: test.TestContext, behaviour: { owner: string[]; health
   await writeFile(path.join(payload, "accordagents-hub.cjs"), "#!/usr/bin/env node\n");
   await writeFile(path.join(payload, "package.json"), JSON.stringify({ version: "1.2.3" }));
   const calls: string[] = [];
+  const argv: Array<{ command: string; args: string[] }> = [];
   const streamed: string[] = [];
   const owners = [...behaviour.owner];
   const control = { failOn: behaviour.failOn };
   const run = async (command: string, args: string[], options: CommandOptions = {}): Promise<CommandResult> => {
     const line = `${command} ${args.join(" ")}`;
     calls.push(line);
+    argv.push({ command, args });
     const result = (stdout: string): CommandResult => ({ command, args, stdout, stderr: "", exitCode: 0, timedOut: false });
     if (control.failOn?.test(line)) throw new CommandError("failed", { command, args, stdout: "", stderr: "E: Unable to locate package sqlite3\n", exitCode: 100, timedOut: false });
     if (command === "ssh-keygen" && args.includes("-f") && !args.includes("-R")) {
@@ -98,7 +100,7 @@ async function fixture(t: test.TestContext, behaviour: { owner: string[]; health
   const links: HubLinkRequest[] = [];
   const exports: number[] = [];
   const states: HubSetupState[] = [];
-  const keyDir = path.join(dir, "keys");
+  const keyDir = path.join(dir, behaviour.keyDirName ?? "keys");
   const installer = new HubInstaller({
     keyDir,
     payloadDir: () => payload,
@@ -123,10 +125,30 @@ async function fixture(t: test.TestContext, behaviour: { owner: string[]; health
   // A line names the command this desktop issued.
   await installer.command("us-east-1");
   const nonce = Object.keys(JSON.parse(await readFile(path.join(keyDir, "commands.json"), "utf8")))[0];
-  return { installer, calls, links, exports, states, streamed, nonce, keyDir, control };
+  return { installer, calls, argv, links, exports, states, streamed, nonce, keyDir, control };
 }
 
 const OWNER_NEW = "{\"ok\":true,\"hubId\":\"hub-1\",\"alreadyOwner\":false}";
+
+test("a computer whose app folder has a space in its path (macOS: Application Support) logs in with the pinned keys", async (t) => {
+  const f = await fixture(t, { owner: [OWNER_NEW], keyDirName: path.join("Library", "Application Support", "AccordAgents", "hub") });
+  const state = await f.installer.install({ blob: blobFor("3.14.15.92", { nonce: f.nonce, hostKeys: [HOST_KEY] }) });
+  assert.equal(state.status, "ready", state.message);
+  const knownHosts = path.join(f.keyDir, "known_hosts");
+  assert.equal(await readFile(knownHosts, "utf8"), `3.14.15.92 ${HOST_KEY}\n`);
+  const remote = f.argv.filter((call) => call.command === "ssh" || call.command === "scp");
+  assert.ok(remote.length > 0);
+  for (const call of remote) {
+    // ssh splits an unquoted value on spaces and would read two files that
+    // do not exist; the whole path goes in one quoted value.
+    assert.ok(call.args.includes(`UserKnownHostsFile="${knownHosts}"`), call.args.join(" "));
+  }
+});
+
+test("an ssh option value keeps quotes and backslashes in a path", () => {
+  assert.equal(sshQuoted("/Users/a b/known_hosts"), "\"/Users/a b/known_hosts\"");
+  assert.equal(sshQuoted("/tmp/q\"t\\b/known_hosts"), "\"/tmp/q\\\"t\\\\b/known_hosts\"");
+});
 const OWNER_DONE = "{\"ok\":true,\"hubId\":\"hub-1\",\"alreadyOwner\":true,\"chatsCopied\":true}";
 const OWNER_HALF = "{\"ok\":true,\"hubId\":\"hub-1\",\"alreadyOwner\":true,\"chatsCopied\":false}";
 const OWNER_OTHER = "{\"ok\":false,\"reason\":\"another-owner\",\"hubId\":\"hub-1\"}";

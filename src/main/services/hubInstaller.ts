@@ -279,7 +279,9 @@ export class HubInstaller {
       "-o", "IdentitiesOnly=yes",
       "-o", "BatchMode=yes",
       "-o", "StrictHostKeyChecking=yes",
-      "-o", `UserKnownHostsFile=${this.knownHostsPath()}`,
+      // Quoted: ssh reads this value as a list of files separated by spaces,
+      // and the app's folder is in "Application Support".
+      "-o", `UserKnownHostsFile=${sshQuoted(this.knownHostsPath())}`,
       "-o", "ConnectTimeout=15",
       "-o", "ServerAliveInterval=8",
       "-o", "ServerAliveCountMax=3"
@@ -665,4 +667,10 @@ function setupFailure(error: unknown): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** One ssh option value as ssh reads it from `-o`: in double quotes, with a
+ *  quote or backslash inside escaped, so a path with spaces stays one path. */
+export function sshQuoted(value: string): string {
+  return `"${value.replace(/["\\]/g, (character) => `\\${character}`)}"`;
 }
