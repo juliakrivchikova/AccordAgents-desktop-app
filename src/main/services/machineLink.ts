@@ -629,6 +629,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
     this.emitStatus();
   }
 
+  /** Whether turns for this machine are being held (an update, a move). */
+  hasTurnHold(machineId: string): boolean {
+    return Boolean(this.connections.get(machineId)?.turnHold);
+  }
+
   /** Whether this machine's runtime can move to another relay address. */
   supportsTransportMove(machineId: string): boolean {
     return this.connections.get(machineId)?.record.lastHello?.transportMoveSupported === true;

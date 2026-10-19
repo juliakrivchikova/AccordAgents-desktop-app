@@ -819,12 +819,6 @@ async function saveMachinePairingRetrying(machine: MachineRecord, pairing: Mobil
   }
 }
 
-/** A machine that may have moved and is not seen at its saved address is
- *  looked for at the server this often, this long. */
-const MACHINE_MOVE_PROBE_EVERY_MS = 10 * 60_000;
-const MACHINE_MOVE_PROBE_MS = 45_000;
-const machineMoveProbedAt = new Map<string, number>();
-
 /** Whether the User's server serves the relay (an older hub program does
  *  not): until it does, new pairings and machines stay where they were. */
 async function hubServesRelay(): Promise<boolean> {
@@ -844,16 +838,15 @@ function resendMachineAccessToPhones(): void {
  *  and only while idle, to meet it there; its keys, rooms and mailbox ids
  *  stay. Its mailbox is registered on the server first, so nothing it or
  *  this desktop still has to send has nowhere to go: both send again what
- *  the other has not confirmed. A move whose answer never came is confirmed
- *  by the machine greeting this desktop at the new address, or undone; and a
- *  machine that may have moved unseen (this desktop quit in between) is
- *  looked for at the server while it is not seen at its saved address. */
+ *  the other has not confirmed. Turns wait while it moves. A move whose
+ *  answer never came is confirmed by the machine greeting this desktop at
+ *  the new address, or undone. */
 async function moveMachinesToHub(): Promise<void> {
   const link = machineLinkService;
   if (movingMachines || !link) return;
-  if (!await hubServesRelay()) return;
   movingMachines = true;
   try {
+    if (!await hubServesRelay()) return;
     const defaults = (await settingsService.getPublicSettings()).mobileControl.defaults;
     const relayUrl = defaults.relayUrl;
     const outboxUrl = defaults.outboxUrl;
@@ -865,12 +858,10 @@ async function moveMachinesToHub(): Promise<void> {
       // that runs elsewhere.
       if (isLoopbackUrl(relayUrl) && !isLoopbackUrl(pairing.relayUrl ?? "")) continue;
       const next: MobilePairingPackage = { ...pairing, relayUrl, outboxUrl };
-      if (!link.isMachineConnected(machine.id)) {
-        await probeMovedMachine(machine, pairing, next);
-        continue;
-      }
-      // An older runtime moves after its update (which happens on its own).
-      if (!link.supportsTransportMove(machine.id)) continue;
+      // An older runtime moves after its update (which happens on its own);
+      // a machine being set up, updated or recovered moves after that.
+      if (!link.isMachineConnected(machine.id) || !link.supportsTransportMove(machine.id)) continue;
+      if (link.hasTurnHold(machine.id) || machineInstallerService.activeOperation(machine.id)) continue;
       const activity = await link.machineActivity(machine.id);
       if (!activity?.fresh || activity.activeRunIds.length || activity.pendingTerminalRunIds.length || activity.dispatchedRunIds.length) continue;
       const release = link.holdTurns(machine.id, "The machine is moving to your server.");
@@ -885,17 +876,26 @@ async function moveMachinesToHub(): Promise<void> {
           continue;
         }
         // Moved, or no answer came and it may have: from here this desktop
-        // looks for it at the new address.
+        // looks for it at the new address, turns still waiting.
         await saveMachinePairingRetrying(machine, next);
         await link.reconnectMachine(machine.id);
-        if (outcome.status === "unknown" && !await link.waitForHello(machine.id, MACHINE_MOVE_CONFIRM_MS)) {
+        const waiting = link.holdTurns(machine.id, "The machine is moving to your server.");
+        let seen: boolean;
+        try {
+          seen = await link.waitForHello(machine.id, MACHINE_MOVE_CONFIRM_MS);
+        } finally {
+          waiting();
+        }
+        if (!seen && outcome.status === "unknown") {
           // It never came there, so it did not move: back to the old address.
           await saveMachinePairingRetrying(machine, pairing);
           await link.reconnectMachine(machine.id);
           void debugLogService.write("machine.transport.move-reverted", { machineId: machine.id, message: outcome.error ?? "" });
           continue;
         }
-        void debugLogService.write("machine.transport.moved", { machineId: machine.id, relayHost: new URL(relayUrl).host, confirmed: outcome.status });
+        // It said it moved: its enrollment names the server now, so this
+        // desktop stays there even when it is slow to come back.
+        void debugLogService.write("machine.transport.moved", { machineId: machine.id, relayHost: new URL(relayUrl).host, confirmed: outcome.status, seen });
         resendMachineAccessToPhones();
         void machineListResult().then((result) => sendToMainWindow("machines:updated", result)).catch(() => undefined);
       } catch (error) {
@@ -904,29 +904,13 @@ async function moveMachinesToHub(): Promise<void> {
         release();
       }
     }
+  } catch (error) {
+    void debugLogService.write("machine.transport.pass-error", { message: error instanceof Error ? error.message : String(error) });
   } finally {
     movingMachines = false;
   }
 }
 
-/** Looks for a machine that is not seen at its saved address at the
- *  server's, for a little while; found there, that is its address now. Only
- *  a runtime that can move can be there. */
-async function probeMovedMachine(machine: MachineRecord, saved: MobilePairingPackage, moved: MobilePairingPackage): Promise<void> {
-  const link = machineLinkService;
-  if (!link || machine.lastHello?.transportMoveSupported !== true) return;
-  const now = Date.now();
-  if (now - (machineMoveProbedAt.get(machine.id) ?? 0) < MACHINE_MOVE_PROBE_EVERY_MS) return;
-  machineMoveProbedAt.set(machine.id, now);
-  await link.reconnectMachine(machine.id, moved);
-  if (await link.waitForHello(machine.id, MACHINE_MOVE_PROBE_MS)) {
-    await saveMachinePairingRetrying(machine, moved);
-    void debugLogService.write("machine.transport.found-moved", { machineId: machine.id });
-    resendMachineAccessToPhones();
-    return;
-  }
-  await link.reconnectMachine(machine.id, saved);
-}
 
 async function createMachine(request: CreateMachineRequest, awsInstanceId?: string): Promise<CreateMachineResult> {
   const name = typeof request?.name === "string" ? request.name.trim() : "";

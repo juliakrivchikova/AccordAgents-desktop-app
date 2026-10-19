@@ -21,7 +21,7 @@ import {
 } from "../shared/hubProtocol";
 import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, verifyHubRequest, type ParsedHubAuthorization } from "../main/services/hubAuth";
 import { HUB_RELAY_MANIFEST } from "../shared/relayProtocol";
-import { HubRelayRooms, RELAY_BODY_BYTES_IN_FLIGHT_MAX, RELAY_HEALTH_PATH, RELAY_MAILBOX_APPEND_MAX_BYTES, RELAY_MAILBOX_PATHS, RELAY_MAILBOX_SMALL_MAX_BYTES, RELAY_MANIFEST_PATH, RELAY_ROOM_PATH, type HubRelayMailboxes } from "./hubRelay";
+import { HubRelayRooms, RELAY_BODY_BYTES_IN_FLIGHT_MAX, RELAY_HEALTH_PATH, RELAY_MAILBOX_APPEND_MAX_BYTES, RELAY_MAILBOX_PATHS, RELAY_MAILBOX_SMALL_MAX_BYTES, RELAY_MAILBOX_TINY_MAX_BYTES, RELAY_MANIFEST_PATH, RELAY_ROOM_PATH, type HubRelayMailboxes } from "./hubRelay";
 import { MAILBOX_HUB_AUTHORIZATION_HEADER } from "../shared/mailboxSealedPayload";
 import type { ChatSearchService } from "../main/services/chatSearch";
 import type { StorageService } from "../main/services/storage";
@@ -254,7 +254,7 @@ export class HubServer {
   private async upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", "http://hub");
-      if (url.pathname === RELAY_ROOM_PATH && this.options.relay) return this.options.relay.rooms.handleUpgrade(request, socket, head, url);
+      if (url.pathname === RELAY_ROOM_PATH && this.options.relay) return this.options.relay.rooms.handleUpgrade(request, socket, head, url, request.socket.remoteAddress ?? "");
       if (url.pathname === "/v1/room") return await this.joinRoom(request, socket, head, url);
       if (url.pathname !== "/v1/live") throw new HubRequestError(404, "Not found.");
       // A browser cannot set headers on a WebSocket: the signature of
@@ -383,10 +383,15 @@ export class HubServer {
             return json(response, refused.status, refused.body);
           }
           const append = request.method === "POST" && url.pathname === "/v1/mailbox/events";
-          const limit = append ? RELAY_MAILBOX_APPEND_MAX_BYTES : RELAY_MAILBOX_SMALL_MAX_BYTES;
-          const declared = Number(request.headers["content-length"] ?? "0");
-          if (Number.isFinite(declared) && declared > limit) throw new HubRequestError(413, "The request is too large.");
-          const reserved = Math.max(Number.isFinite(declared) ? declared : 0, 64 * 1024);
+          // Registration and revocation are a few bytes; nobody makes the
+          // hub hold more for them.
+          const tiny = url.pathname === "/v1/mailbox/register" || url.pathname === "/v1/mailbox/revoke";
+          const limit = append ? RELAY_MAILBOX_APPEND_MAX_BYTES : tiny ? RELAY_MAILBOX_TINY_MAX_BYTES : RELAY_MAILBOX_SMALL_MAX_BYTES;
+          const lengthHeader = request.headers["content-length"];
+          const declared = lengthHeader === undefined ? undefined : Number(lengthHeader);
+          if (declared !== undefined && (!Number.isFinite(declared) || declared > limit)) throw new HubRequestError(413, "The request is too large.");
+          // A read has no body; a body of unstated length counts as the most it may be.
+          const reserved = request.method === "GET" ? 0 : declared ?? limit;
           if (this.relayBodyBytes + reserved > RELAY_BODY_BYTES_IN_FLIGHT_MAX) throw new HubRequestError(503, "The hub is busy; try again.");
           this.relayBodyBytes += reserved;
           let body: Buffer;
@@ -398,8 +403,10 @@ export class HubServer {
           const answer = await relay.mailboxes.handle(request.method ?? "GET", url.pathname, mailboxId, request.headers.authorization, body, url.searchParams, async () => {
             const header = request.headers[MAILBOX_HUB_AUTHORIZATION_HEADER];
             if (typeof header !== "string") return false;
+            // Any device the User's server knows: her desktop (pairings),
+            // her machines (their rooms with each other and the phone).
             const device = await this.authenticate(request.method ?? "POST", body, header, pathWithQuery).catch(() => undefined);
-            return device?.role === "owner" || device?.role === "desktop";
+            return device?.role === "owner" || device?.role === "desktop" || device?.role === "machine";
           });
           status = answer.status;
           return json(response, answer.status, answer.body);

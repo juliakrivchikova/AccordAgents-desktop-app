@@ -57,6 +57,8 @@ import { ScriptService, handleScriptsOperation } from "../main/services/scripts"
 import { HubTunnelClient } from "../main/services/hubTunnelClient";
 import { HUB_SCOPE_PREFIXES, HubSync, hubChatChangeApplier, hubPushedThrough } from "../main/services/hubSync";
 import { HubClient } from "../main/services/hubClient";
+import { signHubRequest } from "../main/services/hubAuth";
+import { setMailboxRegistrationSigner } from "../main/services/mailboxAccess";
 import { ScriptSecretStore, ScriptStore } from "../main/services/scriptStore";
 import { machineScriptHostPhrase } from "../shared/scripts";
 
@@ -275,17 +277,27 @@ function readEnrollment(enrollmentPath: string): MobilePairingPackage {
   return parsed;
 }
 
-/** Starts this runtime again. Under its service the service manager does
- *  (it restarts a runtime that exits); run by hand, a copy of it is started
- *  once this one has let go of its files. */
-function restartRuntime(): void {
+/** How long a moved runtime waits for its own orderly stop before it exits
+ *  anyway: its enrollment names the new address, and staying up on the old
+ *  one with no new work would help nobody. */
+const RESTART_STOP_TIMEOUT_MS = 30_000;
+
+/** Starts this runtime again after it stops. Under its service the service
+ *  manager does (it restarts a runtime that exits); run by hand, a copy of
+ *  it is started once this one has let go of its files. */
+function restartRuntime(stop: (() => Promise<void>) | undefined): void {
   if (!process.env.INVOCATION_ID) {
     // The copy waits until this process is gone: two runtimes never share
     // the machine's files.
     const command = shellCommandLine([process.execPath, ...process.execArgv, ...process.argv.slice(1)]);
     spawn("/bin/sh", ["-c", `while kill -0 ${process.pid} 2>/dev/null; do sleep 1; done; exec ${command}`], { detached: true, stdio: "ignore", env: process.env }).unref();
   }
-  process.kill(process.pid, "SIGTERM");
+  void Promise.race([
+    (stop ?? (async () => undefined))().catch((error: unknown) => {
+      console.error(`Machine shutdown before restart is not complete: ${error instanceof Error ? error.message : String(error)}`);
+    }),
+    new Promise((resolve) => setTimeout(resolve, RESTART_STOP_TIMEOUT_MS))
+  ]).finally(() => process.exit(0));
 }
 
 function appSkillsSourceRoot(appPath: string): string {
@@ -329,6 +341,15 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   void appSkillsService;
   const appMcpService = new AppMcpService(debugLogService);
   const chatEventLogService = new ChatEventLogService(storageService);
+  /** Set once the runtime is up; a move restarts through it. */
+  let stopRuntime: (() => Promise<void>) | undefined;
+  // This machine's own mailboxes on the User's server (its rooms with
+  // other machines, with the phone) are registered with its signature.
+  setMailboxRegistrationSigner(async ({ url, method, pathWithQuery, body }) => {
+    const relay = enrollment.relayUrl ? new URL(enrollment.relayUrl) : undefined;
+    if (!relay || relay.host !== url.host) return undefined;
+    return signHubRequest(await chatEventLogService.getOrCreateDeviceIdentity(), { method, pathWithQuery, body });
+  });
   const chatEventMirrorService = new ChatEventMirrorService(
     storageService,
     chatEventLogService,
@@ -524,7 +545,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       }
     },
     moveTransport: async (addresses) => { await moveEnrollment(args.enrollmentPath, addresses); },
-    restartRuntime,
+    restartRuntime: () => restartRuntime(stopRuntime),
     scripts: {
       handle: (operation) => handleScriptsOperation(scriptService, operation),
       keepsHostAwake: () => scriptService.keepsHostAwake(),
@@ -668,7 +689,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   presenceTimer?.unref();
   console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.hubUrl ?? enrollment.relayUrl} (user data: ${userDataPath()})`);
 
-  return async () => {
+  stopRuntime = async () => {
     presenceClosed = true;
     stopChatChangePruning();
     if (presenceTimer) clearInterval(presenceTimer);
@@ -700,6 +721,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     }
     await appMcpService.stop();
   };
+  return stopRuntime;
 }
 
 if (require.main === module) {

@@ -40,6 +40,7 @@ export const RELAY_MAILBOX_PATHS: ReadonlySet<string> = new Set([
 /** An append carries sealed timeline envelopes; the rest are small. */
 export const RELAY_MAILBOX_APPEND_MAX_BYTES = 32 * 1024 * 1024;
 export const RELAY_MAILBOX_SMALL_MAX_BYTES = 1024 * 1024;
+export const RELAY_MAILBOX_TINY_MAX_BYTES = 4 * 1024;
 /** Request bodies being read at once, all mailboxes together: the small
  *  server's memory is not left to how many arrive in parallel. */
 export const RELAY_BODY_BYTES_IN_FLIGHT_MAX = 64 * 1024 * 1024;
@@ -57,8 +58,10 @@ const HEARTBEAT_MS = 30_000;
 const ROOM_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 /** One stored envelope, as large as the relay could store one. */
 const RELAY_EVENT_MAX_BYTES = 2 * 1024 * 1024;
-/** One User's devices, with room to spare. */
-const ROOM_MAX_SOCKETS = 512;
+/** One User's devices, with room to spare, and no one address taking them
+ *  all (a desktop, a phone or a machine holds a few at most). */
+const ROOM_MAX_SOCKETS = 2048;
+const ROOM_MAX_SOCKETS_PER_ADDRESS = 64;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 
 type RelayRole = "desktop" | "phone" | "machine";
@@ -152,6 +155,7 @@ export class HubRelayMailboxes {
   /** Rings left waiting by the previous run, and the periodic sweep. */
   async start(): Promise<void> {
     for (const pending of await this.options.storage.pendingRings()) this.scheduleRing(pending.mailboxId, pending.pushAt);
+    await this.sweepAll().catch((error) => this.log("relay.sweep.error", { message: errorMessage(error) }));
     this.sweeper = setInterval(() => void this.sweepAll().catch((error) => this.log("relay.sweep.error", { message: errorMessage(error) })), SWEEP_INTERVAL_MS);
     this.sweeper.unref?.();
   }
@@ -269,6 +273,8 @@ export class HubRelayMailboxes {
       if (!isSealedMailboxPayload(event.payload)) return { status: 400, body: { ok: false, error: MAILBOX_ERROR_UNSEALED_PAYLOAD } };
     }
     const storage = this.options.storage;
+    // An expired envelope is gone for every purpose, a repeat of its id too.
+    await storage.sweepExpired(mailboxId, new Date(this.now() - this.eventTtlMs()).toISOString());
     const existing = await storage.existingEventIds(mailboxId, incoming.map((event) => event.eventId));
     const row = await storage.mailbox(mailboxId);
     let arrivalSeq = row?.arrivalSeq ?? 0;
@@ -545,6 +551,7 @@ export class HubRelayRooms {
   // relay's own reason rather than the socket library's.
   private readonly sockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   private socketCount = 0;
+  private readonly socketsByAddress = new Map<string, number>();
   private readonly answered = new WeakSet<WebSocket>();
   private readonly heartbeat: ReturnType<typeof setInterval>;
 
@@ -566,7 +573,7 @@ export class HubRelayRooms {
     return { status: 426, body: { ok: false, error: "websocket required" } };
   }
 
-  handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer, url: URL): void {
+  handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer, url: URL, address = ""): void {
     const rendezvousId = url.searchParams.get("rid") ?? "";
     if (!rendezvousId) {
       socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
@@ -575,14 +582,21 @@ export class HubRelayRooms {
     const role = url.searchParams.get("role") ?? "";
     const capability = url.searchParams.get("cap") ?? "";
     const deviceId = isRelayRole(role) ? resolveRelayDeviceId(role, url.searchParams.get("did") ?? "") : "";
-    if (this.socketCount >= ROOM_MAX_SOCKETS) {
+    if (this.socketCount >= ROOM_MAX_SOCKETS || (this.socketsByAddress.get(address) ?? 0) >= ROOM_MAX_SOCKETS_PER_ADDRESS) {
       socket.end("HTTP/1.1 503 Service Unavailable\r\n\r\n");
       return;
     }
     this.sockets.handleUpgrade(request, socket, head, (ws) => {
       this.socketCount += 1;
+      this.socketsByAddress.set(address, (this.socketsByAddress.get(address) ?? 0) + 1);
       let counted = true;
-      const uncount = () => { if (counted) { counted = false; this.socketCount -= 1; } };
+      const uncount = () => {
+        if (!counted) return;
+        counted = false;
+        this.socketCount -= 1;
+        const left = (this.socketsByAddress.get(address) ?? 1) - 1;
+        if (left > 0) this.socketsByAddress.set(address, left); else this.socketsByAddress.delete(address);
+      };
       ws.on("close", uncount);
       ws.on("error", uncount);
       if (!rendezvousId || !capability || !isRelayRole(role) || !deviceId) {

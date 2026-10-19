@@ -895,23 +895,27 @@ export class MachineHostService {
   private async answerTransportMove(body: MachineTransportMoveBody, replyTo: string | undefined): Promise<void> {
     const fail = (error: string) => this.send({ type: "machine.transport.moved", requestId: body.requestId, ok: false, error }, replyTo).catch(() => undefined);
     const expiresAt = typeof body.expiresAt === "string" ? Date.parse(body.expiresAt) : Number.NaN;
-    if (!this.options.moveTransport) return void await fail("This machine runtime cannot move; upgrade it.");
+    if (!this.options.moveTransport || !this.options.restartRuntime) return void await fail("This machine runtime cannot move; upgrade it.");
     if (body.instanceId !== this.instanceId) return void await fail("The machine restarted since this was asked; try again.");
     if (!Number.isFinite(expiresAt) || this.now().getTime() > expiresAt + SCRIPTS_REQUEST_CLOCK_SKEW_MS) return void await fail("This request is too old; nothing was changed.");
-    if (this.idleFenced || await this.hasWorkForMove()) return void await fail("The machine is busy; it moves once it is idle.");
     const addresses = relayAddresses(body.relayUrl, body.outboxUrl, this.options.pairing.relayUrl);
     if (!addresses) return void await fail("These are not a relay's addresses.");
-    if (!await (this.options.probeRelay ?? probeRelayManifest)(addresses.relayUrl).catch(() => false)) {
-      return void await fail("This machine cannot reach the server at that address.");
-    }
+    if (this.idleFenced) return void await fail("The machine is busy; it moves once it is idle.");
     // From here no new work starts: what arrives waits in the durable inbox
-    // for the runtime that comes back.
+    // (for this runtime if the move does not happen, the next one if it does).
     this.idleFenced = true;
+    const refuse = async (error: string): Promise<void> => {
+      this.idleFenced = false;
+      await fail(error);
+    };
+    if (await this.hasWorkForMove()) return void await refuse("The machine is busy; it moves once it is idle.");
+    if (!await (this.options.probeRelay ?? probeRelayManifest)(addresses.relayUrl).catch(() => false)) {
+      return void await refuse("This machine cannot reach the server at that address.");
+    }
     try {
       await this.options.moveTransport(addresses);
     } catch (error) {
-      this.idleFenced = false;
-      return void await fail(`The machine could not save its new address: ${errorMessage(error)}`);
+      return void await refuse(`The machine could not save its new address: ${errorMessage(error)}`);
     }
     void this.debugLogs.write("machine.transport.moved", { relayHost: new URL(addresses.relayUrl).host });
     await this.send({ type: "machine.transport.moved", requestId: body.requestId, ok: true }, replyTo).catch(() => undefined);

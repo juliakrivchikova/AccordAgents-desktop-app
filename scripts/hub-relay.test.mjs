@@ -33,11 +33,12 @@ function vapidKeys() {
   return { publicKey: point.toString("base64url"), privateJwk: privateKey.export({ format: "jwk" }), subject: "mailto:relay@accordagents.test" };
 }
 
-async function startHub({ eventTtlMs, rings = [], pushStatus = { value: 201 }, openRegistration = true, now, owner } = {}) {
+async function startHub({ eventTtlMs, rings = [], pushStatus = { value: 201 }, openRegistration = true, now, owner, machines = [] } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-relay-"));
   const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
   await storage.init();
   if (owner) await storage.hub().setOwner({ deviceId: owner.originId, publicKeyDerBase64: owner.publicKeyDerBase64, name: "Desktop", addedAt: new Date().toISOString() });
+  if (machines.length) await storage.hub().replaceRoster(machines.map((device, index) => ({ deviceId: device.originId, publicKeyDerBase64: device.publicKeyDerBase64, role: "machine", name: `Machine ${index}`, machineId: `m-${index}`, addedAt: "" })), new Date().toISOString());
   const mailboxes = new HubRelayMailboxes({
     storage: storage.relay(),
     vapid: vapidKeys(),
@@ -482,10 +483,11 @@ test("hub mailbox: a ring waiting when the hub stops is rung after it starts aga
 
 // ---------------------------------------------------------------- the User's server is hers
 
-test("a new mailbox is taken only from the server owner's desktop; one already there keeps working", async () => {
+test("a new mailbox is taken only from a device the server knows; one already there keeps working", async () => {
   const owner = createChatEventDeviceIdentity();
+  const machine = createChatEventDeviceIdentity();
   const stranger = createChatEventDeviceIdentity();
-  const hub = await startHub({ openRegistration: false, owner });
+  const hub = await startHub({ openRegistration: false, owner, machines: [machine] });
   try {
     const creds = credentials("owner-only");
     const pathWithQuery = `/v1/mailbox/register?mailboxId=${creds.mailboxId}`;
@@ -505,6 +507,16 @@ test("a new mailbox is taken only from the server owner's desktop; one already t
     assert.equal((await answer.json()).registered, true);
     // Registering again (a machine retrying, the phone) needs no signature.
     assert.equal((await register(undefined)).status, 200);
+    // A machine of hers registers the mailboxes only it can name (its room
+    // with another machine, with the phone).
+    const own = credentials("machine-room");
+    const machinePath = `/v1/mailbox/register?mailboxId=${own.mailboxId}`;
+    const machineBody = JSON.stringify({ tokenHashBase64Url: own.tokenHashBase64Url });
+    const byMachine = await fetch(`${hub.baseUrl}${machinePath}`, { method: "POST", body: machineBody,
+      headers: { "content-type": "application/json", authorization: `Bearer ${own.token}`, "x-accord-hub-authorization": signHubRequest(machine, { method: "POST", pathWithQuery: machinePath, body: machineBody }) } });
+    assert.equal(byMachine.status, 200);
+    const tooBig = await fetch(`${hub.baseUrl}${pathWithQuery}`, { method: "POST", headers: { authorization: `Bearer ${creds.token}` }, body: Buffer.alloc(8 * 1024, 32) });
+    assert.equal(tooBig.status, 413, "a registration is a few bytes");
   } finally {
     await hub.close();
   }
