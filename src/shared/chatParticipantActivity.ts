@@ -24,11 +24,12 @@ interface RunOwnerState {
 
 export function buildChatParticipantActivitySnapshot(
   conversation: Conversation,
-  snapshotAt = new Date().toISOString()
+  snapshotAt = new Date().toISOString(),
+  backgroundTasks?: ReadonlyMap<string, readonly string[]>
 ): ChatParticipantActivitySnapshot {
   const participants = chatParticipants(conversation);
   const participantIds = new Set(participants.map((participant) => participant.id));
-  const statuses = buildChatParticipantStatusMap(conversation);
+  const statuses = buildChatParticipantStatusMap(conversation, backgroundTasks);
   const activeWorkByParticipantId = new Map<string, ChatParticipantActiveWork[]>(
     participants.map((participant) => [participant.id, []])
   );
@@ -227,6 +228,7 @@ export function buildChatParticipantActivitySnapshot(
     running: 0,
     pending: 0,
     compacting: 0,
+    background: 0,
     stopped: 0,
     error: 0
   };

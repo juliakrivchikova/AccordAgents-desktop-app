@@ -30,6 +30,7 @@ export function ChatActiveRunRow(props: ChatActiveRunParticipantRow & {
         <RosterStatusIndicator
           status={props.status}
           runningRemotely={props.participant.remoteExecution === "remote"}
+          participantId={props.participant.id}
         />
       </span>
     </>

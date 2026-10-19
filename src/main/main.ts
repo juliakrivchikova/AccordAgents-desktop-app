@@ -605,6 +605,7 @@ chatService.setCloudRunPreparation(async (selection, provider, progress) => {
 });
 chatService.setCloudRunAwsService(cloudRunAwsService);
 chatService.setPromptSuggestionsListener((update) => sendToMainWindow("chat:prompt-suggestions", update));
+chatService.onBackgroundTasksChanged((event) => sendToMainWindow("chat:background-tasks", event));
 chatService.setMachineProjectPreparation((machineId, localPath, signal, progress) => cloudRunPreparation.prepareProject(machineId, localPath, signal, progress));
 chatService.setCloudRunDoctorService(cloudRunDoctorService);
 wireChatAppToolHandlers(appMcpService, chatService);
@@ -2959,6 +2960,8 @@ function registerIpc(): void {
   });
   ipcMain.handle("chat:get-prompt-suggestions", (_event, conversationId: unknown) =>
     typeof conversationId === "string" ? chatService.listPromptSuggestions(conversationId) : []);
+  ipcMain.handle("chat:get-background-tasks", (_event, conversationId: unknown) =>
+    typeof conversationId === "string" ? chatService.backgroundTasksForConversation(conversationId) : {});
   ipcMain.handle("chat:send", async (_event, request: SendChatMessageRequest) => {
     const runId = request.runId ?? randomUUID();
     const controller = new AbortController();
@@ -3616,6 +3619,13 @@ void app.whenReady().then(async () => {
       })
     );
     machineLinkService.onRunStarted((event) => chatService.applyMachineRunStarted(event));
+    machineLinkService.onMemberBackgroundTasks((event) => {
+      if (event.member) {
+        chatService.applyMachineBackgroundTasks(event.machineId, event.member);
+      } else if (event.snapshot) {
+        chatService.replaceMachineBackgroundTasks(event.machineId, event.snapshot);
+      }
+    });
     machineLinkService.onPromptSuggestion((event) => chatService.receiveMemberPromptSuggestion({
       conversationId: event.conversationId,
       participantId: event.participantId,

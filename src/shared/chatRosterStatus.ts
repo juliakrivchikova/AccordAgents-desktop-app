@@ -10,12 +10,19 @@ type NonIdleRosterStatus = Exclude<ChatParticipantRosterStatus, "idle">;
 const STATUS_RANK: Record<NonIdleRosterStatus, number> = {
   error: 1,
   stopped: 2,
-  pending: 3,
-  compacting: 4,
-  running: 5
+  background: 3,
+  pending: 4,
+  compacting: 5,
+  running: 6
 };
 
-export function buildChatParticipantStatusMap(activeChatConversation: Conversation | undefined): Map<string, ChatParticipantRosterStatus> {
+/** `backgroundTasks`: live background work by member (see
+ *  ChatService.backgroundTasksForConversation); a member with some and nothing
+ *  more pressing shows as working in the background. */
+export function buildChatParticipantStatusMap(
+  activeChatConversation: Conversation | undefined,
+  backgroundTasks?: ReadonlyMap<string, readonly string[]>
+): Map<string, ChatParticipantRosterStatus> {
   const statuses = new Map<string, ChatParticipantRosterStatus>();
   if (!activeChatConversation) {
     return statuses;
@@ -32,6 +39,12 @@ export function buildChatParticipantStatusMap(activeChatConversation: Conversati
       statuses.set(participantId, status);
     }
   };
+
+  for (const [participantId, labels] of backgroundTasks ?? []) {
+    if (labels.length > 0) {
+      setStatus(participantId, "background");
+    }
+  }
 
   const activeRuns = activeRunSummaryForConversation(activeChatConversation);
   const liveRunIds = new Set(activeRuns.runIds);

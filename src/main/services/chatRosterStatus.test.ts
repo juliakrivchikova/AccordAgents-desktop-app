@@ -398,3 +398,18 @@ test("chat roster status keeps terminal statuses when the run is no longer live"
   assert.equal(stopped.get(participant.id), "stopped");
   assert.equal(failed.get(participant.id), "error");
 });
+
+test("a member with live background work shows as working in the background, below running and pending, above a stopped reply", () => {
+  const background = new Map([[participant.id, ["Run the soak", "Watch logs"]]]);
+  assert.deepEqual(mapEntries(buildChatParticipantStatusMap(conversation({}, []), background)), [[participant.id, "background"]]);
+  const running = buildChatParticipantStatusMap(conversation({}, [
+    participantMessage("reply-running", { status: "pending", metadata: { runId: "run-1" } })
+  ]), background);
+  assert.equal(running.get(participant.id), "running");
+  const stopped = buildChatParticipantStatusMap(conversation({}, [
+    participantMessage("reply-stopped", { status: "error", metadata: { terminalReason: "user-stopped" } })
+  ]), background);
+  assert.equal(stopped.get(participant.id), "background", "a Stop does not end background work, so the status says so");
+  assert.equal(buildChatParticipantStatusMap(conversation({}, []), new Map([[participant.id, []]])).get(participant.id), undefined);
+  assert.equal(buildChatParticipantStatusMap(conversation({}, []), new Map([["not-a-member", ["x"]]])).size, 0);
+});

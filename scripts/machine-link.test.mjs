@@ -875,3 +875,24 @@ test("trust changes queue while a known machine is offline and outbox failures r
     link.close();
   }
 });
+
+test("when a machine goes away the desktop stops showing the background work it reported", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const link = Object.create(MachineLinkService.prototype);
+  link.backgroundListeners = [];
+  link.debugLogs = { write: async () => undefined };
+  link.emitStatus = () => undefined;
+  const events = [];
+  MachineLinkService.prototype.onMemberBackgroundTasks.call(link, (event) => events.push(event));
+  const connection = { record: { id: "machine-a" }, machineDeviceId: "device-a", replicated: new Set(), settingsSynced: true, helloSeen: true };
+  link.setMachinePeer(connection, undefined);
+  assert.deepEqual(events, [{ machineId: "machine-a", snapshot: [] }]);
+  link.setMachinePeer(connection, undefined);
+  assert.equal(events.length, 1, "an already absent machine is not cleared twice");
+  const sent = [];
+  link.send = async (_connection, body) => { sent.push(body.type); };
+  link.options = { desktopDeviceId: "desktop" };
+  connection.helloSeen = true;
+  link.setMachinePeer(connection, "device-a");
+  assert.ok(sent.includes("machine.member.background.request"), "back on the link, the desktop asks what is running now");
+});

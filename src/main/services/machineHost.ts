@@ -27,7 +27,7 @@ import {
 } from "../../shared/machineLink";
 import type { MachineAttachmentResultBody } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
-import type { AgentHealth, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
+import type { AgentHealth, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatBackgroundTasksEvent, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
 import type { ChatParticipantRun, ChatService } from "./chat";
 import type { DebugLogService } from "./debugLogs";
 import { messageBatches, messageStamp } from "./machineLink";
@@ -308,6 +308,7 @@ export class MachineHostService {
   private readonly settlingRuns = new Map<string, ChatParticipantRun>();
   private readonly settlingInFlight = new Set<string>();
   private unsubscribeRunSettled?: () => void;
+  private unsubscribeBackgroundTasks?: () => void;
   private closed = false;
   private draining = false;
   private idleFenced = false;
@@ -332,7 +333,7 @@ export class MachineHostService {
   private readonly knownMessages = new Map<string, Map<string, string>>();
 
   constructor(
-    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady" | "setPromptSuggestionForwarder">>,
+    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady" | "setPromptSuggestionForwarder" | "onBackgroundTasksChanged" | "localBackgroundTasks">>,
     private readonly storage: Pick<StorageService, "getConversation"> & Partial<Pick<StorageService, "deleteConversation">>,
     private readonly settings: Pick<SettingsService, "importMachineSettingsSnapshot">,
     private readonly debugLogs: Pick<DebugLogService, "write">,
@@ -439,6 +440,8 @@ export class MachineHostService {
       this.settlingRuns.set(run.runId, run);
       return this.finishNativeRun(run);
     });
+    // Members hosted here show their background work on the desktop too.
+    this.unsubscribeBackgroundTasks = this.chat.onBackgroundTasksChanged?.((event) => this.sendMemberBackground(event));
     // The desktop decides whether a member's next-prompt suggestion is still
     // on offer; with no desktop connected there is nobody to offer it to.
     this.chat.setPromptSuggestionForwarder?.((suggestion) => {
@@ -523,6 +526,8 @@ export class MachineHostService {
     this.eventChannel?.close();
     this.unsubscribeRunSettled?.();
     this.chat.setPromptSuggestionForwarder?.(undefined);
+    this.unsubscribeBackgroundTasks?.();
+    this.unsubscribeBackgroundTasks = undefined;
     if (this.commandRetry) clearTimeout(this.commandRetry);
     if (this.outboxRetryTimer) {
       clearTimeout(this.outboxRetryTimer);
@@ -763,6 +768,34 @@ export class MachineHostService {
       ...(this.options.idleStopWarning?.() ? { idleStopWarning: this.options.idleStopWarning() } : {}),
       ...(typeof this.options.autoStopEnabled?.() === "boolean" ? { autoStopEnabled: this.options.autoStopEnabled() } : {})
     }, to);
+    // A desktop that (re)connects learns what is running in the background now.
+    this.sendMemberBackgroundSnapshot(to);
+  }
+
+  private sendMemberBackgroundSnapshot(to?: string): void {
+    if (this.closed || !this.chat.localBackgroundTasks) return;
+    void this.send({
+      type: "machine.member.background.snapshot",
+      members: this.chat.localBackgroundTasks().map((event) => ({
+        conversationId: event.conversationId,
+        participantId: event.participantId,
+        labels: event.labels
+      }))
+    }, to).catch((error) => {
+      void this.debugLogs.write("machine-host.background.snapshot-not-sent", { message: errorMessage(error) });
+    });
+  }
+
+  private sendMemberBackground(event: ChatBackgroundTasksEvent, to?: string): void {
+    if (this.closed) return;
+    void this.send({
+      type: "machine.member.background",
+      conversationId: event.conversationId,
+      participantId: event.participantId,
+      labels: event.labels
+    }, to).catch((error) => {
+      void this.debugLogs.write("machine-host.background.not-sent", { participantId: event.participantId, message: errorMessage(error) });
+    });
   }
 
   /**
@@ -957,6 +990,9 @@ export class MachineHostService {
         }
         this.eventChannel.start();
         await this.recoverCommands();
+        return;
+      case "machine.member.background.request":
+        this.sendMemberBackgroundSnapshot(replyTo);
         return;
       case "machine.hello.request":
         // A (re)started desktop asks to be greeted: the same reconciliation

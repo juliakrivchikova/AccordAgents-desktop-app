@@ -69,6 +69,7 @@ import type {
   Conversation,
   ConversationUpdate,
   ChatPromptSuggestionsUpdate,
+  ChatBackgroundTasksEvent,
   CreateChatConversationRequest,
   DeleteChatConversationRequest,
   DismissConversationWarningsRequest,
@@ -307,6 +308,12 @@ const bridge: AppBridge = {
     const listener = (_event: Electron.IpcRendererEvent, update: ChatPromptSuggestionsUpdate) => callback(update);
     ipcRenderer.on("chat:prompt-suggestions", listener);
     return () => ipcRenderer.removeListener("chat:prompt-suggestions", listener);
+  },
+  getChatBackgroundTasks: (conversationId: string) => ipcRenderer.invoke("chat:get-background-tasks", conversationId),
+  onChatBackgroundTasks: (callback: (event: ChatBackgroundTasksEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, update: ChatBackgroundTasksEvent) => callback(update);
+    ipcRenderer.on("chat:background-tasks", listener);
+    return () => ipcRenderer.removeListener("chat:background-tasks", listener);
   }
 };
 
