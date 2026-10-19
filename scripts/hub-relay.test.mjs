@@ -1,0 +1,474 @@
+// The relay as the User's hub serves it, held to the relay's own tests: the
+// mailbox contract every relay implementation passes, the room behaviors of
+// the reference relay, and the doorbell's ring path. The hub runs in this
+// process on plain HTTP; the push service is a stand-in that records rings.
+import assert from "node:assert/strict";
+import { createHash, createHmac, generateKeyPairSync, randomBytes } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import WebSocket from "ws";
+
+import { CONTRACT_CASES, CONTRACT_TTL_MS } from "./mailbox-contract-suite.mjs";
+
+const dist = path.resolve(import.meta.dirname, "../dist/main");
+const { StorageService } = await import(path.join(dist, "main/services/storage.js"));
+const { ChatSearchService } = await import(path.join(dist, "main/services/chatSearch.js"));
+const { HubLog } = await import(path.join(dist, "hub/hubLog.js"));
+const { HubServer } = await import(path.join(dist, "hub/hubServer.js"));
+const { HubRelayMailboxes, HubRelayRooms } = await import(path.join(dist, "hub/hubRelay.js"));
+
+const PUSH_INTERVAL_MS = 1500;
+const PUSH_ORIGIN = "https://fcm.googleapis.com";
+const PUSH_PATH = "/fcm/send/ring-path-suite";
+
+function vapidKeys() {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const jwk = publicKey.export({ format: "jwk" });
+  const point = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, "base64url"), Buffer.from(jwk.y, "base64url")]);
+  return { publicKey: point.toString("base64url"), privateJwk: privateKey.export({ format: "jwk" }), subject: "mailto:relay@accordagents.test" };
+}
+
+async function startHub({ eventTtlMs, rings = [], pushStatus = { value: 201 } } = {}) {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-relay-"));
+  const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
+  await storage.init();
+  const mailboxes = new HubRelayMailboxes({
+    storage: storage.relay(),
+    vapid: vapidKeys(),
+    pushMinIntervalMs: PUSH_INTERVAL_MS,
+    ...(eventTtlMs ? { eventTtlMs } : {}),
+    // Every push the hub sends lands here: the ring log.
+    fetchImpl: async (url, init) => {
+      rings.push({ at: Date.now(), url: String(url), authorization: String(init?.headers?.Authorization ?? "") });
+      if (pushStatus.delayMs) {
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(resolve, pushStatus.delayMs);
+          init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("aborted")); });
+        });
+      }
+      return new Response("", { status: pushStatus.value });
+    }
+  });
+  await mailboxes.start();
+  const server = new HubServer({
+    hubId: "hub-relay-test", version: "test", storage, log: new HubLog(storage), search: new ChatSearchService(storage), vapidPublicKey: "B",
+    relay: { mailboxes, rooms: new HubRelayRooms() }
+  });
+  const http = await server.listenHttp(0, "127.0.0.1");
+  const port = http.address().port;
+  return {
+    kind: "hub",
+    baseUrl: `http://127.0.0.1:${port}`,
+    roomUrl: `ws://127.0.0.1:${port}/v1/relay`,
+    close: async () => {
+      await server.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+}
+
+test("hub mailbox contract", async (t) => {
+  const target = await startHub({ eventTtlMs: CONTRACT_TTL_MS });
+  try {
+    for (const contractCase of CONTRACT_CASES) {
+      await t.test(contractCase.name, async () => {
+        await contractCase.run(target);
+      });
+    }
+  } finally {
+    await target.close();
+  }
+});
+
+// ---------------------------------------------------------------- rooms
+
+function frame(logicalMessageId, ciphertextChunk) {
+  return { protocol: "accord-relay-v1", streamId: "stream-1", logicalMessageId, frameId: `${logicalMessageId}:0:1`, frameIndex: 0, frameCount: 1, ciphertextChunk };
+}
+
+function connect(url) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
+    const inbox = [];
+    const waiters = [];
+    const closeWaiters = [];
+    let closed;
+    socket.on("message", (data) => {
+      const text = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
+      const parsed = text === "accord-pong" ? text : JSON.parse(text);
+      const waiter = waiters.shift();
+      if (waiter) {
+        waiter(parsed);
+        return;
+      }
+      inbox.push(parsed);
+    });
+    socket.on("close", (code, reason) => {
+      closed = { code, reason: reason.toString("utf8") };
+      for (const waiter of closeWaiters.splice(0)) waiter(closed);
+    });
+    socket.once("open", () => resolve({
+      socket,
+      nextJson: () => inbox.length > 0 ? Promise.resolve(inbox.shift()) : new Promise((nextResolve) => waiters.push(nextResolve)),
+      pending: () => inbox.length,
+      closedWith: () => closed ? Promise.resolve(closed) : new Promise((nextResolve) => closeWaiters.push(nextResolve))
+    }));
+    socket.once("error", reject);
+  });
+}
+
+test("hub relay forwards sealed frames between paired desktop and phone, and stores none", async () => {
+  const hub = await startHub();
+  try {
+    const desktop = await connect(`${hub.roomUrl}?rid=pair-1&role=desktop&cap=cap-1`);
+    const phone = await connect(`${hub.roomUrl}?rid=pair-1&role=phone&cap=cap-1`);
+    await phone.nextJson();
+    await desktop.nextJson();
+    await desktop.nextJson();
+    const forwarded = desktop.nextJson();
+    phone.socket.send(JSON.stringify(frame("message-1", "sealed-ciphertext")));
+    assert.deepEqual(await forwarded, frame("message-1", "sealed-ciphertext"));
+    desktop.socket.close();
+    const gone = phone.nextJson();
+    assert.deepEqual(await gone, { type: "relay.peer-disconnected", role: "desktop", rendezvousId: "pair-1", deviceId: "desktop" });
+    const error = phone.nextJson();
+    phone.socket.send(JSON.stringify(frame("message-after", "sealed-ciphertext")));
+    assert.deepEqual(await error, { type: "relay.error", code: "peer-not-connected" });
+    // Its keepalive is answered by the relay itself.
+    const pong = phone.nextJson();
+    phone.socket.send("accord-ping");
+    assert.equal(await pong, "accord-pong");
+    phone.socket.close();
+  } finally {
+    await hub.close();
+  }
+});
+
+test("hub relay closes oversized and unsealed frames, and a capability that is not the room's", async () => {
+  const hub = await startHub();
+  try {
+    const phone = await connect(`${hub.roomUrl}?rid=pair-3&role=phone&cap=cap-3`);
+    await phone.nextJson();
+    const closed = phone.closedWith();
+    phone.socket.send(JSON.stringify(frame("message-too-large", "x".repeat(20_000))));
+    assert.deepEqual(await closed, { code: 1009, reason: "relay frame exceeds provider floor" });
+
+    const desktop = await connect(`${hub.roomUrl}?rid=pair-3b&role=desktop&cap=cap-a`);
+    await desktop.nextJson();
+    const intruder = await connect(`${hub.roomUrl}?rid=pair-3b&role=phone&cap=cap-b`);
+    assert.deepEqual(await intruder.closedWith(), { code: 1008, reason: "capability mismatch" });
+    const unsealed = desktop.closedWith();
+    desktop.socket.send(JSON.stringify({ hello: "plain text" }));
+    assert.deepEqual(await unsealed, { code: 1008, reason: "invalid sealed relay frame" });
+  } finally {
+    await hub.close();
+  }
+});
+
+test("hub relay seats the newest connection and evicts the previous holder", async () => {
+  const hub = await startHub();
+  try {
+    const first = await connect(`${hub.roomUrl}?rid=pair-4&role=phone&cap=cap-4`);
+    await first.nextJson();
+    const firstClosed = first.closedWith();
+    const second = await connect(`${hub.roomUrl}?rid=pair-4&role=phone&cap=cap-4`);
+    const seated = await second.nextJson();
+    assert.deepEqual(await firstClosed, { code: 4001, reason: "replaced by newer connection" });
+    assert.equal(seated.type, "relay.ready");
+    assert.equal(seated.role, "phone");
+    second.socket.close();
+  } finally {
+    await hub.close();
+  }
+});
+
+test("hub relay addresses machines by device id and keeps the legacy pair untouched", async () => {
+  const hub = await startHub();
+  try {
+    const desktop = await connect(`${hub.roomUrl}?rid=pair-5&role=desktop&cap=cap-5`);
+    const desktopReady = await desktop.nextJson();
+    assert.equal(desktopReady.type, "relay.ready");
+    assert.equal(desktopReady.deviceId, "desktop");
+    assert.deepEqual(desktopReady.peers, []);
+
+    const phone = await connect(`${hub.roomUrl}?rid=pair-5&role=phone&cap=cap-5`);
+    const phoneReady = await phone.nextJson();
+    assert.equal(phoneReady.peerConnected, true);
+    assert.deepEqual(await desktop.nextJson(), { type: "relay.peer-connected", role: "phone", rendezvousId: "pair-5", deviceId: "phone" });
+
+    const machine = await connect(`${hub.roomUrl}?rid=pair-5&role=machine&cap=cap-5&did=device-m1`);
+    const machineReady = await machine.nextJson();
+    assert.equal(machineReady.type, "relay.ready");
+    assert.equal(machineReady.deviceId, "device-m1");
+    assert.equal(machineReady.peerConnected, true);
+    assert.deepEqual(machineReady.peers.map((peer) => peer.deviceId).sort(), ["desktop", "phone"]);
+    assert.deepEqual(await desktop.nextJson(), { type: "relay.peer-connected", role: "machine", rendezvousId: "pair-5", deviceId: "device-m1" });
+
+    const toDesktop = desktop.nextJson();
+    machine.socket.send(JSON.stringify({ ...frame("m-1", "sealed-from-machine"), to: "desktop" }));
+    assert.deepEqual(await toDesktop, { ...frame("m-1", "sealed-from-machine"), to: "desktop" });
+
+    const toMachine = machine.nextJson();
+    desktop.socket.send(JSON.stringify({ ...frame("d-1", "sealed-to-machine"), to: "device-m1" }));
+    assert.deepEqual(await toMachine, { ...frame("d-1", "sealed-to-machine"), to: "device-m1" });
+
+    const toPhone = phone.nextJson();
+    desktop.socket.send(JSON.stringify(frame("d-2", "sealed-legacy")));
+    assert.deepEqual(await toPhone, frame("d-2", "sealed-legacy"));
+
+    const missing = desktop.nextJson();
+    desktop.socket.send(JSON.stringify({ ...frame("d-3", "sealed-nowhere"), to: "device-absent" }));
+    assert.deepEqual(await missing, { type: "relay.error", code: "peer-not-connected", to: "device-absent" });
+
+    const machineGone = desktop.nextJson();
+    machine.socket.close();
+    assert.deepEqual(await machineGone, { type: "relay.peer-disconnected", role: "machine", rendezvousId: "pair-5", deviceId: "device-m1" });
+    assert.equal(phone.pending(), 0, "the phone never heard about the machine");
+    desktop.socket.close();
+    phone.socket.close();
+  } finally {
+    await hub.close();
+  }
+});
+
+test("hub relay requires a device id for machines and seats newest per device id", async () => {
+  const hub = await startHub();
+  try {
+    const rejected = await connect(`${hub.roomUrl}?rid=pair-6&role=machine&cap=cap-6`);
+    assert.deepEqual(await rejected.closedWith(), { code: 1008, reason: "invalid relay pairing request" });
+    const first = await connect(`${hub.roomUrl}?rid=pair-6&role=machine&cap=cap-6&did=device-m2`);
+    await first.nextJson();
+    const firstClosed = first.closedWith();
+    const second = await connect(`${hub.roomUrl}?rid=pair-6&role=machine&cap=cap-6&did=device-m2`);
+    const seated = await second.nextJson();
+    assert.deepEqual(await firstClosed, { code: 4001, reason: "replaced by newer connection" });
+    assert.equal(seated.deviceId, "device-m2");
+    second.socket.close();
+  } finally {
+    await hub.close();
+  }
+});
+
+// ---------------------------------------------------------------- doorbell
+
+function credentials(label) {
+  const sealKey = createHash("sha256").update(`accord-ring-${label}`, "utf8").digest();
+  const token = createHmac("sha256", sealKey).update("accord-mailbox-auth-v1", "utf8").digest("base64url");
+  const mailboxId = "mb-" + createHmac("sha256", sealKey).update("accord-mailbox-scope-v1", "utf8").digest("base64url").slice(0, 32);
+  return { token, mailboxId, tokenHashBase64Url: createHash("sha256").update(token, "utf8").digest("base64url") };
+}
+
+function sealedEvent(overrides = {}) {
+  return {
+    eventId: "ring-event-1",
+    conversationId: "conversation-ring",
+    logScopeId: "conversation-ring",
+    originId: "device-desktop",
+    originSeq: 1,
+    logicalTs: "0000000000000001:device-desktop:conversation-ring",
+    kind: "mobile.timeline.events",
+    payload: { v: 1, alg: "A256GCM", iv: randomBytes(12).toString("base64url"), ct: Buffer.from("sealed", "utf8").toString("base64url") },
+    payloadHash: "sha256-payload",
+    eventHash: "sha256-event",
+    createdAt: "2026-08-16T00:00:00.000Z",
+    ...overrides
+  };
+}
+
+function caller(hub, creds) {
+  return (pathname, { method = "GET", body, query = {} } = {}) => {
+    const url = new URL(pathname, hub.baseUrl);
+    url.searchParams.set("mailboxId", creds.mailboxId);
+    for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value));
+    return fetch(url, {
+      method,
+      headers: { "content-type": "application/json", authorization: `Bearer ${creds.token}` },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+  };
+}
+
+async function subscribe(call, creds) {
+  assert.equal((await call("/v1/mailbox/register", { method: "POST", body: { tokenHashBase64Url: creds.tokenHashBase64Url } })).status, 200);
+  assert.equal((await call("/v1/mailbox/push-subscription", {
+    method: "POST",
+    body: { subscription: { endpoint: `${PUSH_ORIGIN}${PUSH_PATH}`, keys: { p256dh: "p", auth: "a" } }, suppressOriginId: "device-phone" }
+  })).status, 200);
+}
+
+test("hub doorbell: only a finished run rings, and a finish inside the window is deferred, not dropped", async () => {
+  const rings = [];
+  const pushStatus = { value: 201 };
+  const hub = await startHub({ rings, pushStatus });
+  const creds = credentials("hub");
+  const call = caller(hub, creds);
+  try {
+    await subscribe(call, creds);
+    assert.equal((await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "ring-progress", originSeq: 1 })] } })).status, 200);
+    await delay(500);
+    assert.equal(rings.length, 0, "an unmarked append never rings");
+    assert.equal((await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "ring-finish-1", originSeq: 2 })], runFinished: true } })).status, 200);
+    for (let i = 0; i < 20 && rings.length === 0; i += 1) await delay(100);
+    assert.equal(rings.length, 1, "a marked append rings exactly once");
+    const firstRingAt = rings[0].at;
+    assert.equal((await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "ring-finish-2", originSeq: 3 })], runFinished: true } })).status, 200);
+    await delay(300);
+    assert.equal(rings.length, 1, "the second finish does not ring immediately");
+    for (let i = 0; i < 60 && rings.length < 2; i += 1) await delay(200);
+    assert.equal(rings.length, 2, "the deferred finish rings rather than being dropped");
+    assert.ok(rings[1].at - firstRingAt >= PUSH_INTERVAL_MS - 250, `the deferred ring waits out the interval (waited ${rings[1].at - firstRingAt}ms)`);
+    for (const ring of rings) {
+      assert.equal(ring.url, `${PUSH_ORIGIN}${PUSH_PATH}`);
+      assert.match(ring.authorization, /^vapid t=/);
+    }
+    const listing = await (await call("/v1/mailbox/events", { query: { afterArrival: 0, limit: 500 } })).json();
+    assert.equal(listing.events.length, 3, "the deferred ring did not disturb stored events");
+
+    pushStatus.value = 410;
+    rings.length = 0;
+    await delay(PUSH_INTERVAL_MS);
+    assert.equal((await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "ring-finish-3", originSeq: 4 })], runFinished: true } })).status, 200);
+    for (let i = 0; i < 30 && rings.length === 0; i += 1) await delay(100);
+    assert.equal(rings.length, 1, "the ring was attempted once");
+    pushStatus.value = 201;
+    rings.length = 0;
+    await delay(PUSH_INTERVAL_MS);
+    assert.equal((await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "ring-finish-4", originSeq: 5 })], runFinished: true } })).status, 200);
+    await delay(PUSH_INTERVAL_MS + 500);
+    assert.equal(rings.length, 0, "a dropped subscription is not rung again and not retried");
+  } finally {
+    await hub.close();
+  }
+});
+
+test("hub doorbell: rings for what the phone does not have", async () => {
+  const rings = [];
+  const hub = await startHub({ rings });
+  const creds = credentials("read-cursor");
+  const call = caller(hub, creds);
+  let seq = 0;
+  const finish = async (label) => {
+    seq += 1;
+    assert.equal((await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: `cursor-${label}`, originSeq: seq })], runFinished: true } })).status, 200);
+  };
+  const progress = async (label) => {
+    seq += 1;
+    assert.equal((await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: `cursor-${label}`, originSeq: seq })] } })).status, 200);
+  };
+  const waitForRings = async (count, ms = PUSH_INTERVAL_MS * 2 + 500) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline && rings.length < count) await delay(100);
+    return rings.length;
+  };
+  const phoneAcknowledges = async (cursor, extra = {}) => {
+    const response = await call("/v1/mailbox/events", { query: { reader: "phone", afterArrival: cursor, limit: 500, ...extra } });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  try {
+    await subscribe(call, creds);
+    await finish("finish-1");
+    assert.equal(await waitForRings(1, 2000), 1, "the answer rings once, straight away");
+    await finish("finish-2");
+    await phoneAcknowledges(2);
+    assert.equal(await waitForRings(2), 1, "nothing is rung twice for what the phone already has");
+    await finish("finish-3");
+    await phoneAcknowledges(2);
+    assert.equal(await waitForRings(2), 2, "a page the phone did not store is still rung for");
+    await phoneAcknowledges(3);
+    await finish("defer-a");
+    assert.equal(await waitForRings(3), 3, "the first of the pair rings straight away");
+    await finish("defer-b");
+    await phoneAcknowledges(3);
+    assert.equal(await waitForRings(4), 4, "a deferred ring survives a read that stored nothing");
+    await phoneAcknowledges(5);
+    await finish("finish-4");
+    assert.equal((await call("/v1/mailbox/events", { query: { afterArrival: 6, limit: 500 } })).status, 200);
+    assert.equal(await waitForRings(5), 5, "a desktop read does not silence the phone's doorbell");
+    await phoneAcknowledges(6);
+    await finish("finish-5");
+    await phoneAcknowledges(7, { conversationId: "conversation-ring" });
+    assert.equal(await waitForRings(6), 6, "a filtered read does not acknowledge the whole box");
+    await phoneAcknowledges(7);
+    await finish("finish-6");
+    assert.equal((await call("/v1/mailbox/events", { query: { reader: "phone", tail: "true", limit: 1 } })).status, 200);
+    assert.equal(await waitForRings(7), 7, "a tail read does not acknowledge the whole box");
+    await phoneAcknowledges(8);
+    await phoneAcknowledges(1e15);
+    await finish("finish-7");
+    assert.equal(await waitForRings(8), 8, "an absurd cursor cannot mute the doorbell");
+    await phoneAcknowledges(9);
+    await finish("quiet-finish-a");
+    assert.equal(await waitForRings(9, 2000), 9, "the finished turn rings once");
+    await finish("quiet-finish-b");
+    await phoneAcknowledges(11);
+    await progress("quiet-progress-1");
+    await progress("quiet-progress-2");
+    assert.equal(await waitForRings(10), 9, "the deferred ring stays quiet: its finish is already on the phone");
+    await finish("quiet-finish-c");
+    assert.equal(await waitForRings(10), 10, "the next finished turn still rings");
+  } finally {
+    await hub.close();
+  }
+});
+
+test("hub doorbell: a finished turn's append does not wait for the push service", async () => {
+  const rings = [];
+  const pushStatus = { value: 201, delayMs: 3000 };
+  const hub = await startHub({ rings, pushStatus });
+  const creds = credentials("slow-push");
+  const call = caller(hub, creds);
+  const waitForRings = async (count, ms) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline && rings.length < count) await delay(50);
+    return rings.length;
+  };
+  try {
+    await subscribe(call, creds);
+    const started = Date.now();
+    const response = await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "slow-finish-1", originSeq: 1 })], runFinished: true } });
+    const appendMs = Date.now() - started;
+    assert.equal(response.status, 200);
+    assert.ok(appendMs < 1500, `the append answers before the push service does (took ${appendMs}ms)`);
+    assert.equal(await waitForRings(1, 2000), 1, "the ring still goes out");
+    // While that push is out, the mailbox keeps answering.
+    const readStarted = Date.now();
+    assert.equal((await call("/v1/mailbox/events", { query: { afterArrival: 0 } })).status, 200);
+    assert.ok(Date.now() - readStarted < 1500, "a read does not wait behind the ring");
+    await delay(pushStatus.delayMs + PUSH_INTERVAL_MS);
+    pushStatus.delayMs = 6000;
+    assert.equal((await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "slow-finish-2", originSeq: 2 })], runFinished: true } })).status, 200);
+    assert.equal(await waitForRings(2, 2000), 2, "the failing ring was attempted");
+    pushStatus.delayMs = 0;
+    await delay(5000 + PUSH_INTERVAL_MS);
+    assert.equal((await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "slow-finish-3", originSeq: 3 })], runFinished: true } })).status, 200);
+    assert.equal(await waitForRings(3, 2000), 3, "a ring that timed out leaves the next one alone");
+  } finally {
+    await hub.close();
+  }
+});
+
+test("hub mailbox: a ring waiting when the hub stops is rung after it starts again", async () => {
+  // Covered by the hub's restart path: pending rings are kept in its table.
+  const rings = [];
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-relay-restart-"));
+  try {
+    const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
+    await storage.init();
+    const relay = storage.relay();
+    const creds = credentials("restart");
+    await relay.updateMailbox(creds.mailboxId, { tokenHash: creds.tokenHashBase64Url, epoch: "e", arrivalSeq: 1, pushFinishSeq: 1, pushAt: Date.now() + 300,
+      pushSubscription: JSON.stringify({ endpoint: `${PUSH_ORIGIN}${PUSH_PATH}`, savedAt: "" }) });
+    const mailboxes = new HubRelayMailboxes({ storage: relay, vapid: vapidKeys(), fetchImpl: async (url) => { rings.push(String(url)); return new Response("", { status: 201 }); } });
+    await mailboxes.start();
+    for (let i = 0; i < 30 && rings.length === 0; i += 1) await delay(100);
+    mailboxes.close();
+    assert.equal(rings.length, 1);
+    assert.equal((await relay.mailbox(creds.mailboxId)).pushAt, null, "rung once, not again on the next start");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

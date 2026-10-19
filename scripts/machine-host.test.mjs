@@ -717,3 +717,57 @@ test("a member's background work on the machine is reported to the desktop as it
   host.close();
   assert.equal(notify, undefined, "closing the host stops reporting");
 });
+
+test("a machine moves to the User's server only when idle and only to a relay's addresses, then starts again", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const moved = [];
+  let restarted = 0;
+  let busy = false;
+  const host = new MachineHostService(
+    {
+      runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined,
+      liveRunIds: () => busy ? ["run-live"] : []
+    },
+    { getConversation: async () => undefined },
+    { importMachineSettingsSnapshot: async () => undefined },
+    { write: async () => undefined },
+    {
+      ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client,
+      moveTransport: async (addresses) => { moved.push(addresses); },
+      restartRuntime: () => { restarted += 1; }
+    }
+  );
+  await host.start();
+  await settle();
+  const inbound = async (body) => {
+    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
+    await host.inbound;
+    await settle();
+  };
+  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
+  let bodies = await sentBodies(client, host.options.pairing);
+  assert.equal(bodies.filter((body) => body.type === "machine.hello").pop().transportMoveSupported, true);
+  const move = (requestId, overrides = {}) => ({ type: "machine.transport.move", requestId, instanceId: host.instanceId,
+    expiresAt: new Date(Date.now() + 20_000).toISOString(), relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events", ...overrides });
+  busy = true;
+  await inbound(move("busy"));
+  busy = false;
+  await inbound(move("elsewhere", { outboxUrl: "https://other.example/v1/mailbox/events" }));
+  await inbound(move("plain", { relayUrl: "ws://52.72.175.0/v1/relay", outboxUrl: "http://52.72.175.0/v1/mailbox/events" }));
+  await inbound(move("stale", { instanceId: "an-earlier-run" }));
+  assert.deepEqual(moved, [], "nothing is saved for a refused move");
+  await inbound(move("ok"));
+  await settle(700);
+  bodies = await sentBodies(client, host.options.pairing);
+  const answers = Object.fromEntries(bodies.filter((body) => body.type === "machine.transport.moved").map((body) => [body.requestId, body]));
+  assert.match(answers.busy.error, /busy/);
+  assert.match(answers.elsewhere.error, /not a relay's addresses/);
+  assert.match(answers.plain.error, /not a relay's addresses/);
+  assert.match(answers.stale.error, /restarted/);
+  assert.equal(answers.ok.ok, true);
+  assert.deepEqual(moved, [{ relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" }]);
+  assert.equal(restarted, 1, "it starts again on its new address after answering");
+  host.close();
+});

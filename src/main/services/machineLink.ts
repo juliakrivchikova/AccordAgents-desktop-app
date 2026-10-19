@@ -200,7 +200,7 @@ interface MachineConnection {
   /** Monotonic start counter of the newest runtime instance seen (preferred
    *  over the wall-clock start time). */
   latestInstanceSequence?: number;
-  /** Scheduled-script requests waiting for the machine's answer. */
+  /** Requests waiting for the machine's answer: scheduled scripts, a move. */
   pendingScripts: Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>;
 }
 
@@ -627,6 +627,49 @@ export class MachineLinkService implements MachineTurnDispatcher {
     connection.client.close();
     this.emitMemberBackground({ machineId, snapshot: [] });
     this.emitStatus();
+  }
+
+  /** Whether this machine's runtime can move to another relay address. */
+  supportsTransportMove(machineId: string): boolean {
+    return this.connections.get(machineId)?.record.lastHello?.transportMoveSupported === true;
+  }
+
+  /** Tells a machine to meet this desktop at another relay address from now
+   *  on (the User's own server), and waits until it says it saved it; it
+   *  restarts right after. The caller saves the new pairing and reconnects. */
+  async requestTransportMove(machineId: string, addresses: { relayUrl: string; outboxUrl: string }, timeoutMs = SCRIPTS_REQUEST_TIMEOUT_MS): Promise<void> {
+    const connection = this.connections.get(machineId);
+    if (!connection?.machineDeviceId) throw new Error("That machine is not connected right now.");
+    const hello = connection.record.lastHello;
+    if (hello?.transportMoveSupported !== true) throw new Error(`${connection.record.name} runs an older runtime that cannot move.`);
+    const requestId = randomUUID();
+    const answer = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        connection.pendingScripts.delete(requestId);
+        reject(new Error(`${connection.record.name} did not answer in time.`));
+      }, timeoutMs);
+      timer.unref?.();
+      connection.pendingScripts.set(requestId, { resolve, reject, timer });
+    });
+    try {
+      await this.send(connection, { type: "machine.transport.move", requestId,
+        ...(hello.instanceId ? { instanceId: hello.instanceId } : {}),
+        expiresAt: new Date(this.now().getTime() + timeoutMs).toISOString(), ...addresses });
+    } catch (error) {
+      const pending = connection.pendingScripts.get(requestId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        connection.pendingScripts.delete(requestId);
+      }
+      throw error;
+    }
+    await answer;
+  }
+
+  /** Connects to a machine again from its saved pairing (it moved). */
+  async reconnectMachine(record: MachineRecord): Promise<void> {
+    await this.disconnectMachine(record.id);
+    await this.connectMachine(record);
   }
 
   /** Ask a machine to do something with its scheduled scripts and wait for
@@ -1659,7 +1702,18 @@ export class MachineLinkService implements MachineTurnDispatcher {
         }
         return;
       case "machine.scripts.request":
+      case "machine.transport.move":
         return;
+      case "machine.transport.moved": {
+        const pending = connection.pendingScripts.get(body.requestId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          connection.pendingScripts.delete(body.requestId);
+          if (body.ok) pending.resolve(undefined);
+          else pending.reject(new Error(body.error || "The machine refused."));
+        }
+        return;
+      }
       case "machine.attachment.request":
         // Served off the inbound chain: reading a chat and sending a picture
         // takes seconds on a large chat, and the machine's turn results,

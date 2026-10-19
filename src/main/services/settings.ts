@@ -98,7 +98,7 @@ import {
   isValidChatSavedPromptTrigger,
   normalizeChatSavedPromptTrigger
 } from "../../shared/chatSavedPrompts";
-import { mobileControlSettingsFromEnvironment } from "../../shared/mobilePairing";
+import { mobileControlForHub, mobileControlSettingsFromEnvironment } from "../../shared/mobilePairing";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import {
   cliProviderHostDefaultModel,
@@ -1869,7 +1869,7 @@ export class SettingsService {
       chatAutoWatchWakeLimit: this.normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
       chatPromptContext: this.normalizeChatPromptContextSettings(stored.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(stored),
-      mobileControl: mobileControlSettingsFromEnvironment(process.env),
+      mobileControl: mobileControlForHub(mobileControlSettingsFromEnvironment(process.env), this.hubUrlOf(stored)),
       assistantProviderKind: this.normalizeChatProviderKind(stored.assistantProviderKind),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
       lastRepoPath: stored.lastRepoPath,
@@ -3593,6 +3593,13 @@ export class SettingsService {
   async getMachinePairing(pairingKey: string): Promise<MobilePairingPackage | undefined> {
     const stored = await this.readStored();
     return this.readMachinePairings(stored)[pairingKey];
+  }
+
+  /** The hub's address as getHubConfig reads it. */
+  private hubUrlOf(stored: StoredSettings): string | undefined {
+    const override = process.env.ACCORDAGENTS_HUB_URL?.trim();
+    if (override) return isAcceptableHubUrl(override) ? override : undefined;
+    return stored.hub?.url;
   }
 
   /** The hub this desktop syncs with. `ACCORDAGENTS_HUB_URL` points a local

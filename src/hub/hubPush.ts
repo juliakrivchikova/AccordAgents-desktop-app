@@ -36,7 +36,7 @@ export function loadOrCreateVapidKeys(file: string): { publicKey: string; privat
   return keys;
 }
 
-function vapidJwt(audience: string, subject: string, privateJwk: JsonWebKey, nowMs: number): string {
+export function vapidJwt(audience: string, subject: string, privateJwk: JsonWebKey, nowMs: number): string {
   const header = Buffer.from(JSON.stringify({ typ: "JWT", alg: "ES256" })).toString("base64url");
   const claims = Buffer.from(JSON.stringify({ aud: audience, exp: Math.floor(nowMs / 1000) + 12 * 60 * 60, sub: subject })).toString("base64url");
   const signingInput = `${header}.${claims}`;

@@ -10,6 +10,7 @@ import { HubFolder } from "./hubFolder";
 import { hubApplyPolicy } from "./hubPolicy";
 import { HubLog } from "./hubLog";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
+import { HubRelayMailboxes, HubRelayRooms } from "./hubRelay";
 import { HubServer } from "./hubServer";
 
 declare const __HUB_VERSION__: string | undefined;
@@ -74,6 +75,9 @@ function finish(result: unknown): Promise<never> {
   });
 }
 
+/** Who the hub's pushes say they come from. */
+const PUSH_SUBJECT = "mailto:push@accordagents.com";
+
 /** Present once the desktop's first copy of the chats is in. */
 function chatCopyMark(): string {
   return path.join(userDataPath(), "chat-copy.json");
@@ -124,14 +128,20 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
   const folder = new HubFolder(storage, policy, log);
   const search = new ChatSearchService(storage);
   const keys = loadOrCreateVapidKeys(path.join(userDataPath(), "vapid.json"));
-  const push = new HubPush({ storage, keys, subject: "mailto:push@accordagents.com", log });
+  const push = new HubPush({ storage, keys, subject: PUSH_SUBJECT, log });
   hubLog.onAppended(({ head, changedConversationIds, originId }) => {
     folder.enqueue(changedConversationIds);
     // A phone is rung when a chat's content changed, not for every progress
     // frame a running turn writes.
     if (changedConversationIds.length > 0) push.noteAppended(head, originId);
   });
-  const server = new HubServer({ hubId: hubId(), version: HUB_VERSION, storage, log: hubLog, search, vapidPublicKey: keys.publicKey, acmeWebroot: args.acmeWebroot, debugLog: log });
+  // The relay the phone and the machines speak, rung with the same keys.
+  const mailboxes = new HubRelayMailboxes({ storage: storage.relay(), vapid: { ...keys, subject: PUSH_SUBJECT }, log });
+  await mailboxes.start();
+  const server = new HubServer({
+    hubId: hubId(), version: HUB_VERSION, storage, log: hubLog, search, vapidPublicKey: keys.publicKey, acmeWebroot: args.acmeWebroot, debugLog: log,
+    relay: { mailboxes, rooms: new HubRelayRooms() }
+  });
   const https = Boolean(args.cert && args.key && existsSync(args.cert) && existsSync(args.key));
   if (https) {
     await server.listenHttps(args.httpsPort, { cert: args.cert!, key: args.key! }, args.host);

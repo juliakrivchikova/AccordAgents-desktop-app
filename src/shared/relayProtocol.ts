@@ -81,6 +81,18 @@ export const PUSHER_CHANNELS_RELAY_MANIFEST: RelayCapabilityManifest = {
   providerHistory: "ignored-for-correctness"
 };
 
+/** The relay as the User's own hub serves it: the same limits as the
+ *  Cloudflare one it replaces. */
+export const HUB_RELAY_MANIFEST: RelayCapabilityManifest = {
+  provider: "accordagents-hub",
+  maxFrameBytes: RELAY_PROTOCOL_MIN_FRAME_BYTES,
+  maxLogicalMessageBytes: RELAY_PROTOCOL_DEFAULT_LOGICAL_MESSAGE_BYTES,
+  oversizeCloseCode: 1009,
+  binaryFrames: false,
+  textFrames: true,
+  providerHistory: "none"
+};
+
 export const CLOUDFLARE_DURABLE_OBJECT_RELAY_MANIFEST: RelayCapabilityManifest = {
   provider: "cloudflare-durable-object",
   maxFrameBytes: RELAY_PROTOCOL_MIN_FRAME_BYTES,

@@ -160,6 +160,29 @@ export function mobileControlSettingsFromEnvironment(env: Record<string, string 
   };
 }
 
+/** With the User's own hub, the relay a new pairing names is the hub: its
+ *  rooms and sealed mailboxes are the relay's, served from her server. The
+ *  phone's app is still loaded from the same site. */
+export function mobileControlForHub(settings: MobileControlSettings, hubUrl: string | undefined): MobileControlSettings {
+  if (!hubUrl) return settings;
+  let origin: URL;
+  try {
+    origin = new URL(hubUrl);
+  } catch {
+    return settings;
+  }
+  const socket = origin.protocol === "https:" ? "wss:" : "ws:";
+  return {
+    provider: settings.provider,
+    defaults: {
+      ...settings.defaults,
+      relayUrl: `${socket}//${origin.host}/v1/relay`,
+      mailboxUrl: `${origin.origin}/`,
+      outboxUrl: `${origin.origin}/v1/mailbox/events`
+    }
+  };
+}
+
 export function mobilePairingRequestWithEndpointDefaults(
   request: CreateMobilePairingRequest,
   defaults: MobileControlEndpointDefaults | undefined

@@ -20,6 +20,8 @@ import {
   type HubRosterRequest
 } from "../shared/hubProtocol";
 import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, verifyHubRequest, type ParsedHubAuthorization } from "../main/services/hubAuth";
+import { HUB_RELAY_MANIFEST } from "../shared/relayProtocol";
+import { HubRelayRooms, RELAY_HEALTH_PATH, RELAY_MAILBOX_APPEND_MAX_BYTES, RELAY_MAILBOX_PATHS, RELAY_MAILBOX_SMALL_MAX_BYTES, RELAY_MANIFEST_PATH, RELAY_ROOM_PATH, type HubRelayMailboxes } from "./hubRelay";
 import type { ChatSearchService } from "../main/services/chatSearch";
 import type { StorageService } from "../main/services/storage";
 import { HubRequestError, type HubLog } from "./hubLog";
@@ -34,6 +36,8 @@ export interface HubServerOptions {
   vapidPublicKey: string;
   /** Files Let's Encrypt validation reads over plain HTTP. */
   acmeWebroot?: string;
+  /** The relay the phone and machines speak (sealed mailboxes, live rooms). */
+  relay?: { mailboxes: HubRelayMailboxes; rooms: HubRelayRooms };
   now?: () => number;
   debugLog?: (event: string, payload: Record<string, unknown>) => void;
 }
@@ -202,6 +206,8 @@ export class HubServer {
   }
 
   async close(): Promise<void> {
+    this.options.relay?.mailboxes.close();
+    this.options.relay?.rooms.close();
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
     for (const socket of this.live.keys()) socket.terminate();
@@ -245,6 +251,7 @@ export class HubServer {
   private async upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", "http://hub");
+      if (url.pathname === RELAY_ROOM_PATH && this.options.relay) return this.options.relay.rooms.handleUpgrade(request, socket, head, url);
       if (url.pathname === "/v1/room") return await this.joinRoom(request, socket, head, url);
       if (url.pathname !== "/v1/live") throw new HubRequestError(404, "Not found.");
       // A browser cannot set headers on a WebSocket: the signature of
@@ -354,6 +361,24 @@ export class HubServer {
         return json(response, 200, { ok: true, publicKey: this.options.vapidPublicKey });
       }
       if (openOnly) throw new HubRequestError(403, "Use HTTPS.");
+      const relay = this.options.relay;
+      if (relay) {
+        // The relay's own paths answer as the relay did, with its own keys.
+        if (request.method === "GET" && url.pathname === RELAY_HEALTH_PATH) return json(response, 200, { ok: true, provider: HUB_RELAY_MANIFEST.provider });
+        if (request.method === "GET" && url.pathname === RELAY_MANIFEST_PATH) return json(response, 200, { ok: true, manifest: HUB_RELAY_MANIFEST });
+        if (url.pathname === RELAY_ROOM_PATH) {
+          const answer = HubRelayRooms.plainRequestAnswer(url);
+          status = answer.status;
+          return json(response, answer.status, answer.body);
+        }
+        if (RELAY_MAILBOX_PATHS.has(url.pathname)) {
+          const append = request.method === "POST" && url.pathname === "/v1/mailbox/events";
+          const body = await readBody(request, append ? RELAY_MAILBOX_APPEND_MAX_BYTES : RELAY_MAILBOX_SMALL_MAX_BYTES);
+          const answer = await relay.mailboxes.handle(request.method ?? "GET", url.pathname, url.searchParams.get("mailboxId"), request.headers.authorization, body, url.searchParams);
+          status = answer.status;
+          return json(response, answer.status, answer.body);
+        }
+      }
       const checked = await this.preauthenticate(request.headers.authorization);
       const large = (request.method === "POST" && url.pathname === "/v1/events") || (request.method === "PUT" && BLOB_PATH.test(url.pathname));
       const body = await readBody(request, large ? HUB_MAX_BODY_BYTES : HUB_MAX_SMALL_BODY_BYTES);

@@ -1066,7 +1066,7 @@ test("when a machine goes away the desktop stops showing the background work it 
   link.emitStatus = () => undefined;
   const events = [];
   MachineLinkService.prototype.onMemberBackgroundTasks.call(link, (event) => events.push(event));
-  const connection = { record: { id: "machine-a" }, machineDeviceId: "device-a", replicated: new Set(), settingsSynced: true, helloSeen: true };
+  const connection = { record: { id: "machine-a" }, machineDeviceId: "device-a", replicated: new Set(), settingsSynced: true, helloSeen: true, pendingScripts: new Map() };
   link.setMachinePeer(connection, undefined);
   assert.deepEqual(events, [{ machineId: "machine-a", snapshot: [] }]);
   link.setMachinePeer(connection, undefined);
@@ -1077,4 +1077,29 @@ test("when a machine goes away the desktop stops showing the background work it 
   connection.helloSeen = true;
   link.setMachinePeer(connection, "device-a");
   assert.ok(sent.includes("machine.member.background.request"), "back on the link, the desktop asks what is running now");
+});
+
+test("the desktop asks a machine to move and waits for its answer; an older runtime is not asked", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const link = Object.create(MachineLinkService.prototype);
+  link.debugLogs = { write: async () => undefined };
+  link.now = () => new Date();
+  const sent = [];
+  const connection = { record: { id: "m", name: "Cloud run", lastHello: { instanceId: "i-1", transportMoveSupported: true } }, machineDeviceId: "device-m", pendingScripts: new Map() };
+  link.connections = new Map([["m", connection]]);
+  link.send = async (_connection, body) => { sent.push(body); };
+  assert.equal(link.supportsTransportMove("m"), true);
+  const moving = link.requestTransportMove("m", { relayUrl: "wss://hub/v1/relay", outboxUrl: "https://hub/v1/mailbox/events" }, 2_000);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sent[0].type, "machine.transport.move");
+  assert.equal(sent[0].instanceId, "i-1");
+  await link.handleBody(connection, { type: "machine.transport.moved", requestId: sent[0].requestId, ok: true });
+  await moving;
+  const refused = link.requestTransportMove("m", { relayUrl: "wss://hub/v1/relay", outboxUrl: "https://hub/v1/mailbox/events" }, 2_000);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await link.handleBody(connection, { type: "machine.transport.moved", requestId: sent[1].requestId, ok: false, error: "The machine is busy; it moves once it is idle." });
+  await assert.rejects(refused, /busy/);
+  connection.record.lastHello = { instanceId: "i-2" };
+  assert.equal(link.supportsTransportMove("m"), false);
+  await assert.rejects(link.requestTransportMove("m", { relayUrl: "wss://hub/v1/relay", outboxUrl: "https://hub/v1/mailbox/events" }), /older runtime/);
 });

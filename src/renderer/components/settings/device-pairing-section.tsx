@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CheckCircle2, Copy, Loader2, QrCode, ShieldX } from "lucide-react";
 import QRCode from "qrcode";
 import { Input } from "@/components/ui/input";
@@ -29,12 +29,21 @@ export function DevicePairingSection(props: {
   const [status, setStatus] = useState<"idle" | "busy" | "copied" | "revoked" | "error">("idle");
   const [confirmingRevoke, setConfirmingRevoke] = useState(false);
   const [error, setError] = useState<string | undefined>();
+  // A phone connects through the User's own server: none, no pairing.
+  const [serverReady, setServerReady] = useState<boolean | undefined>();
+  useEffect(() => {
+    let live = true;
+    const take = (state: { url?: string }) => { if (live) setServerReady(Boolean(state.url)); };
+    void window.consensus.getHubSetupState?.().then(take).catch(() => undefined);
+    const stop = window.consensus.onHubSetupProgress?.(take);
+    return () => { live = false; stop?.(); };
+  }, []);
 
   const defaults = props.mobileControl?.defaults;
   const effectiveRelayUrl = relayUrl.trim() || defaults?.relayUrl || "";
   const effectiveStaticOriginUrl = staticOriginUrl.trim() || defaults?.staticOriginUrl || "";
   const effectiveOutboxUrl = outboxUrl.trim() || defaults?.outboxUrl || "";
-  const canCreate = effectiveRelayUrl.startsWith("wss://") && effectiveStaticOriginUrl.startsWith("https://") && status !== "busy";
+  const canCreate = serverReady === true && effectiveRelayUrl.startsWith("wss://") && effectiveStaticOriginUrl.startsWith("https://") && status !== "busy";
   const mobileUrl = result?.pwaUrl ?? result?.qrPayload;
   const hasManagedDefaults = props.mobileControl?.provider === "accord-managed" && Boolean(defaults?.relayUrl && defaults.staticOriginUrl);
   const showEndpointFields = !hasManagedDefaults;
@@ -138,8 +147,10 @@ export function DevicePairingSection(props: {
         <div className="gen-row">
           <div className="gen-row-text">
             <div className="gen-row-title">Mobile control</div>
-            <div className="gen-row-desc">
-              Scan the code with your phone to control this app from it. The pairing covers the whole app, not a single chat.
+            <div className="gen-row-desc" data-testid="device-pairing-desc">
+              {serverReady === false
+                ? "Set up your server first (Your server, above): the phone connects through it."
+                : "Scan the code with your phone to control this app from it. The pairing covers the whole app, not a single chat."}
             </div>
           </div>
           <div className="gen-row-control">{generateButton}</div>

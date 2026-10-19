@@ -624,6 +624,8 @@ const hubInstaller = new HubInstaller({
     }
     await startHubLink();
     resumeHubReading();
+    // Machines set up before the server move to it now.
+    void moveMachinesToHub();
   },
   currentLink: () => settingsService.getHubConfig().catch(() => undefined),
   reachable: () => hubSync ? hubSync.isReachable() : undefined,
@@ -777,38 +779,77 @@ async function forgetRemovedMachineOutbox(outbox: { pairingKey: string; deviceId
   }
 }
 
+let movingMachines = false;
+/** A machine set up before the User's own server meets this desktop on the
+ *  shared relay. Once the server is set up it is told, over its present link
+ *  and only while idle, to meet it there; its keys, rooms and mailbox ids
+ *  stay. Its mailbox is registered on the server first, so nothing it or
+ *  this desktop still has to send has nowhere to go: both send again what
+ *  the other has not confirmed. */
+async function moveMachinesToHub(): Promise<void> {
+  const link = machineLinkService;
+  if (movingMachines || !link) return;
+  if (!await settingsService.getHubConfig().catch(() => undefined)) return;
+  movingMachines = true;
+  try {
+    const defaults = (await settingsService.getPublicSettings()).mobileControl.defaults;
+    const relayUrl = defaults.relayUrl;
+    const outboxUrl = defaults.outboxUrl;
+    if (!relayUrl || !outboxUrl) return;
+    for (const machine of await settingsService.listMachines()) {
+      const pairing = await settingsService.getMachinePairing(machine.pairingKey).catch(() => undefined);
+      if (!pairing || pairing.hubUrl || pairing.relayUrl === relayUrl) continue;
+      // An older runtime moves after its update (which happens on its own).
+      if (!link.isMachineConnected(machine.id) || !link.supportsTransportMove(machine.id)) continue;
+      const activity = await link.machineActivity(machine.id);
+      if (!activity?.fresh || activity.activeRunIds.length || activity.pendingTerminalRunIds.length || activity.dispatchedRunIds.length) continue;
+      const release = link.holdTurns(machine.id, "The machine is moving to your server.");
+      try {
+        const next: MobilePairingPackage = { ...pairing, relayUrl, outboxUrl };
+        if (!await ensureMailboxRegisteredForPairing(next)) {
+          void debugLogService.write("machine.transport.mailbox-unregistered", { machineId: machine.id });
+          continue;
+        }
+        await link.requestTransportMove(machine.id, { relayUrl, outboxUrl });
+        await settingsService.saveMachine(machine, next);
+        await link.reconnectMachine(machine);
+        void debugLogService.write("machine.transport.moved", { machineId: machine.id, relayHost: new URL(relayUrl).host });
+        void machineListResult().then((result) => sendToMainWindow("machines:updated", result)).catch(() => undefined);
+      } catch (error) {
+        void debugLogService.write("machine.transport.move-error", { machineId: machine.id, message: error instanceof Error ? error.message : String(error) });
+      } finally {
+        release();
+      }
+    }
+  } finally {
+    movingMachines = false;
+  }
+}
+
 async function createMachine(request: CreateMachineRequest, awsInstanceId?: string): Promise<CreateMachineResult> {
   const name = typeof request?.name === "string" ? request.name.trim() : "";
   if (!name) {
     throw new Error("A machine needs a name.");
   }
   const settings = await settingsService.getPublicSettings();
-  const hub = await settingsService.getHubConfig();
-  // With the User's hub, the machine meets this desktop there and every
-  // durable event goes through the hub's order: no relay, no mailbox.
-  // Without it, machines use the same live room and sealed durable buffer as
-  // the phone.
-  const pairing = await mobilePairingService.createPairing(hub ? {
-    purpose: "machine-host",
-    ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES,
-    hubUrl: hub.url
-  } : {
+  // The machine meets this desktop and the phone in the relay's room and
+  // sealed mailbox: on the User's own server once it is set up (the
+  // defaults name it then), otherwise on the shared relay.
+  const pairing = await mobilePairingService.createPairing({
     purpose: "machine-host",
     ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES,
     relayUrl: settings.mobileControl.defaults.relayUrl,
     outboxUrl: settings.mobileControl.defaults.outboxUrl
   });
-  if (!hub) {
-    if (!pairing.package.relayUrl) {
-      throw new Error("Machines need a relay URL; set the mobile control relay in Settings first.");
-    }
-    if (!pairing.package.outboxUrl) {
-      throw new Error("Machines need a sealed mailbox URL; set the mobile control mailbox in Settings first.");
-    }
-    // Reserve the sealed mailbox before exposing its enrollment credentials.
-    if (!await ensureMailboxRegisteredForPairing(pairing.package)) {
-      throw new Error("The machine's relay mailbox could not be registered. Try adding the machine again.");
-    }
+  if (!pairing.package.relayUrl) {
+    throw new Error("Machines need a relay URL; set the mobile control relay in Settings first.");
+  }
+  if (!pairing.package.outboxUrl) {
+    throw new Error("Machines need a sealed mailbox URL; set the mobile control mailbox in Settings first.");
+  }
+  // Reserve the sealed mailbox before exposing its enrollment credentials.
+  if (!await ensureMailboxRegisteredForPairing(pairing.package)) {
+    throw new Error("The machine's relay mailbox could not be registered. Try adding the machine again.");
   }
   const record = {
     id: randomUUID(),
@@ -3622,6 +3663,10 @@ function registerIpc(): void {
     ...(request?.startOver === true ? { startOver: true } : {})
   }));
   ipcMain.handle("mobile:create-pairing", async (_event, request: CreateMobilePairingRequest) => {
+    // A phone connects through the User's own server, not a shared relay.
+    if (!await settingsService.getHubConfig().catch(() => undefined)) {
+      throw new Error("Set up your server first (Your server, above): the phone connects through it.");
+    }
     const settings = await settingsService.getPublicSettings();
     const minted = await mobilePairingService.createPairing(
       mobilePairingRequestWithEndpointDefaults(request, settings.mobileControl.defaults)
@@ -4233,6 +4278,10 @@ void app.whenReady().then(async () => {
     // here, so evaluating on every hello cannot feed itself.
     link.onHello((event) => { void autoUpgrade.evaluate(event.machineId); });
     evaluateMachineUpdates = () => { void autoUpgrade.evaluate(); };
+    // Machines move to the User's own server once it is set up.
+    link.onHello(() => { void moveMachinesToHub(); });
+    const machineMoveTimer = setInterval(() => { void moveMachinesToHub(); }, 60_000);
+    machineMoveTimer.unref?.();
     machineRecovery = new MachineRecoveryService({
       now: () => Date.now(),
       linkStartedAt: () => machineLinkStartedAt,

@@ -24,7 +24,7 @@ import {
   type MachineTurnFinishedBody,
   type MachineTurnRequestBody
 } from "../../shared/machineLink";
-import type { MachineAttachmentResultBody, MachineScriptsOperation, MachineScriptsRequestBody } from "../../shared/machineLink";
+import type { MachineAttachmentResultBody, MachineScriptsOperation, MachineScriptsRequestBody, MachineTransportMoveBody } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type { AgentHealth, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatBackgroundTasksEvent, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
 import type { ChatParticipantRun, ChatService } from "./chat";
@@ -116,6 +116,11 @@ export interface MachineHostOptions {
     /** How many switched-on scripts keep it awake, for the desktop to show. */
     scheduledCount?(): number;
   };
+  /** Moves this machine to another relay address: writes it into the
+   *  enrollment. Absent where the runtime cannot (it then says so). */
+  moveTransport?: (addresses: { relayUrl: string; outboxUrl: string }) => Promise<void>;
+  /** Starts this runtime again, reading the enrollment anew. */
+  restartRuntime?: () => void;
   /** Folds a `chat.changes` event into this machine's copy of the chat.
    *  "missing-conversation" holds the event until the chat arrives. */
   applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation" | "waiting">;
@@ -811,6 +816,7 @@ export class MachineHostService {
       ...((this.outboxError || this.progressErrors.size) ? { outboxError: [this.outboxError, ...this.progressErrors.values()].filter(Boolean).join("; ") } : {}),
       ...(this.options.idleStopWarning?.() ? { idleStopWarning: this.options.idleStopWarning() } : {}),
       ...(typeof this.options.autoStopEnabled?.() === "boolean" ? { autoStopEnabled: this.options.autoStopEnabled() } : {}),
+      ...(this.options.moveTransport ? { transportMoveSupported: true } : {}),
       ...(this.options.scripts ? {
         scriptsSupported: true,
         keepAwake: this.options.scripts.keepsHostAwake(),
@@ -864,6 +870,32 @@ export class MachineHostService {
   private scriptsChangedTimer?: ReturnType<typeof setTimeout>;
   /** Script operations run one at a time, in order, off the inbound chain. */
   private scriptsQueue: Promise<void> = Promise.resolve();
+
+  /** The desktop moves this machine to the User's own server: the new
+   *  addresses go into the enrollment, the answer goes back, and the runtime
+   *  starts again from it. Refused while anything runs here, so no turn is
+   *  cut off; the desktop asks again once this machine is idle. */
+  private async answerTransportMove(body: MachineTransportMoveBody, replyTo: string | undefined): Promise<void> {
+    const fail = (error: string) => this.send({ type: "machine.transport.moved", requestId: body.requestId, ok: false, error }, replyTo).catch(() => undefined);
+    const expiresAt = typeof body.expiresAt === "string" ? Date.parse(body.expiresAt) : Number.NaN;
+    const busy = this.activeTurns.size > 0 || this.queuedRunIds().length > 0 || this.settlingRuns.size > 0 ||
+      (this.chat.activeParticipantRuns?.() ?? []).length > 0 || (this.chat.liveRunIds?.() ?? []).length > 0;
+    if (!this.options.moveTransport) return void await fail("This machine runtime cannot move; upgrade it.");
+    if (body.instanceId !== this.instanceId) return void await fail("The machine restarted since this was asked; try again.");
+    if (!Number.isFinite(expiresAt) || this.now().getTime() > expiresAt + SCRIPTS_REQUEST_CLOCK_SKEW_MS) return void await fail("This request is too old; nothing was changed.");
+    if (busy) return void await fail("The machine is busy; it moves once it is idle.");
+    const addresses = relayAddresses(body.relayUrl, body.outboxUrl);
+    if (!addresses) return void await fail("These are not a relay's addresses.");
+    try {
+      await this.options.moveTransport(addresses);
+    } catch (error) {
+      return void await fail(`The machine could not save its new address: ${errorMessage(error)}`);
+    }
+    void this.debugLogs.write("machine.transport.moved", { relayHost: new URL(addresses.relayUrl).host });
+    await this.send({ type: "machine.transport.moved", requestId: body.requestId, ok: true }, replyTo).catch(() => undefined);
+    // The answer leaves first; then the runtime starts again on its new address.
+    setTimeout(() => this.options.restartRuntime?.(), 500).unref?.();
+  }
 
   /** One desktop request on this machine's scripts, always answered. Served
    *  off the inbound chain, like a picture request on the desktop: releasing
@@ -1206,6 +1238,12 @@ export class MachineHostService {
         return;
       case "machine.scripts.result":
       case "machine.scripts.changed":
+        return;
+      case "machine.transport.move":
+        // Only the enrolling desktop reaches here (see above).
+        void this.answerTransportMove(body, replyTo);
+        return;
+      case "machine.transport.moved":
         return;
       case "machine.turn.query":
         if (await this.options.eventStorage.nativeCommands().forRun(body.runId)) {
@@ -2181,4 +2219,20 @@ function rememberBounded(set: Set<string>, value: string, limit = 5_000): void {
   set.delete(value);
   set.add(value);
   if (set.size > limit) set.delete(set.values().next().value as string);
+}
+
+/** A relay's two addresses as a move names them: the room socket and the
+ *  mailbox, on one host, over TLS (plain only on this computer). */
+function relayAddresses(relayUrl: unknown, outboxUrl: unknown): { relayUrl: string; outboxUrl: string } | undefined {
+  if (typeof relayUrl !== "string" || typeof outboxUrl !== "string") return undefined;
+  try {
+    const room = new URL(relayUrl);
+    const mailbox = new URL(outboxUrl);
+    const local = (url: URL) => url.hostname === "127.0.0.1" || url.hostname === "localhost";
+    const secure = (room.protocol === "wss:" && mailbox.protocol === "https:") || (local(room) && room.protocol === "ws:" && mailbox.protocol === "http:");
+    if (!secure || room.host !== mailbox.host || room.pathname !== "/v1/relay" || mailbox.pathname !== "/v1/mailbox/events") return undefined;
+    return { relayUrl: room.toString(), outboxUrl: mailbox.toString() };
+  } catch {
+    return undefined;
+  }
 }
