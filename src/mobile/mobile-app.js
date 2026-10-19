@@ -3848,12 +3848,18 @@
       return { value };
     } catch (error) {
       const status = error && typeof error === "object" ? error.serverStatus : undefined;
+      const body = String((error && error.serverBody) || "");
       // The pairing was revoked (or its link expired before this phone used
       // it): say so now, as the mailbox would, not after a wait on the desktop.
-      if (status === 401 && String(error.serverBody || "").indexOf("phone_revoked") >= 0) {
+      if (status === 401 && (body.indexOf("phone_revoked") >= 0 || body.indexOf("phone_expired") >= 0)) {
         mailboxAuthRejected = true;
         void clearMailboxAccessMeta();
         void render("revoked");
+      }
+      // One chat the server does not hold (deleted, archived, not copied yet)
+      // is asked of the desktop; the server still answers everything else.
+      if (status === 404 && body.indexOf("chat_not_found") >= 0) {
+        return undefined;
       }
       if (status === 404 || status === 403 || status === 401 || status === 405 || (error && error.unavailable)) {
         if (serverReads !== "no") recordRelayDebug({ event: "server-reads", state: "no", status: status || 0 });
@@ -3916,6 +3922,11 @@
             continue;
           }
           if (!answer || typeof answer.instance !== "string" || typeof answer.seq !== "number") continue;
+          // The server is busy (or answered at once with nothing): ask again
+          // a little later rather than straight away.
+          if (typeof answer.retryAfterMs === "number" && answer.retryAfterMs > 0) {
+            await new Promise(function (resolve) { setTimeout(resolve, Math.min(60_000, answer.retryAfterMs)); });
+          }
           const first = !serverChanges.instance;
           const reset = answer.reset === true;
           serverChanges = { instance: answer.instance, seq: answer.seq };
@@ -3943,6 +3954,15 @@
     const fromServer = await readFromServer(requestChatListFromServer);
     if (fromServer) {
       startServerChanges();
+      // The server cannot see every card (approvals live with whoever raised
+      // them). When the desktop is right there, its list is asked for too,
+      // without waiting, so a card it closed leaves this phone.
+      if (activeRelaySocket && activeRelaySocket.readyState === 1) {
+        void sendRelayPayload(pairing, "chat-list-" + createEventId(), { type: "mobile.chat-list.request" })
+          .then(handleRelayChatListPayload)
+          .then(function () { return render(); })
+          .catch(function () { return undefined; });
+      }
       return fromServer.value;
     }
     const payload = await sendRelayPayload(pairing, "chat-list-" + createEventId(), {

@@ -683,6 +683,10 @@ async function registerSigned(hub, creds, signer, extraBody = {}) {
   });
 }
 
+function inTenMinutes() {
+  return new Date(Date.now() + 10 * 60_000).toISOString();
+}
+
 function phoneGet(hub, creds, pathname, query = {}, headers = {}) {
   const url = new URL(pathname, hub.baseUrl);
   url.searchParams.set("mailboxId", creds.mailboxId);
@@ -702,13 +706,13 @@ test("a paired phone reads the chat list and a chat's page from the server, with
     await hub.storage.saveConversation(chatFixture("chat-b", { title: "Beta", messages: [messageFixture("b1", "user", "second chat")] }));
     await hub.storage.saveConversation(chatFixture("chat-old", { title: "Old", archived: true, messages: [messageFixture("o1", "user", "archived")] }));
     const phone = credentials("phone-device");
-    assert.equal((await registerSigned(hub, phone, owner, { phoneScope: { scope: "device" } })).status, 200);
+    assert.equal((await registerSigned(hub, phone, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: inTenMinutes() })).status, 200);
     const invite = credentials("phone-invite");
-    assert.equal((await registerSigned(hub, invite, owner, { phoneScope: { scope: "conversation", conversationId: "chat-b" } })).status, 200);
+    assert.equal((await registerSigned(hub, invite, owner, { phoneScope: { scope: "conversation", conversationId: "chat-b" }, phoneExpiresAt: inTenMinutes() })).status, 200);
     const plain = credentials("no-scope");
     assert.equal((await registerSigned(hub, plain, owner)).status, 200);
     const byMachine = credentials("machine-says-scope");
-    assert.equal((await registerSigned(hub, byMachine, machine, { phoneScope: { scope: "device" } })).status, 200);
+    assert.equal((await registerSigned(hub, byMachine, machine, { phoneScope: { scope: "device" }, phoneExpiresAt: inTenMinutes() })).status, 200);
 
     const boxBefore = await (await fetch(`${hub.baseUrl}/v1/mailbox/events?mailboxId=${phone.mailboxId}&afterArrival=0`, { headers: { authorization: `Bearer ${phone.token}` } })).json();
     assert.equal(boxBefore.phoneSeenAt, undefined, "not used by the phone yet");
@@ -732,7 +736,9 @@ test("a paired phone reads the chat list and a chat's page from the server, with
     assert.deepEqual(body.events.map((event) => event.content), ["@nora hello from the phone", "Hi! Here is the answer."]);
     assert.equal(body.page.hasMoreBefore, false);
     assert.equal(body.cards, undefined);
-    assert.equal((await phoneGet(hub, phone, "/v1/phone/timeline", { conversationId: "chat-old" })).status, 404, "an archived chat stays hidden");
+    answer = await phoneGet(hub, phone, "/v1/phone/timeline", { conversationId: "chat-old" });
+    assert.equal(answer.status, 404, "an archived chat stays hidden");
+    assert.equal((await answer.json()).error, "chat_not_found", "said as one chat missing, not as no server");
 
     body = await (await phoneGet(hub, invite, "/v1/phone/chats")).json();
     assert.deepEqual(body.chats.map((chat) => chat.id), ["chat-b"], "an invitation sees its one chat");
@@ -745,8 +751,22 @@ test("a paired phone reads the chat list and a chat's page from the server, with
     assert.equal((await phoneGet(hub, { ...phone, token: "wrong" }, "/v1/phone/chats")).status, 401);
 
     // Told again later (a desktop that updated): a pairing gains its scope.
-    assert.equal((await registerSigned(hub, plain, owner, { phoneScope: { scope: "device" } })).status, 200);
+    assert.equal((await registerSigned(hub, plain, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: inTenMinutes() })).status, 200);
     assert.equal((await phoneGet(hub, plain, "/v1/phone/chats")).status, 200);
+
+    // An unused link reads nothing past its window; one the desktop says a
+    // phone used keeps reading; a machine cannot say so.
+    const stale = credentials("stale-link");
+    await registerSigned(hub, stale, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: new Date(Date.now() - 1000).toISOString() });
+    answer = await phoneGet(hub, stale, "/v1/phone/chats");
+    assert.equal(answer.status, 401);
+    assert.equal((await answer.json()).error, "phone_expired");
+    await registerSigned(hub, stale, machine, { phoneScope: { scope: "device" }, phoneClaimed: true });
+    assert.equal((await phoneGet(hub, stale, "/v1/phone/chats")).status, 401, "a machine cannot keep a link alive");
+    await registerSigned(hub, stale, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: new Date(Date.now() - 1000).toISOString(), phoneClaimed: true });
+    assert.equal((await phoneGet(hub, stale, "/v1/phone/chats")).status, 200, "a used link outlives its window");
+    await registerSigned(hub, stale, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: new Date(Date.now() - 1000).toISOString() });
+    assert.equal((await phoneGet(hub, stale, "/v1/phone/chats")).status, 200, "and stays used");
 
     // Revoked: nothing more.
     const revoke = await fetch(`${hub.baseUrl}/v1/mailbox/revoke?mailboxId=${phone.mailboxId}`, { method: "POST", headers: { authorization: `Bearer ${phone.token}` } });
@@ -767,9 +787,9 @@ test("a phone waiting for news is answered when a chat's copy changes, and only 
       await hub.storage.saveConversation(chatFixture(`chat-${index}`, { title: `Chat ${index} ${"x".repeat(200)}`, messages: [messageFixture(`m-${index}`, "user", "y".repeat(300))] }));
     }
     const phone = credentials("phone-feed");
-    await registerSigned(hub, phone, owner, { phoneScope: { scope: "device" } });
+    await registerSigned(hub, phone, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: inTenMinutes() });
     const invite = credentials("invite-feed");
-    await registerSigned(hub, invite, owner, { phoneScope: { scope: "conversation", conversationId: "chat-1" } });
+    await registerSigned(hub, invite, owner, { phoneScope: { scope: "conversation", conversationId: "chat-1" }, phoneExpiresAt: inTenMinutes() });
     // A position from no instance (or another one) is a reset.
     let body = await (await phoneGet(hub, phone, "/v1/phone/changes", { instance: "none", after: 0 })).json();
     assert.equal(body.reset, true);
@@ -786,6 +806,7 @@ test("a phone waiting for news is answered when a chat's copy changes, and only 
     assert.equal(body.reset, undefined);
     const invitedBody = await (await invited).json();
     assert.deepEqual(invitedBody.conversationIds, [], "another chat's change is not news to an invitation");
+    assert.ok(Date.now() - started >= 1400, "nor does it end the invitation's wait early");
     seq = body.seq;
     // Nothing new: an empty answer at the end of the wait.
     body = await (await phoneGet(hub, phone, "/v1/phone/changes", { instance, after: seq, waitMs: 200 })).json();
@@ -794,6 +815,12 @@ test("a phone waiting for news is answered when a chat's copy changes, and only 
     const listed = await phoneGet(hub, phone, "/v1/phone/chats", {}, { "accept-encoding": "gzip" });
     assert.equal(listed.headers.get("content-encoding"), "gzip");
     assert.equal((await listed.json()).chats.length, 60);
+    // A chat that changed is read again for the list; the others come from
+    // what was read before.
+    await hub.storage.saveConversation(chatFixture("chat-3", { title: "Chat 3", messages: [messageFixture("m-3", "user", "y"), messageFixture("m-3b", "participant", "the newest line")] }));
+    hub.feed.note("chat-3");
+    const relisted = await (await phoneGet(hub, phone, "/v1/phone/chats")).json();
+    assert.equal(relisted.chats.find((chat) => chat.id === "chat-3").snippet, "the newest line");
   } finally {
     await hub.close();
   }

@@ -157,7 +157,7 @@ export async function registerMailboxForSealKey(
   outboxUrl: string,
   relaySealKeyBase64: string,
   fetchImpl: typeof fetch = fetch,
-  options: { phoneScope?: MobilePhoneScope } = {}
+  options: { phoneScope?: MobilePhoneScope; phoneExpiresAt?: string; phoneClaimed?: boolean } = {}
 ): Promise<MailboxRegistrationResult> {
   const access = mailboxAccessForSealKey(relaySealKeyBase64);
   const url = new URL(outboxUrl);
@@ -166,7 +166,14 @@ export async function registerMailboxForSealKey(
   url.searchParams.set("mailboxId", access.scopeId);
   // What a phone may read on the User's own server goes only to that server
   // (the one this desktop signs for), never to a shared relay.
-  const signedBody = JSON.stringify({ tokenHashBase64Url: access.tokenHash, ...(options.phoneScope ? { phoneScope: options.phoneScope } : {}) });
+  const signedBody = JSON.stringify({
+    tokenHashBase64Url: access.tokenHash,
+    ...(options.phoneScope ? {
+      phoneScope: options.phoneScope,
+      ...(options.phoneExpiresAt ? { phoneExpiresAt: options.phoneExpiresAt } : {}),
+      ...(options.phoneClaimed ? { phoneClaimed: true } : {})
+    } : {})
+  });
   const signedSignature = registrationSigner
     ? await registrationSigner({ url, method: "POST", pathWithQuery: `${url.pathname}${url.search}`, body: signedBody }).catch(() => undefined)
     : undefined;

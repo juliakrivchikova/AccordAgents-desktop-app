@@ -426,6 +426,8 @@ let hubRosterPublish: Promise<void> | undefined;
 let hubRosterAgain = false;
 let hubRosterRetry: ReturnType<typeof setTimeout> | undefined;
 let hubRosterRetryMs = 5_000;
+/** The server took this desktop's device list, which only its owner may set. */
+let hubOwnerConfirmed = false;
 
 /**
  * Tells the hub which devices are the User's: this desktop and every machine
@@ -460,6 +462,7 @@ function publishHubRoster(): void {
       ...machines
     ]);
     hubRosterRetryMs = 5_000;
+    hubOwnerConfirmed = true;
     void debugLogService.write("hub.roster.published", { machines: machines.length });
     hubSync?.nudgeHeld();
   })().catch((error: unknown) => {
@@ -557,12 +560,27 @@ function scheduleHubProgramUpdate(delayMs = HUB_PROGRAM_UPDATE_DELAY_MS): void {
 }
 
 async function updateHubProgramIfBehind(): Promise<void> {
+  // Only the installed app updates the User's server by itself: a build run
+  // from a checkout (or pointed at a test server) never puts its program there.
+  if (!app.isPackaged || process.env.ACCORDAGENTS_HUB_URL?.trim()) return;
   const config = await settingsService.getHubConfig().catch(() => undefined);
   const installed = config?.server?.installedVersion;
   const desktop = app.getVersion();
   // Only a server this desktop set up (it holds the key to it), and only
   // when its program is older than this desktop.
   if (!config?.server || !installed || compareVersions(desktop, installed) <= 0) return;
+  // The server this desktop syncs with is the one it would update, and it
+  // has just confirmed this desktop is its owner (only the owner sets its
+  // devices): a desktop that is not cannot replace the server's program.
+  if (!hubOwnerConfirmed || new URL(config.url).hostname !== config.server.ip) return;
+  // Updating stops the server for a few seconds: not while a member works.
+  const busy = chatService.liveRunIds().length > 0
+    || machineInstallerService.hasActiveOperations()
+    || (await machineLinkService?.anyMachineBusy().catch(() => true)) === true;
+  if (busy) {
+    scheduleHubProgramUpdate(5 * 60_000);
+    return;
+  }
   const tries = hubProgramUpdateTries.get(desktop) ?? 0;
   if (tries >= HUB_PROGRAM_UPDATE_MAX_TRIES) return;
   hubProgramUpdateTries.set(desktop, tries + 1);
@@ -1617,8 +1635,15 @@ async function ensureMailboxRegisteredForPairing(pairing: MobilePairingPackage):
     return false;
   }
   try {
+    // On the User's own server a phone pairing also says what the phone may
+    // read there, until when an unused link is good, and whether a phone has
+    // used it (said again once one has).
     const phoneScope = mobilePhoneScopeOfPairing(pairing);
-    const result = await registerMailboxForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64, fetch, phoneScope ? { phoneScope } : {});
+    const result = await registerMailboxForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64, fetch, phoneScope ? {
+      phoneScope,
+      phoneExpiresAt: pairing.expiresAt,
+      phoneClaimed: mobileClaimedPairingKeys.has(key)
+    } : {});
     if (!result.ok) {
       await debugLogService.write("mobile.mailbox.register-error", {
         routingId: pairing.stableRoutingId,
@@ -2043,6 +2068,9 @@ async function noteMobilePairingClaimed(pairing: MobilePairingPackage): Promise<
     mobilePairingExpiryTimers.delete(key);
   }
   await persistMobilePairedDevices();
+  // The User's own server serves an unused link only within its window; it
+  // is told this one is in use, so the phone keeps reading after it.
+  void ensureMailboxRegisteredForPairing(pairing);
   await debugLogService.write("mobile.pairing.claimed", {
     routingId: pairing.stableRoutingId,
     rendezvousId: pairing.rendezvousId

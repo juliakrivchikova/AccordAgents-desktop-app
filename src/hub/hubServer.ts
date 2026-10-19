@@ -495,7 +495,9 @@ export class HubServer {
       if (!response.headersSent) json(response, status, { ok: false, error: error instanceof Error && status !== 500 ? error.message : "The hub could not answer." });
     } finally {
       const ms = this.now() - started;
-      if (status >= 500 || ms > SLOW_REQUEST_MS) this.options.debugLog?.("hub.request", { method: request.method, path: (request.url ?? "").split("?")[0], status, ms });
+      const path = (request.url ?? "").split("?")[0];
+      // A phone's wait for news is long on purpose.
+      if (status >= 500 || (ms > SLOW_REQUEST_MS && path !== "/v1/phone/changes")) this.options.debugLog?.("hub.request", { method: request.method, path, status, ms });
     }
   }
 

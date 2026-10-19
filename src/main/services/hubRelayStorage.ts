@@ -65,6 +65,12 @@ export interface HubRelayMailboxRow {
   phoneScope: string | null;
   /** When the phone last read through the server's phone API (ISO). */
   phoneSeenAt: string | null;
+  /** When the pairing's link stops being good for a phone that has not used
+   *  it yet (ISO), as the desktop that made it said. */
+  phoneExpiresAt: string | null;
+  /** 1 once that desktop has said a phone used the link: the link's window
+   *  no longer applies. */
+  phoneClaimed: number;
 }
 
 /** What sorting and choosing a page needs, without the envelope itself. */
@@ -105,13 +111,15 @@ const COLUMNS: Record<keyof HubRelayMailboxUpdate, string> = {
   pushLastResult: "push_last_result",
   pushAt: "push_at",
   phoneScope: "phone_scope",
-  phoneSeenAt: "phone_seen_at"
+  phoneSeenAt: "phone_seen_at",
+  phoneExpiresAt: "phone_expires_at",
+  phoneClaimed: "phone_claimed"
 };
 
 const MAILBOX_SELECT = `mailbox_id as mailboxId, token_hash as tokenHash, registered_at as registeredAt, epoch,
   arrival_seq as arrivalSeq, revoked_at as revokedAt, push_subscription as pushSubscription, push_last_sent as pushLastSent,
   push_read_cursor as pushReadCursor, push_finish_seq as pushFinishSeq, push_last_result as pushLastResult, push_at as pushAt,
-  phone_scope as phoneScope, phone_seen_at as phoneSeenAt`;
+  phone_scope as phoneScope, phone_seen_at as phoneSeenAt, phone_expires_at as phoneExpiresAt, phone_claimed as phoneClaimed`;
 
 /** Ids are read and written in groups no longer than this. */
 const ID_BATCH = 200;
@@ -129,6 +137,8 @@ export class HubRelayStorage {
       const columns = new Set((await this.database.query<{ name: string }>("select name from pragma_table_info('hub_relay_mailboxes');")).map((column) => column.name));
       if (!columns.has("phone_scope")) await this.database.execute("alter table hub_relay_mailboxes add column phone_scope text;");
       if (!columns.has("phone_seen_at")) await this.database.execute("alter table hub_relay_mailboxes add column phone_seen_at text;");
+      if (!columns.has("phone_expires_at")) await this.database.execute("alter table hub_relay_mailboxes add column phone_expires_at text;");
+      if (!columns.has("phone_claimed")) await this.database.execute("alter table hub_relay_mailboxes add column phone_claimed integer not null default 0;");
     })();
     try {
       await this.ready;
@@ -163,7 +173,7 @@ export class HubRelayStorage {
       delete from hub_relay_events where mailbox_id = ${quote(mailboxId)};
       delete from hub_relay_claims where mailbox_id = ${quote(mailboxId)};
       update hub_relay_mailboxes set token_hash = null, registered_at = null, epoch = null, arrival_seq = 0, push_subscription = null,
-        push_last_sent = null, push_read_cursor = 0, push_finish_seq = null, push_last_result = null, push_at = null, phone_scope = null, phone_seen_at = null,
+        push_last_sent = null, push_read_cursor = 0, push_finish_seq = null, push_last_result = null, push_at = null, phone_scope = null, phone_seen_at = null, phone_expires_at = null, phone_claimed = 0,
         revoked_at = ${quote(revokedAt)}
       where mailbox_id = ${quote(mailboxId)};
       commit;
@@ -307,7 +317,8 @@ function normalizeMailbox(row: HubRelayMailboxRow): HubRelayMailboxRow {
     pushReadCursor: Number(row.pushReadCursor) || 0,
     pushLastSent: num(row.pushLastSent),
     pushFinishSeq: num(row.pushFinishSeq),
-    pushAt: num(row.pushAt)
+    pushAt: num(row.pushAt),
+    phoneClaimed: Number(row.phoneClaimed) || 0
   };
 }
 

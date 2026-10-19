@@ -233,7 +233,7 @@ export class HubRelayMailboxes {
   // else at registration time.
   private async register(mailboxId: string, token: string, body: Buffer, signer: () => Promise<RelaySignerRole | undefined>): Promise<RelayAnswer> {
     if (!token) return { status: 401, body: { ok: false, error: MAILBOX_ERROR_UNAUTHORIZED } };
-    const parsed = parseJsonObject(body) as { tokenHashBase64Url?: unknown; phoneScope?: unknown };
+    const parsed = parseJsonObject(body) as { tokenHashBase64Url?: unknown; phoneScope?: unknown; phoneExpiresAt?: unknown; phoneClaimed?: unknown };
     const claimedHash = typeof parsed.tokenHashBase64Url === "string" ? parsed.tokenHashBase64Url.trim() : "";
     const computedHash = sha256Base64Url(token);
     if (!claimedHash || !constantTimeEquals(claimedHash, computedHash)) return { status: 400, body: { ok: false, error: "token hash mismatch" } };
@@ -249,10 +249,21 @@ export class HubRelayMailboxes {
       }
       return role;
     };
-    const scopeUpdate = async (): Promise<{ phoneScope?: string | null }> => {
+    // With the scope come the link's window and whether a phone has used it:
+    // an unused link reads nothing past its window, so one the desktop has
+    // forgotten (it keeps only used links across a restart) cannot be read
+    // through for ever.
+    const expiresAtMs = typeof parsed.phoneExpiresAt === "string" ? Date.parse(parsed.phoneExpiresAt) : Number.NaN;
+    const scopeUpdate = async (): Promise<{ phoneScope?: string | null; phoneExpiresAt?: string | null; phoneClaimed?: number }> => {
       if (!phoneScope) return {};
       const by = await signerRole();
-      return by === "owner" || by === "desktop" ? { phoneScope: JSON.stringify(phoneScope) } : {};
+      if (by !== "owner" && by !== "desktop") return {};
+      return {
+        phoneScope: JSON.stringify(phoneScope),
+        ...(Number.isFinite(expiresAtMs) ? { phoneExpiresAt: new Date(expiresAtMs).toISOString() } : {}),
+        // Only ever set: a link once used stays used.
+        ...(parsed.phoneClaimed === true ? { phoneClaimed: 1 } : {})
+      };
     };
     const row = await this.options.storage.mailbox(mailboxId);
     if (!row?.tokenHash) {

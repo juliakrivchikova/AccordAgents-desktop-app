@@ -4,7 +4,7 @@ import { gzipSync } from "node:zlib";
 import type { ConversationSummary } from "../shared/types";
 import { parseMobilePhoneScope, type MobilePhoneScope } from "../shared/mobilePairing";
 import type { HubRelayStorage } from "../main/services/hubRelayStorage";
-import { buildMobileChatList, buildMobileTimelinePage, type MobileCatalogStore } from "../main/services/mobileChatCatalog";
+import { MOBILE_CHAT_LIST_SNIPPET_WINDOW, buildMobileChatList, buildMobileTimelinePage, type MobileCatalogStore } from "../main/services/mobileChatCatalog";
 import type { MobileRelayChatListItem } from "../main/services/mobileRelayControl";
 
 /**
@@ -20,6 +20,8 @@ export const HUB_PHONE_PATHS = new Set(["/v1/phone/chats", "/v1/phone/timeline",
 export const PHONE_ERROR_UNAUTHORIZED = "phone_unauthorized";
 export const PHONE_ERROR_NO_SCOPE = "phone_scope_missing";
 export const PHONE_ERROR_REVOKED = "phone_revoked";
+export const PHONE_ERROR_EXPIRED = "phone_expired";
+export const PHONE_ERROR_CHAT_NOT_FOUND = "chat_not_found";
 
 /** How long a changes request waits for news before answering empty. */
 const CHANGES_WAIT_MAX_MS = 25_000;
@@ -55,6 +57,12 @@ export class HubChangeFeed {
 
   current(): number {
     return this.seq;
+  }
+
+  /** The position of a chat's last change this instance can vouch for: a
+   *  chat it no longer remembers may have changed as late as the floor. */
+  lastChange(conversationId: string): number {
+    return this.changed.get(conversationId) ?? this.floor;
   }
 
   /** What changed after `after`; a position the feed no longer remembers
@@ -101,8 +109,28 @@ type Answer = { status: number; body: unknown };
 export class HubPhoneApi {
   private listCache = new Map<string, { seq: number; chats: MobileRelayChatListItem[] }>();
   private readonly waitersByMailbox = new Map<string, number>();
+  /** Each listed chat's newest messages as last read, kept until that chat
+   *  changes: a change rebuilds the list from one read, not a read per chat. */
+  private readonly snippetCache = new Map<string, { seq: number; opened: Awaited<ReturnType<MobileCatalogStore["openConversation"]>> }>();
+  private readonly listStore: MobileCatalogStore;
 
-  constructor(private readonly options: HubPhoneOptions) {}
+  constructor(private readonly options: HubPhoneOptions) {
+    const store = options.store;
+    this.listStore = {
+      listConversations: () => store.listConversations(),
+      listPendingChoiceMessages: (ids) => store.listPendingChoiceMessages(ids),
+      openConversation: async (id, limit, page) => {
+        if (page || limit !== MOBILE_CHAT_LIST_SNIPPET_WINDOW) return store.openConversation(id, limit, page);
+        const cached = this.snippetCache.get(id);
+        if (cached && options.feed.lastChange(id) <= cached.seq) return cached.opened;
+        const seq = options.feed.current();
+        const opened = await store.openConversation(id, limit);
+        if (this.snippetCache.size > 2_000) this.snippetCache.clear();
+        this.snippetCache.set(id, { seq, opened });
+        return opened;
+      }
+    };
+  }
 
   /** Answers one phone request; the status is returned for the server's log. */
   async handle(request: IncomingMessage, response: ServerResponse, url: URL): Promise<number> {
@@ -139,6 +167,12 @@ export class HubPhoneApi {
     // A pairing the desktop made before it told the server what it may read:
     // the phone keeps asking the desktop until the desktop says.
     if (!scope) return { status: 403, body: { ok: false, error: PHONE_ERROR_NO_SCOPE } };
+    // A link no phone has used yet is good only within its window; once the
+    // desktop says a phone used it, the window no longer applies.
+    if (!row.phoneClaimed) {
+      const expiresAt = Date.parse(row.phoneExpiresAt ?? "");
+      if (!Number.isFinite(expiresAt) || Date.now() > expiresAt) return { status: 401, body: { ok: false, error: PHONE_ERROR_EXPIRED } };
+    }
     // The phone has used its link: the desktop reads this with the box and
     // keeps the pairing. Written at most once a minute.
     const seenAt = Date.parse(row.phoneSeenAt ?? "");
@@ -154,7 +188,7 @@ export class HubPhoneApi {
     const cached = this.listCache.get(key);
     if (cached && cached.seq === seq) return cached.chats;
     const machineNames = await this.options.machineNames().catch(() => new Map<string, string>());
-    const chats = await buildMobileChatList(this.options.store, {
+    const chats = await buildMobileChatList(this.listStore, {
       roleLabels: new Map(),
       machineNames,
       // Approvals live on the desktop and the machines; a list that cannot
@@ -179,13 +213,13 @@ export class HubPhoneApi {
     }
     const beforeRaw = query.get("beforeMessageId")?.trim() ?? "";
     const before = beforeRaw && beforeRaw.length <= 200 && !/[\u0000-\u001f\u007f]/.test(beforeRaw) ? beforeRaw : undefined;
-    if (scope.scope === "conversation" && scope.conversationId !== conversationId) return { status: 404, body: { ok: false, error: "not found" } };
+    if (scope.scope === "conversation" && scope.conversationId !== conversationId) return { status: 404, body: { ok: false, error: PHONE_ERROR_CHAT_NOT_FOUND } };
     const opened = await this.options.store.openConversation(conversationId, 1);
     const conversation = opened?.conversation;
     // Every chat the desktop would show: an archived one only to the pairing
     // made for it.
     if (!conversation || conversation.kind !== "chat" || (scope.scope === "device" && conversation.metadata.archived === true)) {
-      return { status: 404, body: { ok: false, error: "not found" } };
+      return { status: 404, body: { ok: false, error: PHONE_ERROR_CHAT_NOT_FOUND } };
     }
     const page = await buildMobileTimelinePage(this.options.store, conversationId, before ? { beforeMessageId: before } : {});
     return {
@@ -211,25 +245,38 @@ export class HubPhoneApi {
     const waitMs = Math.max(0, Math.min(CHANGES_WAIT_MAX_MS, Number(query.get("waitMs") ?? CHANGES_WAIT_MAX_MS) || 0));
     const reset = () => ({ status: 200, body: { ok: true, instance: feed.instance, seq: feed.current(), reset: true } });
     if (instance !== feed.instance || !Number.isSafeInteger(after) || after < 0) return reset();
+    const mine = (ids: string[]) => scope.scope === "device" ? ids : ids.filter((id) => id === scope.conversationId);
     let news = feed.since(after);
-    if (!news.reset && news.conversationIds.length === 0 && waitMs > 0) {
-      const mine = this.waitersByMailbox.get(mailboxId) ?? 0;
-      if (feed.waiting() < WAITERS_MAX && mine < WAITERS_PER_MAILBOX_MAX) {
-        this.waitersByMailbox.set(mailboxId, mine + 1);
-        try {
-          // The phone hanging up (an unfinished answer's close) ends the wait.
-          const gone = new Promise<void>((resolve) => response.once("close", () => resolve()));
-          await feed.wait(after, waitMs, gone);
-        } finally {
-          const left = (this.waitersByMailbox.get(mailboxId) ?? 1) - 1;
-          if (left > 0) this.waitersByMailbox.set(mailboxId, left);
-          else this.waitersByMailbox.delete(mailboxId);
+    if (news.reset) return reset();
+    let conversationIds = mine(news.conversationIds);
+    if (conversationIds.length === 0 && waitMs > 0) {
+      const waiting = this.waitersByMailbox.get(mailboxId) ?? 0;
+      // Too many waiting: answered at once, and told when to ask again.
+      if (feed.waiting() >= WAITERS_MAX || waiting >= WAITERS_PER_MAILBOX_MAX) {
+        return { status: 200, body: { ok: true, instance: feed.instance, seq: after, conversationIds: [], retryAfterMs: 5_000 } };
+      }
+      this.waitersByMailbox.set(mailboxId, waiting + 1);
+      try {
+        // The phone hanging up (an unfinished answer's close) ends the wait.
+        let goneNow = false;
+        const gone = new Promise<void>((resolve) => response.once("close", () => { goneNow = true; resolve(); }));
+        const deadline = Date.now() + waitMs;
+        let seen = after;
+        // Another chat's change is no news to a pairing for one chat (and
+        // must not tell it when the User is busy elsewhere): it waits on.
+        while (!goneNow && conversationIds.length === 0 && Date.now() < deadline) {
+          await feed.wait(seen, deadline - Date.now(), gone);
+          news = feed.since(after);
+          if (news.reset) return reset();
+          conversationIds = mine(news.conversationIds);
+          seen = feed.current();
         }
-        news = feed.since(after);
+      } finally {
+        const left = (this.waitersByMailbox.get(mailboxId) ?? 1) - 1;
+        if (left > 0) this.waitersByMailbox.set(mailboxId, left);
+        else this.waitersByMailbox.delete(mailboxId);
       }
     }
-    if (news.reset) return reset();
-    const conversationIds = scope.scope === "device" ? news.conversationIds : news.conversationIds.filter((id) => id === scope.conversationId);
     return { status: 200, body: { ok: true, instance: feed.instance, seq: feed.current(), conversationIds } };
   }
 }
@@ -237,16 +284,34 @@ export class HubPhoneApi {
 /** The server does not hold the desktop's role settings: a built-in role
  *  reads as the desktop names it, any other as a plain member. */
 function roleLabelFor(roleConfigId: string): string {
-  const builtIn: Record<string, string> = {
-    "administrator": "Chat Assistant",
-    "generic-participant": "Generic Member"
-  };
-  if (builtIn[roleConfigId]) return builtIn[roleConfigId];
-  if (/^[a-z]+(?:-[a-z]+){0,4}$/.test(roleConfigId)) {
-    return roleConfigId.split("-").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
-  }
-  return "Member";
+  return BUILT_IN_ROLE_LABELS[roleConfigId] ?? "Member";
 }
+
+/** The desktop's built-in roles as Settings names them (settings.ts keeps
+ *  the roles themselves); a role the User made shows as a plain member. */
+const BUILT_IN_ROLE_LABELS: Record<string, string> = {
+  "administrator": "Chat Assistant",
+  "generic-participant": "Generic Member",
+  "synthesizer": "Synthesizer",
+  "arbiter": "Arbiter",
+  "software-engineer": "Software Engineer",
+  "product-strategist": "Product Strategist",
+  "brand-strategist": "Brand Strategist",
+  "naming-consultant": "Naming Consultant",
+  "product-marketer": "Product Marketer",
+  "ux-content-strategist": "UX Content Strategist",
+  "trademark-attorney": "Trademark Attorney",
+  "domain-seo-specialist": "Domain & SEO Specialist",
+  "engineering-manager": "Engineering Manager",
+  "product-designer": "Product Designer",
+  "devex-reviewer": "Developer Experience Reviewer",
+  "debugger": "Debugger",
+  "qa-lead": "QA Lead",
+  "security-reviewer": "Security Reviewer",
+  "release-engineer": "Release Engineer",
+  "code-reviewer": "Code Reviewer",
+  "workflow-manager": "Workflow Manager"
+};
 
 function sameText(left: string, right: string): boolean {
   const a = Buffer.from(left);
