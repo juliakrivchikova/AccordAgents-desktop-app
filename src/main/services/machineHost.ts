@@ -141,6 +141,13 @@ const ATTACHMENT_PART_TIMEOUT_MS = 120_000;
 const SCRIPTS_CHANGED_COALESCE_MS = 250;
 /** How far the desktop's clock may be ahead of this machine's when it dates a request. */
 const SCRIPTS_REQUEST_CLOCK_SKEW_MS = 30_000;
+/** A move's settling ends this long before the desktop's deadline (or 40%
+ *  of a shorter wait), leaving time to ask the server (up to 10 s) and to
+ *  answer; the move itself is not made later than the second margin (or 10%)
+ *  before it. */
+const TRANSPORT_MOVE_SETTLE_MARGIN_MS = 25_000;
+const TRANSPORT_MOVE_ANSWER_MARGIN_MS = 5_000;
+const TRANSPORT_MOVE_ANSWER_MAX_MS = 5 * 60_000;
 
 function changesScripts(operation: MachineScriptsOperation): boolean {
   return operation.op !== "list" && operation.op !== "revision" && operation.op !== "runs";
@@ -677,6 +684,8 @@ export class MachineHostService {
     commitHostStop?(prepareLocal: () => Promise<boolean>): Promise<boolean>;
   }): Promise<(() => Promise<void>) | undefined> {
     if (this.fenced || await this.hasWorkForIdleStop()) return undefined;
+    // A move may have taken the machine while that was asked.
+    if (this.fenced) return undefined;
     this.idleFenced = true;
     let releaseNative: (() => void) | undefined;
     let committed = false;
@@ -918,12 +927,28 @@ export class MachineHostService {
       void this.eventChannel.flush().catch(error => { void this.debugLogs.write("machine-host.move.resume-error", { message: errorMessage(error) }); });
       await fail(error);
     };
+    // The desktop stops waiting for the answer at its deadline, counted here
+    // from receipt on this machine's own clock: past it, the machine refuses
+    // rather than moving unseen.
+    const budget = typeof body.answerWithinMs === "number" && Number.isFinite(body.answerWithinMs) && body.answerWithinMs > 0
+      ? Math.min(body.answerWithinMs, TRANSPORT_MOVE_ANSWER_MAX_MS)
+      : Math.max(0, expiresAt - this.now().getTime());
+    const answerBy = this.now().getTime() + budget;
+    const late = () => this.now().getTime() > answerBy - Math.min(TRANSPORT_MOVE_ANSWER_MARGIN_MS, budget * 0.1);
     try {
       // What was already taken in (a message being read, a script request,
       // an event being applied) settles before the machine says it is idle.
-      await this.inbound;
-      await this.scriptsQueue;
-      await this.eventChannel.flush();
+      const settled = (async () => {
+        await this.inbound;
+        await this.scriptsQueue;
+        await this.eventChannel.flush();
+        return true;
+      })();
+      const remaining = Math.max(0, answerBy - Math.min(TRANSPORT_MOVE_SETTLE_MARGIN_MS, budget * 0.4) - this.now().getTime());
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      const inTime = await Promise.race([settled, new Promise<false>((resolve) => { deadline = setTimeout(() => resolve(false), remaining); })]);
+      clearTimeout(deadline);
+      if (!inTime) return void await refuse("The machine is still sending what it owes; it moves once that is done.");
     } catch (error) {
       return void await refuse(`The machine could not settle its current work: ${errorMessage(error)}`);
     }
@@ -934,6 +959,7 @@ export class MachineHostService {
     // Asked again after the server answered: a scheduled script may have
     // started meanwhile.
     if (await this.hasWorkForMove().catch(() => true)) return void await refuse("The machine is busy; it moves once it is idle.");
+    if (late()) return void await refuse("This request is too old; nothing was changed.");
     try {
       await this.options.moveTransport(addresses);
     } catch (error) {

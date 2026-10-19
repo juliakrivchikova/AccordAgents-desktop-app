@@ -425,3 +425,26 @@ test("the hub this desktop uses and a machine's key from setup survive a fresh S
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("a machine's unsettled move survives a fresh SettingsService, and settling it saves the new pairing in the same write", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-moves-"));
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const from = { relayUrl: "wss://relay.accordagents.com/v1/relay", outboxUrl: "https://relay.accordagents.com/v1/mailbox/events" };
+  const to = { relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" };
+  const record = { machineId: "m1", pairingKey: "pk-1", from, to, instanceId: "run-1", requestedAt: "2026-10-19T10:00:00.000Z" };
+  try {
+    await make().saveMachineMove(record);
+    assert.deepEqual(await make().listMachineMoves(), [record], "read back from disk");
+    await make().saveMachineMove({ ...record, requestedAt: "2026-10-19T11:00:00.000Z" });
+    assert.equal((await make().listMachineMoves()).length, 1, "one open move per machine");
+    const pairing = { rendezvousId: "rv-1", ...to } as any;
+    await make().finishMachineMove("m1", { pairingKey: "pk-1", pairing });
+    const settled = make();
+    assert.deepEqual(await settled.listMachineMoves(), []);
+    assert.equal((await settled.getMachinePairing("pk-1"))?.relayUrl, to.relayUrl);
+    assert.equal(JSON.parse(await readFile(path.join(dir, "settings.json"), "utf8")).machineMoves, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

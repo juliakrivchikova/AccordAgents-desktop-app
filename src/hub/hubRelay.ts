@@ -155,7 +155,9 @@ export class HubRelayMailboxes {
   /** Rings left waiting by the previous run, and the periodic sweep. */
   async start(): Promise<void> {
     for (const pending of await this.options.storage.pendingRings()) this.scheduleRing(pending.mailboxId, pending.pushAt);
-    await this.sweepAll().catch((error) => this.log("relay.sweep.error", { message: errorMessage(error) }));
+    // In the background: a large backlog does not keep the hub offline after
+    // a restart (what expired is never listed meanwhile).
+    void this.sweepAll().catch((error) => this.log("relay.sweep.error", { message: errorMessage(error) }));
     this.sweeper = setInterval(() => void this.sweepAll().catch((error) => this.log("relay.sweep.error", { message: errorMessage(error) })), SWEEP_INTERVAL_MS);
     this.sweeper.unref?.();
   }

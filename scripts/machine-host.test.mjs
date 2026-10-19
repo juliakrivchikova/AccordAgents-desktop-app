@@ -828,6 +828,47 @@ test("a machine away from this computer refuses to move onto it", async () => {
   host.close();
 });
 
+test("a machine that cannot settle before the desktop stops waiting refuses the move rather than moving unseen", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const moved = [];
+  const host = new MachineHostService(
+    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined },
+    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
+    { ...hostEvents, eventStorage: withoutNativeCommands(hostEvents.eventStorage), pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client,
+      moveTransport: async (addresses) => { moved.push(addresses); }, restartRuntime: () => undefined,
+      probeRelay: async (relayUrl) => {
+        if (relayUrl.includes("slowprobe")) await new Promise((resolve) => setTimeout(resolve, 1_000));
+        return true;
+      } }
+  );
+  await host.start();
+  await settle();
+  const inbound = async (body, waitMs = 50) => {
+    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
+    await host.inbound;
+    await settle(waitMs);
+  };
+  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
+  const move = (requestId, overrides = {}) => ({ type: "machine.transport.move", requestId, instanceId: host.instanceId,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(), relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events", ...overrides });
+  // What it owes takes longer to send than the desktop waits (counted on the
+  // machine's own clock, whatever the expiry says).
+  const flush = host.eventChannel.flush.bind(host.eventChannel);
+  host.eventChannel.flush = () => new Promise((resolve) => setTimeout(resolve, 1_500));
+  await inbound(move("slow", { answerWithinMs: 1_000 }), 1_800);
+  host.eventChannel.flush = flush;
+  assert.equal(host.canApplyNativeEffects(), true, "work is let in again");
+  // Settled in time, but the server answered too close to the deadline.
+  await inbound(move("late", { answerWithinMs: 1_000, relayUrl: "wss://slowprobe.example/v1/relay", outboxUrl: "https://slowprobe.example/v1/mailbox/events" }), 1_300);
+  const answers = Object.fromEntries((await sentBodies(client, host.options.pairing)).filter((body) => body.type === "machine.transport.moved").map((body) => [body.requestId, body]));
+  assert.match(answers.slow.error, /still sending what it owes/);
+  assert.match(answers.late.error, /too old/);
+  assert.deepEqual(moved, [], "nothing was changed");
+  assert.equal(host.canApplyNativeEffects(), true);
+  host.close();
+});
+
 test("a moved enrollment keeps everything but the relay's addresses, in one step, readable only by its account", async () => {
   const { mkdtemp, readFile, readdir, rm, stat, writeFile } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");

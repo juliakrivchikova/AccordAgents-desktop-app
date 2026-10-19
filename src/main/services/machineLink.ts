@@ -59,6 +59,9 @@ export interface MachineLinkOptions {
   /** Builds the client for one machine's room (the hub's rooms, a test
    *  stand-in); undefined leaves that machine on the relay. */
   createClient?: (pairing: MobilePairingPackage) => TunnelClient | undefined;
+  /** Builds the short-lived client that looks for a machine at another
+   *  address (tests); the relay's own client by default. */
+  createProbeClient?: (pairing: MobilePairingPackage) => Pick<TunnelClient, "on" | "connect" | "close">;
   /** The User's hub carries the events of machines enrolled with it: their
    *  channels deliver nothing themselves and forward nothing (every device
    *  reads the hub's order). A machine enrolled with the relay keeps it. */
@@ -205,6 +208,9 @@ interface MachineConnection {
 
 /** How long a scheduled-script request waits for the machine's answer. */
 const SCRIPTS_REQUEST_TIMEOUT_MS = 20_000;
+/** A move's answer waits for the machine to settle what it already took in
+ *  (sending what it owes included), so it gets longer than a script request. */
+const TRANSPORT_MOVE_TIMEOUT_MS = 60_000;
 
 /** A machine as Settings → Scripts sees it. */
 export interface MachineScriptHost {
@@ -645,7 +651,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
    *  "refused": it said no and nothing changed. "unknown": no answer came,
    *  and it may have moved all the same. The caller saves the new pairing
    *  and reconnects. */
-  async requestTransportMove(machineId: string, addresses: { relayUrl: string; outboxUrl: string }, timeoutMs = SCRIPTS_REQUEST_TIMEOUT_MS): Promise<{ status: "moved" | "refused" | "unknown"; error?: string }> {
+  async requestTransportMove(machineId: string, addresses: { relayUrl: string; outboxUrl: string }, timeoutMs = TRANSPORT_MOVE_TIMEOUT_MS): Promise<{ status: "moved" | "refused" | "unknown"; error?: string }> {
     const connection = this.connections.get(machineId);
     if (!connection?.machineDeviceId) return { status: "refused", error: "That machine is not connected right now." };
     const hello = connection.record.lastHello;
@@ -667,7 +673,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     try {
       await this.send(connection, { type: "machine.transport.move", requestId,
         ...(hello.instanceId ? { instanceId: hello.instanceId } : {}),
-        expiresAt: new Date(this.now().getTime() + timeoutMs).toISOString(), ...addresses });
+        expiresAt: new Date(this.now().getTime() + timeoutMs).toISOString(), answerWithinMs: timeoutMs, ...addresses });
     } catch (error) {
       const pending = connection.pendingScripts.get(requestId);
       if (pending) {
@@ -678,6 +684,55 @@ export class MachineLinkService implements MachineTurnDispatcher {
       return { status: "refused", error: errorMessage(error) };
     }
     return answer;
+  }
+
+  /** Where this desktop's link to a machine is now, whether the machine is
+   *  there and greeted this connection, and which runtime run greeted last. */
+  machinePresence(machineId: string): { relayUrl?: string; present: boolean; instanceId?: string } | undefined {
+    const connection = this.connections.get(machineId);
+    if (!connection) return undefined;
+    return {
+      ...(connection.pairing.relayUrl ? { relayUrl: connection.pairing.relayUrl } : {}),
+      present: Boolean(connection.machineDeviceId) && connection.helloSeen,
+      ...(connection.record.lastHello?.instanceId ? { instanceId: connection.record.lastHello.instanceId } : {})
+    };
+  }
+
+  /** Whether the machine is in its room at another relay address right now.
+   *  Asked with a connection of its own under a device id the machine does
+   *  not answer, so the link stays where it is and the machine is not
+   *  disturbed. */
+  async probeMachineAt(machineId: string, pairing: MobilePairingPackage, timeoutMs: number): Promise<boolean> {
+    const record = this.connections.get(machineId)?.record ?? this.enrolled.get(machineId);
+    const machineDeviceId = record?.deviceId || record?.lastHello?.deviceId;
+    if (!machineDeviceId || !pairing.relayUrl) return false;
+    const client = this.options.createProbeClient?.(pairing) ?? new RelayTunnelClient({
+      relayUrl: pairing.relayUrl,
+      rendezvousId: pairing.rendezvousId,
+      role: "desktop",
+      deviceId: `${this.options.desktopDeviceId}-probe`,
+      capability: pairing.fingerprint,
+      streamId: `${pairing.stableRoutingId}:machine-probe`,
+      reconnectDelayMs: 60_000
+    });
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const finish = (found: boolean): void => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        off();
+        client.close();
+        resolve(found);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      timer.unref?.();
+      const off = client.on("peer", (event) => {
+        if (event.type === "ready" && event.peers.some((peer) => peer.deviceId === machineDeviceId)) finish(true);
+        else if (event.type === "peer-connected" && event.peer.deviceId === machineDeviceId) finish(true);
+      });
+      client.connect().catch(() => finish(false));
+    });
   }
 
   /** Resolves true once the machine greets this desktop (within the time). */

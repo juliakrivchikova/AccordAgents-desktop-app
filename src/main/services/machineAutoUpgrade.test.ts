@@ -115,6 +115,16 @@ test("a machine moving to the User's server is updated after the move, not durin
   assert.equal(h.upgrades.length, 1);
 });
 
+test("a move that started while the machine's address was looked up keeps the machine", async () => {
+  let moving = false;
+  const h = harness({ isMoving: () => moving, resolveTarget: async (item) => { moving = true; return item.target; } });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 0, "the move took it first");
+  assert.deepEqual(h.holds, [], "no hold is taken for an update that does not start");
+  assert.equal(h.service.isRunning("m1"), false);
+  assert.equal(h.service.hasWaiting(), true, "asked again later");
+});
+
 test("a turn this desktop dispatched counts as busy even when the machine's hello predates it", async () => {
   const h = harness({ activity: () => activity({ dispatchedRunIds: ["run-2"] }) });
   await h.service.evaluate();

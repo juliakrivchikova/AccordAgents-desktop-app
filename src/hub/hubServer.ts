@@ -390,13 +390,20 @@ export class HubServer {
           const lengthHeader = request.headers["content-length"];
           const declared = lengthHeader === undefined ? undefined : Number(lengthHeader);
           if (declared !== undefined && (!Number.isFinite(declared) || declared > limit)) throw new HubRequestError(413, "The request is too large.");
-          // A read has no body; a body of unstated length counts as the most it may be.
-          const reserved = request.method === "GET" ? 0 : declared ?? limit;
+          // A read has no body: anything sent with one is let through unread.
+          // A body of unstated length counts as the most it may be.
+          const reading = request.method === "GET";
+          const reserved = reading ? 0 : declared ?? limit;
           if (this.relayBodyBytes + reserved > RELAY_BODY_BYTES_IN_FLIGHT_MAX) throw new HubRequestError(503, "The hub is busy; try again.");
           this.relayBodyBytes += reserved;
           let body: Buffer;
           try {
-            body = await readBody(request, limit);
+            if (reading) {
+              request.resume();
+              body = Buffer.alloc(0);
+            } else {
+              body = await readBody(request, limit);
+            }
           } finally {
             this.relayBodyBytes -= reserved;
           }

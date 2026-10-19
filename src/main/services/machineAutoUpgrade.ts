@@ -109,6 +109,11 @@ export class MachineAutoUpgradeService {
     return this.evaluate(machineId);
   }
 
+  /** Whether an automatic update of this machine is running now. */
+  isRunning(machineId: string): boolean {
+    return this.inFlight.has(machineId);
+  }
+
   /** Whether a machine still waits for idle to be upgraded; the periodic
    *  re-check runs only while one does. */
   hasWaiting(): boolean {
@@ -206,6 +211,12 @@ export class MachineAutoUpgradeService {
         this.waiting.add(id);
         this.log("machines.auto-upgrade.unreachable", { machineId: id, running, desktop: this.options.desktopVersion });
       }
+      return;
+    }
+    // Asked again after the last wait, with nothing in between: a move that
+    // started meanwhile keeps the machine until it ends.
+    if (this.options.isMoving?.(id)) {
+      this.waiting.add(id);
       return;
     }
     this.waiting.delete(id);

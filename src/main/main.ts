@@ -200,6 +200,7 @@ import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, startCrashReporting, st
 import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
 import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
+import { MachineTransportMover } from "./services/machineTransportMoves";
 import { MachineRecoveryService } from "./services/machineRecovery";
 import { MachineInactivityCheck, type MachineInactivityOutcome } from "./services/machineInactivity";
 import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, isMachineRecoveryOperation } from "../shared/machineInstall";
@@ -789,46 +790,6 @@ async function forgetRemovedMachineOutbox(outbox: { pairingKey: string; deviceId
   }
 }
 
-let movingMachines = false;
-/** How long a machine that did not answer its move is looked for at the new
- *  address before this desktop concludes it stayed. */
-const MACHINE_MOVE_CONFIRM_MS = 10 * 60_000;
-/** After a machine refused a move (busy, or unable to reach the server), it
- *  is asked again no sooner than this, doubling up to an hour. */
-const MACHINE_MOVE_RETRY_MS = 5 * 60_000;
-const MACHINE_MOVE_RETRY_MAX_MS = 60 * 60_000;
-const machineMoveRetry = new Map<string, { at: number; delayMs: number }>();
-/** The machine being moved now: its update waits for the move to end. */
-let machineBeingMoved: string | undefined;
-/** Pairings a move could not write yet: the link uses them meanwhile and
- *  every pass writes them again. */
-const unsavedMovedPairings = new Map<string, { machine: MachineRecord; pairing: MobilePairingPackage }>();
-
-function isLoopbackUrl(value: string): boolean {
-  try {
-    const host = new URL(value).hostname;
-    return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
-  } catch {
-    return false;
-  }
-}
-
-/** The machine's new address is what this desktop must not lose: a failed
- *  write is tried again before giving up. Only the pairing is written, so a
- *  record updated meanwhile (a hello, a turn) is left as it is. */
-async function saveMachinePairingRetrying(machine: MachineRecord, pairing: MobilePairingPackage): Promise<void> {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      await settingsService.saveMachinePairing(machine.pairingKey, pairing);
-      return;
-    } catch (error) {
-      void debugLogService.write("machine.transport.save-error", { machineId: machine.id, attempt, message: error instanceof Error ? error.message : String(error) });
-      if (attempt >= 3) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
-    }
-  }
-}
-
 /** Whether the User's server serves the relay (an older hub program does
  *  not): until it does, new pairings and machines stay where they were. */
 async function hubServesRelay(): Promise<boolean> {
@@ -843,96 +804,36 @@ function resendMachineAccessToPhones(): void {
   for (const control of mobileRelayControls.values()) void control.resendMachineAccess().catch(() => undefined);
 }
 
-/** A machine set up before the User's own server meets this desktop on the
- *  shared relay. Once the server is set up it is told, over its present link
- *  and only while idle, to meet it there; its keys, rooms and mailbox ids
- *  stay. Its mailbox is registered on the server first, so nothing it or
- *  this desktop still has to send has nowhere to go: both send again what
- *  the other has not confirmed. Turns wait while it moves. A move whose
- *  answer never came is confirmed by the machine greeting this desktop at
- *  the new address, or undone. */
-async function moveMachinesToHub(): Promise<void> {
-  const link = machineLinkService;
-  if (movingMachines || !link) return;
-  movingMachines = true;
-  try {
-    for (const [machineId, unsaved] of [...unsavedMovedPairings]) {
-      await settingsService.saveMachinePairing(unsaved.machine.pairingKey, unsaved.pairing).then(() => { unsavedMovedPairings.delete(machineId); }, () => undefined);
-    }
-    if (!await hubServesRelay()) return;
+/** Whether an automatic update of this machine is running (set once the
+ *  updater exists): a move and an update never start on one machine at once. */
+let machineUpdateRunning: (machineId: string) => boolean = () => false;
+
+/** Machines set up before the User's own server move to it once it serves
+ *  the relay; a move whose answer never came is settled by where the
+ *  machine is found, also after this desktop restarts. */
+const machineTransportMover = new MachineTransportMover({
+  link: () => machineLinkService,
+  listMachines: () => settingsService.listMachines(),
+  getMachinePairing: (pairingKey) => settingsService.getMachinePairing(pairingKey),
+  listMoves: () => settingsService.listMachineMoves(),
+  saveMove: (record) => settingsService.saveMachineMove(record),
+  finishMove: (machineId, adopt) => settingsService.finishMachineMove(machineId, adopt),
+  target: async () => {
+    if (!await hubServesRelay()) return undefined;
     const defaults = (await settingsService.getPublicSettings()).mobileControl.defaults;
-    const relayUrl = defaults.relayUrl;
-    const outboxUrl = defaults.outboxUrl;
-    if (!relayUrl || !outboxUrl) return;
-    for (const machine of await settingsService.listMachines()) {
-      const pairing = await settingsService.getMachinePairing(machine.pairingKey).catch(() => undefined);
-      if (!pairing || pairing.hubUrl || pairing.relayUrl === relayUrl) continue;
-      // A server on this computer (a test setup) is no place for a machine
-      // that runs elsewhere.
-      if (isLoopbackUrl(relayUrl) && !isLoopbackUrl(pairing.relayUrl ?? "")) continue;
-      const next: MobilePairingPackage = { ...pairing, relayUrl, outboxUrl };
-      // An older runtime moves after its update (which happens on its own);
-      // a machine being set up, updated or recovered moves after that.
-      if (!link.isMachineConnected(machine.id) || !link.supportsTransportMove(machine.id)) continue;
-      if (link.hasTurnHold(machine.id) || machineInstallerService.activeOperation(machine.id) || unsavedMovedPairings.has(machine.id)) continue;
-      const retry = machineMoveRetry.get(machine.id);
-      if (retry && Date.now() < retry.at) continue;
-      const activity = await link.machineActivity(machine.id);
-      if (!activity?.fresh || activity.activeRunIds.length || activity.pendingTerminalRunIds.length || activity.dispatchedRunIds.length) continue;
-      // One hold from the request to the end, the confirm and any undo
-      // included: it is kept by machine, so it outlives the reconnects.
-      const release = link.holdTurns(machine.id, "The machine is moving to your server.");
-      machineBeingMoved = machine.id;
-      try {
-        if (!await ensureMailboxRegisteredForPairing(next)) {
-          void debugLogService.write("machine.transport.mailbox-unregistered", { machineId: machine.id });
-          continue;
-        }
-        const outcome = await link.requestTransportMove(machine.id, { relayUrl, outboxUrl });
-        if (outcome.status === "refused") {
-          const delayMs = Math.min(MACHINE_MOVE_RETRY_MAX_MS, (retry?.delayMs ?? MACHINE_MOVE_RETRY_MS / 2) * 2);
-          machineMoveRetry.set(machine.id, { at: Date.now() + delayMs, delayMs });
-          void debugLogService.write("machine.transport.move-refused", { machineId: machine.id, message: outcome.error ?? "", retryMs: delayMs });
-          continue;
-        }
-        machineMoveRetry.delete(machine.id);
-        // Moved, or no answer came and it may have: from here this desktop
-        // looks for it at the new address. A pairing that cannot be written
-        // now is used anyway and written on a later pass.
-        await saveMachinePairingRetrying(machine, next).catch((error: unknown) => {
-          unsavedMovedPairings.set(machine.id, { machine, pairing: next });
-          void debugLogService.write("machine.transport.save-pending", { machineId: machine.id, message: error instanceof Error ? error.message : String(error) });
-        });
-        await link.reconnectMachine(machine.id, next);
-        const seen = await link.waitForHello(machine.id, MACHINE_MOVE_CONFIRM_MS);
-        if (!seen && outcome.status === "unknown") {
-          // Not there after this long: the request never reached it, so it
-          // did not move. Back to the old address.
-          unsavedMovedPairings.delete(machine.id);
-          await saveMachinePairingRetrying(machine, pairing).catch(() => {
-            unsavedMovedPairings.set(machine.id, { machine, pairing });
-          });
-          await link.reconnectMachine(machine.id, pairing);
-          void debugLogService.write("machine.transport.move-reverted", { machineId: machine.id, message: outcome.error ?? "" });
-          continue;
-        }
-        // It said it moved: its enrollment names the server now, so this
-        // desktop stays there even when it is slow to come back.
-        void debugLogService.write("machine.transport.moved", { machineId: machine.id, relayHost: new URL(relayUrl).host, confirmed: outcome.status, seen });
-        resendMachineAccessToPhones();
-        void machineListResult().then((result) => sendToMainWindow("machines:updated", result)).catch(() => undefined);
-      } catch (error) {
-        void debugLogService.write("machine.transport.move-error", { machineId: machine.id, message: error instanceof Error ? error.message : String(error) });
-      } finally {
-        machineBeingMoved = undefined;
-        release();
-      }
-    }
-  } catch (error) {
-    void debugLogService.write("machine.transport.pass-error", { message: error instanceof Error ? error.message : String(error) });
-  } finally {
-    movingMachines = false;
-  }
+    return defaults.relayUrl && defaults.outboxUrl ? { relayUrl: defaults.relayUrl, outboxUrl: defaults.outboxUrl } : undefined;
+  },
+  busyElsewhere: (machineId) => Boolean(machineInstallerService.activeOperation(machineId)) || machineUpdateRunning(machineId),
+  ensureMailboxRegistered: (pairing) => ensureMailboxRegisteredForPairing(pairing),
+  onMoved: () => {
+    resendMachineAccessToPhones();
+    void machineListResult().then((result) => sendToMainWindow("machines:updated", result)).catch(() => undefined);
+  },
+  log: (event, payload) => { void debugLogService.write(event, payload); }
+});
+
+function moveMachinesToHub(): Promise<void> {
+  return machineTransportMover.run();
 }
 
 
@@ -4380,11 +4281,12 @@ void app.whenReady().then(async () => {
       powerRetryMs: MACHINE_POWER_RETRY_MS + 60_000,
       powerMaxAttempts: MACHINE_POWER_MAX_ATTEMPTS,
       holdTurns: (machineId, reason) => link.holdTurns(machineId, reason),
-      isMoving: (machineId) => machineBeingMoved === machineId,
+      isMoving: (machineId) => machineTransportMover.isMoving(machineId),
       onProgress: (snapshot) => sendToMainWindow("machines:install-progress", snapshot),
       onChanged: async () => { sendToMainWindow("machines:updated", await machineListResult()); },
       logger: (event, payload) => { void debugLogService.write(event, payload); }
     });
+    machineUpdateRunning = (machineId) => autoUpgrade.isRunning(machineId);
     // A hello the desktop itself asked for (machineActivity) is not announced
     // here, so evaluating on every hello cannot feed itself.
     link.onHello((event) => { void autoUpgrade.evaluate(event.machineId); });

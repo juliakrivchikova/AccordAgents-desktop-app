@@ -1123,3 +1123,47 @@ test("the desktop asks a machine to move and tells a refusal from an answer that
   assert.equal(link.supportsTransportMove("m"), false);
   assert.equal((await link.requestTransportMove("m", addresses)).status, "refused", "an older runtime is not asked");
 });
+
+test("the desktop looks for a machine at another address without moving its link or disturbing the machine", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const here = createReferenceRelayServer();
+  const elsewhere = createReferenceRelayServer();
+  const hereAddress = await here.listen();
+  const elsewhereAddress = await elsewhere.listen();
+  let host;
+  let link;
+  try {
+    const pairing = machinePairing(hereAddress.url);
+    const record = { id: "machine-probe", name: "Probe box", deviceId: "", pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
+    const debugLogs = { write: async () => undefined };
+    link = new MachineLinkService({
+      listMachines: async () => [record], saveMachine: async (next) => { Object.assign(record, next); return [record]; }, removeMachine: async () => [],
+      getMachinePairing: async (key) => (key === pairing.rendezvousId ? pairing : undefined),
+      exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: "{}", agentEnvironment: [] })
+    }, debugLogs, { ...desktopEvents, appVersion: "desktop-v", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50 });
+    host = new MachineHostService({
+      runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined
+    }, { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, debugLogs,
+    { ...hostEvents, pairing, deviceId: MACHINE_ID, appVersion: "machine-v", createClient: undefined, reconnectDelayMs: 50 });
+    assert.equal(link.machinePresence("machine-probe"), undefined, "not connected yet");
+    await link.start();
+    await host.start();
+    await waitFor(() => link.machinePresence("machine-probe")?.present === true, 10_000);
+    const presence = link.machinePresence("machine-probe");
+    assert.equal(presence.relayUrl, hereAddress.url);
+    assert.equal(presence.instanceId, host.instanceId, "which run of the machine greeted");
+    assert.equal(await link.probeMachineAt("machine-probe", { ...pairing, relayUrl: hereAddress.url }, 5_000), true, "found where it is");
+    assert.equal(await link.probeMachineAt("machine-probe", { ...pairing, relayUrl: elsewhereAddress.url }, 800), false, "not found where it is not");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(link.isMachineConnected("machine-probe"), true, "the link stayed where it was");
+    assert.equal(link.machinePresence("machine-probe").relayUrl, hereAddress.url);
+    assert.equal(host.isDesktopConnected(), true, "the machine still has its desktop");
+  } finally {
+    host?.close();
+    link?.close();
+    await here.close();
+    await elsewhere.close();
+  }
+});

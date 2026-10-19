@@ -9,6 +9,7 @@ import { machineProfileVariables, type MachineInstallRecord } from "../../shared
 import { assertAwsMachinePowerConfig, type AwsMachinePowerConfig } from "../../shared/machinePower";
 import { normalizeMachinePowerHandoffRecords, type MachinePowerHandoffRecord } from "../../shared/machinePowerHandoff";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
+import type { MachineMoveRecord } from "./machineTransportMoves";
 import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -182,6 +183,9 @@ interface StoredSettings {
    *  relay seal keys and are stored sealed, keyed by MachineRecord.pairingKey. */
   machines?: MachineRecord[];
   encryptedMachinePairings?: string;
+  /** Moves to another relay address asked of machines and not settled yet
+   *  (see MachineMoveRecord); written durably. */
+  machineMoves?: MachineMoveRecord[];
   /** This host's power key is never part of participant settings replication. */
   encryptedMachinePower?: string;
   /** The power key `encryptedMachinePower` replaced ("none" when there was
@@ -2957,6 +2961,7 @@ export class SettingsService {
       encryptedMachinePairings: typeof settings.encryptedMachinePairings === "string" && settings.encryptedMachinePairings.trim()
         ? settings.encryptedMachinePairings
         : undefined,
+      machineMoves: normalizeMachineMoves(settings.machineMoves),
       // Read back, not rebuilt. This function returns an explicit object, so a
       // field missing from it is dropped every time settings are read from
       // disk -- and these four were. The roster was written and then forgotten
@@ -3395,6 +3400,35 @@ export class SettingsService {
     pairings[pairingKey] = pairing;
     stored.encryptedMachinePairings = this.sealJson(JSON.stringify(pairings));
     await this.writeStored(stored);
+  }
+
+  /** Moves this desktop asked machines for and has not settled yet. */
+  async listMachineMoves(): Promise<MachineMoveRecord[]> {
+    const stored = await this.readStored();
+    return (stored.machineMoves ?? []).map((record) => structuredClone(record));
+  }
+
+  /** Written to disk before the move is asked for: a move is never forgotten. */
+  async saveMachineMove(record: MachineMoveRecord): Promise<void> {
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+    stored.machineMoves = [...(stored.machineMoves ?? []).filter((item) => item.machineId !== record.machineId), structuredClone(record)];
+    await this.writeStored(stored, true);
+  }
+
+  /** Settles a move; with `adopt`, the machine's new pairing is saved in the
+   *  same write, so the two never disagree on disk. */
+  async finishMachineMove(machineId: string, adopt?: { pairingKey: string; pairing: MobilePairingPackage }): Promise<void> {
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+    if (adopt) {
+      const pairings = this.readMachinePairings(stored);
+      pairings[adopt.pairingKey] = adopt.pairing;
+      stored.encryptedMachinePairings = this.sealJson(JSON.stringify(pairings));
+    }
+    const remaining = (stored.machineMoves ?? []).filter((item) => item.machineId !== machineId);
+    stored.machineMoves = remaining.length ? remaining : undefined;
+    await this.writeStored(stored, true);
   }
 
   async saveMachine(record: MachineRecord, pairing?: MobilePairingPackage): Promise<MachineRecord[]> {
@@ -4460,4 +4494,23 @@ export class SettingsService {
   private normalizeChatPromptContextSettings(value: unknown): ChatPromptContextSettings {
     return normalizeChatPromptContextSettings(value);
   }
+}
+
+function normalizeMachineMoves(value: unknown): MachineMoveRecord[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const text = (item: unknown): item is string => typeof item === "string" && item.length > 0;
+  const addresses = (item: unknown): item is MachineMoveRecord["to"] =>
+    Boolean(item) && typeof item === "object" && text((item as MachineMoveRecord["to"]).relayUrl) && text((item as MachineMoveRecord["to"]).outboxUrl);
+  const records = value.filter((item): item is MachineMoveRecord => Boolean(item) && typeof item === "object"
+    && text((item as MachineMoveRecord).machineId) && text((item as MachineMoveRecord).pairingKey) && text((item as MachineMoveRecord).requestedAt)
+    && addresses((item as MachineMoveRecord).from) && addresses((item as MachineMoveRecord).to))
+    .map((item) => ({
+      machineId: item.machineId,
+      pairingKey: item.pairingKey,
+      from: { relayUrl: item.from.relayUrl, outboxUrl: item.from.outboxUrl },
+      to: { relayUrl: item.to.relayUrl, outboxUrl: item.to.outboxUrl },
+      ...(text(item.instanceId) ? { instanceId: item.instanceId } : {}),
+      requestedAt: item.requestedAt
+    }));
+  return records.length ? records : undefined;
 }

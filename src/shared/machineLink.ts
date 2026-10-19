@@ -487,6 +487,10 @@ export interface MachineTransportMoveBody {
    *  earlier run of the machine is refused. */
   instanceId?: string;
   expiresAt?: string;
+  /** How long the desktop waits for the answer, from when it asked: the
+   *  machine measures it on its own clock from receipt, so the two clocks
+   *  need not agree. */
+  answerWithinMs?: number;
   relayUrl: string;
   outboxUrl: string;
 }
