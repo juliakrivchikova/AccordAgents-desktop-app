@@ -43,6 +43,9 @@ function world(overrides: {
     /** A dead socket still seated at the old address looks present. */
     stickyFrom: false,
     probeFails: 0,
+    /** Removed from settings while its move was settled. */
+    removed: false,
+    movingSeenByProbe: [] as boolean[],
     holds: 0,
     released: 0,
     requests: 0
@@ -82,6 +85,7 @@ function world(overrides: {
     },
     probeMachineAt: async (_id, at) => {
       events.push(`probe:${hostOf(at.relayUrl ?? "")}`);
+      state.movingSeenByProbe.push(moverRef.current?.isMoving("m1") ?? false);
       if (state.probeFails > 0) {
         state.probeFails -= 1;
         return false;
@@ -90,6 +94,7 @@ function world(overrides: {
     },
     refreshTrustRosters: async () => { events.push("rosters"); }
   };
+  const moverRef: { current?: MachineTransportMover } = {};
   const mover = new MachineTransportMover({
     link: () => link,
     listMachines: async () => [machine()],
@@ -101,8 +106,10 @@ function world(overrides: {
     },
     finishMove: async (machineId, adopt) => {
       if (overrides.finishFails?.()) throw new Error("disk full");
-      if (adopt) state.pairings.set(adopt.pairingKey, adopt.pairing);
       state.moves = state.moves.filter((item) => item.machineId !== machineId);
+      if (!adopt || state.removed) return false;
+      state.pairings.set(adopt.pairingKey, adopt.pairing);
+      return true;
     },
     target: async () => HUB,
     busyElsewhere: () => overrides.busyElsewhere?.() ?? false,
@@ -113,6 +120,7 @@ function world(overrides: {
     sleep: async (ms) => { clock += ms; },
     timing: { exitGraceMs: 120_000, settleMs: 150_000, settleEveryMs: 5_000 }
   });
+  moverRef.current = mover;
   return { mover, link, state, events, advance: (ms: number) => { clock += ms; } };
 }
 
@@ -284,4 +292,32 @@ test("an open move of a machine that was removed is dropped", async () => {
   const w = world({ moves: [record] });
   await w.mover.run();
   assert.equal(w.state.moves.some((item) => item.machineId === "gone"), false);
+});
+
+test("a move left open by a restart keeps the machine's update waiting from the first moment of the first pass", async () => {
+  const record: MachineMoveRecord = { machineId: "m1", pairingKey: "pk-1", from: SHARED, to: HUB, instanceId: "run-1", requestedAt: "2026-10-19T09:59:00.000Z" };
+  const w = world({ moves: [record] });
+  w.state.machineAt = HUB.relayUrl;
+  await w.mover.run();
+  assert.deepEqual(w.state.movingSeenByProbe, [true], "already marked while it is looked for");
+  assert.equal(w.mover.isMoving("m1"), false, "and released once settled");
+});
+
+test("a machine paired anew since its move was asked has nothing left to settle", async () => {
+  const record: MachineMoveRecord = { machineId: "m1", pairingKey: "pk-1", from: { relayUrl: "wss://old.example/v1/relay", outboxUrl: "https://old.example/v1/mailbox/events" }, to: HUB, requestedAt: "2026-10-19T09:59:00.000Z" };
+  const w = world({ moves: [record] });
+  w.state.machineAt = undefined;
+  await w.mover.run();
+  assert.equal(w.state.moves.some((item) => item.machineId === "m1"), false);
+  assert.equal(w.state.pairings.get("pk-1")?.relayUrl, SHARED.relayUrl, "its pairing is left as it is");
+});
+
+test("a machine removed while its move is settled is not followed and nobody is told", async () => {
+  const w = world();
+  w.state.removed = true;
+  await w.mover.run();
+  assert.ok(w.events.includes("machine.transport.removed"));
+  assert.equal(w.state.linkAt, SHARED.relayUrl, "no reconnect");
+  assert.equal(w.events.includes("phones"), false);
+  assert.deepEqual(w.state.moves, []);
 });

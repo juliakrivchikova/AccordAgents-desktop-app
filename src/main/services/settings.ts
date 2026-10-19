@@ -3422,13 +3422,14 @@ export class SettingsService {
 
   /** Settles a move; with `adopt`, the machine's new pairing is saved in the
    *  same write, so the two never disagree on disk. */
-  async finishMachineMove(machineId: string, adopt?: { pairingKey: string; pairing: MobilePairingPackage }): Promise<void> {
+  async finishMachineMove(machineId: string, adopt?: { pairingKey: string; pairing: MobilePairingPackage }): Promise<boolean> {
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
     const remaining = (stored.machineMoves ?? []).filter((item) => item.machineId !== machineId);
     const next: StoredSettings = { ...stored, machineMoves: remaining.length ? remaining : undefined };
     // A machine removed meanwhile gets no pairing back: removal leaves no way in.
-    if (adopt && (stored.machines ?? []).some((machine) => machine.id === machineId && machine.pairingKey === adopt.pairingKey)) {
+    const adopted = Boolean(adopt && (stored.machines ?? []).some((machine) => machine.id === machineId && machine.pairingKey === adopt.pairingKey));
+    if (adopt && adopted) {
       const pairings = this.readMachinePairings(stored);
       pairings[adopt.pairingKey] = adopt.pairing;
       next.encryptedMachinePairings = this.sealJson(JSON.stringify(pairings));
@@ -3436,6 +3437,7 @@ export class SettingsService {
     // A new object: a write that fails leaves the record (and the old
     // pairing) in memory as on disk, so a later pass settles it again.
     await this.writeStored(next, true);
+    return adopted;
   }
 
   async saveMachine(record: MachineRecord, pairing?: MobilePairingPackage): Promise<MachineRecord[]> {

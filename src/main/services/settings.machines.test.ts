@@ -460,7 +460,7 @@ test("an open move is not part of the settings machines receive, and a removed m
     await make().saveMachineMove({ machineId: "gone", pairingKey: "pk-gone", from, to, requestedAt: "2026-10-19T10:00:00.000Z" });
     const snapshot = await make().exportMachineSettingsSnapshot();
     assert.equal(snapshot.settingsJson.includes("machineMoves"), false, "a desktop's move records stay on the desktop");
-    await make().finishMachineMove("gone", { pairingKey: "pk-gone", pairing: { rendezvousId: "rv-gone", ...to } as any });
+    assert.equal(await make().finishMachineMove("gone", { pairingKey: "pk-gone", pairing: { rendezvousId: "rv-gone", ...to } as any }), false);
     const after = make();
     assert.equal(await after.getMachinePairing("pk-gone"), undefined, "no way back in for a removed machine");
     assert.deepEqual(await after.listMachineMoves(), []);

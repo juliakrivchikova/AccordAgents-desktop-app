@@ -52,8 +52,9 @@ export interface MachineTransportMoverOptions {
   getMachinePairing: (pairingKey: string) => Promise<MobilePairingPackage | undefined>;
   listMoves: () => Promise<MachineMoveRecord[]>;
   saveMove: (record: MachineMoveRecord) => Promise<void>;
-  /** Removes the record; with `adopt`, saves that pairing in the same write. */
-  finishMove: (machineId: string, adopt?: { pairingKey: string; pairing: MobilePairingPackage }) => Promise<void>;
+  /** Removes the record; with `adopt`, saves that pairing in the same write
+   *  and says whether it did (a machine removed meanwhile gets none). */
+  finishMove: (machineId: string, adopt?: { pairingKey: string; pairing: MobilePairingPackage }) => Promise<boolean | void>;
   /** The User's server's addresses, once it serves the relay. */
   target: () => Promise<RelayAddresses | undefined>;
   /** A setup, update or recovery of this machine is running or starting. */
@@ -119,6 +120,9 @@ export class MachineTransportMover {
     this.running = true;
     try {
       const machines = await this.options.listMachines();
+      // Known open before they are looked at: an update that starts with
+      // this pass (both follow a hello) waits for them.
+      for (const record of await this.options.listMoves()) this.open.add(record.machineId);
       const open = await this.settleOpenMoves(link, machines);
       this.open.clear();
       for (const machineId of open) this.open.add(machineId);
@@ -245,6 +249,8 @@ export class MachineTransportMover {
     if (presence?.present && presence.relayUrl === record.to.relayUrl) return "moved";
     const saved = await this.options.getMachinePairing(record.pairingKey).catch(() => undefined);
     if (!saved) return "unknown";
+    // Paired anew since (another address altogether): nothing is left to settle.
+    if (saved.relayUrl !== record.from.relayUrl && saved.relayUrl !== record.to.relayUrl) return "stayed";
     // Looked for at the new address first, with a connection of its own (the
     // link stays where it is): nothing is concluded at the old one before.
     if (await link.probeMachineAt(machine.id, { ...saved, ...record.to }, this.timing.probeMs).catch(() => false)) return "moved";
@@ -283,10 +289,15 @@ export class MachineTransportMover {
     const next: MobilePairingPackage = { ...pairing, ...record.to };
     // A pairing that cannot be written now leaves the record, which finds
     // the machine at its new address again on a later pass.
-    const written = await this.options.finishMove(record.machineId, { pairingKey: record.pairingKey, pairing: next }).then(() => true, (error: unknown) => {
+    const written = await this.options.finishMove(record.machineId, { pairingKey: record.pairingKey, pairing: next }).then((adopted) => adopted !== false, (error: unknown) => {
       this.options.log("machine.transport.save-pending", { machineId: machine.id, message: errorMessage(error) });
-      return false;
+      return undefined;
     });
+    if (written === false) {
+      // Removed meanwhile: it is not followed, and nobody is told about it.
+      this.options.log("machine.transport.removed", { machineId: machine.id });
+      return;
+    }
     this.retries.delete(machine.id);
     const presence = link.machinePresence(machine.id);
     let greeted = presence?.present === true && presence.relayUrl === record.to.relayUrl;
@@ -298,7 +309,7 @@ export class MachineTransportMover {
     }
     this.options.log("machine.transport.moved", { machineId: machine.id, relayHost: hostOf(record.to.relayUrl), how, written, greeted });
     await link.refreshTrustRosters().catch(() => undefined);
-    if (written) this.options.onMoved(machine.id);
+    if (written === true) this.options.onMoved(machine.id);
   }
 
   private claimedElsewhere(link: MachineTransportMoveLink, machineId: string): boolean {
