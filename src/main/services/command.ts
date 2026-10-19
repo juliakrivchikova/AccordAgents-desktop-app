@@ -37,6 +37,17 @@ export interface CommandOptions {
   signal?: AbortSignal;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
+  /** Use `env` as the whole environment: no `process.env`, no login-shell
+   *  variables. For programs that must see only what they were given. */
+  exactEnv?: boolean;
+  /** Keep only the last N characters of stdout and of stderr. */
+  maxOutputChars?: number;
+  /** Called once with the child's pid (its process group with killProcessGroup). */
+  onSpawn?: (pid: number) => void;
+  /** With killProcessGroup: when the child itself exits, kill whatever it
+   *  left running in its group and stop waiting for their output. The run
+   *  is the child; background helpers do not outlive it. */
+  killGroupOnExit?: boolean;
 }
 
 export interface CommandEnvironmentOptions {
@@ -163,10 +174,15 @@ export async function runCommand(command: string, args: string[], options: Comma
     const useProcessGroup = killProcessTree && process.platform !== "win32";
     const child = spawnCommand(command, args, {
       cwd: options.cwd,
-      env: commandEnvironment(options.env, options.envOptions),
+      env: options.exactEnv === true ? { ...(options.env ?? {}) } : commandEnvironment(options.env, options.envOptions),
       detached: useProcessGroup,
       stdio: ["pipe", "pipe", "pipe"]
     });
+    if (child.pid !== undefined) {
+      options.onSpawn?.(child.pid);
+    }
+    const maxOutputChars = options.maxOutputChars !== undefined && options.maxOutputChars > 0 ? options.maxOutputChars : undefined;
+    const keepTail = (text: string): string => (maxOutputChars !== undefined && text.length > maxOutputChars ? text.slice(-maxOutputChars) : text);
 
     let stdout = "";
     let stderr = "";
@@ -234,18 +250,32 @@ export async function runCommand(command: string, args: string[], options: Comma
       if (!settled && (options.signal?.aborted || timedOut)) {
         releaseStdio();
       }
+      if (options.killGroupOnExit === true && useProcessGroup && child.pid) {
+        const pid = child.pid;
+        // A short grace lets the child's last output arrive first.
+        setTimeout(() => {
+          try {
+            process.kill(-pid, "SIGKILL");
+          } catch {
+            // The group is already empty.
+          }
+          if (!settled) {
+            releaseStdio();
+          }
+        }, 200).unref();
+      }
     });
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
 
     child.stdout.on("data", (chunk) => {
-      stdout += chunk;
+      stdout = keepTail(stdout + chunk);
       options.onStdout?.(chunk);
     });
 
     child.stderr.on("data", (chunk) => {
-      stderr += chunk;
+      stderr = keepTail(stderr + chunk);
       options.onStderr?.(chunk);
     });
 
@@ -303,8 +333,17 @@ export async function runCommand(command: string, args: string[], options: Comma
         }
       });
     }
-    if (options.inputStream) options.inputStream.pipe(child.stdin);
-    else child.stdin.end();
+    if (options.inputStream) {
+      // pipe() leaves its destination open when the source fails: the child
+      // would wait for more input until the timeout.
+      options.inputStream.once("error", (error) => {
+        stdinError ??= error;
+        child.stdin.end();
+      });
+      options.inputStream.pipe(child.stdin);
+    } else {
+      child.stdin.end();
+    }
   });
 }
 

@@ -28,6 +28,7 @@ import { mkdtemp, writeFile, readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
+import { chatPublisher } from "./machine-chat-publish.mjs";
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -305,7 +306,7 @@ async function main() {
     messages: [{ id: "seed-1", role: "user", content: "Setting up.", status: "done", createdAt: new Date().toISOString() }],
     findings: [], metadata: { participants: [participant] }
   };
-  await ownerLink.replicateConversation(conversation);
+  await chatPublisher({ storage: ownerStorage, log: ownerLog, link: ownerLink }).publish(conversation);
   await wait(1500);
 
   // The owner goes away completely. Everything below is the phone alone.
@@ -811,24 +812,27 @@ async function main() {
   log("a second tab ran nothing again");
 
   // --- 6. The desktop comes back and learns what happened without it -------
-  const backDeltas = [];
+  // The phone's message became the machine's own, and reaches the desktop as
+  // that machine's chat change.
+  const changes = [];
   const returningLink = new MachineLinkService(desktopSettings(records, pairings), {
     write: async () => undefined
   }, {
     eventStorage: ownerStorage, eventLog: ownerLog, appVersion: "phone-e2e",
-    desktopDeviceId: owner.originId, reconnectDelayMs: 50
+    desktopDeviceId: owner.originId, reconnectDelayMs: 50,
+    applyChatChanges: async (event, payload) => { changes.push({ originId: event.originId, payload }); return "applied"; }
   });
-  returningLink.onConversationBackDelta((delta) => { backDeltas.push(delta); });
   await returningLink.start();
   await waitFor(() => returningLink.isMachineConnected(MACHINE_ID), 60_000, "the desktop to come back");
   let learned = false;
   try {
-    await waitFor(() => backDeltas.some((delta) => (delta.messages || []).some((message) => String(message.content || "").includes(ask))),
-      60_000, "the desktop to learn the message the phone sent while it was closed");
+    await waitFor(() => changes.some(({ originId, payload }) => originId === machineDeviceId && (payload.changes || []).some((change) =>
+      change.type === "message.created" && change.message.role === "user" && String(change.message.content || "").includes(ask))),
+    60_000, "the desktop to learn the message the phone sent while it was closed");
     learned = true;
     log("the desktop learned the User's message from the machine");
   } catch {
-    log("NOT PROVEN: the desktop did not receive the phone's message as a back delta");
+    log("NOT PROVEN: the desktop did not receive the phone's message as the machine's chat change");
   }
   returningLink.close();
 

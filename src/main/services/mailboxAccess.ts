@@ -2,6 +2,7 @@ import { createHash, createHmac } from "node:crypto";
 import {
   MAILBOX_AUTH_TOKEN_INFO,
   MAILBOX_DELETE_PATH,
+  MAILBOX_HUB_AUTHORIZATION_HEADER,
   MAILBOX_REGISTER_PATH,
   MAILBOX_REVOKE_PATH,
   MAILBOX_SCOPE_ID_INFO,
@@ -141,6 +142,16 @@ export function classifyMailboxRegistrationFailure(
   return "transient";
 }
 
+/** The User's own server takes a new mailbox only with a request her
+ *  desktop signed; the desktop sets this to sign for its server (and only
+ *  for it: a shared relay is never sent the signature). */
+type MailboxRegistrationSigner = (request: { url: URL; method: string; pathWithQuery: string; body: string }) => Promise<string | undefined>;
+let registrationSigner: MailboxRegistrationSigner | undefined;
+
+export function setMailboxRegistrationSigner(signer: MailboxRegistrationSigner | undefined): void {
+  registrationSigner = signer;
+}
+
 export async function registerMailboxForSealKey(
   outboxUrl: string,
   relaySealKeyBase64: string,
@@ -151,20 +162,23 @@ export async function registerMailboxForSealKey(
   url.pathname = MAILBOX_REGISTER_PATH;
   url.search = "";
   url.searchParams.set("mailboxId", access.scopeId);
+  const body = JSON.stringify({ tokenHashBase64Url: access.tokenHash });
+  const signature = await registrationSigner?.({ url, method: "POST", pathWithQuery: `${url.pathname}${url.search}`, body }).catch(() => undefined);
   const response = await fetchImpl(url.toString(), {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${access.token}`
+      authorization: `Bearer ${access.token}`,
+      ...(signature ? { [MAILBOX_HUB_AUTHORIZATION_HEADER]: signature } : {})
     },
-    body: JSON.stringify({ tokenHashBase64Url: access.tokenHash }),
+    body,
     signal: AbortSignal.timeout(8_000)
   });
-  const body = await response.text();
+  const answer = await response.text();
   return {
     ok: response.ok,
     status: response.status,
-    ...(response.ok ? {} : { error: body.slice(0, 500) })
+    ...(response.ok ? {} : { error: answer.slice(0, 500) })
   };
 }
 

@@ -16,6 +16,8 @@ interface DeviceEventMailboxOptions {
   peerDeviceId: string;
   receive(packet: DeviceEventPacket): Promise<void>;
   authenticate?(packet: DeviceEventPacket): Promise<DeviceEventPacket>;
+  /** Kinds kept for the peer but not sent yet; see DeviceEventChannelOptions. */
+  heldKinds?(): readonly string[];
   onError(error: Error): void;
   fetch?: typeof fetch;
 }
@@ -100,7 +102,8 @@ export class DeviceEventMailbox {
       // Identities only: a delivered event is probed by its header, and an
       // envelope is read just before it is posted. Re-reading every waiting
       // envelope on each pass kept the database busy for everything else.
-      const page = await storage.deviceEvents().listPendingHeaders(pairing.rendezvousId, cursor, peerDeviceId);
+      const page = await storage.deviceEvents().listPendingHeaders(pairing.rendezvousId, cursor, peerDeviceId,
+        { excludeKinds: this.options.heldKinds?.() ?? [] });
       if (!page.length) break;
       const probes: Extract<DeviceEventPacket, { type: "probe" }>["events"] = [];
       for (const item of page) {

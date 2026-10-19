@@ -4,9 +4,10 @@ import {
   type ChatActionDependency, type DeviceEventPacket
 } from "../../shared/deviceEventChannel";
 import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
+import { CHAT_CHANGES_EVENT_KIND, isChatChangesLogScope } from "./chatChanges";
 import { DEVICE_EVENT_INLINE_BYTES, isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import type { DeviceEventApplyOutcome, DeviceEventGap, DeviceEventReceipt } from "../../shared/deviceEventDelivery";
+import type { DeviceEventApplyOutcome, DeviceEventGap, DeviceEventReceipt, DeviceEventRecipient } from "../../shared/deviceEventDelivery";
 import { DEVICE_EVENT_PROBE_LIMIT, DeviceEventProjectionPendingError } from "../../shared/deviceEventDelivery";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import { ChatEventLogService, verifySignedChatEvent } from "./chatEventLog";
@@ -36,6 +37,26 @@ interface DeviceEventChannelOptions {
   /** The peer cannot produce something a held action needs. Reported, because
    *  a deferred action that can never apply is not a transient state. */
   onDependencyUnavailable?(dependency: ChatActionDependency): void;
+  /** Desktop: who else should hold a chat change this peer wrote. Recorded
+   *  with its arrival, so the other machines get it unchanged, signed by its
+   *  author, whether or not that author is online later. */
+  forwardTo?(event: ChatEventEnvelope): DeviceEventRecipient[];
+  /** Machine: the signing key of another of the owner's machines whose chat
+   *  changes this peer may forward. Undefined refuses the forward. */
+  forwardedOriginKey?(originId: string): string | undefined;
+  /** This peer is a device that holds every chat (a machine, or the desktop
+   *  that enrolled this machine), so it may be served any chat change it
+   *  asks for. Other peers are served only what was addressed to them. */
+  peerHoldsEveryChat?: boolean;
+  /** Kinds of events kept for this peer but not sent to it yet (a runtime
+   *  that cannot read them): they stay queued, in order, and go once this no
+   *  longer names them. */
+  heldKinds?(): readonly string[];
+  /** The User's hub carries this channel's events: they are delivered by the
+   *  hub's order (HubSync hands each in through `receiveFromHub`), so the
+   *  channel sends no events, acknowledgements or repair requests itself,
+   *  and keeps no mailbox. */
+  hubMode?: boolean;
   onError(error: Error): void;
   /** First wait before a held (deferred or failing) event is tried again; it
    *  doubles per attempt up to sixty times this. Tests shorten it. */
@@ -51,6 +72,15 @@ export interface DeferredWithDependency {
 /** A durable device channel, independent of desktop/phone/machine roles.
  * Presence is separate. Events retain their signed identity across live, mailbox,
  * reconnect and repair paths; transport writes never delete retained events. */
+/** The channel was closed (a shutdown, a reconnect): whoever delivered an
+ *  event offers it again later. */
+export class DeviceEventChannelClosedError extends Error {
+  constructor() {
+    super("The device event channel is closed.");
+    this.name = "DeviceEventChannelClosedError";
+  }
+}
+
 export class DeviceEventChannel {
   private readonly mailbox?: DeviceEventMailbox;
   private inbound: Promise<void> = Promise.resolve();
@@ -66,7 +96,7 @@ export class DeviceEventChannel {
    *  packet re-tried every held event: a machine holding ~500 answers to chats
    *  it does not host made about 10,000 attempts a minute and ran out of
    *  memory. In memory only: after a restart each is tried once, then waits. */
-  private readonly heldRetry = new Map<string, { attempts: number; notBefore: number; waitsFor?: string }>();
+  private readonly heldRetry = new Map<string, { attempts: number; notBefore: number; waitsFor?: string; conversationId?: string }>();
   // Live-room and mailbox copies commonly overlap. Cache only identities and
   // receipts already committed to SQLite, never uncommitted application state.
   private readonly received = new Map<string, { hash: string; receipt?: DeviceEventReceipt; ackAt?: number }>();
@@ -77,10 +107,11 @@ export class DeviceEventChannel {
     if (options.peerDeviceId !== `device-${hash.slice(0, 32)}`) {
       throw new Error("Device event peer identity does not match its enrolled signing key.");
     }
-    if (options.pairing?.outboxUrl) {
+    if (options.pairing?.outboxUrl && !options.hubMode) {
       this.mailbox = new DeviceEventMailbox({
         storage: options.storage, pairing: options.pairing,
         localDeviceId: options.localDeviceId, peerDeviceId: options.peerDeviceId,
+        ...(options.heldKinds ? { heldKinds: options.heldKinds } : {}),
         authenticate: packet => this.authenticate(packet),
         receive: (packet) => this.receive(packet), onError: options.onError
       });
@@ -147,9 +178,12 @@ export class DeviceEventChannel {
         case "event": {
           this.receivePending = true;
           const event = value.event;
-          if (!event || Buffer.byteLength(JSON.stringify(event), "utf8") > DEVICE_EVENT_INLINE_BYTES * 2 || event.originId !== value.from ||
+          // Second-hand, only a chat change is accepted, never a command.
+          const originKey = event && (event.originId === value.from || event.kind === CHAT_CHANGES_EVENT_KIND)
+            ? this.originKey(event.originId, event.logScopeId, value.from) : undefined;
+          if (!event || Buffer.byteLength(JSON.stringify(event), "utf8") > DEVICE_EVENT_INLINE_BYTES * 2 || !originKey ||
               !this.inScope(event.logScopeId) ||
-              !verifySignedChatEvent(event, this.options.peerPublicKeyDerBase64)) {
+              !verifySignedChatEvent(event, originKey)) {
             throw new DevicePacketAuthenticationError("Device event signature or channel scope is invalid.");
           }
           const remembered = this.received.get(event.eventId);
@@ -169,8 +203,10 @@ export class DeviceEventChannel {
             this.wake(event.eventId);
             break;
           }
+          const forward = event.originId === value.from ? this.options.forwardTo?.(event) ?? [] : [];
           const stored = await this.options.storage.appendChatEvent(event, {
-            ingress: { deviceId: value.from, channelId: this.options.channelId }
+            ingress: { deviceId: value.from, channelId: this.options.channelId },
+            ...(forward.length ? { recipients: forward } : {})
           });
           if (stored.status === "conflict") throw new Error(`Conflicting device event ${event.eventId}.`);
           const receipt = await this.options.storage.deviceEvents().receipt(event.eventId);
@@ -188,7 +224,9 @@ export class DeviceEventChannel {
           return;
         }
         case "resend":
-          for (const event of await this.options.storage.deviceEvents().repair(this.options.channelId, value.from, value.gap)) {
+          for (const event of await this.options.storage.deviceEvents().repair(this.options.channelId, value.from, value.gap,
+            { anyChatChange: this.options.peerHoldsEveryChat === true })) {
+            if (this.options.heldKinds?.().includes(event.kind)) continue;
             await this.sendEvent(event, value.requestId);
           }
           return;
@@ -210,11 +248,16 @@ export class DeviceEventChannel {
         case "probe":
           if (!Array.isArray(value.events) || value.events.length > DEVICE_EVENT_PROBE_LIMIT) throw new Error("Invalid device event receipt probe.");
           for (const header of value.events) {
-            if (!header || header.originId !== value.from || typeof header.eventId !== "string" ||
+            if (!header || typeof header.originId !== "string" || typeof header.eventId !== "string" ||
                 typeof header.eventHash !== "string" || typeof header.logScopeId !== "string" ||
-                !this.inScope(header.logScopeId) || !Number.isSafeInteger(header.originSeq) || header.originSeq < 1) {
+                !Number.isSafeInteger(header.originSeq) || header.originSeq < 1) {
               throw new Error("Invalid device event receipt probe identity.");
             }
+            // An event this device would not accept (a scope it does not
+            // take, an author it does not know yet) is skipped: refusing the
+            // whole probe would stop the mailbox at it, and every packet
+            // behind it with it.
+            if (!this.originKey(header.originId, header.logScopeId, value.from) || !this.inScope(header.logScopeId)) continue;
             const receipt = await this.options.storage.deviceEvents().receipt(header.eventId);
             if (receipt) {
               if (receipt.eventHash !== header.eventHash) throw new Error("Conflicting device receipt probe.");
@@ -264,16 +307,18 @@ export class DeviceEventChannel {
   }
 
   private async flushPending(): Promise<void> {
-    if (this.options.isPeerConnected?.() === false) return;
+    if (this.options.hubMode || this.options.isPeerConnected?.() === false) return;
     let cursor = 0;
     while (!this.stopped) {
       // Identities first; an envelope is read only for an event that is due.
       // Re-reading every waiting envelope on each pass kept the database busy
       // for everything else while the peer was unreachable.
-      const page = await this.options.storage.deviceEvents().listPendingHeaders(this.options.channelId, cursor, this.options.peerDeviceId);
+      const page = await this.options.storage.deviceEvents().listPendingHeaders(this.options.channelId, cursor, this.options.peerDeviceId,
+        { excludeKinds: this.options.heldKinds?.() ?? [] });
       if (!page.length) return;
       for (const entry of page) {
         if (this.stopped) return;
+        cursor = entry.rowId;
         const previous = this.lastSent.get(entry.eventId);
         const delay = previous ? Math.min(5_000 * 2 ** previous.attempts, 300_000) : 0;
         if (!previous || performance.now() - previous.at >= delay) {
@@ -283,7 +328,6 @@ export class DeviceEventChannel {
             this.lastSent.set(entry.eventId, { at: performance.now(), attempts: Math.min((previous?.attempts ?? -1) + 1, 6) });
           }
         }
-        cursor = entry.rowId;
       }
     }
   }
@@ -314,6 +358,12 @@ export class DeviceEventChannel {
     // was waiting for usually arrives in the same delivery, and waiting for the
     // next timer would make an answered dependency look like a stuck one.
     let appliedSinceHold = false;
+    // Events a chat copy already contained are confirmed, not applied again.
+    for (const receipt of await this.options.storage.deviceEvents().settleCovered(this.options.channelId, this.options.peerDeviceId, new Date().toISOString())) {
+      if (this.stopped) return;
+      remember(this.received, receipt.eventId, { hash: receipt.eventHash, receipt });
+      await this.sendControl(this.packet({ type: "ack", receipt }));
+    }
     // Events held in this pass may be tried once more right away when
     // something else applied, even though their backoff has started.
     let retryNow = new Set<string>();
@@ -354,7 +404,7 @@ export class DeviceEventChannel {
           if (outcome === "deferred" || (typeof outcome === "object" && outcome.deferred)) {
             deferred = true;
             held.add(event.eventId);
-            this.holdForRetry(event.eventId, "deferred", typeof outcome === "object" ? outcome.dependency.targetKey : undefined);
+            this.holdForRetry(event.eventId, "deferred", typeof outcome === "object" ? outcome.dependency.targetKey : undefined, event.conversationId);
             if (typeof outcome === "object") dependencies.set(JSON.stringify(outcome.dependency), outcome.dependency);
             continue;
           }
@@ -363,8 +413,13 @@ export class DeviceEventChannel {
           this.heldRetry.delete(event.eventId);
           // What a held action named as missing has just arrived: wake it now
           // instead of leaving it to its backoff.
+          // So is a change of the same chat that waited for an earlier one:
+          // chat changes arrive out of order across the live room and the
+          // mailbox, and the one before is usually what it waited for.
           const appliedKey = targetKeyOf(payload);
-          if (appliedKey) for (const [heldId, retry] of this.heldRetry) if (retry.waitsFor === appliedKey) this.wake(heldId);
+          for (const [heldId, retry] of this.heldRetry) {
+            if ((appliedKey && retry.waitsFor === appliedKey) || (!retry.waitsFor && retry.conversationId === event.conversationId)) this.wake(heldId);
+          }
           remember(this.received, event.eventId, { hash: event.eventHash, receipt });
           await this.sendControl(this.packet({ type: "ack", receipt }));
           this.received.get(event.eventId)!.ackAt = performance.now();
@@ -373,7 +428,7 @@ export class DeviceEventChannel {
           // A missing chat, full disk, or pending domain owner holds this
           // stream; other conversations on the same device can still apply.
           held.add(event.eventId);
-          this.holdForRetry(event.eventId, "failed");
+          this.holdForRetry(event.eventId, "failed", undefined, event.conversationId);
           applyError ??= error;
         }
       }
@@ -407,10 +462,19 @@ export class DeviceEventChannel {
     if (applyError !== undefined) throw applyError;
   }
 
+  /** The key an event arriving from `from` must be signed with: the peer's own
+   *  for its own events, and for a chat change it forwards, the key of the
+   *  machine that wrote it. Nothing else is accepted second-hand. */
+  private originKey(originId: string, logScopeId: unknown, from: string): string | undefined {
+    if (originId === from) return this.options.peerPublicKeyDerBase64;
+    if (typeof logScopeId !== "string" || !isChatChangesLogScope(logScopeId) || originId === this.options.localDeviceId) return undefined;
+    return this.options.forwardedOriginKey?.(originId);
+  }
+
   /** A deferral waits for something that may take long to arrive, up to
    *  five minutes between attempts; a failure is usually transient (a busy
    *  database, a changed authorization) and is retried within thirty seconds. */
-  private holdForRetry(eventId: string, reason: "deferred" | "failed", waitsFor?: string): void {
+  private holdForRetry(eventId: string, reason: "deferred" | "failed", waitsFor?: string, conversationId?: string): void {
     const base = this.options.heldRetryBaseMs ?? 5_000;
     const previous = this.heldRetry.get(eventId);
     const attempts = Math.min((previous?.attempts ?? -1) + 1, 6);
@@ -418,7 +482,8 @@ export class DeviceEventChannel {
     this.heldRetry.set(eventId, {
       attempts,
       notBefore: performance.now() + Math.min(base * 2 ** attempts, cap),
-      waitsFor: waitsFor ?? previous?.waitsFor
+      waitsFor: waitsFor ?? previous?.waitsFor,
+      conversationId: conversationId ?? previous?.conversationId
     });
   }
 
@@ -446,7 +511,13 @@ export class DeviceEventChannel {
   /** Chat actions share one log across every machine, so one decision is one
    *  event with many recipients rather than a separate copy per channel. */
   private inScope(logScopeId: string): boolean {
-    return logScopeId === CHAT_ACTION_LOG_SCOPE || logScopeId.startsWith(`device:${this.options.channelId}:`);
+    return logScopeId === CHAT_ACTION_LOG_SCOPE || isChatChangesLogScope(logScopeId) || logScopeId.startsWith(`device:${this.options.channelId}:`);
+  }
+
+  /** Sends whatever this device committed for the peer outside `publish`
+   *  (a chat save's change event) without waiting for the next retry tick. */
+  nudge(): void {
+    this.scheduleFlush();
   }
 
   private scope(conversationId: string, scope: string): string {
@@ -457,9 +528,9 @@ export class DeviceEventChannel {
     return { protocol: DEVICE_EVENT_CHANNEL_PROTOCOL, from: this.options.localDeviceId, to: this.options.peerDeviceId, ...body };
   }
 
-  private enqueue(task: () => Promise<void>): Promise<void> {
+  private enqueue<T>(task: () => Promise<T>): Promise<T> {
     const next = this.inbound.then(task);
-    this.inbound = next.catch(() => undefined);
+    this.inbound = next.then(() => undefined, () => undefined);
     return next;
   }
 
@@ -485,6 +556,8 @@ export class DeviceEventChannel {
   }
 
   private async sendControl(packet: DeviceEventPacket): Promise<void> {
+    // Through a hub, delivery is the hub's acceptance: no receipts travel.
+    if (this.options.hubMode) return;
     packet = await this.authenticate(packet);
     const writes: Promise<void>[] = this.options.isPeerConnected?.() === false ? [] : [this.options.send(packet)];
     if (this.mailbox) writes.push(this.mailbox.sendPacket(packet));
@@ -496,6 +569,44 @@ export class DeviceEventChannel {
 
   private async authenticate(packet: DeviceEventPacket): Promise<DeviceEventPacket> {
     return signDevicePacket(packet, await this.options.eventLog.getOrCreateDeviceIdentity());
+  }
+
+  /**
+   * An event the hub's order delivered. Checked like one from the peer (its
+   * own signature, this channel's scope; second-hand only a chat change),
+   * stored once, then applied by the same drain, so deferral and
+   * dependencies behave as before. Once stored the event is this channel's:
+   * an event the drain holds (its own or an earlier one) is retried by the
+   * channel, not by whoever delivered it.
+   */
+  receiveFromHub(event: ChatEventEnvelope): Promise<"stored" | "conflict"> {
+    return this.enqueue(async () => {
+      if (this.stopped) throw new DeviceEventChannelClosedError();
+      const originKey = this.hubOriginKey(event);
+      if (!originKey || !this.inScope(event.logScopeId) || !verifySignedChatEvent(event, originKey)) {
+        throw new DevicePacketAuthenticationError("Device event signature or channel scope is invalid.");
+      }
+      const stored = await this.options.storage.appendChatEvent(event, {
+        ingress: { deviceId: this.options.peerDeviceId, channelId: this.options.channelId }
+      });
+      if (stored.status === "conflict") return "conflict";
+      this.receivePending = true;
+      await this.drain().catch((error: unknown) => this.report(error instanceof Error ? error : new Error(String(error))));
+      return "stored";
+    });
+  }
+
+  /** True for an event this channel takes from the hub: its scope, and its
+   *  author is the peer (or another machine's chat change the peer would forward). */
+  accepts(event: ChatEventEnvelope): boolean {
+    return this.inScope(event.logScopeId) && Boolean(this.hubOriginKey(event));
+  }
+
+  /** Second-hand, only a chat change is accepted, never a command: the rule
+   *  the peer path applies, for the hub's order. */
+  private hubOriginKey(event: ChatEventEnvelope): string | undefined {
+    if (event.originId !== this.options.peerDeviceId && event.kind !== CHAT_CHANGES_EVENT_KIND) return undefined;
+    return this.originKey(event.originId, event.logScopeId, this.options.peerDeviceId);
   }
 
   private async repeatReceipt(receipt: DeviceEventReceipt): Promise<void> {

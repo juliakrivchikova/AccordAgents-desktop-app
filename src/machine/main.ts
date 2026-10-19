@@ -13,9 +13,12 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { moveEnrollment, shellCommandLine } from "./transportMove";
 import path from "node:path";
 import { artifactMembersForConversation } from "../shared/artifacts";
-import { assertMobilePairingPackage, type MobilePairingPackage } from "../shared/mobilePairing";
+import { ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS, assertMobilePairingPackage, type MobilePairingPackage } from "../shared/mobilePairing";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "../main/appToolWiring";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
 import { AgentEnvironmentService } from "../main/services/agentEnvironment";
@@ -24,6 +27,8 @@ import { AppSkillsService } from "../main/services/appSkills";
 import { ArtifactService } from "../main/services/artifacts";
 import { ArtifactStore } from "../main/services/artifactStore";
 import { artifactEventWriter, artifactProjectionPort } from "../main/services/artifactReplication";
+import { createChatChangeTransport, scheduleChatChangePruning } from "../main/services/chatChangeTransport";
+import { importChatCopy } from "../main/services/chatCopy";
 import { ChatEventLogService } from "../main/services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "../main/services/chatEventMirror";
 import { ChatService } from "../main/services/chat";
@@ -36,9 +41,9 @@ import { ChatActionApplier } from "../main/services/chatActionApplier";
 import { ChatActionEmitter } from "../main/services/chatActionEmitter";
 import { createChatActionEffects } from "../main/services/chatActionEffects";
 import { MachineIdlePower, assertNativeRegistryClosed } from "../main/services/machineIdlePower";
-import { MachineHostPowerRegistry } from "../main/services/machineHostPower";
+import { MachineHostPowerRegistry, type MachineHostAdmission } from "../main/services/machineHostPower";
 import { NATIVE_PROCESS_REGISTRY_FILE } from "../main/services/nativeProcessRegistry";
-import { uptime } from "node:os";
+import { hostname, uptime } from "node:os";
 import { MachineMaintenance } from "../main/services/machineMaintenance";
 import { nativeHostIdentity } from "../main/services/nativeHostIdentity";
 import { assertAwsMachinePowerConfig, MACHINE_POWER_KEY_CHECK_MS, MACHINE_POWER_REFUSED_EXIT_CODE, MachinePowerRefusal, type AwsMachinePowerConfig } from "../shared/machinePower";
@@ -48,6 +53,14 @@ import { PluginService } from "../main/services/plugins";
 import { SettingsService } from "../main/services/settings";
 import { StorageService } from "../main/services/storage";
 import { UserSkillsService } from "../main/services/userSkills";
+import { ScriptService, handleScriptsOperation } from "../main/services/scripts";
+import { HubTunnelClient } from "../main/services/hubTunnelClient";
+import { HUB_SCOPE_PREFIXES, HubSync, hubChatChangeApplier, hubPushedThrough } from "../main/services/hubSync";
+import { HubClient } from "../main/services/hubClient";
+import { signHubRequest } from "../main/services/hubAuth";
+import { setMailboxRegistrationSigner } from "../main/services/mailboxAccess";
+import { ScriptSecretStore, ScriptStore } from "../main/services/scriptStore";
+import { machineScriptHostPhrase } from "../shared/scripts";
 
 interface MachineArgs {
   enrollmentPath: string;
@@ -60,6 +73,12 @@ interface MachineArgs {
    *  runtime that did not come back after the handover). */
   revertPower?: boolean;
   maintenanceCommand?: string[];
+  /** Setup only: print this machine's device identity (creating it once). */
+  deviceIdentity?: boolean;
+  /** Setup only: import a chat copy the desktop exported into this directory. */
+  importChatCopy?: string;
+  /** The desktop's id for this machine, for which members' replies are its own. */
+  machineId?: string;
 }
 
 function parseArgs(argv: string[]): MachineArgs {
@@ -69,6 +88,9 @@ function parseArgs(argv: string[]): MachineArgs {
   let configurePower = false;
   let checkPower = false;
   let revertPower = false;
+  let deviceIdentity = false;
+  let importChatCopy: string | undefined;
+  let machineId: string | undefined;
   let maintenance = false;
   let maintenanceCommand: string[] | undefined;
   for (let index = 0; index < argv.length; index += 1) {
@@ -98,6 +120,12 @@ function parseArgs(argv: string[]): MachineArgs {
       checkPower = true;
     } else if (arg === "--revert-power") {
       revertPower = true;
+    } else if (arg === "--device-identity") {
+      deviceIdentity = true;
+    } else if (arg === "--import-chat-copy") {
+      importChatCopy = next();
+    } else if (arg === "--machine-id") {
+      machineId = next();
     } else if (arg === "--help" || arg === "-h") {
       console.log("Usage: accordagents-machine --enrollment <pairing.json> [--user-data <dir>] [--name <machine name>]\nSetup only: accordagents-machine --check-power (bounded JSON on stdin; asks AWS, writes nothing)\nSetup only: accordagents-machine --configure-power --user-data <dir> (bounded JSON on stdin; keys never in argv)\nSetup only: accordagents-machine --revert-power --user-data <dir> (puts back the key the last --configure-power replaced)");
       process.exit(0);
@@ -107,10 +135,14 @@ function parseArgs(argv: string[]): MachineArgs {
   if (maintenance && (!maintenanceCommand?.length || !userDataDir || configurePower || revertPower || checkPower)) {
     throw new Error("Maintenance requires --user-data <dir> -- <command> [args] and cannot configure power at the same time.");
   }
-  if (!enrollmentPath && !configurePower && !revertPower && !checkPower && !maintenance) {
+  if ((deviceIdentity || importChatCopy) && !userDataDir) {
+    throw new Error("Setup commands require --user-data <dir>.");
+  }
+  if (!enrollmentPath && !configurePower && !revertPower && !checkPower && !maintenance && !deviceIdentity && !importChatCopy) {
     throw new Error("A machine enrollment file is required (--enrollment <pairing.json> or ACCORDAGENTS_MACHINE_ENROLLMENT).");
   }
-  return { enrollmentPath: path.resolve(enrollmentPath), userDataDir, machineName, configurePower, checkPower, revertPower, maintenanceCommand };
+  return { enrollmentPath: path.resolve(enrollmentPath || "."), userDataDir, machineName, configurePower, checkPower, revertPower, maintenanceCommand,
+    deviceIdentity, importChatCopy: importChatCopy ? path.resolve(importChatCopy) : undefined, machineId };
 }
 
 async function runMachineMaintenance(args: MachineArgs): Promise<void> {
@@ -147,6 +179,38 @@ async function runMachineMaintenance(args: MachineArgs): Promise<void> {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exit(1);
   }
+}
+
+/** Setup only: the identity this machine signs its events with, created once
+ *  and kept in its own database, so the desktop can address chat changes to
+ *  it before the runtime first connects. The private key never leaves. */
+async function printDeviceIdentity(args: MachineArgs): Promise<void> {
+  setHostPlatform(createHeadlessPlatform({ userDataDir: args.userDataDir }));
+  const storage = new StorageService({ sqliteExecutable: "sqlite3" });
+  await storage.init();
+  const identity = await new ChatEventLogService(storage).getOrCreateDeviceIdentity();
+  await finishSetupCommand({ originId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64 });
+}
+
+/** The storage keeps a sqlite3 process open; a setup command prints its one
+ *  JSON line and exits instead of waiting for it. */
+function finishSetupCommand(result: unknown): Promise<never> {
+  return new Promise(() => {
+    process.stdout.write(`${JSON.stringify(result)}\n`, () => process.exit(0));
+  });
+}
+
+/** Setup only: merges the desktop's chat copy into this machine's database.
+ *  Runs while the runtime is stopped; nothing it writes is emitted. */
+async function runChatCopyImport(args: MachineArgs): Promise<void> {
+  setHostPlatform(createHeadlessPlatform({ userDataDir: args.userDataDir }));
+  const storage = new StorageService({ sqliteExecutable: "sqlite3" });
+  await storage.init();
+  // The artifact tables the copy fills are created by the artifact store.
+  await new ArtifactStore(path.join(userDataPath(), "accordagents.sqlite3"), "sqlite3").init();
+  const identity = await new ChatEventLogService(storage).getOrCreateDeviceIdentity();
+  const summary = await importChatCopy(storage, args.importChatCopy!, { hostMachineId: args.machineId, localOriginId: identity.originId });
+  await finishSetupCommand({ ok: true, ...summary });
 }
 
 const POWER_KEY_CHECK_RETRY_MS = 5_000;
@@ -213,6 +277,29 @@ function readEnrollment(enrollmentPath: string): MobilePairingPackage {
   return parsed;
 }
 
+/** How long a moved runtime waits for its own orderly stop before it exits
+ *  anyway: its enrollment names the new address, and staying up on the old
+ *  one with no new work would help nobody. */
+const RESTART_STOP_TIMEOUT_MS = 30_000;
+
+/** Starts this runtime again after it stops. Under its service the service
+ *  manager does (it restarts a runtime that exits); run by hand, a copy of
+ *  it is started once this one has let go of its files. */
+function restartRuntime(stop: (() => Promise<void>) | undefined): void {
+  if (!process.env.INVOCATION_ID) {
+    // The copy waits until this process is gone: two runtimes never share
+    // the machine's files.
+    const command = shellCommandLine([process.execPath, ...process.execArgv, ...process.argv.slice(1)]);
+    spawn("/bin/sh", ["-c", `while kill -0 ${process.pid} 2>/dev/null; do sleep 1; done; exec ${command}`], { detached: true, stdio: "ignore", env: process.env }).unref();
+  }
+  void Promise.race([
+    (stop ?? (async () => undefined))().catch((error: unknown) => {
+      console.error(`Machine shutdown before restart is not complete: ${error instanceof Error ? error.message : String(error)}`);
+    }),
+    new Promise((resolve) => setTimeout(resolve, RESTART_STOP_TIMEOUT_MS))
+  ]).finally(() => process.exit(0));
+}
+
 function appSkillsSourceRoot(appPath: string): string {
   // Bundle layout (dist/machine/appSkills), compiled tree layout
   // (dist/main/main/appSkills), and the source tree, in that order.
@@ -254,6 +341,17 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   void appSkillsService;
   const appMcpService = new AppMcpService(debugLogService);
   const chatEventLogService = new ChatEventLogService(storageService);
+  /** Set once the runtime is up; a move restarts through it. */
+  let stopRuntime: (() => Promise<void>) | undefined;
+  // This machine's own mailboxes on the User's server (its rooms with
+  // other machines, with the phone) are registered with its signature.
+  setMailboxRegistrationSigner(async ({ url, method, pathWithQuery, body }) => {
+    // Only the User's own server takes it; the shared relay never sees it.
+    const relay = enrollment.relayUrl ? new URL(enrollment.relayUrl) : undefined;
+    const shared = ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS.relayUrl ? new URL(ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS.relayUrl).host : undefined;
+    if (!relay || relay.host !== url.host || relay.host === shared) return undefined;
+    return signHubRequest(await chatEventLogService.getOrCreateDeviceIdentity(), { method, pathWithQuery, body });
+  });
   const chatEventMirrorService = new ChatEventMirrorService(
     storageService,
     chatEventLogService,
@@ -360,9 +458,24 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       void debugLogService.write("machine.host-power.unavailable", { message: error instanceof Error ? error.message : String(error) });
     }
   }
-  // Refused before a provider is started, not discovered when the instance
-  // disappears underneath a running turn.
-  cliAgentRunner.setHostAdmission(presence ? (what) => presence!.admit(what) : () => ({ admitted: false, reason: presenceWarning }));
+  // Refused before a provider (or a scheduled script) is started, not
+  // discovered when the instance disappears underneath a running turn.
+  const admitHostWork = (what: string): MachineHostAdmission | Promise<MachineHostAdmission> => presence
+    ? presence.admit(what)
+    : { admitted: false, reason: presenceWarning || "This machine cannot confirm it is staying awake." };
+  cliAgentRunner.setHostAdmission(admitHostWork);
+  // The name the desktop last gave this machine, kept for a restart while the
+  // desktop is away; the host name only until it first greets this machine.
+  const machineLabelPath = path.join(userDataPath(), "machine-label.json");
+  let storedMachineLabel = await readFile(machineLabelPath, "utf8")
+    .then((text) => (JSON.parse(text) as { name?: unknown }).name)
+    .then((name) => typeof name === "string" && name.trim() ? name.trim() : undefined)
+    .catch(() => undefined);
+  const hubUrl = enrollment.hubUrl;
+  const hubRoom = (url: string, rendezvousId: string) => new HubTunnelClient({
+    hubUrl: url, rendezvousId, role: "machine",
+    identity: () => chatEventLogService.getOrCreateDeviceIdentity()
+  });
   const host: MachineHostService = new MachineHostService(chatService, storageService, settingsService, debugLogService, {
     // A signature or a superseded change that arrives here has to become part
     // of this machine's own state, not just a stored event.
@@ -383,6 +496,13 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     serveChatActionDependency: async (dependency) => dependency.targetKey.startsWith("artifact:")
       && artifactService.emitRevisionActionFor(dependency.targetKey.slice("artifact:".length), dependency.stateId),
     pairing: enrollment,
+    // With the User's hub, this machine meets its devices in the hub's rooms
+    // and its events travel in the hub's order (no relay, no mailbox).
+    ...(hubUrl ? {
+      hubMode: true,
+      createClient: (pairing: MobilePairingPackage) => hubRoom(hubUrl, pairing.rendezvousId),
+      createPeerClient: (room: { rendezvousId: string }) => hubRoom(hubUrl, room.rendezvousId)
+    } : {}),
     deviceId: identity.originId,
     machineName: args.machineName,
     appVersion: platform.appVersion(),
@@ -416,9 +536,83 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     },
     onDesktopMachineId: (machineId) => {
       chatService.setHostMachineId(machineId);
-    }
+    },
+    // These two reach `scriptService`, built below: the desktop's greeting and
+    // its requests arrive only after host.start(), further down.
+    onDesktopMachineName: (name) => {
+      scriptService.setHostName(name, machineScriptHostPhrase(name));
+      if (name !== storedMachineLabel) {
+        storedMachineLabel = name;
+        void writeFile(machineLabelPath, JSON.stringify({ name }), "utf8").catch(() => undefined);
+      }
+    },
+    moveTransport: async (addresses) => { await moveEnrollment(args.enrollmentPath, addresses); },
+    restartRuntime: () => restartRuntime(stopRuntime),
+    scripts: {
+      handle: (operation) => handleScriptsOperation(scriptService, operation),
+      keepsHostAwake: () => scriptService.keepsHostAwake(),
+      scheduledCount: () => scriptService.scheduledCount(),
+      runningNow: () => scriptService.isRunningNow()
+    },
+    // Chats reach this machine as change events from the desktop.
+    applyChatChanges: (event, payload) => chatService.applyRemoteChatChanges(event, payload)
   });
   hostRef = host;
+  // This machine's own changes (its members' replies, messages typed into it
+  // while the desktop is away) go to the desktop and the other machines the
+  // same way.
+  chatService.setChatChangeTransport(createChatChangeTransport({
+    role: "machine",
+    storage: storageService,
+    log: chatEventLogService,
+    recipients: () => host.chatChangeRecipients(),
+    onCommitted: () => host.nudgeEventChannel(),
+    hostMachineId: () => host.enrolledMachineId(),
+    desktopOriginId: () => enrollment.issuer.originId,
+    machineOriginId: (machineId) => host.machineOriginId(machineId),
+    alwaysEmit: () => Boolean(enrollment.hubUrl)
+  }));
+  const stopChatChangePruning = scheduleChatChangePruning({
+    storage: storageService,
+    originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+    unpushedAfter: async () => enrollment.hubUrl ? hubPushedThrough(storageService) : undefined,
+    log: (event, payload) => { void debugLogService.write(event, payload); }
+  });
+  // Scheduled scripts that live on this machine: they run here with the lid
+  // of the laptop closed, keep the instance awake while one is switched on,
+  // and wake the members that run here.
+  const machineLabel = storedMachineLabel ?? args.machineName ?? hostname();
+  let scriptsAwake = "";
+  const scriptService: ScriptService = new ScriptService({
+    store: new ScriptStore(path.join(userDataPath(), "scripts")),
+    secrets: new ScriptSecretStore(path.join(userDataPath(), "script-secrets.json"), platform.secrets),
+    hostId: `machine:${identity.originId}`,
+    hostLabel: machineLabel,
+    hostPhrase: machineScriptHostPhrase(machineLabel),
+    tokens: appMcpService,
+    chat: {
+      describeChat: (chatId) => chatService.describeChatForScripts(chatId),
+      postScriptMessage: (input) => chatService.postScriptMessage({ ...input, progress: (progress) => host.noteNativeProgress(progress) })
+    },
+    node: { command: process.execPath, env: {} },
+    admit: admitHostWork,
+    localMembersOnly: true,
+    debugLog: (event, payload) => {
+      void debugLogService.write(event, payload);
+    },
+    onChanged: () => {
+      host.noteScriptsChanged();
+      // Whether it must stay awake, and for how many scripts, is part of
+      // what the desktop shows and what its automatic stop asks.
+      const awake = `${scriptService.keepsHostAwake()}:${scriptService.scheduledCount()}`;
+      if (awake !== scriptsAwake) {
+        scriptsAwake = awake;
+        void host.publishPowerStatus().catch(() => undefined);
+      }
+    }
+  });
+  chatService.setScriptHost(scriptService);
+  appMcpService.setScriptApiHandler((context, _route, body) => scriptService.postFromScript(context, body));
   // A member here asking other members goes through the desktop: it owns the
   // roster and runs each target where that member lives.
   chatService.setParticipantRequestDelegate({
@@ -454,6 +648,22 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await idlePower.start();
   }
   await host.start();
+  const hubSync = enrollment.hubUrl ? new HubSync({
+    client: new HubClient({ url: enrollment.hubUrl, identity: () => chatEventLogService.getOrCreateDeviceIdentity(), storage: storageService }),
+    storage: storageService,
+    localOriginId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+    trustedKey: async (originId) => host.trustedKey(originId),
+    deliver: (event) => host.receiveFromHub(event),
+    applyChatChange: hubChatChangeApplier(storageService, chatService),
+    onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString()),
+    scopePrefixes: HUB_SCOPE_PREFIXES,
+    log: (event, payload) => { void debugLogService.write(event, payload); }
+  }) : undefined;
+  if (hubSync) {
+    chatEventLogService.onLocalAppend(() => hubSync.nudgePush());
+    hubSync.start();
+  }
+  void scriptService.start().catch((error) => debugLogService.write("scripts.start.error", { message: String(error) }));
   // Repair artifact actions written by runtimes whose event writer was absent.
   // The ids are immutable, so a restart cannot create another version or signature.
   void (async () => {
@@ -480,16 +690,32 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     }).finally(() => { refreshing = false; });
   }, 30_000) : undefined;
   presenceTimer?.unref();
-  console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.relayUrl} (user data: ${userDataPath()})`);
+  console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.hubUrl ?? enrollment.relayUrl} (user data: ${userDataPath()})`);
 
-  return async () => {
+  // One stop, whoever asks for it (a move's restart, the service manager's
+  // SIGTERM): a second request waits for the first instead of running the
+  // shutdown again. A stop that failed may be asked for again.
+  let stopping: Promise<void> | undefined;
+  const stopOnce = async (): Promise<void> => {
     presenceClosed = true;
+    stopChatChangePruning();
     if (presenceTimer) clearInterval(presenceTimer);
     await presenceRefresh;
     try { presence?.publish(true); } catch (error) {
       void debugLogService.write("machine.host-power.shutdown-claim-failed", { message: String(error) });
     }
+    await scriptService.stop();
+    // The channels close with the host: nothing is read into them any more,
+    // so nothing read now is lost; it is read again on the next start.
+    hubSync?.pausePulls();
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
+    if (hubSync) {
+      // What the shutdown itself wrote (interrupted turns) goes up before the
+      // link closes; an unreachable hub gets it on the next start instead.
+      hubSync.nudgePush();
+      await Promise.race([hubSync.idle(), new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
+      hubSync.stop();
+    }
     idlePower?.close();
     await idlePower?.releaseAfterShutdown();
     // The registration outlives the idle scheduler: it is released only once
@@ -502,11 +728,21 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     }
     await appMcpService.stop();
   };
+  stopRuntime = () => {
+    stopping ??= stopOnce().catch((error: unknown) => {
+      stopping = undefined;
+      throw error;
+    });
+    return stopping;
+  };
+  return stopRuntime;
 }
 
 if (require.main === module) {
   const args = parseArgs(process.argv.slice(2));
   (args.maintenanceCommand ? runMachineMaintenance(args).then(() => undefined) :
+    args.deviceIdentity ? printDeviceIdentity(args).then(() => undefined) :
+    args.importChatCopy ? runChatCopyImport(args).then(() => undefined) :
     args.configurePower ? configureMachinePower(args).then(() => undefined) :
     args.checkPower ? checkMachinePower().then(() => undefined) :
     args.revertPower ? revertMachinePower(args).then(() => undefined) : startMachine(args))

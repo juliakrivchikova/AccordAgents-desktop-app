@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { ScriptsUpdatedEvent } from "../shared/scripts";
 import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
+import type { HubInstallRequest, HubSetupCommandRequest, HubSetupState } from "../shared/hubSetup";
 import type {
   CreateMachineRequest,
   CreateMachineResult,
@@ -7,7 +9,9 @@ import type {
   MachineListResult,
   MachineTrustedDevicesResult,
   SaveTrustedDeviceRequest,
-  RemoveMachineRequest
+  RemoveMachineRequest,
+  MachineInactivityQuestion,
+  AnswerMachineInactivityRequest
 } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
@@ -220,6 +224,14 @@ const bridge: AppBridge = {
   respondToChatChoice: (request: RespondToChatChoiceRequest) => ipcRenderer.invoke("chat:respond-to-choice", request),
   respondToChatAppToolApproval: (request: RespondToChatAppToolApprovalRequest) => ipcRenderer.invoke("chat:respond-to-app-tool-approval", request),
   createMobilePairing: (request: CreateMobilePairingRequest) => ipcRenderer.invoke("mobile:create-pairing", request),
+  getHubSetupState: () => ipcRenderer.invoke("hub:setup-state"),
+  getHubSetupCommand: (request: HubSetupCommandRequest) => ipcRenderer.invoke("hub:setup-command", request),
+  installHub: (request: HubInstallRequest) => ipcRenderer.invoke("hub:install", request),
+  onHubSetupProgress: (callback: (state: HubSetupState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: HubSetupState) => callback(state);
+    ipcRenderer.on("hub:setup-progress", listener);
+    return () => ipcRenderer.removeListener("hub:setup-progress", listener);
+  },
   revokeMobilePairing: (request: RevokeMobilePairingRequest) => ipcRenderer.invoke("mobile:revoke-pairing", request),
   startReview: (request: ReviewRequest) => ipcRenderer.invoke("conversations:start-review", request),
   continueReview: (request: ContinueReviewRequest) => ipcRenderer.invoke("conversations:continue-review", request),
@@ -282,6 +294,29 @@ const bridge: AppBridge = {
     const listener = (_event: unknown, result: MachineListResult): void => callback(result);
     ipcRenderer.on("machines:updated", listener);
     return () => ipcRenderer.off("machines:updated", listener);
+  },
+  listScripts: () => ipcRenderer.invoke("scripts:list"),
+  getScriptRevision: (request) => ipcRenderer.invoke("scripts:get-revision", request),
+  getScriptRuns: (request) => ipcRenderer.invoke("scripts:runs", request),
+  setScriptSecret: (request) => ipcRenderer.invoke("scripts:set-secret", request),
+  deleteScriptSecret: (request) => ipcRenderer.invoke("scripts:delete-secret", request),
+  setScriptEnabled: (request) => ipcRenderer.invoke("scripts:set-enabled", request),
+  runScriptNow: (request) => ipcRenderer.invoke("scripts:run-now", request),
+  deleteScript: (request) => ipcRenderer.invoke("scripts:delete", request),
+  releaseHeldScriptMessages: (request) => ipcRenderer.invoke("scripts:release-held", request),
+  discardHeldScriptMessages: (request) => ipcRenderer.invoke("scripts:discard-held", request),
+  onScriptsUpdated: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: ScriptsUpdatedEvent) => callback(payload);
+    ipcRenderer.on("scripts:updated", listener);
+    return () => ipcRenderer.removeListener("scripts:updated", listener);
+  },
+  listMachineInactivityQuestions: (): Promise<MachineInactivityQuestion[]> => ipcRenderer.invoke("machines:inactivity-questions"),
+  answerMachineInactivity: (request: AnswerMachineInactivityRequest): Promise<MachineInactivityQuestion[]> =>
+    ipcRenderer.invoke("machines:inactivity-answer", request),
+  onMachineInactivityQuestions: (callback: (questions: MachineInactivityQuestion[]) => void) => {
+    const listener = (_event: unknown, questions: MachineInactivityQuestion[]): void => callback(questions);
+    ipcRenderer.on("machines:inactivity-questions", listener);
+    return () => ipcRenderer.off("machines:inactivity-questions", listener);
   },
   onArtifactsUpdated: (callback: (event: ArtifactsUpdatedEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: ArtifactsUpdatedEvent) => callback(payload);

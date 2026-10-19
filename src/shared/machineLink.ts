@@ -67,6 +67,20 @@ export interface MachineHelloBody {
   /** Set when the machine cannot keep its outbox on disk: results are held
    *  in memory only and would not survive a restart of the runtime. */
   outboxError?: string;
+  /** This runtime hosts scheduled scripts (absent before scripts existed). */
+  scriptsSupported?: boolean;
+  /** This runtime can move to another relay address when told to
+   *  (machine.transport.move); absent before it could. */
+  transportMoveSupported?: boolean;
+  /** An enabled scheduled script keeps this machine from stopping when idle.
+   *  Not a run: the desktop's update gate does not wait on it. */
+  keepAwake?: boolean;
+  /** How many switched-on scripts keep it awake ("Kept on by 2 scheduled scripts"). */
+  keepAwakeScripts?: number;
+  /** The chat change version this runtime folds (1 and up). A runtime from
+   *  before chat change events leaves it out: it is sent no chat changes and
+   *  runs no turns until it is updated. */
+  chatChanges?: number;
 }
 
 export interface MachineHelloAckBody {
@@ -76,6 +90,9 @@ export interface MachineHelloAckBody {
   /** The desktop's record id for this machine: the value members carry as
    *  `homeMachineId`, so the runtime knows which members are its own. */
   machineId?: string;
+  /** The name the User gave this machine on the desktop, so what the machine
+   *  writes about itself (a script card's "Runs on") uses the same name. */
+  machineName?: string;
 }
 
 export interface MachineSettingsSyncBody {
@@ -119,6 +136,12 @@ export interface MachineTurnRequestBody {
   /** Sealed before entering the immutable log: environment values must not
    * become plaintext chat history or blob fragments on either endpoint. */
   sealedSettings?: string;
+  /** The last chat change the desktop committed for this chat before the
+   *  request. The machine runs the turn only once it has applied that event,
+   *  so a member never answers a chat that has not fully arrived. */
+  chatHead?: { originId: string; logScopeId: string; originSeq: number };
+  /** Where the chat's project lives on each machine (the member's cwd). */
+  machineRepository?: { sourcePath: string; paths: Record<string, string> };
 }
 
 export interface MachineTurnCancelBody {
@@ -413,7 +436,78 @@ export interface MachineTurnSuggestionBody {
   suggestion: string;
 }
 
+/** One operation on this machine's scheduled scripts, asked by the desktop
+ *  that enrolled it. Ephemeral and addressed to one machine: a key value in
+ *  setSecret never enters the durable event log, a mailbox or settings. */
+export type MachineScriptsOperation =
+  | { op: "list" }
+  | { op: "revision"; scriptId: string; revisionId?: string }
+  | { op: "runs"; scriptId: string }
+  | { op: "setSecret"; scriptId: string; name: string; value: string }
+  | { op: "deleteSecret"; scriptId: string; name: string }
+  | { op: "setEnabled"; scriptId: string; enabled: boolean }
+  | { op: "runNow"; scriptId: string }
+  | { op: "delete"; scriptId: string }
+  | { op: "releaseHeld"; scriptId: string }
+  | { op: "discardHeld"; scriptId: string };
+
+export interface MachineScriptsRequestBody {
+  type: "machine.scripts.request";
+  requestId: string;
+  /** The runtime instance the desktop last heard from (hello `instanceId`):
+   *  the machine refuses a request made for an earlier run of itself. */
+  instanceId?: string;
+  /** When the desktop stops waiting. The machine refuses the request after
+   *  this, so a change the User was told timed out never happens later. */
+  expiresAt?: string;
+  operation: MachineScriptsOperation;
+}
+
+export interface MachineScriptsResultBody {
+  type: "machine.scripts.result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  result?: unknown;
+}
+
+/** Machine -> desktop: its scheduled scripts changed; ask for the list again. */
+export interface MachineScriptsChangedBody {
+  type: "machine.scripts.changed";
+}
+
+/** Desktop -> machine: meet this desktop and the phone at another relay
+ *  address from now on (the User's own server). The machine keeps its keys,
+ *  rooms and mailbox ids, rewrites the addresses in its enrollment and
+ *  restarts. Only an idle machine is asked. */
+export interface MachineTransportMoveBody {
+  type: "machine.transport.move";
+  requestId: string;
+  /** The runtime instance the desktop last heard from; a request made for an
+   *  earlier run of the machine is refused. */
+  instanceId?: string;
+  expiresAt?: string;
+  /** How long the desktop waits for the answer, from when it asked: the
+   *  machine measures it on its own clock from receipt, so the two clocks
+   *  need not agree. */
+  answerWithinMs?: number;
+  relayUrl: string;
+  outboxUrl: string;
+}
+
+export interface MachineTransportMovedBody {
+  type: "machine.transport.moved";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+}
+
 export type MachineLinkMessage =
+  | MachineTransportMoveBody
+  | MachineTransportMovedBody
+  | MachineScriptsRequestBody
+  | MachineScriptsResultBody
+  | MachineScriptsChangedBody
   | MachineHelloBody
   | MachineHelloAckBody
   | MachineSettingsSyncBody
@@ -502,6 +596,11 @@ const MESSAGE_TYPE_TABLE: Record<MachineLinkMessageType, true> = {
   "machine.attachment.request": true,
   "machine.attachment.result": true,
   "machine.turn.suggestion": true,
+  "machine.scripts.request": true,
+  "machine.scripts.result": true,
+  "machine.scripts.changed": true,
+  "machine.transport.move": true,
+  "machine.transport.moved": true,
   "machine.member.background": true,
   "machine.member.background.snapshot": true,
   "machine.member.background.request": true,
@@ -574,8 +673,28 @@ export interface RemoveMachineRequest {
   id: string;
 }
 
+/** A machine that has not been active for 10 days or more. While it is kept,
+ *  the desktop keeps every chat change for it, so the User is asked whether it
+ *  is still in use. */
+export interface MachineInactivityQuestion {
+  machineId: string;
+  name: string;
+  inactiveDays: number;
+}
+
+export interface AnswerMachineInactivityRequest {
+  machineId: string;
+  answer: "keep" | "remove";
+}
+
 /** An enrolled machine as the desktop stores it. The pairing package carries
  *  the relay room, the seal key, and the capability fingerprint. */
+/** The key a machine signs with: from its hello, or recorded at setup
+ *  before it first connected. */
+export function machineSigningKey(record: Pick<MachineRecord, "lastHello" | "devicePublicKeyDerBase64">): string | undefined {
+  return record.lastHello?.publicKeyDerBase64 ?? record.devicePublicKeyDerBase64;
+}
+
 export interface MachineRecord {
   id: string;
   name: string;
@@ -584,6 +703,9 @@ export interface MachineRecord {
   /** Relay device id of the machine (its chat-event origin id) once it has
    *  connected; empty until the first hello. */
   deviceId: string;
+  /** The key the machine signs with, recorded at setup: the User's hub admits
+   *  the machine by it before its first hello. */
+  devicePublicKeyDerBase64?: string;
   pairingKey: string;
   createdAt: string;
   lastSeenAt?: string;
@@ -595,4 +717,8 @@ export interface MachineRecord {
    *  yet: kept across desktop restarts, so a restarted desktop asks the
    *  machine about them instead of leaving their bubbles pending forever. */
   pendingRuns?: Array<{ runId: string; conversationId: string }>;
+  /** The machine runs a runtime that folds chat change events: known from its
+   *  hello, or from setup, which installs such a runtime and copies every
+   *  chat to it. Until then it is sent no chat changes. */
+  chatChanges?: boolean;
 }

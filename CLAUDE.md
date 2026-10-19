@@ -33,6 +33,8 @@ Prefer the Makefile aliases; they wrap the npm scripts in `package.json`.
 - `npm run test:accord` — Build the main process, then run focused Accord launcher preference and target reconciliation tests.
 - `npm run test:permissions` — Build the main process, then run targeted Node service tests for chat permissions/cancellation, repo file mentions, chat rename, role archive behavior, participant request threads, git repo-file listing, CLI permission handling, and warnings.
 - `npm run test:app-skills` — Build the main process, then run app-skill service tests.
+- `npm run test:scripts` — Build the main process, then run the scheduled-scripts service, schedule (cron, time zones, DST) and command tests.
+- `npm run test:hub` — Build the main process, then run the User's hub (server, order, folding, rooms) and device sync tests.
 
 There is no single full-project lint suite. Before submitting changes, run `make typecheck` and (for renderer changes) `make build`. Renderer guardrails are available through `make lint-colors`, `make lint-lines`, and `make lint-unused`. For chat permissions, cancellation, repo-file mentions, rename, git repo-file listing, CLI permission behavior, role archive behavior, participant request threads, or warnings, run `npm run test:permissions`. For app-skill service changes, run `npm run test:app-skills`. Manual verification notes are expected in PRs whenever IPC, provider integrations, git diff handling, conversation storage, or chat concurrency are touched.
 

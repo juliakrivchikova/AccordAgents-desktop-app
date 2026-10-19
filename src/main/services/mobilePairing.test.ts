@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS,
+  mobileControlForHub,
   mobileControlSettingsFromEnvironment,
   mobilePairingRequestWithEndpointDefaults,
   parseMobilePairingPayload
@@ -241,3 +242,18 @@ async function testStorage(): Promise<{ storage: StorageService; cleanup: () => 
 function fixedClock(): () => Date {
   return () => new Date("2026-08-06T00:00:00.000Z");
 }
+
+test("with the User's own server, new pairings name it as their relay and the phone's app stays where it is", () => {
+  const managed = mobileControlSettingsFromEnvironment({});
+  const hub = mobileControlForHub(managed, "https://52.72.175.0");
+  assert.equal(hub.provider, managed.provider);
+  assert.deepEqual(hub.defaults, {
+    ...managed.defaults,
+    relayUrl: "wss://52.72.175.0/v1/relay",
+    mailboxUrl: "https://52.72.175.0/",
+    outboxUrl: "https://52.72.175.0/v1/mailbox/events"
+  });
+  assert.equal(hub.defaults.staticOriginUrl, "https://mobile.accordagents.com/");
+  assert.deepEqual(mobileControlForHub(managed, undefined), managed, "no server, the shared relay as before");
+  assert.equal(mobileControlForHub(managed, "http://127.0.0.1:18310").defaults.relayUrl, "ws://127.0.0.1:18310/v1/relay");
+});

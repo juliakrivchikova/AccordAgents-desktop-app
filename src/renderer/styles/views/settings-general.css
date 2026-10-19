@@ -787,6 +787,18 @@
   color: var(--app-success);
 }
 
+.settings-view .gen-aws-progress li.is-failed,
+.gen-aws-dialog .gen-aws-progress li.is-failed {
+  color: var(--app-danger);
+  font-weight: 650;
+}
+
+.settings-view .gen-aws-progress li.is-failed > span:first-child,
+.gen-aws-dialog .gen-aws-progress li.is-failed > span:first-child {
+  border-color: var(--app-danger-border);
+  color: var(--app-danger);
+}
+
 .settings-view .gen-pill-danger {
   color: var(--app-danger);
   border-color: var(--app-danger-border);

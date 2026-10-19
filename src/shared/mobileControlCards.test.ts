@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { controlCardFromChoiceMessage } from "./mobileControlCards";
-import type { ChatMessage } from "./types";
+import { controlCardFromApproval, controlCardFromChoiceMessage } from "./mobileControlCards";
+import type { ChatAppToolApproval, ChatMessage } from "./types";
 
 function choiceMessage(recommendedOptionId?: string): ChatMessage {
   return {
@@ -58,4 +58,34 @@ test("refused answers travel with their card while the choice still waits, and n
   choice.status = "selected";
   choice.selectedOptionId = "both";
   assert.equal(controlCardFromChoiceMessage("conversation-1", message)?.refusedAnswers, undefined);
+});
+
+// The phone cannot show a script's code yet, so a script that installs code is
+// approved on the desktop: the phone may only decline it.
+test("a scheduled script that installs code reaches the phone as decline-only", () => {
+  const approval = (op: string) => ({
+    id: `approval-${op}`,
+    conversationId: "chat-1",
+    requesterParticipantId: "p-taylor",
+    requesterHandle: "taylor",
+    requesterRoleConfigId: "software-engineer",
+    toolName: "app_scripts_request_change",
+    capability: "scripts.request",
+    status: "pending",
+    summary: "Add the scheduled script \"QA ping\"",
+    createdAt: "2026-10-18T00:00:00.000Z",
+    updatedAt: "2026-10-18T00:00:00.000Z",
+    request: {
+      kind: "script-change", op, scriptId: "script-0000-test", name: "QA ping", description: "d",
+      hostId: "desktop", hostLabel: "This Mac", hostPhrase: "this Mac", runtime: "node", entry: "w.mjs",
+      schedule: { kind: "interval", everySeconds: 60 }, scheduleText: "Every minute", timeoutSeconds: 300,
+      secretNames: [], permissions: { chatIds: ["chat-1"], participantIds: [], maxWakeupsPerHour: 6 },
+      chatLabels: {}, participantLabels: {}, fileCount: 1, totalBytes: 10
+    }
+  }) as unknown as ChatAppToolApproval;
+  const create = controlCardFromApproval("chat-1", approval("create"));
+  assert.deepEqual(create.options.map((option) => option.id), ["deny"]);
+  assert.match(create.title, /^Approve on the desktop/);
+  const disable = controlCardFromApproval("chat-1", approval("disable"));
+  assert.deepEqual(disable.options.map((option) => option.id), ["allow", "deny"], "switching off installs nothing, so the phone may approve it");
 });

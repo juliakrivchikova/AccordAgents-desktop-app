@@ -31,6 +31,7 @@ import {
   normalizeChatPromptContextSettings
 } from "../../../shared/chatPromptContext";
 import { DevicePairingSection } from "./device-pairing-section";
+import { HubServerSection } from "./hub-server-section";
 import { MachinesSection } from "./machines-section";
 import { cliProviderMetadata, deriveAgentReadiness } from "../../../shared/cliReadiness";
 import { isChatProviderKind } from "../../../shared/chatProviders";
@@ -278,6 +279,8 @@ export function GeneralSettingsSection(props: {
           </div>
         </div>
       </section>
+
+      <HubServerSection />
 
       <DevicePairingSection mobileControl={props.mobileControl} />
 

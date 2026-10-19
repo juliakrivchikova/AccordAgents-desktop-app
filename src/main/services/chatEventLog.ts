@@ -38,6 +38,7 @@ export class ChatEventLogService {
   private deviceIdentityLoad?: Promise<ChatEventDeviceIdentityRecord>;
   private clock?: HybridLogicalClock;
   private readonly localAppendQueues = new Map<string, Promise<void>>();
+  private readonly appendListeners = new Set<() => void>();
 
   constructor(
     private readonly storage: StorageService,
@@ -163,6 +164,12 @@ export class ChatEventLogService {
     throw new Error("Chat event append failed after retrying origin sequence conflicts.");
   }
 
+  /** Called after every local append (a hub link sends it at once). */
+  onLocalAppend(listener: () => void): () => void {
+    this.appendListeners.add(listener);
+    return () => { this.appendListeners.delete(listener); };
+  }
+
   private enqueueLocalAppend<T>(
     originId: string,
     append: () => Promise<T>
@@ -175,6 +182,9 @@ export class ChatEventLogService {
     return next.finally(() => {
       if (this.localAppendQueues.get(queueKey) === tail) {
         this.localAppendQueues.delete(queueKey);
+      }
+      for (const listener of this.appendListeners) {
+        try { listener(); } catch { /* a listener never breaks an append */ }
       }
     });
   }

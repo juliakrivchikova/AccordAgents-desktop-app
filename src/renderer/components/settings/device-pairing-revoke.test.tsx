@@ -63,6 +63,8 @@ async function clickableButton(text: string): Promise<HTMLButtonElement> {
 // copy or revoke, so the section offers Generate alone.
 test("the untouched section shows no QR panel and no copy or revoke", async () => {
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    getHubSetupState: async () => ({ status: "ready", url: "https://52.72.175.0", bundledVersion: "1.0.0" }),
+    onHubSetupProgress: () => () => undefined,
     createMobilePairing: async () => PAIRING,
     revokeMobilePairing: async () => undefined
   };
@@ -99,6 +101,8 @@ test("the untouched section shows no QR panel and no copy or revoke", async () =
 test("device pairing does not revoke until the confirmation is accepted", async () => {
   const revokeCalls: unknown[] = [];
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    getHubSetupState: async () => ({ status: "ready", url: "https://52.72.175.0", bundledVersion: "1.0.0" }),
+    onHubSetupProgress: () => () => undefined,
     createMobilePairing: async () => PAIRING,
     revokeMobilePairing: async (request: unknown) => {
       revokeCalls.push(request);
@@ -148,6 +152,8 @@ test("device pairing does not revoke until the confirmation is accepted", async 
 // died with it, a paired phone could never be revoked from the UI again.
 test("the pairing survives leaving and reopening settings", async () => {
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    getHubSetupState: async () => ({ status: "ready", url: "https://52.72.175.0", bundledVersion: "1.0.0" }),
+    onHubSetupProgress: () => () => undefined,
     createMobilePairing: async () => PAIRING,
     revokeMobilePairing: async () => undefined
   };
@@ -183,4 +189,27 @@ test("the pairing survives leaving and reopening settings", async () => {
   await act(async () => {
     reopened.unmount();
   });
+});
+
+test("without the User's server the phone cannot be paired, and the section says why", async () => {
+  forgetDevicePairingForTests();
+  let created = 0;
+  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    getHubSetupState: async () => ({ status: "none", bundledVersion: "1.0.0" }),
+    onHubSetupProgress: () => () => undefined,
+    createMobilePairing: async () => { created += 1; throw new Error("not reached"); }
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(<DevicePairingSection mobileControl={{ provider: "accord-managed", defaults: { relayUrl: "wss://relay.accordagents.com/v1/relay", staticOriginUrl: "https://mobile.accordagents.com/", outboxUrl: "https://relay.accordagents.com/v1/mailbox/events" } }} />);
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+  const generate = host.querySelector("[data-device-pairing-action=generate]") as HTMLButtonElement;
+  assert.equal(generate.disabled, true);
+  assert.match(host.querySelector("[data-testid=device-pairing-desc]")?.textContent ?? "", /Set up your server first/);
+  await act(async () => { generate.click(); });
+  assert.equal(created, 0);
+  await act(async () => { root.unmount(); host.remove(); });
 });

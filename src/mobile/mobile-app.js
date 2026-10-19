@@ -1621,6 +1621,32 @@
       await render("synced");
       return "applied";
     }
+    if (event.kind === "chat.changes") {
+      // A machine writes its members' messages as chat change events. With the
+      // desktop away they reach this phone directly, and are shown the way the
+      // back delta that carried them before was shown, choice cards included.
+      const changed = (Array.isArray(body.changes) ? body.changes : [])
+        .filter(function (change) { return change && (change.type === "message.created" || change.type === "message.updated") && change.message; })
+        .map(function (change) { return change.message; });
+      // Shown as they arrive, so never older text over newer.
+      const orderKey = MACHINE_CHANGE_ORDER_META_PREFIX + event.originId + ":" + conversationId;
+      const order = globalThis.AccordMachineChannel.newerMachineMessages(await readMetaRecord(orderKey), event.originSeq, changed);
+      const messages = order.fresh;
+      if (messages.length) {
+        await handleRelayTimelinePayload({
+          type: "mobile.timeline.events",
+          conversationId: conversationId,
+          events: messages.map(function (message) { return machineTimelineEvent(message, "done"); })
+        }, conversationId);
+        for (const message of messages) {
+          const card = machineChoiceCard(conversationId, message);
+          if (card) mergeControlCard(conversationId, card);
+        }
+        await writeMetaRecord(orderKey, order.record);
+        await render("synced");
+      }
+      return "applied";
+    }
     if (body.type === "machine.approval.requested" || body.type === "machine.approval.updated") {
       mergeControlCard(conversationId, machineApprovalCard(conversationId, body.approval, machine && machine.name));
       await render("synced");
@@ -1677,7 +1703,10 @@
       id: message.id,
       messageId: message.id,
       role: message.role === "user" ? "you" : message.role === "system" ? "system" : "participant",
-      participantLabel: message.participantHandle || message.participantName,
+      // A scheduled script's message is named after the script, as the
+      // desktop's timeline names it.
+      participantLabel: message.participantHandle || message.participantName ||
+        (message.role === "script" ? message.participantLabel || (message.metadata && message.metadata.scriptName) : undefined),
       content: content,
       status: status,
       createdAt: message.createdAt || nowIso(),
@@ -1708,6 +1737,17 @@
    * than by hope; a card missing its options is a card with no buttons.
    */
   function machineApprovalCard(conversationId, approval, machineName) {
+    // A script that installs code is approved where its code can be read:
+    // like controlCardFromApproval, the phone may only decline it.
+    // The same fail-closed rule as approvalInstallsScriptCode: a scripts card
+    // it cannot read is treated as installing code.
+    const request = approval.request;
+    const readable = Boolean(request && request.kind === "script-change" && typeof request.scriptId === "string" &&
+      typeof request.name === "string" && Array.isArray(request.secretNames) && request.schedule && typeof request.schedule === "object" &&
+      request.permissions && Array.isArray(request.permissions.chatIds) && Array.isArray(request.permissions.participantIds));
+    const desktopOnly = approval.toolName === "app_scripts_request_change" &&
+      !(readable && (request.op === "delete" || request.op === "enable" || request.op === "disable"));
+    const scriptSummary = approval.summary || "A scheduled script";
     return {
       id: approval.id,
       kind: "permission",
@@ -1715,11 +1755,13 @@
       // chat list cannot vouch for it and must not withdraw it.
       source: "machine",
       conversationId: conversationId,
-      title: approval.summary || "Permission request",
-      summary: approval.summary || "",
+      title: desktopOnly ? "Approve on the desktop: " + scriptSummary : approval.summary || "Permission request",
+      summary: desktopOnly
+        ? scriptSummary + ". The phone cannot show the script's code yet, so it is approved on the desktop. You can decline it here."
+        : approval.summary || "",
       ...(approval.requesterHandle ? { requesterLabel: "@" + approval.requesterHandle } : {}),
       ...(machineName ? { machineName: machineName } : {}),
-      options: [{ id: "allow", label: "Allow" }, { id: "deny", label: "Deny" }],
+      options: desktopOnly ? [{ id: "deny", label: "Deny" }] : [{ id: "allow", label: "Allow" }, { id: "deny", label: "Deny" }],
       allowsCustomAnswer: false,
       allowsCancel: false,
       status: approval.status === "pending" ? "pending" : "answered",
@@ -1973,6 +2015,9 @@
    * reload rebuilds the Stop controls from the rows, and a run whose terminal
    * only ever lived in memory would be offered for stopping again.
    */
+  /** Per machine and chat: the change that last set each message shown here. */
+  const MACHINE_CHANGE_ORDER_META_PREFIX = "machine-change-order:";
+
   async function rememberMachineTerminal(conversationId, body) {
     const record = (await readMetaRecord(MACHINE_TERMINALS_META_KEY)) || {};
     const terminals = record.terminals || {};

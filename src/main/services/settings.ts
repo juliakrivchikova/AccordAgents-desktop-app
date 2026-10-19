@@ -9,6 +9,7 @@ import { machineProfileVariables, type MachineInstallRecord } from "../../shared
 import { assertAwsMachinePowerConfig, type AwsMachinePowerConfig } from "../../shared/machinePower";
 import { normalizeMachinePowerHandoffRecords, type MachinePowerHandoffRecord } from "../../shared/machinePowerHandoff";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
+import type { MachineMoveRecord } from "./machineTransportMoves";
 import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -98,7 +99,7 @@ import {
   isValidChatSavedPromptTrigger,
   normalizeChatSavedPromptTrigger
 } from "../../shared/chatSavedPrompts";
-import { mobileControlSettingsFromEnvironment } from "../../shared/mobilePairing";
+import { mobileControlForHub, mobileControlSettingsFromEnvironment } from "../../shared/mobilePairing";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import {
   cliProviderHostDefaultModel,
@@ -111,6 +112,10 @@ import { CLI_PROVIDER_SETUP, preferredReadyAssistantProviderKind } from "../../s
 import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import { readCrashReportsChoice, writeCrashReportsChoice } from "./crashReportPreferences";
+import { isAcceptableHubUrl } from "../../shared/hubProtocol";
+import { compareVersions } from "../../shared/machineInstall";
+import { HUB_RELAY_FIRST_VERSION } from "../../shared/hubSetup";
+import { isHubServerAddress, type HubLinkConfig } from "../../shared/hubSetup";
 
 type StoredProviderSettings = ProviderSettings & {
   encryptedApiKey?: string;
@@ -178,6 +183,9 @@ interface StoredSettings {
    *  relay seal keys and are stored sealed, keyed by MachineRecord.pairingKey. */
   machines?: MachineRecord[];
   encryptedMachinePairings?: string;
+  /** Moves to another relay address asked of machines and not settled yet
+   *  (see MachineMoveRecord); written durably. */
+  machineMoves?: MachineMoveRecord[];
   /** This host's power key is never part of participant settings replication. */
   encryptedMachinePower?: string;
   /** The power key `encryptedMachinePower` replaced ("none" when there was
@@ -191,6 +199,8 @@ interface StoredSettings {
   /** When the User last changed the switch: a machine's report older than
    *  this predates the change and says nothing about whether it arrived. */
   machineAutoStopChangedAt?: string;
+  /** The User's own server (hub), once it is set up. */
+  hub?: HubLinkConfig;
   /** Who holds a copy of the phone's start key. Records only, never the
    *  secret, and never sent to a machine: they name the User's devices. */
   machinePowerHandoffs?: MachinePowerHandoffRecord[];
@@ -205,6 +215,11 @@ interface StoredSettings {
   machinePairingBindings?: Record<string, string>;
   revokedMachinePairingKeys?: string[];
   machineDeviceRevocations?: Record<string, string>;
+  /** When this desktop last asked about machines that stopped being used. */
+  machineInactivityCheckAt?: string;
+  /** Removed machines whose kept chat changes may not be dropped yet (the
+   *  app stopped in between); dropped at the next start. */
+  removedMachineOutboxes?: Array<{ pairingKey: string; deviceId: string }>;
 }
 
 
@@ -1805,6 +1820,31 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
 /** `encryptedMachinePowerPrevious` when the key a save replaced was none. */
 const NO_MACHINE_POWER = "none";
 
+function hubSettingField(value: unknown): { hub?: HubLinkConfig } {
+  const hub = normalizeHubSetting(value);
+  return hub ? { hub } : {};
+}
+
+/** The hub this desktop syncs with, as read back from disk. */
+function normalizeHubSetting(value: unknown): HubLinkConfig | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const hub = value as { url?: unknown; hubId?: unknown; server?: unknown };
+  if (typeof hub.url !== "string" || !isAcceptableHubUrl(hub.url)) return undefined;
+  let server: import("../../shared/hubSetup").HubServerRecord | undefined;
+  if (hub.server && typeof hub.server === "object") {
+    const record = hub.server as Record<string, unknown>;
+    // Only a record setup could have written: its fields go into SSH commands.
+    if (isHubServerAddress(record)) {
+      server = {
+        version: 1, region: record.region as string, instanceName: record.instanceName as string, ip: record.ip as string, user: record.user as string,
+        ...(typeof record.installedAt === "string" ? { installedAt: record.installedAt } : {}),
+        ...(typeof record.installedVersion === "string" ? { installedVersion: record.installedVersion } : {})
+      };
+    }
+  }
+  return { url: hub.url, ...(typeof hub.hubId === "string" && hub.hubId ? { hubId: hub.hubId } : {}), ...(server ? { server } : {}) };
+}
+
 export class SettingsService {
   private readonly settingsPath: string;
   private readonly mobilePairedDevicesPath: string;
@@ -1814,6 +1854,8 @@ export class SettingsService {
   private storedLoad: Promise<StoredSettings> | undefined;
   private storedWriteQueue: Promise<void> = Promise.resolve();
   private assistantProviderMutation: Promise<void> = Promise.resolve();
+
+  private readonly storedChangeListeners = new Set<() => void>();
 
   constructor(private readonly options: { profileHome?: string } = {}) {
     this.settingsPath = path.join(userDataPath(), "settings.json");
@@ -1833,7 +1875,7 @@ export class SettingsService {
       chatAutoWatchWakeLimit: this.normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
       chatPromptContext: this.normalizeChatPromptContextSettings(stored.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(stored),
-      mobileControl: mobileControlSettingsFromEnvironment(process.env),
+      mobileControl: mobileControlForHub(mobileControlSettingsFromEnvironment(process.env), this.hubUrlOf(stored)),
       assistantProviderKind: this.normalizeChatProviderKind(stored.assistantProviderKind),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
       lastRepoPath: stored.lastRepoPath,
@@ -2543,6 +2585,31 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
+  /** Removed machines whose kept chat changes still have to be dropped. */
+  async listRemovedMachineOutboxes(): Promise<Array<{ pairingKey: string; deviceId: string }>> {
+    const entries = (await this.readStored()).removedMachineOutboxes;
+    return Array.isArray(entries)
+      ? entries.filter((entry) => typeof entry?.pairingKey === "string" && typeof entry?.deviceId === "string" && entry.deviceId.length > 0)
+      : [];
+  }
+
+  async clearRemovedMachineOutbox(deviceId: string): Promise<void> {
+    const stored = await this.readStored();
+    const entries = (stored.removedMachineOutboxes ?? []).filter((entry) => entry.deviceId !== deviceId);
+    stored.removedMachineOutboxes = entries.length ? entries : undefined;
+    await this.writeStored(stored);
+  }
+
+  async getMachineInactivityCheckAt(): Promise<string | undefined> {
+    return (await this.readStored()).machineInactivityCheckAt;
+  }
+
+  async saveMachineInactivityCheckAt(at: string): Promise<void> {
+    const stored = await this.readStored();
+    stored.machineInactivityCheckAt = at;
+    await this.writeStored(stored);
+  }
+
   async updateLastRepoPath(repoPath: string): Promise<AppSettings> {
     const stored = await this.readStored();
     const normalized = repoPath.trim();
@@ -2786,6 +2853,12 @@ export class SettingsService {
     }
   }
 
+  /** Called after every settings write that reached the disk. */
+  onStoredChange(listener: () => void): () => void {
+    this.storedChangeListeners.add(listener);
+    return () => { this.storedChangeListeners.delete(listener); };
+  }
+
   private async writeStored(settings: StoredSettings, durable = false): Promise<void> {
     const previous = this.storedState;
     this.storedState = settings;
@@ -2813,6 +2886,9 @@ export class SettingsService {
     catch (error) {
       if (durable && this.storedState === settings) this.storedState = previous;
       throw error;
+    }
+    for (const listener of this.storedChangeListeners) {
+      try { listener(); } catch { /* a listener's failure is not the write's */ }
     }
   }
 
@@ -2878,12 +2954,14 @@ export class SettingsService {
         ? settings.encryptedMachinePowerPrevious : undefined,
       ...(typeof settings.machineAutoStopEnabled === "boolean" ? { machineAutoStopEnabled: settings.machineAutoStopEnabled } : {}),
       ...(typeof settings.machineAutoStopChangedAt === "string" ? { machineAutoStopChangedAt: settings.machineAutoStopChangedAt } : {}),
+      ...hubSettingField(settings.hub),
       machinePowerHandoffs: normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs).length
         ? normalizeMachinePowerHandoffRecords(settings.machinePowerHandoffs)
         : undefined,
       encryptedMachinePairings: typeof settings.encryptedMachinePairings === "string" && settings.encryptedMachinePairings.trim()
         ? settings.encryptedMachinePairings
         : undefined,
+      machineMoves: normalizeMachineMoves(settings.machineMoves),
       // Read back, not rebuilt. This function returns an explicit object, so a
       // field missing from it is dropped every time settings are read from
       // disk -- and these four were. The roster was written and then forgotten
@@ -2896,7 +2974,14 @@ export class SettingsService {
       revokedMachinePairingKeys: Array.isArray(settings.revokedMachinePairingKeys)
         ? [...new Set(settings.revokedMachinePairingKeys.filter(key => typeof key === "string" && key))] : undefined,
       machineDeviceRevocations: settings.machineDeviceRevocations && typeof settings.machineDeviceRevocations === "object"
-        ? { ...settings.machineDeviceRevocations } : undefined
+        ? { ...settings.machineDeviceRevocations } : undefined,
+      // Read back too: dropped here, the 10-day rhythm of the question about
+      // unused machines restarted with every launch.
+      machineInactivityCheckAt: typeof settings.machineInactivityCheckAt === "string" ? settings.machineInactivityCheckAt : undefined,
+      removedMachineOutboxes: Array.isArray(settings.removedMachineOutboxes)
+        ? settings.removedMachineOutboxes.filter((entry) => typeof entry?.pairingKey === "string" && typeof entry?.deviceId === "string" && entry.deviceId)
+          .map((entry) => ({ pairingKey: entry.pairingKey, deviceId: entry.deviceId }))
+        : undefined
     };
   }
 
@@ -2940,7 +3025,9 @@ export class SettingsService {
         ...(typeof record.lastSeenAt === "string" ? { lastSeenAt: record.lastSeenAt } : {}),
         pendingRuns: this.normalizeMachineRunRecords(record.pendingRuns),
         pendingCancels: this.normalizeMachineRunRecords(record.pendingCancels),
-        ...(record.lastHello && typeof record.lastHello === "object" ? { lastHello: record.lastHello } : {})
+        ...(record.lastHello && typeof record.lastHello === "object" ? { lastHello: record.lastHello } : {}),
+        ...(typeof record.devicePublicKeyDerBase64 === "string" && record.devicePublicKeyDerBase64 ? { devicePublicKeyDerBase64: record.devicePublicKeyDerBase64 } : {}),
+        ...(record.chatChanges === true ? { chatChanges: true } : {})
       }];
     });
     return machines.length > 0 ? machines : undefined;
@@ -3304,6 +3391,55 @@ export class SettingsService {
     return (stored.machines ?? []).map((machine) => ({ ...machine }));
   }
 
+  /** Replaces only a machine's pairing (it moved), leaving its record as
+   *  it stands now. */
+  async saveMachinePairing(pairingKey: string, pairing: MobilePairingPackage): Promise<void> {
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+    const pairings = this.readMachinePairings(stored);
+    pairings[pairingKey] = pairing;
+    stored.encryptedMachinePairings = this.sealJson(JSON.stringify(pairings));
+    await this.writeStored(stored);
+  }
+
+  /** Moves this desktop asked machines for and has not settled yet. */
+  async listMachineMoves(): Promise<MachineMoveRecord[]> {
+    const stored = await this.readStored();
+    return (stored.machineMoves ?? []).map((record) => structuredClone(record));
+  }
+
+  /** Written to disk before the move is asked for: a move is never forgotten. */
+  async saveMachineMove(record: MachineMoveRecord): Promise<void> {
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+    // A new object: a write that fails leaves the settings in memory as the
+    // disk has them.
+    await this.writeStored({
+      ...stored,
+      machineMoves: [...(stored.machineMoves ?? []).filter((item) => item.machineId !== record.machineId), structuredClone(record)]
+    }, true);
+  }
+
+  /** Settles a move; with `adopt`, the machine's new pairing is saved in the
+   *  same write, so the two never disagree on disk. */
+  async finishMachineMove(machineId: string, adopt?: { pairingKey: string; pairing: MobilePairingPackage }): Promise<boolean> {
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+    const remaining = (stored.machineMoves ?? []).filter((item) => item.machineId !== machineId);
+    const next: StoredSettings = { ...stored, machineMoves: remaining.length ? remaining : undefined };
+    // A machine removed meanwhile gets no pairing back: removal leaves no way in.
+    const adopted = Boolean(adopt && (stored.machines ?? []).some((machine) => machine.id === machineId && machine.pairingKey === adopt.pairingKey));
+    if (adopt && adopted) {
+      const pairings = this.readMachinePairings(stored);
+      pairings[adopt.pairingKey] = adopt.pairing;
+      next.encryptedMachinePairings = this.sealJson(JSON.stringify(pairings));
+    }
+    // A new object: a write that fails leaves the record (and the old
+    // pairing) in memory as on disk, so a later pass settles it again.
+    await this.writeStored(next, true);
+    return adopted;
+  }
+
   async saveMachine(record: MachineRecord, pairing?: MobilePairingPackage): Promise<MachineRecord[]> {
     const stored = await this.readStored();
     const machines = (stored.machines ?? []).filter((machine) => machine.id !== record.id);
@@ -3369,6 +3505,14 @@ export class SettingsService {
     const stored = await this.readStored();
     const removed = (stored.machines ?? []).find((machine) => machine.id === id);
     stored.machines = (stored.machines ?? []).filter((machine) => machine.id !== id);
+    // What was kept for it is dropped after this write; should the app stop in
+    // between, the next start finishes it.
+    if (removed?.deviceId) {
+      stored.removedMachineOutboxes = [
+        ...(stored.removedMachineOutboxes ?? []).filter((entry) => entry.deviceId !== removed.deviceId),
+        { pairingKey: removed.pairingKey, deviceId: removed.deviceId }
+      ].slice(-50);
+    }
     // A removed machine must not leave this desktop's way into it behind.
     const installs = (stored.machineInstalls ?? []).filter((record) => record.machineId !== id);
     stored.machineInstalls = installs.length ? installs : undefined;
@@ -3507,6 +3651,38 @@ export class SettingsService {
     return this.readMachinePairings(stored)[pairingKey];
   }
 
+  /** The hub's address as getHubConfig reads it, once its program serves
+   *  the relay (an older one does not, and a pairing that named it would
+   *  find nobody there). */
+  private hubUrlOf(stored: StoredSettings): string | undefined {
+    const override = process.env.ACCORDAGENTS_HUB_URL?.trim();
+    if (override) return isAcceptableHubUrl(override) ? override : undefined;
+    const hub = stored.hub;
+    if (!hub?.url || !isAcceptableHubUrl(hub.url)) return undefined;
+    const installed = hub.server?.installedVersion;
+    return !installed || compareVersions(installed, HUB_RELAY_FIRST_VERSION) >= 0 ? hub.url : undefined;
+  }
+
+  /** The hub this desktop syncs with. `ACCORDAGENTS_HUB_URL` points a local
+   *  run at a test hub. An address that is neither HTTPS nor on this
+   *  computer is not used. */
+  async getHubConfig(): Promise<HubLinkConfig | undefined> {
+    const override = process.env.ACCORDAGENTS_HUB_URL?.trim();
+    if (override) return isAcceptableHubUrl(override) ? { url: override } : undefined;
+    const stored = (await this.readStored()).hub;
+    return stored && typeof stored.url === "string" && isAcceptableHubUrl(stored.url) ? stored : undefined;
+  }
+
+  /** Setup writes this once the User's hub answers (the hub setup flow). */
+  async saveHubConfig(config: HubLinkConfig | undefined): Promise<void> {
+    if (config && !isAcceptableHubUrl(config.url)) throw new Error("A hub is reached over HTTPS.");
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+    if (config) stored.hub = { url: config.url, ...(config.hubId ? { hubId: config.hubId } : {}), ...(config.server ? { server: config.server } : {}) };
+    else delete stored.hub;
+    await this.writeStored(stored, true);
+  }
+
   /** Whether the User left automatic stop on; the stop key is separate. */
   async getMachineAutoStopEnabled(): Promise<boolean> {
     const stored = await this.readStored();
@@ -3602,6 +3778,9 @@ export class SettingsService {
       machinePairingBindings: _machinePairingBindings,
       revokedMachinePairingKeys: _revokedMachinePairingKeys,
       machineDeviceRevocations: _machineDeviceRevocations,
+      machineInactivityCheckAt: _machineInactivityCheckAt,
+      removedMachineOutboxes: _removedMachineOutboxes,
+      machineMoves: _machineMoves,
       lastRepoPath: _lastRepoPath,
       ...shareable
     } = stored;
@@ -3668,6 +3847,9 @@ export class SettingsService {
       machinePairingBindings: stored.machinePairingBindings,
       revokedMachinePairingKeys: stored.revokedMachinePairingKeys,
       machineDeviceRevocations: stored.machineDeviceRevocations,
+      machineInactivityCheckAt: stored.machineInactivityCheckAt,
+      removedMachineOutboxes: stored.removedMachineOutboxes,
+      machineMoves: stored.machineMoves,
       lastRepoPath: stored.lastRepoPath
     };
     // One atomic settings write replaces both configuration and environment.
@@ -4323,4 +4505,23 @@ export class SettingsService {
   private normalizeChatPromptContextSettings(value: unknown): ChatPromptContextSettings {
     return normalizeChatPromptContextSettings(value);
   }
+}
+
+function normalizeMachineMoves(value: unknown): MachineMoveRecord[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const text = (item: unknown): item is string => typeof item === "string" && item.length > 0;
+  const addresses = (item: unknown): item is MachineMoveRecord["to"] =>
+    Boolean(item) && typeof item === "object" && text((item as MachineMoveRecord["to"]).relayUrl) && text((item as MachineMoveRecord["to"]).outboxUrl);
+  const records = value.filter((item): item is MachineMoveRecord => Boolean(item) && typeof item === "object"
+    && text((item as MachineMoveRecord).machineId) && text((item as MachineMoveRecord).pairingKey) && text((item as MachineMoveRecord).requestedAt)
+    && addresses((item as MachineMoveRecord).from) && addresses((item as MachineMoveRecord).to))
+    .map((item) => ({
+      machineId: item.machineId,
+      pairingKey: item.pairingKey,
+      from: { relayUrl: item.from.relayUrl, outboxUrl: item.from.outboxUrl },
+      to: { relayUrl: item.to.relayUrl, outboxUrl: item.to.outboxUrl },
+      ...(text(item.instanceId) ? { instanceId: item.instanceId } : {}),
+      requestedAt: item.requestedAt
+    }));
+  return records.length ? records : undefined;
 }

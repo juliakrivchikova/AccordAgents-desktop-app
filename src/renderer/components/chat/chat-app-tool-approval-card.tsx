@@ -28,8 +28,18 @@ import { ChatAppToolRosterOperation, ChatAppToolRosterPermissionEnvelope, Roster
 import { ChatAppToolRoleChangeOperation } from "./chat-app-tool-role-operation";
 import { ChatAppToolParticipantChangeOperation } from "./chat-app-tool-participant-operation";
 import { ChatCodexApprovalOperation } from "./chat-codex-approval-operation";
+import { ChatScriptApprovalCard } from "./chat-script-approval-card";
+import { chatScriptChangeRequest } from "./chat-app-tool-data";
 
-export function ChatAppToolApprovalCard(props: {
+/** Scheduled-script proposals have their own card; every other approval uses the generic one. */
+export function ChatAppToolApprovalCard(props: Parameters<typeof GenericChatAppToolApprovalCard>[0]): JSX.Element {
+  const request = chatScriptChangeRequest(props.approval);
+  return request
+    ? <ChatScriptApprovalCard {...props} request={request} />
+    : <GenericChatAppToolApprovalCard {...props} />;
+}
+
+function GenericChatAppToolApprovalCard(props: {
   approval: ChatAppToolApproval;
   participants: ChatParticipant[];
   savedParticipants: ChatParticipantConfig[];

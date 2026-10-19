@@ -374,3 +374,97 @@ test("an unreadable settings file never reads as automatic stop left on, and is 
     assert.equal(await readFile(path.join(dir, "settings.json"), "utf8"), "{ not json");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("a removed machine is remembered until what was kept for it has been dropped, and the question's rhythm survives a restart", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-removed-"));
+  const file = path.join(dir, "settings.json");
+  const instance = (): SettingsService => {
+    const service = new SettingsService();
+    (service as any).settingsPath = file;
+    return service;
+  };
+  try {
+    await instance().saveMachine({ id: "machine-1", name: "Gone", deviceId: "device-gone", pairingKey: "room-gone", createdAt: "2026-09-06T00:00:00.000Z" });
+    await instance().saveMachine({ id: "machine-2", name: "Never introduced", deviceId: "", pairingKey: "room-new", createdAt: "2026-09-06T00:00:00.000Z" });
+    await instance().removeMachine("machine-1");
+    await instance().removeMachine("machine-2");
+    // A fresh start still knows what is left to drop, and only for a machine that had an identity.
+    assert.deepEqual(await instance().listRemovedMachineOutboxes(), [{ pairingKey: "room-gone", deviceId: "device-gone" }]);
+    // So does the time the User was last asked about unused machines, through an unrelated save too.
+    await instance().saveMachineInactivityCheckAt("2026-10-01T12:00:00.000Z");
+    await instance().saveMachine({ id: "machine-3", name: "Other", deviceId: "device-3", pairingKey: "room-3", createdAt: "2026-09-06T00:00:00.000Z" });
+    assert.equal(await instance().getMachineInactivityCheckAt(), "2026-10-01T12:00:00.000Z");
+    assert.equal(JSON.stringify((await instance().exportMachineSettingsSnapshot()).settingsJson).includes("room-gone"), false,
+      "not part of what machines are sent");
+    await instance().clearRemovedMachineOutbox("device-gone");
+    assert.deepEqual(await instance().listRemovedMachineOutboxes(), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the hub this desktop uses and a machine's key from setup survive a fresh SettingsService reading the disk", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-settings-"));
+  const file = path.join(dir, "settings.json");
+  const instance = (): SettingsService => {
+    const service = new SettingsService();
+    (service as any).settingsPath = file;
+    return service;
+  };
+  try {
+    const server = { version: 1 as const, region: "us-east-1", instanceName: "accordagents-hub", ip: "52.72.175.0", user: "ubuntu", installedAt: "2026-10-18T19:28:02.800Z", installedVersion: "1.11.2" };
+    await instance().saveHubConfig({ url: "https://52.72.175.0", hubId: "hub-1", server });
+    await instance().saveMachine({ id: "machine-1", name: "Box", deviceId: "device-machine", pairingKey: "pairing-1", createdAt: "2026-10-18T00:00:00.000Z", devicePublicKeyDerBase64: "MCowBQYDK2VwAyEAkey" });
+    const restarted = instance();
+    assert.deepEqual(await restarted.getHubConfig(), { url: "https://52.72.175.0", hubId: "hub-1", server });
+    assert.equal((await restarted.listMachines())[0].devicePublicKeyDerBase64, "MCowBQYDK2VwAyEAkey");
+    // Another write keeps it too.
+    await restarted.saveMachine({ id: "machine-2", name: "Box 2", deviceId: "", pairingKey: "pairing-2", createdAt: "2026-10-18T00:00:00.000Z" });
+    assert.equal((await instance().getHubConfig())?.url, "https://52.72.175.0");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a machine's unsettled move survives a fresh SettingsService, and settling it saves the new pairing in the same write", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-moves-"));
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const from = { relayUrl: "wss://relay.accordagents.com/v1/relay", outboxUrl: "https://relay.accordagents.com/v1/mailbox/events" };
+  const to = { relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" };
+  const record = { machineId: "m1", pairingKey: "pk-1", from, to, instanceId: "run-1", requestedAt: "2026-10-19T10:00:00.000Z" };
+  try {
+    await make().saveMachineMove(record);
+    assert.deepEqual(await make().listMachineMoves(), [record], "read back from disk");
+    await make().saveMachineMove({ ...record, requestedAt: "2026-10-19T11:00:00.000Z" });
+    assert.equal((await make().listMachineMoves()).length, 1, "one open move per machine");
+    const pairing = { rendezvousId: "rv-1", ...to } as any;
+    await make().saveMachine({ id: "m1", name: "Cloud run", deviceId: "", pairingKey: "pk-1", createdAt: "" } as any);
+    await make().finishMachineMove("m1", { pairingKey: "pk-1", pairing });
+    const settled = make();
+    assert.deepEqual(await settled.listMachineMoves(), []);
+    assert.equal((await settled.getMachinePairing("pk-1"))?.relayUrl, to.relayUrl);
+    assert.equal(JSON.parse(await readFile(path.join(dir, "settings.json"), "utf8")).machineMoves, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an open move is not part of the settings machines receive, and a removed machine gets no pairing back from it", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-moves-removed-"));
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const from = { relayUrl: "wss://relay.accordagents.com/v1/relay", outboxUrl: "https://relay.accordagents.com/v1/mailbox/events" };
+  const to = { relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" };
+  try {
+    await make().saveMachineMove({ machineId: "gone", pairingKey: "pk-gone", from, to, requestedAt: "2026-10-19T10:00:00.000Z" });
+    const snapshot = await make().exportMachineSettingsSnapshot();
+    assert.equal(snapshot.settingsJson.includes("machineMoves"), false, "a desktop's move records stay on the desktop");
+    assert.equal(await make().finishMachineMove("gone", { pairingKey: "pk-gone", pairing: { rendezvousId: "rv-gone", ...to } as any }), false);
+    const after = make();
+    assert.equal(await after.getMachinePairing("pk-gone"), undefined, "no way back in for a removed machine");
+    assert.deepEqual(await after.listMachineMoves(), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -17,7 +17,8 @@ const exactCheckFiles = [
   ...mainUserFacingFiles,
   "src/main/appSkills/accord/SKILL.md",
   "src/main/appSkills/app-chat-reply/SKILL.md",
-  "src/main/appSkills/app-chat-request/SKILL.md"
+  "src/main/appSkills/app-chat-request/SKILL.md",
+  "src/main/appSkills/automations/SKILL.md"
 ];
 
 const staleProductSnippets = [

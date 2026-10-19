@@ -18,7 +18,7 @@ test("every link message type passes the envelope validator, including picture r
   assert.equal(isMachineLinkEnvelope(envelope({ type: "machine.not.a.message" })), false);
 });
 
-test("the desktop answers a picture request in bounded parts, only for a machine that hosts a member of the chat", async () => {
+test("the desktop answers a picture request in bounded parts, for any chat it holds", async () => {
   const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
   const { MACHINE_ATTACHMENT_PART_BYTES } = await import("../dist/main/shared/machineLink.js");
   const picture = Buffer.alloc(MACHINE_ATTACHMENT_PART_BYTES * 2 + 12345, 7);
@@ -51,11 +51,15 @@ test("the desktop answers a picture request in bounded parts, only for a machine
   assert.ok(Buffer.concat(parts.map((body) => Buffer.from(body.dataBase64, "base64"))).equals(picture), "the parts reassemble to the picture");
   assert.ok(parts.every((body) => Buffer.byteLength(body.dataBase64) < 3 * 1024 * 1024), "no part approaches the relay's 10 MiB logical-message limit once sealed");
 
+  // Every machine holds every chat now, so a picture of a chat without a
+  // member there is served too (an agent searching another chat of the project).
   await link.answerAttachmentRequest(connection, request("chat-elsewhere"));
-  const refused = sent.find((body) => body.requestId === "r-chat-elsewhere");
+  assert.ok(sent.some((body) => body.requestId === "r-chat-elsewhere" && body.ok));
+  await link.answerAttachmentRequest(connection, request("chat-missing"));
+  const refused = sent.find((body) => body.requestId === "r-chat-missing");
   assert.equal(refused.ok, false);
-  assert.match(refused.error, /no member on this machine/);
-  assert.deepEqual(reads.map((read) => read.conversationId), ["chat-on-box"], "a chat the machine does not host is never read");
+  assert.match(refused.error, /not on this desktop/);
+  assert.deepEqual(reads.map((read) => read.conversationId), ["chat-on-box", "chat-elsewhere"], "a chat this desktop does not hold is never read");
   link.close();
 });
 
@@ -84,7 +88,7 @@ test("a command queued with the machine offline survives a desktop restart and e
   const relay = createReferenceRelayServer();
   const address = await relay.listen();
   const pairing = machinePairing(address.url);
-  const record = { id: "machine-offline", name: "Offline test", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId,
+  const record = { id: "machine-offline", name: "Offline test", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId, chatChanges: true,
     createdAt: new Date().toISOString(), lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } };
   let envValue = "synthetic-retained-secret";
   const settings = {
@@ -119,6 +123,8 @@ test("a command queued with the machine offline survives a desktop restart and e
     });
     await link.start();
     let imported;
+    // The chat reached the machine before (as chat change events).
+    conversations.set(conversation.id, conversation);
     host = new MachineHostService({
       runMachineHostedTurn: async request => { runs.push({ id: request.runId, environment: imported.agentEnvironment[0].value }); return { messages: [], warnings: [] }; },
       cancelRun: () => true, respondToAppToolApproval: async () => undefined,
@@ -139,11 +145,45 @@ test("a command queued with the machine offline survives a desktop restart and e
   } finally { link.close(); host?.close(); await relay.close(); }
 });
 
+test("a machine still on a runtime that cannot receive chat changes is sent no turn, and its chat changes are kept for it", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const pairing = machinePairing("ws://unused/v1/relay");
+  const capable = { id: "machine-new", name: "New box", deviceId: "device-new", pairingKey: "room-new", chatChanges: true, createdAt: new Date().toISOString() };
+  const outdated = { id: "machine-old", name: "Old box", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString(),
+    lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } };
+  const logs = [];
+  const link = new MachineLinkService({
+    listMachines: async () => [capable, outdated], getMachinePairing: async () => pairing,
+    saveMachine: async () => [capable, outdated],
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
+  }, { write: async (event, payload) => logs.push({ event, payload }) }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID,
+    createClient: () => ({ on() {}, connect: async () => undefined, close() {}, sendCiphertext: async () => [] }) });
+  // Before any machine connects, every enrolled one is known, and is a
+  // recipient whatever its runtime: what it cannot read yet is kept for it.
+  await link.loadMachines();
+  assert.deepEqual(link.chatChangeRecipients().map((recipient) => recipient.deviceId).sort(), ["device-new", MACHINE_ID].sort());
+  assert.deepEqual(link.chatActionRecipients().map((recipient) => recipient.deviceId).sort(), ["device-new", MACHINE_ID].sort());
+  await link.start();
+  try {
+    const participant = { id: "old-member", homeMachineId: outdated.id, handle: "bot", kind: "codex-cli" };
+    const triggerMessage = { id: "old-message", role: "user", content: "hello", createdAt: new Date().toISOString() };
+    const conversation = { id: "old-chat", kind: "chat", title: "old", messages: [triggerMessage], metadata: { participants: [participant] }, findings: [],
+      createdAt: triggerMessage.createdAt, updatedAt: triggerMessage.createdAt };
+    const result = await link.runTurn({ conversation, participant, triggerMessage, runId: "old-run", pendingMessageId: "old-reply" });
+    assert.equal(result.status, "failed");
+    assert.equal(result.sent, false, "the desktop settles it");
+    assert.match(result.error, /@bot is hosted on Old box, which still runs an older version of AccordAgents/);
+    assert.equal(await desktopEvents.eventStorage.getChatEvent("machine-command:old-run"), undefined, "nothing was queued for it");
+    assert.ok(logs.some((entry) => entry.event === "machine-link.turn.runtime-outdated"));
+  } finally { link.close(); }
+});
+
 // Machines transport: desktop MachineLinkService <-> machine MachineHostService
 // through the reference relay, sealed with a machine-host pairing.
-test("machine link replicates settings and conversations, runs a turn, streams progress, and cancels", async () => {
+test("machine link sends settings, chats as change events, runs a turn, streams progress, and cancels", async () => {
   const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
   const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const chatChanges = await import("../dist/main/main/services/chatChanges.js");
   const relay = createReferenceRelayServer();
   const address = await relay.listen();
   const capturedLogs = [];
@@ -177,7 +217,24 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const logs = capturedLogs;
     let settingsDelayMs = 0;
     const debugLogs = { write: async (event, payload) => { logs.push({ event, payload, at: Date.now() }); } };
-    const link = new MachineLinkService(desktopSettings, debugLogs, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50 });
+    // What the desktop's ChatService does on every save: the chat's changes as
+    // one signed event for every enrolled machine, and the head a turn names.
+    const chatBaselines = new Map();
+    const chatHeads = new Map();
+    const link = new MachineLinkService(desktopSettings, debugLogs, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50,
+      chatChangeHead: async (id) => ({ originId: DESKTOP_ID, logScopeId: chatChanges.chatChangesLogScope(id), originSeq: chatHeads.get(id) ?? 0 }) });
+    const publishChat = async (conversation) => {
+      const { changes } = chatChanges.diffChatChanges(chatBaselines.get(conversation.id), conversation, { emitsConversationFields: true, ownsMessage: () => true });
+      if (!changes.length) return;
+      const payload = await desktopEvents.eventStorage.deviceEventBlobs().prepare({ version: 1, conversationId: conversation.id, updatedAt: conversation.updatedAt, changes });
+      const { event } = await desktopEvents.eventLog.appendLocalEvent({ conversationId: conversation.id, logScopeId: chatChanges.chatChangesLogScope(conversation.id),
+        kind: chatChanges.CHAT_CHANGES_EVENT_KIND, payload, recipients: link.chatActionRecipients() });
+      chatBaselines.set(conversation.id, chatChanges.chatChangeBaseline(JSON.parse(JSON.stringify(conversation))));
+      chatHeads.set(conversation.id, event.originSeq);
+      link.nudgeEventChannels();
+    };
+    const dispatchTurn = link.runTurn.bind(link);
+    const runTurn = async (request) => { await publishChat(request.conversation); return dispatchTurn(request); };
 
     const machineStore = new Map();
     const importedSnapshots = [];
@@ -248,7 +305,18 @@ test("machine link replicates settings and conversations, runs a turn, streams p
       machineName: "test-box",
       appVersion: "test",
       detectProviders: async () => [{ kind: "codex-cli", label: "Codex", installed: true, version: "0.153.4" }],
-      reconnectDelayMs: 50
+      reconnectDelayMs: 50,
+      applyChatChanges: async (event, payload) => {
+        const result = chatChanges.applyChatChanges(machineStore.get(payload.conversationId), payload, event.originId,
+          { acceptsConversationFields: () => true, acceptsMessageUpdate: () => true, acceptsMessageCreate: () => true, acceptsMessageRemoval: () => true, holdsUnknownChats: true });
+        if (result.status !== "applied") return "missing-conversation";
+        if (failNextApplyContaining && result.conversation.messages.some((message) => message.id === failNextApplyContaining)) {
+          failNextApplyContaining = undefined;
+          throw new Error("SQLITE_FULL: disk is full");
+        }
+        machineStore.set(payload.conversationId, result.conversation);
+        return "applied";
+      }
     });
 
     await link.start();
@@ -267,14 +335,14 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     };
     const progressSeen = [];
     rejectRunRecord = "run-no-store";
-    const refused = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: rejectRunRecord, pendingMessageId: "pending-no-store" });
+    const refused = await runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: rejectRunRecord, pendingMessageId: "pending-no-store" });
     assert.equal(refused.status, "failed");
     assert.match(refused.error, /ENOSPC/);
     assert.ok(!hostRuns.some((run) => run.runId === rejectRunRecord), "a failed intent write must never start a provider turn");
     rejectRunRecord = undefined;
     holdRunRecord = "run-cancel-before-store";
     const preparingController = new AbortController();
-    const preparing = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: holdRunRecord, pendingMessageId: "pending-before-store", signal: preparingController.signal });
+    const preparing = runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: holdRunRecord, pendingMessageId: "pending-before-store", signal: preparingController.signal });
     await waitFor(() => typeof releaseRunRecord === "function", 5_000);
     assert.ok(!hostRuns.some((run) => run.runId === "run-cancel-before-store"));
     preparingController.abort();
@@ -282,7 +350,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     assert.equal((await preparing).status, "interrupted");
     assert.ok(!hostRuns.some((run) => run.runId === "run-cancel-before-store"));
     assert.ok(!(record.pendingRuns ?? []).some((run) => run.runId === "run-cancel-before-store"));
-    const result = await link.runTurn({
+    const result = await runTurn({
       conversation, participant, triggerMessage: conversation.messages[0], runId: "run-1", pendingMessageId: "pending-1",
       progress: (progress) => progressSeen.push(progress)
     });
@@ -318,12 +386,12 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     // The machine keeps its own run bookkeeping and sessions, not the desktop's.
     const copy = machineStore.get("conv-1");
     assert.equal(copy.metadata.activeRunIds, undefined);
-    assert.equal(copy.metadata.participantSessions, undefined);
+    assert.deepEqual(copy.metadata.participantSessions ?? [], [], "the desktop's own sessions never travel");
     assert.equal(copy.messages.length, 2);
 
-    // Second turn: only the new message travels as a delta and lands in the copy.
+    // Second turn: only the new message travels as a change and lands in the copy.
     conversation.messages.push({ id: "msg-2", role: "user", content: "again", createdAt: new Date().toISOString(), status: "done" });
-    const second = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[1], runId: "run-2", pendingMessageId: "pending-2" });
+    const second = await runTurn({ conversation, participant, triggerMessage: conversation.messages[1], runId: "run-2", pendingMessageId: "pending-2" });
     assert.equal(second.status, "completed");
     await second.acknowledge?.();
     assert.ok(machineStore.get("conv-1").messages.some((message) => message.id === "msg-2"));
@@ -332,7 +400,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     // Cancel: the desktop aborts, the machine's turn signal fires, the result is interrupted.
     conversation.messages.push({ id: "msg-long", role: "user", content: "slow", createdAt: new Date().toISOString(), status: "done" });
     const controller = new AbortController();
-    const pendingLong = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-3", pendingMessageId: "pending-3", signal: controller.signal });
+    const pendingLong = runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-3", pendingMessageId: "pending-3", signal: controller.signal });
     await waitFor(() => hostRuns.length === 3 && typeof releaseLongTurn === "function", 5_000);
     controller.abort();
     const third = await pendingLong;
@@ -343,36 +411,26 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const runsBefore = hostRuns.length;
     const preAborted = new AbortController();
     preAborted.abort();
-    const early = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: "run-early", pendingMessageId: "pending-early", signal: preAborted.signal });
+    const early = await runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: "run-early", pendingMessageId: "pending-early", signal: preAborted.signal });
     assert.equal(early.status, "interrupted");
     // Stop during preparation (settings/replication in flight): same outcome.
     const midPrep = new AbortController();
-    const midPrepTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: "run-midprep", pendingMessageId: "pending-midprep", signal: midPrep.signal });
+    const midPrepTurn = runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: "run-midprep", pendingMessageId: "pending-midprep", signal: midPrep.signal });
     midPrep.abort();
     assert.equal((await midPrepTurn).status, "interrupted");
     assert.equal(hostRuns.length, runsBefore, "cancelled turns are not dispatched");
 
-    // A large chat travels as a shell plus bounded batches and arrives whole.
+    // A large chat travels as one change event in bounded fragments and arrives whole.
     const big = {
       id: "conv-big", kind: "chat", title: "Big", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       metadata: { participants: [participant] },
       messages: Array.from({ length: 400 }, (_, index) => ({ id: `big-${index}`, role: "user", content: "x".repeat(10_000), createdAt: new Date(Date.now() + index).toISOString(), status: "done" })),
       findings: []
     };
-    const bigResult = await link.runTurn({ conversation: big, participant, triggerMessage: big.messages[399], runId: "run-big", pendingMessageId: "pending-big" });
+    const bigResult = await runTurn({ conversation: big, participant, triggerMessage: big.messages[399], runId: "run-big", pendingMessageId: "pending-big" });
     assert.equal(bigResult.status, "completed");
     await bigResult.acknowledge?.();
     assert.equal(machineStore.get("conv-big").messages.length, 401);
-    const bigDeltas = logs.filter((entry) => entry.event === "machine-host.message" && entry.payload?.type === "machine.conversation.delta" && entry.payload?.conversationId === "conv-big");
-    assert.ok(bigDeltas.length >= 3, `expected batched deltas, saw ${bigDeltas.length}`);
-    // What the desktop replicated is never echoed back as a back delta.
-    const echoes = [];
-    const stopEchoListener = link.onConversationBackDelta((delta) => { if (delta.conversationId === "conv-big") echoes.push(delta); });
-    host.noteConversationSnapshot(machineStore.get("conv-big"));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    const echoedReplicated = echoes.flatMap((delta) => delta.messages.map((message) => message.id)).filter((id) => id.startsWith("big-"));
-    assert.deepEqual(echoedReplicated, [], "replicated messages must not come back as a back delta");
-    stopEchoListener();
 
     // A member on the machine asked other members to answer. The machine does
     // not run them: the desktop does, where the roster and every member's home
@@ -395,11 +453,9 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const lateTerminals = [];
     let lateStoreDelay = 0;
     link.onLateTerminal(async (event) => { await new Promise((resolve) => setTimeout(resolve, lateStoreDelay)); lateTerminals.push({ ...event, storedAt: Date.now() }); });
-    const backdeltas = [];
-    link.onConversationBackDelta((delta) => backdeltas.push(delta));
     conversation.messages.push({ id: "msg-away", role: "user", content: "away", createdAt: new Date().toISOString(), status: "done" });
     releaseLongTurn = undefined;
-    const awayTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[3], runId: "run-away", pendingMessageId: "pending-away" });
+    const awayTurn = runTurn({ conversation, participant, triggerMessage: conversation.messages[3], runId: "run-away", pendingMessageId: "pending-away" });
     await waitFor(() => hostRuns.length === runsBefore + 2 && typeof releaseLongTurn === "function", 5_000);
     await link.disconnectMachine("machine-1");
     await awayTurn.catch(() => undefined);
@@ -423,7 +479,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     await waitFor(() => logs.some((entry) => entry.event === "machine-host.desktop.away"), 5_000);
     await link.connectMachine(record);
     await waitFor(() => link.status()[0]?.connected === true, 5_000);
-    const failTurn = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-fail", pendingMessageId: "pending-fail" });
+    const failTurn = await runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-fail", pendingMessageId: "pending-fail" });
     assert.equal(failTurn.status, "failed");
     assert.match(failTurn.error, /provider exploded/);
     await failTurn.acknowledge?.();
@@ -432,23 +488,23 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     const loadable = new Map([["conv-1", conversation]]);
     link.setConversationLoader(async (id) => loadable.get(id));
 
-    // A regular delta that cannot be stored after the first copy makes the copy incomplete:
-    // the durable request waits behind the failed delta until it is stored.
+    // A chat change that cannot be stored on the machine is retried; the turn
+    // that names it waits until it is stored, and never runs on stale rows.
     conversation.messages.push({ id: "msg-edit", role: "user", content: "edited instruction", createdAt: new Date().toISOString(), status: "done" });
     failNextApplyContaining = "msg-edit";
-    const staleTurn = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-stale", pendingMessageId: "pending-stale" });
-    assert.equal(staleTurn.status, "completed", "the retained request runs after its earlier delta is repaired");
+    const staleTurn = await runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-stale", pendingMessageId: "pending-stale" });
+    assert.equal(staleTurn.status, "completed", "the request runs once the change it names is stored");
     assert.equal(triggerAtStart.get("run-stale"), "edited instruction", "the provider sees the repaired instruction, never stale rows");
     await staleTurn.acknowledge?.();
     await waitFor(() => machineStore.get("conv-1")?.messages.some((message) => message.id === "msg-edit"), 10_000);
-    const repairedTurn = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-repaired", pendingMessageId: "pending-repaired" });
+    const repairedTurn = await runTurn({ conversation, participant, triggerMessage: conversation.messages[conversation.messages.length - 1], runId: "run-repaired", pendingMessageId: "pending-repaired" });
     assert.equal(repairedTurn.status, "completed");
     await repairedTurn.acknowledge?.();
 
     // A hello that arrives while a turn is still being prepared must not close it:
     // the machine is asked only about turns whose request has left.
     settingsDelayMs = 400;
-    const racedTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: "run-raced", pendingMessageId: "pending-raced" });
+    const racedTurn = runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: "run-raced", pendingMessageId: "pending-raced" });
     await new Promise((resolve) => setTimeout(resolve, 100));
     host.client.close();
     await host.client.connect(); // the machine's hello lands during the desktop's preparation
@@ -460,34 +516,27 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     // what must never happen is a close from an answer to a pre-dispatch query.
     assert.ok(!logs.some((entry) => entry.event === "machine-link.turn.unknown" && entry.payload?.runId === "run-raced" && entry.payload?.dispatched === true), "no lost-run close for a turn the machine holds");
 
-    // A batch of the first copy that cannot be stored on the machine makes it ask for the copy again;
-    // the completed copy never echoes back and the retry stores everything.
+    // A large chat whose change fails to store the first time is retried whole;
+    // the member starts only on the complete chat.
     const bigger = { ...big, id: "conv-bigger", messages: big.messages.map((message) => ({ ...message, id: message.id.replace("big-", "bigger-") })) };
     loadable.set("conv-bigger", bigger);
     failNextApplyContaining = "bigger-200";
-    const biggerEchoes = [];
-    const stopBiggerEcho = link.onConversationBackDelta((delta) => { if (delta.conversationId === "conv-bigger") biggerEchoes.push(delta); });
-    const biggerResult = await link.runTurn({ conversation: bigger, participant, triggerMessage: bigger.messages[399], runId: "run-bigger", pendingMessageId: "pending-bigger" });
-    assert.equal(biggerResult.status, "completed", "the retained failed event is retried before the copy boundary allows execution");
+    const biggerResult = await runTurn({ conversation: bigger, participant, triggerMessage: bigger.messages[399], runId: "run-bigger", pendingMessageId: "pending-bigger" });
+    assert.equal(biggerResult.status, "completed", "the failed change is retried before the turn may run");
     assert.equal(messagesAtStart.get("run-bigger"), 400, "the provider cannot start against a partial copy");
     assert.equal(hostRuns.filter((run) => run.runId === "run-bigger").length, 1);
     await biggerResult.acknowledge?.();
-    assert.ok(logs.some((entry) => entry.event === "machine-host.sync.batch-failed" && entry.payload?.conversationId === "conv-bigger"));
     assert.equal(machineStore.get("conv-bigger")?.messages.length, 401);
-    const retried = await link.runTurn({ conversation: bigger, participant, triggerMessage: bigger.messages[399], runId: "run-bigger-2", pendingMessageId: "pending-bigger-2" });
+    const retried = await runTurn({ conversation: bigger, participant, triggerMessage: bigger.messages[399], runId: "run-bigger-2", pendingMessageId: "pending-bigger-2" });
     assert.equal(retried.status, "completed");
     await retried.acknowledge?.();
-    host.noteConversationSnapshot(machineStore.get("conv-bigger"));
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.deepEqual(biggerEchoes.flatMap((delta) => delta.messages.map((message) => message.id)).filter((id) => id.startsWith("bigger-")), []);
-    stopBiggerEcho();
 
     // Rule 2: a Stop while the machine is unreachable is held and shown as
     // waiting, delivered when the machine is back, and confirmed only then.
     const stopsWaiting = [];
     releaseLongTurn = undefined;
     const heldController = new AbortController();
-    const heldTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-held", pendingMessageId: "pending-held", signal: heldController.signal, onStopPending: (name) => stopsWaiting.push(name) });
+    const heldTurn = runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-held", pendingMessageId: "pending-held", signal: heldController.signal, onStopPending: (name) => stopsWaiting.push(name) });
     await waitFor(() => typeof releaseLongTurn === "function", 5_000);
     host.client.close(); // the machine's own link drops (network blip); the turn keeps running there
     await waitFor(() => link.status()[0]?.connected === false, 5_000);
@@ -502,7 +551,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     // asks about them, a result the machine still holds lands as a late result, and a
     // run the machine does not know is closed instead of staying pending forever.
     releaseLongTurn = undefined;
-    const survivingTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-survives", pendingMessageId: "pending-survives" });
+    const survivingTurn = runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-survives", pendingMessageId: "pending-survives" });
     await waitFor(() => hostRuns.some((run) => run.runId === "run-survives") && typeof releaseLongTurn === "function", 5_000);
     assert.ok((record.pendingRuns ?? []).some((run) => run.runId === "run-survives"), "the dispatched run is recorded durably");
     link.close(); // the desktop goes away mid-turn
@@ -523,7 +572,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
 
     // A machine restart closes the turns it lost instead of leaving them pending.
     releaseLongTurn = undefined;
-    const lostTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-lost", pendingMessageId: "pending-lost" });
+    const lostTurn = runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-lost", pendingMessageId: "pending-lost" });
     await waitFor(() => typeof releaseLongTurn === "function", 5_000);
     host.close();
     await Promise.allSettled([...host.turnTasks]);
@@ -545,7 +594,7 @@ test("machine link replicates settings and conversations, runs a turn, streams p
     // A native continuation owned by ChatService can outlive the host wrapper:
     // Stop still reaches that owner, and confirms only after it has returned.
     const unknownController = new AbortController();
-    const unknownTurn = link.runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-unknown", pendingMessageId: "pending-unknown", signal: unknownController.signal });
+    const unknownTurn = runTurn({ conversation, participant, triggerMessage: conversation.messages[2], runId: "run-unknown", pendingMessageId: "pending-unknown", signal: unknownController.signal });
     await waitFor(() => hostRuns.some((run) => run.runId === "run-unknown"), 5_000);
     const nativeController = host2.activeTurns.get("run-unknown");
     host2.activeTurns.delete("run-unknown");
@@ -574,7 +623,7 @@ test("outgoing commands preserve order and Stop fences dispatch even when a writ
   const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
   const { openMachineRelayPayload } = await import("../dist/main/main/services/machineRelaySealing.js");
   const pairing = machinePairing("ws://unused/v1/relay");
-  const record = { id: "machine-fence", name: "Fence box", pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
+  const record = { id: "machine-fence", name: "Fence box", pairingKey: pairing.rendezvousId, chatChanges: true, createdAt: new Date().toISOString() };
   const writes = [];
   let onWrite = async () => undefined;
   let onSave = () => undefined;
@@ -748,6 +797,7 @@ test("machineActivity asks the machine afresh: a turn that started or ended sinc
     const participant = { id: "p-act", homeMachineId: record.id, handle: "bot", kind: "codex-cli" };
     const triggerMessage = { id: "m-act", role: "user", content: "go", createdAt: new Date().toISOString() };
     const conversation = { id: "chat-act", kind: "chat", title: "act", messages: [triggerMessage], metadata: { participants: [participant] }, findings: [], createdAt: triggerMessage.createdAt, updatedAt: triggerMessage.createdAt };
+    conversations.set(conversation.id, conversation);
     const turn = link.runTurn({ conversation, participant, triggerMessage, runId: "run-act", pendingMessageId: "pm-act" });
     await waitFor(() => hostRuns.includes("run-act"), 10_000);
     const busy = await link.machineActivity("machine-act");
@@ -773,6 +823,12 @@ test("machineActivity asks the machine afresh: a turn that started or ended sinc
     await new Promise((resolve) => setTimeout(resolve, 300));
     assert.ok(!hostRuns.includes("run-act-held"), "not dispatched while held");
     assert.deepEqual(waitingMarks, [{ name: "Act box", reason: "updating the runtime" }], "the bubble says why the member has not started");
+    // A move reconnects the machine while its turns are held: the hold is the
+    // machine's, not the connection's, so the turn keeps waiting.
+    await link.reconnectMachine("machine-act");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.ok(!hostRuns.includes("run-act-held"), "a reconnect does not release the hold");
+    assert.equal(link.hasTurnHold("machine-act"), true);
     const stopper = new AbortController();
     const stopped = link.runTurn({ conversation, participant, triggerMessage, runId: "run-act-stopped", pendingMessageId: "pm-act-stopped", signal: stopper.signal });
     stopper.abort();
@@ -876,6 +932,138 @@ test("trust changes queue while a known machine is offline and outbox failures r
   }
 });
 
+test("script requests go to the one machine, resolve on its answer, and refuse an older or absent machine", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const record = { id: "machine-s", name: "Box", deviceId: "dev-s", pairingKey: "rv-s", createdAt: new Date().toISOString(),
+    lastHello: { protocol: "accord-machine-link-v1", deviceId: "dev-s", instanceId: "run-7", scriptsSupported: true, keepAwake: true } };
+  const link = new MachineLinkService({
+    listMachines: async () => [record],
+    saveMachine: async () => [record],
+    removeMachine: async () => [],
+    getMachinePairing: async () => undefined,
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
+  }, { write: async () => undefined }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID });
+  const sent = [];
+  const connection = { record, machineDeviceId: "dev-s", pendingScripts: new Map(), client: { close() {} }, pairing: { issuer: { originId: DESKTOP_ID } } };
+  link.connections.set(record.id, connection);
+  link.send = async (_connection, body) => { sent.push(body); };
+
+  const listed = link.scriptsRequest("machine-s", { op: "setSecret", scriptId: "s1", name: "SLACK_TOKEN", value: "xoxb-1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, "machine.scripts.request");
+  assert.deepEqual(sent[0].operation, { op: "setSecret", scriptId: "s1", name: "SLACK_TOKEN", value: "xoxb-1" });
+  assert.equal(sent[0].instanceId, "run-7", "the request names the run of the machine it was made for");
+  assert.ok(Date.parse(sent[0].expiresAt) > Date.now(), "and when the desktop stops waiting for it");
+  await link.handleBody(connection, { type: "machine.scripts.result", requestId: sent[0].requestId, ok: true, result: { id: "s1" } });
+  assert.deepEqual(await listed, { id: "s1" });
+
+  const refused = link.scriptsRequest("machine-s", { op: "runNow", scriptId: "s1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await link.handleBody(connection, { type: "machine.scripts.result", requestId: sent[1].requestId, ok: false, error: "That script is switched off." });
+  await assert.rejects(refused, /switched off/);
+
+  const changed = [];
+  link.onScriptsChanged((machineId) => changed.push(machineId));
+  await link.handleBody(connection, { type: "machine.scripts.changed" });
+  assert.deepEqual(changed, ["machine-s"]);
+
+  assert.equal(link.machineKeepsAwake(), true, "switched-on scripts keep the box from the AWS idle stop");
+  assert.equal(link.hasActiveMachineWork(), false, "but they are not a run");
+  assert.deepEqual(link.scriptHosts(), [{ machineId: "machine-s", name: "Box", connected: true, supported: true }]);
+
+  const waiting = link.scriptsRequest("machine-s", { op: "list" });
+  await new Promise((resolve) => setImmediate(resolve));
+  link.rejectPendingScripts(connection, "The machine went away.");
+  await assert.rejects(waiting, /went away/);
+
+  connection.machineDeviceId = undefined;
+  await assert.rejects(link.scriptsRequest("machine-s", { op: "list" }), /not connected/);
+  assert.equal(link.machineKeepsAwake(), false, "a machine that is away is not counted");
+  record.awsInstanceId = "i-box";
+  assert.equal(link.machineKeepsAwake("i-box"), true, "for its own AWS instance, what it last said counts even while the link is down");
+  assert.equal(link.machineKeepsAwake("i-other"), false, "another instance is not kept on by this machine's scripts");
+  delete record.awsInstanceId;
+  connection.machineDeviceId = "dev-s";
+  record.lastHello = { ...record.lastHello, scriptsSupported: undefined };
+  await assert.rejects(link.scriptsRequest("machine-s", { op: "list" }), /older runtime/);
+  await assert.rejects(link.scriptsRequest("missing", { op: "list" }), /not set up/);
+  // A machine set up by another desktop takes no script requests from this one.
+  record.lastHello = { ...record.lastHello, scriptsSupported: true };
+  connection.pairing = { issuer: { originId: "device-another-desktop" } };
+  await assert.rejects(link.scriptsRequest("machine-s", { op: "list" }), /managed from the desktop that set it up/);
+  assert.deepEqual(link.scriptHosts(), [], "and Settings does not list it as one of this desktop's script hosts");
+  link.close();
+});
+
+test("a machine's capability recorded at its setup reaches the other machines' rosters", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { createChatEventDeviceIdentity } = await import("../dist/main/main/services/chatEventLog.js");
+  const upgraded = createChatEventDeviceIdentity(new Date().toISOString());
+  const pairingA = { ...machinePairing("ws://127.0.0.1:1/v1/relay"), rendezvousId: "rv-capability-a-" + Date.now() };
+  const pairingB = { ...machinePairing("ws://127.0.0.1:1/v1/relay"), rendezvousId: "rv-capability-b-" + Date.now() };
+  const createdAt = new Date().toISOString();
+  const records = [
+    { id: "cap-a", name: "A", deviceId: MACHINE_ID, pairingKey: pairingA.rendezvousId, chatChanges: true, createdAt,
+      lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } },
+    // B still runs a runtime from before chat changes; its upgrade is under way.
+    { id: "cap-b", name: "B", deviceId: upgraded.originId, pairingKey: pairingB.rendezvousId, createdAt,
+      lastHello: { publicKeyDerBase64: upgraded.publicKeyDerBase64 } }
+  ];
+  const link = new MachineLinkService({
+    listMachines: async () => records,
+    getMachinePairing: async (key) => (key === pairingA.rendezvousId ? pairingA : pairingB),
+    saveMachine: async (next) => { Object.assign(records.find((record) => record.id === next.id), next); return records; }
+  }, { write: async () => undefined }, {
+    ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 60_000, trustedDevices: async () => []
+  });
+  const rosters = async () => (await desktopEvents.eventStorage.deviceEvents().listPending(pairingA.rendezvousId))
+    .filter((row) => row.event.kind === "machine.trust.roster");
+  try {
+    await link.start();
+    const before = (await rosters()).length;
+    await link.adoptMachineIdentity("cap-b", { originId: upgraded.originId, publicKeyDerBase64: upgraded.publicKeyDerBase64 });
+    const rows = await rosters();
+    assert.ok(rows.length > before, "machine A is told at once");
+    const latest = await desktopEvents.eventStorage.deviceEventBlobs().hydrate(rows[rows.length - 1].event.payload);
+    assert.equal(latest.roster.peers.find((peer) => peer.deviceId === upgraded.originId)?.chatChanges, true);
+  } finally {
+    link.close();
+  }
+});
+
+test("another machine meeting this one in its room does not make it look present or absent", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const pairing = machinePairing("ws://127.0.0.1:1/v1/relay");
+  const record = { id: "machine-presence", name: "Presence", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId, chatChanges: true,
+    createdAt: new Date().toISOString() };
+  const settings = {
+    listMachines: async () => [record], getMachinePairing: async () => pairing,
+    saveMachine: async next => { Object.assign(record, next); return [record]; },
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: "{}", agentEnvironment: [] })
+  };
+  const listeners = new Map();
+  const client = {
+    on(event, listener) { listeners.set(event, [...(listeners.get(event) ?? []), listener]); return () => undefined; },
+    emit(event, payload) { for (const listener of listeners.get(event) ?? []) listener(payload); },
+    currentState: () => "connected", deviceId: () => DESKTOP_ID,
+    async connect() {}, close() {}, async sendCiphertext() { return []; }
+  };
+  const link = new MachineLinkService(settings, { write: async () => undefined }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, createClient: () => client });
+  try {
+    await link.start();
+    const other = "device-" + "f".repeat(32);
+    client.emit("peer", { type: "ready", deviceId: DESKTOP_ID, peerConnected: true, peers: [{ role: "machine", deviceId: other }] });
+    assert.equal(link.isMachineConnected(record.id), false, "another machine is not this one");
+    client.emit("peer", { type: "peer-connected", peer: { role: "machine", deviceId: MACHINE_ID } });
+    assert.equal(link.isMachineConnected(record.id), true);
+    client.emit("peer", { type: "peer-disconnected", peer: { role: "machine", deviceId: other } });
+    assert.equal(link.isMachineConnected(record.id), true, "the other one leaving does not take this one away");
+    client.emit("peer", { type: "peer-disconnected", peer: { role: "machine", deviceId: MACHINE_ID } });
+    assert.equal(link.isMachineConnected(record.id), false);
+  } finally { link.close(); }
+});
+
 test("when a machine goes away the desktop stops showing the background work it reported", async () => {
   const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
   const link = Object.create(MachineLinkService.prototype);
@@ -884,7 +1072,7 @@ test("when a machine goes away the desktop stops showing the background work it 
   link.emitStatus = () => undefined;
   const events = [];
   MachineLinkService.prototype.onMemberBackgroundTasks.call(link, (event) => events.push(event));
-  const connection = { record: { id: "machine-a" }, machineDeviceId: "device-a", replicated: new Set(), settingsSynced: true, helloSeen: true };
+  const connection = { record: { id: "machine-a" }, machineDeviceId: "device-a", replicated: new Set(), settingsSynced: true, helloSeen: true, pendingScripts: new Map() };
   link.setMachinePeer(connection, undefined);
   assert.deepEqual(events, [{ machineId: "machine-a", snapshot: [] }]);
   link.setMachinePeer(connection, undefined);
@@ -895,4 +1083,111 @@ test("when a machine goes away the desktop stops showing the background work it 
   connection.helloSeen = true;
   link.setMachinePeer(connection, "device-a");
   assert.ok(sent.includes("machine.member.background.request"), "back on the link, the desktop asks what is running now");
+});
+
+test("the desktop asks a machine to move and tells a refusal from an answer that never came", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const link = Object.create(MachineLinkService.prototype);
+  link.debugLogs = { write: async () => undefined };
+  link.now = () => new Date();
+  const { EventEmitter } = await import("node:events");
+  link.emitter = new EventEmitter();
+  const sent = [];
+  const connection = { record: { id: "m", name: "Cloud run", lastHello: { instanceId: "i-1", transportMoveSupported: true } }, machineDeviceId: "device-m", pendingScripts: new Map() };
+  link.connections = new Map([["m", connection]]);
+  link.send = async (_connection, body) => { sent.push(body); };
+  const addresses = { relayUrl: "wss://hub/v1/relay", outboxUrl: "https://hub/v1/mailbox/events" };
+  assert.equal(link.supportsTransportMove("m"), true);
+  const moving = link.requestTransportMove("m", addresses, 2_000);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sent[0].type, "machine.transport.move");
+  assert.equal(sent[0].instanceId, "i-1");
+  await link.handleBody(connection, { type: "machine.transport.moved", requestId: sent[0].requestId, ok: true });
+  assert.deepEqual(await moving, { status: "moved" });
+  const refused = link.requestTransportMove("m", addresses, 2_000);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await link.handleBody(connection, { type: "machine.transport.moved", requestId: sent[1].requestId, ok: false, error: "The machine is busy; it moves once it is idle." });
+  assert.equal((await refused).status, "refused");
+  // No answer: it may have moved all the same.
+  assert.equal((await link.requestTransportMove("m", addresses, 50)).status, "unknown");
+  // Gone from the link: the move is answered for it, and it is not a refusal.
+  const cut = link.requestTransportMove("m", addresses, 2_000);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  link.rejectPendingScripts(connection, "The machine was removed.");
+  assert.equal((await cut).status, "unknown");
+  const greeted = link.waitForHello("m", 1_000);
+  link.emitter.emit("hello", { machineId: "m" });
+  assert.equal(await greeted, true);
+  assert.equal(await link.waitForHello("m", 20), false);
+  connection.record.lastHello = { instanceId: "i-2" };
+  assert.equal(link.supportsTransportMove("m"), false);
+  assert.equal((await link.requestTransportMove("m", addresses)).status, "refused", "an older runtime is not asked");
+});
+
+test("the desktop looks for a machine at another address without moving its link or disturbing the machine", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const here = createReferenceRelayServer();
+  const elsewhere = createReferenceRelayServer();
+  const hereAddress = await here.listen();
+  const elsewhereAddress = await elsewhere.listen();
+  let host;
+  let link;
+  try {
+    const pairing = machinePairing(hereAddress.url);
+    const record = { id: "machine-probe", name: "Probe box", deviceId: "", pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
+    const debugLogs = { write: async () => undefined };
+    link = new MachineLinkService({
+      listMachines: async () => [record], saveMachine: async (next) => { Object.assign(record, next); return [record]; }, removeMachine: async () => [],
+      getMachinePairing: async (key) => (key === pairing.rendezvousId ? pairing : undefined),
+      exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: "{}", agentEnvironment: [] })
+    }, debugLogs, { ...desktopEvents, appVersion: "desktop-v", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50 });
+    host = new MachineHostService({
+      runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined
+    }, { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, debugLogs,
+    { ...hostEvents, pairing, deviceId: MACHINE_ID, appVersion: "machine-v", createClient: undefined, reconnectDelayMs: 50 });
+    assert.equal(link.machinePresence("machine-probe"), undefined, "not connected yet");
+    await link.start();
+    await host.start();
+    await waitFor(() => link.machinePresence("machine-probe")?.present === true, 10_000);
+    const presence = link.machinePresence("machine-probe");
+    assert.equal(presence.relayUrl, hereAddress.url);
+    assert.equal(presence.instanceId, host.instanceId, "which run of the machine greeted");
+    assert.equal(await link.probeMachineAt("machine-probe", { ...pairing, relayUrl: hereAddress.url }, 5_000), true, "found where it is");
+    assert.equal(await link.probeMachineAt("machine-probe", { ...pairing, relayUrl: elsewhereAddress.url }, 800), false, "not found where it is not");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(link.isMachineConnected("machine-probe"), true, "the link stayed where it was");
+    assert.equal(link.machinePresence("machine-probe").relayUrl, hereAddress.url);
+    assert.equal(host.isDesktopConnected(), true, "the machine still has its desktop");
+  } finally {
+    host?.close();
+    link?.close();
+    await here.close();
+    await elsewhere.close();
+  }
+});
+
+test("a reconnect for a move keeps the turns waiting for the machine's answer", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const link = Object.create(MachineLinkService.prototype);
+  link.enrolled = new Map();
+  link.emitMemberBackground = () => undefined;
+  link.emitStatus = () => undefined;
+  link.rejectPendingScripts = () => undefined;
+  let outcome;
+  const pendingTurns = new Map([["run-1", { resolve: (value) => { outcome = value; }, dispatched: true }]]);
+  const pendingTurnConversations = new Map([["run-1", "chat-1"]]);
+  const record = { id: "m", name: "Cloud run" };
+  link.connections = new Map([["m", { record, pendingTurns, pendingTurnConversations, client: { close: () => undefined } }]]);
+  let carried;
+  link.connectMachine = async (_record, _pairing, kept) => { carried = kept; };
+  await link.reconnectMachine("m", { relayUrl: "wss://52.72.175.0/v1/relay" });
+  assert.equal(outcome, undefined, "not failed as if the machine were removed");
+  assert.equal(carried.pendingTurns, pendingTurns, "the same waiting turns move to the new connection");
+  assert.equal(carried.pendingTurnConversations, pendingTurnConversations);
+  // Removing a machine still ends its turns.
+  link.connections = new Map([["m", { record, pendingTurns, pendingTurnConversations, client: { close: () => undefined } }]]);
+  await link.disconnectMachine("m");
+  assert.equal(outcome.status, "failed");
 });

@@ -367,3 +367,53 @@ test("a shared room key cannot forge another device's application ACK", async ()
     assert.equal((await pair.storageA.deviceEvents().listPending("room")).length, 0);
   } finally { await pair.cleanup(); }
 });
+
+test("from the hub's order a channel stores what is its own, keeps it when applying fails, and refuses when closed", async () => {
+  const pair = await devices();
+  try {
+    pair.failedKinds.add("message.updated");
+    const fine = await pair.a.publish({ conversationId: "chat", kind: "message.created", payload: { text: "one" } });
+    const failing = await pair.a.publish({ conversationId: "other", kind: "message.updated", payload: { text: "two" } });
+    assert.ok(pair.b.accepts(fine));
+    assert.equal(await pair.b.receiveFromHub(fine), "stored");
+    assert.deepEqual(pair.applied, [fine.eventId]);
+    // Its apply fails: the channel holds it and retries; the delivery succeeded.
+    assert.equal(await pair.b.receiveFromHub(failing), "stored");
+    assert.deepEqual(pair.applied, [fine.eventId]);
+    pair.failedKinds.clear();
+    // Held, it waits out its retry (another chat applying does not wake it);
+    // once due, it is applied with the next pass.
+    pair.b.retryHeldNow();
+    const later = await pair.a.publish({ conversationId: "chat", kind: "message.created", payload: { text: "three" } });
+    assert.equal(await pair.b.receiveFromHub(later), "stored");
+    assert.deepEqual(new Set(pair.applied), new Set([fine.eventId, failing.eventId, later.eventId]));
+    // A closed channel takes nothing: whoever delivered offers it again.
+    pair.b.close();
+    const afterClose = await pair.a.publish({ conversationId: "chat", kind: "message.created", payload: { text: "four" } });
+    await assert.rejects(pair.b.receiveFromHub(afterClose), (error: Error) => error.name === "DeviceEventChannelClosedError");
+  } finally { await pair.cleanup(); }
+});
+
+test("from the hub's order a second-hand event is taken only when it is a chat change", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-device-channel-hub-"));
+  try {
+    const storage = new StorageService({ dbPath: path.join(directory, "receiver.sqlite3") });
+    const peerLog = new ChatEventLogService(new StorageService({ dbPath: path.join(directory, "peer.sqlite3") }));
+    const otherStorage = new StorageService({ dbPath: path.join(directory, "other.sqlite3") });
+    const otherLog = new ChatEventLogService(otherStorage);
+    const local = await new ChatEventLogService(storage).getOrCreateDeviceIdentity();
+    const peer = await peerLog.getOrCreateDeviceIdentity();
+    const other = await otherLog.getOrCreateDeviceIdentity();
+    const channel = new DeviceEventChannel({ storage, eventLog: new ChatEventLogService(storage), channelId: "room", hubMode: true,
+      localDeviceId: local.originId, peerDeviceId: peer.originId, peerPublicKeyDerBase64: peer.publicKeyDerBase64,
+      forwardedOriginKey: (originId) => originId === other.originId ? other.publicKeyDerBase64 : undefined,
+      send: async () => undefined, apply: async () => "applied", onError: () => undefined });
+    try {
+      const change = (await otherLog.appendLocalEvent({ conversationId: "chat", logScopeId: "chat-changes:chat", kind: "chat.changes", payload: {} })).event;
+      const command = (await otherLog.appendLocalEvent({ conversationId: "chat-2", logScopeId: "chat-changes:chat-2", kind: "machine.trust.roster", payload: {} })).event;
+      assert.equal(channel.accepts(change), true, "another machine's chat change, forwarded");
+      assert.equal(channel.accepts(command), false, "never a command at second hand");
+      await assert.rejects(channel.receiveFromHub(command), /signature or channel scope/);
+    } finally { channel.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

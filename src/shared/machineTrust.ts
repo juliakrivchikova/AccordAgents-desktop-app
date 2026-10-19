@@ -19,6 +19,9 @@ export interface TrustedPeerAccess {
   fingerprint?: string;
   /** For a machine peer: the id members carry as `homeMachineId`. */
   machineId?: string;
+  /** For a machine peer: its runtime folds chat change events. Until it does,
+   *  the changes for it are kept but not sent. */
+  chatChanges?: boolean;
 }
 
 export interface MachineTrustRoster {

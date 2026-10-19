@@ -1,4 +1,5 @@
 import { assertMachinePowerHandoff, type MachinePowerHandoff } from "./machinePowerHandoff";
+import { isAcceptableHubUrl } from "./hubProtocol";
 export const MOBILE_PAIRING_VERSION = 1;
 
 /** phone-control: a phone drives this desktop; person-invite: another person
@@ -43,6 +44,9 @@ export interface MobilePairingPackage {
   mailboxUrl?: string;
   outboxUrl?: string;
   staticOriginUrl?: string;
+  /** The User's own server: when set, rooms and every durable event go
+   *  through it instead of the relay and its mailboxes. */
+  hubUrl?: string;
   capabilities: MobilePairingCapability[];
   /** Rule 3: the phone's start key, which lets this device start a stopped
    *  AWS machine by itself. Only while the link is built: the key reaches the
@@ -61,6 +65,7 @@ export interface MobilePairingPackage {
 export interface CreateMobilePairingRequest {
   conversationId?: string;
   purpose?: MobilePairingPurpose;
+  hubUrl?: string;
   relayUrl?: string;
   mailboxUrl?: string;
   outboxUrl?: string;
@@ -152,6 +157,29 @@ export function mobileControlSettingsFromEnvironment(env: Record<string, string 
     defaults: hasManagedRelay && hasManagedStatic
       ? { ...ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS, ...defaults }
       : defaults
+  };
+}
+
+/** With the User's own hub, the relay a new pairing names is the hub: its
+ *  rooms and sealed mailboxes are the relay's, served from her server. The
+ *  phone's app is still loaded from the same site. */
+export function mobileControlForHub(settings: MobileControlSettings, hubUrl: string | undefined): MobileControlSettings {
+  if (!hubUrl) return settings;
+  let origin: URL;
+  try {
+    origin = new URL(hubUrl);
+  } catch {
+    return settings;
+  }
+  const socket = origin.protocol === "https:" ? "wss:" : "ws:";
+  return {
+    provider: settings.provider,
+    defaults: {
+      ...settings.defaults,
+      relayUrl: `${socket}//${origin.host}/v1/relay`,
+      mailboxUrl: `${origin.origin}/`,
+      outboxUrl: `${origin.origin}/v1/mailbox/events`
+    }
   };
 }
 
@@ -281,6 +309,9 @@ export function assertMobilePairingPackage(value: unknown, now?: Date): asserts 
   }
   if (typeof value.staticOriginUrl === "string") {
     assertHttpsUrl(value.staticOriginUrl, "staticOriginUrl");
+  }
+  if (value.hubUrl !== undefined && (typeof value.hubUrl !== "string" || !/^https?:\/\/[^\s]+$/.test(value.hubUrl) || !isAcceptableHubUrl(value.hubUrl))) {
+    throw new Error("Mobile pairing hubUrl must be an https URL (plain http only on this computer).");
   }
   if (value.power !== undefined) {
     assertMachinePowerHandoff(value.power);

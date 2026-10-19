@@ -15,6 +15,8 @@ const sqliteResourcePath = path.join(assetsDir, "sqlite");
 // resource, never inside the asar: rsync copies real files to the machine and
 // nothing inside an asar has a real path on disk. `npm run build` produces it.
 const machinePayloadPath = path.resolve(__dirname, "dist", "machine");
+// The User's own server program, installed on it over SSH the same way.
+const hubPayloadPath = path.resolve(__dirname, "dist", "hub");
 const dmgBackgroundPath = path.join(assetsDir, "dmg-background.png");
 const entitlementsPath = path.resolve(__dirname, "entitlements.mac.plist");
 const entitlementsInheritPath = path.resolve(__dirname, "entitlements.mac.inherit.plist");
@@ -72,7 +74,8 @@ const config = {
     icon: process.platform === "win32" ? iconBasePath : iconPath,
     extraResource: [
       ...(process.platform === "win32" ? [sqliteResourcePath] : []),
-      machinePayloadPath
+      machinePayloadPath,
+      hubPayloadPath
     ],
     extendInfo: {
       CFBundleDisplayName: productName,
@@ -86,6 +89,7 @@ const config = {
       // Shipped as a loose resource instead (machinePayloadPath); keeping it in
       // the asar as well would ship the same 6 MB twice and still be unusable.
       /^\/dist\/machine(?:\/|$)/,
+      /^\/dist\/hub(?:\/|$)/,
       /^\/dist\/renderer-tests(?:-|\/|$)/,
       /^\/dist\/codex-approval-renderer-test(?:\/|$)/,
       /^\/dist\/.*\.d\.ts$/,
