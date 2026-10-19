@@ -4,7 +4,7 @@ import { gzipSync } from "node:zlib";
 import type { ConversationSummary } from "../shared/types";
 import { parseMobilePhoneScope, type MobilePhoneScope } from "../shared/mobilePairing";
 import type { HubRelayStorage } from "../main/services/hubRelayStorage";
-import { MOBILE_CHAT_LIST_SNIPPET_WINDOW, buildMobileChatList, buildMobileTimelinePage, type MobileCatalogStore } from "../main/services/mobileChatCatalog";
+import { MOBILE_CHAT_LIST_LIMIT, buildMobileChatList, buildMobileTimelinePage, type MobileCatalogStore } from "../main/services/mobileChatCatalog";
 import type { MobileRelayChatListItem } from "../main/services/mobileRelayControl";
 
 /**
@@ -22,6 +22,7 @@ export const PHONE_ERROR_NO_SCOPE = "phone_scope_missing";
 export const PHONE_ERROR_REVOKED = "phone_revoked";
 export const PHONE_ERROR_EXPIRED = "phone_expired";
 export const PHONE_ERROR_CHAT_NOT_FOUND = "chat_not_found";
+export const PHONE_ERROR_UNKNOWN = "phone_unknown";
 
 /** How long a changes request waits for news before answering empty. */
 const CHANGES_WAIT_MAX_MS = 25_000;
@@ -109,30 +110,12 @@ type Answer = { status: number; body: unknown };
 export class HubPhoneApi {
   private listCache = new Map<string, { seq: number; chats: MobileRelayChatListItem[] }>();
   private readonly waitersByMailbox = new Map<string, number>();
-  /** Each listed chat's newest messages as last read, kept until that chat
-   *  changes: a change rebuilds the list from one read, not a read per chat. */
-  private readonly snippetCache = new Map<string, { seq: number; opened: Awaited<ReturnType<MobileCatalogStore["openConversation"]>> }>();
-  private readonly listStore: MobileCatalogStore;
+  /** Each listed chat's row as last built, kept until that chat changes: a
+   *  change rebuilds one row, not a read per chat (and the rows are small,
+   *  where the chats behind them are not). */
+  private readonly rowCache = new Map<string, { seq: number; updatedAt: string; row: MobileRelayChatListItem }>();
 
-  constructor(private readonly options: HubPhoneOptions) {
-    const store = options.store;
-    this.listStore = {
-      listConversations: () => store.listConversations(),
-      listPendingChoiceMessages: (ids) => store.listPendingChoiceMessages(ids),
-      openConversation: async (id, limit, page) => {
-        if (page || limit !== MOBILE_CHAT_LIST_SNIPPET_WINDOW) return store.openConversation(id, limit, page);
-        const cached = this.snippetCache.get(id);
-        if (cached && options.feed.lastChange(id) <= cached.seq) return cached.opened;
-        const seq = options.feed.current();
-        const opened = await store.openConversation(id, limit);
-        if (this.snippetCache.size > 2_000) this.snippetCache.clear();
-        // Kept short: the list needs each chat's members and the start of its
-        // last lines, not whole replies (a 512 MB server holds every chat).
-        this.snippetCache.set(id, { seq, opened: opened ? trimmedForList(opened) : opened });
-        return opened;
-      }
-    };
-  }
+  constructor(private readonly options: HubPhoneOptions) {}
 
   /** Answers one phone request; the status is returned for the server's log. */
   async handle(request: IncomingMessage, response: ServerResponse, url: URL): Promise<number> {
@@ -169,6 +152,9 @@ export class HubPhoneApi {
     // A pairing the desktop made before it told the server what it may read:
     // the phone keeps asking the desktop until the desktop says.
     if (!scope) return { status: 403, body: { ok: false, error: PHONE_ERROR_NO_SCOPE } };
+    // A link the desktop no longer lists among the phones it knows (its record
+    // was lost): nothing here until it lists it again.
+    if (row.phoneKnown === 0) return { status: 403, body: { ok: false, error: PHONE_ERROR_UNKNOWN } };
     // A link no phone has used yet is good only within its window; once the
     // desktop says a phone used it, the window no longer applies.
     if (!row.phoneClaimed) {
@@ -186,26 +172,46 @@ export class HubPhoneApi {
 
   private async chats(scope: MobilePhoneScope): Promise<MobileRelayChatListItem[]> {
     const key = scope.scope === "device" ? "device" : `conversation:${scope.conversationId}`;
-    const seq = this.options.feed.current();
+    const feed = this.options.feed;
+    const seq = feed.current();
     const cached = this.listCache.get(key);
     if (cached && cached.seq === seq) return cached.chats;
-    const machineNames = await this.options.machineNames().catch(() => new Map<string, string>());
-    const chats = await buildMobileChatList(this.listStore, {
-      roleLabels: new Map(),
-      machineNames,
-      // Approvals live on the desktop and the machines; a list that cannot
-      // name them all names none, and the phone keeps the cards it holds.
-      pendingCards: false,
-      runningFromMessages: true,
-      include: (summary: ConversationSummary) => scope.scope === "device" || summary.id === scope.conversationId
+    const include = (summary: ConversationSummary) => scope.scope === "device" || summary.id === scope.conversationId;
+    const listed = (await this.options.store.listConversations())
+      .filter((summary) => summary.kind === "chat" && summary.archived !== true && include(summary))
+      .slice(0, MOBILE_CHAT_LIST_LIMIT);
+    const stale = new Set(listed.filter((summary) => {
+      const row = this.rowCache.get(summary.id);
+      return !row || row.updatedAt !== summary.updatedAt || feed.lastChange(summary.id) > row.seq;
+    }).map((summary) => summary.id));
+    if (stale.size > 0) {
+      const machineNames = await this.options.machineNames().catch(() => new Map<string, string>());
+      const built = await buildMobileChatList(this.options.store, {
+        roleLabels: new Map(),
+        machineNames,
+        // Approvals live on the desktop and the machines; a list that cannot
+        // name them all names none, and the phone keeps the cards it holds.
+        pendingCards: false,
+        runningFromMessages: true,
+        include: (summary: ConversationSummary) => stale.has(summary.id) && include(summary)
+      });
+      const updatedAt = new Map(listed.map((summary) => [summary.id, summary.updatedAt]));
+      if (this.rowCache.size > 4_000) this.rowCache.clear();
+      for (const row of built) {
+        this.rowCache.set(row.id, {
+          seq,
+          updatedAt: updatedAt.get(row.id) ?? row.updatedAt,
+          row: { ...row, members: row.members?.map((member) => ({ ...member, roleLabel: roleLabelFor(member.roleLabel) })) }
+        });
+      }
+    }
+    const chats = listed.flatMap((summary) => {
+      const row = this.rowCache.get(summary.id)?.row;
+      return row ? [row] : [];
     });
-    const labelled = chats.map((chat) => ({
-      ...chat,
-      members: chat.members?.map((member) => ({ ...member, roleLabel: roleLabelFor(member.roleLabel) }))
-    }));
     if (this.listCache.size > 16) this.listCache = new Map();
-    this.listCache.set(key, { seq, chats: labelled });
-    return labelled;
+    this.listCache.set(key, { seq, chats });
+    return chats;
   }
 
   private async timeline(scope: MobilePhoneScope, query: URLSearchParams): Promise<Answer> {
@@ -314,21 +320,6 @@ const BUILT_IN_ROLE_LABELS: Record<string, string> = {
   "code-reviewer": "Code Reviewer",
   "workflow-manager": "Workflow Manager"
 };
-
-/** What the chat list reads of a chat: its metadata and the first part of
- *  each of its newest messages (the line shown is at most 84 characters). */
-function trimmedForList<T extends { conversation: { messages: Array<{ content: string; metadata?: unknown }> } }>(opened: T): T {
-  return {
-    ...opened,
-    conversation: {
-      ...opened.conversation,
-      messages: opened.conversation.messages.map((message) => ({
-        ...message,
-        content: message.content.length > 400 ? message.content.slice(0, 400) : message.content
-      }))
-    }
-  };
-}
 
 function sameText(left: string, right: string): boolean {
   const a = Buffer.from(left);

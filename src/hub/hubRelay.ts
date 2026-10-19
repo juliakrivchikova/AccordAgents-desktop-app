@@ -189,6 +189,11 @@ export class HubRelayMailboxes {
     return undefined;
   }
 
+  /** The phone links the User's desktop knows (see HubRelayStorage). */
+  setKnownPhoneLinks(mailboxIds: string[]): Promise<number> {
+    return this.options.storage.setKnownPhoneLinks(mailboxIds);
+  }
+
   /** One mailbox request: `pathname` is one of RELAY_MAILBOX_PATHS.
    *  `ownerSigned` says whether the request also carries a valid signature
    *  of the server's owner (asked only when a new mailbox is registered). */
@@ -254,12 +259,14 @@ export class HubRelayMailboxes {
     // forgotten (it keeps only used links across a restart) cannot be read
     // through for ever.
     const expiresAtMs = typeof parsed.phoneExpiresAt === "string" ? Date.parse(parsed.phoneExpiresAt) : Number.NaN;
-    const scopeUpdate = async (): Promise<{ phoneScope?: string | null; phoneExpiresAt?: string | null; phoneClaimed?: number }> => {
+    const scopeUpdate = async (): Promise<{ phoneScope?: string | null; phoneExpiresAt?: string | null; phoneClaimed?: number; phoneKnown?: number }> => {
       if (!phoneScope) return {};
       const by = await signerRole();
       if (by !== "owner" && by !== "desktop") return {};
       return {
         phoneScope: JSON.stringify(phoneScope),
+        // Said by the desktop just now: it knows this link.
+        phoneKnown: 1,
         ...(Number.isFinite(expiresAtMs) ? { phoneExpiresAt: new Date(expiresAtMs).toISOString() } : {}),
         // Only ever set: a link once used stays used.
         ...(parsed.phoneClaimed === true ? { phoneClaimed: 1 } : {})

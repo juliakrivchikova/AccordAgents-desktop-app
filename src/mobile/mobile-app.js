@@ -3935,8 +3935,16 @@
           const reset = answer.reset === true;
           serverChanges = { instance: answer.instance, seq: answer.seq };
           if (first) continue;
-          const changed = Array.isArray(answer.conversationIds) ? answer.conversationIds : [];
+          let changed = Array.isArray(answer.conversationIds) ? answer.conversationIds : [];
           if (!reset && changed.length === 0) continue;
+          // A member at work changes its chat in bursts: what changed in the
+          // next moment is read in the same go, not in one read per change.
+          await new Promise(function (resolve) { setTimeout(resolve, 1_200); });
+          const more = await serverPhoneGet("/v1/phone/changes", { instance: serverChanges.instance, after: serverChanges.seq, waitMs: 0 }).catch(function () { return undefined; });
+          if (more && more.instance === serverChanges.instance && typeof more.seq === "number") {
+            serverChanges = { instance: more.instance, seq: more.seq };
+            if (Array.isArray(more.conversationIds)) changed = changed.concat(more.conversationIds);
+          }
           const openConversationId = selectedConversationId();
           await requestChatListFromServer().catch(function () { return []; });
           if (openConversationId && (reset || changed.indexOf(openConversationId) >= 0)) {

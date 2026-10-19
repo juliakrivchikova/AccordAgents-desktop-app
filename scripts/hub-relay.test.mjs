@@ -771,6 +771,24 @@ test("a paired phone reads the chat list and a chat's page from the server, with
     await registerSigned(hub, stale, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: new Date(Date.now() - 1000).toISOString() });
     assert.equal((await phoneGet(hub, stale, "/v1/phone/chats")).status, 200, "and stays used");
 
+    // The desktop lists the phone links it knows; one it no longer knows (its
+    // record lost) reads nothing until listed (or registered) again. Only
+    // the owner may say so.
+    const putLinks = (signer, ids) => {
+      const body = JSON.stringify({ mailboxIds: ids });
+      return fetch(`${hub.baseUrl}/v1/phone-links`, { method: "PUT", body,
+        headers: { "content-type": "application/json", authorization: signHubRequest(signer, { method: "PUT", pathWithQuery: "/v1/phone-links", body }) } });
+    };
+    assert.equal((await putLinks(machine, [])).status, 403, "a machine cannot");
+    answer = await putLinks(owner, [phone.mailboxId, invite.mailboxId]);
+    assert.equal(answer.status, 200, await answer.clone().text());
+    assert.equal((await phoneGet(hub, phone, "/v1/phone/chats")).status, 200);
+    answer = await phoneGet(hub, plain, "/v1/phone/chats");
+    assert.equal(answer.status, 403);
+    assert.equal((await answer.json()).error, "phone_unknown");
+    await registerSigned(hub, plain, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: inTenMinutes(), phoneClaimed: true });
+    assert.equal((await phoneGet(hub, plain, "/v1/phone/chats")).status, 200, "registered again by the desktop: known again");
+
     // Revoked: nothing more.
     const revoke = await fetch(`${hub.baseUrl}/v1/mailbox/revoke?mailboxId=${phone.mailboxId}`, { method: "POST", headers: { authorization: `Bearer ${phone.token}` } });
     assert.equal(revoke.status, 200);

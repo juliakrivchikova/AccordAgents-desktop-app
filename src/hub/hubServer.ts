@@ -477,6 +477,17 @@ export class HubServer {
         await this.options.storage.hub().savePushSubscription(device.deviceId, normalized, JSON.stringify({ ...parsed.subscription, endpoint: normalized }), new Date(this.now()).toISOString());
         return json(response, 200, { ok: true });
       }
+      if (url.pathname === "/v1/phone-links") {
+        if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub says which phones may read it.");
+        if (request.method !== "PUT" || !this.options.relay) throw new HubRequestError(404, "Not found.");
+        const parsed = parseJson(body) as { mailboxIds?: unknown };
+        const ids = Array.isArray(parsed?.mailboxIds) ? parsed.mailboxIds : undefined;
+        if (!ids || ids.length > 10_000 || !ids.every((id) => typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
+          throw new HubRequestError(400, "Invalid phone links.");
+        }
+        const known = await this.options.relay.mailboxes.setKnownPhoneLinks(ids as string[]);
+        return json(response, 200, { ok: true, known });
+      }
       if (url.pathname === "/v1/roster") {
         if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub changes its devices.");
         if (request.method === "GET") return json(response, 200, { devices: await this.options.storage.hub().devices() });

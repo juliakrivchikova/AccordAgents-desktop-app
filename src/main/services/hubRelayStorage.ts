@@ -71,6 +71,9 @@ export interface HubRelayMailboxRow {
   /** 1 once that desktop has said a phone used the link: the link's window
    *  no longer applies. */
   phoneClaimed: number;
+  /** 0 once the desktop listed the phone links it knows without this one:
+   *  a link it no longer knows (a lost record) reads nothing here. */
+  phoneKnown: number;
 }
 
 /** What sorting and choosing a page needs, without the envelope itself. */
@@ -113,13 +116,14 @@ const COLUMNS: Record<keyof HubRelayMailboxUpdate, string> = {
   phoneScope: "phone_scope",
   phoneSeenAt: "phone_seen_at",
   phoneExpiresAt: "phone_expires_at",
-  phoneClaimed: "phone_claimed"
+  phoneClaimed: "phone_claimed",
+  phoneKnown: "phone_known"
 };
 
 const MAILBOX_SELECT = `mailbox_id as mailboxId, token_hash as tokenHash, registered_at as registeredAt, epoch,
   arrival_seq as arrivalSeq, revoked_at as revokedAt, push_subscription as pushSubscription, push_last_sent as pushLastSent,
   push_read_cursor as pushReadCursor, push_finish_seq as pushFinishSeq, push_last_result as pushLastResult, push_at as pushAt,
-  phone_scope as phoneScope, phone_seen_at as phoneSeenAt, phone_expires_at as phoneExpiresAt, phone_claimed as phoneClaimed`;
+  phone_scope as phoneScope, phone_seen_at as phoneSeenAt, phone_expires_at as phoneExpiresAt, phone_claimed as phoneClaimed, phone_known as phoneKnown`;
 
 /** Ids are read and written in groups no longer than this. */
 const ID_BATCH = 200;
@@ -139,6 +143,7 @@ export class HubRelayStorage {
       if (!columns.has("phone_seen_at")) await this.database.execute("alter table hub_relay_mailboxes add column phone_seen_at text;");
       if (!columns.has("phone_expires_at")) await this.database.execute("alter table hub_relay_mailboxes add column phone_expires_at text;");
       if (!columns.has("phone_claimed")) await this.database.execute("alter table hub_relay_mailboxes add column phone_claimed integer not null default 0;");
+      if (!columns.has("phone_known")) await this.database.execute("alter table hub_relay_mailboxes add column phone_known integer not null default 1;");
     })();
     try {
       await this.ready;
@@ -163,6 +168,19 @@ export class HubRelayStorage {
       insert into hub_relay_mailboxes(mailbox_id) values (${quote(mailboxId)}) on conflict(mailbox_id) do nothing;
       ${assignments.length ? `update hub_relay_mailboxes set ${assignments.join(", ")} where mailbox_id = ${quote(mailboxId)};` : ""}
     `);
+  }
+
+  /** The phone links the desktop knows now: every other phone link stops
+   *  reading here (and starts again if listed later). Mailboxes without a
+   *  phone scope (machines') are left alone. */
+  async setKnownPhoneLinks(mailboxIds: string[]): Promise<number> {
+    await this.init();
+    const listed = mailboxIds.length ? mailboxIds.map(quote).join(", ") : "''";
+    await this.database.execute(`
+      update hub_relay_mailboxes set phone_known = case when mailbox_id in (${listed}) then 1 else 0 end where phone_scope is not null;
+    `);
+    const rows = await this.database.query<{ count: number }>("select count(*) as count from hub_relay_mailboxes where phone_scope is not null and phone_known = 1;");
+    return Number(rows[0]?.count) || 0;
   }
 
   /** Revocation: everything readable goes, the row stays as the tombstone. */
@@ -318,7 +336,8 @@ function normalizeMailbox(row: HubRelayMailboxRow): HubRelayMailboxRow {
     pushLastSent: num(row.pushLastSent),
     pushFinishSeq: num(row.pushFinishSeq),
     pushAt: num(row.pushAt),
-    phoneClaimed: Number(row.phoneClaimed) || 0
+    phoneClaimed: Number(row.phoneClaimed) || 0,
+    phoneKnown: row.phoneKnown === null || row.phoneKnown === undefined ? 1 : Number(row.phoneKnown)
   };
 }
 

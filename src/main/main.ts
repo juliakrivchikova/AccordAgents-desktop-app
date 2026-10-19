@@ -361,6 +361,8 @@ const mobileMailboxPollers = new Map<string, NodeJS.Timeout>();
 const mobilePairingsByKey = new Map<string, MobilePairingPackage>();
 /** When a used link was last said to be used to the User's server. */
 const mobileClaimResentAt = new Map<string, number>();
+/** Whether the stored phones were all restored this session. */
+let mobilePairingsRestoreComplete = false;
 // W1 arrival cursors, per pairing. Persisted with paired devices so a restart
 // does not re-read the whole mailbox.
 const mobileMailboxCursors = new Map<string, { epoch: string; cursor: number }>();
@@ -466,6 +468,7 @@ function publishHubRoster(): void {
     hubRosterRetryMs = 5_000;
     hubOwnerConfirmed = true;
     void debugLogService.write("hub.roster.published", { machines: machines.length });
+    publishPhoneLinks();
     hubSync?.nudgeHeld();
   })().catch((error: unknown) => {
     // A machine set up while the hub was away would be refused by it: the
@@ -1870,6 +1873,7 @@ async function revokeMobilePairingInternal(
   }
   await persistMobilePairedDevices();
   await revokeMailboxForPairing(pairing);
+  publishPhoneLinks();
   await recordMobilePairingCapabilityRevocation(pairing, revokedAt, reason);
   await debugLogService.write("mobile.pairing.revoked", {
     routingId: pairing.stableRoutingId,
@@ -1940,16 +1944,19 @@ async function revokeMailboxForPairing(pairing: MobilePairingPackage): Promise<v
   try {
     const access = mailboxAccessForSealKey(pairing.relaySealKeyBase64);
     const secret = settingsService.encodeMobilePairingSecret(access.token);
-    const pending = await settingsService.readPendingMailboxRevocations();
-    if (!pending.some((item) => item.mailboxScopeId === access.scopeId)) {
-      await settingsService.writePendingMailboxRevocations([...pending, {
-        outboxUrl: pairing.outboxUrl,
-        mailboxScopeId: access.scopeId,
-        encryptedToken: secret.encryptedValue,
-        tokenProtection: secret.protection,
-        revokedAt: new Date().toISOString()
-      }]);
-    }
+    const outboxUrl = pairing.outboxUrl;
+    await withPendingMailboxRevocations(async () => {
+      const pending = await settingsService.readPendingMailboxRevocations();
+      if (!pending.some((item) => item.mailboxScopeId === access.scopeId)) {
+        await settingsService.writePendingMailboxRevocations([...pending, {
+          outboxUrl,
+          mailboxScopeId: access.scopeId,
+          encryptedToken: secret.encryptedValue,
+          tokenProtection: secret.protection,
+          revokedAt: new Date().toISOString()
+        }]);
+      }
+    });
   } catch (error) {
     await debugLogService.write("mobile.mailbox.revoke-persist-error", {
       routingId: pairing.stableRoutingId,
@@ -1958,7 +1965,21 @@ async function revokeMailboxForPairing(pairing: MobilePairingPackage): Promise<v
   }
 }
 
-async function retryPendingMailboxRevocations(): Promise<void> {
+/** The pending revocations file is read and rewritten whole: one writer at a
+ *  time (a revoke adding to it, a retry taking from it), or one loses the
+ *  other's change. */
+let pendingMailboxRevocationsQueue: Promise<unknown> = Promise.resolve();
+function withPendingMailboxRevocations<T>(work: () => Promise<T>): Promise<T> {
+  const run = pendingMailboxRevocationsQueue.then(work, work);
+  pendingMailboxRevocationsQueue = run.catch(() => undefined);
+  return run;
+}
+
+function retryPendingMailboxRevocations(): Promise<void> {
+  return withPendingMailboxRevocations(retryPendingMailboxRevocationsNow);
+}
+
+async function retryPendingMailboxRevocationsNow(): Promise<void> {
   const pending = await settingsService.readPendingMailboxRevocations();
   if (pending.length === 0) {
     return;
@@ -2001,22 +2022,29 @@ function findMobilePairingForRevoke(request: RevokeMobilePairingRequest): Mobile
 }
 
 /** Whether the User's own server says the phone read through this pairing
- *  within its link's window. A shared relay says nothing (false). */
-async function phoneUsedPairingOnServer(pairing: MobilePairingPackage): Promise<boolean> {
-  if (!pairing.outboxUrl) return false;
+ *  within its link's window: "yes", "no" (a shared relay, which says
+ *  nothing, is "no"), or "unknown" when the box could not be asked. */
+async function phoneUsedPairingOnServer(pairing: MobilePairingPackage): Promise<"yes" | "no" | "unknown"> {
+  if (!pairing.outboxUrl) return "no";
   try {
     const url = new URL(mailboxEndpointForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64));
     url.searchParams.set("limit", "1");
     url.searchParams.set("afterArrival", String(Number.MAX_SAFE_INTEGER));
     const response = await fetch(url.toString(), { headers: mailboxAuthHeaders(pairing.relaySealKeyBase64), signal: AbortSignal.timeout(8_000) });
-    if (!response.ok) return false;
+    // A box the relay no longer has (revoked) is a "no"; any other refusal
+    // or a failure to reach it says nothing.
+    if (response.status === 401) return "no";
+    if (!response.ok) return "unknown";
     const body = await response.json() as { phoneSeenAt?: unknown };
     const seenAt = typeof body.phoneSeenAt === "string" ? Date.parse(body.phoneSeenAt) : Number.NaN;
-    return Number.isFinite(seenAt) && seenAt < Date.parse(pairing.expiresAt);
+    return Number.isFinite(seenAt) && seenAt < Date.parse(pairing.expiresAt) ? "yes" : "no";
   } catch {
-    return false;
+    return "unknown";
   }
 }
+
+/** How long an expiry waits to ask again when the box could not be asked. */
+const MOBILE_EXPIRY_RECHECK_MS = 2 * 60_000;
 
 function scheduleMobilePairingExpiry(pairing: MobilePairingPackage): void {
   const key = mobilePairingKey(pairing);
@@ -2038,8 +2066,20 @@ function scheduleMobilePairingExpiry(pairing: MobilePairingPackage): void {
     void (async () => {
       // A phone that read through the User's own server within the window has
       // used the link; this desktop may have slept through it (no poll ran).
-      if (await phoneUsedPairingOnServer(pairing)) {
+      const used = await phoneUsedPairingOnServer(pairing);
+      // Used meanwhile by another way (the room, the box), or revoked.
+      if (mobileClaimedPairingKeys.has(key) || mobileRevokedPairingKeys.has(key)) return;
+      if (used === "yes") {
         await noteMobilePairingClaimed(pairing);
+        return;
+      }
+      if (used === "unknown") {
+        // Asked again later rather than revoking a link the phone may be
+        // using: the server itself stops serving an unused link at its end.
+        mobilePairingExpiryTimers.delete(key);
+        const retry = setTimeout(() => scheduleMobilePairingExpiry(pairing), MOBILE_EXPIRY_RECHECK_MS);
+        retry.unref?.();
+        mobilePairingExpiryTimers.set(key, retry);
         return;
       }
       await revokeMobilePairingInternal(pairing, "expired");
@@ -2078,6 +2118,7 @@ async function applyStoredMobilePairingRevocations(): Promise<void> {
     // not keep it. Kept for a retry when the server cannot be reached.
     await persistMobilePairedDevices();
     await revokeMailboxForPairing(pairing);
+    publishPhoneLinks();
   }
 }
 
@@ -2186,6 +2227,33 @@ async function restoreMobilePairedDevices(): Promise<void> {
   if (count > 0) {
     await debugLogService.write("mobile.pairing.restored", { count });
   }
+  // Every stored phone came back: the list of phones this desktop knows is
+  // whole, and the User's server may hear it. One that did not come back
+  // (its key unreadable just now) keeps the list from being sent at all.
+  mobilePairingsRestoreComplete = count === devices.length;
+  publishPhoneLinks();
+}
+
+
+/** Tells the User's own server which phone links this desktop knows; it
+ *  serves chats to those only. A link whose record this desktop lost (and so
+ *  could never revoke) stops reading there. Sent only when the list is whole
+ *  and the server took this desktop as its owner. */
+function publishPhoneLinks(): void {
+  const client = hubClient;
+  if (!client || !hubOwnerConfirmed || !mobilePairingsRestoreComplete) return;
+  void (async () => {
+    const hub = await settingsService.getHubConfig().catch(() => undefined);
+    if (!hub) return;
+    const origin = new URL(hub.url).origin;
+    const mailboxIds = [...mobilePairingsByKey.values()]
+      .filter((pairing) => isMobilePairingActive(pairing) && pairing.outboxUrl && new URL(pairing.outboxUrl).origin === origin && mobilePhoneScopeOfPairing(pairing))
+      .map((pairing) => mailboxAccessForSealKey(pairing.relaySealKeyBase64).scopeId);
+    const answer = await client.setPhoneLinks(mailboxIds);
+    void debugLogService.write("hub.phone-links.published", { listed: mailboxIds.length, known: answer.known });
+  })().catch((error: unknown) => {
+    void debugLogService.write("hub.phone-links.error", { message: error instanceof Error ? error.message : String(error) });
+  });
 }
 
 function acceptsMobileOutboxEnvelopeForPairing(pairing: MobilePairingPackage, event: ChatEventEnvelope): boolean {
