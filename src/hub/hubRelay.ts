@@ -381,7 +381,10 @@ export class HubRelayMailboxes {
       const acknowledged = Math.min(Math.max(0, afterArrival as number), maxArrivalSeq);
       if (acknowledged > (row?.pushReadCursor ?? 0)) await storage.updateMailbox(mailboxId, { pushReadCursor: acknowledged });
     }
-    return { status: 200, body: { events, maxArrivalSeq, oldestArrivalSeq, epoch: row?.epoch ?? "" } };
+    // When the phone last read through the server: the desktop that made the
+    // pairing takes it as the phone's first use (a phone that only reads
+    // here never writes to the box within the link's window).
+    return { status: 200, body: { events, maxArrivalSeq, oldestArrivalSeq, epoch: row?.epoch ?? "", ...(row?.phoneSeenAt ? { phoneSeenAt: row.phoneSeenAt } : {}) } };
   }
 
   // Owner-driven deletion: the desktop names its own superseded envelopes.

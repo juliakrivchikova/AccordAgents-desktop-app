@@ -139,6 +139,12 @@ export class HubPhoneApi {
     // A pairing the desktop made before it told the server what it may read:
     // the phone keeps asking the desktop until the desktop says.
     if (!scope) return { status: 403, body: { ok: false, error: PHONE_ERROR_NO_SCOPE } };
+    // The phone has used its link: the desktop reads this with the box and
+    // keeps the pairing. Written at most once a minute.
+    const seenAt = Date.parse(row.phoneSeenAt ?? "");
+    if (!Number.isFinite(seenAt) || Date.now() - seenAt > 60_000) {
+      await this.options.relayStorage.updateMailbox(mailboxId, { phoneSeenAt: new Date().toISOString() }).catch(() => undefined);
+    }
     return { scope, mailboxId };
   }
 

@@ -710,8 +710,12 @@ test("a paired phone reads the chat list and a chat's page from the server, with
     const byMachine = credentials("machine-says-scope");
     assert.equal((await registerSigned(hub, byMachine, machine, { phoneScope: { scope: "device" } })).status, 200);
 
+    const boxBefore = await (await fetch(`${hub.baseUrl}/v1/mailbox/events?mailboxId=${phone.mailboxId}&afterArrival=0`, { headers: { authorization: `Bearer ${phone.token}` } })).json();
+    assert.equal(boxBefore.phoneSeenAt, undefined, "not used by the phone yet");
     let answer = await phoneGet(hub, phone, "/v1/phone/chats");
     assert.equal(answer.status, 200, await answer.clone().text());
+    const boxAfter = await (await fetch(`${hub.baseUrl}/v1/mailbox/events?mailboxId=${phone.mailboxId}&afterArrival=0`, { headers: { authorization: `Bearer ${phone.token}` } })).json();
+    assert.ok(Date.parse(boxAfter.phoneSeenAt) > Date.now() - 60_000, "the desktop reading the box learns that the phone has used its link");
     let body = await answer.json();
     assert.equal(body.type, "mobile.chat-list");
     assert.deepEqual(body.chats.map((chat) => chat.title).sort(), ["Alpha", "Beta"], "every chat but the archived one");

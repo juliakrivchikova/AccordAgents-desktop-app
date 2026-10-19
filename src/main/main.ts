@@ -2422,12 +2422,20 @@ async function pollMobileMailboxOutbox(
       }
       throw new Error(`Mailbox poll failed with HTTP ${response.status}: ${body}`);
     }
-    return await response.json() as { events?: unknown; epoch?: unknown };
+    return await response.json() as { events?: unknown; epoch?: unknown; phoneSeenAt?: unknown };
   };
   const stored = mobileMailboxCursors.get(pairingKey) ?? { epoch: "", cursor: 0 };
   const startedCursor = stored.cursor;
   const startedEpoch = stored.epoch;
   let body = await fetchPage(stored.cursor);
+  // The User's own server says when the phone last read through it: a phone
+  // that only reads there has used its link as surely as one that wrote, so
+  // the link is kept rather than expired. Only a use within the link's
+  // window counts.
+  const phoneSeenAtMs = typeof body.phoneSeenAt === "string" ? Date.parse(body.phoneSeenAt) : Number.NaN;
+  if (Number.isFinite(phoneSeenAtMs) && phoneSeenAtMs < Date.parse(pairing.expiresAt)) {
+    void noteMobilePairingClaimed(pairing);
+  }
   const epoch = typeof body.epoch === "string" ? body.epoch : "";
   if (epoch && epoch !== stored.epoch) {
     // Box recreated: arrival numbering restarted. Re-read from zero and let

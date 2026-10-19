@@ -3848,6 +3848,13 @@
       return { value };
     } catch (error) {
       const status = error && typeof error === "object" ? error.serverStatus : undefined;
+      // The pairing was revoked (or its link expired before this phone used
+      // it): say so now, as the mailbox would, not after a wait on the desktop.
+      if (status === 401 && String(error.serverBody || "").indexOf("phone_revoked") >= 0) {
+        mailboxAuthRejected = true;
+        void clearMailboxAccessMeta();
+        void render("revoked");
+      }
       if (status === 404 || status === 403 || status === 401 || status === 405 || (error && error.unavailable)) {
         if (serverReads !== "no") recordRelayDebug({ event: "server-reads", state: "no", status: status || 0 });
         serverReads = "no";

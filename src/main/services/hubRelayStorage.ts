@@ -63,6 +63,8 @@ export interface HubRelayMailboxRow {
   /** What this mailbox's pairing may read through the server's phone API
    *  (JSON of MobilePhoneScope), as the desktop that made the pairing said. */
   phoneScope: string | null;
+  /** When the phone last read through the server's phone API (ISO). */
+  phoneSeenAt: string | null;
 }
 
 /** What sorting and choosing a page needs, without the envelope itself. */
@@ -102,13 +104,14 @@ const COLUMNS: Record<keyof HubRelayMailboxUpdate, string> = {
   pushFinishSeq: "push_finish_seq",
   pushLastResult: "push_last_result",
   pushAt: "push_at",
-  phoneScope: "phone_scope"
+  phoneScope: "phone_scope",
+  phoneSeenAt: "phone_seen_at"
 };
 
 const MAILBOX_SELECT = `mailbox_id as mailboxId, token_hash as tokenHash, registered_at as registeredAt, epoch,
   arrival_seq as arrivalSeq, revoked_at as revokedAt, push_subscription as pushSubscription, push_last_sent as pushLastSent,
   push_read_cursor as pushReadCursor, push_finish_seq as pushFinishSeq, push_last_result as pushLastResult, push_at as pushAt,
-  phone_scope as phoneScope`;
+  phone_scope as phoneScope, phone_seen_at as phoneSeenAt`;
 
 /** Ids are read and written in groups no longer than this. */
 const ID_BATCH = 200;
@@ -123,10 +126,9 @@ export class HubRelayStorage {
       await this.database.init();
       await this.database.execute(HUB_RELAY_SCHEMA_SQL);
       // Added after the first servers were set up: their table gains it.
-      const columns = await this.database.query<{ name: string }>("select name from pragma_table_info('hub_relay_mailboxes');");
-      if (!columns.some((column) => column.name === "phone_scope")) {
-        await this.database.execute("alter table hub_relay_mailboxes add column phone_scope text;");
-      }
+      const columns = new Set((await this.database.query<{ name: string }>("select name from pragma_table_info('hub_relay_mailboxes');")).map((column) => column.name));
+      if (!columns.has("phone_scope")) await this.database.execute("alter table hub_relay_mailboxes add column phone_scope text;");
+      if (!columns.has("phone_seen_at")) await this.database.execute("alter table hub_relay_mailboxes add column phone_seen_at text;");
     })();
     try {
       await this.ready;
@@ -161,7 +163,7 @@ export class HubRelayStorage {
       delete from hub_relay_events where mailbox_id = ${quote(mailboxId)};
       delete from hub_relay_claims where mailbox_id = ${quote(mailboxId)};
       update hub_relay_mailboxes set token_hash = null, registered_at = null, epoch = null, arrival_seq = 0, push_subscription = null,
-        push_last_sent = null, push_read_cursor = 0, push_finish_seq = null, push_last_result = null, push_at = null, phone_scope = null,
+        push_last_sent = null, push_read_cursor = 0, push_finish_seq = null, push_last_result = null, push_at = null, phone_scope = null, phone_seen_at = null,
         revoked_at = ${quote(revokedAt)}
       where mailbox_id = ${quote(mailboxId)};
       commit;
