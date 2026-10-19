@@ -363,6 +363,8 @@ const mobilePairingsByKey = new Map<string, MobilePairingPackage>();
 const mobileClaimResentAt = new Map<string, number>();
 /** Whether the stored phones were all restored this session. */
 let mobilePairingsRestoreComplete = false;
+let phoneLinksQueue: Promise<void> = Promise.resolve();
+let phoneLinksRetry: ReturnType<typeof setTimeout> | undefined;
 // W1 arrival cursors, per pairing. Persisted with paired devices so a restart
 // does not re-read the whole mailbox.
 const mobileMailboxCursors = new Map<string, { epoch: string; cursor: number }>();
@@ -720,6 +722,7 @@ hubInstaller.onProgress((state) => {
   // so the phones read their chats from the server from here on.
   if (state.status === "ready" && state.phase === "ready") {
     for (const pairing of mobilePairingsByKey.values()) void ensureMailboxRegisteredForPairing(pairing);
+    publishPhoneLinks();
   }
   sendToMainWindow("hub:setup-progress", state);
 });
@@ -2189,8 +2192,10 @@ async function persistMobilePairedDevices(): Promise<void> {
 }
 
 async function restoreMobilePairedDevices(): Promise<void> {
-  // readMobilePairedDevices swallows its own read/parse errors and returns [].
-  const devices = await settingsService.readMobilePairedDevices();
+  // A file that could not be read is not "no phones": the list of phones
+  // this desktop knows is then not whole, and is not sent to the server.
+  const stored = await settingsService.readMobilePairedDevicesState();
+  const devices = stored.devices;
   // Each relay connect can burn its full timeout, so devices come back
   // together rather than in turn, and one unreadable record cannot strand the
   // phones behind it.
@@ -2230,7 +2235,7 @@ async function restoreMobilePairedDevices(): Promise<void> {
   // Every stored phone came back: the list of phones this desktop knows is
   // whole, and the User's server may hear it. One that did not come back
   // (its key unreadable just now) keeps the list from being sent at all.
-  mobilePairingsRestoreComplete = count === devices.length;
+  mobilePairingsRestoreComplete = !stored.readFailed && count === devices.length;
   publishPhoneLinks();
 }
 
@@ -2240,19 +2245,32 @@ async function restoreMobilePairedDevices(): Promise<void> {
  *  could never revoke) stops reading there. Sent only when the list is whole
  *  and the server took this desktop as its owner. */
 function publishPhoneLinks(): void {
-  const client = hubClient;
-  if (!client || !hubOwnerConfirmed || !mobilePairingsRestoreComplete) return;
-  void (async () => {
+  // A build run from a checkout and pointed at the User's real server (no
+  // test server named) never tells it which phones may read.
+  if (!app.isPackaged && !process.env.ACCORDAGENTS_HUB_URL?.trim()) return;
+  if (!hubClient || !hubOwnerConfirmed || !mobilePairingsRestoreComplete) return;
+  // One list at a time, each built when it is sent: an older list can never
+  // land after a newer one.
+  phoneLinksQueue = phoneLinksQueue.then(async () => {
+    const client = hubClient;
     const hub = await settingsService.getHubConfig().catch(() => undefined);
-    if (!hub) return;
+    if (!client || !hub || !hubOwnerConfirmed || !mobilePairingsRestoreComplete) return;
     const origin = new URL(hub.url).origin;
+    const key = (pairing: MobilePairingPackage) => mobilePairingKey(pairing);
+    // Every link not revoked: the server itself ends an unused link at its
+    // window, and a used one this desktop has not noticed yet stays listed.
     const mailboxIds = [...mobilePairingsByKey.values()]
-      .filter((pairing) => isMobilePairingActive(pairing) && pairing.outboxUrl && new URL(pairing.outboxUrl).origin === origin && mobilePhoneScopeOfPairing(pairing))
+      .filter((pairing) => !mobileRevokedPairingKeys.has(key(pairing)) && pairing.outboxUrl && new URL(pairing.outboxUrl).origin === origin && mobilePhoneScopeOfPairing(pairing))
       .map((pairing) => mailboxAccessForSealKey(pairing.relaySealKeyBase64).scopeId);
     const answer = await client.setPhoneLinks(mailboxIds);
     void debugLogService.write("hub.phone-links.published", { listed: mailboxIds.length, known: answer.known });
-  })().catch((error: unknown) => {
+  }).catch((error: unknown) => {
     void debugLogService.write("hub.phone-links.error", { message: error instanceof Error ? error.message : String(error) });
+    // Sent again later (an older server program, the server away).
+    if (!phoneLinksRetry) {
+      phoneLinksRetry = setTimeout(() => { phoneLinksRetry = undefined; publishPhoneLinks(); }, 5 * 60_000);
+      phoneLinksRetry.unref?.();
+    }
   });
 }
 
@@ -2557,7 +2575,7 @@ async function pollMobileMailboxOutbox(
       }
       throw new Error(`Mailbox poll failed with HTTP ${response.status}: ${body}`);
     }
-    return await response.json() as { events?: unknown; epoch?: unknown; phoneSeenAt?: unknown; phoneClaimed?: unknown };
+    return await response.json() as { events?: unknown; epoch?: unknown; phoneSeenAt?: unknown; phoneClaimed?: unknown; phoneKnown?: unknown };
   };
   const stored = mobileMailboxCursors.get(pairingKey) ?? { epoch: "", cursor: 0 };
   const startedCursor = stored.cursor;
@@ -2573,7 +2591,10 @@ async function pollMobileMailboxOutbox(
   }
   // A used link the server does not know as used yet (the one registration
   // that says so was lost): said again, at most once a minute.
-  if (body.phoneClaimed === false && mobileClaimedPairingKeys.has(pairingKey)) {
+  // Likewise a link this desktop knows that the server was told it does not
+  // (a list that missed it): registering it again says it is known.
+  if ((body.phoneClaimed === false && mobileClaimedPairingKeys.has(pairingKey)) ||
+    (body.phoneKnown === false && !mobileRevokedPairingKeys.has(pairingKey))) {
     const last = mobileClaimResentAt.get(pairingKey) ?? 0;
     if (Date.now() - last > 60_000) {
       mobileClaimResentAt.set(pairingKey, Date.now());

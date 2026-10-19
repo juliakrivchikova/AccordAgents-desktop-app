@@ -177,7 +177,9 @@ export class HubPhoneApi {
     const cached = this.listCache.get(key);
     if (cached && cached.seq === seq) return cached.chats;
     const include = (summary: ConversationSummary) => scope.scope === "device" || summary.id === scope.conversationId;
-    const listed = (await this.options.store.listConversations())
+    if (this.rowCache.size > 4_000) this.rowCache.clear();
+    const summaries = await this.options.store.listConversations();
+    const listed = summaries
       .filter((summary) => summary.kind === "chat" && summary.archived !== true && include(summary))
       .slice(0, MOBILE_CHAT_LIST_LIMIT);
     const stale = new Set(listed.filter((summary) => {
@@ -193,10 +195,10 @@ export class HubPhoneApi {
         // name them all names none, and the phone keeps the cards it holds.
         pendingCards: false,
         runningFromMessages: true,
+        summaries,
         include: (summary: ConversationSummary) => stale.has(summary.id) && include(summary)
       });
       const updatedAt = new Map(listed.map((summary) => [summary.id, summary.updatedAt]));
-      if (this.rowCache.size > 4_000) this.rowCache.clear();
       for (const row of built) {
         this.rowCache.set(row.id, {
           seq,

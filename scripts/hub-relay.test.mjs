@@ -786,6 +786,8 @@ test("a paired phone reads the chat list and a chat's page from the server, with
     answer = await phoneGet(hub, plain, "/v1/phone/chats");
     assert.equal(answer.status, 403);
     assert.equal((await answer.json()).error, "phone_unknown");
+    assert.equal((await boxOf(plain)).phoneKnown, false, "the desktop reading the box sees the server was told it does not know this link");
+    assert.equal((await boxOf(phone)).phoneKnown, true);
     await registerSigned(hub, plain, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: inTenMinutes(), phoneClaimed: true });
     assert.equal((await phoneGet(hub, plain, "/v1/phone/chats")).status, 200, "registered again by the desktop: known again");
 

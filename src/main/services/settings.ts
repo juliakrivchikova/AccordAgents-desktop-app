@@ -3246,18 +3246,32 @@ export class SettingsService {
   // it, so one install keeps working across desktop restarts. The short-lived
   // pairing link stays short-lived: it carries a key in a URL.
   async readMobilePairedDevices(): Promise<StoredMobilePairedDevice[]> {
+    return (await this.readMobilePairedDevicesState()).devices;
+  }
+
+  /** The stored phones, and whether the file could not be read at all (as
+   *  opposed to there being none): a failed read is not "no phones". */
+  async readMobilePairedDevicesState(): Promise<{ devices: StoredMobilePairedDevice[]; readFailed: boolean }> {
+    let raw: string;
     try {
-      const raw = await readFile(this.mobilePairedDevicesPath, "utf8");
+      raw = await readFile(this.mobilePairedDevicesPath, "utf8");
+    } catch (error) {
+      return { devices: [], readFailed: (error as NodeJS.ErrnoException).code !== "ENOENT" };
+    }
+    try {
       const parsed = JSON.parse(raw) as unknown;
       if (!Array.isArray(parsed)) {
-        return [];
+        return { devices: [], readFailed: true };
       }
-      return parsed.filter((entry): entry is StoredMobilePairedDevice =>
-        Boolean(entry) && typeof entry === "object" &&
-        typeof (entry as StoredMobilePairedDevice).stableRoutingId === "string" &&
-        typeof (entry as StoredMobilePairedDevice).pairingJson === "string");
+      return {
+        devices: parsed.filter((entry): entry is StoredMobilePairedDevice =>
+          Boolean(entry) && typeof entry === "object" &&
+          typeof (entry as StoredMobilePairedDevice).stableRoutingId === "string" &&
+          typeof (entry as StoredMobilePairedDevice).pairingJson === "string"),
+        readFailed: false
+      };
     } catch {
-      return [];
+      return { devices: [], readFailed: true };
     }
   }
 

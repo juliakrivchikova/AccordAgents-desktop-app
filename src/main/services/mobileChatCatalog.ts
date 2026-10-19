@@ -38,10 +38,12 @@ export interface MobileChatListOptions {
   /** Only chats this returns true for are listed (a pairing's scope). */
   include?: (summary: ConversationSummary) => boolean;
   onPendingCardsTruncated?: (listed: number) => void;
+  /** The chat summaries when the caller already read them. */
+  summaries?: ConversationSummary[];
 }
 
 export async function buildMobileChatList(store: MobileCatalogStore, options: MobileChatListOptions): Promise<MobileRelayChatListItem[]> {
-  const summaries = await store.listConversations();
+  const summaries = options.summaries ?? await store.listConversations();
   const listed = summaries
     .filter((summary) => summary.kind === "chat" && summary.archived !== true && (options.include?.(summary) ?? true))
     .slice(0, MOBILE_CHAT_LIST_LIMIT);

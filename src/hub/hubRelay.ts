@@ -406,7 +406,7 @@ export class HubRelayMailboxes {
     // on that was lost can say it again.
     return { status: 200, body: { events, maxArrivalSeq, oldestArrivalSeq, epoch: row?.epoch ?? "",
       ...(row?.phoneSeenAt ? { phoneSeenAt: row.phoneSeenAt } : {}),
-      ...(row?.phoneScope ? { phoneClaimed: row.phoneClaimed === 1 } : {}) } };
+      ...(row?.phoneScope ? { phoneClaimed: row.phoneClaimed === 1, phoneKnown: row.phoneKnown !== 0 } : {}) } };
   }
 
   // Owner-driven deletion: the desktop names its own superseded envelopes.
