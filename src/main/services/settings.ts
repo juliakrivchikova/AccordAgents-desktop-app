@@ -3412,8 +3412,12 @@ export class SettingsService {
   async saveMachineMove(record: MachineMoveRecord): Promise<void> {
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
-    stored.machineMoves = [...(stored.machineMoves ?? []).filter((item) => item.machineId !== record.machineId), structuredClone(record)];
-    await this.writeStored(stored, true);
+    // A new object: a write that fails leaves the settings in memory as the
+    // disk has them.
+    await this.writeStored({
+      ...stored,
+      machineMoves: [...(stored.machineMoves ?? []).filter((item) => item.machineId !== record.machineId), structuredClone(record)]
+    }, true);
   }
 
   /** Settles a move; with `adopt`, the machine's new pairing is saved in the
@@ -3421,14 +3425,17 @@ export class SettingsService {
   async finishMachineMove(machineId: string, adopt?: { pairingKey: string; pairing: MobilePairingPackage }): Promise<void> {
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
-    if (adopt) {
+    const remaining = (stored.machineMoves ?? []).filter((item) => item.machineId !== machineId);
+    const next: StoredSettings = { ...stored, machineMoves: remaining.length ? remaining : undefined };
+    // A machine removed meanwhile gets no pairing back: removal leaves no way in.
+    if (adopt && (stored.machines ?? []).some((machine) => machine.id === machineId && machine.pairingKey === adopt.pairingKey)) {
       const pairings = this.readMachinePairings(stored);
       pairings[adopt.pairingKey] = adopt.pairing;
-      stored.encryptedMachinePairings = this.sealJson(JSON.stringify(pairings));
+      next.encryptedMachinePairings = this.sealJson(JSON.stringify(pairings));
     }
-    const remaining = (stored.machineMoves ?? []).filter((item) => item.machineId !== machineId);
-    stored.machineMoves = remaining.length ? remaining : undefined;
-    await this.writeStored(stored, true);
+    // A new object: a write that fails leaves the record (and the old
+    // pairing) in memory as on disk, so a later pass settles it again.
+    await this.writeStored(next, true);
   }
 
   async saveMachine(record: MachineRecord, pairing?: MobilePairingPackage): Promise<MachineRecord[]> {
@@ -3771,6 +3778,7 @@ export class SettingsService {
       machineDeviceRevocations: _machineDeviceRevocations,
       machineInactivityCheckAt: _machineInactivityCheckAt,
       removedMachineOutboxes: _removedMachineOutboxes,
+      machineMoves: _machineMoves,
       lastRepoPath: _lastRepoPath,
       ...shareable
     } = stored;
@@ -3839,6 +3847,7 @@ export class SettingsService {
       machineDeviceRevocations: stored.machineDeviceRevocations,
       machineInactivityCheckAt: stored.machineInactivityCheckAt,
       removedMachineOutboxes: stored.removedMachineOutboxes,
+      machineMoves: stored.machineMoves,
       lastRepoPath: stored.lastRepoPath
     };
     // One atomic settings write replaces both configuration and environment.

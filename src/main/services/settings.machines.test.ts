@@ -439,11 +439,31 @@ test("a machine's unsettled move survives a fresh SettingsService, and settling 
     await make().saveMachineMove({ ...record, requestedAt: "2026-10-19T11:00:00.000Z" });
     assert.equal((await make().listMachineMoves()).length, 1, "one open move per machine");
     const pairing = { rendezvousId: "rv-1", ...to } as any;
+    await make().saveMachine({ id: "m1", name: "Cloud run", deviceId: "", pairingKey: "pk-1", createdAt: "" } as any);
     await make().finishMachineMove("m1", { pairingKey: "pk-1", pairing });
     const settled = make();
     assert.deepEqual(await settled.listMachineMoves(), []);
     assert.equal((await settled.getMachinePairing("pk-1"))?.relayUrl, to.relayUrl);
     assert.equal(JSON.parse(await readFile(path.join(dir, "settings.json"), "utf8")).machineMoves, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an open move is not part of the settings machines receive, and a removed machine gets no pairing back from it", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-moves-removed-"));
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const from = { relayUrl: "wss://relay.accordagents.com/v1/relay", outboxUrl: "https://relay.accordagents.com/v1/mailbox/events" };
+  const to = { relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" };
+  try {
+    await make().saveMachineMove({ machineId: "gone", pairingKey: "pk-gone", from, to, requestedAt: "2026-10-19T10:00:00.000Z" });
+    const snapshot = await make().exportMachineSettingsSnapshot();
+    assert.equal(snapshot.settingsJson.includes("machineMoves"), false, "a desktop's move records stay on the desktop");
+    await make().finishMachineMove("gone", { pairingKey: "pk-gone", pairing: { rendezvousId: "rv-gone", ...to } as any });
+    const after = make();
+    assert.equal(await after.getMachinePairing("pk-gone"), undefined, "no way back in for a removed machine");
+    assert.deepEqual(await after.listMachineMoves(), []);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -966,8 +966,13 @@ export class MachineHostService {
       return void await refuse(`The machine could not save its new address: ${errorMessage(error)}`);
     }
     void this.debugLogs.write("machine.transport.moved", { relayHost: new URL(addresses.relayUrl).host });
-    await this.send({ type: "machine.transport.moved", requestId: body.requestId, ok: true }, replyTo).catch(() => undefined);
-    // The answer leaves first; then the runtime starts again on its new address.
+    // The answer leaves first; then the runtime starts again on its new
+    // address, also when the answer cannot leave: its enrollment names the
+    // new one already, and staying here would only look like it stayed.
+    const answered = this.send({ type: "machine.transport.moved", requestId: body.requestId, ok: true }, replyTo).catch(() => undefined);
+    let waited: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([answered, new Promise((resolve) => { waited = setTimeout(resolve, 5_000); })]);
+    clearTimeout(waited);
     setTimeout(() => this.options.restartRuntime?.(), 500).unref?.();
   }
 

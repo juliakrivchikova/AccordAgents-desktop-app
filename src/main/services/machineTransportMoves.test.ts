@@ -40,6 +40,9 @@ function world(overrides: {
     instanceId: "run-1",
     linkAt: SHARED.relayUrl,
     linkGreeted: true,
+    /** A dead socket still seated at the old address looks present. */
+    stickyFrom: false,
+    probeFails: 0,
     holds: 0,
     released: 0,
     requests: 0
@@ -54,8 +57,10 @@ function world(overrides: {
       let done = false;
       return () => { if (!done) { done = true; state.released += 1; events.push("release"); } };
     },
-    machineActivity: async () => idle(),
-    machinePresence: (): MachinePresence => ({ relayUrl: state.linkAt, present: state.linkGreeted && state.machineAt === state.linkAt, instanceId: state.instanceId }),
+    // Only a machine that is there answers.
+    machineActivity: async () => (state.machineAt === state.linkAt ? idle() : { ...idle(), fresh: false }),
+    machinePresence: (): MachinePresence => ({ relayUrl: state.linkAt,
+      present: state.linkGreeted && (state.machineAt === state.linkAt || (state.stickyFrom && state.linkAt === SHARED.relayUrl)), instanceId: state.instanceId }),
     requestTransportMove: async (_id, addresses) => {
       state.requests += 1;
       events.push(`request:${state.moves.length ? "recorded" : "unrecorded"}`);
@@ -77,6 +82,10 @@ function world(overrides: {
     },
     probeMachineAt: async (_id, at) => {
       events.push(`probe:${hostOf(at.relayUrl ?? "")}`);
+      if (state.probeFails > 0) {
+        state.probeFails -= 1;
+        return false;
+      }
       return state.machineAt === at.relayUrl;
     },
     refreshTrustRosters: async () => { events.push("rosters"); }
@@ -183,6 +192,42 @@ test("a desktop that restarted mid-move finds the machine at the new address bef
   assert.equal(w.state.pairings.get("pk-1")?.relayUrl, HUB.relayUrl);
   assert.equal(w.state.linkAt, HUB.relayUrl);
   assert.deepEqual(w.state.moves, []);
+  assert.ok(w.state.holds >= 1 && w.state.holds === w.state.released, "turns wait while the link follows it, and are let go");
+});
+
+test("a computer that slept through the move, with a dead seat left at the old address, still finds the machine moved", async () => {
+  const w = world({ answer: () => "unknown" });
+  w.state.stickyFrom = true;
+  const request = w.link.requestTransportMove;
+  w.link.requestTransportMove = async (id, addresses) => {
+    const answer = await request(id, addresses);
+    w.advance(10 * 60_000); // the clock jumped while asleep
+    return answer;
+  };
+  await w.mover.run();
+  assert.equal(w.events.includes("machine.transport.move-stayed"), false, "never concluded from time and a stale seat");
+  assert.equal(w.state.pairings.get("pk-1")?.relayUrl, HUB.relayUrl);
+  assert.equal(w.state.linkAt, HUB.relayUrl);
+});
+
+test("a look at the new address that fails is no reason to think the machine stayed", async () => {
+  const w = world({ answer: () => "unknown" });
+  w.state.stickyFrom = true;
+  w.state.probeFails = 1000;
+  const request = w.link.requestTransportMove;
+  w.link.requestTransportMove = async (id, addresses) => {
+    const answer = await request(id, addresses);
+    w.advance(10 * 60_000);
+    return answer;
+  };
+  await w.mover.run();
+  assert.equal(w.events.includes("machine.transport.move-stayed"), false);
+  assert.equal(w.state.moves.length, 1, "kept open");
+  assert.equal(w.mover.isMoving("m1"), true, "its update waits while the move is open");
+  w.state.probeFails = 0;
+  await w.mover.run();
+  assert.equal(w.state.pairings.get("pk-1")?.relayUrl, HUB.relayUrl);
+  assert.equal(w.mover.isMoving("m1"), false);
 });
 
 test("an open move whose machine is nowhere waits for later passes and is never undone or repeated", async () => {

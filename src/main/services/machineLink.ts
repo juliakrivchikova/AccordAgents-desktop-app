@@ -519,7 +519,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
     await this.deliverPendingConversationDeletions();
   }
 
-  async connectMachine(record: MachineRecord, pairingOverride?: MobilePairingPackage): Promise<void> {
+  async connectMachine(record: MachineRecord, pairingOverride?: MobilePairingPackage,
+    carried?: Pick<MachineConnection, "pendingTurns" | "pendingTurnConversations">): Promise<void> {
     const existing = this.connections.get(record.id);
     if (existing) {
       existing.record = record;
@@ -548,13 +549,13 @@ export class MachineLinkService implements MachineTurnDispatcher {
       pairing,
       client,
       settingsSynced: false,
-      pendingTurns: new Map(),
+      pendingTurns: carried?.pendingTurns ?? new Map(),
       pendingCancels: new Map((record.pendingCancels ?? []).map((cancel) => [cancel.runId, cancel.conversationId])),
       pendingRuns: new Map((record.pendingRuns ?? []).map((run) => [run.runId, run.conversationId])),
       persist: Promise.resolve(),
       pendingApprovals: new Map(),
       pendingChoices: new Map(),
-      pendingTurnConversations: new Map(),
+      pendingTurnConversations: carried?.pendingTurnConversations ?? new Map(),
       inbound: Promise.resolve(),
       outbound: Promise.resolve(),
       helloSeen: false,
@@ -618,17 +619,19 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   /** Closes a machine's connection. It stays enrolled, and a recipient of
    *  every chat change, until `forgetMachine`. */
-  async disconnectMachine(machineId: string): Promise<void> {
+  async disconnectMachine(machineId: string, options: { keepTurns?: boolean } = {}): Promise<void> {
     const connection = this.connections.get(machineId);
     if (!connection) {
       return;
     }
     this.enrolled.set(machineId, connection.record);
     this.connections.delete(machineId);
-    for (const pending of connection.pendingTurns.values()) {
-      pending.resolve({ status: "failed", messages: [], warnings: [], error: "The machine was removed while the turn was running." });
+    if (!options.keepTurns) {
+      for (const pending of connection.pendingTurns.values()) {
+        pending.resolve({ status: "failed", messages: [], warnings: [], error: "The machine was removed while the turn was running." });
+      }
+      connection.pendingTurns.clear();
     }
-    connection.pendingTurns.clear();
     this.rejectPendingScripts(connection, "The machine was removed.");
     connection.eventChannel?.close();
     connection.client.close();
@@ -753,10 +756,15 @@ export class MachineLinkService implements MachineTurnDispatcher {
   /** Connects to a machine again: from its saved pairing (it moved), or for
    *  a while from another one (looking for it at another address). */
   async reconnectMachine(machineId: string, pairing?: MobilePairingPackage): Promise<void> {
-    const record = this.connections.get(machineId)?.record ?? this.enrolled.get(machineId);
+    const previous = this.connections.get(machineId);
+    const record = previous?.record ?? this.enrolled.get(machineId);
     if (!record) return;
-    await this.disconnectMachine(machineId);
-    await this.connectMachine(record, pairing);
+    // The machine is the same, only its address changed: turns waiting for
+    // its answer wait on the new connection (what this desktop sent is sent
+    // again there), instead of failing.
+    const carried = previous ? { pendingTurns: previous.pendingTurns, pendingTurnConversations: previous.pendingTurnConversations } : undefined;
+    await this.disconnectMachine(machineId, { keepTurns: true });
+    await this.connectMachine(record, pairing, carried);
   }
 
   /** Ask a machine to do something with its scheduled scripts and wait for

@@ -99,6 +99,8 @@ export class MachineTransportMover {
   private readonly retries = new Map<string, { at: number; delayMs: number }>();
   /** The machine being moved now: its update waits for the move to end. */
   private moving?: string;
+  /** Machines whose move is not settled yet: their update waits too. */
+  private readonly open = new Set<string>();
   private readonly timing: typeof MACHINE_MOVE_TIMING;
 
   constructor(private readonly options: MachineTransportMoverOptions) {
@@ -106,7 +108,7 @@ export class MachineTransportMover {
   }
 
   isMoving(machineId: string): boolean {
-    return this.moving === machineId;
+    return this.moving === machineId || this.open.has(machineId);
   }
 
   /** One pass: first settle what earlier moves left open, then move what is
@@ -118,6 +120,8 @@ export class MachineTransportMover {
     try {
       const machines = await this.options.listMachines();
       const open = await this.settleOpenMoves(link, machines);
+      this.open.clear();
+      for (const machineId of open) this.open.add(machineId);
       const target = await this.options.target();
       if (!target) return;
       for (const machine of machines) {
@@ -205,7 +209,7 @@ export class MachineTransportMover {
       // No answer: it may have moved all the same. It is looked for while
       // its turns wait; the record settles it later if it is not found now.
       this.options.log("machine.transport.move-unanswered", { machineId: machine.id, message: outcome.error ?? "" });
-      await this.settle(link, machine, record, this.timing.settleMs);
+      if (await this.settle(link, machine, record, this.timing.settleMs) === "unknown") this.open.add(machine.id);
     } finally {
       this.moving = undefined;
       release();
@@ -219,6 +223,7 @@ export class MachineTransportMover {
     const deadline = this.now() + waitMs;
     for (;;) {
       const verdict = await this.observe(link, machine, record);
+      if (verdict !== "unknown") this.open.delete(record.machineId);
       if (verdict === "moved") {
         const saved = await this.options.getMachinePairing(record.pairingKey).catch(() => undefined);
         if (saved) await this.adopt(link, machine, record, saved, "found");
@@ -238,21 +243,43 @@ export class MachineTransportMover {
   private async observe(link: MachineTransportMoveLink, machine: MachineRecord, record: MachineMoveRecord): Promise<Verdict> {
     const presence = link.machinePresence(record.machineId);
     if (presence?.present && presence.relayUrl === record.to.relayUrl) return "moved";
-    if (presence?.present && presence.relayUrl === record.from.relayUrl) {
-      if (record.instanceId && presence.instanceId && presence.instanceId !== record.instanceId) return "stayed";
-      if (this.now() - Date.parse(record.requestedAt) > this.timing.exitGraceMs) return "stayed";
-    }
     const saved = await this.options.getMachinePairing(record.pairingKey).catch(() => undefined);
     if (!saved) return "unknown";
-    // Looked for at the new address with a connection of its own: the link
-    // stays where it is until the machine is found there.
-    const found = await link.probeMachineAt(machine.id, { ...saved, ...record.to }, this.timing.probeMs).catch(() => false);
-    return found ? "moved" : "unknown";
+    // Looked for at the new address first, with a connection of its own (the
+    // link stays where it is): nothing is concluded at the old one before.
+    if (await link.probeMachineAt(machine.id, { ...saved, ...record.to }, this.timing.probeMs).catch(() => false)) return "moved";
+    if (presence?.relayUrl !== record.from.relayUrl) return "unknown";
+    // At the old address only what the machine answers now counts (a seat
+    // there may be a dead socket, and a clock may have jumped while this
+    // computer slept): another run greeting there started again there; the
+    // same run still answering long after a moved one would have left
+    // never moved.
+    const activity = await link.machineActivity(machine.id).catch(() => undefined);
+    if (!activity?.fresh) return "unknown";
+    const now = link.machinePresence(record.machineId);
+    if (now?.relayUrl !== record.from.relayUrl) return "unknown";
+    if (record.instanceId && now.instanceId && now.instanceId !== record.instanceId) return "stayed";
+    if (this.now() - Date.parse(record.requestedAt) > this.timing.exitGraceMs) return "stayed";
+    return "unknown";
   }
 
   /** The machine is at the new address: the pairing names it, the link and
    *  the other devices follow. */
   private async adopt(link: MachineTransportMoveLink, machine: MachineRecord, record: MachineMoveRecord, pairing: MobilePairingPackage, how: "answered" | "found"): Promise<void> {
+    // Turns wait while the link follows the machine (a move holds them
+    // already; a move settled on a later pass takes its own hold).
+    const own = this.moving === machine.id ? undefined : link.holdTurns(machine.id, "The machine is moving to your server.");
+    const before = this.moving;
+    this.moving = machine.id;
+    try {
+      await this.follow(link, machine, record, pairing, how);
+    } finally {
+      this.moving = before;
+      own?.();
+    }
+  }
+
+  private async follow(link: MachineTransportMoveLink, machine: MachineRecord, record: MachineMoveRecord, pairing: MobilePairingPackage, how: "answered" | "found"): Promise<void> {
     const next: MobilePairingPackage = { ...pairing, ...record.to };
     // A pairing that cannot be written now leaves the record, which finds
     // the machine at its new address again on a later pass.

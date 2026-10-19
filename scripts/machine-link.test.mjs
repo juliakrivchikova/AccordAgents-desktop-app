@@ -1167,3 +1167,27 @@ test("the desktop looks for a machine at another address without moving its link
     await elsewhere.close();
   }
 });
+
+test("a reconnect for a move keeps the turns waiting for the machine's answer", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const link = Object.create(MachineLinkService.prototype);
+  link.enrolled = new Map();
+  link.emitMemberBackground = () => undefined;
+  link.emitStatus = () => undefined;
+  link.rejectPendingScripts = () => undefined;
+  let outcome;
+  const pendingTurns = new Map([["run-1", { resolve: (value) => { outcome = value; }, dispatched: true }]]);
+  const pendingTurnConversations = new Map([["run-1", "chat-1"]]);
+  const record = { id: "m", name: "Cloud run" };
+  link.connections = new Map([["m", { record, pendingTurns, pendingTurnConversations, client: { close: () => undefined } }]]);
+  let carried;
+  link.connectMachine = async (_record, _pairing, kept) => { carried = kept; };
+  await link.reconnectMachine("m", { relayUrl: "wss://52.72.175.0/v1/relay" });
+  assert.equal(outcome, undefined, "not failed as if the machine were removed");
+  assert.equal(carried.pendingTurns, pendingTurns, "the same waiting turns move to the new connection");
+  assert.equal(carried.pendingTurnConversations, pendingTurnConversations);
+  // Removing a machine still ends its turns.
+  link.connections = new Map([["m", { record, pendingTurns, pendingTurnConversations, client: { close: () => undefined } }]]);
+  await link.disconnectMachine("m");
+  assert.equal(outcome.status, "failed");
+});
