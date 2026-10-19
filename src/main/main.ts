@@ -8,7 +8,6 @@ import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, powerMonitor, shell } from "electron";
 import { parseCustomAvatarId, type AvatarStudioTurnRequest, type SaveCustomAvatarRequest } from "../shared/avatarStudio";
-import { chatMessageHiddenFromTimeline } from "../shared/chatParticipantRequestThreads";
 import type {
   AddChatParticipantRequest,
   AgentDetectionRequest,
@@ -16,8 +15,6 @@ import type {
   DeleteAgentEnvironmentVariableRequest,
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
-  ChatMessage,
-  ChatParticipant,
   ChatProviderKind,
   ChatPromptContextSettings,
   ChatSearchRequest,
@@ -140,7 +137,7 @@ import { MachineApprovalExecutor, machineApprovalResultId } from "./services/mac
 import { readPosixProcessTableAsync } from "./services/processTermination";
 import { createChatActionEffects } from "./services/chatActionEffects";
 import { MachineChoiceExecutor, machineChoiceResultId } from "./services/chatActionNativeClaims";
-import type { AnswerMachineInactivityRequest, CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineInactivityQuestion, MachineListResult, MachineRecord, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
+import type { AnswerMachineInactivityRequest, CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineInactivityQuestion, MachineListResult, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
   MachineInstallRequest,
@@ -160,7 +157,6 @@ import {
   type MobileComposerOptions,
   type MobileNoticeKind,
   type MobileRelayChatCatalog,
-  type MobileRelayChatListItem,
   type MobileTimelineEvents,
   type MobileTimelinePage,
   type MobileTimelineSink
@@ -170,7 +166,7 @@ import {
   fulfilledMobileEventKeysFromMailboxEvents,
   mobileMailboxEventScopeKey
 } from "./services/mobileMailboxOutbox";
-import { mobilePairingRequestWithEndpointDefaults, mobilePairingWithStartKey, type MobilePairingPackage } from "../shared/mobilePairing";
+import { mobilePairingRequestWithEndpointDefaults, mobilePairingWithStartKey, mobilePhoneScopeOfPairing, type MobilePairingPackage } from "../shared/mobilePairing";
 import type { ChatEventEnvelope } from "../shared/chatEvents";
 import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
 import { readActiveRunIds } from "../shared/chatRunState";
@@ -179,7 +175,7 @@ import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
 import { acquireMobileMailboxExecutionClaim } from "./services/mobileMailboxClaims";
-import { controlCardFromApproval, controlCardFromChoiceMessage, controlCardsFromConversation, type MobileControlCard } from "../shared/mobileControlCards";
+import { controlCardFromChoiceMessage, controlCardsFromConversation } from "../shared/mobileControlCards";
 import {
   deleteMailboxEvents,
   mailboxAccessForSealKey,
@@ -201,6 +197,7 @@ import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashRepo
 import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
 import { MachineTransportMover } from "./services/machineTransportMoves";
+import { buildMobileChatList, buildMobileTimelinePage, mobileRelayChatMembers } from "./services/mobileChatCatalog";
 import { MachineRecoveryService } from "./services/machineRecovery";
 import { MachineInactivityCheck, type MachineInactivityOutcome } from "./services/machineInactivity";
 import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, isMachineRecoveryOperation } from "../shared/machineInstall";
@@ -362,6 +359,12 @@ let machineLinkStartedAt: number | undefined;
 const DESKTOP_LINK_STARTUP_GRACE_MS = 60_000;
 const mobileMailboxPollers = new Map<string, NodeJS.Timeout>();
 const mobilePairingsByKey = new Map<string, MobilePairingPackage>();
+/** When a used link was last said to be used to the User's server. */
+const mobileClaimResentAt = new Map<string, number>();
+/** Whether the stored phones were all restored this session. */
+let mobilePairingsRestoreComplete = false;
+let phoneLinksQueue: Promise<void> = Promise.resolve();
+let phoneLinksRetry: ReturnType<typeof setTimeout> | undefined;
 // W1 arrival cursors, per pairing. Persisted with paired devices so a restart
 // does not re-read the whole mailbox.
 const mobileMailboxCursors = new Map<string, { epoch: string; cursor: number }>();
@@ -429,6 +432,8 @@ let hubRosterPublish: Promise<void> | undefined;
 let hubRosterAgain = false;
 let hubRosterRetry: ReturnType<typeof setTimeout> | undefined;
 let hubRosterRetryMs = 5_000;
+/** The server took this desktop's device list, which only its owner may set. */
+let hubOwnerConfirmed = false;
 
 /**
  * Tells the hub which devices are the User's: this desktop and every machine
@@ -463,7 +468,9 @@ function publishHubRoster(): void {
       ...machines
     ]);
     hubRosterRetryMs = 5_000;
+    hubOwnerConfirmed = true;
     void debugLogService.write("hub.roster.published", { machines: machines.length });
+    publishPhoneLinks();
     hubSync?.nudgeHeld();
   })().catch((error: unknown) => {
     // A machine set up while the hub was away would be refused by it: the
@@ -484,6 +491,7 @@ function publishHubRoster(): void {
 async function startHubLink(): Promise<void> {
   const config = await settingsService.getHubConfig();
   if (!config || hubSync) return;
+  hubOwnerConfirmed = false;
   const identity = () => chatEventLogService.getOrCreateDeviceIdentity();
   hubClient = new HubClient({ url: config.url, identity, storage: storageService });
   hubSync = new HubSync({
@@ -537,6 +545,68 @@ async function startHubLink(): Promise<void> {
   }
   publishHubRoster();
   void debugLogService.write("hub.link.started", { url: config.url });
+  scheduleHubProgramUpdate();
+}
+
+/** The program on the User's server follows this desktop: after the desktop
+ *  updates, the server is updated the way the Update button does it, once a
+ *  minute after the link starts, and again later if it did not work (a few
+ *  times per version at most). Settings shows its progress like a press. */
+let hubProgramUpdateTimer: ReturnType<typeof setTimeout> | undefined;
+const MAILBOX_REVOKE_RETRY_MS = 5 * 60_000;
+const hubProgramUpdateTries = new Map<string, number>();
+const HUB_PROGRAM_UPDATE_DELAY_MS = 60_000;
+const HUB_PROGRAM_UPDATE_RETRY_MS = 30 * 60_000;
+const HUB_PROGRAM_UPDATE_MAX_TRIES = 3;
+
+function scheduleHubProgramUpdate(delayMs = HUB_PROGRAM_UPDATE_DELAY_MS): void {
+  if (hubProgramUpdateTimer) return;
+  hubProgramUpdateTimer = setTimeout(() => {
+    hubProgramUpdateTimer = undefined;
+    void updateHubProgramIfBehind();
+  }, delayMs);
+  hubProgramUpdateTimer.unref?.();
+}
+
+async function updateHubProgramIfBehind(): Promise<void> {
+  // Only the installed app updates the User's server by itself: a build run
+  // from a checkout (or pointed at a test server) never puts its program there.
+  if (!app.isPackaged || process.env.ACCORDAGENTS_HUB_URL?.trim()) return;
+  const config = await settingsService.getHubConfig().catch(() => undefined);
+  const installed = config?.server?.installedVersion;
+  const desktop = app.getVersion();
+  // Only a server this desktop set up (it holds the key to it), and only
+  // when its program is older than this desktop.
+  if (!config?.server || !installed || compareVersions(desktop, installed) <= 0) return;
+  // The server this desktop syncs with is the one it would update, and it
+  // has just confirmed this desktop is its owner (only the owner sets its
+  // devices): a desktop that is not cannot replace the server's program.
+  if (new URL(config.url).hostname !== config.server.ip) return;
+  if (!hubOwnerConfirmed) {
+    // Not confirmed yet (the server away, this desktop offline): asked again.
+    scheduleHubProgramUpdate(5 * 60_000);
+    return;
+  }
+  // Updating stops the server for a few seconds: not while a member works.
+  const busy = chatService.liveRunIds().length > 0
+    || machineInstallerService.hasActiveOperations()
+    || (await machineLinkService?.anyMachineBusy().catch(() => true)) === true;
+  if (busy) {
+    scheduleHubProgramUpdate(5 * 60_000);
+    return;
+  }
+  const tries = hubProgramUpdateTries.get(desktop) ?? 0;
+  if (tries >= HUB_PROGRAM_UPDATE_MAX_TRIES) return;
+  hubProgramUpdateTries.set(desktop, tries + 1);
+  void debugLogService.write("hub.program-update.start", { from: installed, to: desktop, attempt: tries + 1 });
+  try {
+    const state = await hubInstaller.install({});
+    void debugLogService.write("hub.program-update.finished", { status: state.status, message: state.message ?? "" });
+    if (state.status !== "ready") scheduleHubProgramUpdate(HUB_PROGRAM_UPDATE_RETRY_MS);
+  } catch (error) {
+    void debugLogService.write("hub.program-update.error", { message: error instanceof Error ? error.message : String(error) });
+    scheduleHubProgramUpdate(HUB_PROGRAM_UPDATE_RETRY_MS);
+  }
 }
 
 /** The hub link reads from here on: called once the machine link is up (or
@@ -647,6 +717,13 @@ hubInstaller.onProgress((state) => {
   // A setup that ended (linked, or stopped before) no longer needs every
   // save to emit: a running link does that by itself.
   if (state.status !== "installing") hubLinking = false;
+  // A program just put on the server (set up, updated by the button or by
+  // this desktop) may not have kept what each phone may read: told again,
+  // so the phones read their chats from the server from here on.
+  if (state.status === "ready" && state.phase === "ready") {
+    for (const pairing of mobilePairingsByKey.values()) void ensureMailboxRegisteredForPairing(pairing);
+    publishPhoneLinks();
+  }
   sendToMainWindow("hub:setup-progress", state);
 });
 void removeStaleHubTemp().then((removed) => {
@@ -1572,7 +1649,15 @@ async function ensureMailboxRegisteredForPairing(pairing: MobilePairingPackage):
     return false;
   }
   try {
-    const result = await registerMailboxForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64);
+    // On the User's own server a phone pairing also says what the phone may
+    // read there, until when an unused link is good, and whether a phone has
+    // used it (said again once one has).
+    const phoneScope = mobilePhoneScopeOfPairing(pairing);
+    const result = await registerMailboxForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64, fetch, phoneScope ? {
+      phoneScope,
+      phoneExpiresAt: pairing.expiresAt,
+      phoneClaimed: mobileClaimedPairingKeys.has(key)
+    } : {});
     if (!result.ok) {
       await debugLogService.write("mobile.mailbox.register-error", {
         routingId: pairing.stableRoutingId,
@@ -1791,6 +1876,7 @@ async function revokeMobilePairingInternal(
   }
   await persistMobilePairedDevices();
   await revokeMailboxForPairing(pairing);
+  publishPhoneLinks();
   await recordMobilePairingCapabilityRevocation(pairing, revokedAt, reason);
   await debugLogService.write("mobile.pairing.revoked", {
     routingId: pairing.stableRoutingId,
@@ -1861,16 +1947,19 @@ async function revokeMailboxForPairing(pairing: MobilePairingPackage): Promise<v
   try {
     const access = mailboxAccessForSealKey(pairing.relaySealKeyBase64);
     const secret = settingsService.encodeMobilePairingSecret(access.token);
-    const pending = await settingsService.readPendingMailboxRevocations();
-    if (!pending.some((item) => item.mailboxScopeId === access.scopeId)) {
-      await settingsService.writePendingMailboxRevocations([...pending, {
-        outboxUrl: pairing.outboxUrl,
-        mailboxScopeId: access.scopeId,
-        encryptedToken: secret.encryptedValue,
-        tokenProtection: secret.protection,
-        revokedAt: new Date().toISOString()
-      }]);
-    }
+    const outboxUrl = pairing.outboxUrl;
+    await withPendingMailboxRevocations(async () => {
+      const pending = await settingsService.readPendingMailboxRevocations();
+      if (!pending.some((item) => item.mailboxScopeId === access.scopeId)) {
+        await settingsService.writePendingMailboxRevocations([...pending, {
+          outboxUrl,
+          mailboxScopeId: access.scopeId,
+          encryptedToken: secret.encryptedValue,
+          tokenProtection: secret.protection,
+          revokedAt: new Date().toISOString()
+        }]);
+      }
+    });
   } catch (error) {
     await debugLogService.write("mobile.mailbox.revoke-persist-error", {
       routingId: pairing.stableRoutingId,
@@ -1879,7 +1968,21 @@ async function revokeMailboxForPairing(pairing: MobilePairingPackage): Promise<v
   }
 }
 
-async function retryPendingMailboxRevocations(): Promise<void> {
+/** The pending revocations file is read and rewritten whole: one writer at a
+ *  time (a revoke adding to it, a retry taking from it), or one loses the
+ *  other's change. */
+let pendingMailboxRevocationsQueue: Promise<unknown> = Promise.resolve();
+function withPendingMailboxRevocations<T>(work: () => Promise<T>): Promise<T> {
+  const run = pendingMailboxRevocationsQueue.then(work, work);
+  pendingMailboxRevocationsQueue = run.catch(() => undefined);
+  return run;
+}
+
+function retryPendingMailboxRevocations(): Promise<void> {
+  return withPendingMailboxRevocations(retryPendingMailboxRevocationsNow);
+}
+
+async function retryPendingMailboxRevocationsNow(): Promise<void> {
   const pending = await settingsService.readPendingMailboxRevocations();
   if (pending.length === 0) {
     return;
@@ -1921,6 +2024,31 @@ function findMobilePairingForRevoke(request: RevokeMobilePairingRequest): Mobile
   return [...mobilePairingsByKey.values()].find((pairing) => pairing.stableRoutingId === stableRoutingId);
 }
 
+/** Whether the User's own server says the phone read through this pairing
+ *  within its link's window: "yes", "no" (a shared relay, which says
+ *  nothing, is "no"), or "unknown" when the box could not be asked. */
+async function phoneUsedPairingOnServer(pairing: MobilePairingPackage): Promise<"yes" | "no" | "unknown"> {
+  if (!pairing.outboxUrl) return "no";
+  try {
+    const url = new URL(mailboxEndpointForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64));
+    url.searchParams.set("limit", "1");
+    url.searchParams.set("afterArrival", String(Number.MAX_SAFE_INTEGER));
+    const response = await fetch(url.toString(), { headers: mailboxAuthHeaders(pairing.relaySealKeyBase64), signal: AbortSignal.timeout(8_000) });
+    // A box the relay no longer has (revoked) is a "no"; any other refusal
+    // or a failure to reach it says nothing.
+    if (response.status === 401) return "no";
+    if (!response.ok) return "unknown";
+    const body = await response.json() as { phoneSeenAt?: unknown };
+    const seenAt = typeof body.phoneSeenAt === "string" ? Date.parse(body.phoneSeenAt) : Number.NaN;
+    return Number.isFinite(seenAt) && seenAt < Date.parse(pairing.expiresAt) ? "yes" : "no";
+  } catch {
+    return "unknown";
+  }
+}
+
+/** How long an expiry waits to ask again when the box could not be asked. */
+const MOBILE_EXPIRY_RECHECK_MS = 2 * 60_000;
+
 function scheduleMobilePairingExpiry(pairing: MobilePairingPackage): void {
   const key = mobilePairingKey(pairing);
   // A device that already connected is remembered until revoked. Re-arming the
@@ -1938,7 +2066,27 @@ function scheduleMobilePairingExpiry(pairing: MobilePairingPackage): void {
     return;
   }
   const timer = setTimeout(() => {
-    void revokeMobilePairingInternal(pairing, "expired").catch((error) => {
+    void (async () => {
+      // A phone that read through the User's own server within the window has
+      // used the link; this desktop may have slept through it (no poll ran).
+      const used = await phoneUsedPairingOnServer(pairing);
+      // Used meanwhile by another way (the room, the box), or revoked.
+      if (mobileClaimedPairingKeys.has(key) || mobileRevokedPairingKeys.has(key)) return;
+      if (used === "yes") {
+        await noteMobilePairingClaimed(pairing);
+        return;
+      }
+      if (used === "unknown") {
+        // Asked again later rather than revoking a link the phone may be
+        // using: the server itself stops serving an unused link at its end.
+        mobilePairingExpiryTimers.delete(key);
+        const retry = setTimeout(() => scheduleMobilePairingExpiry(pairing), MOBILE_EXPIRY_RECHECK_MS);
+        retry.unref?.();
+        mobilePairingExpiryTimers.set(key, retry);
+        return;
+      }
+      await revokeMobilePairingInternal(pairing, "expired");
+    })().catch((error) => {
       void debugLogService.write("mobile.pairing.expire-error", {
         routingId: pairing.stableRoutingId,
         rendezvousId: pairing.rendezvousId,
@@ -1968,6 +2116,12 @@ async function applyStoredMobilePairingRevocations(): Promise<void> {
     mobileRelayControls.get(pairing.rendezvousId)?.close();
     mobileRelayControls.delete(pairing.rendezvousId);
     mobilePairingsByKey.delete(key);
+    // The removed phone's mailbox goes too: on the User's own server the
+    // mailbox key also reads her chats, so a removed (or lost) phone must
+    // not keep it. Kept for a retry when the server cannot be reached.
+    await persistMobilePairedDevices();
+    await revokeMailboxForPairing(pairing);
+    publishPhoneLinks();
   }
 }
 
@@ -1997,6 +2151,9 @@ async function noteMobilePairingClaimed(pairing: MobilePairingPackage): Promise<
     mobilePairingExpiryTimers.delete(key);
   }
   await persistMobilePairedDevices();
+  // The User's own server serves an unused link only within its window; it
+  // is told this one is in use, so the phone keeps reading after it.
+  void ensureMailboxRegisteredForPairing(pairing);
   await debugLogService.write("mobile.pairing.claimed", {
     routingId: pairing.stableRoutingId,
     rendezvousId: pairing.rendezvousId
@@ -2035,8 +2192,10 @@ async function persistMobilePairedDevices(): Promise<void> {
 }
 
 async function restoreMobilePairedDevices(): Promise<void> {
-  // readMobilePairedDevices swallows its own read/parse errors and returns [].
-  const devices = await settingsService.readMobilePairedDevices();
+  // A file that could not be read is not "no phones": the list of phones
+  // this desktop knows is then not whole, and is not sent to the server.
+  const stored = await settingsService.readMobilePairedDevicesState();
+  const devices = stored.devices;
   // Each relay connect can burn its full timeout, so devices come back
   // together rather than in turn, and one unreadable record cannot strand the
   // phones behind it.
@@ -2073,6 +2232,46 @@ async function restoreMobilePairedDevices(): Promise<void> {
   if (count > 0) {
     await debugLogService.write("mobile.pairing.restored", { count });
   }
+  // Every stored phone came back: the list of phones this desktop knows is
+  // whole, and the User's server may hear it. One that did not come back
+  // (its key unreadable just now) keeps the list from being sent at all.
+  mobilePairingsRestoreComplete = !stored.readFailed && count === devices.length;
+  publishPhoneLinks();
+}
+
+
+/** Tells the User's own server which phone links this desktop knows; it
+ *  serves chats to those only. A link whose record this desktop lost (and so
+ *  could never revoke) stops reading there. Sent only when the list is whole
+ *  and the server took this desktop as its owner. */
+function publishPhoneLinks(): void {
+  // A build run from a checkout and pointed at the User's real server (no
+  // test server named) never tells it which phones may read.
+  if (!app.isPackaged && !process.env.ACCORDAGENTS_HUB_URL?.trim()) return;
+  if (!hubClient || !hubOwnerConfirmed || !mobilePairingsRestoreComplete) return;
+  // One list at a time, each built when it is sent: an older list can never
+  // land after a newer one.
+  phoneLinksQueue = phoneLinksQueue.then(async () => {
+    const client = hubClient;
+    const hub = await settingsService.getHubConfig().catch(() => undefined);
+    if (!client || !hub || !hubOwnerConfirmed || !mobilePairingsRestoreComplete) return;
+    const origin = new URL(hub.url).origin;
+    const key = (pairing: MobilePairingPackage) => mobilePairingKey(pairing);
+    // Every link not revoked: the server itself ends an unused link at its
+    // window, and a used one this desktop has not noticed yet stays listed.
+    const mailboxIds = [...mobilePairingsByKey.values()]
+      .filter((pairing) => !mobileRevokedPairingKeys.has(key(pairing)) && pairing.outboxUrl && new URL(pairing.outboxUrl).origin === origin && mobilePhoneScopeOfPairing(pairing))
+      .map((pairing) => mailboxAccessForSealKey(pairing.relaySealKeyBase64).scopeId);
+    const answer = await client.setPhoneLinks(mailboxIds);
+    void debugLogService.write("hub.phone-links.published", { listed: mailboxIds.length, known: answer.known });
+  }).catch((error: unknown) => {
+    void debugLogService.write("hub.phone-links.error", { message: error instanceof Error ? error.message : String(error) });
+    // Sent again later (an older server program, the server away).
+    if (!phoneLinksRetry) {
+      phoneLinksRetry = setTimeout(() => { phoneLinksRetry = undefined; publishPhoneLinks(); }, 5 * 60_000);
+      phoneLinksRetry.unref?.();
+    }
+  });
 }
 
 function acceptsMobileOutboxEnvelopeForPairing(pairing: MobilePairingPackage, event: ChatEventEnvelope): boolean {
@@ -2376,12 +2575,32 @@ async function pollMobileMailboxOutbox(
       }
       throw new Error(`Mailbox poll failed with HTTP ${response.status}: ${body}`);
     }
-    return await response.json() as { events?: unknown; epoch?: unknown };
+    return await response.json() as { events?: unknown; epoch?: unknown; phoneSeenAt?: unknown; phoneClaimed?: unknown; phoneKnown?: unknown };
   };
   const stored = mobileMailboxCursors.get(pairingKey) ?? { epoch: "", cursor: 0 };
   const startedCursor = stored.cursor;
   const startedEpoch = stored.epoch;
   let body = await fetchPage(stored.cursor);
+  // The User's own server says when the phone last read through it: a phone
+  // that only reads there has used its link as surely as one that wrote, so
+  // the link is kept rather than expired. Only a use within the link's
+  // window counts.
+  const phoneSeenAtMs = typeof body.phoneSeenAt === "string" ? Date.parse(body.phoneSeenAt) : Number.NaN;
+  if (Number.isFinite(phoneSeenAtMs) && phoneSeenAtMs < Date.parse(pairing.expiresAt)) {
+    void noteMobilePairingClaimed(pairing);
+  }
+  // A used link the server does not know as used yet (the one registration
+  // that says so was lost): said again, at most once a minute.
+  // Likewise a link this desktop knows that the server was told it does not
+  // (a list that missed it): registering it again says it is known.
+  if ((body.phoneClaimed === false && mobileClaimedPairingKeys.has(pairingKey)) ||
+    (body.phoneKnown === false && !mobileRevokedPairingKeys.has(pairingKey))) {
+    const last = mobileClaimResentAt.get(pairingKey) ?? 0;
+    if (Date.now() - last > 60_000) {
+      mobileClaimResentAt.set(pairingKey, Date.now());
+      void ensureMailboxRegisteredForPairing(pairing);
+    }
+  }
   const epoch = typeof body.epoch === "string" ? body.epoch : "";
   if (epoch && epoch !== stored.epoch) {
     // Box recreated: arrival numbering restarted. Re-read from zero and let
@@ -2639,7 +2858,6 @@ function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: 
 /** How many newest messages the chat list reads per chat to find the last
  *  line with text: a pending or empty row at the end must not blank the
  *  snippet, and the whole history must never be read for it. */
-const MOBILE_CHAT_LIST_SNIPPET_WINDOW = 10;
 /** The window the "/" menu resolves a draft's target in. The desktop composer
  *  resolves against the whole chat; the newest participant message is what
  *  the no-mention rule looks for, and it is in this window unless the last
@@ -2649,8 +2867,6 @@ const MOBILE_COMPOSER_TARGET_WINDOW = 200;
 function mobileRelayChatCatalog(): MobileRelayChatCatalog {
   return {
     async listChats() {
-      const summaries = await storageService.listConversations();
-      const visible = summaries.filter((summary) => summary.kind === "chat" && summary.archived !== true);
       const settings = await settingsService.getPublicSettings();
       const roleLabels = new Map(settings.chatRoleConfigs.map((role) => [
         role.id,
@@ -2659,89 +2875,12 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
           : role.label
       ]));
       const machineNames = new Map((await settingsService.listMachines()).map((machine) => [machine.id, machine.name]));
-      const listed = visible.slice(0, 100);
-      // What waits for the User in each listed chat, so the phone can drop a
-      // pending card the desktop has closed. Pending approvals are in the
-      // metadata opened below; pending choices are one indexed query over
-      // the listed chats, never a chat's history.
-      const pendingChoicesByConversation = new Map<string, MobileControlCard[]>();
-      const pendingChoices = await storageService.listPendingChoiceMessages(listed.map((summary) => summary.id));
-      if (pendingChoices.truncated) {
-        // The phone then reconciles nothing from this list. Said here, or a
-        // desktop that quietly crossed the cap would look like the old defect.
-        void debugLogService.write("mobile.chat-list.pending-cards-truncated", { chats: listed.length });
-      }
-      for (const row of pendingChoices.rows) {
-        const card = controlCardFromChoiceMessage(row.conversationId, row.message);
-        if (!card || card.status !== "pending") continue;
-        const cards = pendingChoicesByConversation.get(row.conversationId) ?? [];
-        cards.push(card);
-        pendingChoicesByConversation.set(row.conversationId, cards);
-      }
-      // An incomplete set must not be offered as the whole: the phone would
-      // drop every card it does not name.
-      const pendingCardsFor = (conversationId: string, conversation: Conversation | undefined): MobileControlCard[] | undefined =>
-        pendingChoices.truncated ? undefined : [
-          ...((conversation?.metadata as { pendingAppToolApprovals?: import("../shared/types").ChatAppToolApproval[] } | undefined)?.pendingAppToolApprovals ?? [])
-            .filter((approval) => approval.status === "pending")
-            .map((approval) => controlCardFromApproval(conversationId, approval)),
-          ...(pendingChoicesByConversation.get(conversationId) ?? [])
-        ].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-      const items: MobileRelayChatListItem[] = [];
-      for (const summary of listed) {
-        // The list needs each chat's members and its last line, not its
-        // history. Reading whole conversations here pulled the newest hundred
-        // chats' messages — tens of megabytes on the User's data — through the
-        // sqlite CLI on every list request, and the phone now asks for the
-        // list on every return to the foreground and every pull to refresh.
-        const opened = await storageService.openConversation(summary.id, MOBILE_CHAT_LIST_SNIPPET_WINDOW);
-        const conversation = opened?.conversation;
-        // The last line the User can see, not the last line stored: an internal
-        // system trigger is hidden on the desktop and must not become the
-        // phone's preview of the chat. When the whole window is internal, a
-        // member's own words the desktop merely tidies away (a waiting status)
-        // may stand in; a system trigger or a control message never does.
-        const newest = conversation?.messages.slice().reverse().filter((message) => message.content.trim()) ?? [];
-        const lastMessage = newest.find((message) => !chatMessageHiddenFromTimeline(conversation as Conversation, message)) ??
-          newest.find((message) => message.role === "participant" && message.metadata?.hiddenFromTimeline !== true);
-        const members = mobileRelayChatMembers(conversation);
-        items.push({
-          id: summary.id,
-          title: summary.title || "Chat",
-          group: mobileChatGroupLabel(summary.repoPath),
-          snippet: mobileSnippet(lastMessage?.content),
-          who: mobileWhoLabel(lastMessage),
-          updatedAt: summary.updatedAt,
-          running: summary.running === true,
-          participants: (summary.chatParticipants ?? [])
-            .map((participant) => participant.handle.startsWith("@") ? participant.handle : `@${participant.handle}`)
-            .slice(0, 4),
-          ...(pendingCardsFor(summary.id, conversation) ? { pendingCards: pendingCardsFor(summary.id, conversation) } : {}),
-          members: members.map((participant) => ({
-            id: participant.id,
-            handle: participant.handle,
-            mentionHandle: mobileParticipantMentionHandle(participant, members),
-            displayName: mobileParticipantDisplayName(participant),
-            roleLabel: roleLabels.get(participant.roleConfigId) ?? participant.roleConfigId,
-            kind: participant.kind,
-            ...(participant.avatarId ? { avatarId: participant.avatarId } : {}),
-            ...(mobileParticipantIsAssistant(participant) ? { isAssistant: true } : {}),
-            // A member that lives on a machine travels with what that machine
-            // needs to run it, so the phone can ask the machine itself when
-            // this desktop is closed. Local members carry nothing extra.
-            ...(participant.homeMachineId
-              ? {
-                homeMachineId: participant.homeMachineId,
-                ...(machineNames.get(participant.homeMachineId)
-                  ? { homeMachineName: machineNames.get(participant.homeMachineId) }
-                  : {}),
-                participant
-              }
-              : {})
-          }))
-        });
-      }
-      return items;
+      return buildMobileChatList(storageService, {
+        roleLabels,
+        machineNames,
+        pendingCards: true,
+        onPendingCardsTruncated: (listed) => { void debugLogService.write("mobile.chat-list.pending-cards-truncated", { chats: listed }); }
+      });
     },
     async readMemberAvatar(request: { conversationId: string; avatarId: string }) {
       const customId = parseCustomAvatarId(request.avatarId);
@@ -2797,22 +2936,7 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
       return opened ? timelineEventsFromSnapshot(opened.conversation, 80) : [];
     },
     async listTimelinePage(conversationId: string, options: { beforeMessageId?: string }): Promise<MobileTimelinePage> {
-      // The same 80-message page the phone always got, or the 80 before a
-      // message it already holds. The cursor is the oldest stored message of
-      // the page, not the oldest visible row: a page of rows the phone does
-      // not show would otherwise be asked for again and again.
-      const opened = await storageService.openConversation(conversationId, 80, options.beforeMessageId
-        ? { beforeMessageId: options.beforeMessageId }
-        : undefined);
-      if (!opened) {
-        return { events: [], hasMoreBefore: false };
-      }
-      const oldest = opened.conversation.messages[0];
-      return {
-        events: timelineEventsFromSnapshot(opened.conversation, 80),
-        hasMoreBefore: opened.messagePage.hasMoreBefore,
-        ...(oldest ? { beforeMessageId: oldest.id } : {})
-      };
+      return buildMobileTimelinePage(storageService, conversationId, options);
     },
     async composerOptions(request: { conversationId: string; query: string; content: string }): Promise<MobileComposerOptions> {
       const opened = await storageService.openConversation(request.conversationId, MOBILE_COMPOSER_TARGET_WINDOW);
@@ -2863,60 +2987,6 @@ async function cancelMobileChatRun(conversationId: string, runId: string): Promi
   return belongsToConversation ? chatService.cancelRun(targetRunId) : false;
 }
 
-function mobileRelayChatMembers(conversation: Conversation | undefined): ChatParticipant[] {
-  const participants = conversation?.metadata.participants;
-  return Array.isArray(participants)
-    ? participants.filter((participant): participant is ChatParticipant => Boolean(
-      participant &&
-      typeof participant === "object" &&
-      typeof participant.id === "string" &&
-      typeof participant.handle === "string" &&
-      typeof participant.roleConfigId === "string" &&
-      (participant.kind === "claude-code" || participant.kind === "codex-cli" || participant.kind === "gemini-cli")
-    ))
-    : [];
-}
-
-function mobileParticipantIsAssistant(participant: Pick<ChatParticipant, "handle" | "roleConfigId">): boolean {
-  return participant.roleConfigId === "administrator" ||
-    participant.handle.trim().replace(/^@/, "").toLowerCase() === "admin";
-}
-
-function mobileParticipantMentionHandle(
-  participant: Pick<ChatParticipant, "handle" | "roleConfigId">,
-  participants: Array<Pick<ChatParticipant, "handle" | "roleConfigId">>
-): string {
-  if (!mobileParticipantIsAssistant(participant)) {
-    return participant.handle;
-  }
-  const normalizedHandle = participant.handle.trim().replace(/^@/, "").toLowerCase();
-  const assistantAliasTaken = participants.some((item) =>
-    item !== participant &&
-    item.handle.trim().replace(/^@/, "").toLowerCase() === "assistant" &&
-    item.roleConfigId !== "administrator"
-  );
-  return normalizedHandle === "admin" && !assistantAliasTaken ? "assistant" : participant.handle;
-}
-
-function mobileParticipantDisplayName(participant: Pick<ChatParticipant, "handle" | "roleConfigId">): string {
-  return mobileParticipantIsAssistant(participant) ? "Chat Assistant" : `@${participant.handle}`;
-}
-
-function mobileChatGroupLabel(repoPath: string | undefined): string {
-  if (!repoPath) {
-    return "AccordAgents";
-  }
-  return path.basename(repoPath) || "AccordAgents";
-}
-
-function mobileSnippet(content: string | undefined): string {
-  const normalized = content?.replace(/\s+/g, " ").trim() ?? "";
-  if (!normalized) {
-    return "No messages yet";
-  }
-  return normalized.length > 84 ? `${normalized.slice(0, 81)}...` : normalized;
-}
-
 /** The same rule as the desktop composer's `compactCommandOption` and
  *  `goalCommandOption`: both commands exist only for one clearly addressed
  *  member, and are offered while the typed word is still a prefix of them. */
@@ -2936,19 +3006,6 @@ function mobileComposerCommandOptions(
     options.push({ id: "goal", label: "/goal", description: "Run the mentioned member until the goal is finished" });
   }
   return options;
-}
-
-function mobileWhoLabel(message: ChatMessage | undefined): string | undefined {
-  if (!message) {
-    return undefined;
-  }
-  if (message.role === "user") {
-    return "you:";
-  }
-  if (message.participantLabel) {
-    return `${message.participantLabel.replace(/^@/, "")}:`;
-  }
-  return message.role === "system" ? "system:" : undefined;
 }
 
 function registerIpc(): void {
@@ -4397,6 +4454,12 @@ void app.whenReady().then(async () => {
       message: error instanceof Error ? error.message : String(error)
     });
   });
+  // And every few minutes after: a phone removed while the server was away
+  // (stopped, updating) loses its access as soon as the server is back, not
+  // at the next start of this desktop.
+  setInterval(() => {
+    void retryPendingMailboxRevocations().catch(() => undefined);
+  }, MAILBOX_REVOKE_RETRY_MS).unref?.();
   await artifactService.flushPendingArtifactEvents().catch((error) => {
     void debugLogService.write("artifacts.outbox.startup-error", {
       message: error instanceof Error ? error.message : String(error)

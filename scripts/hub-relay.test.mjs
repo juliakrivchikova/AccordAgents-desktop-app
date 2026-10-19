@@ -21,6 +21,7 @@ const { ChatSearchService } = await import(path.join(dist, "main/services/chatSe
 const { HubLog } = await import(path.join(dist, "hub/hubLog.js"));
 const { HubServer } = await import(path.join(dist, "hub/hubServer.js"));
 const { HubRelayMailboxes, HubRelayRooms } = await import(path.join(dist, "hub/hubRelay.js"));
+const { HubChangeFeed, HubPhoneApi } = await import(path.join(dist, "hub/hubPhone.js"));
 const { createChatEventDeviceIdentity } = await import(path.join(dist, "main/services/chatEventLog.js"));
 const { signHubRequest } = await import(path.join(dist, "main/services/hubAuth.js"));
 
@@ -36,7 +37,7 @@ function vapidKeys() {
   return { publicKey: point.toString("base64url"), privateJwk: privateKey.export({ format: "jwk" }), subject: "mailto:relay@accordagents.test" };
 }
 
-async function startHub({ eventTtlMs, rings = [], pushStatus = { value: 201 }, openRegistration = true, now, owner, machines = [] } = {}) {
+async function startHub({ eventTtlMs, rings = [], pushStatus = { value: 201 }, openRegistration = true, now, owner, machines = [], phone = false } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-relay-"));
   const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
   await storage.init();
@@ -62,9 +63,16 @@ async function startHub({ eventTtlMs, rings = [], pushStatus = { value: 201 }, o
     }
   });
   await mailboxes.start();
+  const feed = new HubChangeFeed();
   const server = new HubServer({
     hubId: "hub-relay-test", version: "test", storage, log: new HubLog(storage), search: new ChatSearchService(storage), vapidPublicKey: "B",
-    relay: { mailboxes, rooms: new HubRelayRooms() }
+    relay: { mailboxes, rooms: new HubRelayRooms() },
+    ...(phone ? {
+      phone: new HubPhoneApi({
+        store: storage, relayStorage: storage.relay(), feed,
+        machineNames: async () => new Map((await storage.hub().devices()).filter((device) => device.machineId).map((device) => [device.machineId, device.name]))
+      })
+    } : {})
   });
   const http = await server.listenHttp(0, "127.0.0.1");
   const port = http.address().port;
@@ -75,6 +83,8 @@ async function startHub({ eventTtlMs, rings = [], pushStatus = { value: 201 }, o
     roomUrl: `ws://127.0.0.1:${port}/v1/relay`,
     openUrl: `http://127.0.0.1:${open.address().port}`,
     dbPath: path.join(dir, "hub.sqlite3"),
+    storage,
+    feed,
     close: async () => {
       await server.close();
       await rm(dir, { recursive: true, force: true });
@@ -639,6 +649,201 @@ test("the relay's own paths answer as the relay's, and never over plain HTTP on 
     assert.equal((await fetch(`${hub.baseUrl}/v1/relay`)).status, 400);
     assert.equal((await fetch(`${hub.openUrl}/v1/mailbox/events?mailboxId=x`)).status, 403);
     assert.equal((await fetch(`${hub.openUrl}/healthz`)).status, 403);
+  } finally {
+    await hub.close();
+  }
+});
+
+// ---------------------------------------------------------------- phone reads
+
+function chatFixture(id, { title, archived = false, messages = [], participants } = {}) {
+  const at = "2026-10-19T10:00:00.000Z";
+  return {
+    id, kind: "chat", title: title ?? `Chat ${id}`, createdAt: at, updatedAt: at, findings: [],
+    messages,
+    metadata: {
+      participants: participants ?? [{ id: "p1", handle: "nora", roleConfigId: "software-engineer", kind: "claude-code", homeMachineId: "m-0" }],
+      ...(archived ? { archived: true, archivedAt: at } : {})
+    }
+  };
+}
+
+function messageFixture(id, role, content, extra = {}) {
+  return { id, role, content, createdAt: "2026-10-19T10:00:00.000Z", status: "done", ...(role === "participant" ? { participantLabel: "@nora", participantId: "p1" } : {}), ...extra };
+}
+
+async function registerSigned(hub, creds, signer, extraBody = {}) {
+  const pathWithQuery = `/v1/mailbox/register?mailboxId=${creds.mailboxId}`;
+  const body = JSON.stringify({ tokenHashBase64Url: creds.tokenHashBase64Url, ...extraBody });
+  return fetch(`${hub.baseUrl}${pathWithQuery}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${creds.token}`,
+      ...(signer ? { "x-accord-hub-authorization": signHubRequest(signer, { method: "POST", pathWithQuery, body }) } : {}) },
+    body
+  });
+}
+
+function inTenMinutes() {
+  return new Date(Date.now() + 10 * 60_000).toISOString();
+}
+
+function phoneGet(hub, creds, pathname, query = {}, headers = {}) {
+  const url = new URL(pathname, hub.baseUrl);
+  url.searchParams.set("mailboxId", creds.mailboxId);
+  for (const [key, value] of Object.entries(query)) url.searchParams.set(key, String(value));
+  return fetch(url, { headers: { authorization: `Bearer ${creds.token}`, ...headers } });
+}
+
+test("a paired phone reads the chat list and a chat's page from the server, within what its desktop allowed", async () => {
+  const owner = createChatEventDeviceIdentity();
+  const machine = createChatEventDeviceIdentity();
+  const hub = await startHub({ openRegistration: false, owner, machines: [machine], phone: true });
+  try {
+    await hub.storage.saveConversation(chatFixture("chat-a", { title: "Alpha", messages: [
+      messageFixture("a1", "user", "@nora hello from the phone"),
+      messageFixture("a2", "participant", "Hi! Here is the answer.")
+    ] }));
+    await hub.storage.saveConversation(chatFixture("chat-b", { title: "Beta", messages: [messageFixture("b1", "user", "second chat")] }));
+    await hub.storage.saveConversation(chatFixture("chat-old", { title: "Old", archived: true, messages: [messageFixture("o1", "user", "archived")] }));
+    const phone = credentials("phone-device");
+    assert.equal((await registerSigned(hub, phone, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: inTenMinutes() })).status, 200);
+    const invite = credentials("phone-invite");
+    assert.equal((await registerSigned(hub, invite, owner, { phoneScope: { scope: "conversation", conversationId: "chat-b" }, phoneExpiresAt: inTenMinutes() })).status, 200);
+    const plain = credentials("no-scope");
+    assert.equal((await registerSigned(hub, plain, owner)).status, 200);
+    const byMachine = credentials("machine-says-scope");
+    assert.equal((await registerSigned(hub, byMachine, machine, { phoneScope: { scope: "device" }, phoneExpiresAt: inTenMinutes() })).status, 200);
+
+    const boxBefore = await (await fetch(`${hub.baseUrl}/v1/mailbox/events?mailboxId=${phone.mailboxId}&afterArrival=0`, { headers: { authorization: `Bearer ${phone.token}` } })).json();
+    assert.equal(boxBefore.phoneSeenAt, undefined, "not used by the phone yet");
+    let answer = await phoneGet(hub, phone, "/v1/phone/chats");
+    assert.equal(answer.status, 200, await answer.clone().text());
+    const boxAfter = await (await fetch(`${hub.baseUrl}/v1/mailbox/events?mailboxId=${phone.mailboxId}&afterArrival=0`, { headers: { authorization: `Bearer ${phone.token}` } })).json();
+    assert.ok(Date.parse(boxAfter.phoneSeenAt) > Date.now() - 60_000, "the desktop reading the box learns that the phone has used its link");
+    let body = await answer.json();
+    assert.equal(body.type, "mobile.chat-list");
+    assert.deepEqual(body.chats.map((chat) => chat.title).sort(), ["Alpha", "Beta"], "every chat but the archived one");
+    const alpha = body.chats.find((chat) => chat.id === "chat-a");
+    assert.equal(alpha.snippet, "Hi! Here is the answer.");
+    assert.equal(alpha.who, "nora:");
+    assert.equal(alpha.members[0].roleLabel, "Software Engineer");
+    assert.equal(alpha.members[0].homeMachineName, "Machine 0", "a machine's name from the server's roster");
+    assert.equal(alpha.pendingCards, undefined, "the server cannot see every card, so it names none");
+
+    answer = await phoneGet(hub, phone, "/v1/phone/timeline", { conversationId: "chat-a" });
+    body = await answer.json();
+    assert.equal(body.type, "mobile.timeline.events");
+    assert.deepEqual(body.events.map((event) => event.content), ["@nora hello from the phone", "Hi! Here is the answer."]);
+    assert.equal(body.page.hasMoreBefore, false);
+    assert.equal(body.cards, undefined);
+    answer = await phoneGet(hub, phone, "/v1/phone/timeline", { conversationId: "chat-old" });
+    assert.equal(answer.status, 404, "an archived chat stays hidden");
+    assert.equal((await answer.json()).error, "chat_not_found", "said as one chat missing, not as no server");
+
+    body = await (await phoneGet(hub, invite, "/v1/phone/chats")).json();
+    assert.deepEqual(body.chats.map((chat) => chat.id), ["chat-b"], "an invitation sees its one chat");
+    assert.equal((await phoneGet(hub, invite, "/v1/phone/timeline", { conversationId: "chat-a" })).status, 404, "and nothing else");
+
+    answer = await phoneGet(hub, plain, "/v1/phone/chats");
+    assert.equal(answer.status, 403);
+    assert.equal((await answer.json()).error, "phone_scope_missing", "a pairing the desktop said nothing about reads nothing");
+    assert.equal((await phoneGet(hub, byMachine, "/v1/phone/chats")).status, 403, "a machine cannot grant reading");
+    assert.equal((await phoneGet(hub, { ...phone, token: "wrong" }, "/v1/phone/chats")).status, 401);
+
+    // Told again later (a desktop that updated): a pairing gains its scope.
+    assert.equal((await registerSigned(hub, plain, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: inTenMinutes() })).status, 200);
+    assert.equal((await phoneGet(hub, plain, "/v1/phone/chats")).status, 200);
+
+    // An unused link reads nothing past its window; one the desktop says a
+    // phone used keeps reading; a machine cannot say so.
+    const stale = credentials("stale-link");
+    await registerSigned(hub, stale, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: new Date(Date.now() - 1000).toISOString() });
+    answer = await phoneGet(hub, stale, "/v1/phone/chats");
+    assert.equal(answer.status, 401);
+    assert.equal((await answer.json()).error, "phone_expired");
+    await registerSigned(hub, stale, machine, { phoneScope: { scope: "device" }, phoneClaimed: true });
+    assert.equal((await phoneGet(hub, stale, "/v1/phone/chats")).status, 401, "a machine cannot keep a link alive");
+    const boxOf = async (creds) => (await fetch(`${hub.baseUrl}/v1/mailbox/events?mailboxId=${creds.mailboxId}&afterArrival=0`, { headers: { authorization: `Bearer ${creds.token}` } })).json();
+    assert.equal((await boxOf(stale)).phoneClaimed, false, "the desktop reading the box sees the server does not know the link as used");
+    await registerSigned(hub, stale, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: new Date(Date.now() - 1000).toISOString(), phoneClaimed: true });
+    assert.equal((await phoneGet(hub, stale, "/v1/phone/chats")).status, 200, "a used link outlives its window");
+    assert.equal((await boxOf(stale)).phoneClaimed, true);
+    await registerSigned(hub, stale, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: new Date(Date.now() - 1000).toISOString() });
+    assert.equal((await phoneGet(hub, stale, "/v1/phone/chats")).status, 200, "and stays used");
+
+    // The desktop lists the phone links it knows; one it no longer knows (its
+    // record lost) reads nothing until listed (or registered) again. Only
+    // the owner may say so.
+    const putLinks = (signer, ids) => {
+      const body = JSON.stringify({ mailboxIds: ids });
+      return fetch(`${hub.baseUrl}/v1/phone-links`, { method: "PUT", body,
+        headers: { "content-type": "application/json", authorization: signHubRequest(signer, { method: "PUT", pathWithQuery: "/v1/phone-links", body }) } });
+    };
+    assert.equal((await putLinks(machine, [])).status, 403, "a machine cannot");
+    answer = await putLinks(owner, [phone.mailboxId, invite.mailboxId]);
+    assert.equal(answer.status, 200, await answer.clone().text());
+    assert.equal((await phoneGet(hub, phone, "/v1/phone/chats")).status, 200);
+    answer = await phoneGet(hub, plain, "/v1/phone/chats");
+    assert.equal(answer.status, 403);
+    assert.equal((await answer.json()).error, "phone_unknown");
+    assert.equal((await boxOf(plain)).phoneKnown, false, "the desktop reading the box sees the server was told it does not know this link");
+    assert.equal((await boxOf(phone)).phoneKnown, true);
+    await registerSigned(hub, plain, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: inTenMinutes(), phoneClaimed: true });
+    assert.equal((await phoneGet(hub, plain, "/v1/phone/chats")).status, 200, "registered again by the desktop: known again");
+
+    // Revoked: nothing more.
+    const revoke = await fetch(`${hub.baseUrl}/v1/mailbox/revoke?mailboxId=${phone.mailboxId}`, { method: "POST", headers: { authorization: `Bearer ${phone.token}` } });
+    assert.equal(revoke.status, 200);
+    answer = await phoneGet(hub, phone, "/v1/phone/chats");
+    assert.equal(answer.status, 401);
+    assert.equal((await answer.json()).error, "phone_revoked");
+  } finally {
+    await hub.close();
+  }
+});
+
+test("a phone waiting for news is answered when a chat's copy changes, and only with chats it may read", async () => {
+  const owner = createChatEventDeviceIdentity();
+  const hub = await startHub({ openRegistration: false, owner, phone: true });
+  try {
+    for (let index = 0; index < 60; index += 1) {
+      await hub.storage.saveConversation(chatFixture(`chat-${index}`, { title: `Chat ${index} ${"x".repeat(200)}`, messages: [messageFixture(`m-${index}`, "user", "y".repeat(300))] }));
+    }
+    const phone = credentials("phone-feed");
+    await registerSigned(hub, phone, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: inTenMinutes() });
+    const invite = credentials("invite-feed");
+    await registerSigned(hub, invite, owner, { phoneScope: { scope: "conversation", conversationId: "chat-1" }, phoneExpiresAt: inTenMinutes() });
+    // A position from no instance (or another one) is a reset.
+    let body = await (await phoneGet(hub, phone, "/v1/phone/changes", { instance: "none", after: 0 })).json();
+    assert.equal(body.reset, true);
+    const { instance } = body;
+    let seq = body.seq;
+    const started = Date.now();
+    const waiting = phoneGet(hub, phone, "/v1/phone/changes", { instance, after: seq, waitMs: 5000 });
+    const invited = phoneGet(hub, invite, "/v1/phone/changes", { instance, after: seq, waitMs: 1500 });
+    await delay(300);
+    hub.feed.note("chat-7");
+    body = await (await waiting).json();
+    assert.ok(Date.now() - started < 3000, "answered when the change came, not at the end of the wait");
+    assert.deepEqual(body.conversationIds, ["chat-7"]);
+    assert.equal(body.reset, undefined);
+    const invitedBody = await (await invited).json();
+    assert.deepEqual(invitedBody.conversationIds, [], "another chat's change is not news to an invitation");
+    assert.ok(Date.now() - started >= 1400, "nor does it end the invitation's wait early");
+    seq = body.seq;
+    // Nothing new: an empty answer at the end of the wait.
+    body = await (await phoneGet(hub, phone, "/v1/phone/changes", { instance, after: seq, waitMs: 200 })).json();
+    assert.deepEqual(body.conversationIds, []);
+    // A big list travels compressed to a phone that accepts it.
+    const listed = await phoneGet(hub, phone, "/v1/phone/chats", {}, { "accept-encoding": "gzip" });
+    assert.equal(listed.headers.get("content-encoding"), "gzip");
+    assert.equal((await listed.json()).chats.length, 60);
+    // A chat that changed is read again for the list; the others come from
+    // what was read before.
+    await hub.storage.saveConversation(chatFixture("chat-3", { title: "Chat 3", messages: [messageFixture("m-3", "user", "y"), messageFixture("m-3b", "participant", "the newest line")] }));
+    hub.feed.note("chat-3");
+    const relisted = await (await phoneGet(hub, phone, "/v1/phone/chats")).json();
+    assert.equal(relisted.chats.find((chat) => chat.id === "chat-3").snippet, "the newest line");
   } finally {
     await hub.close();
   }

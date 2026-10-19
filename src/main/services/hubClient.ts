@@ -138,6 +138,12 @@ export class HubClient {
     }
   }
 
+  /** The phone links this desktop knows (their mailbox ids): the server
+   *  serves chats to those only. */
+  setPhoneLinks(mailboxIds: string[]): Promise<{ ok: boolean; known: number }> {
+    return this.request("PUT", "/v1/phone-links", JSON.stringify({ mailboxIds }), "application/json");
+  }
+
   setRoster(devices: Array<Omit<HubDevice, "addedAt">>): Promise<{ devices: HubDevice[] }> {
     return this.request("PUT", "/v1/roster", JSON.stringify({ devices }), "application/json");
   }

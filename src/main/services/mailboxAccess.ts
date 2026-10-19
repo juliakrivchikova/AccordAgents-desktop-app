@@ -11,6 +11,7 @@ import {
   isSealedMailboxPayload
 } from "../../shared/mailboxSealedPayload";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import type { MobilePhoneScope } from "../../shared/mobilePairing";
 import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
 
 // Both credentials are one-way derivations from the pairing seal key: the
@@ -155,15 +156,29 @@ export function setMailboxRegistrationSigner(signer: MailboxRegistrationSigner |
 export async function registerMailboxForSealKey(
   outboxUrl: string,
   relaySealKeyBase64: string,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  options: { phoneScope?: MobilePhoneScope; phoneExpiresAt?: string; phoneClaimed?: boolean } = {}
 ): Promise<MailboxRegistrationResult> {
   const access = mailboxAccessForSealKey(relaySealKeyBase64);
   const url = new URL(outboxUrl);
   url.pathname = MAILBOX_REGISTER_PATH;
   url.search = "";
   url.searchParams.set("mailboxId", access.scopeId);
-  const body = JSON.stringify({ tokenHashBase64Url: access.tokenHash });
-  const signature = await registrationSigner?.({ url, method: "POST", pathWithQuery: `${url.pathname}${url.search}`, body }).catch(() => undefined);
+  // What a phone may read on the User's own server goes only to that server
+  // (the one this desktop signs for), never to a shared relay.
+  const signedBody = JSON.stringify({
+    tokenHashBase64Url: access.tokenHash,
+    ...(options.phoneScope ? {
+      phoneScope: options.phoneScope,
+      ...(options.phoneExpiresAt ? { phoneExpiresAt: options.phoneExpiresAt } : {}),
+      ...(options.phoneClaimed ? { phoneClaimed: true } : {})
+    } : {})
+  });
+  const signedSignature = registrationSigner
+    ? await registrationSigner({ url, method: "POST", pathWithQuery: `${url.pathname}${url.search}`, body: signedBody }).catch(() => undefined)
+    : undefined;
+  const body = signedSignature ? signedBody : JSON.stringify({ tokenHashBase64Url: access.tokenHash });
+  const signature = signedSignature;
   const response = await fetchImpl(url.toString(), {
     method: "POST",
     headers: {

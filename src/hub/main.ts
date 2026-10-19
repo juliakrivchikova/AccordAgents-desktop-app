@@ -11,6 +11,7 @@ import { hubApplyPolicy } from "./hubPolicy";
 import { HubLog } from "./hubLog";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
 import { HubRelayMailboxes, HubRelayRooms } from "./hubRelay";
+import { HubChangeFeed, HubPhoneApi } from "./hubPhone";
 import { HubServer } from "./hubServer";
 
 declare const __HUB_VERSION__: string | undefined;
@@ -125,7 +126,9 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
 
   const policy = hubApplyPolicy(storage);
   const hubLog = new HubLog(storage);
-  const folder = new HubFolder(storage, policy, log);
+  // Which chats' copies changed, for the phones reading them here.
+  const feed = new HubChangeFeed();
+  const folder = new HubFolder(storage, policy, log, (conversationId) => feed.note(conversationId));
   const search = new ChatSearchService(storage);
   const keys = loadOrCreateVapidKeys(path.join(userDataPath(), "vapid.json"));
   const push = new HubPush({ storage, keys, subject: PUSH_SUBJECT, log });
@@ -140,7 +143,16 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
   await mailboxes.start();
   const server = new HubServer({
     hubId: hubId(), version: HUB_VERSION, storage, log: hubLog, search, vapidPublicKey: keys.publicKey, acmeWebroot: args.acmeWebroot, debugLog: log,
-    relay: { mailboxes, rooms: new HubRelayRooms() }
+    relay: { mailboxes, rooms: new HubRelayRooms() },
+    phone: new HubPhoneApi({
+      store: storage,
+      relayStorage: storage.relay(),
+      feed,
+      machineNames: async () => new Map((await storage.hub().devices())
+        .filter((device) => device.role === "machine" && device.machineId)
+        .map((device) => [device.machineId as string, device.name])),
+      log
+    })
   });
   const https = Boolean(args.cert && args.key && existsSync(args.cert) && existsSync(args.key));
   if (https) {
