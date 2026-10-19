@@ -3804,6 +3804,7 @@
   const SERVER_READ_RETRY_MS = 5 * 60_000;
   const SERVER_FETCH_TIMEOUT_MS = 20_000;
   const SERVER_CHANGES_WAIT_MS = 25_000;
+  let desktopListAskedAt = 0;
   let serverReads = "unknown"; // "yes" | "no" | "unknown"
   let serverReadsCheckedAt = 0;
 
@@ -3851,7 +3852,10 @@
       const body = String((error && error.serverBody) || "");
       // The pairing was revoked (or its link expired before this phone used
       // it): say so now, as the mailbox would, not after a wait on the desktop.
-      if (status === 401 && (body.indexOf("phone_revoked") >= 0 || body.indexOf("phone_expired") >= 0)) {
+      // An expired link is not a revoked one (the desktop may yet say it was
+      // used): reading from the server stops for a while, and the mailbox
+      // says on its own whether the pairing is gone.
+      if (status === 401 && body.indexOf("phone_revoked") >= 0) {
         mailboxAuthRejected = true;
         void clearMailboxAccessMeta();
         void render("revoked");
@@ -3955,9 +3959,11 @@
     if (fromServer) {
       startServerChanges();
       // The server cannot see every card (approvals live with whoever raised
-      // them). When the desktop is right there, its list is asked for too,
-      // without waiting, so a card it closed leaves this phone.
-      if (activeRelaySocket && activeRelaySocket.readyState === 1) {
+      // them), so the desktop's list is asked for too, in the background and
+      // at most once a minute: when the desktop is there, a card it closed
+      // leaves this phone; when it is not, nothing waits for it.
+      if (Date.now() - desktopListAskedAt > 60_000) {
+        desktopListAskedAt = Date.now();
         void sendRelayPayload(pairing, "chat-list-" + createEventId(), { type: "mobile.chat-list.request" })
           .then(handleRelayChatListPayload)
           .then(function () { return render(); })

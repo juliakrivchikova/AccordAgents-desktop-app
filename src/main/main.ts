@@ -359,6 +359,8 @@ let machineLinkStartedAt: number | undefined;
 const DESKTOP_LINK_STARTUP_GRACE_MS = 60_000;
 const mobileMailboxPollers = new Map<string, NodeJS.Timeout>();
 const mobilePairingsByKey = new Map<string, MobilePairingPackage>();
+/** When a used link was last said to be used to the User's server. */
+const mobileClaimResentAt = new Map<string, number>();
 // W1 arrival cursors, per pairing. Persisted with paired devices so a restart
 // does not re-read the whole mailbox.
 const mobileMailboxCursors = new Map<string, { epoch: string; cursor: number }>();
@@ -484,6 +486,7 @@ function publishHubRoster(): void {
 async function startHubLink(): Promise<void> {
   const config = await settingsService.getHubConfig();
   if (!config || hubSync) return;
+  hubOwnerConfirmed = false;
   const identity = () => chatEventLogService.getOrCreateDeviceIdentity();
   hubClient = new HubClient({ url: config.url, identity, storage: storageService });
   hubSync = new HubSync({
@@ -545,6 +548,7 @@ async function startHubLink(): Promise<void> {
  *  minute after the link starts, and again later if it did not work (a few
  *  times per version at most). Settings shows its progress like a press. */
 let hubProgramUpdateTimer: ReturnType<typeof setTimeout> | undefined;
+const MAILBOX_REVOKE_RETRY_MS = 5 * 60_000;
 const hubProgramUpdateTries = new Map<string, number>();
 const HUB_PROGRAM_UPDATE_DELAY_MS = 60_000;
 const HUB_PROGRAM_UPDATE_RETRY_MS = 30 * 60_000;
@@ -572,7 +576,12 @@ async function updateHubProgramIfBehind(): Promise<void> {
   // The server this desktop syncs with is the one it would update, and it
   // has just confirmed this desktop is its owner (only the owner sets its
   // devices): a desktop that is not cannot replace the server's program.
-  if (!hubOwnerConfirmed || new URL(config.url).hostname !== config.server.ip) return;
+  if (new URL(config.url).hostname !== config.server.ip) return;
+  if (!hubOwnerConfirmed) {
+    // Not confirmed yet (the server away, this desktop offline): asked again.
+    scheduleHubProgramUpdate(5 * 60_000);
+    return;
+  }
   // Updating stops the server for a few seconds: not while a member works.
   const busy = chatService.liveRunIds().length > 0
     || machineInstallerService.hasActiveOperations()
@@ -588,14 +597,7 @@ async function updateHubProgramIfBehind(): Promise<void> {
   try {
     const state = await hubInstaller.install({});
     void debugLogService.write("hub.program-update.finished", { status: state.status, message: state.message ?? "" });
-    if (state.status !== "ready") {
-      scheduleHubProgramUpdate(HUB_PROGRAM_UPDATE_RETRY_MS);
-      return;
-    }
-    // The phones' pairings were registered when this desktop started, with
-    // the older program that did not keep what a phone may read: told again
-    // now, so the phones read their chats from the server from here on.
-    for (const pairing of mobilePairingsByKey.values()) void ensureMailboxRegisteredForPairing(pairing);
+    if (state.status !== "ready") scheduleHubProgramUpdate(HUB_PROGRAM_UPDATE_RETRY_MS);
   } catch (error) {
     void debugLogService.write("hub.program-update.error", { message: error instanceof Error ? error.message : String(error) });
     scheduleHubProgramUpdate(HUB_PROGRAM_UPDATE_RETRY_MS);
@@ -710,6 +712,12 @@ hubInstaller.onProgress((state) => {
   // A setup that ended (linked, or stopped before) no longer needs every
   // save to emit: a running link does that by itself.
   if (state.status !== "installing") hubLinking = false;
+  // A program just put on the server (set up, updated by the button or by
+  // this desktop) may not have kept what each phone may read: told again,
+  // so the phones read their chats from the server from here on.
+  if (state.status === "ready" && state.phase === "ready") {
+    for (const pairing of mobilePairingsByKey.values()) void ensureMailboxRegisteredForPairing(pairing);
+  }
   sendToMainWindow("hub:setup-progress", state);
 });
 void removeStaleHubTemp().then((removed) => {
@@ -1992,6 +2000,24 @@ function findMobilePairingForRevoke(request: RevokeMobilePairingRequest): Mobile
   return [...mobilePairingsByKey.values()].find((pairing) => pairing.stableRoutingId === stableRoutingId);
 }
 
+/** Whether the User's own server says the phone read through this pairing
+ *  within its link's window. A shared relay says nothing (false). */
+async function phoneUsedPairingOnServer(pairing: MobilePairingPackage): Promise<boolean> {
+  if (!pairing.outboxUrl) return false;
+  try {
+    const url = new URL(mailboxEndpointForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64));
+    url.searchParams.set("limit", "1");
+    url.searchParams.set("afterArrival", String(Number.MAX_SAFE_INTEGER));
+    const response = await fetch(url.toString(), { headers: mailboxAuthHeaders(pairing.relaySealKeyBase64), signal: AbortSignal.timeout(8_000) });
+    if (!response.ok) return false;
+    const body = await response.json() as { phoneSeenAt?: unknown };
+    const seenAt = typeof body.phoneSeenAt === "string" ? Date.parse(body.phoneSeenAt) : Number.NaN;
+    return Number.isFinite(seenAt) && seenAt < Date.parse(pairing.expiresAt);
+  } catch {
+    return false;
+  }
+}
+
 function scheduleMobilePairingExpiry(pairing: MobilePairingPackage): void {
   const key = mobilePairingKey(pairing);
   // A device that already connected is remembered until revoked. Re-arming the
@@ -2009,7 +2035,15 @@ function scheduleMobilePairingExpiry(pairing: MobilePairingPackage): void {
     return;
   }
   const timer = setTimeout(() => {
-    void revokeMobilePairingInternal(pairing, "expired").catch((error) => {
+    void (async () => {
+      // A phone that read through the User's own server within the window has
+      // used the link; this desktop may have slept through it (no poll ran).
+      if (await phoneUsedPairingOnServer(pairing)) {
+        await noteMobilePairingClaimed(pairing);
+        return;
+      }
+      await revokeMobilePairingInternal(pairing, "expired");
+    })().catch((error) => {
       void debugLogService.write("mobile.pairing.expire-error", {
         routingId: pairing.stableRoutingId,
         rendezvousId: pairing.rendezvousId,
@@ -2039,6 +2073,11 @@ async function applyStoredMobilePairingRevocations(): Promise<void> {
     mobileRelayControls.get(pairing.rendezvousId)?.close();
     mobileRelayControls.delete(pairing.rendezvousId);
     mobilePairingsByKey.delete(key);
+    // The removed phone's mailbox goes too: on the User's own server the
+    // mailbox key also reads her chats, so a removed (or lost) phone must
+    // not keep it. Kept for a retry when the server cannot be reached.
+    await persistMobilePairedDevices();
+    await revokeMailboxForPairing(pairing);
   }
 }
 
@@ -2450,7 +2489,7 @@ async function pollMobileMailboxOutbox(
       }
       throw new Error(`Mailbox poll failed with HTTP ${response.status}: ${body}`);
     }
-    return await response.json() as { events?: unknown; epoch?: unknown; phoneSeenAt?: unknown };
+    return await response.json() as { events?: unknown; epoch?: unknown; phoneSeenAt?: unknown; phoneClaimed?: unknown };
   };
   const stored = mobileMailboxCursors.get(pairingKey) ?? { epoch: "", cursor: 0 };
   const startedCursor = stored.cursor;
@@ -2463,6 +2502,15 @@ async function pollMobileMailboxOutbox(
   const phoneSeenAtMs = typeof body.phoneSeenAt === "string" ? Date.parse(body.phoneSeenAt) : Number.NaN;
   if (Number.isFinite(phoneSeenAtMs) && phoneSeenAtMs < Date.parse(pairing.expiresAt)) {
     void noteMobilePairingClaimed(pairing);
+  }
+  // A used link the server does not know as used yet (the one registration
+  // that says so was lost): said again, at most once a minute.
+  if (body.phoneClaimed === false && mobileClaimedPairingKeys.has(pairingKey)) {
+    const last = mobileClaimResentAt.get(pairingKey) ?? 0;
+    if (Date.now() - last > 60_000) {
+      mobileClaimResentAt.set(pairingKey, Date.now());
+      void ensureMailboxRegisteredForPairing(pairing);
+    }
   }
   const epoch = typeof body.epoch === "string" ? body.epoch : "";
   if (epoch && epoch !== stored.epoch) {
@@ -4317,6 +4365,12 @@ void app.whenReady().then(async () => {
       message: error instanceof Error ? error.message : String(error)
     });
   });
+  // And every few minutes after: a phone removed while the server was away
+  // (stopped, updating) loses its access as soon as the server is back, not
+  // at the next start of this desktop.
+  setInterval(() => {
+    void retryPendingMailboxRevocations().catch(() => undefined);
+  }, MAILBOX_REVOKE_RETRY_MS).unref?.();
   await artifactService.flushPendingArtifactEvents().catch((error) => {
     void debugLogService.write("artifacts.outbox.startup-error", {
       message: error instanceof Error ? error.message : String(error)

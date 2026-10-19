@@ -395,7 +395,11 @@ export class HubRelayMailboxes {
     // When the phone last read through the server: the desktop that made the
     // pairing takes it as the phone's first use (a phone that only reads
     // here never writes to the box within the link's window).
-    return { status: 200, body: { events, maxArrivalSeq, oldestArrivalSeq, epoch: row?.epoch ?? "", ...(row?.phoneSeenAt ? { phoneSeenAt: row.phoneSeenAt } : {}) } };
+    // And whether the server knows the link as used, so a desktop whose word
+    // on that was lost can say it again.
+    return { status: 200, body: { events, maxArrivalSeq, oldestArrivalSeq, epoch: row?.epoch ?? "",
+      ...(row?.phoneSeenAt ? { phoneSeenAt: row.phoneSeenAt } : {}),
+      ...(row?.phoneScope ? { phoneClaimed: row.phoneClaimed === 1 } : {}) } };
   }
 
   // Owner-driven deletion: the desktop names its own superseded envelopes.

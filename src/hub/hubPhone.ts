@@ -126,7 +126,9 @@ export class HubPhoneApi {
         const seq = options.feed.current();
         const opened = await store.openConversation(id, limit);
         if (this.snippetCache.size > 2_000) this.snippetCache.clear();
-        this.snippetCache.set(id, { seq, opened });
+        // Kept short: the list needs each chat's members and the start of its
+        // last lines, not whole replies (a 512 MB server holds every chat).
+        this.snippetCache.set(id, { seq, opened: opened ? trimmedForList(opened) : opened });
         return opened;
       }
     };
@@ -312,6 +314,21 @@ const BUILT_IN_ROLE_LABELS: Record<string, string> = {
   "code-reviewer": "Code Reviewer",
   "workflow-manager": "Workflow Manager"
 };
+
+/** What the chat list reads of a chat: its metadata and the first part of
+ *  each of its newest messages (the line shown is at most 84 characters). */
+function trimmedForList<T extends { conversation: { messages: Array<{ content: string; metadata?: unknown }> } }>(opened: T): T {
+  return {
+    ...opened,
+    conversation: {
+      ...opened.conversation,
+      messages: opened.conversation.messages.map((message) => ({
+        ...message,
+        content: message.content.length > 400 ? message.content.slice(0, 400) : message.content
+      }))
+    }
+  };
+}
 
 function sameText(left: string, right: string): boolean {
   const a = Buffer.from(left);

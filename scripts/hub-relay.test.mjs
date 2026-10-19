@@ -763,8 +763,11 @@ test("a paired phone reads the chat list and a chat's page from the server, with
     assert.equal((await answer.json()).error, "phone_expired");
     await registerSigned(hub, stale, machine, { phoneScope: { scope: "device" }, phoneClaimed: true });
     assert.equal((await phoneGet(hub, stale, "/v1/phone/chats")).status, 401, "a machine cannot keep a link alive");
+    const boxOf = async (creds) => (await fetch(`${hub.baseUrl}/v1/mailbox/events?mailboxId=${creds.mailboxId}&afterArrival=0`, { headers: { authorization: `Bearer ${creds.token}` } })).json();
+    assert.equal((await boxOf(stale)).phoneClaimed, false, "the desktop reading the box sees the server does not know the link as used");
     await registerSigned(hub, stale, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: new Date(Date.now() - 1000).toISOString(), phoneClaimed: true });
     assert.equal((await phoneGet(hub, stale, "/v1/phone/chats")).status, 200, "a used link outlives its window");
+    assert.equal((await boxOf(stale)).phoneClaimed, true);
     await registerSigned(hub, stale, owner, { phoneScope: { scope: "device" }, phoneExpiresAt: new Date(Date.now() - 1000).toISOString() });
     assert.equal((await phoneGet(hub, stale, "/v1/phone/chats")).status, 200, "and stays used");
 
