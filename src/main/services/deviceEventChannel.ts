@@ -58,6 +58,9 @@ interface DeviceEventChannelOptions {
    *  and keeps no mailbox. */
   hubMode?: boolean;
   onError(error: Error): void;
+  /** First wait before a held (deferred or failing) event is tried again; it
+   *  doubles per attempt up to sixty times this. Tests shorten it. */
+  heldRetryBaseMs?: number;
 }
 
 /** A deferred application that named what it is waiting for. */
@@ -89,6 +92,11 @@ export class DeviceEventChannel {
   private readonly lastSent = new Map<string, { at: number; attempts: number }>();
   private readonly requestedGaps = new Map<string, number>();
   private readonly requestedDependencies = new Map<string, number>();
+  /** Held events and when each may be tried again. Without it every incoming
+   *  packet re-tried every held event: a machine holding ~500 answers to chats
+   *  it does not host made about 10,000 attempts a minute and ran out of
+   *  memory. In memory only: after a restart each is tried once, then waits. */
+  private readonly heldRetry = new Map<string, { attempts: number; notBefore: number; waitsFor?: string; conversationId?: string }>();
   // Live-room and mailbox copies commonly overlap. Cache only identities and
   // receipts already committed to SQLite, never uncommitted application state.
   private readonly received = new Map<string, { hash: string; receipt?: DeviceEventReceipt; ackAt?: number }>();
@@ -188,7 +196,13 @@ export class DeviceEventChannel {
             }
             return;
           }
-          if (remembered) break; // Stored but unapplied: retry the domain below.
+          if (remembered) {
+            // Stored but unapplied: the peer sending it again is a reason to
+            // try it now. Its attempts are kept, so a resend cadence cannot
+            // turn the backoff back into a retry storm.
+            this.wake(event.eventId);
+            break;
+          }
           const forward = event.originId === value.from ? this.options.forwardTo?.(event) ?? [] : [];
           const stored = await this.options.storage.appendChatEvent(event, {
             ingress: { deviceId: value.from, channelId: this.options.channelId },
@@ -270,6 +284,7 @@ export class DeviceEventChannel {
   confirmApplied(event: ChatEventEnvelope, outcome: DeviceEventApplyOutcome = "applied"): Promise<void> {
     return this.enqueue(async () => {
       const receipt = await this.options.storage.deviceEvents().markApplied(event, outcome, new Date().toISOString());
+      this.heldRetry.delete(event.eventId);
       remember(this.received, event.eventId, { hash: event.eventHash, receipt });
       await this.sendControl(this.packet({ type: "ack", receipt }));
       this.received.get(event.eventId)!.ackAt = performance.now();
@@ -349,17 +364,27 @@ export class DeviceEventChannel {
       remember(this.received, receipt.eventId, { hash: receipt.eventHash, receipt });
       await this.sendControl(this.packet({ type: "ack", receipt }));
     }
+    // Events held in this pass may be tried once more right away when
+    // something else applied, even though their backoff has started.
+    let retryNow = new Set<string>();
+    const returned = new Set<string>();
+    let queriedAt = performance.now();
     while (!this.stopped) {
-      const ready = await this.options.storage.deviceEvents().ready(this.options.channelId, this.options.peerDeviceId, [...held]);
+      const now = performance.now();
+      queriedAt = now;
+      const waiting = [...this.heldRetry].filter(([eventId, retry]) => retry.notBefore > now && !retryNow.has(eventId)).map(([eventId]) => eventId);
+      const ready = await this.options.storage.deviceEvents().ready(this.options.channelId, this.options.peerDeviceId, [...new Set([...held, ...waiting])]);
       if (!ready.length) {
         if (!appliedSinceHold || !held.size) break;
         appliedSinceHold = false;
+        retryNow = new Set(held);
         held.clear();
         deferred = false;
         continue;
       }
       for (const event of ready) {
         if (this.stopped) return;
+        returned.add(event.eventId);
         try {
           let payload: unknown;
           try { payload = await this.options.storage.deviceEventBlobs().hydrate(event.payload); }
@@ -379,11 +404,22 @@ export class DeviceEventChannel {
           if (outcome === "deferred" || (typeof outcome === "object" && outcome.deferred)) {
             deferred = true;
             held.add(event.eventId);
+            this.holdForRetry(event.eventId, "deferred", typeof outcome === "object" ? outcome.dependency.targetKey : undefined, event.conversationId);
             if (typeof outcome === "object") dependencies.set(JSON.stringify(outcome.dependency), outcome.dependency);
             continue;
           }
           const receipt = await this.options.storage.deviceEvents()
             .markApplied(event, outcome as DeviceEventApplyOutcome, new Date().toISOString());
+          this.heldRetry.delete(event.eventId);
+          // What a held action named as missing has just arrived: wake it now
+          // instead of leaving it to its backoff.
+          // So is a change of the same chat that waited for an earlier one:
+          // chat changes arrive out of order across the live room and the
+          // mailbox, and the one before is usually what it waited for.
+          const appliedKey = targetKeyOf(payload);
+          for (const [heldId, retry] of this.heldRetry) {
+            if ((appliedKey && retry.waitsFor === appliedKey) || (!retry.waitsFor && retry.conversationId === event.conversationId)) this.wake(heldId);
+          }
           remember(this.received, event.eventId, { hash: event.eventHash, receipt });
           await this.sendControl(this.packet({ type: "ack", receipt }));
           this.received.get(event.eventId)!.ackAt = performance.now();
@@ -392,12 +428,22 @@ export class DeviceEventChannel {
           // A missing chat, full disk, or pending domain owner holds this
           // stream; other conversations on the same device can still apply.
           held.add(event.eventId);
+          this.holdForRetry(event.eventId, "failed", undefined, event.conversationId);
           applyError ??= error;
         }
       }
     }
+    // An entry that was due yet not offered is no longer waiting here (it was
+    // confirmed by its owner, or sits behind another event of its stream).
+    // Judged against the last query, so an entry that became due after it is
+    // not mistaken for one that was offered and is gone.
+    for (const [eventId, retry] of this.heldRetry) {
+      if (retry.notBefore <= queriedAt && !returned.has(eventId) && !held.has(eventId)) this.heldRetry.delete(eventId);
+    }
     const gaps = [...missingBodies.values(), ...await this.options.storage.deviceEvents().gaps(this.options.channelId, this.options.peerDeviceId)];
-    this.receivePending = deferred || applyError !== undefined || gaps.length > 0;
+    // Events waiting out a backoff keep the periodic pass alive so they are
+    // tried again when due, even if nothing new arrives.
+    this.receivePending = deferred || applyError !== undefined || gaps.length > 0 || this.heldRetry.size > 0;
     const activeRequests = new Set(gaps.map((gap) => JSON.stringify(gap)));
     for (const key of this.requestedGaps.keys()) if (!activeRequests.has(key)) this.requestedGaps.delete(key);
     for (const gap of gaps) {
@@ -423,6 +469,43 @@ export class DeviceEventChannel {
     if (originId === from) return this.options.peerPublicKeyDerBase64;
     if (typeof logScopeId !== "string" || !isChatChangesLogScope(logScopeId) || originId === this.options.localDeviceId) return undefined;
     return this.options.forwardedOriginKey?.(originId);
+  }
+
+  /** A deferral waits for something that may take long to arrive, up to
+   *  five minutes between attempts; a failure is usually transient (a busy
+   *  database, a changed authorization) and is retried within thirty seconds. */
+  private holdForRetry(eventId: string, reason: "deferred" | "failed", waitsFor?: string, conversationId?: string): void {
+    const base = this.options.heldRetryBaseMs ?? 5_000;
+    const previous = this.heldRetry.get(eventId);
+    const attempts = Math.min((previous?.attempts ?? -1) + 1, 6);
+    const cap = reason === "failed" ? base * 6 : base * 60;
+    this.heldRetry.set(eventId, {
+      attempts,
+      notBefore: performance.now() + Math.min(base * 2 ** attempts, cap),
+      waitsFor: waitsFor ?? previous?.waitsFor,
+      conversationId: conversationId ?? previous?.conversationId
+    });
+  }
+
+  private wake(eventId: string): void {
+    const retry = this.heldRetry.get(eventId);
+    if (retry) retry.notBefore = 0;
+  }
+
+  /** A held event whose application failed outside `apply` (a delivery to
+   *  a provider that runs on after the event was deferred) is retried on the
+   *  short failure schedule, not left on the long deferral one. */
+  retryFailedSoon(eventId: string): void {
+    this.holdForRetry(eventId, "failed");
+    this.receivePending = true;
+  }
+
+  /** Everything held is tried on the next pass: the reason it was held has
+   *  gone away here (for example a machine's idle fence was lifted). */
+  retryHeldNow(): void {
+    for (const retry of this.heldRetry.values()) retry.notBefore = 0;
+    this.receivePending = true;
+    this.scheduleFlush();
   }
 
   /** Chat actions share one log across every machine, so one decision is one
@@ -545,4 +628,9 @@ function remember<T>(entries: Map<string, T>, key: string, value: T): void {
   entries.delete(key);
   entries.set(key, value);
   if (entries.size > 2048) entries.delete(entries.keys().next().value!);
+}
+
+function targetKeyOf(payload: unknown): string | undefined {
+  const key = payload && typeof payload === "object" ? (payload as { targetKey?: unknown }).targetKey : undefined;
+  return typeof key === "string" && key ? key : undefined;
 }

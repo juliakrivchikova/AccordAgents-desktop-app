@@ -3673,12 +3673,14 @@ input.on("line", (line) => {
   let markSelfResumed!: () => void;
   const selfResumedSeen = new Promise<void>((resolve) => { markSelfResumed = resolve; });
   let repliesStarted = 0;
+  const backgroundReports: string[][] = [];
   const warm = {
     conversationId: "conversation-background",
     participantId: participant.id,
     contextKey: "context-background",
     idleTimeoutMs: 60_000,
     onReplyStarted: () => { repliesStarted += 1; },
+    onBackgroundTasksChanged: (tasks: any[]) => { backgroundReports.push(tasks.map((task) => `${task.label}@${task.origin?.messageId}`)); },
     origin: { runId: "run-1", messageId: "reply-1" },
     onSelfResumedTurn: (turn: any) => {
       selfResumed.push(turn);
@@ -3738,6 +3740,8 @@ input.on("line", (line) => {
     assert.equal(continuation.ok, true);
     assert.equal(continuation.content, "Background done.");
     assert.ok(outputs.some((event) => /Background task finished: fixture background task/.test(event.text)));
+    assert.deepEqual(backgroundReports, [["fixture background task@reply-1"], []],
+      "the member's background work is reported once when it starts, with the reply that started it, and once when it ends");
     await assertFixtureProcessStops(helperPid);
   } finally {
     await runner.shutdownWarmAgents();

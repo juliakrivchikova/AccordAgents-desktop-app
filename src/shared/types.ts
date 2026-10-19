@@ -1434,6 +1434,14 @@ export interface ChatAppToolApprovalPolicy {
   updatedAt: string;
 }
 
+/** A chat member's live background work (Claude Code `run_in_background`),
+ *  by task name; an empty list means none is running any more. */
+export interface ChatBackgroundTasksEvent {
+  conversationId: string;
+  participantId: string;
+  labels: string[];
+}
+
 export interface ChatMessageMetadata {
   /** Machines transport, Rule 2: a Stop was requested but the member's
    *  machine has not confirmed it yet (shown honestly instead of "stopped");
@@ -3057,4 +3065,7 @@ export interface AppBridge {
   /** The next-prompt suggestions on offer in a chat (newest first). */
   getChatPromptSuggestions(conversationId: string): Promise<ChatPromptSuggestion[]>;
   onChatPromptSuggestions(callback: (update: ChatPromptSuggestionsUpdate) => void): () => void;
+  /** Live background work of the chat's members, by member id. */
+  getChatBackgroundTasks(conversationId: string): Promise<Record<string, string[]>>;
+  onChatBackgroundTasks(callback: (event: ChatBackgroundTasksEvent) => void): () => void;
 }

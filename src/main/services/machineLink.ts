@@ -105,6 +105,19 @@ export interface MachineApprovalEvent {
   decisionId?: string;
 }
 
+function cleanBackgroundLabels(labels: unknown[]): string[] {
+  return labels.filter((label): label is string => typeof label === "string").slice(0, 50);
+}
+
+/** A machine's members' background work: one member's change, the machine's
+ *  complete list (`snapshot`, replacing what it reported before), or nothing
+ *  (`snapshot` empty) when the machine went away. */
+export interface MachineMemberBackgroundEvent {
+  machineId: string;
+  member?: { conversationId: string; participantId: string; labels: string[] };
+  snapshot?: Array<{ conversationId: string; participantId: string; labels: string[] }>;
+}
+
 /** The machine that sent it is named: the desktop offers a suggestion only
  *  for a reply it dispatched to that machine. */
 export interface MachinePromptSuggestionEvent {
@@ -248,6 +261,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private readonly runStartedListeners: Array<(event: { conversationId: string; runId: string }) => Promise<void> | void> = [];
   private readonly progressListeners: Array<(progress: ReviewProgress) => void> = [];
   private readonly suggestionListeners: Array<(event: MachinePromptSuggestionEvent) => void> = [];
+  private readonly backgroundListeners: Array<(event: MachineMemberBackgroundEvent) => void> = [];
   private readonly participantRequestListeners: Array<(request: { machineId: string; conversationId: string; requestMessageId: string; depth: number; targetParticipantIds?: string[] }) => Promise<void> | void> = [];
   private readonly backDeltaListeners: Array<(delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void> = [];
   private readonly deletionListeners: Array<(event: MachineConversationDeletedBody) => Promise<void>> = [];
@@ -257,6 +271,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
    *  saved while the link is still starting (or for a machine whose
    *  connection failed) must still be addressed to it. */
   private readonly enrolled = new Map<string, MachineRecord>();
+  /** Events whose deferral was already reported, so a retry is not logged again. */
+  private readonly reportedDeferrals = new Set<string>();
   private deletionRetry?: ReturnType<typeof setTimeout>;
   private deletionDelivery?: Promise<number>;
   private deletionDeliveryRequested = false;
@@ -280,6 +296,13 @@ export class MachineLinkService implements MachineTurnDispatcher {
   onRunStarted(listener: (event: { conversationId: string; runId: string }) => Promise<void> | void): () => void {
     this.runStartedListeners.push(listener);
     return () => { const index = this.runStartedListeners.indexOf(listener); if (index >= 0) this.runStartedListeners.splice(index, 1); };
+  }
+
+  /** A member hosted on a machine started or ended background work; `labels`
+   *  empty also when the machine went away (nothing it said holds any more). */
+  onMemberBackgroundTasks(listener: (event: MachineMemberBackgroundEvent) => void): () => void {
+    this.backgroundListeners.push(listener);
+    return () => { const index = this.backgroundListeners.indexOf(listener); if (index >= 0) this.backgroundListeners.splice(index, 1); };
   }
 
   /** A member's next-prompt suggestion from the machine that ran its reply. */
@@ -602,6 +625,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     this.rejectPendingScripts(connection, "The machine was removed.");
     connection.eventChannel?.close();
     connection.client.close();
+    this.emitMemberBackground({ machineId, snapshot: [] });
     this.emitStatus();
   }
 
@@ -944,7 +968,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
     const applier = this.options.chatActions;
     if (!applier?.handles(event, hydrated)) return undefined;
     const outcome = await applier.apply(event, hydrated);
-    if (outcome.detail) {
+    // A deferral is reported once; it is retried until it applies, and logging
+    // every attempt wrote hundreds of thousands of identical lines a day.
+    const repeatedDeferral = outcome.status === "deferred" && this.reportedDeferrals.has(event.eventId);
+    if (outcome.status === "deferred") rememberBounded(this.reportedDeferrals, event.eventId);
+    else this.reportedDeferrals.delete(event.eventId);
+    if (outcome.detail && !repeatedDeferral) {
       void this.debugLogs.write("machine-link.action.applied", {
         kind: outcome.kind, targetKey: outcome.targetKey, status: outcome.status, detail: outcome.detail
       });
@@ -1558,6 +1587,29 @@ export class MachineLinkService implements MachineTurnDispatcher {
       case "machine.turn.finished":
         await this.finishTurn(connection, body);
         return;
+      case "machine.member.background":
+        if (typeof body.conversationId !== "string" || typeof body.participantId !== "string" || !Array.isArray(body.labels)) {
+          return;
+        }
+        this.emitMemberBackground({
+          machineId: connection.record.id,
+          member: { conversationId: body.conversationId, participantId: body.participantId, labels: cleanBackgroundLabels(body.labels) }
+        });
+        return;
+      case "machine.member.background.snapshot":
+        if (!Array.isArray(body.members)) {
+          return;
+        }
+        this.emitMemberBackground({
+          machineId: connection.record.id,
+          snapshot: body.members
+            .filter((member) => member && typeof member.conversationId === "string" && typeof member.participantId === "string" && Array.isArray(member.labels))
+            .slice(0, 500)
+            .map((member) => ({ conversationId: member.conversationId, participantId: member.participantId, labels: cleanBackgroundLabels(member.labels) }))
+        });
+        return;
+      case "machine.member.background.request":
+        return;
       case "machine.turn.suggestion":
         if (typeof body.suggestion !== "string" || typeof body.participantId !== "string" || typeof body.runId !== "string") {
           return;
@@ -2016,14 +2068,30 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
   }
 
+  private emitMemberBackground(event: MachineMemberBackgroundEvent): void {
+    for (const listener of this.backgroundListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        void this.debugLogs.write("machine-link.background.listener-error", { machineId: event.machineId, message: errorMessage(error) });
+      }
+    }
+  }
+
   private setMachinePeer(connection: MachineConnection, deviceId: string | undefined): void {
     const changed = connection.machineDeviceId !== deviceId;
     if (!deviceId) {
+      if (connection.machineDeviceId) {
+        this.emitMemberBackground({ machineId: connection.record.id, snapshot: [] });
+      }
       connection.machineDeviceId = undefined;
       connection.settingsSynced = false;
       this.rejectPendingScripts(connection, `${connection.record.name} disconnected.`);
     } else if (!connection.machineDeviceId) {
       connection.machineDeviceId = deviceId;
+      // Back on the link (also after a blip a hello does not follow): ask for
+      // the members' background work that is running now.
+      void this.send(connection, { type: "machine.member.background.request" }).catch(() => undefined);
       if (!connection.helloSeen && !connection.helloRequestTimer) {
         // The machine is there; if it does not greet this connection by
         // itself shortly (a relay may seat a restarted desktop silently in
@@ -2113,4 +2181,11 @@ function errorMessage(error: unknown): string {
 /** The part of a settings snapshot a machine uses; the export time is not. */
 function machineSettingsKey(snapshot: MachineSettingsSnapshot): string {
   return JSON.stringify([snapshot.settingsJson, snapshot.agentEnvironment]);
+}
+
+/** Adds to a set that keeps at most `limit` entries, dropping the oldest. */
+function rememberBounded(set: Set<string>, value: string, limit = 5_000): void {
+  set.delete(value);
+  set.add(value);
+  if (set.size > limit) set.delete(set.values().next().value as string);
 }

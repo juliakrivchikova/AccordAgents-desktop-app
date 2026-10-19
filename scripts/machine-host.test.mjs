@@ -319,6 +319,7 @@ test("a ChatService native resume is listed, stopped and delivered through the h
     chatRunMeta: new Map(), chatRunControllers: new Map(), activeConversationRunIds: new Map(), activeRunIds: new Set(),
     participantRequestRunners: new Map(), remoteRunHandlesByRun: new Map(), participantRunSettledListeners: new Set(),
     appSendMessageCountsByRun: new Map(), appSendMessageImageBytesByRun: new Map(), debugLogs: logs,
+    memberBackgroundTasks: new Map(), backgroundTaskListeners: new Set(),
     settledParticipantRunResult: async () => ({ messages: [{ id: "native-bubble", role: "participant", participantId: "p1", status: "error", content: "partial", createdAt: new Date().toISOString(), metadata: { runId: "native-resume", terminalReason: "user-stopped" } }], warnings: [] })
   });
   const host = new MachineHostService(chat, {}, {}, logs, { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client });
@@ -671,4 +672,48 @@ test("through the hub two machines name their channel after the pair, never afte
     viaRelay.close();
     viaHub.close();
   }
+});
+
+test("a member's background work on the machine is reported to the desktop as it changes and again with each hello", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const store = new Map();
+  let notify;
+  const live = [{ conversationId: "conv-bg", participantId: "p1", labels: ["long build"] }];
+  const host = new MachineHostService(
+    {
+      runMachineHostedTurn: async () => ({ messages: [], warnings: [] }),
+      cancelRun: () => true,
+      respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) store.set(id, next); },
+      onBackgroundTasksChanged: (listener) => { notify = listener; return () => { notify = undefined; }; },
+      localBackgroundTasks: () => live
+    },
+    { getConversation: async (id) => store.get(id) },
+    { importMachineSettingsSnapshot: async () => undefined },
+    { write: async () => undefined },
+    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
+  );
+  await host.start();
+  await settle();
+  const backgroundBodies = async () => (await sentBodies(client, host.options.pairing)).filter((body) => body.type === "machine.member.background");
+  const snapshots = (await sentBodies(client, host.options.pairing)).filter((body) => body.type === "machine.member.background.snapshot");
+  assert.deepEqual(snapshots.at(-1)?.members, [{ conversationId: "conv-bg", participantId: "p1", labels: ["long build"] }], "the hello is followed by the full list of what is running now");
+  assert.equal(typeof notify, "function");
+  notify({ conversationId: "conv-bg", participantId: "p1", labels: [] });
+  await host.outbound;
+  await settle(50);
+  const bodies = await backgroundBodies();
+  assert.deepEqual(bodies.at(-1), { type: "machine.member.background", conversationId: "conv-bg", participantId: "p1", labels: [] });
+  // A desktop back from a network blip asks; the machine answers with the full list.
+  live.length = 0;
+  client.emit("message", { ciphertext: await envelope({ type: "machine.member.background.request" }, host.options.pairing) });
+  await host.inbound;
+  await host.outbound;
+  await settle(50);
+  const snapshotsAfterRequest = (await sentBodies(client, host.options.pairing)).filter((body) => body.type === "machine.member.background.snapshot");
+  assert.equal(snapshotsAfterRequest.length, 2);
+  assert.deepEqual(snapshotsAfterRequest.at(-1).members, [], "nothing is running any more");
+  host.close();
+  assert.equal(notify, undefined, "closing the host stops reporting");
 });

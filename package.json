@@ -1,7 +1,7 @@
 {
   "name": "accordagents",
   "productName": "AccordAgents",
-  "version": "1.11.2-beta.5",
+  "version": "1.11.2-beta.8",
   "private": true,
   "description": "Desktop app for multi-participant AI chat that debates a question or code diff and converges on a consensus answer.",
   "author": "Iuliia Svetlichnaia",
@@ -100,7 +100,7 @@
     "bump:minor": "node scripts/bump-version.mjs minor",
     "bump:major": "node scripts/bump-version.mjs major",
     "tag-release": "node scripts/tag-release.mjs",
-    "test:device-events": "npm run build:main && node --test dist/main/main/services/deviceEventStorage.test.js dist/main/main/services/deviceEventChannel.test.js dist/main/main/services/deviceEventMailbox.test.js",
+    "test:device-events": "npm run build:main && node --test dist/main/main/services/deviceEventStorage.test.js dist/main/main/services/deviceEventChannel.test.js dist/main/main/services/deviceEventMailbox.test.js scripts/chat-action-dependency.test.mjs",
     "test:native-execution": "npm run build:main && node --test dist/main/main/services/nativeCommandStore.test.js dist/main/main/services/nativeProcess.test.js dist/main/main/services/machineApprovalExecutor.test.js scripts/machine-command.test.mjs",
     "test:packaged-native": "node scripts/verify-packaged-native-process.mjs",
     "test:worker-relay": "npm run build:main && node --test scripts/worker-relay-chat-read.test.mjs",

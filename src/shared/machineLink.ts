@@ -396,6 +396,32 @@ export interface MachineTrustRosterBody {
   roster: MachineTrustRoster;
 }
 
+/** A member hosted on this machine started or ended background work (Claude
+ *  Code `run_in_background`); the full current list, empty when none is left.
+ *  Live only, like the CLI's own status line: sent on every change, with a
+ *  full list after each hello (see the snapshot below), and dropped by the
+ *  desktop when the machine goes away. */
+export interface MachineMemberBackgroundBody {
+  type: "machine.member.background";
+  conversationId: string;
+  participantId: string;
+  labels: string[];
+}
+
+/** Every member hosted on this machine with background work running now, as
+ *  one list that replaces what the machine reported before. Sent after each
+ *  hello and when the desktop asks (it reconnected), so nothing that ended or
+ *  died meanwhile stays shown. */
+export interface MachineMemberBackgroundSnapshotBody {
+  type: "machine.member.background.snapshot";
+  members: Array<{ conversationId: string; participantId: string; labels: string[] }>;
+}
+
+/** The desktop is back on the link and asks for that list. */
+export interface MachineMemberBackgroundRequestBody {
+  type: "machine.member.background.request";
+}
+
 /** A Claude Code member's next-prompt suggestion, sent by its CLI after a
  *  reply that ran on this machine. Live only: one lost on the way is simply
  *  not offered, as a suggestion the CLI skipped. */
@@ -481,7 +507,10 @@ export type MachineLinkMessage =
   | MachineChoiceResultBody
   | MachineAttachmentRequestBody
   | MachineAttachmentResultBody
-  | MachineTurnSuggestionBody;
+  | MachineTurnSuggestionBody
+  | MachineMemberBackgroundBody
+  | MachineMemberBackgroundSnapshotBody
+  | MachineMemberBackgroundRequestBody;
 
 export type MachineLinkMessageType = MachineLinkMessage["type"];
 
@@ -539,6 +568,9 @@ const MESSAGE_TYPE_TABLE: Record<MachineLinkMessageType, true> = {
   "machine.scripts.request": true,
   "machine.scripts.result": true,
   "machine.scripts.changed": true,
+  "machine.member.background": true,
+  "machine.member.background.snapshot": true,
+  "machine.member.background.request": true,
 };
 
 const MESSAGE_TYPES: ReadonlySet<string> = new Set<string>(Object.keys(MESSAGE_TYPE_TABLE));

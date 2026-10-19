@@ -219,3 +219,21 @@ test("an emitted answer reaches the receiving owner with the full native decisio
   await applier.apply(envelopes([h.published.at(-1)!])[0]);
   assert.equal((h.published.at(-1)!.payload as unknown as { effect: string }).effect, "requested the run to stop");
 });
+
+test("a peer without a chat never owns an answer from that chat, so the answer is not held there", async () => {
+  // Answers to every chat reach every machine; one that does not hold the chat
+  // used to keep each of them waiting, and re-tried them until it ran out of memory.
+  const h = harness();
+  const effects = createChatActionEffects({
+    emitter: h.emitter,
+    storage: { getConversation: async () => undefined },
+    chat: {
+      respondToAppToolApproval: async () => undefined,
+      respondToChoice: async () => undefined,
+      cancelRun: () => false,
+      conversationIdForRun: () => undefined
+    }
+  });
+  assert.equal(await effects.owns("chat-elsewhere", "choice:choice-1"), false);
+  assert.equal(await effects.owns("chat-elsewhere", "approval:card-1"), false);
+});

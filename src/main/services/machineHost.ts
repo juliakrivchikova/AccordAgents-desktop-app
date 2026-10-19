@@ -26,7 +26,7 @@ import {
 } from "../../shared/machineLink";
 import type { MachineAttachmentResultBody, MachineScriptsOperation, MachineScriptsRequestBody } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
-import type { AgentHealth, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
+import type { AgentHealth, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatBackgroundTasksEvent, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
 import type { ChatParticipantRun, ChatService } from "./chat";
 import type { DebugLogService } from "./debugLogs";
 import { advanceInstanceSequence, isStoredTerminal } from "./machineTurnOutcome";
@@ -188,6 +188,8 @@ export class MachineHostService {
    *  is, or fail honestly if it never arrives. */
   private readonly turnsAwaitingChat = new Map<string, Array<{ request: MachineTurnRequestBody; since: number }>>();
   private awaitingChatTimer?: ReturnType<typeof setTimeout>;
+  /** Events whose deferral was already reported, so a retry is not logged again. */
+  private readonly reportedDeferrals = new Set<string>();
   /** True when the outbox file exists but could not be read: it is then
    *  never overwritten, so a result on disk is not lost to a bad read. */
   /** Applies an incoming chat action, or undefined when the event is not one.
@@ -197,7 +199,12 @@ export class MachineHostService {
     const applier = this.options.chatActions;
     if (!applier?.handles(event, hydrated)) return undefined;
     const outcome = await applier.apply(event, hydrated);
-    if (outcome.detail) {
+    // A deferral is reported once; it is retried until it applies, and logging
+    // every attempt wrote hundreds of thousands of identical lines a day.
+    const repeatedDeferral = outcome.status === "deferred" && this.reportedDeferrals.has(event.eventId);
+    if (outcome.status === "deferred") rememberBounded(this.reportedDeferrals, event.eventId);
+    else this.reportedDeferrals.delete(event.eventId);
+    if (outcome.detail && !repeatedDeferral) {
       void this.debugLogs.write("machine-host.action.applied", {
         kind: outcome.kind, targetKey: outcome.targetKey, status: outcome.status, detail: outcome.detail
       });
@@ -345,6 +352,7 @@ export class MachineHostService {
   private readonly settlingRuns = new Map<string, ChatParticipantRun>();
   private readonly settlingInFlight = new Set<string>();
   private unsubscribeRunSettled?: () => void;
+  private unsubscribeBackgroundTasks?: () => void;
   private closed = false;
   private draining = false;
   private idleFenced = false;
@@ -366,7 +374,7 @@ export class MachineHostService {
   private readonly forwardedApprovals = new Map<string, string>();
 
   constructor(
-    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady" | "setPromptSuggestionForwarder" | "applyMachineRepository">>,
+    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady" | "setPromptSuggestionForwarder" | "applyMachineRepository" | "onBackgroundTasksChanged" | "localBackgroundTasks">>,
     private readonly storage: Pick<StorageService, "getConversation"> & Partial<Pick<StorageService, "deleteConversation" | "conversationPresence">>,
     private readonly settings: Pick<SettingsService, "importMachineSettingsSnapshot">,
     private readonly debugLogs: Pick<DebugLogService, "write">,
@@ -475,6 +483,8 @@ export class MachineHostService {
       this.settlingRuns.set(run.runId, run);
       return this.finishNativeRun(run);
     });
+    // Members hosted here show their background work on the desktop too.
+    this.unsubscribeBackgroundTasks = this.chat.onBackgroundTasksChanged?.((event) => this.sendMemberBackground(event));
     // The desktop decides whether a member's next-prompt suggestion is still
     // on offer; with no desktop connected there is nobody to offer it to.
     this.chat.setPromptSuggestionForwarder?.((suggestion) => {
@@ -563,6 +573,8 @@ export class MachineHostService {
     this.eventChannel?.close();
     this.unsubscribeRunSettled?.();
     this.chat.setPromptSuggestionForwarder?.(undefined);
+    this.unsubscribeBackgroundTasks?.();
+    this.unsubscribeBackgroundTasks = undefined;
     if (this.commandRetry) clearTimeout(this.commandRetry);
     if (this.outboxRetryTimer) {
       clearTimeout(this.outboxRetryTimer);
@@ -662,12 +674,21 @@ export class MachineHostService {
       if (!committed) {
         releaseNative?.();
         this.idleFenced = false;
+        this.retryHeldEventsNow();
         void this.eventChannel.flush().catch(error => { void this.debugLogs.write("machine-host.idle.resume-error", { message: errorMessage(error) }); });
       }
     }
   }
 
   private uncertainIdleRelease?: () => void;
+
+  /** Commands held while the idle fence stood are tried now that it is gone,
+   *  on the desktop's channel and on every other device's (the phone, other
+   *  machines) alike. */
+  private retryHeldEventsNow(): void {
+    this.eventChannel.retryHeldNow();
+    for (const deviceId of this.peers.peerDeviceIds()) this.peers.channel(deviceId)?.retryHeldNow();
+  }
 
   /** A failed fence read is recoverable without restarting the runtime. Only
    * a successful read proving absence permits reopening native admission. */
@@ -676,6 +697,7 @@ export class MachineHostService {
     this.uncertainIdleRelease?.();
     this.uncertainIdleRelease = undefined;
     this.idleFenced = false;
+    this.retryHeldEventsNow();
     void this.eventChannel.flush().catch(error => { void this.debugLogs.write("machine-host.idle.resume-error", { message: errorMessage(error) }); });
     return false;
   }
@@ -796,6 +818,34 @@ export class MachineHostService {
       } : {}),
       chatChanges: CHAT_CHANGES_VERSION
     }, to);
+    // A desktop that (re)connects learns what is running in the background now.
+    this.sendMemberBackgroundSnapshot(to);
+  }
+
+  private sendMemberBackgroundSnapshot(to?: string): void {
+    if (this.closed || !this.chat.localBackgroundTasks) return;
+    void this.send({
+      type: "machine.member.background.snapshot",
+      members: this.chat.localBackgroundTasks().map((event) => ({
+        conversationId: event.conversationId,
+        participantId: event.participantId,
+        labels: event.labels
+      }))
+    }, to).catch((error) => {
+      void this.debugLogs.write("machine-host.background.snapshot-not-sent", { message: errorMessage(error) });
+    });
+  }
+
+  private sendMemberBackground(event: ChatBackgroundTasksEvent, to?: string): void {
+    if (this.closed) return;
+    void this.send({
+      type: "machine.member.background",
+      conversationId: event.conversationId,
+      participantId: event.participantId,
+      labels: event.labels
+    }, to).catch((error) => {
+      void this.debugLogs.write("machine-host.background.not-sent", { participantId: event.participantId, message: errorMessage(error) });
+    });
   }
 
   /** Tell the desktop the scripts changed, so its Settings and cards refresh.
@@ -886,6 +936,7 @@ export class MachineHostService {
       void this.applyChatAction(event, body).then(outcome => {
         if (outcome === "applied") return channel?.confirmApplied(event);
       }).catch(error => {
+        channel?.retryFailedSoon(event.eventId);
         void this.debugLogs.write("machine-host.approval.retry-pending", { eventId: event.eventId, message: errorMessage(error) });
       });
       return "deferred";
@@ -917,6 +968,7 @@ export class MachineHostService {
       // Stop and other conversations must still be able to arrive.
       const decision = envelope.body;
       void this.approvalExecutor.apply(event, decision).then(() => channel?.confirmApplied(event)).catch((error) => {
+        channel?.retryFailedSoon(event.eventId);
         void this.debugLogs.write("machine-host.approval.retry-pending", { approvalId: decision.approvalId, message: errorMessage(error) });
       });
       return "deferred";
@@ -1054,6 +1106,9 @@ export class MachineHostService {
         if (body.machineName?.trim()) this.options.onDesktopMachineName?.(body.machineName.trim());
         this.eventChannel.start();
         await this.recoverCommands();
+        return;
+      case "machine.member.background.request":
+        this.sendMemberBackgroundSnapshot(replyTo);
         return;
       case "machine.hello.request":
         // A (re)started desktop asks to be greeted: the same reconciliation
@@ -2119,4 +2174,11 @@ export function machineMessagesForRun(conversation: Conversation, participantId:
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Adds to a set that keeps at most `limit` entries, dropping the oldest. */
+function rememberBounded(set: Set<string>, value: string, limit = 5_000): void {
+  set.delete(value);
+  set.add(value);
+  if (set.size > limit) set.delete(set.values().next().value as string);
 }

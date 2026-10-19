@@ -58,6 +58,8 @@ Whenever the user asks an agent to **see**, **screenshot**, **scroll**, **click*
 
 In AccordAgents Chat, use the repo-local `/electron-desktop-qa` skill for this workflow. It requires retrying localhost/CDP launch failures with escalation before reporting desktop UI QA as blocked.
 
+**Never leave the user an app instance they cannot close.** Never start a separate test instance of the app with `launchctl submit`: launchd restarts such a job every time it exits, so quitting the app only brings it back. A test instance that must outlive your turn uses only the detached recipe in `docs/inspecting-the-desktop-app.md`, which stays closed once the user quits it. Stop every temporary instance you started before you finish; leave one running only when the user asked to keep using it, and tell them its label and how to stop it. This rule covers separate test instances; it does not change how the user's own running app is restarted.
+
 If live desktop inspection cannot be completed after following that workflow, stop and ask the user how to proceed instead of silently substituting a browser/Vite check. Offer concrete options, such as relaunching Electron with the debug port, using a renderer mock/browser fixture as a limited fallback, or skipping visual verification.
 
 ## MANDATORY: a change is done only after end-to-end QA and review
