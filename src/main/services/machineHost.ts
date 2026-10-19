@@ -121,6 +121,9 @@ export interface MachineHostOptions {
   moveTransport?: (addresses: { relayUrl: string; outboxUrl: string }) => Promise<void>;
   /** Starts this runtime again, reading the enrollment anew. */
   restartRuntime?: () => void;
+  /** Whether the relay at this address answers (asked before a move, so a
+   *  machine never rewrites its enrollment to a place it cannot reach). */
+  probeRelay?: (relayUrl: string) => Promise<boolean>;
   /** Folds a `chat.changes` event into this machine's copy of the chat.
    *  "missing-conversation" holds the event until the chat arrives. */
   applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation" | "waiting">;
@@ -627,6 +630,20 @@ export class MachineHostService {
     return Boolean(this.desktopDeviceId);
   }
 
+  /** Work a move would cut off: everything the idle stop waits for except
+   *  a scheduled script's next run (it runs after the restart), and a
+   *  member's background work besides. */
+  private async hasWorkForMove(): Promise<boolean> {
+    if ((this.chat.localBackgroundTasks?.() ?? []).length > 0) return true;
+    if (this.queuedRunIds().length > 0 || (this.chat.liveRunIds?.() ?? []).length > 0) return true;
+    if (this.closed || this.draining || this.activeTurns.size || this.turnTasks.size || this.commandTasks.size ||
+        this.settlingRuns.size || this.settlingInFlight.size || this.turnsAwaitingChat.size ||
+        (this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork()) || (this.chat.activeParticipantRuns?.().length ?? 0) ||
+        this.outboxError || this.progressErrors.size || [...this.progressSenders.values()].some(sender => sender.hasPending())) return true;
+    if ([...this.pendingTerminals.values()].some(terminal => !this.durableTerminalIds.has(terminalEventId(terminal)))) return true;
+    return (await this.options.eventStorage.nativeCommands().pending()).length > 0;
+  }
+
   /** All work owned by this runtime, including native continuations and
    * incomplete copies. Stored, acknowledged-later results do not keep an idle
    * EC2 box running indefinitely; an unpersisted result does. */
@@ -878,17 +895,22 @@ export class MachineHostService {
   private async answerTransportMove(body: MachineTransportMoveBody, replyTo: string | undefined): Promise<void> {
     const fail = (error: string) => this.send({ type: "machine.transport.moved", requestId: body.requestId, ok: false, error }, replyTo).catch(() => undefined);
     const expiresAt = typeof body.expiresAt === "string" ? Date.parse(body.expiresAt) : Number.NaN;
-    const busy = this.activeTurns.size > 0 || this.queuedRunIds().length > 0 || this.settlingRuns.size > 0 ||
-      (this.chat.activeParticipantRuns?.() ?? []).length > 0 || (this.chat.liveRunIds?.() ?? []).length > 0;
     if (!this.options.moveTransport) return void await fail("This machine runtime cannot move; upgrade it.");
     if (body.instanceId !== this.instanceId) return void await fail("The machine restarted since this was asked; try again.");
     if (!Number.isFinite(expiresAt) || this.now().getTime() > expiresAt + SCRIPTS_REQUEST_CLOCK_SKEW_MS) return void await fail("This request is too old; nothing was changed.");
-    if (busy) return void await fail("The machine is busy; it moves once it is idle.");
-    const addresses = relayAddresses(body.relayUrl, body.outboxUrl);
+    if (this.idleFenced || await this.hasWorkForMove()) return void await fail("The machine is busy; it moves once it is idle.");
+    const addresses = relayAddresses(body.relayUrl, body.outboxUrl, this.options.pairing.relayUrl);
     if (!addresses) return void await fail("These are not a relay's addresses.");
+    if (!await (this.options.probeRelay ?? probeRelayManifest)(addresses.relayUrl).catch(() => false)) {
+      return void await fail("This machine cannot reach the server at that address.");
+    }
+    // From here no new work starts: what arrives waits in the durable inbox
+    // for the runtime that comes back.
+    this.idleFenced = true;
     try {
       await this.options.moveTransport(addresses);
     } catch (error) {
+      this.idleFenced = false;
       return void await fail(`The machine could not save its new address: ${errorMessage(error)}`);
     }
     void this.debugLogs.write("machine.transport.moved", { relayHost: new URL(addresses.relayUrl).host });
@@ -2223,16 +2245,29 @@ function rememberBounded(set: Set<string>, value: string, limit = 5_000): void {
 
 /** A relay's two addresses as a move names them: the room socket and the
  *  mailbox, on one host, over TLS (plain only on this computer). */
-function relayAddresses(relayUrl: unknown, outboxUrl: unknown): { relayUrl: string; outboxUrl: string } | undefined {
+function relayAddresses(relayUrl: unknown, outboxUrl: unknown, currentRelayUrl: string | undefined): { relayUrl: string; outboxUrl: string } | undefined {
   if (typeof relayUrl !== "string" || typeof outboxUrl !== "string") return undefined;
   try {
     const room = new URL(relayUrl);
     const mailbox = new URL(outboxUrl);
     const local = (url: URL) => url.hostname === "127.0.0.1" || url.hostname === "localhost";
+    // This computer is a place only for a machine already on it (a test).
+    const alreadyLocal = (() => { try { return local(new URL(currentRelayUrl ?? "")); } catch { return false; } })();
+    if (local(room) && !alreadyLocal) return undefined;
     const secure = (room.protocol === "wss:" && mailbox.protocol === "https:") || (local(room) && room.protocol === "ws:" && mailbox.protocol === "http:");
     if (!secure || room.host !== mailbox.host || room.pathname !== "/v1/relay" || mailbox.pathname !== "/v1/mailbox/events") return undefined;
     return { relayUrl: room.toString(), outboxUrl: mailbox.toString() };
   } catch {
     return undefined;
   }
+}
+
+/** The relay at this room address answers with its manifest. */
+async function probeRelayManifest(relayUrl: string): Promise<boolean> {
+  const room = new URL(relayUrl);
+  const manifest = new URL("/v1/relay/manifest", `${room.protocol === "wss:" ? "https:" : "http:"}//${room.host}`);
+  const response = await fetch(manifest, { signal: AbortSignal.timeout(10_000) });
+  if (!response.ok) return false;
+  const body = await response.json() as { ok?: unknown; manifest?: { provider?: unknown } };
+  return body.ok === true && typeof body.manifest?.provider === "string";
 }

@@ -110,7 +110,7 @@ import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
 import { HUB_ID_KEY, HUB_SHARED_SCOPE_PREFIXES, HubSync, PULLED_KEY, PUSHED_KEY, hubChatChangeApplier, hubPushedThrough } from "./services/hubSync";
-import { deviceIdForPublicKey } from "./services/hubAuth";
+import { deviceIdForPublicKey, signHubRequest } from "./services/hubAuth";
 import { machineSigningKey } from "../shared/machineLink";
 import { HubTunnelClient } from "./services/hubTunnelClient";
 import { ScriptSecretStore, ScriptStore } from "./services/scriptStore";
@@ -130,7 +130,8 @@ import { ChatService } from "./services/chat";
 import { MobilePairingService } from "./services/mobilePairing";
 import { MachineLinkService } from "./services/machineLink";
 import { MachineInstallerService, machinePowerNeedsDelivery } from "./services/machineInstaller";
-import { MACHINE_POWER_MAX_ATTEMPTS, MACHINE_POWER_RETRY_MS } from "../shared/machineInstall";
+import { MACHINE_POWER_MAX_ATTEMPTS, MACHINE_POWER_RETRY_MS, compareVersions } from "../shared/machineInstall";
+import { HUB_RELAY_FIRST_VERSION } from "../shared/hubSetup";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
 import type { MachinePowerHandoff } from "../shared/machinePowerHandoff";
 import { ChatActionApplier } from "./services/chatActionApplier";
@@ -139,7 +140,7 @@ import { MachineApprovalExecutor, machineApprovalResultId } from "./services/mac
 import { readPosixProcessTableAsync } from "./services/processTermination";
 import { createChatActionEffects } from "./services/chatActionEffects";
 import { MachineChoiceExecutor, machineChoiceResultId } from "./services/chatActionNativeClaims";
-import type { AnswerMachineInactivityRequest, CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineInactivityQuestion, MachineListResult, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
+import type { AnswerMachineInactivityRequest, CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineInactivityQuestion, MachineListResult, MachineRecord, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
   MachineInstallRequest,
@@ -187,6 +188,7 @@ import {
   openMailboxEventPayloads,
   classifyMailboxRegistrationFailure,
   registerMailboxForSealKey,
+  setMailboxRegistrationSigner,
   revokeMailboxForSealKey,
   revokeMailboxWithToken,
   sealMailboxEventPayloads
@@ -632,6 +634,14 @@ const hubInstaller = new HubInstaller({
   defaultRegion: async () => (await settingsService.getPublicSettings()).cloudRuns.awsRegion,
   log: (event, payload) => { void debugLogService.write(event, payload); }
 });
+// The User's server takes a new mailbox only from her desktop: a pairing's
+// mailbox there is registered with this desktop's hub signature.
+setMailboxRegistrationSigner(async ({ url, method, pathWithQuery, body }) => {
+  const hub = await settingsService.getHubConfig().catch(() => undefined);
+  if (!hub || new URL(hub.url).origin !== url.origin) return undefined;
+  const identity = await chatEventLogService.getOrCreateDeviceIdentity();
+  return signHubRequest(identity, { method, pathWithQuery, body });
+});
 hubInstaller.onProgress((state) => {
   // A setup that ended (linked, or stopped before) no longer needs every
   // save to emit: a running link does that by itself.
@@ -780,16 +790,68 @@ async function forgetRemovedMachineOutbox(outbox: { pairingKey: string; deviceId
 }
 
 let movingMachines = false;
+/** How long a machine that did not answer its move is looked for at the new
+ *  address before this desktop concludes it stayed. */
+const MACHINE_MOVE_CONFIRM_MS = 2 * 60_000;
+
+function isLoopbackUrl(value: string): boolean {
+  try {
+    const host = new URL(value).hostname;
+    return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/** The machine's new address is what this desktop must not lose: a failed
+ *  write is tried again before giving up. Only the pairing is written, so a
+ *  record updated meanwhile (a hello, a turn) is left as it is. */
+async function saveMachinePairingRetrying(machine: MachineRecord, pairing: MobilePairingPackage): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await settingsService.saveMachinePairing(machine.pairingKey, pairing);
+      return;
+    } catch (error) {
+      void debugLogService.write("machine.transport.save-error", { machineId: machine.id, attempt, message: error instanceof Error ? error.message : String(error) });
+      if (attempt >= 3) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
+    }
+  }
+}
+
+/** A machine that may have moved and is not seen at its saved address is
+ *  looked for at the server this often, this long. */
+const MACHINE_MOVE_PROBE_EVERY_MS = 10 * 60_000;
+const MACHINE_MOVE_PROBE_MS = 45_000;
+const machineMoveProbedAt = new Map<string, number>();
+
+/** Whether the User's server serves the relay (an older hub program does
+ *  not): until it does, new pairings and machines stay where they were. */
+async function hubServesRelay(): Promise<boolean> {
+  const hub = await settingsService.getHubConfig().catch(() => undefined);
+  if (!hub) return false;
+  const installed = hub.server?.installedVersion;
+  return !installed || compareVersions(installed, HUB_RELAY_FIRST_VERSION) >= 0;
+}
+
+/** Tells the phones the machines' addresses changed. */
+function resendMachineAccessToPhones(): void {
+  for (const control of mobileRelayControls.values()) void control.resendMachineAccess().catch(() => undefined);
+}
+
 /** A machine set up before the User's own server meets this desktop on the
  *  shared relay. Once the server is set up it is told, over its present link
  *  and only while idle, to meet it there; its keys, rooms and mailbox ids
  *  stay. Its mailbox is registered on the server first, so nothing it or
  *  this desktop still has to send has nowhere to go: both send again what
- *  the other has not confirmed. */
+ *  the other has not confirmed. A move whose answer never came is confirmed
+ *  by the machine greeting this desktop at the new address, or undone; and a
+ *  machine that may have moved unseen (this desktop quit in between) is
+ *  looked for at the server while it is not seen at its saved address. */
 async function moveMachinesToHub(): Promise<void> {
   const link = machineLinkService;
   if (movingMachines || !link) return;
-  if (!await settingsService.getHubConfig().catch(() => undefined)) return;
+  if (!await hubServesRelay()) return;
   movingMachines = true;
   try {
     const defaults = (await settingsService.getPublicSettings()).mobileControl.defaults;
@@ -799,21 +861,42 @@ async function moveMachinesToHub(): Promise<void> {
     for (const machine of await settingsService.listMachines()) {
       const pairing = await settingsService.getMachinePairing(machine.pairingKey).catch(() => undefined);
       if (!pairing || pairing.hubUrl || pairing.relayUrl === relayUrl) continue;
+      // A server on this computer (a test setup) is no place for a machine
+      // that runs elsewhere.
+      if (isLoopbackUrl(relayUrl) && !isLoopbackUrl(pairing.relayUrl ?? "")) continue;
+      const next: MobilePairingPackage = { ...pairing, relayUrl, outboxUrl };
+      if (!link.isMachineConnected(machine.id)) {
+        await probeMovedMachine(machine, pairing, next);
+        continue;
+      }
       // An older runtime moves after its update (which happens on its own).
-      if (!link.isMachineConnected(machine.id) || !link.supportsTransportMove(machine.id)) continue;
+      if (!link.supportsTransportMove(machine.id)) continue;
       const activity = await link.machineActivity(machine.id);
       if (!activity?.fresh || activity.activeRunIds.length || activity.pendingTerminalRunIds.length || activity.dispatchedRunIds.length) continue;
       const release = link.holdTurns(machine.id, "The machine is moving to your server.");
       try {
-        const next: MobilePairingPackage = { ...pairing, relayUrl, outboxUrl };
         if (!await ensureMailboxRegisteredForPairing(next)) {
           void debugLogService.write("machine.transport.mailbox-unregistered", { machineId: machine.id });
           continue;
         }
-        await link.requestTransportMove(machine.id, { relayUrl, outboxUrl });
-        await settingsService.saveMachine(machine, next);
-        await link.reconnectMachine(machine);
-        void debugLogService.write("machine.transport.moved", { machineId: machine.id, relayHost: new URL(relayUrl).host });
+        const outcome = await link.requestTransportMove(machine.id, { relayUrl, outboxUrl });
+        if (outcome.status === "refused") {
+          void debugLogService.write("machine.transport.move-refused", { machineId: machine.id, message: outcome.error ?? "" });
+          continue;
+        }
+        // Moved, or no answer came and it may have: from here this desktop
+        // looks for it at the new address.
+        await saveMachinePairingRetrying(machine, next);
+        await link.reconnectMachine(machine.id);
+        if (outcome.status === "unknown" && !await link.waitForHello(machine.id, MACHINE_MOVE_CONFIRM_MS)) {
+          // It never came there, so it did not move: back to the old address.
+          await saveMachinePairingRetrying(machine, pairing);
+          await link.reconnectMachine(machine.id);
+          void debugLogService.write("machine.transport.move-reverted", { machineId: machine.id, message: outcome.error ?? "" });
+          continue;
+        }
+        void debugLogService.write("machine.transport.moved", { machineId: machine.id, relayHost: new URL(relayUrl).host, confirmed: outcome.status });
+        resendMachineAccessToPhones();
         void machineListResult().then((result) => sendToMainWindow("machines:updated", result)).catch(() => undefined);
       } catch (error) {
         void debugLogService.write("machine.transport.move-error", { machineId: machine.id, message: error instanceof Error ? error.message : String(error) });
@@ -824,6 +907,25 @@ async function moveMachinesToHub(): Promise<void> {
   } finally {
     movingMachines = false;
   }
+}
+
+/** Looks for a machine that is not seen at its saved address at the
+ *  server's, for a little while; found there, that is its address now. Only
+ *  a runtime that can move can be there. */
+async function probeMovedMachine(machine: MachineRecord, saved: MobilePairingPackage, moved: MobilePairingPackage): Promise<void> {
+  const link = machineLinkService;
+  if (!link || machine.lastHello?.transportMoveSupported !== true) return;
+  const now = Date.now();
+  if (now - (machineMoveProbedAt.get(machine.id) ?? 0) < MACHINE_MOVE_PROBE_EVERY_MS) return;
+  machineMoveProbedAt.set(machine.id, now);
+  await link.reconnectMachine(machine.id, moved);
+  if (await link.waitForHello(machine.id, MACHINE_MOVE_PROBE_MS)) {
+    await saveMachinePairingRetrying(machine, moved);
+    void debugLogService.write("machine.transport.found-moved", { machineId: machine.id });
+    resendMachineAccessToPhones();
+    return;
+  }
+  await link.reconnectMachine(machine.id, saved);
 }
 
 async function createMachine(request: CreateMachineRequest, awsInstanceId?: string): Promise<CreateMachineResult> {

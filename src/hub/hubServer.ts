@@ -21,7 +21,8 @@ import {
 } from "../shared/hubProtocol";
 import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, verifyHubRequest, type ParsedHubAuthorization } from "../main/services/hubAuth";
 import { HUB_RELAY_MANIFEST } from "../shared/relayProtocol";
-import { HubRelayRooms, RELAY_HEALTH_PATH, RELAY_MAILBOX_APPEND_MAX_BYTES, RELAY_MAILBOX_PATHS, RELAY_MAILBOX_SMALL_MAX_BYTES, RELAY_MANIFEST_PATH, RELAY_ROOM_PATH, type HubRelayMailboxes } from "./hubRelay";
+import { HubRelayRooms, RELAY_BODY_BYTES_IN_FLIGHT_MAX, RELAY_HEALTH_PATH, RELAY_MAILBOX_APPEND_MAX_BYTES, RELAY_MAILBOX_PATHS, RELAY_MAILBOX_SMALL_MAX_BYTES, RELAY_MANIFEST_PATH, RELAY_ROOM_PATH, type HubRelayMailboxes } from "./hubRelay";
+import { MAILBOX_HUB_AUTHORIZATION_HEADER } from "../shared/mailboxSealedPayload";
 import type { ChatSearchService } from "../main/services/chatSearch";
 import type { StorageService } from "../main/services/storage";
 import { HubRequestError, type HubLog } from "./hubLog";
@@ -90,6 +91,8 @@ const { WebSocketServer } = require("ws") as { WebSocketServer: new (options: { 
  */
 export class HubServer {
   private readonly nonces = new HubNonceCache();
+  /** Relay request bodies being read now, by their declared size. */
+  private relayBodyBytes = 0;
   /** Live head sockets and the device each one belongs to. */
   private readonly live = new Map<LiveSocket, string>();
   private readonly sockets: LiveSocketServer = new WebSocketServer({ noServer: true, maxPayload: 1024 });
@@ -372,9 +375,32 @@ export class HubServer {
           return json(response, answer.status, answer.body);
         }
         if (RELAY_MAILBOX_PATHS.has(url.pathname)) {
+          const mailboxId = url.searchParams.get("mailboxId");
+          // Only the mailbox's owner makes the hub read a body.
+          const refused = await relay.mailboxes.preauthorize(url.pathname, mailboxId, request.headers.authorization);
+          if (refused) {
+            status = refused.status;
+            return json(response, refused.status, refused.body);
+          }
           const append = request.method === "POST" && url.pathname === "/v1/mailbox/events";
-          const body = await readBody(request, append ? RELAY_MAILBOX_APPEND_MAX_BYTES : RELAY_MAILBOX_SMALL_MAX_BYTES);
-          const answer = await relay.mailboxes.handle(request.method ?? "GET", url.pathname, url.searchParams.get("mailboxId"), request.headers.authorization, body, url.searchParams);
+          const limit = append ? RELAY_MAILBOX_APPEND_MAX_BYTES : RELAY_MAILBOX_SMALL_MAX_BYTES;
+          const declared = Number(request.headers["content-length"] ?? "0");
+          if (Number.isFinite(declared) && declared > limit) throw new HubRequestError(413, "The request is too large.");
+          const reserved = Math.max(Number.isFinite(declared) ? declared : 0, 64 * 1024);
+          if (this.relayBodyBytes + reserved > RELAY_BODY_BYTES_IN_FLIGHT_MAX) throw new HubRequestError(503, "The hub is busy; try again.");
+          this.relayBodyBytes += reserved;
+          let body: Buffer;
+          try {
+            body = await readBody(request, limit);
+          } finally {
+            this.relayBodyBytes -= reserved;
+          }
+          const answer = await relay.mailboxes.handle(request.method ?? "GET", url.pathname, mailboxId, request.headers.authorization, body, url.searchParams, async () => {
+            const header = request.headers[MAILBOX_HUB_AUTHORIZATION_HEADER];
+            if (typeof header !== "string") return false;
+            const device = await this.authenticate(request.method ?? "POST", body, header, pathWithQuery).catch(() => undefined);
+            return device?.role === "owner" || device?.role === "desktop";
+          });
           status = answer.status;
           return json(response, answer.status, answer.body);
         }

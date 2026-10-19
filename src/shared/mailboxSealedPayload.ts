@@ -15,6 +15,10 @@ export const MAILBOX_REVOKE_PATH = "/v1/mailbox/revoke";
 export const MAILBOX_DELETE_PATH = "/v1/mailbox/delete";
 export const MAILBOX_PUSH_SUBSCRIPTION_PATH = "/v1/mailbox/push-subscription";
 export const PUSH_VAPID_PATH = "/v1/push/vapid";
+/** On the User's own server, a new mailbox is taken only with a request
+ *  signed by her desktop (the bearer token stays in Authorization). */
+export const MAILBOX_HUB_AUTHORIZATION_HEADER = "x-accord-hub-authorization";
+export const MAILBOX_ERROR_REGISTRATION_REFUSED = "mailbox_registration_refused";
 
 // The doorbell (W5) sends EMPTY pushes on purpose: a push with no body needs
 // no payload encryption and structurally cannot carry routing authority or

@@ -81,6 +81,14 @@ async function sentBodies(client, enrollment) {
   return bodies;
 }
 
+/** The shared test storage as a machine with no native work left over
+ *  from earlier tests sees it (a pending one rightly keeps it busy). */
+function withoutNativeCommands(storage) {
+  const view = Object.create(storage);
+  view.nativeCommands = () => ({ ...storage.nativeCommands(), pending: async () => [] });
+  return view;
+}
+
 function settle(ms = 150) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -734,9 +742,10 @@ test("a machine moves to the User's server only when idle and only to a relay's 
     { importMachineSettingsSnapshot: async () => undefined },
     { write: async () => undefined },
     {
-      ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client,
+      ...hostEvents, eventStorage: withoutNativeCommands(hostEvents.eventStorage), pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client,
       moveTransport: async (addresses) => { moved.push(addresses); },
-      restartRuntime: () => { restarted += 1; }
+      restartRuntime: () => { restarted += 1; },
+      probeRelay: async (relayUrl) => !relayUrl.includes("unreachable")
     }
   );
   await host.start();
@@ -757,6 +766,7 @@ test("a machine moves to the User's server only when idle and only to a relay's 
   await inbound(move("elsewhere", { outboxUrl: "https://other.example/v1/mailbox/events" }));
   await inbound(move("plain", { relayUrl: "ws://52.72.175.0/v1/relay", outboxUrl: "http://52.72.175.0/v1/mailbox/events" }));
   await inbound(move("stale", { instanceId: "an-earlier-run" }));
+  await inbound(move("unreachable", { relayUrl: "wss://unreachable.example/v1/relay", outboxUrl: "https://unreachable.example/v1/mailbox/events" }));
   assert.deepEqual(moved, [], "nothing is saved for a refused move");
   await inbound(move("ok"));
   await settle(700);
@@ -766,8 +776,61 @@ test("a machine moves to the User's server only when idle and only to a relay's 
   assert.match(answers.elsewhere.error, /not a relay's addresses/);
   assert.match(answers.plain.error, /not a relay's addresses/);
   assert.match(answers.stale.error, /restarted/);
+  assert.match(answers.unreachable.error, /cannot reach the server/);
   assert.equal(answers.ok.ok, true);
   assert.deepEqual(moved, [{ relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" }]);
   assert.equal(restarted, 1, "it starts again on its new address after answering");
   host.close();
+});
+
+test("a machine away from this computer refuses to move onto it", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const moved = [];
+  const host = new MachineHostService(
+    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined },
+    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
+    { ...hostEvents, eventStorage: withoutNativeCommands(hostEvents.eventStorage), pairing: { ...pairing(), relayUrl: "wss://relay.accordagents.com/v1/relay" }, deviceId: MACHINE_ID, appVersion: "test", createClient: () => client,
+      moveTransport: async (addresses) => { moved.push(addresses); }, restartRuntime: () => undefined, probeRelay: async () => true }
+  );
+  await host.start();
+  await settle();
+  client.emit("message", { ciphertext: await envelope({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" }, host.options.pairing) });
+  await host.inbound;
+  await settle();
+  client.emit("message", { ciphertext: await envelope({ type: "machine.transport.move", requestId: "local", instanceId: host.instanceId,
+    expiresAt: new Date(Date.now() + 20_000).toISOString(), relayUrl: "ws://127.0.0.1:18310/v1/relay", outboxUrl: "http://127.0.0.1:18310/v1/mailbox/events" }, host.options.pairing) });
+  await host.inbound;
+  await settle();
+  const answer = (await sentBodies(client, host.options.pairing)).find((body) => body.type === "machine.transport.moved");
+  assert.equal(answer.ok, false);
+  assert.match(answer.error, /not a relay's addresses/);
+  assert.deepEqual(moved, []);
+  host.close();
+});
+
+test("a moved enrollment keeps everything but the relay's addresses, in one step, readable only by its account", async () => {
+  const { mkdtemp, readFile, readdir, rm, stat, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const { moveEnrollment, shellCommandLine } = await import("../dist/main/machine/transportMove.js");
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-move-"));
+  try {
+    const file = path.join(dir, "enrollment.json");
+    const before = { ...pairing(), relayUrl: "wss://relay.accordagents.com/v1/relay", outboxUrl: "https://relay.accordagents.com/v1/mailbox/events?mailboxId=mb-x" };
+    await writeFile(file, JSON.stringify(before), { mode: 0o644 });
+    await moveEnrollment(file, { relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" });
+    const after = JSON.parse(await readFile(file, "utf8"));
+    assert.deepEqual(after, { ...before, relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" });
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+    assert.deepEqual(await readdir(dir), ["enrollment.json"], "no half-written file is left");
+    await writeFile(file, JSON.stringify({ not: "a pairing" }));
+    await assert.rejects(moveEnrollment(file, { relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" }));
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { not: "a pairing" }, "an unreadable one is left as it was");
+    const parts = ["/usr/bin/printf", "%s|", "it's", "a b", "$HOME", "`x`"];
+    assert.equal(execFileSync("/bin/sh", ["-c", shellCommandLine(parts)], { encoding: "utf8" }), "it's|a b|$HOME|`x`|");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

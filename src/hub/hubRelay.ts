@@ -12,6 +12,7 @@ import type { Duplex } from "node:stream";
 import {
   MAILBOX_DELETE_PATH,
   MAILBOX_ERROR_PUSH_ENDPOINT_REJECTED,
+  MAILBOX_ERROR_REGISTRATION_REFUSED,
   MAILBOX_ERROR_REVOKED,
   MAILBOX_ERROR_UNAUTHORIZED,
   MAILBOX_ERROR_UNREGISTERED,
@@ -39,6 +40,9 @@ export const RELAY_MAILBOX_PATHS: ReadonlySet<string> = new Set([
 /** An append carries sealed timeline envelopes; the rest are small. */
 export const RELAY_MAILBOX_APPEND_MAX_BYTES = 32 * 1024 * 1024;
 export const RELAY_MAILBOX_SMALL_MAX_BYTES = 1024 * 1024;
+/** Request bodies being read at once, all mailboxes together: the small
+ *  server's memory is not left to how many arrive in parallel. */
+export const RELAY_BODY_BYTES_IN_FLIGHT_MAX = 64 * 1024 * 1024;
 const MAX_FRAME_BYTES = HUB_RELAY_MANIFEST.maxFrameBytes;
 /** A read never answers with more envelope than this (the relay's limit). */
 const SELECTION_MAX_BYTES = 6 * 1024 * 1024;
@@ -48,7 +52,13 @@ const MAX_CLAIM_TTL_MS = 10 * 60_000;
 const SWEEP_INTERVAL_MS = 60 * 60_000;
 /** Sockets that stop answering pings are let go: their peers are told. */
 const HEARTBEAT_MS = 30_000;
+/** A peer that cannot keep up is let go rather than buffered for: more
+ *  than a picture's frames (the relay buffered as much). */
 const ROOM_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+/** One stored envelope, as large as the relay could store one. */
+const RELAY_EVENT_MAX_BYTES = 2 * 1024 * 1024;
+/** One User's devices, with room to spare. */
+const ROOM_MAX_SOCKETS = 512;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 
 type RelayRole = "desktop" | "phone" | "machine";
@@ -97,8 +107,13 @@ export interface HubRelayOptions {
   fetchImpl?: typeof fetch;
   now?: () => number;
   log?: (event: string, payload: Record<string, unknown>) => void;
+  /** Takes a new mailbox from anyone, as the shared relay does (tests and
+   *  the contract suite). On the User's server only her desktop may. */
+  openRegistration?: boolean;
 }
 
+/** A refusal the caller is told about in these words; anything else is
+ *  answered without the detail (it stays in the hub's log). */
 class RelayRequestError extends Error {}
 
 /** What the rooms use of a `ws` socket. */
@@ -148,27 +163,47 @@ export class HubRelayMailboxes {
     this.rings.clear();
   }
 
-  /** One mailbox request: `pathname` is one of RELAY_MAILBOX_PATHS. */
-  async handle(method: string, pathname: string, mailboxIdParam: string | null, authorization: string | undefined, body: Buffer, query: URLSearchParams): Promise<RelayAnswer> {
+  /** Before a body is read: a request that is not the mailbox owner's is
+   *  answered from its headers alone, so nobody else makes the hub read one.
+   *  Registration and revocation carry small bodies and decide for
+   *  themselves. */
+  async preauthorize(pathname: string, mailboxIdParam: string | null, authorization: string | undefined): Promise<RelayAnswer | undefined> {
+    const mailboxId = normalizedMailboxId(mailboxIdParam);
+    if (!mailboxId) return { status: 400, body: { ok: false, error: "mailboxId required" } };
+    if (pathname === MAILBOX_REGISTER_PATH || pathname === MAILBOX_REVOKE_PATH) return undefined;
+    const row = await this.options.storage.mailbox(mailboxId);
+    if (row?.revokedAt) return { status: 401, body: { ok: false, error: MAILBOX_ERROR_REVOKED, revokedAt: row.revokedAt } };
+    if (!row?.tokenHash) return { status: 401, body: { ok: false, error: MAILBOX_ERROR_UNREGISTERED } };
+    const token = bearerToken(authorization);
+    if (!token || !constantTimeEquals(row.tokenHash, sha256Base64Url(token))) return { status: 401, body: { ok: false, error: MAILBOX_ERROR_UNAUTHORIZED } };
+    return undefined;
+  }
+
+  /** One mailbox request: `pathname` is one of RELAY_MAILBOX_PATHS.
+   *  `ownerSigned` says whether the request also carries a valid signature
+   *  of the server's owner (asked only when a new mailbox is registered). */
+  async handle(method: string, pathname: string, mailboxIdParam: string | null, authorization: string | undefined, body: Buffer, query: URLSearchParams, ownerSigned: () => Promise<boolean> = async () => false): Promise<RelayAnswer> {
     // No default mailbox: a caller that does not name its own has nothing to talk to.
     const mailboxId = normalizedMailboxId(mailboxIdParam);
     if (!mailboxId) return { status: 400, body: { ok: false, error: "mailboxId required" } };
     return this.serialized(mailboxId, async () => {
       try {
-        return await this.route(method, pathname, mailboxId, bearerToken(authorization), body, query);
+        return await this.route(method, pathname, mailboxId, bearerToken(authorization), body, query, ownerSigned);
       } catch (error) {
-        return { status: 400, body: { ok: false, error: errorMessage(error) } };
+        if (error instanceof RelayRequestError) return { status: 400, body: { ok: false, error: error.message } };
+        this.log("relay.mailbox.error", { path: pathname, message: errorMessage(error) });
+        return { status: 500, body: { ok: false, error: "The relay could not answer." } };
       }
     });
   }
 
-  private async route(method: string, pathname: string, mailboxId: string, token: string, body: Buffer, query: URLSearchParams): Promise<RelayAnswer> {
+  private async route(method: string, pathname: string, mailboxId: string, token: string, body: Buffer, query: URLSearchParams, ownerSigned: () => Promise<boolean>): Promise<RelayAnswer> {
     const storage = this.options.storage;
     const row = await storage.mailbox(mailboxId);
     // Terminal by design: a revoked mailbox answers everything, register
     // included, with its own code.
     if (row?.revokedAt) return { status: 401, body: { ok: false, error: MAILBOX_ERROR_REVOKED, revokedAt: row.revokedAt } };
-    if (pathname === MAILBOX_REGISTER_PATH) return method === "POST" ? this.register(mailboxId, token, body) : notAllowed();
+    if (pathname === MAILBOX_REGISTER_PATH) return method === "POST" ? this.register(mailboxId, token, body, ownerSigned) : notAllowed();
     if (pathname === MAILBOX_REVOKE_PATH) return method === "POST" ? this.revoke(mailboxId, token) : notAllowed();
     if (!row?.tokenHash) return { status: 401, body: { ok: false, error: MAILBOX_ERROR_UNREGISTERED } };
     if (!token || !constantTimeEquals(row.tokenHash, sha256Base64Url(token))) return { status: 401, body: { ok: false, error: MAILBOX_ERROR_UNAUTHORIZED } };
@@ -186,7 +221,7 @@ export class HubRelayMailboxes {
   // Trust-on-first-use, and only ever once: the desktop registers the lock
   // before the pairing link leaves it, so the scope id is unknowable to anyone
   // else at registration time.
-  private async register(mailboxId: string, token: string, body: Buffer): Promise<RelayAnswer> {
+  private async register(mailboxId: string, token: string, body: Buffer, ownerSigned: () => Promise<boolean>): Promise<RelayAnswer> {
     if (!token) return { status: 401, body: { ok: false, error: MAILBOX_ERROR_UNAUTHORIZED } };
     const parsed = parseJsonObject(body) as { tokenHashBase64Url?: unknown };
     const claimedHash = typeof parsed.tokenHashBase64Url === "string" ? parsed.tokenHashBase64Url.trim() : "";
@@ -194,6 +229,11 @@ export class HubRelayMailboxes {
     if (!claimedHash || !constantTimeEquals(claimedHash, computedHash)) return { status: 400, body: { ok: false, error: "token hash mismatch" } };
     const row = await this.options.storage.mailbox(mailboxId);
     if (!row?.tokenHash) {
+      // The User's server is hers alone: a new mailbox comes from her
+      // desktop (the pairings it makes), never from whoever asks.
+      if (!this.options.openRegistration && !await ownerSigned()) {
+        return { status: 403, body: { ok: false, error: MAILBOX_ERROR_REGISTRATION_REFUSED } };
+      }
       const epoch = randomUUID();
       await this.options.storage.updateMailbox(mailboxId, { tokenHash: computedHash, registeredAt: this.nowIso(), epoch });
       return { status: 200, body: { ok: true, registered: true, epoch } };
@@ -244,10 +284,13 @@ export class HubRelayMailboxes {
       existing.add(event.eventId);
       arrivalSeq += 1;
       const ct = (event.payload as { ct?: unknown }).ct;
+      const eventJson = JSON.stringify({ ...event, arrivalSeq, arrivedAt });
+      // The relay kept an envelope as one stored value, at most this large.
+      if (eventJson.length > RELAY_EVENT_MAX_BYTES) throw new RelayRequestError("Mailbox event is too large.");
       stored.push({
         eventId: event.eventId, arrivalSeq, arrivedAt, conversationId: event.conversationId, logScopeId: event.logScopeId,
         originId: event.originId, originSeq: event.originSeq, ctLength: typeof ct === "string" ? ct.length : 0,
-        eventJson: JSON.stringify({ ...event, arrivalSeq, arrivedAt })
+        eventJson
       });
       appendedEventIds.push(event.eventId);
     }
@@ -270,20 +313,24 @@ export class HubRelayMailboxes {
     const conversationId = query.get("conversationId") ?? "";
     const logScopeId = query.get("logScopeId") ?? "";
     const originId = query.get("originId") ?? "";
-    const afterSeq = Number(query.get("afterSeq") ?? "0");
+    // Positions are whole numbers within what the store can compare; a
+    // larger one stands for "after everything" as the relay's did.
+    const afterSeq = boundedPosition(query.get("afterSeq"));
     const afterArrivalRaw = query.get("afterArrival");
-    const afterArrival = afterArrivalRaw === null ? undefined : Math.max(0, Number(afterArrivalRaw) || 0);
+    const afterArrival = afterArrivalRaw === null ? undefined : boundedPosition(afterArrivalRaw);
     const limit = Math.max(1, Math.min(1000, Number(query.get("limit") ?? "500") || 500));
     const tail = query.get("tail") === "true";
     // Cursor mode supersedes tail: ascending arrival order, strictly after the cursor.
     const cursorMode = afterArrival !== undefined;
     const storage = this.options.storage;
-    await storage.sweepExpired(mailboxId, new Date(this.now() - this.eventTtlMs()).toISOString());
-    const candidates = await storage.candidates(mailboxId, {
+    // Expired envelopes are passed over here and deleted by the hourly
+    // sweep: a read is not also a write over the whole box.
+    const keptSince = new Date(this.now() - this.eventTtlMs()).toISOString();
+    const candidates = await storage.candidates(mailboxId, keptSince, {
       ...(conversationId ? { conversationId } : {}),
       ...(logScopeId ? { logScopeId } : {}),
       ...(originId ? { originId } : {}),
-      ...(originId && Number.isFinite(afterSeq) ? { afterOriginSeq: afterSeq } : {}),
+      ...(originId ? { afterOriginSeq: afterSeq } : {}),
       ...(cursorMode ? { afterArrival } : {})
     });
     candidates.sort(cursorMode ? (left, right) => left.arrivalSeq - right.arrivalSeq : compareMailboxEvents);
@@ -298,7 +345,7 @@ export class HubRelayMailboxes {
     // With an empty box the oldest retained sequence is one past the
     // counter, so a reader's staleness test still sees that everything
     // expired underneath it.
-    const oldestArrivalSeq = await storage.oldestArrivalSeq(mailboxId) ?? maxArrivalSeq + 1;
+    const oldestArrivalSeq = await storage.oldestArrivalSeq(mailboxId, keptSince) ?? maxArrivalSeq + 1;
     // What the phone says it already holds: its own cursor, from an
     // unfiltered read over the whole box only, clamped to what the box holds.
     const phoneRead = query.get("reader") === "phone" && cursorMode && !tail && !conversationId && !logScopeId && !originId;
@@ -496,7 +543,8 @@ export class HubRelayRooms {
   private readonly rooms = new Map<string, Set<RoomMember>>();
   // Larger than a frame may be, so an oversized one is closed with the
   // relay's own reason rather than the socket library's.
-  private readonly sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+  private readonly sockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+  private socketCount = 0;
   private readonly answered = new WeakSet<WebSocket>();
   private readonly heartbeat: ReturnType<typeof setInterval>;
 
@@ -527,7 +575,16 @@ export class HubRelayRooms {
     const role = url.searchParams.get("role") ?? "";
     const capability = url.searchParams.get("cap") ?? "";
     const deviceId = isRelayRole(role) ? resolveRelayDeviceId(role, url.searchParams.get("did") ?? "") : "";
+    if (this.socketCount >= ROOM_MAX_SOCKETS) {
+      socket.end("HTTP/1.1 503 Service Unavailable\r\n\r\n");
+      return;
+    }
     this.sockets.handleUpgrade(request, socket, head, (ws) => {
+      this.socketCount += 1;
+      let counted = true;
+      const uncount = () => { if (counted) { counted = false; this.socketCount -= 1; } };
+      ws.on("close", uncount);
+      ws.on("error", uncount);
       if (!rendezvousId || !capability || !isRelayRole(role) || !deviceId) {
         ws.close(1008, "invalid relay pairing request");
         return;
@@ -796,4 +853,12 @@ function dropUnreachable(socket: WebSocket): void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A position from a query: a whole number, at least 0, at most the largest
+ *  the store compares exactly. Anything unreadable is 0. */
+function boundedPosition(value: string | null): number {
+  const parsed = Number(value ?? "0");
+  if (!Number.isFinite(parsed)) return parsed > 0 ? Number.MAX_SAFE_INTEGER : 0;
+  return Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(parsed)));
 }

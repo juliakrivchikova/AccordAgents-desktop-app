@@ -13,8 +13,9 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { chmod, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { moveEnrollment, shellCommandLine } from "./transportMove";
 import path from "node:path";
 import { artifactMembersForConversation } from "../shared/artifacts";
 import { assertMobilePairingPackage, type MobilePairingPackage } from "../shared/mobilePairing";
@@ -274,25 +275,15 @@ function readEnrollment(enrollmentPath: string): MobilePairingPackage {
   return parsed;
 }
 
-/** The enrollment with the relay's new addresses, replaced in one step: a
- *  machine stopped half way keeps the old file, never half of each. */
-async function moveEnrollment(enrollmentPath: string, addresses: { relayUrl: string; outboxUrl: string }): Promise<void> {
-  const current = readEnrollment(enrollmentPath);
-  const next = { ...current, relayUrl: addresses.relayUrl, outboxUrl: addresses.outboxUrl };
-  assertMobilePairingPackage(next);
-  const temp = `${enrollmentPath}.moving`;
-  await writeFile(temp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-  await chmod(temp, 0o600);
-  await rename(temp, enrollmentPath);
-}
-
 /** Starts this runtime again. Under its service the service manager does
  *  (it restarts a runtime that exits); run by hand, a copy of it is started
  *  once this one has let go of its files. */
 function restartRuntime(): void {
   if (!process.env.INVOCATION_ID) {
-    const command = [process.execPath, ...process.execArgv, ...process.argv.slice(1)].map((part) => `'${part.replace(/'/g, "'\\''")}'`).join(" ");
-    spawn("/bin/sh", ["-c", `sleep 3; exec ${command}`], { detached: true, stdio: "ignore", env: process.env }).unref();
+    // The copy waits until this process is gone: two runtimes never share
+    // the machine's files.
+    const command = shellCommandLine([process.execPath, ...process.execArgv, ...process.argv.slice(1)]);
+    spawn("/bin/sh", ["-c", `while kill -0 ${process.pid} 2>/dev/null; do sleep 1; done; exec ${command}`], { detached: true, stdio: "ignore", env: process.env }).unref();
   }
   process.kill(process.pid, "SIGTERM");
 }
@@ -532,7 +523,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
         void writeFile(machineLabelPath, JSON.stringify({ name }), "utf8").catch(() => undefined);
       }
     },
-    moveTransport: (addresses) => moveEnrollment(args.enrollmentPath, addresses),
+    moveTransport: async (addresses) => { await moveEnrollment(args.enrollmentPath, addresses); },
     restartRuntime,
     scripts: {
       handle: (operation) => handleScriptsOperation(scriptService, operation),

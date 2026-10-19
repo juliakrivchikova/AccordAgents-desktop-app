@@ -112,6 +112,8 @@ import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import { readCrashReportsChoice, writeCrashReportsChoice } from "./crashReportPreferences";
 import { isAcceptableHubUrl } from "../../shared/hubProtocol";
+import { compareVersions } from "../../shared/machineInstall";
+import { HUB_RELAY_FIRST_VERSION } from "../../shared/hubSetup";
 import { isHubServerAddress, type HubLinkConfig } from "../../shared/hubSetup";
 
 type StoredProviderSettings = ProviderSettings & {
@@ -3384,6 +3386,17 @@ export class SettingsService {
     return (stored.machines ?? []).map((machine) => ({ ...machine }));
   }
 
+  /** Replaces only a machine's pairing (it moved), leaving its record as
+   *  it stands now. */
+  async saveMachinePairing(pairingKey: string, pairing: MobilePairingPackage): Promise<void> {
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+    const pairings = this.readMachinePairings(stored);
+    pairings[pairingKey] = pairing;
+    stored.encryptedMachinePairings = this.sealJson(JSON.stringify(pairings));
+    await this.writeStored(stored);
+  }
+
   async saveMachine(record: MachineRecord, pairing?: MobilePairingPackage): Promise<MachineRecord[]> {
     const stored = await this.readStored();
     const machines = (stored.machines ?? []).filter((machine) => machine.id !== record.id);
@@ -3595,11 +3608,16 @@ export class SettingsService {
     return this.readMachinePairings(stored)[pairingKey];
   }
 
-  /** The hub's address as getHubConfig reads it. */
+  /** The hub's address as getHubConfig reads it, once its program serves
+   *  the relay (an older one does not, and a pairing that named it would
+   *  find nobody there). */
   private hubUrlOf(stored: StoredSettings): string | undefined {
     const override = process.env.ACCORDAGENTS_HUB_URL?.trim();
     if (override) return isAcceptableHubUrl(override) ? override : undefined;
-    return stored.hub?.url;
+    const hub = stored.hub;
+    if (!hub?.url || !isAcceptableHubUrl(hub.url)) return undefined;
+    const installed = hub.server?.installedVersion;
+    return !installed || compareVersions(installed, HUB_RELAY_FIRST_VERSION) >= 0 ? hub.url : undefined;
   }
 
   /** The hub this desktop syncs with. `ACCORDAGENTS_HUB_URL` points a local

@@ -4,6 +4,9 @@
  * and what the desktop does with that line (it installs the hub over SSH).
  */
 
+/** The first hub program that serves the relay the phone and machines use. */
+export const HUB_RELAY_FIRST_VERSION = "1.11.2-beta.8";
+
 /** What the setup command prints for the app; the rest is base64 JSON. */
 export const HUB_SETUP_BLOB_PREFIX = "accord-hub-v1:";
 

@@ -512,14 +512,14 @@ export class MachineLinkService implements MachineTurnDispatcher {
     await this.deliverPendingConversationDeletions();
   }
 
-  async connectMachine(record: MachineRecord): Promise<void> {
+  async connectMachine(record: MachineRecord, pairingOverride?: MobilePairingPackage): Promise<void> {
     const existing = this.connections.get(record.id);
     if (existing) {
       existing.record = record;
       return;
     }
     this.enrolled.set(record.id, record);
-    const pairing = await this.settings.getMachinePairing(record.pairingKey);
+    const pairing = pairingOverride ?? await this.settings.getMachinePairing(record.pairingKey);
     if (!pairing) {
       throw new Error(`Machine ${record.name} has no pairing package.`);
     }
@@ -635,21 +635,28 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   /** Tells a machine to meet this desktop at another relay address from now
-   *  on (the User's own server), and waits until it says it saved it; it
-   *  restarts right after. The caller saves the new pairing and reconnects. */
-  async requestTransportMove(machineId: string, addresses: { relayUrl: string; outboxUrl: string }, timeoutMs = SCRIPTS_REQUEST_TIMEOUT_MS): Promise<void> {
+   *  on (the User's own server). "moved": it saved the address and restarts.
+   *  "refused": it said no and nothing changed. "unknown": no answer came,
+   *  and it may have moved all the same. The caller saves the new pairing
+   *  and reconnects. */
+  async requestTransportMove(machineId: string, addresses: { relayUrl: string; outboxUrl: string }, timeoutMs = SCRIPTS_REQUEST_TIMEOUT_MS): Promise<{ status: "moved" | "refused" | "unknown"; error?: string }> {
     const connection = this.connections.get(machineId);
-    if (!connection?.machineDeviceId) throw new Error("That machine is not connected right now.");
+    if (!connection?.machineDeviceId) return { status: "refused", error: "That machine is not connected right now." };
     const hello = connection.record.lastHello;
-    if (hello?.transportMoveSupported !== true) throw new Error(`${connection.record.name} runs an older runtime that cannot move.`);
+    if (hello?.transportMoveSupported !== true) return { status: "refused", error: `${connection.record.name} runs an older runtime that cannot move.` };
     const requestId = randomUUID();
-    const answer = new Promise<unknown>((resolve, reject) => {
+    const answer = new Promise<{ status: "moved" | "refused" | "unknown"; error?: string }>((resolve) => {
       const timer = setTimeout(() => {
         connection.pendingScripts.delete(requestId);
-        reject(new Error(`${connection.record.name} did not answer in time.`));
+        resolve({ status: "unknown", error: `${connection.record.name} did not answer in time.` });
       }, timeoutMs);
       timer.unref?.();
-      connection.pendingScripts.set(requestId, { resolve, reject, timer });
+      connection.pendingScripts.set(requestId, {
+        resolve: () => resolve({ status: "moved" }),
+        // The machine's own no is a refusal; a link that went away is not.
+        reject: (error) => resolve({ status: error instanceof MachineRefusal ? "refused" : "unknown", error: error.message }),
+        timer
+      });
     });
     try {
       await this.send(connection, { type: "machine.transport.move", requestId,
@@ -661,15 +668,34 @@ export class MachineLinkService implements MachineTurnDispatcher {
         clearTimeout(pending.timer);
         connection.pendingScripts.delete(requestId);
       }
-      throw error;
+      // Not sent: the machine cannot have moved.
+      return { status: "refused", error: errorMessage(error) };
     }
-    await answer;
+    return answer;
   }
 
-  /** Connects to a machine again from its saved pairing (it moved). */
-  async reconnectMachine(record: MachineRecord): Promise<void> {
-    await this.disconnectMachine(record.id);
-    await this.connectMachine(record);
+  /** Resolves true once the machine greets this desktop (within the time). */
+  waitForHello(machineId: string, timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      timer.unref?.();
+      const onHello = (event: { machineId: string }): void => { if (event.machineId === machineId) finish(true); };
+      const finish = (value: boolean): void => {
+        clearTimeout(timer);
+        this.emitter.off("hello", onHello);
+        resolve(value);
+      };
+      this.emitter.on("hello", onHello);
+    });
+  }
+
+  /** Connects to a machine again: from its saved pairing (it moved), or for
+   *  a while from another one (looking for it at another address). */
+  async reconnectMachine(machineId: string, pairing?: MobilePairingPackage): Promise<void> {
+    const record = this.connections.get(machineId)?.record ?? this.enrolled.get(machineId);
+    if (!record) return;
+    await this.disconnectMachine(machineId);
+    await this.connectMachine(record, pairing);
   }
 
   /** Ask a machine to do something with its scheduled scripts and wait for
@@ -1710,7 +1736,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
           clearTimeout(pending.timer);
           connection.pendingScripts.delete(body.requestId);
           if (body.ok) pending.resolve(undefined);
-          else pending.reject(new Error(body.error || "The machine refused."));
+          else pending.reject(new MachineRefusal(body.error || "The machine refused."));
         }
         return;
       }
@@ -2243,3 +2269,6 @@ function rememberBounded(set: Set<string>, value: string, limit = 5_000): void {
   set.add(value);
   if (set.size > limit) set.delete(set.values().next().value as string);
 }
+
+/** The machine itself said no (as opposed to a link that went away). */
+class MachineRefusal extends Error {}

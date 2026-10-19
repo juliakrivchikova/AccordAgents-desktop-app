@@ -833,6 +833,13 @@ export class MobileRelayControlService {
    *  machine access is its own, so a later request is answered for it. */
   private lastPhoneDeviceId?: string;
 
+  /** The machines' addresses changed (one moved to the User's server): the
+   *  phone is told again rather than when it next asks. */
+  async resendMachineAccess(): Promise<void> {
+    if (!this.lastPhoneDeviceId) return;
+    await this.sendMachineAccess(`machines-${randomUUID()}`, this.lastPhoneDeviceId);
+  }
+
   private async sendMachineAccess(logicalMessageId: string, deviceId?: string): Promise<void> {
     if (!this.isActive()) return;
     // Named, because each device is given its own key for a machine's room:

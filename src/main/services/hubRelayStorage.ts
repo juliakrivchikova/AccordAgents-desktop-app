@@ -31,6 +31,7 @@ export const HUB_RELAY_SCHEMA_SQL = `
     primary key(mailbox_id, event_id)
   );
   create index if not exists hub_relay_events_arrival on hub_relay_events(mailbox_id, arrival_seq);
+  create index if not exists hub_relay_events_age on hub_relay_events(arrived_at);
   create table if not exists hub_relay_claims (
     mailbox_id text not null,
     claim_key text not null,
@@ -198,17 +199,20 @@ export class HubRelayStorage {
     await this.database.execute(`delete from hub_relay_claims where expires_at <= ${quote(nowIso)};`);
   }
 
-  async oldestArrivalSeq(mailboxId: string): Promise<number | undefined> {
+  /** The oldest envelope still kept (arrived at or after `keptSinceIso`). */
+  async oldestArrivalSeq(mailboxId: string, keptSinceIso: string): Promise<number | undefined> {
     await this.init();
-    const rows = await this.database.query<{ oldest: number | null }>(`select min(arrival_seq) as oldest from hub_relay_events where mailbox_id = ${quote(mailboxId)};`);
+    const rows = await this.database.query<{ oldest: number | null }>(`select min(arrival_seq) as oldest from hub_relay_events where mailbox_id = ${quote(mailboxId)} and arrived_at >= ${quote(keptSinceIso)};`);
     const oldest = rows[0]?.oldest;
     return oldest === null || oldest === undefined ? undefined : Number(oldest);
   }
 
   /** The envelopes a read may choose from, metadata only. */
-  async candidates(mailboxId: string, filter: { conversationId?: string; logScopeId?: string; originId?: string; afterOriginSeq?: number; afterArrival?: number }): Promise<HubRelayEventMeta[]> {
+  /** Envelopes that arrived before `keptSinceIso` are past their keeping
+   *  and not offered (the hourly sweep deletes them). */
+  async candidates(mailboxId: string, keptSinceIso: string, filter: { conversationId?: string; logScopeId?: string; originId?: string; afterOriginSeq?: number; afterArrival?: number }): Promise<HubRelayEventMeta[]> {
     await this.init();
-    const where = [`mailbox_id = ${quote(mailboxId)}`];
+    const where = [`mailbox_id = ${quote(mailboxId)}`, `arrived_at >= ${quote(keptSinceIso)}`];
     if (filter.conversationId) where.push(`conversation_id = ${quote(filter.conversationId)}`);
     if (filter.logScopeId) where.push(`log_scope_id = ${quote(filter.logScopeId)}`);
     if (filter.originId) where.push(`origin_id = ${quote(filter.originId)}`);

@@ -19,6 +19,8 @@ const { ChatSearchService } = await import(path.join(dist, "main/services/chatSe
 const { HubLog } = await import(path.join(dist, "hub/hubLog.js"));
 const { HubServer } = await import(path.join(dist, "hub/hubServer.js"));
 const { HubRelayMailboxes, HubRelayRooms } = await import(path.join(dist, "hub/hubRelay.js"));
+const { createChatEventDeviceIdentity } = await import(path.join(dist, "main/services/chatEventLog.js"));
+const { signHubRequest } = await import(path.join(dist, "main/services/hubAuth.js"));
 
 const PUSH_INTERVAL_MS = 1500;
 const PUSH_ORIGIN = "https://fcm.googleapis.com";
@@ -31,14 +33,17 @@ function vapidKeys() {
   return { publicKey: point.toString("base64url"), privateJwk: privateKey.export({ format: "jwk" }), subject: "mailto:relay@accordagents.test" };
 }
 
-async function startHub({ eventTtlMs, rings = [], pushStatus = { value: 201 } } = {}) {
+async function startHub({ eventTtlMs, rings = [], pushStatus = { value: 201 }, openRegistration = true, now, owner } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-relay-"));
   const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
   await storage.init();
+  if (owner) await storage.hub().setOwner({ deviceId: owner.originId, publicKeyDerBase64: owner.publicKeyDerBase64, name: "Desktop", addedAt: new Date().toISOString() });
   const mailboxes = new HubRelayMailboxes({
     storage: storage.relay(),
     vapid: vapidKeys(),
     pushMinIntervalMs: PUSH_INTERVAL_MS,
+    openRegistration,
+    ...(now ? { now } : {}),
     ...(eventTtlMs ? { eventTtlMs } : {}),
     // Every push the hub sends lands here: the ring log.
     fetchImpl: async (url, init) => {
@@ -59,10 +64,12 @@ async function startHub({ eventTtlMs, rings = [], pushStatus = { value: 201 } } 
   });
   const http = await server.listenHttp(0, "127.0.0.1");
   const port = http.address().port;
+  const open = await server.listenHttp(0, "127.0.0.1", { openOnly: true });
   return {
     kind: "hub",
     baseUrl: `http://127.0.0.1:${port}`,
     roomUrl: `ws://127.0.0.1:${port}/v1/relay`,
+    openUrl: `http://127.0.0.1:${open.address().port}`,
     close: async () => {
       await server.close();
       await rm(dir, { recursive: true, force: true });
@@ -470,5 +477,129 @@ test("hub mailbox: a ring waiting when the hub stops is rung after it starts aga
     assert.equal((await relay.mailbox(creds.mailboxId)).pushAt, null, "rung once, not again on the next start");
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------- the User's server is hers
+
+test("a new mailbox is taken only from the server owner's desktop; one already there keeps working", async () => {
+  const owner = createChatEventDeviceIdentity();
+  const stranger = createChatEventDeviceIdentity();
+  const hub = await startHub({ openRegistration: false, owner });
+  try {
+    const creds = credentials("owner-only");
+    const pathWithQuery = `/v1/mailbox/register?mailboxId=${creds.mailboxId}`;
+    const body = JSON.stringify({ tokenHashBase64Url: creds.tokenHashBase64Url });
+    const register = (signer) => fetch(`${hub.baseUrl}${pathWithQuery}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${creds.token}`,
+        ...(signer ? { "x-accord-hub-authorization": signHubRequest(signer, { method: "POST", pathWithQuery, body }) } : {}) },
+      body
+    });
+    let answer = await register(undefined);
+    assert.equal(answer.status, 403);
+    assert.equal((await answer.json()).error, "mailbox_registration_refused");
+    assert.equal((await register(stranger)).status, 403, "a device the server does not know cannot either");
+    answer = await register(owner);
+    assert.equal(answer.status, 200, await answer.clone().text());
+    assert.equal((await answer.json()).registered, true);
+    // Registering again (a machine retrying, the phone) needs no signature.
+    assert.equal((await register(undefined)).status, 200);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("a request that is not the mailbox owner's is refused before its body is read", async () => {
+  const hub = await startHub();
+  const creds = credentials("preauth");
+  const call = caller(hub, creds);
+  try {
+    assert.equal((await call("/v1/mailbox/register", { method: "POST", body: { tokenHashBase64Url: creds.tokenHashBase64Url } })).status, 200);
+    const big = Buffer.alloc(8 * 1024 * 1024, 120);
+    const started = Date.now();
+    const wrong = await fetch(`${hub.baseUrl}/v1/mailbox/events?mailboxId=${creds.mailboxId}`, { method: "POST", headers: { authorization: "Bearer not-the-token" }, body: big });
+    assert.equal(wrong.status, 401);
+    assert.equal((await wrong.json()).error, "mailbox_unauthorized");
+    const nobody = await fetch(`${hub.baseUrl}/v1/mailbox/events?mailboxId=mb-nobody-has-this`, { method: "POST", body: big });
+    assert.equal(nobody.status, 401);
+    assert.ok(Date.now() - started < 5_000);
+    const tooLarge = await fetch(`${hub.baseUrl}/v1/mailbox/events?mailboxId=${creds.mailboxId}`, {
+      method: "POST", headers: { authorization: `Bearer ${creds.token}`, "content-type": "application/json" }, body: Buffer.alloc(33 * 1024 * 1024, 32)
+    }).catch((error) => ({ status: 413, error }));
+    assert.equal(tooLarge.status, 413);
+    const oneHuge = await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "huge", payload: { v: 1, alg: "A256GCM", iv: "aaaa", ct: "a".repeat(3 * 1024 * 1024) } })] } });
+    assert.equal(oneHuge.status, 400);
+    assert.match((await oneHuge.json()).error, /too large/);
+    // The mailbox still answers afterwards.
+    assert.equal((await call("/v1/mailbox/events", { query: { afterArrival: 0 } })).status, 200);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("positions beyond any number, and routing fields with quotes, leave the store unharmed", async () => {
+  const hub = await startHub();
+  const creds = credentials("hostile");
+  const call = caller(hub, creds);
+  try {
+    assert.equal((await call("/v1/mailbox/register", { method: "POST", body: { tokenHashBase64Url: creds.tokenHashBase64Url } })).status, 200);
+    const odd = "it's'; drop table hub_relay_events; --";
+    const appended = await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: odd, conversationId: odd, logScopeId: odd, originId: odd })] } });
+    assert.equal(appended.status, 200);
+    for (const afterArrival of ["1e400", "-1e400", "NaN", "abc", "9007199254740993"]) {
+      const answer = await call("/v1/mailbox/events", { query: { afterArrival, originId: odd, afterSeq: afterArrival } });
+      assert.equal(answer.status, 200, `afterArrival=${afterArrival}`);
+    }
+    const listed = await (await call("/v1/mailbox/events", { query: { afterArrival: 0, conversationId: odd } })).json();
+    assert.deepEqual(listed.events.map((event) => [event.eventId, event.originId]), [[odd, odd]], "stored and read back as written");
+    const newline = await call("/v1/mailbox/events", { method: "POST", body: { events: [sealedEvent({ eventId: "a\n.shell echo x" })] } });
+    assert.equal(newline.status, 400, "a control character in a routing field is refused");
+    const deleted = await (await call("/v1/mailbox/delete", { method: "POST", body: { eventIds: [odd] } })).json();
+    assert.deepEqual(deleted.deletedEventIds, [odd]);
+    assert.equal((await (await call("/v1/mailbox/events", { query: { afterArrival: 0 } })).json()).events.length, 0);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("execution claims: taken, held against another owner, renewed by the same one, taken over once expired", async () => {
+  let clock = Date.parse("2026-10-19T08:00:00.000Z");
+  const hub = await startHub({ now: () => clock });
+  const creds = credentials("claims");
+  const call = caller(hub, creds);
+  const claim = (ownerId, extra = {}) => call("/v1/mailbox/claims", { method: "POST", body: { conversationId: "c", eventId: "e", ownerId, ownerRole: "desktop", runId: `run-${ownerId}`, ttlMs: 30_000, ...extra } }).then((r) => r.json());
+  try {
+    assert.equal((await call("/v1/mailbox/register", { method: "POST", body: { tokenHashBase64Url: creds.tokenHashBase64Url } })).status, 200);
+    const first = await claim("desktop-a");
+    assert.equal(first.acquired, true);
+    const contested = await claim("machine-b");
+    assert.equal(contested.acquired, false);
+    assert.equal(contested.claim.ownerId, "desktop-a");
+    clock += 10_000;
+    const renewed = await claim("desktop-a");
+    assert.equal(renewed.acquired, true);
+    assert.equal(renewed.claim.claimedAt, first.claim.claimedAt, "the same owner keeps when it first claimed");
+    clock += 31_000;
+    assert.equal((await claim("machine-b")).acquired, true, "an expired claim is taken over");
+    assert.equal((await claim("x", { ttlMs: 1 })).acquired, false, "a short ttl is raised to the floor, not used as given");
+    const bad = await call("/v1/mailbox/claims", { method: "POST", body: { conversationId: "c", eventId: "e" } });
+    assert.equal(bad.status, 400);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("the relay's own paths answer as the relay's, and never over plain HTTP on the open port", async () => {
+  const hub = await startHub();
+  try {
+    assert.deepEqual(await (await fetch(`${hub.baseUrl}/healthz`)).json(), { ok: true, provider: "accordagents-hub" });
+    assert.equal((await (await fetch(`${hub.baseUrl}/v1/relay/manifest`)).json()).manifest.provider, "accordagents-hub");
+    assert.equal((await fetch(`${hub.baseUrl}/v1/relay?rid=x`)).status, 426);
+    assert.equal((await fetch(`${hub.baseUrl}/v1/relay`)).status, 400);
+    assert.equal((await fetch(`${hub.openUrl}/v1/mailbox/events?mailboxId=x`)).status, 403);
+    assert.equal((await fetch(`${hub.openUrl}/healthz`)).status, 403);
+  } finally {
+    await hub.close();
   }
 });

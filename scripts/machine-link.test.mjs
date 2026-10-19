@@ -1079,27 +1079,41 @@ test("when a machine goes away the desktop stops showing the background work it 
   assert.ok(sent.includes("machine.member.background.request"), "back on the link, the desktop asks what is running now");
 });
 
-test("the desktop asks a machine to move and waits for its answer; an older runtime is not asked", async () => {
+test("the desktop asks a machine to move and tells a refusal from an answer that never came", async () => {
   const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
   const link = Object.create(MachineLinkService.prototype);
   link.debugLogs = { write: async () => undefined };
   link.now = () => new Date();
+  const { EventEmitter } = await import("node:events");
+  link.emitter = new EventEmitter();
   const sent = [];
   const connection = { record: { id: "m", name: "Cloud run", lastHello: { instanceId: "i-1", transportMoveSupported: true } }, machineDeviceId: "device-m", pendingScripts: new Map() };
   link.connections = new Map([["m", connection]]);
   link.send = async (_connection, body) => { sent.push(body); };
+  const addresses = { relayUrl: "wss://hub/v1/relay", outboxUrl: "https://hub/v1/mailbox/events" };
   assert.equal(link.supportsTransportMove("m"), true);
-  const moving = link.requestTransportMove("m", { relayUrl: "wss://hub/v1/relay", outboxUrl: "https://hub/v1/mailbox/events" }, 2_000);
+  const moving = link.requestTransportMove("m", addresses, 2_000);
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(sent[0].type, "machine.transport.move");
   assert.equal(sent[0].instanceId, "i-1");
   await link.handleBody(connection, { type: "machine.transport.moved", requestId: sent[0].requestId, ok: true });
-  await moving;
-  const refused = link.requestTransportMove("m", { relayUrl: "wss://hub/v1/relay", outboxUrl: "https://hub/v1/mailbox/events" }, 2_000);
+  assert.deepEqual(await moving, { status: "moved" });
+  const refused = link.requestTransportMove("m", addresses, 2_000);
   await new Promise((resolve) => setTimeout(resolve, 10));
   await link.handleBody(connection, { type: "machine.transport.moved", requestId: sent[1].requestId, ok: false, error: "The machine is busy; it moves once it is idle." });
-  await assert.rejects(refused, /busy/);
+  assert.equal((await refused).status, "refused");
+  // No answer: it may have moved all the same.
+  assert.equal((await link.requestTransportMove("m", addresses, 50)).status, "unknown");
+  // Gone from the link: the move is answered for it, and it is not a refusal.
+  const cut = link.requestTransportMove("m", addresses, 2_000);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  link.rejectPendingScripts(connection, "The machine was removed.");
+  assert.equal((await cut).status, "unknown");
+  const greeted = link.waitForHello("m", 1_000);
+  link.emitter.emit("hello", { machineId: "m" });
+  assert.equal(await greeted, true);
+  assert.equal(await link.waitForHello("m", 20), false);
   connection.record.lastHello = { instanceId: "i-2" };
   assert.equal(link.supportsTransportMove("m"), false);
-  await assert.rejects(link.requestTransportMove("m", { relayUrl: "wss://hub/v1/relay", outboxUrl: "https://hub/v1/mailbox/events" }), /older runtime/);
+  assert.equal((await link.requestTransportMove("m", addresses)).status, "refused", "an older runtime is not asked");
 });
