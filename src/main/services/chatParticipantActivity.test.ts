@@ -86,6 +86,8 @@ test("participant activity returns roster-ordered authoritative statuses and com
     running: 1,
     pending: 0,
     compacting: 0,
+
+    background: 0,
     stopped: 0,
     error: 0
   });
@@ -367,6 +369,8 @@ test("terminal and idle roster states do not make the snapshot active", () => {
     running: 0,
     pending: 0,
     compacting: 0,
+
+    background: 0,
     stopped: 1,
     error: 0
   });
@@ -431,6 +435,8 @@ test("participant activity reports all six roster statuses with zero-free counts
     running: 1,
     pending: 1,
     compacting: 1,
+
+    background: 0,
     stopped: 1,
     error: 1
   });
@@ -651,6 +657,8 @@ test("app MCP dispatches participant activity as capability-free read-only JSON"
       running: 0,
       pending: 0,
       compacting: 0,
+
+      background: 0,
       stopped: 0,
       error: 0
     },
@@ -979,3 +987,14 @@ function appToolApproval(requester: ChatParticipant): ChatAppToolApproval {
     }
   };
 }
+
+test("members see a member's live background work in its activity status, as the User does", () => {
+  const worker = participant("worker", "worker", "claude-code");
+  const idle = participant("idle", "idle", "codex-cli");
+  const conversation = chatConversation([worker, idle]);
+  const snapshot = buildChatParticipantActivitySnapshot(conversation, SNAPSHOT_AT, new Map([[worker.id, ["Run the soak"]]]));
+  assert.equal(snapshot.participants.find((entry) => entry.participantId === worker.id)?.status, "background");
+  assert.equal(snapshot.statusCounts.background, 1);
+  assert.equal(snapshot.statusCounts.idle, 1);
+  assert.equal(snapshot.hasActiveParticipants, false, "background work does not keep the member busy");
+});

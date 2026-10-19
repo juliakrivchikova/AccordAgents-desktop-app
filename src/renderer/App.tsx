@@ -51,6 +51,7 @@ import { clearActivityItem, markActivityItemRead } from "./app/activity-item-sta
 import { errorText } from "./components/review/review-conversation-data";
 import { isCodexActivityApprovalItem } from "../shared/chatActivity";
 import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
+import { ChatBackgroundTasksContext } from "./components/chat/chat-roster-status";
 import "./styles/app.css";
 function App(): JSX.Element {
   const state = useAppState();
@@ -352,7 +353,7 @@ function App(): JSX.Element {
     ? null
     : chatTopBar;
 
-  return (
+  const shell = (
     <AppShell
       sidebarCollapsed={state.sidebarCollapsed}
       // Activity takes the sidebar's place, the way Settings does.
@@ -572,6 +573,11 @@ function App(): JSX.Element {
         </div>
       )}
     </AppShell>
+  );
+  return (
+    <ChatBackgroundTasksContext.Provider value={view.participantBackgroundTasksById}>
+      {shell}
+    </ChatBackgroundTasksContext.Provider>
   );
 }
 

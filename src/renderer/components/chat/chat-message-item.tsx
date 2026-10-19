@@ -331,6 +331,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 <RosterStatusIndicator
                   status={participantStatus}
                   runningRemotely={participant?.remoteExecution === "remote"}
+                  participantId={message.participantId}
                 />
               )
             )}

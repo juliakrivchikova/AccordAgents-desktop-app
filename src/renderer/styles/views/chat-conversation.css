@@ -690,6 +690,15 @@
   animation: chat-rt-blink 1.6s ease-in-out infinite;
 }
 
+/* Work the member left running in the background: neutral, slow pulse. */
+.chat-rt-status.is-background {
+  --st: var(--app-muted);
+}
+
+.chat-rt-status.is-background .chat-rt-status-dot {
+  animation: chat-rt-pulse 2.4s ease-in-out infinite;
+}
+
 .chat-rt-status.is-stopped {
   --st: var(--app-muted);
 }

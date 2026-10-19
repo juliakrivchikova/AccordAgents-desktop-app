@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { Conversation } from "../../shared/types";
 import { buildChatParticipantStatusMap } from "../../shared/chatRosterStatus";
+import { useChatBackgroundTasks } from "../components/chat/use-chat-background-tasks";
 import { chatParticipants } from "../components/chat/chat-conversation-data";
 import {
   canRecoverImplementationPlan,
@@ -57,7 +58,11 @@ export function useAppViewModel(state: AppState) {
   }, [state.conversation, state.progressLog]);
   const activeChatConversation = state.conversation?.kind === "chat" ? state.conversation : undefined;
   const activeChatParticipants = useMemo(() => activeChatConversation ? chatParticipants(activeChatConversation) : [], [activeChatConversation]);
-  const participantStatusById = useMemo(() => buildChatParticipantStatusMap(activeChatConversation), [activeChatConversation]);
+  const participantBackgroundTasksById = useChatBackgroundTasks(activeChatConversation?.id);
+  const participantStatusById = useMemo(
+    () => buildChatParticipantStatusMap(activeChatConversation, participantBackgroundTasksById),
+    [activeChatConversation, participantBackgroundTasksById]
+  );
   const participantHasRunById = useMemo(() => buildParticipantHasRunMap(activeChatConversation), [activeChatConversation]);
 
   return {
@@ -81,6 +86,7 @@ export function useAppViewModel(state: AppState) {
     activeChatConversation,
     activeChatParticipants,
     participantStatusById,
+    participantBackgroundTasksById,
     participantHasRunById
   };
 }

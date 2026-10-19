@@ -2632,6 +2632,56 @@ test("Stop on a reply the Claude CLI started on its own interrupts it", async ()
     message.id === pending.id && message.metadata?.terminalReason === "user-stopped"));
 });
 
+test("a Claude member's live background tasks are reported to the app as they start and end, and are never stored with the chat", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  let warmOptions: any;
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, runOptions: any) => {
+      warmOptions = runOptions.warm;
+      return { participant: runParticipant, ok: true, content: "Started the soak.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const events: unknown[] = [];
+  service.onBackgroundTasksChanged((event) => events.push(event));
+  await service.sendMessage({ conversationId: conversation.id, runId: "send-bg", content: `@${participant.handle} start the soak` });
+  await waitFor(() => Boolean(warmOptions));
+  assert.equal(typeof warmOptions.onBackgroundTasksChanged, "function");
+
+  warmOptions.onBackgroundTasksChanged([{ id: "t1", label: "Run the soak", origin: warmOptions.origin }]);
+  warmOptions.onBackgroundTasksChanged([{ id: "t1", label: "Run the soak", origin: warmOptions.origin }]);
+  assert.deepEqual(service.backgroundTasksForConversation(conversation.id), { [participant.id]: ["Run the soak"] });
+  assert.equal(events.length, 1, "an unchanged list is not reported again");
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "Started the soak."));
+  assert.equal(JSON.stringify(storage.current).includes("Run the soak"), false, "live state is not written into the chat");
+
+  warmOptions.onBackgroundTasksChanged([]);
+  assert.deepEqual(service.backgroundTasksForConversation(conversation.id), {});
+  assert.deepEqual(events.at(-1), { conversationId: conversation.id, participantId: participant.id, labels: [] });
+});
+
+test("a machine's members' background tasks show until that machine reports them done or goes away", () => {
+  const { service } = testService();
+  const events: Array<{ participantId: string; labels: string[] }> = [];
+  service.onBackgroundTasksChanged((event) => events.push(event));
+  service.applyMachineBackgroundTasks("machine-a", { conversationId: "c1", participantId: "p1", labels: ["build"] });
+  service.applyMachineBackgroundTasks("machine-a", { conversationId: "c1", participantId: "p2", labels: ["watch"] });
+  service.applyMachineBackgroundTasks("machine-b", { conversationId: "c1", participantId: "p3", labels: ["serve"] });
+  assert.deepEqual(service.backgroundTasksForConversation("c1"), { p1: ["build"], p2: ["watch"], p3: ["serve"] });
+  service.applyMachineBackgroundTasks("machine-a", { conversationId: "c1", participantId: "p1", labels: [] });
+  assert.deepEqual(Object.keys(service.backgroundTasksForConversation("c1")).sort(), ["p2", "p3"]);
+  service.replaceMachineBackgroundTasks("machine-a", []);
+  assert.deepEqual(service.backgroundTasksForConversation("c1"), { p3: ["serve"] }, "only the machine that went away is cleared");
+  assert.deepEqual(events.at(-1), { conversationId: "c1", participantId: "p2", labels: [] });
+  // A machine's full list after its hello replaces what it reported before.
+  service.applyMachineBackgroundTasks("machine-b", { conversationId: "c1", participantId: "p4", labels: ["stale"] });
+  service.replaceMachineBackgroundTasks("machine-b", [{ conversationId: "c1", participantId: "p3", labels: ["serve", "tail"] }]);
+  assert.deepEqual(service.backgroundTasksForConversation("c1"), { p3: ["serve", "tail"] });
+  assert.deepEqual(service.localBackgroundTasks(), [], "a machine's members are not reported as this host's");
+});
+
 test("stored participant stop preserves nonblank pending and diagnostic content", () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);

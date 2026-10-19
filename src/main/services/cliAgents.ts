@@ -286,6 +286,9 @@ export interface CliAgentWarmOptions {
    *  (a background task finished, as in the dedicated CLI). The caller attaches
    *  to it to show and settle that reply; without a handler it is dropped. */
   onSelfResumedTurn?: (turn: CliAgentSelfResumedTurn) => void;
+  /** Claude: the member's live background tasks changed (one started or
+   *  finished, or the process ended with them). Always the full current list. */
+  onBackgroundTasksChanged?: (tasks: CliAgentBackgroundTask[]) => void;
   /** Claude: the CLI handed this run's message to a step (it starts now, or
    *  joins the step that is running). Until then the process may still be
    *  working on an earlier message. */
@@ -298,6 +301,13 @@ export interface CliAgentWarmOptions {
    *  input). Given only when the caller shows suggestions; the process is
    *  started with the flag only then and only when the CLI supports it. */
   onPromptSuggestion?: (suggestion: string) => void;
+}
+
+/** A background task the CLI reports as live, with the reply that started it. */
+export interface CliAgentBackgroundTask {
+  id: string;
+  label: string;
+  origin?: CliAgentReplyOrigin;
 }
 
 /** Opaque to the runner: identifies the chat reply whose run started work. */
@@ -422,6 +432,7 @@ interface WarmAgentEntry {
 interface ClaudeWarmRunContext {
   origin?: CliAgentReplyOrigin;
   onSelfResumedTurn?: (turn: CliAgentSelfResumedTurn) => void;
+  onBackgroundTasksChanged?: (tasks: CliAgentBackgroundTask[]) => void;
   onReplyStarted?: () => void;
   onMessageWritten?: () => void;
   onPromptSuggestion?: (suggestion: string) => void;
@@ -508,6 +519,9 @@ interface ClaudeWarmProcessState {
   sessionId?: string;
   model?: string;
   onSelfResumedTurn?: (turn: CliAgentSelfResumedTurn) => void;
+  onBackgroundTasksChanged?: (tasks: CliAgentBackgroundTask[]) => void;
+  /** What was last reported through onBackgroundTasksChanged. */
+  reportedBackgroundTasks: string;
   /** Where the CLI's next `prompt_suggestion` goes: the reply that ended last,
    *  until a step starts (the CLI drops a pending suggestion then, too). */
   promptSuggestionTarget?: (suggestion: string) => void;
@@ -5291,6 +5305,7 @@ export class CliAgentRunner {
           await claudeEntry.run(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs, undefined, undefined, {
             origin: warm.origin,
             onSelfResumedTurn: warm.onSelfResumedTurn,
+            onBackgroundTasksChanged: warm.onBackgroundTasksChanged,
             onReplyStarted: freshProcess ? undefined : warm.onReplyStarted,
             onMessageWritten: warm.onMessageWritten,
             onPromptSuggestion: warm.onPromptSuggestion,
@@ -5462,6 +5477,7 @@ export class CliAgentRunner {
       sessionId: options.sessionId ?? newSessionId,
       model: participant.model,
       cancelRequests: new Map(),
+      reportedBackgroundTasks: "[]",
       lastTaskEventAt: 0,
       selfResumeExpectedUntil: 0
     };
@@ -5630,6 +5646,7 @@ export class CliAgentRunner {
         if (line) {
           this.handleClaudeWarmLine(line, participant, newSessionId, state, hooks);
           refreshCapturedBackgroundProcesses();
+          this.reportClaudeBackgroundTasks(state, participant);
           notifyIfIdle();
           armSelfResumeCheck();
         }
@@ -5640,10 +5657,15 @@ export class CliAgentRunner {
     child.on("error", (error) => {
       closed = true;
       failProcess(error);
+      // A process that failed this way may never report "close" (its
+      // supervisor died); its background work is gone either way.
+      this.reportClaudeBackgroundTasks(state, participant, true);
     });
     child.on("close", (exitCode) => {
       closed = true;
       failProcess(new Error(`claude warm process exited${exitCode === null ? "" : ` with code ${exitCode}`}${stderr ? `: ${stderr}` : ""}`));
+      // Its background tasks ended with it (stdin EOF or a kill).
+      this.reportClaudeBackgroundTasks(state, participant, true);
       if (!entry.closed) {
         // Nothing of ours will run on it again; retire it now so background
         // work it leaves behind is not kept until the next message.
@@ -5700,6 +5722,9 @@ export class CliAgentRunner {
         }
         if (claude?.onSelfResumedTurn) {
           state.onSelfResumedTurn = claude.onSelfResumedTurn;
+        }
+        if (claude?.onBackgroundTasksChanged) {
+          state.onBackgroundTasksChanged = claude.onBackgroundTasksChanged;
         }
         return new Promise<ParticipantRunResult>((resolve, reject) => {
           const reply = this.newClaudeWarmReply({
@@ -6487,6 +6512,29 @@ export class CliAgentRunner {
 
   private isClaudeWarmResult(event: unknown): boolean {
     return this.stringField(this.asRecord(event) ?? {}, "type") === "result";
+  }
+
+  /** Tells the caller which background tasks are live whenever that changes,
+   *  so the member can be shown as working in the background. */
+  private reportClaudeBackgroundTasks(state: ClaudeWarmProcessState, participant: ParticipantConfig, ended = false): void {
+    const tasks: CliAgentBackgroundTask[] = ended ? [] : Array.from(state.backgroundTasks.entries()).map(([id, label]) => ({
+      id,
+      label,
+      origin: state.backgroundTaskOrigins.get(id)
+    }));
+    const signature = JSON.stringify(tasks.map((task) => [task.id, task.label, task.origin?.messageId]));
+    if (signature === state.reportedBackgroundTasks) {
+      return;
+    }
+    state.reportedBackgroundTasks = signature;
+    try {
+      state.onBackgroundTasksChanged?.(tasks);
+    } catch (error) {
+      void this.writeDebugLog("cli-agent-claude-background-report-error", {
+        participantId: participant.id,
+        error: this.errorText(error)
+      });
+    }
   }
 
   /** Mirrors the CLI's background-task bookkeeping from its `system` events
