@@ -194,7 +194,7 @@ import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, startCrashReporting, stopCrashReporting } from "./services/crashReporting";
 import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
-import { ACTIVITY_RECHECK_MS, appHiddenForUpdate, bootstrapAppUpdater, createUpdateRestart, createUpdateRestartGate, currentUpdateWindows, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
+import { ACTIVITY_RECHECK_MS, appHiddenForUpdate, bootstrapAppUpdater, createUpdateRestart, createUpdateRestartGate, currentUpdateWindows, quitAndInstallUpdate, showUpdateRestartPrompt, updatePromptWindowShown } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
 import { MachineTransportMover } from "./services/machineTransportMoves";
 import { buildMobileChatList, buildMobileTimelinePage, mobileRelayChatMembers } from "./services/mobileChatCatalog";
@@ -1457,6 +1457,13 @@ async function openTerminal(): Promise<void> {
     }
   }
   throw new Error("Terminal could not be opened.");
+}
+
+/** The window an update question is asked on: the main one, or any other
+ *  still open. */
+function updatePromptWindow(): BrowserWindow | undefined {
+  if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
+  return BrowserWindow.getAllWindows().find((window) => !window.isDestroyed());
 }
 
 function createWindow(): void {
@@ -4099,7 +4106,15 @@ void app.whenReady().then(async () => {
       const offHello = machineLinkService?.onHello(() => listener());
       return () => { offRun(); offHello?.(); };
     },
-    prompt: showUpdateRestartPrompt,
+    // The question is asked on a window; one waiting for a window is asked as
+    // soon as the User brings one up.
+    onWindowAvailable: (listener) => {
+      const onFocus = (): void => listener();
+      app.on("browser-window-focus", onFocus);
+      return () => { app.removeListener("browser-window-focus", onFocus); };
+    },
+    canPrompt: () => updatePromptWindowShown(updatePromptWindow()),
+    prompt: (info) => showUpdateRestartPrompt(info, updatePromptWindow()),
     quitAndInstall: createUpdateRestart({
       quitAndInstall: quitAndInstallUpdate,
       windows: currentUpdateWindows,

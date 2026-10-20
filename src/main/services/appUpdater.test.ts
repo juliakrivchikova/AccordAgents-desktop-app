@@ -266,3 +266,75 @@ test("window state for the restart record reads each window, and never throws in
   assert.equal(pageGone.rendererCrashed, undefined);
   assert.deepEqual(describeUpdateWindows([fakeWindow({ isVisible: () => { throw new Error("Object has been destroyed"); } })]), [{ id: 7, error: "Object has been destroyed" }]);
 });
+
+import { showUpdateRestartPrompt } from "./appUpdater";
+import type { BrowserWindow } from "electron";
+
+test("the update question is never asked without a shown window: it waits instead of stopping the app", async () => {
+  const window = (overrides: Record<string, () => boolean>) => ({
+    isDestroyed: () => false, isVisible: () => true, isMinimized: () => false, ...overrides
+  }) as unknown as BrowserWindow;
+  assert.equal(await showUpdateRestartPrompt({ releaseName: "v" }, undefined), "unanswered");
+  assert.equal(await showUpdateRestartPrompt({ releaseName: "v" }, window({ isDestroyed: () => true })), "unanswered");
+  assert.equal(await showUpdateRestartPrompt({ releaseName: "v" }, window({ isVisible: () => false })), "unanswered");
+  assert.equal(await showUpdateRestartPrompt({ releaseName: "v" }, window({ isMinimized: () => true })), "unanswered");
+});
+
+test("an update waiting for a window says so once and is asked again when one comes up", async () => {
+  let shown = false;
+  const log: string[] = [];
+  const listeners = new Set<() => void>();
+  const windowListeners = new Set<() => void>();
+  const gate = createUpdateRestartGate({
+    isBusy: async () => false,
+    onActivitySettled: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    onWindowAvailable: (listener) => { windowListeners.add(listener); return () => { windowListeners.delete(listener); }; },
+    prompt: async () => (shown ? "restart" : "unanswered"),
+    quitAndInstall: () => { log.push("quit"); },
+    log: (event) => { log.push(event); },
+    recheckIntervalMs: 60_000
+  });
+  gate.onDownloaded({ releaseName: "AccordAgents v9.9.9" });
+  await tick();
+  for (const listener of [...listeners]) listener();
+  await tick();
+  assert.deepEqual(log, ["app-update-downloaded", "app-update-prompt-waiting"], "waiting is said once, not on every check");
+  assert.ok(gate.pending(), "the update stays pending");
+  assert.equal(windowListeners.size, 1, "one window listener, however many checks found no window");
+  shown = true;
+  for (const listener of [...windowListeners]) listener();
+  await tick();
+  assert.deepEqual(log.slice(2), ["app-update-restarting", "quit"]);
+  assert.equal(windowListeners.size, 0, "the window listener goes once the question is asked");
+  gate.dispose();
+});
+
+test("with no window to ask on, an update waits without checking who is busy (that greets every machine)", async () => {
+  let windowUp = false;
+  let busyChecks = 0;
+  const log: string[] = [];
+  const listeners = new Set<() => void>();
+  const windowListeners = new Set<() => void>();
+  const gate = createUpdateRestartGate({
+    isBusy: async () => { busyChecks += 1; return false; },
+    onActivitySettled: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    onWindowAvailable: (listener) => { windowListeners.add(listener); return () => { windowListeners.delete(listener); }; },
+    canPrompt: () => windowUp,
+    prompt: async () => "restart",
+    quitAndInstall: () => { log.push("quit"); },
+    log: (event) => { log.push(event); },
+    recheckIntervalMs: 10
+  });
+  gate.onDownloaded({ releaseName: "AccordAgents v9.9.9" });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  for (const listener of [...listeners]) listener();
+  await tick();
+  assert.equal(busyChecks, 0, "no busy check, so no machine is greeted, while no window is up");
+  assert.deepEqual(log, ["app-update-downloaded", "app-update-prompt-waiting"]);
+  windowUp = true;
+  for (const listener of [...windowListeners]) listener();
+  await tick();
+  assert.equal(busyChecks, 2, "asked once the window is up: checked before the question and after the answer");
+  assert.deepEqual(log.slice(2), ["app-update-restarting", "quit"]);
+  gate.dispose();
+});

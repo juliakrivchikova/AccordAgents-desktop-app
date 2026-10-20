@@ -34,8 +34,16 @@ export interface UpdateRestartGateOptions {
   /** Called with a listener to re-check when work settles (a run ends, a
    *  machine reports in). Returns the unsubscribe. */
   onActivitySettled: (listener: () => void) => () => void;
-  /** Shows the update prompt; resolves with what the User chose. */
-  prompt: (info: UpdateRestartInfo) => Promise<"restart" | "later">;
+  /** Called with a listener once the prompt had no window to show on; calls
+   *  it when the User brings one up. Returns the unsubscribe. Only then:
+   *  each busy check greets every machine, too dear for every focus. */
+  onWindowAvailable?: (listener: () => void) => () => void;
+  /** Whether a window to ask on is up now. Without one nothing is checked:
+   *  the busy check greets every machine, and its answer could not be used. */
+  canPrompt?: () => boolean;
+  /** Shows the update prompt; resolves with what the User chose, or
+   *  "unanswered" when it cannot be shown now (no window to show it in). */
+  prompt: (info: UpdateRestartInfo) => Promise<"restart" | "later" | "unanswered">;
   quitAndInstall: () => void;
   log: (event: string, payload: Record<string, unknown>) => void;
   /** Safety net while an update waits: a machine turn started from the phone
@@ -66,12 +74,16 @@ export function createUpdateRestartGate(options: UpdateRestartGateOptions): Upda
   let prompting = false;
   let checking = false;
   let deferredLogged = false;
+  let unansweredLogged = false;
   let unsubscribe: (() => void) | undefined;
+  let unsubscribeWindow: (() => void) | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
 
   const stopWatching = (): void => {
     unsubscribe?.();
     unsubscribe = undefined;
+    unsubscribeWindow?.();
+    unsubscribeWindow = undefined;
     if (timer) clearInterval(timer);
     timer = undefined;
   };
@@ -83,8 +95,27 @@ export function createUpdateRestartGate(options: UpdateRestartGateOptions): Upda
     timer.unref?.();
   };
 
+  const waitForWindow = (info: UpdateRestartInfo): void => {
+    if (!unansweredLogged) {
+      unansweredLogged = true;
+      options.log("app-update-prompt-waiting", { releaseName: info.releaseName ?? "" });
+    }
+    if (!unsubscribeWindow && options.onWindowAvailable) {
+      unsubscribeWindow = options.onWindowAvailable(() => {
+        unsubscribeWindow?.();
+        unsubscribeWindow = undefined;
+        void attempt();
+      });
+    }
+    watch();
+  };
+
   const attempt = async (): Promise<void> => {
     if (!pending || prompting || checking) return;
+    if (options.canPrompt && !options.canPrompt()) {
+      waitForWindow(pending);
+      return;
+    }
     checking = true;
     let busy = true;
     try {
@@ -116,8 +147,9 @@ export function createUpdateRestartGate(options: UpdateRestartGateOptions): Upda
     }
     if (choice === "unanswered") {
       // The dialog could not be shown (no window yet): the update is still
-      // pending, and the next quiet moment asks again.
-      watch();
+      // pending, and the next quiet moment (or the window coming back) asks
+      // again.
+      waitForWindow(info);
       return;
     }
     if (choice === "later") {
@@ -146,6 +178,7 @@ export function createUpdateRestartGate(options: UpdateRestartGateOptions): Upda
     onDownloaded: (info) => {
       pending = info;
       deferredLogged = false;
+      unansweredLogged = false;
       options.log("app-update-downloaded", { releaseName: info.releaseName ?? "" });
       void attempt();
     },
@@ -199,15 +232,41 @@ export function bootstrapAppUpdater(debugLogs: DebugLogService, betaUpdates: boo
 }
 
 /** The library's own prompt, so the User sees the same dialog as before —
- *  just not while a member is working. */
-export function showUpdateRestartPrompt(info: UpdateRestartInfo): Promise<"restart" | "later"> {
-  return dialog.showMessageBox({
+ *  just not while a member is working — attached to the app's window.
+ *
+ *  Never without a window: on macOS a message box with no parent window runs
+ *  modally inside the call, and the whole main process waits for the answer.
+ *  On 2026-10-20 that stopped every member, the phone and the machines for 4
+ *  and then 8 hours, until the User came back and pressed Restart. A sheet on
+ *  the window waits without stopping anything; with no window open, the
+ *  question waits for one. */
+export function showUpdateRestartPrompt(info: UpdateRestartInfo, window: BrowserWindow | undefined): Promise<"restart" | "later" | "unanswered"> {
+  // A hidden or minimized window waits too: newer Electron versions run the
+  // box modally for a parent that is not shown, which is the freeze again.
+  if (!updatePromptWindowShown(window)) return Promise.resolve("unanswered");
+  // Quitting (Cmd+Q, the Dock, logging out) ends the sheet before the window
+  // closes, and an ended sheet reports its cancel button, which is Restart
+  // here: that is no answer, and the update still installs as the app quits.
+  let quitting = false;
+  const onQuit = (): void => { quitting = true; };
+  app.on("before-quit", onQuit);
+  window.once("close", onQuit);
+  return dialog.showMessageBox(window, {
     type: "info",
     buttons: ["Restart", "Later"],
     title: "Application Update",
     message: process.platform === "win32" ? (info.releaseNotes ?? info.releaseName ?? "Update") : (info.releaseName ?? "Update"),
     detail: "A new version has been downloaded. Restart the application to apply the updates."
-  }).then(({ response }) => (response === 0 ? "restart" : "later"));
+  }).then(({ response }) => (quitting ? "unanswered" : response === 0 ? "restart" : "later"))
+    .finally(() => {
+      app.removeListener("before-quit", onQuit);
+      if (!window.isDestroyed()) window.removeListener("close", onQuit);
+    });
+}
+
+/** A window the question can be asked on: there, shown, not minimized. */
+export function updatePromptWindowShown(window: Pick<BrowserWindow, "isDestroyed" | "isVisible" | "isMinimized"> | undefined): window is BrowserWindow {
+  return Boolean(window && !window.isDestroyed() && window.isVisible() && !window.isMinimized());
 }
 
 export function quitAndInstallUpdate(): void {
