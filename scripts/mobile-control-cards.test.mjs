@@ -311,11 +311,13 @@ test("a card published by the desktop is answered on the phone and survives a re
     assert.equal(await evaluate(`document.querySelectorAll('#message-list .control-card:not(.control-card-answered)[data-card-id="choice-answered"]').length`), 0,
       "an answered question is not offered for answering again");
 
-    // The wake control is offered because this pairing carries a scoped key.
+    // Waking the machine lives in Settings, never over a chat (the User,
+    // 2026-10-20: "это вообще не место для плашки").
     assert.equal(await evaluate(`(() => {
-      const wake = document.getElementById("machine-wake");
-      return wake && !wake.hidden ? wake.innerText : null;
-    })()`) !== null, true, "the wake control must be offered when the pairing carries a key");
+      const screen = document.getElementById("timeline-screen");
+      return /Wake machine|Machine asleep|Asleep\?/.test(screen.innerText) ||
+        [...screen.querySelectorAll("button")].some((button) => /wake/i.test(button.innerText));
+    })()`), false, "a chat must not carry the wake control");
 
     // Tap Allow, in the page.
     await evaluate(`(() => {

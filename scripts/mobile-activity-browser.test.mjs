@@ -724,6 +724,28 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     assert.match(settings, /Message alerts/);
     assert.doesNotMatch(settings, /Cloud machine/, "no wake without the key for a machine");
 
+    // With the key for a machine, waking it is offered here, in Settings: it
+    // is not a chat's business (the User, 2026-10-20).
+    await evaluate(`(() => {
+      const pairing = JSON.parse(localStorage.getItem("accordagents.mobile.pairing.v1"));
+      pairing.power = {
+        version: 1, handoffId: "handoff-qa", machineId: "m1",
+        instanceId: "i-0943b28f7231ab93c", region: "us-east-1",
+        credentials: { accessKeyId: "AKIAEXAMPLEWAKEKEY001", secretAccessKey: "synthetic", region: "us-east-1" },
+        issuedTo: "route", issuedAt: new Date(0).toISOString()
+      };
+      localStorage.setItem("accordagents.mobile.pairing.v1", JSON.stringify(pairing));
+      return true;
+    })()`);
+    await evaluate(`document.querySelector('[data-home-tab="chats"]').click()`);
+    await evaluate(`document.querySelector('[data-home-tab="settings"]').click()`);
+    const withKey = await waitFor(`(() => {
+      const list = document.getElementById("settings-list");
+      const wake = [...list.querySelectorAll("button")].find((button) => button.innerText.trim() === "Wake");
+      return document.getElementById("settings-screen").classList.contains("is-active") && wake && !wake.disabled ? list.innerText : null;
+    })()`, "Wake in Settings with the key for a machine");
+    assert.match(withKey, /Cloud machine/);
+
     // Search sits on the bar and searches the chats, from any tab.
     await evaluate(`document.getElementById("chat-search-toggle").click()`);
     await waitFor(`(() => document.getElementById("chats-screen").classList.contains("is-active") &&
