@@ -1706,34 +1706,6 @@ button.mobile-chat-group-title:active {
   outline-offset: 1px;
 }
 
-/* Waking a stopped machine, from the same place its members are used. */
-.machine-wake {
-  margin: 8px 12px 0;
-  border: 1px solid var(--mobile-border, rgba(0, 0, 0, 0.12));
-  border-radius: 12px;
-  padding: 10px 12px;
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-/* display: flex above outranks the hidden attribute, so the empty box stayed
-   on screen — a bordered bar above the composer with nothing in it. */
-.machine-wake[hidden] {
-  display: none;
-}
-
-.machine-wake button {
-  border: 1px solid var(--mobile-border, rgba(0, 0, 0, 0.12));
-  border-radius: 999px;
-  padding: 6px 14px;
-  font: inherit;
-  background: transparent;
-  color: inherit;
-}
-
 /* --- Search in the chat list ---------------------------------------------- */
 
 .mobile-chat-search {

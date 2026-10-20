@@ -8,7 +8,7 @@
     <title>AccordAgents</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="assets/accordagents-mark.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-10-20-phone-reads-server" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-10-20-wake-in-settings" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -134,9 +134,6 @@
             </header>
             <div id="stream-body" class="stream-view-body mscroll"></div>
           </section>
-          <!-- Rule 3: the phone wakes its machine itself, with the scoped key
-               handed over sealed at pairing. -->
-          <section id="machine-wake" class="machine-wake" aria-label="Machine power" hidden></section>
           <button id="jump-to-latest" class="jump-to-latest" type="button" aria-label="Jump to latest message">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 5v14M19 12l-7 7-7-7"></path>
@@ -224,8 +221,8 @@
       </main>
     </div>
     <!-- The database description both the page and the service worker load. -->
-    <script src="mobile-db.js?v=2026-10-20-phone-reads-server" defer></script>
-    <script src="jsqr.js?v=2026-10-20-phone-reads-server" defer></script>
+    <script src="mobile-db.js?v=2026-10-20-wake-in-settings" defer></script>
+    <script src="jsqr.js?v=2026-10-20-wake-in-settings" defer></script>
     <script src="mobile-event-log.js?v=2026-09-07-event-log-v1" defer></script>
     <script src="mobile-machine-wake.js?v=2026-09-07-wake-v1" defer></script>
     <script src="mobile-machine-sealing.js?v=2026-09-07-pair-sealing-v1" defer></script>
@@ -233,8 +230,8 @@
     <script src="mobile-machine-channel.js?v=2026-09-07-machine-channel-v1" defer></script>
     <!-- Rules shared with the desktop verbatim (avatars, timeline visibility),
          bundled from src/shared by the mobile build. -->
-    <script src="mobile-shared.js?v=2026-10-20-phone-reads-server" defer></script>
-    <script src="mobile-activity.js?v=2026-10-20-phone-reads-server" defer></script>
-    <script src="mobile-app.js?v=2026-10-20-phone-reads-server" defer></script>
+    <script src="mobile-shared.js?v=2026-10-20-wake-in-settings" defer></script>
+    <script src="mobile-activity.js?v=2026-10-20-wake-in-settings" defer></script>
+    <script src="mobile-app.js?v=2026-10-20-wake-in-settings" defer></script>
   </body>
 </html>

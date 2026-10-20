@@ -8048,25 +8048,6 @@
     await pollMailboxTimeline().catch(function () { return 0; });
   }
 
-  function renderMachineWake() {
-    const host = document.getElementById("machine-wake");
-    if (!host) return;
-    const power = machinePowerHandoff();
-    host.replaceChildren();
-    host.hidden = !power;
-    if (!power) return;
-    const label = document.createElement("span");
-    label.textContent = machineWakeState.detail || "Machine asleep? Wake it to keep working.";
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = machineWakeState.status === "waking" ? "Waking…" : "Wake machine";
-    button.disabled = machineWakeState.status === "waking";
-    button.addEventListener("click", function () {
-      void wakeMachineFromPhone();
-    });
-    host.append(label, button);
-  }
-
   let renderRevision = 0;
 
   async function render(connectionStatus) {
@@ -8152,7 +8133,6 @@
       }
     }
     renderChatList();
-    renderMachineWake();
     const openHomeTab = homeTab();
     showScreen(activeId ? "timeline" : openHomeTab);
     if (!activeId) {
