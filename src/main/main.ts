@@ -4565,7 +4565,15 @@ app.on("before-quit", (event) => {
   void Promise.race([cleanup, timeout]).finally(() => {
     debugLogService.writeNow("app-quit.cleanup-finished", { ms: Date.now() - cleanupStartedAt, timedOut: !cleanupDone });
     quitCleanupFinished = true;
-    app.quit();
+    // Quit again only after Electron's own quit call has returned. A quit
+    // from the Quit menu (Cmd+Q), the Dock or a signal starts in native code,
+    // so this promise can settle while that call is still emitting
+    // before-quit: a nested app.quit() then runs inside it, and the outer call
+    // overwrites the quitting state with "cancelled" on return. The windows
+    // close and the app keeps running with none (2026-10-20, the User's
+    // Cmd+Q at 08:45). The immediate runs at the loop's next wakeup, which
+    // the quit's own file and network work brings at once (0 ms measured).
+    setImmediate(() => app.quit());
   });
 });
 
