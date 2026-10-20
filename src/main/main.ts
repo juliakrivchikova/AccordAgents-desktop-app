@@ -194,7 +194,7 @@ import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, startCrashReporting, stopCrashReporting } from "./services/crashReporting";
 import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
-import { ACTIVITY_RECHECK_MS, bootstrapAppUpdater, createUpdateRestartGate, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
+import { ACTIVITY_RECHECK_MS, appHiddenForUpdate, bootstrapAppUpdater, createUpdateRestart, createUpdateRestartGate, currentUpdateWindows, quitAndInstallUpdate, showUpdateRestartPrompt } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
 import { MachineTransportMover } from "./services/machineTransportMoves";
 import { buildMobileChatList, buildMobileTimelinePage, mobileRelayChatMembers } from "./services/mobileChatCatalog";
@@ -1483,17 +1483,35 @@ function createWindow(): void {
     }
   });
   mainWindow = window;
+  // A restart for an update waits for every window to close; these say which
+  // window closed, which did not, and why a renderer could not answer.
+  const windowId = window.id;
+  void debugLogService.write("app-window.created", { windowId, windows: BrowserWindow.getAllWindows().length });
   window.on("close", () => {
+    debugLogService.writeNow("app-window.close", { windowId, forUpdate: quittingForUpdate, quitting: quitCleanupStarted });
     if (mainWindow === window) {
       mainWindow = undefined;
     }
+  });
+  window.on("closed", () => {
+    debugLogService.writeNow("app-window.closed", { windowId, windows: BrowserWindow.getAllWindows().length });
+  });
+  window.on("unresponsive", () => {
+    void debugLogService.write("app-window.unresponsive", { windowId });
+  });
+  window.on("responsive", () => {
+    void debugLogService.write("app-window.responsive", { windowId });
+  });
+  window.webContents.on("will-prevent-unload", () => {
+    debugLogService.writeNow("app-window.unload-prevented", { windowId });
   });
   window.webContents.on("destroyed", () => {
     if (mainWindow === window) {
       mainWindow = undefined;
     }
   });
-  window.webContents.on("render-process-gone", () => {
+  window.webContents.on("render-process-gone", (_event, details) => {
+    void debugLogService.write("app-window.renderer-gone", { windowId, reason: details.reason, exitCode: details.exitCode });
     if (mainWindow === window) {
       mainWindow = undefined;
     }
@@ -4082,7 +4100,12 @@ void app.whenReady().then(async () => {
       return () => { offRun(); offHello?.(); };
     },
     prompt: showUpdateRestartPrompt,
-    quitAndInstall: quitAndInstallUpdate,
+    quitAndInstall: createUpdateRestart({
+      quitAndInstall: quitAndInstallUpdate,
+      windows: currentUpdateWindows,
+      appHidden: appHiddenForUpdate,
+      log: (event, payload) => { debugLogService.writeNow(event, payload); }
+    }),
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
   bootstrapAppUpdater(debugLogService, betaUpdates, updateRestartGate);
@@ -4497,13 +4520,16 @@ void app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
+  debugLogService.writeNow("app-window.all-closed", { forUpdate: quittingForUpdate, quitting: quitCleanupStarted });
   if (process.platform !== "darwin") {
     app.quit();
   }
 });
 
 autoUpdater.on("before-quit-for-update", () => {
+  const again = quittingForUpdate;
   quittingForUpdate = true;
+  debugLogService.writeNow("app-update-before-quit", { again, windows: currentUpdateWindows() });
   // The updater cannot await the normal graceful quit gate. Kill warm CLI
   // process trees synchronously so detached background work cannot outlive the
   // app and keep mutating the repository during installation.
@@ -4511,6 +4537,12 @@ autoUpdater.on("before-quit-for-update", () => {
 });
 
 app.on("before-quit", (event) => {
+  debugLogService.writeNow("app-quit.before-quit", {
+    forUpdate: quittingForUpdate,
+    cleanupStarted: quitCleanupStarted,
+    cleanupFinished: quitCleanupFinished,
+    windows: BrowserWindow.getAllWindows().length
+  });
   if (quittingForUpdate) {
     return;
   }
@@ -4522,14 +4554,25 @@ app.on("before-quit", (event) => {
     return;
   }
   quitCleanupStarted = true;
+  const cleanupStartedAt = Date.now();
+  let cleanupDone = false;
   hubSync?.stop();
   const cleanup = Promise.allSettled([
     cliAgentRunner.shutdownWarmAgents(),
     scriptService.stop().then(() => appMcpService.stop())
-  ]);
+  ]).then(() => { cleanupDone = true; });
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, 5_000));
-  void Promise.race([cleanup.then(() => undefined), timeout]).finally(() => {
+  void Promise.race([cleanup, timeout]).finally(() => {
+    debugLogService.writeNow("app-quit.cleanup-finished", { ms: Date.now() - cleanupStartedAt, timedOut: !cleanupDone });
     quitCleanupFinished = true;
     app.quit();
   });
+});
+
+app.on("will-quit", () => {
+  debugLogService.writeNow("app-quit.will-quit", { forUpdate: quittingForUpdate });
+});
+
+app.on("quit", (_event, exitCode) => {
+  debugLogService.writeNow("app-quit.quit", { exitCode, forUpdate: quittingForUpdate });
 });

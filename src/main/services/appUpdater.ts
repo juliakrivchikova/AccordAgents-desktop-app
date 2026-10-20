@@ -1,5 +1,5 @@
 import { updateElectronApp, UpdateSourceType } from "update-electron-app";
-import { app, autoUpdater, dialog } from "electron";
+import { app, autoUpdater, BrowserWindow, dialog } from "electron";
 import { DebugLogService } from "./debugLogs";
 
 export const STABLE_UPDATE_REPO = "juliakrivchikova/AccordAgents-Releases";
@@ -166,6 +166,22 @@ export function bootstrapAppUpdater(debugLogs: DebugLogService, betaUpdates: boo
       channel: betaUpdates ? "beta" : "stable",
       repo
     });
+    // The library reports these only to the console, which a packaged app
+    // does not keep; an update that never offers itself or never installs is
+    // otherwise invisible. Registered before the library's first check.
+    autoUpdater.on("checking-for-update", () => { void debugLogs.write("app-update-checking", {}); });
+    autoUpdater.on("update-available", () => { void debugLogs.write("app-update-available", {}); });
+    autoUpdater.on("update-not-available", () => { void debugLogs.write("app-update-not-available", {}); });
+    // A failed install ("No update available, can't quit and install", a
+    // relaunch error) arrives here, not as a throw, and can be the last thing
+    // the process does: written before returning.
+    autoUpdater.on("error", (error: Error & { code?: unknown; domain?: unknown }) => {
+      debugLogs.writeNow("app-update-error", {
+        message: error instanceof Error ? error.message : String(error),
+        ...(error && error.code !== undefined ? { code: error.code } : {}),
+        ...(error && error.domain !== undefined ? { domain: error.domain } : {})
+      });
+    });
     updateElectronApp({
       updateSource: {
         type: UpdateSourceType.ElectronPublicUpdateService,
@@ -196,4 +212,126 @@ export function showUpdateRestartPrompt(info: UpdateRestartInfo): Promise<"resta
 
 export function quitAndInstallUpdate(): void {
   autoUpdater.quitAndInstall();
+}
+
+/** A window as it stands when the app restarts for an update: Electron
+ *  installs only once every window has closed, so a window that stays open
+ *  holds the restart. */
+export interface UpdateWindowState {
+  id?: number;
+  destroyed?: boolean;
+  visible?: boolean;
+  enabled?: boolean;
+  childWindows?: number;
+  focused?: boolean;
+  minimized?: boolean;
+  fullScreen?: boolean;
+  closable?: boolean;
+  rendererCrashed?: boolean;
+  /** The page is gone while the window is still open. */
+  contentsDestroyed?: boolean;
+  loading?: boolean;
+  /** The window could not be read (it went away while being read). */
+  error?: string;
+}
+
+/** The parts of a window read here; a BrowserWindow is one. */
+export interface UpdateWindowLike {
+  id: number;
+  isDestroyed(): boolean;
+  isVisible(): boolean;
+  isFocused(): boolean;
+  isMinimized(): boolean;
+  isFullScreen(): boolean;
+  isClosable(): boolean;
+  isEnabled(): boolean;
+  getChildWindows(): unknown[];
+  webContents: { isDestroyed(): boolean; isCrashed(): boolean; isLoading(): boolean } | null;
+}
+
+/** Never throws: it is read inside the quit path, where an exception would
+ *  stop the quit itself. */
+export function describeUpdateWindows(windows: UpdateWindowLike[]): UpdateWindowState[] {
+  return windows.map((window) => {
+    let id: number | undefined;
+    try {
+      id = window.id;
+      if (window.isDestroyed()) return { id, destroyed: true };
+      const contents = window.webContents && !window.webContents.isDestroyed() ? window.webContents : undefined;
+      return {
+        id,
+        destroyed: false,
+        visible: window.isVisible(),
+        enabled: window.isEnabled(),
+        focused: window.isFocused(),
+        minimized: window.isMinimized(),
+        fullScreen: window.isFullScreen(),
+        closable: window.isClosable(),
+        childWindows: window.getChildWindows().length,
+        ...(contents ? { rendererCrashed: contents.isCrashed(), loading: contents.isLoading() } : { contentsDestroyed: true })
+      };
+    } catch (error) {
+      return { ...(id !== undefined ? { id } : {}), error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+}
+
+export function currentUpdateWindows(): UpdateWindowState[] {
+  try {
+    return describeUpdateWindows(BrowserWindow.getAllWindows());
+  } catch (error) {
+    return [{ error: error instanceof Error ? error.message : String(error) }];
+  }
+}
+
+/** Whether the app itself is hidden (Cmd+H): a hidden app's windows are
+ *  closed all the same, but it is worth seeing next to a stall. */
+export function appHiddenForUpdate(): boolean | undefined {
+  try {
+    return process.platform === "darwin" ? app.isHidden() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** When to record that the app still runs after it was asked to restart. */
+export const UPDATE_RESTART_STALL_MS = [30_000, 5 * 60_000];
+
+export interface UpdateRestartOptions {
+  quitAndInstall: () => void;
+  windows: () => UpdateWindowState[];
+  appHidden?: () => boolean | undefined;
+  log: (event: string, payload: Record<string, unknown>) => void;
+  stallAfterMs?: number[];
+}
+
+/**
+ * The restart for an update, recorded: what every window looked like when it
+ * was asked for and when the call returned, and, if the app is still running
+ * a while later, that it is and what holds it. Electron closes the windows
+ * inside the call, so a window close logged between the first two records
+ * means the close was asked; a window still open with none means it was not
+ * even tried. The app quitting ends the process and with it these timers; a
+ * stall record means it did not.
+ */
+export function createUpdateRestart(options: UpdateRestartOptions): () => void {
+  let timers: Array<ReturnType<typeof setTimeout>> = [];
+  return () => {
+    for (const timer of timers) clearTimeout(timer);
+    timers = [];
+    options.log("app-update-quit-and-install", { windows: options.windows(), appHidden: options.appHidden?.() });
+    try {
+      options.quitAndInstall();
+    } catch (error) {
+      options.log("app-update-quit-and-install-error", { message: error instanceof Error ? error.message : String(error) });
+    }
+    options.log("app-update-quit-and-install-returned", { windows: options.windows() });
+    for (const afterMs of options.stallAfterMs ?? UPDATE_RESTART_STALL_MS) {
+      const timer = setTimeout(() => {
+        options.log("app-update-restart-stalled", { afterMs, windows: options.windows(), appHidden: options.appHidden?.() });
+      }, afterMs);
+      timer.unref?.();
+      timers.push(timer);
+    }
+  };
 }

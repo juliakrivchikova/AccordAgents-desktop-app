@@ -170,3 +170,99 @@ test("a busy check that throws counts as busy and is retried, never as idle", as
   await harness.settle();
   assert.equal(harness.prompts.length, 1);
 });
+
+import { createUpdateRestart, type UpdateWindowState } from "./appUpdater";
+
+function makeRestart(options: { throws?: Error; stallAfterMs?: number[] } = {}) {
+  const log: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  let windows: UpdateWindowState[] = [{ id: 1, destroyed: false, visible: true, closable: true }];
+  let calls = 0;
+  const restart = createUpdateRestart({
+    quitAndInstall: () => {
+      calls += 1;
+      if (options.throws) throw options.throws;
+    },
+    windows: () => windows,
+    log: (event, payload) => { log.push({ event, payload }); },
+    stallAfterMs: options.stallAfterMs ?? [10, 30]
+  });
+  return {
+    restart, log,
+    calls: () => calls,
+    setWindows: (next: UpdateWindowState[]) => { windows = next; },
+    events: () => log.map((entry) => entry.event)
+  };
+}
+
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("the restart for an update records every window before asking Electron to install, and again when the call returns", () => {
+  const harness = makeRestart({ stallAfterMs: [] });
+  harness.restart();
+  assert.equal(harness.calls(), 1);
+  assert.deepEqual(harness.log, [
+    { event: "app-update-quit-and-install", payload: { windows: [{ id: 1, destroyed: false, visible: true, closable: true }], appHidden: undefined } },
+    { event: "app-update-quit-and-install-returned", payload: { windows: [{ id: 1, destroyed: false, visible: true, closable: true }] } }
+  ]);
+});
+
+test("an app still running after the restart was asked for says so, with what still holds it", async () => {
+  const harness = makeRestart();
+  harness.restart();
+  harness.setWindows([{ id: 1, destroyed: false, visible: false, closable: true }]);
+  await wait(60);
+  assert.deepEqual(harness.events(), ["app-update-quit-and-install", "app-update-quit-and-install-returned", "app-update-restart-stalled", "app-update-restart-stalled"]);
+  assert.deepEqual(harness.log.slice(2).map((entry) => entry.payload), [
+    { afterMs: 10, windows: [{ id: 1, destroyed: false, visible: false, closable: true }], appHidden: undefined },
+    { afterMs: 30, windows: [{ id: 1, destroyed: false, visible: false, closable: true }], appHidden: undefined }
+  ]);
+});
+
+// Electron 31 reports a failed install as an 'error' event, not a throw; the
+// catch guards the quit path against an updater that does throw.
+test("a restart call that throws is recorded, and the stall records still follow", async () => {
+  const harness = makeRestart({ throws: new Error("updater threw"), stallAfterMs: [10] });
+  assert.doesNotThrow(() => harness.restart());
+  await wait(30);
+  assert.deepEqual(harness.events(), ["app-update-quit-and-install", "app-update-quit-and-install-error", "app-update-quit-and-install-returned", "app-update-restart-stalled"]);
+  assert.deepEqual(harness.log[1].payload, { message: "updater threw" });
+});
+
+test("asking again starts the stall records over instead of doubling them", async () => {
+  const harness = makeRestart({ stallAfterMs: [20] });
+  harness.restart();
+  await wait(5);
+  harness.restart();
+  await wait(50);
+  assert.deepEqual(harness.events(), ["app-update-quit-and-install", "app-update-quit-and-install-returned", "app-update-quit-and-install", "app-update-quit-and-install-returned", "app-update-restart-stalled"]);
+});
+
+import { describeUpdateWindows, type UpdateWindowLike } from "./appUpdater";
+
+function fakeWindow(overrides: Partial<UpdateWindowLike> = {}): UpdateWindowLike {
+  return {
+    id: 7,
+    isDestroyed: () => false,
+    isVisible: () => true,
+    isFocused: () => false,
+    isMinimized: () => false,
+    isFullScreen: () => false,
+    isClosable: () => true,
+    isEnabled: () => true,
+    getChildWindows: () => [],
+    webContents: { isDestroyed: () => false, isCrashed: () => false, isLoading: () => false },
+    ...overrides
+  };
+}
+
+test("window state for the restart record reads each window, and never throws in the quit path", () => {
+  assert.deepEqual(describeUpdateWindows([fakeWindow()]), [{
+    id: 7, destroyed: false, visible: true, enabled: true, focused: false, minimized: false, fullScreen: false, closable: true, childWindows: 0, rendererCrashed: false, loading: false
+  }]);
+  assert.deepEqual(describeUpdateWindows([fakeWindow({ isDestroyed: () => true })]), [{ id: 7, destroyed: true }]);
+  // A page already gone while its window stays open: said so, not read.
+  const pageGone = describeUpdateWindows([fakeWindow({ webContents: { isDestroyed: () => true, isCrashed: () => { throw new Error("Object has been destroyed"); }, isLoading: () => false } })])[0];
+  assert.equal(pageGone.contentsDestroyed, true);
+  assert.equal(pageGone.rendererCrashed, undefined);
+  assert.deepEqual(describeUpdateWindows([fakeWindow({ isVisible: () => { throw new Error("Object has been destroyed"); } })]), [{ id: 7, error: "Object has been destroyed" }]);
+});
