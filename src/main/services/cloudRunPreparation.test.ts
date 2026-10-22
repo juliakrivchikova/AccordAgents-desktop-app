@@ -136,6 +136,13 @@ test("selecting Cloud never provisions an absent or stopped server", async () =>
   assert.deepEqual(h.calls, []);
 });
 
+test("selecting Cloud on an instance the app just found gone says so and sets nothing up", async () => {
+  const h = harness();
+  h.options.aws.status = async () => ({ configured: false, notice: "Your cloud machine no longer exists in AWS, so it was removed." } as AwsWorkerStatus);
+  await assert.rejects(new CloudRunPreparationService(h.options).prepare(request, () => {}), /no longer exists in AWS, so it was removed/);
+  assert.deepEqual(h.calls, []);
+});
+
 test("choosing an existing AWS machine never silently switches to a different instance", async () => {
   const h = harness();
   await assert.rejects(h.service.prepare({ ...request, instanceId: "i-def" }, () => {}), /different AWS instance/);

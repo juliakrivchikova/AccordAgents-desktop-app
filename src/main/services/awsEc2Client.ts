@@ -407,6 +407,12 @@ export class SdkEc2Client implements Ec2Client {
   private async mapInstance(instance: Instance): Promise<AwsWorkerInstanceInfo | undefined> {
     const base = awsWorkerInstanceInfoFromSdkInstance(instance);
     if (!base) return undefined;
+    const described = { ...base, region: this.region, instanceType: instance.InstanceType, keyName: instance.KeyName,
+      launchedAt: instance.LaunchTime?.toISOString() };
+    // Nothing of a terminated instance is looked up: its disk and security
+    // group may already be deleted, and asking for them would turn the one
+    // answer that matters, "terminated", into an error.
+    if (base.state === "terminated") return described;
     const rootVolumeId = base.rootVolumeId;
     const groupIds = (instance.SecurityGroups ?? [])
       .map((group) => group.GroupId)
@@ -423,17 +429,13 @@ export class SdkEc2Client implements Ec2Client {
     const securityGroupId = groupResult?.SecurityGroups?.find((group) =>
       group.Tags?.some((tag) => tag.Key === AWS_WORKER_TAG_KEY && tag.Value === AWS_WORKER_TAG_VALUE))?.GroupId;
     return {
-      ...base,
-      region: this.region,
+      ...described,
       availabilityZone: instance.Placement?.AvailabilityZone,
-      instanceType: instance.InstanceType,
       vCpu: typeInfo?.vCpu,
       memoryMiB: typeInfo?.memoryMiB,
       rootVolumeId,
       rootVolumeSizeGb: volumeResult?.Volumes?.[0]?.Size,
-      securityGroupId,
-      keyName: instance.KeyName,
-      launchedAt: instance.LaunchTime?.toISOString()
+      securityGroupId
     };
   }
 

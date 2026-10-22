@@ -168,6 +168,30 @@ test("describeInstance translates InvalidInstanceID.NotFound to absence", async 
   assert.equal(await client.describeInstance("i-gone"), undefined);
 });
 
+test("describeInstance of a terminated instance says terminated without asking for its deleted disk or security group", async () => {
+  const sent: string[] = [];
+  const ec2 = fakeClient(async (command) => {
+    sent.push(command.constructor.name);
+    if (command.constructor.name !== "DescribeInstancesCommand") {
+      const error = new Error("The security group 'sg-gone' does not exist");
+      error.name = "InvalidGroup.NotFound";
+      throw error;
+    }
+    return { Reservations: [{ Instances: [{
+      InstanceId: "i-gone",
+      State: { Name: "terminated" },
+      InstanceType: "t3.small",
+      RootDeviceName: "/dev/sda1",
+      SecurityGroups: [{ GroupId: "sg-gone" }]
+    }] }] };
+  });
+  const client = new SdkEc2Client(ec2 as EC2Client, fakeClient(async () => ({})) as EC2InstanceConnectClient, "us-east-1");
+  const info = await client.describeInstance("i-gone");
+  assert.equal(info?.state, "terminated");
+  assert.equal(info?.region, "us-east-1");
+  assert.deepEqual(sent, ["DescribeInstancesCommand"]);
+});
+
 test("terminateInstance treats InvalidInstanceID.NotFound as an idempotent success", async () => {
   const ec2 = fakeClient(async () => {
     const error = new Error("The instance ID 'i-gone' does not exist");

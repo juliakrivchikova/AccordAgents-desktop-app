@@ -144,6 +144,38 @@ interface StoredAgentEnvironmentSettings {
   variables?: StoredAgentEnvironmentVariable[];
 }
 
+/** Which instance the app removed by itself, and when: only that it
+ *  happened is shown, the instance id is kept for the debug trail. */
+export interface AwsWorkerGoneNotice {
+  instanceId: string;
+  at: string;
+}
+
+/** A machine whose instance can never come back, recorded before it is
+ *  removed so that a removal cut short is finished later, also after a restart. */
+export interface LeavingMachine {
+  machineId: string;
+  instanceId: string;
+  at: string;
+}
+
+function normalizeLeavingMachines(value: unknown): LeavingMachine[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const text = (item: unknown): item is string => typeof item === "string" && item.trim().length > 0;
+  const entries = value.filter((item): item is LeavingMachine => Boolean(item) && typeof item === "object"
+    && text((item as LeavingMachine).machineId) && text((item as LeavingMachine).instanceId) && text((item as LeavingMachine).at))
+    .map((item) => ({ machineId: item.machineId, instanceId: item.instanceId, at: item.at }));
+  return entries.length ? entries.slice(-50) : undefined;
+}
+
+function normalizeAwsWorkerGoneNotice(value: unknown): AwsWorkerGoneNotice | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Partial<AwsWorkerGoneNotice>;
+  return typeof record.instanceId === "string" && record.instanceId.trim() && typeof record.at === "string" && record.at
+    ? { instanceId: record.instanceId.trim(), at: record.at }
+    : undefined;
+}
+
 interface StoredSettings {
   settingsVersion?: number;
   roundLimitDefault: number;
@@ -166,6 +198,11 @@ interface StoredSettings {
     desired: AwsWorkerSpec;
   };
   awsWorkerVolumeExpansion?: AwsWorkerVolumeExpansion;
+  /** The app removed its instance by itself because AWS no longer has it;
+   *  the AWS page says so until another instance is connected. */
+  awsWorkerGoneNotice?: AwsWorkerGoneNotice;
+  /** Machines on an instance that can never come back, not removed yet. */
+  leavingMachines?: LeavingMachine[];
   agentEnvironment?: StoredAgentEnvironmentSettings;
   cliProviderHosts?: StoredCliProviderHost[];
   assistantProviderKind?: ChatProviderKind;
@@ -2928,6 +2965,8 @@ export class SettingsService {
         : undefined,
       awsWorkerSpecAcceptance: this.normalizeAwsWorkerSpecAcceptance(settings.awsWorkerSpecAcceptance),
       awsWorkerVolumeExpansion: this.normalizeAwsWorkerVolumeExpansion(settings.awsWorkerVolumeExpansion),
+      awsWorkerGoneNotice: normalizeAwsWorkerGoneNotice(settings.awsWorkerGoneNotice),
+      leavingMachines: normalizeLeavingMachines(settings.leavingMachines),
       agentEnvironment: {
         variables: this.normalizeAgentEnvironmentVariables(settings.agentEnvironment?.variables)
       },
@@ -3397,6 +3436,8 @@ export class SettingsService {
     stored.awsWorkerRegion = credentials.region;
     stored.awsWorkerHandle = handle;
     stored.cloudRunsMode = "aws";
+    // Another instance is connected: the old one's removal is no longer news.
+    stored.awsWorkerGoneNotice = undefined;
     await this.writeStored(stored);
   }
 
@@ -3779,6 +3820,8 @@ export class SettingsService {
       awsWorkerProvisioningToken: _token,
       awsWorkerSpecAcceptance: _spec,
       awsWorkerVolumeExpansion: _volume,
+      awsWorkerGoneNotice: _goneNotice,
+      leavingMachines: _leavingMachines,
       cloudRuns: _cloudRuns,
       cloudRunsMode: _cloudRunsMode,
       cloudRunsDeviceId: _cloudRunsDeviceId,
@@ -3848,6 +3891,8 @@ export class SettingsService {
       awsWorkerProvisioningToken: stored.awsWorkerProvisioningToken,
       awsWorkerSpecAcceptance: stored.awsWorkerSpecAcceptance,
       awsWorkerVolumeExpansion: stored.awsWorkerVolumeExpansion,
+      awsWorkerGoneNotice: stored.awsWorkerGoneNotice,
+      leavingMachines: stored.leavingMachines,
       cloudRuns: stored.cloudRuns,
       cloudRunsMode: stored.cloudRunsMode,
       cloudRunsDeviceId: stored.cloudRunsDeviceId,
@@ -3965,6 +4010,57 @@ export class SettingsService {
   async getAwsWorkerVolumeExpansion(): Promise<AwsWorkerVolumeExpansion | undefined> {
     const stored = await this.readStored();
     return this.normalizeAwsWorkerVolumeExpansion(stored.awsWorkerVolumeExpansion);
+  }
+
+  /** Forgets the AWS instance `instanceId` in one write, and only while it
+   *  is still the saved one; false when another instance was saved meanwhile.
+   *  Without `keepCredentials` this app's AWS keys go too (Delete). The
+   *  notice, when given, is what the AWS page says about it; otherwise any
+   *  earlier one ends. */
+  async forgetAwsWorkerInstance(instanceId: string, options: {
+    keepCredentials: boolean;
+    notice?: AwsWorkerGoneNotice;
+    mode?: CloudRunWorkerMode;
+  }): Promise<boolean> {
+    const stored = await this.readStored();
+    if (stored.awsWorkerHandle?.instanceId !== instanceId) return false;
+    stored.awsWorkerHandle = undefined;
+    stored.awsWorkerOperation = undefined;
+    stored.awsWorkerSpecAcceptance = undefined;
+    stored.awsWorkerVolumeExpansion = undefined;
+    if (!options.keepCredentials) {
+      stored.encryptedAwsCredentials = undefined;
+      stored.awsWorkerRegion = undefined;
+      stored.awsWorkerProvisioningToken = undefined;
+    }
+    if (options.mode) stored.cloudRunsMode = options.mode;
+    stored.awsWorkerGoneNotice = normalizeAwsWorkerGoneNotice(options.notice);
+    await this.writeStored(stored);
+    return true;
+  }
+
+  async getAwsWorkerGoneNotice(): Promise<AwsWorkerGoneNotice | undefined> {
+    return normalizeAwsWorkerGoneNotice((await this.readStored()).awsWorkerGoneNotice);
+  }
+
+  /** Records machines that leave with their instance, before any is removed. */
+  async addLeavingMachines(entries: LeavingMachine[]): Promise<void> {
+    if (!entries.length) return;
+    const stored = await this.readStored();
+    const ids = new Set(entries.map((entry) => entry.machineId));
+    stored.leavingMachines = normalizeLeavingMachines([...(stored.leavingMachines ?? []).filter((entry) => !ids.has(entry.machineId)), ...entries]);
+    await this.writeStored(stored, true);
+  }
+
+  async listLeavingMachines(): Promise<LeavingMachine[]> {
+    return (normalizeLeavingMachines((await this.readStored()).leavingMachines) ?? []).map((entry) => ({ ...entry }));
+  }
+
+  async clearLeavingMachine(machineId: string): Promise<void> {
+    const stored = await this.readStored();
+    if (!stored.leavingMachines?.some((entry) => entry.machineId === machineId)) return;
+    stored.leavingMachines = normalizeLeavingMachines(stored.leavingMachines.filter((entry) => entry.machineId !== machineId));
+    await this.writeStored(stored);
   }
 
   async saveAwsWorkerSpecAcceptance(instanceId: string, desired: AwsWorkerSpec): Promise<void> {

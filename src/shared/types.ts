@@ -214,6 +214,9 @@ export interface AwsWorkerStatus {
   message?: string;
   /** Failure of the requested mutation, independent of the observed EC2 state. */
   actionError?: string;
+  /** Something the app did by itself that the AWS page tells the User in one
+   *  line: the instance AWS no longer has was removed, with its machine. */
+  notice?: string;
   persistentStorage?: {
     rootVolumeBackedByEbs: boolean;
     rootDeviceName?: string;
