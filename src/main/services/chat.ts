@@ -1085,14 +1085,53 @@ export class ChatService {
     };
   }
 
-  /** A member whose provider went away must not keep a warm process that still
-   *  holds the old key; the runner would otherwise keep it until the idle timeout. */
-  private async closeWarmAgentsForParticipant(conversationId: string, participantId: string): Promise<void> {
+  /** Retires every warm process of one member in this chat (and the
+   *  background tasks it carries) instead of leaving it until the idle
+   *  timeout: when its provider went away and the process still holds the old
+   *  key, or when the member left the chat. Never throws; a failed close is
+   *  logged. */
+  private async closeWarmAgentsForParticipant(
+    conversationId: string,
+    participantId: string,
+    reason: "provider-binding-changed" | "member-removed" = "provider-binding-changed"
+  ): Promise<void> {
     const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "closeWarmAgents">>;
     if (typeof runner.closeWarmAgents !== "function") {
       return;
     }
-    await runner.closeWarmAgents.call(this.cliRunner, conversationId, participantId, "provider-binding-changed").catch(() => undefined);
+    try {
+      await runner.closeWarmAgents.call(this.cliRunner, conversationId, participantId, reason);
+    } catch (error) {
+      void this.debugLogs.write("chat.warm-agents.close-error", {
+        conversationId,
+        participantId,
+        reason,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  /** A removed member's warm CLI process, and the background tasks it
+   *  carries, end with its membership instead of lingering until the idle
+   *  timeout. Called once the removal is saved. Only that member's own
+   *  processes in this chat are closed (another member's turn is untouched),
+   *  and only on the host that runs it: a machine member's process is closed
+   *  by its machine when the member list it receives no longer has it (see
+   *  membersDroppedFrom). Closing reports its background tasks as ended. */
+  private retireRemovedMembers(conversationId: string, removed: ChatParticipant[]): void {
+    for (const participant of removed) {
+      if (!this.ownsParticipant(participant)) {
+        continue;
+      }
+      void this.closeWarmAgentsForParticipant(conversationId, participant.id, "member-removed");
+    }
+  }
+
+  /** Members `before` had that `after` no longer has: a member list that
+   *  arrived from another device removed them. */
+  private membersDroppedFrom(before: Conversation, after: Conversation): ChatParticipant[] {
+    const remaining = new Set(this.chatParticipants(after).map((participant) => participant.id));
+    return this.chatParticipants(before).filter((participant) => !remaining.has(participant.id));
   }
 
   /** Machines transport: participants whose home is an enrolled machine run
@@ -1819,18 +1858,22 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat") {
       return conversation;
     }
-    return this.withChatMutation(conversation, async () => {
-      this.removeParticipantsInMutation(conversation, [request.participantId], new Date().toISOString());
+    const retired: ChatParticipant[] = [];
+    const saved = await this.withChatMutation(conversation, async () => {
+      retired.push(...this.removeParticipantsInMutation(conversation, [request.participantId], new Date().toISOString()));
       await this.saveConversation(conversation);
       return conversation;
     });
+    this.retireRemovedMembers(conversation.id, retired);
+    return saved;
   }
 
   /**
    * The one member removal, shared by the member list (removeParticipant) and
    * an approved member request (applyQueuedMemberRemovals). The caller holds
-   * the chat mutation and saves. Every target is checked before anything is
-   * changed, so a refused removal leaves the chat untouched.
+   * the chat mutation and saves, and once the save succeeded passes the
+   * returned members to retireRemovedMembers. Every target is checked before
+   * anything is changed, so a refused removal leaves the chat untouched.
    *
    * The chat must be idle: a removed member's own turn would keep writing its
    * reply, approvals and session after this cleanup ran, and an open member
@@ -3721,6 +3764,7 @@ export class ChatService {
       // requireChat recovers a run no live process owns any more (the same
       // recovery every chat read does) before the idle check below.
       const conversation = held ?? await this.requireChat(conversationId);
+      const retired: ChatParticipant[] = [];
       await this.withChatMutation(conversation, async () => {
         const queued = this.chatAppToolApprovals(conversation).filter((approval) => this.isQueuedMemberRemovalApproval(approval));
         if (queued.length === 0) {
@@ -3743,6 +3787,7 @@ export class ChatService {
           const targetIds = request.operations.map((operation) => operation.participantId).filter((id) => present.has(id));
           try {
             const removed = targetIds.length > 0 ? this.removeParticipantsInMutation(conversation, targetIds, now) : [];
+            retired.push(...removed);
             this.upsertAppToolApproval(conversation, {
               ...decided,
               appliedParticipantIds: removed.map((participant) => participant.id),
@@ -3766,6 +3811,7 @@ export class ChatService {
         await this.saveConversation(conversation);
         this.forgetQueuedMemberRemovals(conversationId, generation);
       });
+      this.retireRemovedMembers(conversationId, retired);
     });
   }
 
@@ -6999,11 +7045,13 @@ export class ChatService {
     // The merge runs inside the mutation, against the copy refreshed there,
     // so a reply or session id written by a turn on this machine between the
     // read and the write is never replaced by an older desktop copy.
+    const dropped: ChatParticipant[] = [];
     await this.withChatMutation(existing, async () => {
       const merged = merge(existing);
       if (!merged) {
         return;
       }
+      dropped.push(...this.membersDroppedFrom(existing, merged));
       this.reconcileReplicatedWatcher(existing, merged);
       if (merged.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
       existing.messages = merged.messages;
@@ -7013,6 +7061,7 @@ export class ChatService {
       existing.updatedAt = merged.updatedAt;
       await this.saveConversation(existing);
     });
+    this.retireRemovedMembers(conversationId, dropped);
   }
 
   /** Called by the transport only after the entire copied chat is durable. */
@@ -20070,6 +20119,7 @@ export class ChatService {
     }
     if (existing.kind !== "chat") return "applied";
     let waiting = false;
+    const dropped: ChatParticipant[] = [];
     await this.withChatMutation(existing, async () => {
       const result = applyChatChanges(existing, payload, event.originId, transport.applyPolicy(existing));
       if (result.status !== "applied") return;
@@ -20082,6 +20132,7 @@ export class ChatService {
       // A member that watches the chat here sees new user messages the way a
       // local one does: a new one resets its wake chain.
       this.reconcileReplicatedWatcher(existing, result.conversation);
+      const droppedHere = this.membersDroppedFrom(existing, result.conversation);
       const wasArchived = existing.metadata.archived === true;
       existing.title = result.conversation.title;
       const repoChanged = payload.changes.some((change) => change.type === "conversation.updated" && change.repoPath !== undefined);
@@ -20102,7 +20153,11 @@ export class ChatService {
       }
       if (!wasArchived && existing.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
       await this.saveConversation(existing, { emitChanges: false });
+      dropped.push(...droppedHere);
     });
+    // A member this host runs that the member list no longer has (removed on
+    // the desktop) ends its process here, as a local member's does there.
+    this.retireRemovedMembers(conversationId, dropped);
     if (waiting) return wait();
     this.waitingChatChanges.delete(event.eventId);
     this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");

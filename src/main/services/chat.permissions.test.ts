@@ -6397,6 +6397,10 @@ test("a removal whose write fails stays approved and waiting, and applies at the
   const requested = await service.requestParticipantChangeFromTool(actor, {
     operations: [{ type: "remove_participant_from_chat", handle: "target" }]
   }) as { approvalId: string };
+  const closedWarm: string[] = [];
+  (service as any).cliRunner.closeWarmAgents = async (_conversationId: string, participantId: string) => {
+    closedWarm.push(participantId);
+  };
   const save = storage.saveConversation.bind(storage);
   let failNextRemovalWrite = true;
   storage.saveConversation = async (conversation: Conversation) => {
@@ -6412,6 +6416,7 @@ test("a removal whose write fails stays approved and waiting, and applies at the
 
   assert.equal(failNextRemovalWrite, false, "the removal write was attempted");
   assert.ok(memberIds(storage.current).includes(target.id));
+  assert.deepEqual(closedWarm, [], "a removal that was not stored leaves the member's process alone");
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
   assert.equal(typeof storage.current.metadata.pendingAppToolApprovals[0].memberRemovalQueuedAt, "string");
 
@@ -6432,6 +6437,8 @@ test("a removal whose write fails stays approved and waiting, and applies at the
   await waitFor(() => !memberIds(storage.current).includes(target.id));
   assert.deepEqual(storage.current.metadata.pendingAppToolApprovals[0].appliedParticipantIds, [target.id]);
   assert.equal(storage.current.messages.filter((message: ChatMessage) => message.content.startsWith("Removed @target")).length, 1);
+  await waitFor(() => closedWarm.length === 1);
+  assert.deepEqual(closedWarm, [target.id]);
 });
 
 function queuedRemovalApproval(targetId: string, handle: string, patch: Partial<ChatAppToolApproval> = {}): ChatAppToolApproval {
@@ -6699,6 +6706,94 @@ test("a removal recorded while an older pass is finishing keeps its index", () =
   (service as any).forgetQueuedMemberRemovals("conversation-1", olderPass);
 
   assert.equal(index.has("conversation-1"), true);
+});
+
+test("a removed member's warm CLI process is closed, and only that member's, only where it runs", async () => {
+  const closed: Array<[string, string, string]> = [];
+  const spyOnClose = (service: ChatService): void => {
+    (service as any).cliRunner.closeWarmAgents = async (conversationId: string, participantId: string, reason: string) => {
+      closed.push([conversationId, participantId, reason]);
+    };
+  };
+  {
+    // Approved through the tool, while another member keeps its own process.
+    const { service, storage, actor, target } = memberRemovalFixture();
+    spyOnClose(service);
+    const requested = await service.requestParticipantChangeFromTool(actor, {
+      operations: [{ type: "remove_participant_from_chat", handle: "target" }]
+    }) as { approvalId: string };
+    await service.respondToAppToolApproval({ conversationId: storage.current.id, approvalId: requested.approvalId, approve: true });
+    await waitFor(() => closed.length === 1);
+    assert.deepEqual(closed, [["conversation-1", target.id, "member-removed"]]);
+  }
+  closed.length = 0;
+  {
+    // From the member list.
+    const { service, storage, target } = memberRemovalFixture();
+    spyOnClose(service);
+    await service.removeParticipant({ conversationId: storage.current.id, participantId: target.id });
+    await waitFor(() => closed.length === 1);
+    assert.deepEqual(closed, [["conversation-1", target.id, "member-removed"]]);
+  }
+  closed.length = 0;
+  {
+    // A member whose home is a machine has no process on this desktop; a
+    // local member removed alongside it is closed, so the check is not vacuous.
+    const { service, storage, target } = memberRemovalFixture();
+    const onMachine = { ...chatParticipant("claude-code"), id: "machine-member", handle: "remote", homeMachineId: "machine" };
+    storage.current.metadata.participants = [...storage.current.metadata.participants, onMachine];
+    spyOnClose(service);
+    await service.removeParticipant({ conversationId: storage.current.id, participantId: onMachine.id });
+    await service.removeParticipant({ conversationId: storage.current.id, participantId: target.id });
+    await waitFor(() => closed.length === 1);
+    assert.equal(memberIds(storage.current).includes(onMachine.id), false);
+    assert.deepEqual(closed, [["conversation-1", target.id, "member-removed"]]);
+  }
+  closed.length = 0;
+  {
+    // A refused or unsaved removal leaves the member's process alone.
+    const { service, storage, assistant, target } = memberRemovalFixture();
+    spyOnClose(service);
+    await assert.rejects(() => service.removeParticipant({ conversationId: storage.current.id, participantId: assistant.id }), /Chat Assistant/);
+    const save = storage.saveConversation.bind(storage);
+    storage.saveConversation = async () => { throw new Error("SQLITE_FULL"); };
+    await assert.rejects(() => service.removeParticipant({ conversationId: storage.current.id, participantId: target.id }), /SQLITE_FULL/);
+    storage.saveConversation = save;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(closed, []);
+  }
+});
+
+test("on a machine, removing or losing one of its own members closes that member's process there, and no one else's", async () => {
+  const closed: string[] = [];
+  const { service, storage } = memberRemovalFixture();
+  service.setHostMachineId("machine");
+  (service as any).cliRunner.closeWarmAgents = async (_conversationId: string, participantId: string, reason: string) => {
+    closed.push(`${participantId}:${reason}`);
+  };
+  const ownA = { ...chatParticipant("claude-code"), id: "own-a", handle: "owna", homeMachineId: "machine" };
+  const ownB = { ...chatParticipant("claude-code"), id: "own-b", handle: "ownb", homeMachineId: "machine" };
+  const elsewhere = { ...chatParticipant("claude-code"), id: "elsewhere", handle: "elsewhere", homeMachineId: "other-machine" };
+  storage.current.metadata.participants = [...storage.current.metadata.participants, ownA, ownB, elsewhere];
+
+  // Applied here (an approved request of a member on this machine).
+  await service.removeParticipant({ conversationId: "conversation-1", participantId: ownA.id });
+  await waitFor(() => closed.length === 1);
+  assert.deepEqual(closed, ["own-a:member-removed"]);
+
+  // The desktop removed members; this machine learns it from the member list.
+  await service.applyReplicatedConversation("conversation-1", (previous) => previous && ({
+    ...previous,
+    metadata: {
+      ...previous.metadata,
+      participants: (previous.metadata.participants as ChatParticipant[]).filter((participant) =>
+        participant.id !== ownB.id && participant.id !== elsewhere.id && participant.id !== "target-participant")
+    }
+  }));
+  await waitFor(() => closed.length === 2);
+  await new Promise((resolve) => setImmediate(resolve));
+  // The desktop-local member and another machine's member have no process here.
+  assert.deepEqual(closed, ["own-a:member-removed", "own-b:member-removed"]);
 });
 
 test("a denied member removal changes nothing and tells the asking member", async () => {
