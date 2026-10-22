@@ -618,6 +618,12 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   chatService.setParticipantRequestDelegate({
     delegateParticipantRequest: (request) => host.delegateParticipantRequest(request)
   });
+  // A member here compacting its own context goes through the desktop too,
+  // when it is there, so the User sees and can stop it as one they started.
+  chatService.setCompactionDelegate({
+    canDelegateCompaction: () => host.canDelegateCompaction(),
+    delegateCompaction: (request) => host.delegateCompaction(request)
+  });
   // And a picture the User attached is read from the desktop too: the chat's
   // text is replicated here, its attachment files are not.
   chatService.setMachineLink({

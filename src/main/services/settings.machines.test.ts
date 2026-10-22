@@ -103,6 +103,31 @@ test("machine run intents and held stops survive a fresh SettingsService reading
   }
 });
 
+test("what the desktop published to a machine's runtime survives a fresh SettingsService reading the disk", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-published-"));
+  const file = path.join(dir, "settings.json");
+  const instance = (): SettingsService => {
+    const service = new SettingsService();
+    (service as any).settingsPath = file;
+    return service;
+  };
+  try {
+    const published = { instanceId: "runtime-run-1", settings: "digest-of-settings", roster: "digest-of-roster" };
+    const record = { id: "machine-p", name: "Published", deviceId: "device-p", pairingKey: "pairing-p", createdAt: "2026-10-22T00:00:00.000Z", published };
+    await instance().saveMachine(record);
+    assert.deepEqual((await instance().listMachines())[0].published, published, "a desktop restart remembers it, so it publishes nothing again");
+    const disk = JSON.parse(await readFile(file, "utf8"));
+    disk.machines[0].published = { instanceId: 7, settings: "x".repeat(300), roster: "kept" };
+    await writeFile(file, JSON.stringify(disk));
+    assert.deepEqual((await instance().listMachines())[0].published, { roster: "kept" }, "malformed parts are dropped, so they are published again");
+    disk.machines[0].published = "nonsense";
+    await writeFile(file, JSON.stringify(disk));
+    assert.equal((await instance().listMachines())[0].published, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("concurrent machine runtimes publish one complete secret key and corrupt keys never get replaced", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-key-"));
   const modulePath = path.join(__dirname, "..", "platform.js");

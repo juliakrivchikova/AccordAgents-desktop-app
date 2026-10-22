@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { desktopEvents, hostEvents, DESKTOP_ID, MACHINE_ID, DESKTOP_ISSUER } from "./machine-test-events.mjs";
 
@@ -139,6 +143,8 @@ test("a command queued with the machine offline survives a desktop restart and e
     link.connections.get(record.id).eventChannel.start();
     await waitFor(() => outcomes.some(outcome => outcome.runId === "offline-command"), 10_000);
     assert.deepEqual(runs, [{ id: "offline-command", environment: "synthetic-retained-secret" }]);
+    // Newer settings that reached the machine meanwhile are put back after it ran.
+    await waitFor(() => imported.agentEnvironment[0].value === "a-later-settings-value", 5_000);
     assert.equal(outcomes.find(outcome => outcome.runId === "offline-command").status, "completed");
     await waitFor(() => !record.pendingRuns.some(run => run.runId === "offline-command"), 5_000);
     assert.ok(!logs.some(entry => entry.event === "machine-link.turn.queried" && entry.payload.runId === "offline-command"));
@@ -924,8 +930,17 @@ test("trust changes queue while a known machine is offline and outbox failures r
     assert.equal(rows.length, 2);
     const latest = await desktopEvents.eventStorage.deviceEventBlobs().hydrate(rows[1].event.payload);
     assert.equal(latest.roster.peers.some(peer => peer.deviceId === controller.originId), false);
+    // The same peers again are not published again.
+    await link.refreshTrustRosters();
+    assert.equal((await pending()).filter(row => row.event.kind === "machine.trust.roster").length, 2);
+    // A change that cannot be written reaches the caller, and is published by
+    // the next attempt rather than taken as already sent.
+    peers = [{ deviceId: controller.originId, publicKeyDerBase64: controller.publicKeyDerBase64, role: "desktop" }];
     desktopEvents.eventStorage.appendChatEvent = async () => { throw new Error("SQLITE_FULL: trust outbox"); };
     await assert.rejects(link.refreshTrustRosters(), /SQLITE_FULL/);
+    desktopEvents.eventStorage.appendChatEvent = append;
+    await link.refreshTrustRosters();
+    assert.equal((await pending()).filter(row => row.event.kind === "machine.trust.roster").length, 3);
   } finally {
     desktopEvents.eventStorage.appendChatEvent = append;
     link.close();
@@ -1190,4 +1205,311 @@ test("a reconnect for a move keeps the turns waiting for the machine's answer", 
   link.connections = new Map([["m", { record, pendingTurns, pendingTurnConversations, client: { close: () => undefined } }]]);
   await link.disconnectMachine("m");
   assert.equal(outcome.status, "failed");
+});
+
+// Compacting a member that runs on a machine: the command path of its turns,
+// the machine's own compaction, its outcome line and context use returned.
+test("a member on a machine is compacted there through its turns' command path, and Stop reaches it", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  let host;
+  let link;
+  try {
+    const pairing = { ...machinePairing(address.url), rendezvousId: "rv-compact-" + Date.now() };
+    const record = { id: "machine-compact", name: "Compact box", deviceId: "", pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
+    const logs = [];
+    const debugLogs = { write: async (event, payload) => logs.push({ event, payload }) };
+    link = new MachineLinkService({
+      listMachines: async () => [record], saveMachine: async (next) => { Object.assign(record, next); return [record]; }, removeMachine: async () => [],
+      getMachinePairing: async (key) => (key === pairing.rendezvousId ? pairing : undefined),
+      exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: "{}", agentEnvironment: [{ key: "K", value: "v" }] })
+    }, debugLogs, { ...desktopEvents, appVersion: "desktop-v", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50 });
+    const participant = { id: "compact-member", handle: "bot", roleConfigId: "r", kind: "claude-code", homeMachineId: record.id };
+    const conversation = { id: "compact-chat-" + Date.now(), kind: "chat", title: "c", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      messages: [], metadata: { participants: [participant] }, findings: [] };
+    const conversations = new Map([[conversation.id, conversation]]);
+    const compactions = [];
+    const turns = [];
+    let holdCompaction = false;
+    let releaseTurn;
+    const delegated = [];
+    link.onCompactionDelegate((event) => { delegated.push(event); });
+    const usage = { usedTokens: 1200, contextWindowTokens: 200000, percentage: 1, source: "claude-code", updatedAt: new Date().toISOString() };
+    host = new MachineHostService({
+      runMachineHostedTurn: async (request) => {
+        turns.push(request.runId);
+        if (request.runId === "held-turn") await new Promise((resolve) => { releaseTurn = resolve; });
+        return { messages: [], warnings: [] };
+      },
+      runMachineHostedCompaction: async (request, signal) => {
+        compactions.push({ ...request, abortedAtStart: signal?.aborted === true, turnsRunning: typeof releaseTurn === "function" });
+        if (holdCompaction) await new Promise((resolve) => signal?.addEventListener("abort", resolve, { once: true }));
+        const outcome = signal?.aborted ? "failed" : "completed";
+        const message = { id: `outcome-${request.runId}`, role: "system", content: signal?.aborted ? "Could not compact @bot context: Compaction was cancelled.." : "Compacted @bot context.",
+          createdAt: new Date().toISOString(), status: "done",
+          metadata: { runId: request.runId, threadId: request.threadId, compaction: { triggeredBy: request.triggeredBy, participantId: request.participantId, outcome, instructionsProvided: Boolean(request.instructions) } } };
+        return { messages: [message], warnings: signal?.aborted ? [message.content] : [], contextUsage: usage };
+      },
+      cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined
+    }, {
+      getConversation: async (id) => conversations.get(id),
+      // As the real storage answers: without a message id, no message is "held".
+      conversationPresence: async (id, messageId) => {
+        const chat = conversations.get(id);
+        return chat && { kind: chat.kind, hasMessage: Boolean(messageId) && chat.messages.some((message) => message.id === messageId) };
+      }
+    }, { importMachineSettingsSnapshot: async () => undefined }, debugLogs,
+    { ...hostEvents, pairing, deviceId: MACHINE_ID, appVersion: "machine-v", createClient: undefined, reconnectDelayMs: 50 });
+    await link.start();
+    await host.start();
+    await waitFor(() => link.isMachineConnected(record.id) && record.lastHello?.compactionSupported === true, 10_000);
+    await waitFor(() => host.canDelegateCompaction(), 10_000);
+
+    const result = await link.compactOnMachine({ conversation, participant, runId: "compact-run-1",
+      compaction: { triggeredBy: "user", instructions: "keep the plan", threadId: "thread-7" } });
+    assert.equal(result.status, "completed");
+    assert.equal(result.messages[0].content, "Compacted @bot context.");
+    assert.equal(result.messages[0].metadata.compaction.outcome, "completed");
+    assert.deepEqual(result.contextUsage, usage, "the member's new context use comes back with the outcome");
+    assert.equal(compactions.length, 1);
+    assert.equal(compactions[0].participantId, participant.id);
+    assert.equal(compactions[0].instructions, "keep the plan");
+    assert.equal(compactions[0].threadId, "thread-7");
+    assert.deepEqual(turns, [], "a compaction is never run as a turn");
+    const command = await desktopEvents.eventStorage.getChatEvent("machine-command:compact-run-1");
+    assert.ok(command, "the compaction is the same durable command a turn is");
+    await result.acknowledge();
+    await waitFor(() => logs.some((entry) => entry.event === "machine-host.terminal.acked" && entry.payload?.runId === "compact-run-1"), 5_000);
+    await waitFor(() => !(record.pendingRuns ?? []).some((run) => run.runId === "compact-run-1"), 5_000);
+
+    // Stop while it runs: the machine's compaction is aborted and says so.
+    holdCompaction = true;
+    const stop = new AbortController();
+    const stopping = link.compactOnMachine({ conversation, participant, runId: "compact-run-2", signal: stop.signal, compaction: { triggeredBy: "agent" } });
+    await waitFor(() => compactions.length === 2, 5_000);
+    stop.abort();
+    const stopped = await stopping;
+    assert.equal(stopped.status, "interrupted");
+    assert.equal(stopped.messages[0].metadata.compaction.outcome, "failed");
+    assert.equal(compactions[1].triggeredBy, "agent");
+    await stopped.acknowledge?.();
+
+    // Stopped before it was sent: nothing reaches the machine.
+    const early = new AbortController();
+    early.abort();
+    const notSent = await link.compactOnMachine({ conversation, participant, runId: "compact-run-3", signal: early.signal, compaction: { triggeredBy: "user" } });
+    assert.equal(notSent.status, "interrupted");
+    assert.equal(notSent.sent, false);
+    assert.equal(compactions.length, 2);
+
+    // A compaction waits for the member's earlier command to finish, not only
+    // to be admitted (a Claude Code member takes messages while it works).
+    holdCompaction = false;
+    const message = { id: "held-message", role: "user", content: "work", createdAt: new Date().toISOString(), status: "done" };
+    conversation.messages.push(message);
+    const turn = link.runTurn({ conversation, participant, triggerMessage: message, runId: "held-turn", pendingMessageId: "held-reply" });
+    await waitFor(() => typeof releaseTurn === "function", 5_000);
+    const queued = link.compactOnMachine({ conversation, participant, runId: "compact-run-4", compaction: { triggeredBy: "user" } });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(compactions.length, 2, "not started while the earlier turn runs");
+    releaseTurn();
+    releaseTurn = undefined;
+    await (await turn).acknowledge?.();
+    const afterTurn = await queued;
+    assert.equal(afterTurn.status, "completed");
+    assert.equal(compactions[2].turnsRunning, false);
+    await afterTurn.acknowledge?.();
+
+    // A member here asking to compact itself is handed to the desktop, once.
+    await host.delegateCompaction({ conversationId: conversation.id, participantId: participant.id, runId: "self-run", instructions: "keep it" });
+    await host.delegateCompaction({ conversationId: conversation.id, participantId: participant.id, runId: "self-run", instructions: "keep it" });
+    await waitFor(() => delegated.length >= 1, 5_000);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual(delegated, [{ machineId: record.id, conversationId: conversation.id, participantId: participant.id, runId: "self-run", instructions: "keep it" }]);
+
+    // A compaction does not overtake a turn of its member still waiting here
+    // for its chat; the turn runs first, then the compaction.
+    const late = { id: "late-message", role: "user", content: "late", createdAt: new Date().toISOString(), status: "done" };
+    const waitingTurn = link.runTurn({ conversation, participant, triggerMessage: late, runId: "waiting-turn", pendingMessageId: "waiting-reply" });
+    await waitFor(() => logs.some((entry) => entry.event === "machine-host.turn.awaiting-chat" && entry.payload?.runId === "waiting-turn"), 5_000);
+    const behind = link.compactOnMachine({ conversation, participant, runId: "compact-run-5", compaction: { triggeredBy: "user" } });
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.equal(compactions.length, 3, "the compaction waits behind the waiting turn");
+    conversation.messages.push(late);
+    await (await waitingTurn).acknowledge?.();
+    const ran = await behind;
+    assert.equal(ran.status, "completed");
+    assert.ok(turns.indexOf("waiting-turn") >= 0);
+    await ran.acknowledge?.();
+  } finally {
+    host?.close();
+    link?.close();
+    await relay.close();
+  }
+});
+
+test("a machine runtime that cannot compact is sent no compaction and is not wedged by one", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  let host;
+  let link;
+  try {
+    const pairing = { ...machinePairing(address.url), rendezvousId: "rv-compact-old-" + Date.now() };
+    const record = { id: "machine-compact-old", name: "Old box", deviceId: "", pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
+    const logs = [];
+    const debugLogs = { write: async (event, payload) => logs.push({ event, payload }) };
+    link = new MachineLinkService({
+      listMachines: async () => [record], saveMachine: async (next) => { Object.assign(record, next); return [record]; }, removeMachine: async () => [],
+      getMachinePairing: async (key) => (key === pairing.rendezvousId ? pairing : undefined),
+      exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: "{}", agentEnvironment: [] })
+    }, debugLogs, { ...desktopEvents, appVersion: "desktop-v", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50 });
+    const participant = { id: "old-compact-member", handle: "bot", roleConfigId: "r", kind: "codex-cli", homeMachineId: record.id };
+    const conversation = { id: "old-compact-chat", kind: "chat", title: "c", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      messages: [{ id: "old-compact-message", role: "user", content: "hi", createdAt: new Date().toISOString(), status: "done" }], metadata: { participants: [participant] }, findings: [] };
+    const conversations = new Map([[conversation.id, conversation]]);
+    const turns = [];
+    // A runtime from before compactions: no runMachineHostedCompaction.
+    host = new MachineHostService({
+      runMachineHostedTurn: async (request) => { turns.push(request.runId); return { messages: [], warnings: [] }; },
+      cancelRun: () => true, respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined
+    }, { getConversation: async (id) => conversations.get(id) }, { importMachineSettingsSnapshot: async () => undefined }, debugLogs,
+    { ...hostEvents, pairing, deviceId: MACHINE_ID, appVersion: "machine-old", createClient: undefined, reconnectDelayMs: 50 });
+    await link.start();
+    await host.start();
+    await waitFor(() => link.isMachineConnected(record.id) && Boolean(record.lastHello?.instanceId), 10_000);
+    assert.equal(record.lastHello.compactionSupported, undefined);
+    assert.equal(host.canDelegateCompaction(), false, "a desktop that did not say it takes them is not handed any");
+    const refused = await link.compactOnMachine({ conversation, participant, runId: "old-compact-run", compaction: { triggeredBy: "user" } });
+    assert.equal(refused.status, "failed");
+    assert.equal(refused.sent, false);
+    assert.match(refused.error, /@bot is hosted on Old box, which still runs an older version of AccordAgents that cannot compact members\. This computer updates it the next time it is connected and idle; compact again after that$/);
+    assert.equal(await desktopEvents.eventStorage.getChatEvent("machine-command:old-compact-run"), undefined, "nothing was queued for it");
+    assert.ok(logs.some((entry) => entry.event === "machine-link.compaction.runtime-outdated"));
+    // The machine still runs turns afterwards.
+    const turn = await link.runTurn({ conversation, participant, triggerMessage: conversation.messages[0], runId: "old-compact-turn", pendingMessageId: "old-compact-reply" });
+    assert.equal(turn.status, "completed");
+    assert.deepEqual(turns, ["old-compact-turn"]);
+    await turn.acknowledge?.();
+  } finally {
+    host?.close();
+    link?.close();
+    await relay.close();
+  }
+});
+
+test("settings and the trust roster are published to a machine only when they change or its runtime is new", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const relay = createReferenceRelayServer();
+  const address = await relay.listen();
+  let host;
+  let link;
+  const append = desktopEvents.eventStorage.appendChatEvent.bind(desktopEvents.eventStorage);
+  const published = [];
+  const rosterDir = await mkdtemp(path.join(os.tmpdir(), "accord-quiet-roster-"));
+  try {
+    const pairing = { ...machinePairing(address.url), rendezvousId: "rv-quiet-" + Date.now() };
+    const record = { id: "machine-quiet", name: "Quiet box", deviceId: "", pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
+    let envValue = "first";
+    const settings = {
+      listMachines: async () => [record], saveMachine: async (next) => { Object.assign(record, JSON.parse(JSON.stringify(next))); return [record]; }, removeMachine: async () => [],
+      getMachinePairing: async (key) => (key === pairing.rendezvousId ? pairing : undefined),
+      exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: "{\"a\":1}", agentEnvironment: [{ key: "GH_TOKEN", value: envValue }] })
+    };
+    desktopEvents.eventStorage.appendChatEvent = async (event, delivery) => {
+      if (event.logScopeId.startsWith(`device:${pairing.rendezvousId}:`) && (event.kind === "machine.settings.sealed" || event.kind === "machine.trust.roster")) published.push(event.kind);
+      return append(event, delivery);
+    };
+    const count = (kind) => published.filter((item) => item === kind).length;
+    const logs = [];
+    const debugLogs = { write: async (event, payload) => logs.push({ event, payload }) };
+    const imported = [];
+    const rosters = [];
+    const createLink = () => new MachineLinkService(settings, debugLogs, { ...desktopEvents, appVersion: "desktop-v", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50,
+      trustedDevices: async () => [] });
+    const createHost = () => new MachineHostService({
+      runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined
+    }, { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async (snapshot) => { imported.push(snapshot.agentEnvironment[0]?.value); } }, {
+      write: async (event, payload) => { logs.push({ event, payload }); if (event === "machine-host.trust.applied") rosters.push(payload); }
+    }, { ...hostEvents, pairing, deviceId: MACHINE_ID, appVersion: "machine-v", createClient: undefined, reconnectDelayMs: 50,
+      trustRosterPath: path.join(rosterDir, "roster.json") });
+    link = createLink();
+    host = createHost();
+    await link.start();
+    await host.start();
+    await waitFor(() => imported.length === 1 && rosters.length === 1, 10_000);
+    assert.equal(count("machine.settings.sealed"), 1);
+    assert.equal(count("machine.trust.roster"), 1);
+    const firstInstance = record.lastHello.instanceId;
+
+    // The same runtime greeting again: asked for a hello, and after a relay drop.
+    // A hello is announced only after what it published.
+    await link.machineActivity(record.id);
+    await link.machineActivity(record.id);
+    const reconnected = link.waitForHello(record.id, 10_000);
+    await link.reconnectMachine(record.id);
+    assert.equal(await reconnected, true);
+    assert.equal(record.lastHello.instanceId, firstInstance);
+    assert.equal(count("machine.settings.sealed"), 1, "re-hellos of the same runtime publish no settings");
+    assert.equal(count("machine.trust.roster"), 1, "nor a roster");
+
+    // A desktop restart: the record remembers what this runtime was given.
+    link.close();
+    link = createLink();
+    const restarted = link.waitForHello(record.id, 10_000);
+    await link.start();
+    assert.equal(await restarted, true);
+    assert.equal(count("machine.settings.sealed"), 1, "a desktop restart publishes no settings");
+    assert.equal(count("machine.trust.roster"), 1, "nor a roster");
+
+    // A saved environment variable: exactly one settings event, and only once.
+    // A save racing a hello: still one event.
+    envValue = "second";
+    await Promise.all([link.syncSettings(), link.syncSettings(), link.machineActivity(record.id)]);
+    assert.equal(count("machine.settings.sealed"), 2);
+    assert.equal(count("machine.trust.roster"), 1);
+    await waitFor(() => imported.includes("second"), 10_000);
+
+    // A new runtime process may have lost what the previous one had: both again.
+    host.close();
+    host = createHost();
+    await host.start();
+    await waitFor(() => record.lastHello?.instanceId && record.lastHello.instanceId !== firstInstance, 10_000);
+    await waitFor(() => count("machine.settings.sealed") === 3 && count("machine.trust.roster") === 2, 10_000);
+    assert.ok(!JSON.stringify(record.published).includes("second"), "the stored digests do not carry setting values");
+    const unkeyed = createHash("sha256").update(JSON.stringify(["{\"a\":1}", [{ key: "GH_TOKEN", value: "second" }]])).digest("base64url");
+    assert.notEqual(record.published.settings, unkeyed, "and are keyed, so a stored digest cannot confirm a guessed value");
+  } finally {
+    await rm(rosterDir, { recursive: true, force: true });
+    desktopEvents.eventStorage.appendChatEvent = append;
+    host?.close();
+    link?.close();
+    await relay.close();
+  }
+});
+
+test("a settings event older than what the machine applied is not applied again", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const imported = [];
+  const pairing = { ...machinePairing("ws://127.0.0.1:1/v1/relay"), rendezvousId: "rv-settings-order-" + Date.now() };
+  const host = new MachineHostService({
+    runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined
+  }, { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async (snapshot) => { imported.push(snapshot.agentEnvironment[0].value); } },
+  { write: async () => undefined }, { ...hostEvents, pairing, deviceId: MACHINE_ID, appVersion: "test",
+    createClient: () => ({ on() {}, connect: async () => undefined, close() {}, sendCiphertext: async () => [] }) });
+  try {
+    const snapshot = (exportedAt, value) => ({ version: 1, exportedAt, settingsJson: "{}", agentEnvironment: [{ key: "K", value }] });
+    assert.equal(await host.importSettings(snapshot("2026-10-22T08:00:00.000Z", "older"), "command"), true);
+    assert.equal(await host.importSettings(snapshot("2026-10-22T09:00:00.000Z", "newer"), "event"), true);
+    assert.equal(await host.importSettings(snapshot("2026-10-22T08:30:00.000Z", "queued"), "event"), false, "an older delivery does not roll the settings back");
+    assert.deepEqual(imported, ["older", "newer"]);
+  } finally {
+    host.close();
+  }
 });

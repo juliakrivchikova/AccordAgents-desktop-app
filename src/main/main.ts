@@ -4308,6 +4308,9 @@ void app.whenReady().then(async () => {
         throw error;
       })
     );
+    // A member on a machine asked to compact its own context: it runs here,
+    // as a compaction the User started, and is dispatched back to it.
+    machineLinkService.onCompactionDelegate((event) => chatService.runDelegatedCompaction(event));
     machineLinkService.onRunStarted((event) => chatService.applyMachineRunStarted(event));
     machineLinkService.onMemberBackgroundTasks((event) => {
       if (event.member) {
@@ -4333,7 +4336,11 @@ void app.whenReady().then(async () => {
         error: event.error,
         finishedAt: event.finishedAt,
         receiptId: event.receiptId,
-        machineName: event.machineName
+        machineName: event.machineName,
+        machineId: event.machineId,
+        participantId: event.participantId,
+        contextUsage: event.contextUsage,
+        compaction: event.compaction
       })
     );
     machineLinkService.setConversationLoader((conversationId) => storageService.getConversation(conversationId));

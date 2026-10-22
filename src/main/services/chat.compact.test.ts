@@ -759,6 +759,343 @@ test("requestSelfCompactionFromTool enforces a deny override even with a stale c
   assert.equal(compactCalls, 0);
 });
 
+test("/compact on a member hosted on a machine is compacted there and shows the machine's outcome and context use", async () => {
+  const participant = chatParticipant({ homeMachineId: "box" });
+  const conversation = chatConversation([participant], []);
+  const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const { service, storage } = testService({
+    conversation,
+    debugEvents,
+    compactSession: async () => { throw new Error("a member on a machine is never compacted on the desktop"); }
+  });
+  const dispatched: any[] = [];
+  let acknowledged = false;
+  let markerDuringDispatch: unknown;
+  const usage = { usedTokens: 300, contextWindowTokens: 1000, percentage: 30, source: "codex-cli", updatedAt: "2026-02-01T00:00:00.000Z" };
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    compactOnMachine: async (request) => {
+      dispatched.push(request);
+      markerDuringDispatch = readParticipantCompactions(storage.current.metadata)[participant.id]?.runId;
+      return {
+        status: "completed",
+        messages: [{ id: "machine-outcome", role: "system", content: "Compacted @admin context with focus instructions.", createdAt: NOW, status: "done",
+          metadata: { runId: request.runId, threadId: "thread-1", compaction: { triggeredBy: "user", participantId: participant.id, outcome: "completed", instructionsProvided: true } } } as any],
+        warnings: [],
+        contextUsage: usage as any,
+        acknowledge: async () => { acknowledged = true; }
+      };
+    }
+  });
+
+  const result = await service.sendMessage({ conversationId: conversation.id, runId: "machine-compact", content: "@admin /compact keep the plan", threadId: "thread-1" });
+
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].runId, "machine-compact");
+  assert.equal(dispatched[0].participant.id, participant.id);
+  assert.deepEqual(dispatched[0].compaction, { triggeredBy: "user", instructions: "keep the plan", threadId: "thread-1" });
+  assert.equal(markerDuringDispatch, "machine-compact", "the member shows as compacting while its machine works");
+  assert.equal(result.warnings.length, 0);
+  assert.equal(storage.current.messages.at(-1)?.id, "machine-outcome");
+  assert.equal(storage.current.messages.at(-1)?.content, "Compacted @admin context with focus instructions.");
+  assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[participant.id]?.usedTokens, 300);
+  assert.equal(acknowledged, true, "the machine drops its result only after this desktop stored it");
+  assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
+  assert.equal(storage.current.metadata.activeRunIds, undefined);
+  assert.deepEqual(debugEvents.filter(({ event }) => event.startsWith("chat.compaction.")).map(({ event, payload }) => [event, payload.outcome]), [
+    ["chat.compaction.requested", undefined],
+    ["chat.compaction.finished", "completed"]
+  ]);
+});
+
+test("a machine compaction that could not start ends as a local one that could not", async () => {
+  const participant = chatParticipant({ homeMachineId: "box" });
+  const conversation = chatConversation([participant], []);
+  const { service, storage } = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
+  const calls: string[] = [];
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    compactOnMachine: async (request) => {
+      calls.push(request.runId);
+      return { status: "failed", messages: [], warnings: [], sent: false, error: "@admin is hosted on Box, which is not connected." };
+    }
+  });
+  const offline = await service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "machine-offline" });
+  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: @admin is hosted on Box, which is not connected.");
+  assert.equal(storage.current.messages.at(-1)?.metadata?.compaction?.outcome, "failed");
+  assert.deepEqual(offline.warnings, ["Could not compact @admin context: @admin is hosted on Box, which is not connected."]);
+
+  // Stopped before it was sent: the words a local compaction stopped before it started writes.
+  const stop = new AbortController();
+  stop.abort();
+  await service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "machine-stopped" }, stop.signal);
+  assert.deepEqual(calls, ["machine-offline"], "a stopped compaction is never sent");
+  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: Compaction was cancelled before native execution started..");
+  assert.equal(storage.current.metadata.activeRunIds, undefined);
+
+  // A member whose cloud machine was never prepared has never run.
+  const pending = chatParticipant({ id: "cloud-pending", handle: "cloudy", cloudRun: { kind: "aws" } as any });
+  storage.current.metadata.participants = [participant, pending];
+  await service.compactParticipant({ conversationId: conversation.id, participantId: pending.id, runId: "machine-pending" });
+  assert.equal(storage.current.messages.at(-1)?.content, "@cloudy does not have an active session to compact yet.");
+  assert.deepEqual(calls, ["machine-offline"]);
+});
+
+test("the machine compacts its own member with the desktop's run id and returns the outcome line and context use", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-machine-"));
+  try {
+    const participant = chatParticipant({ homeMachineId: "box" });
+    const conversation = chatConversation([participant], [chatSession(participant, "session-on-box")]);
+    let compactedSession: unknown;
+    const { service } = testService({
+      conversation,
+      compactSession: async (runParticipant, _repoPath, _diffMode, _kind, _signal, options) => {
+        compactedSession = options.sessionId;
+        return { participant: runParticipant, ok: true, sessionId: "session-on-box",
+          contextUsage: { usedTokens: 50, contextWindowTokens: 1000, percentage: 5, source: "codex-cli", updatedAt: "2026-03-01T00:00:00.000Z" } };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    service.setHostMachineId("box");
+    const result = await service.runMachineHostedCompaction({ conversationId: conversation.id, participantId: participant.id, runId: "desktop-run", triggeredBy: "agent", threadId: "t-9" });
+    assert.equal(compactedSession, "session-on-box");
+    assert.equal(result.messages.length, 1);
+    assert.equal(result.messages[0].content, "Compacted @admin context.");
+    assert.equal(result.messages[0].metadata?.runId, "desktop-run");
+    assert.equal(result.messages[0].metadata?.threadId, "t-9");
+    assert.equal(result.messages[0].metadata?.compaction?.triggeredBy, "agent");
+    assert.equal(result.contextUsage?.usedTokens, 50);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("a member on a machine asking to compact itself is run through the desktop when it is there", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-delegate-"));
+  try {
+    const participant = chatParticipant({
+      homeMachineId: "box",
+      permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" })
+    });
+    const conversation = chatConversation([participant], [chatSession(participant, "session-on-box")]);
+    let compactCalls = 0;
+    const { service } = testService({
+      conversation,
+      compactSession: async (runParticipant) => { compactCalls += 1; return { participant: runParticipant, ok: true, sessionId: "session-on-box" }; }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    service.setHostMachineId("box");
+    const delegated: any[] = [];
+    let desktopHere = true;
+    service.setCompactionDelegate({ canDelegateCompaction: () => desktopHere, delegateCompaction: async (request) => { delegated.push(request); } });
+
+    const asked = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), { instructions: "Keep the API notes." });
+    assert.equal(asked.status, "queued");
+    await waitFor(() => delegated.length === 1);
+    assert.deepEqual(delegated[0], { conversationId: conversation.id, participantId: participant.id, runId: asked.runId, instructions: "Keep the API notes." });
+    await delay(25);
+    assert.equal(compactCalls, 0, "the desktop runs it, and sends it back as a compaction command");
+
+    // No desktop to take it: it runs here, as it always has.
+    desktopHere = false;
+    (service as any).storage.current.metadata.participantSelfCompactionRequestedAtByParticipantId = {};
+    const alone = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
+    assert.equal(alone.status, "queued");
+    await waitFor(() => compactCalls === 1);
+    assert.equal(delegated.length, 1);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("the desktop runs a compaction a machine asks for only for that machine's own member", async () => {
+  const participant = chatParticipant({ homeMachineId: "box" });
+  const conversation = chatConversation([participant], []);
+  const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const { service, storage } = testService({ conversation, debugEvents, compactSession: async () => { throw new Error("not here"); } });
+  const dispatched: any[] = [];
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    compactOnMachine: async (request) => {
+      dispatched.push(request);
+      return { status: "completed", warnings: [], messages: [{ id: `outcome-${request.runId}`, role: "system", content: "Compacted @admin context.", createdAt: NOW, status: "done",
+        metadata: { runId: request.runId, compaction: { triggeredBy: "agent", participantId: participant.id, outcome: "completed", instructionsProvided: false } } } as any] };
+    }
+  });
+  await service.runDelegatedCompaction({ machineId: "another-box", conversationId: conversation.id, participantId: participant.id, runId: "foreign" });
+  assert.equal(dispatched.length, 0);
+  assert.equal(debugEvents.find(({ event }) => event === "chat.self-compaction.delegation-refused")?.payload.reason, "not-its-member");
+
+  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "own", instructions: "Focus." });
+  await waitFor(() => storage.current.messages.some((message: any) => message.id === "outcome-own"));
+  assert.equal(dispatched.length, 1);
+  assert.deepEqual(dispatched[0].compaction, { triggeredBy: "agent", instructions: "Focus." });
+  // Delivered again: still one run.
+  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "own" });
+  assert.equal(debugEvents.filter(({ event }) => event === "chat.self-compaction.delegation-refused").at(-1)?.payload.reason, "already-run");
+  assert.equal(dispatched.length, 1);
+  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "../../etc" });
+  assert.equal(debugEvents.filter(({ event }) => event === "chat.self-compaction.delegation-refused").at(-1)?.payload.reason, "invalid-run-id");
+});
+
+test("a delegated compaction is one run while it is in flight, and yields to one already running", async () => {
+  const participant = chatParticipant({ homeMachineId: "box" });
+  const conversation = chatConversation([participant], []);
+  const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const { service, storage } = testService({ conversation, debugEvents, compactSession: async () => { throw new Error("not here"); } });
+  const dispatched: string[] = [];
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    compactOnMachine: async (request) => {
+      dispatched.push(request.runId);
+      await held;
+      return { status: "completed", warnings: [], messages: [{ id: `outcome-${request.runId}`, role: "system", content: "Compacted @admin context.", createdAt: NOW, status: "done",
+        metadata: { runId: request.runId, compaction: { triggeredBy: "agent", participantId: participant.id, outcome: "completed", instructionsProvided: false } } } as any] };
+    }
+  });
+  const reasons = () => debugEvents.filter(({ event }) => event === "chat.self-compaction.delegation-refused").map(({ payload }) => payload.reason);
+  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "first" });
+  await waitFor(() => dispatched.length === 1);
+  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "first" });
+  assert.deepEqual(reasons(), ["already-run"]);
+  // The member asks again while the first is running: the running one covers it.
+  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "second" });
+  assert.deepEqual(reasons(), ["already-run", "already-compacting"]);
+  release();
+  await waitFor(() => storage.current.messages.some((message: any) => message.id === "outcome-first"));
+  assert.deepEqual(dispatched, ["first"]);
+});
+
+test("a member's own compaction the User switched off here ends with the line a refusal leaves", async () => {
+  const participant = chatParticipant({ homeMachineId: "box", permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "deny" }) });
+  const conversation = chatConversation([participant], []);
+  const { service, storage } = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
+  let dispatched = 0;
+  service.setMachineLink({ runTurn: async () => { throw new Error("not a turn"); }, compactOnMachine: async () => { dispatched += 1; return { status: "completed", messages: [], warnings: [] }; } });
+  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "refused" });
+  assert.equal(dispatched, 0);
+  await waitFor(() => storage.current.messages.at(-1)?.content === "Could not compact @admin context: Context compaction requests are disabled for @admin.");
+  assert.equal(storage.current.messages.at(-1)?.metadata?.compaction?.triggeredBy, "agent");
+});
+
+test("the machine keeps its compaction result while this desktop cannot store it", async () => {
+  const participant = chatParticipant({ homeMachineId: "box" });
+  const conversation = chatConversation([participant], []);
+  const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const { service, storage } = testService({ conversation, debugEvents, compactSession: async () => { throw new Error("not here"); } });
+  let acknowledged = 0;
+  let failSaves = false;
+  const save = storage.saveConversation.bind(storage);
+  storage.saveConversation = async (next: Conversation) => {
+    if (failSaves && next.messages.some((message: any) => message.id === "unsaved-outcome")) throw new Error("SQLITE_FULL: database or disk is full");
+    return save(next);
+  };
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    compactOnMachine: async (request) => {
+      failSaves = request.runId === "unsaved";
+      return { status: "completed", warnings: [],
+        messages: [{ id: `${request.runId}-outcome`, role: "system", content: "Compacted @admin context.", createdAt: NOW, status: "done",
+          metadata: { runId: request.runId, compaction: { triggeredBy: "user", participantId: participant.id, outcome: "completed", instructionsProvided: false } } } as any],
+        acknowledge: async () => {
+          acknowledged += 1;
+          if (request.runId === "ack-fails") throw new Error("the receipt could not be sent");
+        }
+      };
+    }
+  });
+  await assert.rejects(service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "unsaved" }), /SQLITE_FULL/);
+  assert.equal(acknowledged, 0, "no acknowledgement for a result this desktop did not store: the machine keeps it and sends it again");
+  assert.ok(debugEvents.some(({ event, payload }) => event === "chat.compaction.finished" && payload.runId === "unsaved" && payload.outcome === "failed"));
+  failSaves = false;
+  await service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "ack-fails" });
+  assert.equal(acknowledged, 1);
+  assert.ok(debugEvents.some(({ event, payload }) => event === "chat.compaction.ack-pending" && payload.runId === "ack-fails"));
+  assert.equal(storage.current.messages.at(-1)?.id, "ack-fails-outcome");
+  assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
+  assert.equal(storage.current.metadata.activeRunIds, undefined);
+});
+
+test("a compaction result that arrives after a desktop restart lands its line and the member's context use", async () => {
+  const participant = chatParticipant({ homeMachineId: "box" });
+  const local = chatParticipant({ id: "local-member", handle: "local" });
+  const conversation = chatConversation([participant, local], []);
+  conversation.metadata.participantCompactionsByParticipantId = { [participant.id]: { runId: "late-run", startedAt: NOW } };
+  conversation.metadata.activeRunIds = ["late-run"];
+  const { service, storage } = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
+  const usage = { usedTokens: 70, contextWindowTokens: 1000, percentage: 7, source: "codex-cli", updatedAt: "2026-04-01T00:00:00.000Z" };
+  const line = { id: "late-outcome", role: "system", content: "Compacted @admin context.", createdAt: NOW, status: "done",
+    metadata: { runId: "late-run", compaction: { triggeredBy: "user", participantId: participant.id, outcome: "completed", instructionsProvided: false } } } as any;
+  await service.applyMachineLateTerminal({ conversationId: conversation.id, runId: "late-run", status: "completed", messages: [line], warnings: [],
+    machineName: "Box", machineId: "box", participantId: participant.id, contextUsage: usage as any });
+  assert.equal(storage.current.messages.at(-1)?.content, "Compacted @admin context.");
+  assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
+  assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[participant.id]?.usedTokens, 70);
+  // A compaction stopped on the machine before it ran, learned after a restart, still says so.
+  await service.applyMachineLateTerminal({ conversationId: conversation.id, runId: "late-stopped", status: "interrupted", messages: [], warnings: [],
+    machineName: "Box", machineId: "box", participantId: participant.id, compaction: { triggeredBy: "user" } });
+  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: Compaction was cancelled before native execution started..");
+  assert.equal(storage.current.messages.at(-1)?.metadata?.runId, "late-stopped");
+  await service.applyMachineLateTerminal({ conversationId: conversation.id, runId: "late-failed", status: "failed", messages: [], warnings: [],
+    machineName: "Box", machineId: "box", participantId: participant.id, compaction: { triggeredBy: "agent" },
+    error: "The machine runtime ended after accepting this command; its execution outcome is uncertain and it was not run again." });
+  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: The machine runtime ended after accepting this command; its execution outcome is uncertain and it was not run again.");
+  // Another machine cannot set the context use of a member that is not its own.
+  await service.applyMachineLateTerminal({ conversationId: conversation.id, runId: "other-run", status: "completed", messages: [], warnings: [],
+    machineName: "Other", machineId: "other-box", participantId: local.id, contextUsage: { ...usage, usedTokens: 999, updatedAt: "2099-01-01T00:00:00.000Z" } as any });
+  assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[local.id], undefined);
+});
+
+test("a member's own compaction runs on its machine when handing it to the desktop fails", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-delegate-fail-"));
+  try {
+    const participant = chatParticipant({ homeMachineId: "box", permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" }) });
+    const conversation = chatConversation([participant], [chatSession(participant, "session-on-box")]);
+    const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
+    let compactCalls = 0;
+    const { service } = testService({ conversation, debugEvents,
+      compactSession: async (runParticipant) => { compactCalls += 1; return { participant: runParticipant, ok: true, sessionId: "session-on-box" }; } });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    service.setHostMachineId("box");
+    service.setCompactionDelegate({ canDelegateCompaction: () => true, delegateCompaction: async () => { throw new Error("outbox full"); } });
+    const asked = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
+    assert.equal(asked.status, "queued");
+    await waitFor(() => compactCalls === 1);
+    assert.ok(debugEvents.some(({ event, payload }) => event === "chat.self-compaction.delegate-error" && payload.runId === asked.runId));
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("Stop by run id reaches a compaction the machine runs for the desktop", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-machine-stop-"));
+  try {
+    const participant = chatParticipant({ homeMachineId: "box" });
+    const conversation = chatConversation([participant], [chatSession(participant, "session-on-box")]);
+    let compactSignal: AbortSignal | undefined;
+    const { service } = testService({
+      conversation,
+      compactSession: async (runParticipant, _repoPath, _diffMode, _kind, signal) => {
+        compactSignal = signal;
+        await new Promise((resolve) => signal?.addEventListener("abort", resolve, { once: true }));
+        return { participant: runParticipant, ok: false, error: "Compaction was cancelled." };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    service.setHostMachineId("box");
+    const running = service.runMachineHostedCompaction({ conversationId: conversation.id, participantId: participant.id, runId: "stop-me", triggeredBy: "user" });
+    await waitFor(() => compactSignal !== undefined);
+    assert.equal(service.cancelRun("stop-me"), true);
+    const result = await running;
+    assert.equal(compactSignal?.aborted, true);
+    assert.equal(result.messages[0]?.metadata?.compaction?.outcome, "failed");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 function testService(options: {
   conversation: Conversation;
   compactSession: (participant: ParticipantConfig, repoPath: string | undefined, diffMode: undefined, kind: "chat", signal: AbortSignal | undefined, options: Record<string, unknown>) => Promise<Record<string, unknown>>;

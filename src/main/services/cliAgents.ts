@@ -159,6 +159,10 @@ const ANTIGRAVITY_GOAL_CANCEL_GRACE_MS = 2_500;
 const ANTIGRAVITY_CONVERSATION_RE = /agy --conversation=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 // eslint-disable-next-line no-control-regex
 const ANSI_ESCAPE_RE = /[\u001b\u009b][[\]()#;?]*(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*)?\u0007|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
+/** What a compaction stopped before it started says; a member on a machine
+ *  stopped before its compaction was sent says the same. */
+export const COMPACTION_CANCELLED_BEFORE_START = "Compaction was cancelled before native execution started.";
+
 export function antigravityExpectProgram(): string {
   return `
   set timeout -1
@@ -1368,7 +1372,7 @@ export class CliAgentRunner {
     try {
       const compactionRefusal = await this.hostRefusal("compaction");
       if (shutdownGeneration !== this.nativeShutdownGeneration) return this.failedCompact(participant, new Error("Native sessions shut down while compaction waited; it did not start."));
-      if (signal?.aborted) return this.failedCompact(participant, new Error("Compaction was cancelled before native execution started."));
+      if (signal?.aborted) return this.failedCompact(participant, new Error(COMPACTION_CANCELLED_BEFORE_START));
       if (options.warm && this.conversationClosing(options.warm.conversationId)) return this.failedCompact(participant, new Error("This chat is closing; compaction did not start."));
       if (compactionRefusal || this.nativeAdmissionsFenced) return { participant, ok: false, error: compactionRefusal ?? "Native admission is fenced." };
       if (participant.kind === "codex-cli") {

@@ -11,7 +11,7 @@
  */
 
 import type {
-  ChatAppToolApprovalRequest, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "./types";
+  AgentContextUsage, ChatAppToolApprovalRequest, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "./types";
 import type { MachineProgressFrame } from "./machineProgress";
 import type { MachineTrustRoster, TrustedDeviceRecord } from "./machineTrust";
 
@@ -81,6 +81,10 @@ export interface MachineHelloBody {
    *  before chat change events leaves it out: it is sent no chat changes and
    *  runs no turns until it is updated. */
   chatChanges?: number;
+  /** This runtime compacts its members when the desktop asks
+   *  (machine.turn.request with `compaction`); absent before it could, and
+   *  such a runtime is sent no compaction. */
+  compactionSupported?: boolean;
 }
 
 export interface MachineHelloAckBody {
@@ -93,6 +97,10 @@ export interface MachineHelloAckBody {
   /** The name the User gave this machine on the desktop, so what the machine
    *  writes about itself (a script card's "Runs on") uses the same name. */
   machineName?: string;
+  /** The desktop runs a compaction a member here asks for itself
+   *  (machine.compaction.delegate), so the User sees and stops it exactly as
+   *  one they started. Absent from desktops that cannot. */
+  compactionDelegation?: boolean;
 }
 
 export interface MachineSettingsSyncBody {
@@ -124,6 +132,46 @@ export interface MachineConversationDeltaBody {
   updatedAt: string;
 }
 
+/** A compaction of the member's own CLI session, run on its machine by the
+ *  same code a desktop runs for a local member. Carried by a
+ *  machine.turn.request, so it is queued, admitted, stopped and answered
+ *  exactly as a turn is. */
+export interface MachineTurnCompaction {
+  instructions?: string;
+  triggeredBy: "user" | "agent";
+  /** Where the outcome line goes, as for a local compaction. */
+  threadId?: string;
+  parentMessageId?: string;
+  chatThreadRootId?: string;
+}
+
+/** The message id a compaction request names: no message has it, so a
+ *  runtime that does not know compactions fails the request instead of
+ *  running a turn. */
+export function machineCompactionMessageId(runId: string): string {
+  return `compaction:${runId}`;
+}
+
+/** A compaction as it arrives from another device, with only the fields it
+ *  may carry. */
+export function normalizeMachineTurnCompaction(value: unknown): MachineTurnCompaction {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const text = (field: unknown): string | undefined => typeof field === "string" && field.trim() ? field.trim() : undefined;
+  return {
+    triggeredBy: record.triggeredBy === "agent" ? "agent" : "user",
+    ...(text(record.instructions) ? { instructions: text(record.instructions) } : {}),
+    ...(text(record.threadId) ? { threadId: text(record.threadId) } : {}),
+    ...(text(record.parentMessageId) ? { parentMessageId: text(record.parentMessageId) } : {}),
+    ...(text(record.chatThreadRootId) ? { chatThreadRootId: text(record.chatThreadRootId) } : {})
+  };
+}
+
+/** The outcome line a compaction of `runId` wrote for this member. */
+export function isMachineCompactionLine(message: ChatMessage | undefined, runId: string, participantId: string): boolean {
+  return Boolean(message) && typeof message!.id === "string" && message!.role === "system" &&
+    message!.metadata?.runId === runId && message!.metadata?.compaction?.participantId === participantId;
+}
+
 export interface MachineTurnRequestBody {
   type: "machine.turn.request";
   conversationId: string;
@@ -142,6 +190,9 @@ export interface MachineTurnRequestBody {
   chatHead?: { originId: string; logScopeId: string; originSeq: number };
   /** Where the chat's project lives on each machine (the member's cwd). */
   machineRepository?: { sourcePath: string; paths: Record<string, string> };
+  /** Present when this command compacts the member instead of running a
+   *  turn; `messageId` and `pendingMessageId` then name no message. */
+  compaction?: MachineTurnCompaction;
 }
 
 export interface MachineTurnCancelBody {
@@ -176,7 +227,27 @@ export interface MachineTurnFinishedBody {
   warnings: string[];
   error?: string;
   finishedAt: string;
+  /** The member's context window use as its CLI reports it after this run,
+   *  which the desktop shows exactly as for a local member. */
+  contextUsage?: AgentContextUsage;
+  /** Set when the run was a compaction, so a result that arrives after the
+   *  desktop restarted still gets its outcome line. */
+  compaction?: { triggeredBy: "user" | "agent" };
 }
+
+/** Machine -> desktop: a member here asked to compact its own context. The
+ *  desktop runs it as it runs one the User asked for (and sends it back here
+ *  as a compaction command), so the User sees it and can stop it. Sent only
+ *  to a desktop that said it takes these (hello.ack compactionDelegation). */
+export interface MachineCompactionDelegateBody {
+  type: "machine.compaction.delegate";
+  conversationId: string;
+  participantId: string;
+  runId: string;
+  instructions?: string;
+}
+
+export type MachineCompactionDelegateRequest = Omit<MachineCompactionDelegateBody, "type">;
 
 /** Conversation changes made on the machine while it hosts a turn (pending
  *  approval cards, participant requests, reactions). The desktop upserts them. */
@@ -534,6 +605,7 @@ export type MachineLinkMessage =
   | MachineConversationResyncBody
   | MachineTrustRosterBody
   | MachineParticipantsDelegateBody
+  | MachineCompactionDelegateBody
   | MachineChoiceAnswerBody
   | MachineChoiceResultBody
   | MachineAttachmentRequestBody
@@ -554,7 +626,7 @@ export function isMachineDurableMessage(body: MachineLinkMessage): boolean {
   return isMachineReplicationMessage(body) || body.type === "machine.turn.finished" || body.type === "machine.turn.finished.ack" ||
     body.type === "machine.turn.request" || body.type === "machine.turn.cancel" || body.type === "machine.settings.sealed" || body.type === "machine.turn.started" ||
     body.type === "machine.approval.requested" || body.type === "machine.approval.updated" || body.type === "machine.approval.decision" || body.type === "machine.approval.result" || body.type === "machine.choice.result" ||
-    body.type === "machine.turn.progress.delta" || body.type === "machine.participants.delegate" ||
+    body.type === "machine.turn.progress.delta" || body.type === "machine.participants.delegate" || body.type === "machine.compaction.delegate" ||
     body.type === "machine.conversation.deleted" || body.type === "machine.trust.roster";
 }
 
@@ -577,6 +649,7 @@ const MESSAGE_TYPE_TABLE: Record<MachineLinkMessageType, true> = {
   "machine.turn.progress": true,
   "machine.turn.progress.delta": true,
   "machine.participants.delegate": true,
+  "machine.compaction.delegate": true,
   "machine.trust.roster": true,
   "machine.turn.started": true,
   "machine.turn.finished": true,
@@ -721,4 +794,10 @@ export interface MachineRecord {
    *  hello, or from setup, which installs such a runtime and copies every
    *  chat to it. Until then it is sent no chat changes. */
   chatChanges?: boolean;
+  /** What this desktop last published to the machine's runtime `instanceId`:
+   *  keyed digests of the settings and of the trust roster (timestamps
+   *  excluded). The same content is not published to it again; a runtime
+   *  process this desktop has not published to is sent both, since it may
+   *  have lost what the previous one had. */
+  published?: { instanceId?: string; settings?: string; roster?: string };
 }

@@ -3027,10 +3027,25 @@ export class SettingsService {
         pendingCancels: this.normalizeMachineRunRecords(record.pendingCancels),
         ...(record.lastHello && typeof record.lastHello === "object" ? { lastHello: record.lastHello } : {}),
         ...(typeof record.devicePublicKeyDerBase64 === "string" && record.devicePublicKeyDerBase64 ? { devicePublicKeyDerBase64: record.devicePublicKeyDerBase64 } : {}),
-        ...(record.chatChanges === true ? { chatChanges: true } : {})
+        ...(record.chatChanges === true ? { chatChanges: true } : {}),
+        ...(this.normalizeMachinePublished(record.published) ?? {})
       }];
     });
     return machines.length > 0 ? machines : undefined;
+  }
+
+  /** What the desktop last published to the machine's runtime (digests only):
+   *  kept across restarts so a restart does not publish the same again. */
+  private normalizeMachinePublished(value: unknown): Pick<MachineRecord, "published"> | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    const text = (field: unknown): string | undefined => typeof field === "string" && field.length > 0 && field.length <= 256 ? field : undefined;
+    const published = {
+      ...(text(record.instanceId) ? { instanceId: text(record.instanceId) } : {}),
+      ...(text(record.settings) ? { settings: text(record.settings) } : {}),
+      ...(text(record.roster) ? { roster: text(record.roster) } : {})
+    };
+    return Object.keys(published).length ? { published } : undefined;
   }
 
   private normalizeMachineRunRecords(value: unknown): Array<{ runId: string; conversationId: string }> {
