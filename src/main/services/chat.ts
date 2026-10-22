@@ -117,6 +117,7 @@ import type {
 } from "../../shared/types";
 import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import { isMachineCompactionLine, normalizeMachineTurnCompaction, type MachineCompactionDelegateRequest, type MachineTurnCompaction } from "../../shared/machineLink";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES,
@@ -176,7 +177,7 @@ import {
 import { chatActionOperationId } from "./chatActionEmitter";
 import type { ChatEventMirrorService } from "./chatEventMirror";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
-import { CliAgentRunner, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
+import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
@@ -734,6 +735,25 @@ export interface MachineTurnDispatchResult {
   /** False when the turn never left this desktop (refused, or stopped while
    *  being prepared): the member's home only ever had its empty bubble. */
   sent?: boolean;
+  /** The member's context use as its CLI reported it on the machine after
+   *  this run, shown here exactly as a local member's. */
+  contextUsage?: AgentContextUsage;
+}
+
+/** Compacts a member on the machine that hosts it, through the same command
+ *  path as its turns (no message to answer, no bubble, no progress frames). */
+export type MachineCompactionDispatchRequest = Omit<MachineTurnDispatchRequest, "triggerMessage" | "pendingMessageId" | "progress"> & {
+  compaction: MachineTurnCompaction;
+};
+
+/** Machine side. Hands a compaction a member here asked for itself to the
+ *  desktop, which runs it as one the User started (and so shows it and can
+ *  stop it), and sends it back here as a compaction command. */
+export interface ChatCompactionDelegate {
+  /** False when the desktop cannot take it now; the compaction then runs
+   *  here directly, as it would without a desktop. */
+  canDelegateCompaction(): boolean;
+  delegateCompaction(request: MachineCompactionDelegateRequest): Promise<void>;
 }
 
 /** Machine side. Hands one prepared member request to the desktop; the answers
@@ -757,6 +777,7 @@ export interface ChatParticipantRequestDelegate {
 
 export interface MachineTurnDispatcher {
   runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult>;
+  compactOnMachine?(request: MachineCompactionDispatchRequest): Promise<MachineTurnDispatchResult>;
   cancelMachineRun?(request: { machineId: string; conversationId: string; runId: string; onStopPending?: (machineName: string) => Promise<void> }): Promise<void>;
   /** The bytes of a picture this copy does not hold on disk. Only a machine
    *  supplies this: replication brings an attachment's metadata here without
@@ -864,7 +885,7 @@ export class ChatService {
     return () => { this.participantRunSettledListeners.delete(listener); };
   }
 
-  async settledParticipantRunResult(run: ChatParticipantRun): Promise<{ messages: ChatMessage[]; warnings: string[] }> {
+  async settledParticipantRunResult(run: ChatParticipantRun): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
     // A native resume releases its provider controller before its caller
     // appends the returned messages. endChatRun is the end of that lifecycle.
     if (this.activeRunIds.has(run.runId)) {
@@ -881,9 +902,11 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat") {
       throw new Error("The run's chat is unavailable.");
     }
+    const contextUsage = this.agentContextUsageByParticipant(conversation)[run.participantId];
     return {
       messages: conversation.messages.filter((message) => message.metadata?.runId === run.runId),
-      warnings: Array.isArray(conversation.metadata.warnings) ? conversation.metadata.warnings.filter((warning): warning is string => typeof warning === "string") : []
+      warnings: Array.isArray(conversation.metadata.warnings) ? conversation.metadata.warnings.filter((warning): warning is string => typeof warning === "string") : [],
+      ...(contextUsage ? { contextUsage } : {})
     };
   }
 
@@ -979,6 +1002,9 @@ export class ChatService {
   private machineLink?: MachineTurnDispatcher;
   private scriptHost?: ChatScriptHost;
   private participantRequestDelegate?: ChatParticipantRequestDelegate;
+  private compactionDelegate?: ChatCompactionDelegate;
+  /** Run ids of compactions machines delegated here, so a redelivery is one run. */
+  private readonly delegatedCompactionRunIds = new Set<string>();
   private cloudRunAws?: CloudRunAwsResolver;
   private cloudRunDoctor?: CloudRunDoctorProbe;
   private artifactCleanup?: (conversationId: string) => Promise<void>;
@@ -1143,6 +1169,12 @@ export class ChatService {
    *  which owns the roster and runs each target where that member lives. */
   setParticipantRequestDelegate(delegate: ChatParticipantRequestDelegate | undefined): void {
     this.participantRequestDelegate = delegate;
+  }
+
+  /** Machine side: where a member's own compaction request goes (see
+   *  ChatCompactionDelegate). */
+  setCompactionDelegate(delegate: ChatCompactionDelegate | undefined): void {
+    this.compactionDelegate = delegate;
   }
 
   setCloudRunAwsService(service: CloudRunAwsResolver): void {
@@ -1852,7 +1884,8 @@ export class ChatService {
     let ingest: {
       conversation: Conversation;
       participant: ChatParticipant;
-      session: ChatParticipantSession;
+      /** Undefined for a member on a machine: its session is there. */
+      session?: ChatParticipantSession;
       runStarted: boolean;
     };
     try {
@@ -1862,9 +1895,13 @@ export class ChatService {
         if (!participant) {
           throw new Error("Chat member was not found.");
         }
-        this.assertOwnsParticipant(participant);
-        const sessionState = await this.sessionForParticipant(conversation, participant);
-        if (!sessionState.session.sessionId) {
+        // A member on a machine is compacted there, through the same command
+        // path as its turns; its session is known only there. One whose
+        // machine has not been prepared yet has never run, so has none.
+        const onMachine = this.compactsOnMachine(participant);
+        if (!onMachine) this.assertOwnsParticipant(participant);
+        const session = onMachine ? undefined : (await this.sessionForParticipant(conversation, participant)).session;
+        if (onMachine ? !participant.homeMachineId : !session?.sessionId) {
           await this.withChatMutation(conversation, async () => {
             conversation.messages.push(this.message(
               "system",
@@ -1875,11 +1912,11 @@ export class ChatService {
             conversation.updatedAt = new Date().toISOString();
             await this.saveConversation(conversation);
           });
-          return { conversation, participant, session: sessionState.session, runStarted: false };
+          return { conversation, participant, session, runStarted: false };
         }
         await this.beginChatParticipantCompactionRun(conversation, runId, participant.id);
         await this.waitForQueuedSave(conversation.id);
-        return { conversation, participant, session: sessionState.session, runStarted: true };
+        return { conversation, participant, session, runStarted: true };
       });
     } catch (error) {
       await this.debugLogs.write("chat.compaction.finished", {
@@ -1909,6 +1946,9 @@ export class ChatService {
       const conversation = ingest.conversation;
       const participant = ingest.participant;
       const session = ingest.session;
+      if (!session) {
+        return await this.compactParticipantOnMachine(conversation, participant, request, runId, compactInstructions, warnings, auditBase, signal, progress);
+      }
       const workspacePath = await this.ensureHistoryFiles(conversation);
       const agentMode = this.agentModeForSession(session, participant);
       const permissions = normalizeChatAgentPermissions(participant.permissions);
@@ -2010,6 +2050,134 @@ export class ChatService {
     } finally {
       reservation.release();
       await this.endChatRun(ingest.conversation, runId);
+    }
+  }
+
+  /** A member whose home is a machine (or will be one, once its cloud
+   *  machine is prepared) is compacted there, exactly as its turns run there. */
+  private compactsOnMachine(participant: ChatParticipant): boolean {
+    return !this.machineRuntime && Boolean(participant.cloudRun || participant.homeMachineId);
+  }
+
+  /**
+   * Desktop side of compacting a member that runs on a machine. The machine
+   * runs this service's own compactParticipant for the member's session there
+   * and returns the outcome line it wrote; this desktop shows that same line,
+   * the same progress and the member's new context use. Whatever kept the
+   * machine from running it (not connected, an older runtime, stopped before
+   * it was sent) ends exactly as a local compaction that could not start.
+   */
+  private async compactParticipantOnMachine(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    request: CompactChatParticipantRequest,
+    runId: string,
+    compactInstructions: string | undefined,
+    warnings: string[],
+    auditBase: Record<string, unknown>,
+    signal?: AbortSignal,
+    progress?: ProgressCallback
+  ): Promise<StartReviewResult> {
+    const link = this.machineLink;
+    let result: MachineTurnDispatchResult;
+    if (signal?.aborted) {
+      result = { status: "interrupted", messages: [], warnings: [], sent: false };
+    } else if (!link?.compactOnMachine) {
+      result = { status: "failed", messages: [], warnings: [], sent: false, error: `@${participant.handle} is hosted on a machine, but the machine link is not available` };
+    } else {
+      result = await link.compactOnMachine({
+        conversation,
+        participant,
+        runId,
+        signal,
+        compaction: normalizeMachineTurnCompaction({ ...request, instructions: compactInstructions }),
+        onStopPending: (machineName) => {
+          void this.debugLogs.write("chat.compaction.stop-pending", { conversationId: conversation.id, runId, machineName });
+        }
+      });
+    }
+    // Only the lines the machine's compaction of this run wrote are taken.
+    const compactionLines = result.messages.filter((message) => isMachineCompactionLine(message, runId, participant.id));
+    const outcomeMessage = compactionLines.at(-1);
+    const reported = outcomeMessage?.metadata?.compaction?.outcome;
+    let outcome: "completed" | "failed" | "no-active-session" = reported === "completed" || reported === "no-active-session" ? reported : "failed";
+    await this.withChatMutation(conversation, async () => {
+      if (outcomeMessage) {
+        for (const message of compactionLines) {
+          if (!conversation.messages.some((existing) => existing.id === message.id)) {
+            conversation.messages.push(message);
+          }
+        }
+        for (const warning of result.warnings) {
+          if (!warnings.includes(warning)) warnings.push(warning);
+        }
+      } else {
+        // It never ran on the machine: the same line a local compaction that
+        // could not start writes (a Stop before it started: word for word).
+        const error = result.status === "interrupted" && !result.error
+          ? COMPACTION_CANCELLED_BEFORE_START
+          : (result.error ?? "unknown error").replace(/[.\s]+$/, "");
+        const content = `Could not compact @${participant.handle} context: ${error}.`;
+        conversation.messages.push(this.message("system", content, undefined, this.compactMessageMetadata(request, participant.id, "failed")));
+        warnings.push(content);
+        outcome = "failed";
+      }
+      this.updateParticipantContextUsage(conversation, participant.id, normalizeAgentContextUsage(result.contextUsage));
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+    });
+    // The machine keeps its result until this desktop has stored it.
+    if (await this.waitForQueuedSaveResult(conversation.id)) {
+      try { await result.acknowledge?.(); }
+      catch (error) {
+        void this.debugLogs.write("chat.compaction.ack-pending", { conversationId: conversation.id, runId, message: error instanceof Error ? error.message : String(error) });
+      }
+    } else {
+      void this.debugLogs.write("chat.compaction.not-stored", { conversationId: conversation.id, runId });
+    }
+    if (outcome !== "no-active-session") {
+      this.emitProgress(runId, progress, outcome === "completed" ? "done" : "error", outcome === "completed" ? `Compacted @${participant.handle}.` : `Could not compact @${participant.handle}.`, {
+        participantLabel: `@${participant.handle}`
+      });
+    }
+    await this.debugLogs.write("chat.compaction.finished", {
+      ...auditBase,
+      participantId: participant.id,
+      participantHandle: participant.handle,
+      outcome,
+      homeMachineId: participant.homeMachineId,
+      machineStatus: result.status
+    });
+    return { conversation, warnings };
+  }
+
+  /** Machines transport, machine side: compacts one of this machine's members
+   *  for the desktop, with the run id the desktop chose. Returns the outcome
+   *  line written here and the member's context use after it. */
+  async runMachineHostedCompaction(
+    request: { conversationId: string; participantId: string; runId: string } & MachineTurnCompaction,
+    signal?: AbortSignal
+  ): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
+    // Stop reaches it by run id as it reaches a turn (cancelRun), not only
+    // through the command's own controller.
+    const run = this.registerBackgroundRunController(request.runId, signal);
+    try {
+      const result = await this.compactParticipant({
+        conversationId: request.conversationId,
+        participantId: request.participantId,
+        runId: request.runId,
+        triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
+        ...(request.instructions ? { instructions: request.instructions } : {}),
+        ...(request.threadId ? { threadId: request.threadId } : {}),
+        ...(request.parentMessageId ? { parentMessageId: request.parentMessageId } : {}),
+        ...(request.chatThreadRootId ? { chatThreadRootId: request.chatThreadRootId } : {})
+      }, run.signal);
+      const conversation = result.conversation;
+      const messages = conversation.messages.filter((message) => isMachineCompactionLine(message, request.runId, request.participantId));
+      const contextUsage = this.agentContextUsageByParticipant(conversation)[request.participantId];
+      return { messages, warnings: result.warnings, ...(contextUsage ? { contextUsage } : {}) };
+    } finally {
+      run.cleanup();
     }
   }
 
@@ -6224,6 +6392,7 @@ export class ChatService {
             conversation.messages.push(message);
           }
         }
+        this.updateParticipantContextUsage(conversation, participant.id, normalizeAgentContextUsage(result.contextUsage));
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
       });
@@ -6678,6 +6847,13 @@ export class ChatService {
     finishedAt?: string;
     receiptId?: string;
     machineName: string;
+    /** The machine that sent it: context use is taken only for its own member. */
+    machineId?: string;
+    participantId?: string;
+    contextUsage?: AgentContextUsage;
+    /** A compaction of `participantId`: one that never wrote its outcome
+     *  line (stopped or failed before it ran) gets the line it would have. */
+    compaction?: { triggeredBy: "user" | "agent" };
   }): Promise<void> {
     // The tombstone is a durable disposition of a late result: acknowledge it
     // without reviving a deleted chat or retaining its delivery forever.
@@ -6714,6 +6890,21 @@ export class ChatService {
       for (const warning of request.warnings ?? []) {
         this.addConversationWarning(conversation, warning);
       }
+      const usageParticipantId = bubble?.participantId ?? request.participantId;
+      const usageMember = usageParticipantId ? this.chatParticipants(conversation).find((item) => item.id === usageParticipantId) : undefined;
+      const ownMember = usageMember && request.machineId && usageMember.homeMachineId === request.machineId ? usageMember : undefined;
+      if (ownMember) {
+        this.updateParticipantContextUsage(conversation, ownMember.id, normalizeAgentContextUsage(request.contextUsage));
+      }
+      if (ownMember && request.compaction && !bubble && request.status !== "completed" &&
+          !conversation.messages.some((message) => isMachineCompactionLine(message, request.runId, ownMember.id))) {
+        const error = request.status === "interrupted" && !request.error
+          ? COMPACTION_CANCELLED_BEFORE_START
+          : (request.error ?? "unknown error").replace(/[.\s]+$/, "");
+        conversation.messages.push(this.message("system", `Could not compact @${ownMember.handle} context: ${error}.`, undefined,
+          { ...this.compactMessageMetadata({ runId: request.runId, triggeredBy: request.compaction.triggeredBy }, ownMember.id, "failed"),
+            ...(request.compaction.triggeredBy === "agent" ? { threadId: "system" } : {}) }));
+      }
       // A late result has no local run's finally block to clear its status.
       // Publish and store that same final state, preserving other machines'
       // concurrent runs rather than relying on a later storage read to sweep it.
@@ -6749,7 +6940,7 @@ export class ChatService {
     request: { conversationId: string; participantId: string; messageId: string; runId: string; pendingMessageId: string },
     signal?: AbortSignal,
     progress?: ProgressCallback
-  ): Promise<{ messages: ChatMessage[]; warnings: string[] }> {
+  ): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
     // The desktop's pending bubble for this run is already in the copy; the
     // run must count as live before the stale-run sweep in requireChat sees
     // it, or the bubble is marked interrupted before the turn even starts.
@@ -6796,7 +6987,9 @@ export class ChatService {
     const messages = refreshed.messages.filter((message) =>
       message.participantId === participantId && message.metadata?.runId === request.runId && message.status !== "pending"
     );
-    return { messages, warnings };
+    // The desktop shows the member's context use from what its CLI reported here.
+    const contextUsage = this.agentContextUsageByParticipant(refreshed)[participantId];
+    return { messages, warnings, ...(contextUsage ? { contextUsage } : {}) };
   }
 
   private async discardStoppedTargetRun(
@@ -15934,6 +16127,103 @@ export class ChatService {
     request: ChatSelfCompactionRequest,
     runId: string
   ): void {
+    // A member on a machine asked for it there: the desktop runs it as one
+    // the User asked for, so it is shown and can be stopped the same way.
+    // Without a desktop to take it now, it runs here as before.
+    const delegate = this.machineRuntime ? this.compactionDelegate : undefined;
+    if (delegate?.canDelegateCompaction()) {
+      void delegate.delegateCompaction({
+        conversationId,
+        participantId: participant.id,
+        runId,
+        ...(request.instructions ? { instructions: request.instructions } : {})
+      }).then(() => this.debugLogs.write("chat.self-compaction.delegated", { conversationId, participantId: participant.id, runId }), async (error) => {
+        await this.debugLogs.write("chat.self-compaction.delegate-error", {
+          conversationId, participantId: participant.id, runId, message: error instanceof Error ? error.message : String(error)
+        });
+        this.runQueuedSelfCompaction(conversationId, participant, request, runId);
+      });
+      return;
+    }
+    this.runQueuedSelfCompaction(conversationId, participant, request, runId);
+  }
+
+  /** Desktop side: a member on a machine asked to compact its own context.
+   *  Only the member's own machine may ask for it. */
+  async runDelegatedCompaction(request: MachineCompactionDelegateRequest & { machineId: string }): Promise<void> {
+    if (this.machineRuntime) return;
+    const refuse = (reason: string): Promise<void> => this.debugLogs.write("chat.self-compaction.delegation-refused", {
+      conversationId: request.conversationId, participantId: request.participantId, runId: request.runId, machineId: request.machineId, reason
+    });
+    // A run id becomes this desktop's own (run state, the machine's record):
+    // only a plain token is taken.
+    if (!isSafeChatId(request.runId)) return refuse("invalid-run-id");
+    if (this.deletedConversationIds.has(request.conversationId)) return refuse("deleted");
+    // Delivered again while this process runs it or ran it: one run.
+    if (this.delegatedCompactionRunIds.has(request.runId) || this.activeRunIds.has(request.runId) || this.chatRunControllers.has(request.runId)) {
+      return refuse("already-run");
+    }
+    // What a compaction just started here wrote must be read back.
+    await this.waitForQueuedSave(request.conversationId);
+    // Read without its messages: this runs in the machine's ordered event
+    // stream, and the chat can be thousands of messages long.
+    const stored = typeof this.storage.openConversation === "function"
+      ? (await this.storage.openConversation(request.conversationId, 1))?.conversation
+      : await this.storage.getConversation(request.conversationId);
+    if (!stored || stored.kind !== "chat") return refuse("no-chat");
+    const participant = this.chatParticipants(stored).find((item) => item.id === request.participantId);
+    if (!participant || participant.homeMachineId !== request.machineId) return refuse("not-its-member");
+    let instructions: string | undefined;
+    try {
+      instructions = this.normalizeCompactInstructions(request.instructions);
+    } catch (error) {
+      return refuse(error instanceof Error ? error.message : String(error));
+    }
+    // A compaction of this member already queued or running here (the User's)
+    // covers it, as it does for a local member asking at the same time.
+    if (readParticipantCompactions(stored.metadata)[participant.id]) return refuse("already-compacting");
+    this.delegatedCompactionRunIds.add(request.runId);
+    if (this.delegatedCompactionRunIds.size > 1_000) {
+      this.delegatedCompactionRunIds.delete(this.delegatedCompactionRunIds.values().next().value as string);
+    }
+    // The User's choice on this desktop holds, even before it reached the machine.
+    const permission = normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(participant.permissions).requestCompaction);
+    if (permission === "deny") {
+      await refuse("denied");
+      // Written off the machine's event stream, as a compaction would run.
+      void this.recordSelfCompactionFailure(request.conversationId, participant, request.runId, instructions, `Context compaction requests are disabled for @${participant.handle}`)
+        .catch((error) => this.debugLogs.write("chat.self-compaction.denied-line-error", { conversationId: request.conversationId, runId: request.runId, message: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
+    this.runQueuedSelfCompaction(stored.id, participant, { type: "self_compaction", instructions }, request.runId);
+  }
+
+  /** The line a member's own compaction that could not run leaves. */
+  private async recordSelfCompactionFailure(conversationId: string, participant: ChatParticipant, runId: string, instructions: string | undefined, message: string): Promise<void> {
+    const latest = await this.requireChat(conversationId).catch(() => undefined);
+    if (!latest) return;
+    await this.withChatMutation(latest, async () => {
+      latest.messages.push(this.message(
+        "system",
+        `Could not compact @${participant.handle} context: ${message}.`,
+        undefined,
+        {
+          ...this.compactMessageMetadata({ runId, triggeredBy: "agent", instructions }, participant.id, "failed"),
+          threadId: "system"
+        }
+      ));
+      latest.updatedAt = new Date().toISOString();
+      await this.saveConversation(latest);
+      this.queueSnapshot(latest);
+    });
+  }
+
+  private runQueuedSelfCompaction(
+    conversationId: string,
+    participant: ChatParticipant,
+    request: ChatSelfCompactionRequest,
+    runId: string
+  ): void {
     const backgroundController = this.registerBackgroundRunController(runId, undefined);
     void this.compactParticipant({
       conversationId,
@@ -15952,28 +16242,7 @@ export class ChatService {
       if (backgroundController.signal.aborted) {
         return;
       }
-      const latest = await this.requireChat(conversationId).catch(() => undefined);
-      if (!latest) {
-        return;
-      }
-      await this.withChatMutation(latest, async () => {
-        latest.messages.push(this.message(
-          "system",
-          `Could not compact @${participant.handle} context: ${message}.`,
-          undefined,
-          {
-            ...this.compactMessageMetadata(
-              { runId, triggeredBy: "agent", instructions: request.instructions },
-              participant.id,
-              "failed"
-            ),
-            threadId: "system"
-          }
-        ));
-        latest.updatedAt = new Date().toISOString();
-        await this.saveConversation(latest);
-        this.queueSnapshot(latest);
-      });
+      await this.recordSelfCompactionFailure(conversationId, participant, runId, request.instructions, message);
     }).finally(() => backgroundController.cleanup());
   }
 

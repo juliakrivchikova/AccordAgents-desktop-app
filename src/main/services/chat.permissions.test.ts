@@ -4238,6 +4238,18 @@ test("a saved Cloud choice survives setup failure and restart, and only the addr
   assert.deepEqual(dispatched, [two.id, two.id]);
 });
 
+test("a machine member's context use after its turn is shown here as a local member's is", async () => {
+  const member = { ...chatParticipant("claude-code"), id: "machine-member", handle: "remote", homeMachineId: "box" };
+  const h = testService({ conversation: chatConversation([member]) });
+  const usage = { usedTokens: 4200, contextWindowTokens: 200000, percentage: 2, source: "claude-code", updatedAt: "2026-10-22T00:00:00.000Z" };
+  h.service.setMachineLink({ runTurn: async request => ({ status: "completed", warnings: [], contextUsage: usage as any, messages: [{
+    ...pendingParticipantMessage(request.participant, request.pendingMessageId, request.runId), status: "done", content: "MACHINE_REPLY"
+  }] }) });
+  await h.service.sendMessage({ conversationId: h.storage.current.id, content: "@remote hello" });
+  await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.content === "MACHINE_REPLY"));
+  await waitFor(() => h.storage.current.metadata.agentContextUsageByParticipant?.[member.id]?.usedTokens === 4200);
+});
+
 test("participant reservation is released if turn controller setup fails", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
