@@ -28,6 +28,7 @@ function harness() {
     getAwsWorkerCredentials: async () => ({ accessKeyId: "synthetic", secretAccessKey: "synthetic", region: "us-east-1" }),
     getAwsWorkerOperation: async () => operation,
     getAwsWorkerGoneNotice: async () => undefined,
+    listLeavingMachines: async () => [],
     saveAwsWorkerOperation: async (next: AwsWorkerOperationSnapshot) => { operation = next; },
     getAwsWorkerVolumeExpansion: async () => expansion,
     saveAwsWorkerVolumeExpansion: async () => forbidden("save-expansion"),

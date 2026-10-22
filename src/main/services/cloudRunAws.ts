@@ -62,13 +62,16 @@ const INSTANCE_VISIBILITY_GRACE_MS = 10 * 60_000;
 const RUNNING_OPERATION_PHASES: ReadonlySet<AwsWorkerOperationSnapshot["phase"]> = new Set(["starting", "waiting-running", "setting-up"]);
 /** How long a status read waits for the removal of a gone instance. */
 const STATUS_FORGET_WAIT_MS = 10_000;
-/** How long a removal that failed waits before a look tries it again. */
+/** How long a machine removal that failed waits before a look tries it again. */
 const FORGET_RETRY_MS = 5 * 60_000;
 /** What the AWS page says after the app removed an instance AWS no longer has. */
 export const AWS_INSTANCE_GONE_NOTICE = "Your cloud machine no longer exists in AWS, so it was removed.";
 /** What a look that found the instance gone came to. */
-type ForgetOutcome = { kind: "forgotten" } | { kind: "kept" } | { kind: "changed" } | { kind: "pending" } | { kind: "failed"; error: string };
-type ForgetResult = { removed: true; forgotten: boolean } | { removed: false; error: string };
+type ForgetOutcome = { kind: "forgotten" } | { kind: "kept" } | { kind: "changed" } | { kind: "pending" };
+type ForgetResult = { forgotten: boolean; machineIds: string[]; error?: string };
+/** Why an instance's machines leave: the User deleted it, she replaced it
+ *  with a new one, or the app found it gone by itself. */
+type ForgetReason = "deleted" | "replaced" | "gone";
 
 export interface CloudRunAwsServiceOptions {
   /** This desktop's version: an automatic update of it that already failed
@@ -142,8 +145,10 @@ export class CloudRunAwsService {
   private readonly deleting = new Map<string, number>();
   /** Instances the User deleted in this session. */
   private readonly deletedByUser = new Set<string>();
-  /** A removal of a gone instance's machines that failed, by instance. */
-  private readonly forgetFailures = new Map<string, { at: number; error: string }>();
+  /** The last removal of a leaving machine that failed, and why. */
+  private leavingFailure: { at: number; error: string } | undefined;
+  /** A background pass over the leaving machines, while one runs. */
+  private leavingPass: Promise<unknown> | undefined;
   /** Forgetting an instance, one at a time; a preparation waits for it. */
   private forgetting: Promise<unknown> = Promise.resolve();
 
@@ -329,6 +334,12 @@ export class CloudRunAwsService {
         replacedInstanceId = previousHandle.instanceId;
       }
     }
+    // Another instance takes the saved one's place: its machines go first,
+    // once AWS says it can never come back.
+    const savedHandle = publicSettings.cloudRuns.awsHandle;
+    if (savedHandle && matches[0]?.instanceId !== savedHandle.instanceId) {
+      await this.replacedInstanceMachinesLeave(savedHandle, await this.settings.getAwsWorkerCredentials());
+    }
     let created = false;
     let info = matches[0];
     let handle: AwsWorkerHandleInfo;
@@ -512,6 +523,10 @@ export class CloudRunAwsService {
       if (result.terminateFailed || !result.terminationConfirmed) {
         throw new Error(`The existing shared worker could not be confirmed terminated: ${result.terminateFailed ?? "unknown termination state"}`);
       }
+      // The old instance's program can never come back: its machines leave
+      // with it, and the new instance enrolls as a new machine. A removal cut
+      // short is finished later; the replacement goes on.
+      await this.oneForgetAtATime(() => this.machinesLeave(prepared.handle, "replaced"));
       await this.settings.saveAwsWorkerHandle(undefined);
     });
     return this.prepareWorker({
@@ -552,6 +567,9 @@ export class CloudRunAwsService {
   }
 
   private async readStatus(again: boolean): Promise<AwsWorkerStatus> {
+    // Machines of an instance that can never come back, whose removal was
+    // cut short, are finished in the background whatever this look finds.
+    this.finishLeavingMachines();
     const context = await this.workerContext();
     if (!context.credentials || !context.handle) return this.notConfigured(context.operation);
     let status: AwsWorkerStatus;
@@ -569,16 +587,15 @@ export class CloudRunAwsService {
     // Another look, Delete or a new instance got there first: what is saved
     // now is the answer, not this look.
     if (outcome.kind === "changed" && again) return this.readStatus(false);
-    if (outcome.kind === "failed") {
-      status = { ...status, message: `This instance no longer exists in AWS, but ${outcome.error}. The app tries again by itself.` };
-    }
     return this.withMachineState(context.credentials, context.handle, status);
   }
 
-  /** One look, once the desktop's machines are up, whether AWS still has
-   *  this app's instance; one it terminated or no longer has is forgotten
-   *  with the machines on it. An AWS error changes nothing. */
+  /** At start-up, once the desktop's machines are up: what a removal left
+   *  unfinished is finished, then one look whether AWS still has this app's
+   *  instance; one it terminated or no longer has is forgotten with the
+   *  machines on it. An AWS error changes nothing. */
   async forgetInstanceIfGone(): Promise<boolean> {
+    await this.oneForgetAtATime(() => this.removeLeavingMachines());
     const { credentials, handle } = await this.workerContext();
     if (!credentials || !handle) return false;
     let info: AwsWorkerInstanceInfo | undefined;
@@ -591,11 +608,17 @@ export class CloudRunAwsService {
     return (await this.forgetIfObservedGone(handle, info)).kind === "forgotten";
   }
 
-  /** No instance: and, when the app removed one AWS no longer has, the line
-   *  that says so. */
+  /** No instance, and the one line the AWS page says about the last one: a
+   *  machine of it that is still being removed, or that AWS no longer had it. */
   private async notConfigured(operation: StoredAwsWorkerOperation): Promise<AwsWorkerStatus> {
-    const gone = await this.settings.getAwsWorkerGoneNotice().catch(() => undefined);
-    return { configured: false, operation, ...(gone ? { notice: AWS_INSTANCE_GONE_NOTICE } : {}) };
+    const [gone, leaving] = await Promise.all([
+      this.settings.getAwsWorkerGoneNotice().catch(() => undefined),
+      this.settings.listLeavingMachines().catch(() => [])
+    ]);
+    const notice = leaving.length && this.leavingFailure
+      ? `Your old cloud machine could not be removed from this computer yet: ${this.leavingFailure.error}. The app tries again by itself.`
+      : gone ? AWS_INSTANCE_GONE_NOTICE : undefined;
+    return { configured: false, operation, ...(notice ? { notice } : {}) };
   }
 
   /** AWS says the instance can never come back: it is terminated, or AWS no
@@ -628,27 +651,19 @@ export class CloudRunAwsService {
 
   /** The app saw by itself that its instance is gone: the instance is
    *  forgotten with its machines, and the AWS page says so. Not while Delete,
-   *  a setup or a new instance owns it, not when the instance changed since
-   *  the look, and a removal that failed is not repeated on every look. */
+   *  a setup or a new instance owns it, and not when the instance changed
+   *  since the look. */
   private forgetGoneInstance(observed: AwsWorkerHandleInfo, observation: "terminated" | "not-found"): Promise<ForgetOutcome> {
     return this.oneForgetAtATime(async (): Promise<ForgetOutcome> => {
       if (this.deleting.has(observed.instanceId) || this.prepareActive) return { kind: "kept" };
       const { credentials, handle, operation } = await this.workerContext();
       if (!credentials || !handle || handle.instanceId !== observed.instanceId || handle.region !== observed.region) return { kind: "changed" };
       if (operation && RUNNING_OPERATION_PHASES.has(operation.phase)) return { kind: "kept" };
-      const failed = this.forgetFailures.get(handle.instanceId);
-      if (failed && this.now() - failed.at < FORGET_RETRY_MS) return { kind: "failed", error: failed.error };
       // The User's own Delete that could not finish ends the way she asked
       // for: keys and all, and with nothing to tell her.
-      const deletedByUser = this.deletedByUser.has(handle.instanceId);
-      this.log("aws-worker.instance-gone", { instanceId: handle.instanceId, region: handle.region, observed: observation, deletedByUser });
-      const result = await this.forgetInstance(handle, deletedByUser ? "deleted" : "gone");
-      if (!result.removed) {
-        this.forgetFailures.set(handle.instanceId, { at: this.now(), error: result.error });
-        return { kind: "failed", error: result.error };
-      }
-      this.forgetFailures.delete(handle.instanceId);
-      return result.forgotten ? { kind: "forgotten" } : { kind: "changed" };
+      const reason: ForgetReason = this.deletedByUser.has(handle.instanceId) ? "deleted" : "gone";
+      this.log("aws-worker.instance-gone", { instanceId: handle.instanceId, region: handle.region, observed: observation, reason });
+      return (await this.forgetInstance(handle, reason)).forgotten ? { kind: "forgotten" } : { kind: "changed" };
     }).catch((error: unknown): ForgetOutcome => {
       this.log("aws-worker.instance-gone.error", { instanceId: observed.instanceId, message: errorMessage(error).slice(0, 500) });
       return { kind: "kept" };
@@ -656,29 +671,97 @@ export class CloudRunAwsService {
   }
 
   /**
-   * What this desktop keeps for an instance that can never come back: each
-   * machine on it leaves the way Settings → Remove removes one, then the
-   * instance is forgotten in one settings write, only while it is still the
-   * saved one. Delete forgets this app's AWS keys with it, as it always did.
-   * An instance the app found gone by itself leaves the keys: they still
-   * work for a new instance, and dropping them would mean running the
-   * administrator's setup command again. A machine that could not be removed
-   * keeps everything, so the next look at the instance tries again.
+   * What this desktop keeps for an instance that can never come back: its
+   * machines leave (see `machinesLeave`), then the instance is forgotten in
+   * one settings write, only while it is still the saved one. Delete forgets
+   * this app's AWS keys with it, as it always did. An instance the app found
+   * gone by itself leaves the keys: they still work for a new instance, and
+   * dropping them would mean running the administrator's setup command again.
    */
-  private async forgetInstance(handle: AwsWorkerHandleInfo, reason: "deleted" | "gone"): Promise<ForgetResult> {
-    let machineIds: string[] = [];
-    try {
-      machineIds = (await this.installsOnInstance(handle)).machines.map((machine) => machine.id);
-      for (const machineId of machineIds) await this.removeMachine?.(machineId);
-    } catch (error) {
-      this.log("aws-worker.forget.machine-error", { instanceId: handle.instanceId, reason, machineIds, message: errorMessage(error).slice(0, 500) });
-      return { removed: false, error: `its machine could not be removed from this computer: ${plainReason(errorMessage(error)).replace(/[.!?…]$/, "")}` };
-    }
+  private async forgetInstance(handle: AwsWorkerHandleInfo, reason: ForgetReason): Promise<ForgetResult> {
+    const machines = await this.machinesLeave(handle, reason);
     const forgotten = await this.settings.forgetAwsWorkerInstance(handle.instanceId, reason === "deleted"
       ? { keepCredentials: false, mode: "ssh" }
-      : { keepCredentials: true, notice: { instanceId: handle.instanceId, at: new Date(this.now()).toISOString() } });
-    this.log("aws-worker.forgotten", { instanceId: handle.instanceId, region: handle.region, reason, machineIds, forgotten });
-    return { removed: true, forgotten };
+      : { keepCredentials: true, ...(reason === "gone" ? { notice: { instanceId: handle.instanceId, at: new Date(this.now()).toISOString() } } : {}) });
+    this.log("aws-worker.forgotten", { instanceId: handle.instanceId, region: handle.region, reason, machineIds: machines.machineIds, forgotten });
+    return { ...machines, forgotten };
+  }
+
+  /**
+   * The machines on an instance whose program can never come back leave this
+   * desktop, each the way Settings → Remove removes one. They are recorded
+   * first, so a removal cut short, by a failure or a restart, is finished on
+   * a later look; nothing waits for that.
+   */
+  private async machinesLeave(handle: AwsWorkerHandleInfo, reason: ForgetReason): Promise<{ machineIds: string[]; error?: string }> {
+    const machineIds = (await this.installsOnInstance(handle)).machines.map((machine) => machine.id);
+    const at = new Date(this.now()).toISOString();
+    await this.settings.addLeavingMachines(machineIds.map((machineId) => ({ machineId, instanceId: handle.instanceId, at })));
+    const error = await this.removeLeavingMachines();
+    this.log("aws-worker.machines-leave", { instanceId: handle.instanceId, reason, machineIds, ...(error ? { error } : {}) });
+    return { machineIds, ...(error ? { error } : {}) };
+  }
+
+  /** Removes the machines recorded as leaving; the first that fails stops
+   *  the pass and stays recorded. Returns why, in plain words. */
+  private async removeLeavingMachines(): Promise<string | undefined> {
+    const leaving = await this.settings.listLeavingMachines();
+    if (!leaving.length) {
+      this.leavingFailure = undefined;
+      return undefined;
+    }
+    const present = new Set((await this.settings.listMachines()).map((machine) => machine.id));
+    for (const entry of leaving) {
+      try {
+        if (present.has(entry.machineId)) await this.removeMachine?.(entry.machineId);
+        await this.settings.clearLeavingMachine(entry.machineId);
+      } catch (error) {
+        const reason = plainReason(errorMessage(error)).replace(/[.!?…]$/, "");
+        this.leavingFailure = { at: this.now(), error: reason };
+        this.log("aws-worker.machine-leave.error", { machineId: entry.machineId, instanceId: entry.instanceId, message: errorMessage(error).slice(0, 500) });
+        return reason;
+      }
+    }
+    this.leavingFailure = undefined;
+    return undefined;
+  }
+
+  /** A look finishes, in the background, what a removal left unfinished: at
+   *  most every five minutes after a failure, and one pass at a time. */
+  private finishLeavingMachines(): void {
+    if (this.leavingPass || this.leavingFailure && this.now() - this.leavingFailure.at < FORGET_RETRY_MS) return;
+    this.leavingPass = this.oneForgetAtATime(() => this.removeLeavingMachines())
+      .catch((error: unknown) => { this.log("aws-worker.machine-leave.error", { message: errorMessage(error).slice(0, 500) }); return undefined; })
+      .finally(() => { this.leavingPass = undefined; });
+  }
+
+  /**
+   * A new instance takes the place of the saved one: the machines on the
+   * old one leave first, once AWS says it is terminated or no longer has it.
+   * A stopped or running old instance keeps them, as do keys this computer
+   * can no longer read. When the old instance cannot be checked, nothing is
+   * replaced: a new instance would leave its machines behind for good.
+   */
+  private async replacedInstanceMachinesLeave(previous: AwsWorkerHandleInfo, credentials: AwsWorkerCredentials | undefined): Promise<void> {
+    if (!credentials) {
+      this.log("aws-worker.replaced.kept", { instanceId: previous.instanceId, state: "keys-unreadable" });
+      return;
+    }
+    let info: AwsWorkerInstanceInfo | undefined;
+    try {
+      info = await this.clientForRegion(credentials, previous.region).describeInstance(previous.instanceId);
+    } catch (error) {
+      this.log("aws-worker.replaced.check-error", { instanceId: previous.instanceId, ...this.safeAwsErrorLogFields(error) });
+      throw new Error(`Could not check the previous instance ${previous.instanceId} in AWS: ${errorMessage(error)}. Nothing was changed; try again.`);
+    }
+    if (!info && !this.instanceGone(info, previous)) {
+      throw new Error(`AWS does not show the previous instance ${previous.instanceId} yet. Nothing was changed; try again in a few minutes.`);
+    }
+    if (!this.instanceGone(info, previous)) {
+      this.log("aws-worker.replaced.kept", { instanceId: previous.instanceId, state: info?.state });
+      return;
+    }
+    await this.oneForgetAtATime(() => this.machinesLeave(previous, "replaced"));
   }
 
   private oneForgetAtATime<T>(action: () => Promise<T>): Promise<T> {
@@ -1008,19 +1091,20 @@ export class CloudRunAwsService {
       };
     }
     this.deletedByUser.add(handle.instanceId);
-    const forgotten = await this.oneForgetAtATime(() => this.forgetInstance(handle, "deleted"));
-    if (!forgotten.removed) {
-      // Terminated, but the machine stays until it can be removed: the next
-      // look at the instance tries again by itself.
-      return { configured: true, handle, state: "terminated", actionError: forgotten.error,
-        message: `The instance is terminated, but ${forgotten.error}. The app tries again by itself.` };
+    let forgotten: ForgetResult;
+    try {
+      forgotten = await this.oneForgetAtATime(() => this.forgetInstance(handle, "deleted"));
+    } catch (error) {
+      // Terminated, but this computer could not record it: the instance stays
+      // saved, and the next look at it finishes the Delete.
+      return { configured: true, handle, state: "terminated", actionError: errorMessage(error),
+        message: `The instance is terminated, but this computer could not forget it yet: ${errorMessage(error)}. The app tries again by itself.` };
     }
-    return {
-      configured: false,
-      message: result.cleanupFailures.length > 0
-        ? `Worker terminated with ${result.cleanupFailures.length} cleanup warning(s).`
-        : undefined
-    };
+    const warnings = [
+      ...(result.cleanupFailures.length > 0 ? [`Worker terminated with ${result.cleanupFailures.length} cleanup warning(s).`] : []),
+      ...(forgotten.error ? [`Its machine could not be removed from this computer yet: ${forgotten.error}. The app tries again by itself.`] : [])
+    ];
+    return { configured: false, message: warnings.length ? warnings.join(" ") : undefined };
   }
 
   async stopWorker(): Promise<AwsWorkerStatus> {

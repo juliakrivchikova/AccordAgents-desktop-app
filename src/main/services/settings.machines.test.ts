@@ -503,3 +503,24 @@ test("forgetting an AWS instance is one write that holds only for the saved inst
     assert.equal(await make().getAwsWorkerCredentials(), undefined);
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });
+
+test("machines leaving with a gone instance are recorded durably, cleared one by one, and never travel to a machine", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-machines-"));
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  try {
+    const at = "2026-10-22T10:00:00.000Z";
+    await make().addLeavingMachines([{ machineId: "m1", instanceId: "i-0943b28f7231ab93c", at }, { machineId: "m2", instanceId: "i-0943b28f7231ab93c", at }]);
+    await make().addLeavingMachines([{ machineId: "m1", instanceId: "i-0943b28f7231ab93c", at }]);
+    assert.deepEqual((await make().listLeavingMachines()).map((entry) => entry.machineId), ["m2", "m1"], "a machine is recorded once");
+    const snapshot = await make().exportMachineSettingsSnapshot();
+    assert.equal(snapshot.settingsJson.includes("leavingMachines"), false);
+    await make().importMachineSettingsSnapshot({ ...snapshot, settingsJson: JSON.stringify({ ...JSON.parse(snapshot.settingsJson), leavingMachines: [] }) });
+    assert.equal((await make().listLeavingMachines()).length, 2, "a machine's snapshot cannot clear it");
+    await make().clearLeavingMachine("m2");
+    await make().clearLeavingMachine("unknown");
+    assert.deepEqual((await make().listLeavingMachines()).map((entry) => entry.machineId), ["m1"]);
+    await make().clearLeavingMachine("m1");
+    assert.deepEqual(await make().listLeavingMachines(), []);
+  } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
+});

@@ -4,7 +4,7 @@ import test from "node:test";
 import type { AppSettings, AwsWorkerHandleInfo, AwsWorkerOperationSnapshot } from "../../shared/types";
 import type { MachineInstallRecord } from "../../shared/machineInstall";
 import { AWS_INSTANCE_GONE_NOTICE, CloudRunAwsService } from "./cloudRunAws";
-import type { CloudRunAwsServiceOptions } from "./cloudRunAws";
+import type { CloudRunAwsServiceOptions, PreparedAwsWorker } from "./cloudRunAws";
 import { resolveCurrentWorkerAddress } from "./cloudRunWorkers";
 import { encodeWorkerBlob } from "./awsWorkerProvisioning";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
@@ -127,6 +127,21 @@ class FakeSettings {
 
   async getAwsWorkerGoneNotice(): Promise<{ instanceId: string; at: string } | undefined> {
     return this.goneNotice;
+  }
+
+  leaving: Array<{ machineId: string; instanceId: string; at: string }> = [];
+
+  async addLeavingMachines(entries: Array<{ machineId: string; instanceId: string; at: string }>): Promise<void> {
+    const ids = new Set(entries.map((entry) => entry.machineId));
+    this.leaving = [...this.leaving.filter((entry) => !ids.has(entry.machineId)), ...entries];
+  }
+
+  async listLeavingMachines(): Promise<Array<{ machineId: string; instanceId: string; at: string }>> {
+    return this.leaving.map((entry) => ({ ...entry }));
+  }
+
+  async clearLeavingMachine(machineId: string): Promise<void> {
+    this.leaving = this.leaving.filter((entry) => entry.machineId !== machineId);
   }
 
   async saveAwsWorkerConnection(credentials: AwsWorkerCredentials, handle: AwsWorkerHandleInfo): Promise<void> {
@@ -1468,28 +1483,32 @@ test("Delete never reads a failed look as gone: AWS's terminate answers", async 
   assert.deepEqual(settings.handle, OLD_HANDLE);
 });
 
-test("a machine that cannot be removed keeps the connection, and the next look finishes the job", async () => {
+test("Delete whose machine removal fails still deletes; the machine is recorded and a later look removes it", async () => {
   const { settings, removed, removeMachine } = instanceWithMachines();
+  let now = Date.parse("2026-10-22T10:00:00.000Z");
   const client = new FakeEc2Client({ instanceId: OLD_HANDLE.instanceId, state: "running" });
   let failing = true;
   const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), {
+    now: () => now,
     removeMachine: async (machineId) => { if (failing) throw new Error("disk full"); await removeMachine(machineId); }
   });
 
   const deleted = await service.deleteWorker();
-  assert.equal(deleted.configured, true);
-  assert.equal(deleted.state, "terminated");
-  assert.match(deleted.actionError ?? "", /machine could not be removed from this computer: disk full/);
-  assert.deepEqual(settings.handle, OLD_HANDLE, "kept, so the instance is looked at again");
-  assert.deepEqual(settings.credentials, OLD_CREDS);
+  assert.equal(deleted.configured, false, "Delete is not left half done");
+  assert.match(deleted.message ?? "", /Its machine could not be removed from this computer yet: disk full\. The app tries again by itself\./);
+  assert.equal(settings.handle, undefined);
+  assert.equal(settings.credentials, undefined, "Delete forgets the keys, as it always did");
+  assert.deepEqual(settings.leaving.map((entry) => entry.machineId), ["cloud", "older"], "recorded, so a restart finishes it");
+  assert.equal((await service.status()).notice,
+    "Your old cloud machine could not be removed from this computer yet: disk full. The app tries again by itself.");
 
   failing = false;
-  const next = await service.status();
-  assert.deepEqual(next, { configured: false, operation: undefined }, "the User's own Delete: nothing to tell her");
+  now += 5 * 60_000;
+  await service.status();
+  await waitFor(() => removed.length === 2);
   assert.deepEqual(removed, ["cloud", "older"]);
-  assert.equal(settings.handle, undefined);
-  assert.equal(settings.credentials, undefined, "it ends the way Delete does, keys and all");
-  assert.equal(settings.mode, "ssh");
+  await waitFor(() => settings.leaving.length === 0);
+  assert.deepEqual(await service.status(), { configured: false, operation: undefined }, "the User's own Delete: nothing to tell her");
 });
 
 test("a stopped instance is never removed; a terminated one is, with its machines, and the page says so", async () => {
@@ -1617,28 +1636,35 @@ test("two looks at once remove each machine once", async () => {
   assert.deepEqual(removed, ["cloud", "older"]);
 });
 
-test("a removal that fails while looking says why on the page and is not repeated on every look", async () => {
+test("a machine removal that fails while looking says why on the page, is retried every five minutes, and survives a restart", async () => {
   const { settings, removed, removeMachine } = instanceWithMachines();
   let now = Date.parse("2026-10-22T10:00:00.000Z");
   let failing = true;
   let attempts = 0;
   const client = new FakeEc2Client({ instanceId: OLD_HANDLE.instanceId, state: "terminated" });
-  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), {
+  const options = {
     now: () => now,
-    removeMachine: async (machineId) => { attempts += 1; if (failing) throw new Error("disk full"); await removeMachine(machineId); }
-  });
+    removeMachine: async (machineId: string) => { attempts += 1; if (failing) throw new Error("disk full"); await removeMachine(machineId); }
+  };
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), options);
   const first = await service.status();
-  assert.equal(first.configured, true);
-  assert.equal(first.state, "terminated");
-  assert.equal(first.message, "This instance no longer exists in AWS, but its machine could not be removed from this computer: disk full. The app tries again by itself.");
+  assert.deepEqual(first, { configured: false, operation: undefined,
+    notice: "Your old cloud machine could not be removed from this computer yet: disk full. The app tries again by itself." });
+  assert.equal(settings.handle, undefined, "the gone instance is forgotten all the same");
+  assert.deepEqual(settings.credentials, OLD_CREDS);
   assert.equal(attempts, 1);
   now += 60_000;
-  assert.match((await service.status()).message ?? "", /could not be removed/);
-  assert.equal(attempts, 1, "a minute later the failure is shown again, not retried");
+  await service.status();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(attempts, 1, "a minute later it is not retried");
+
+  // A restart: a new app reads what was recorded and finishes it at start-up.
   failing = false;
-  now += 5 * 60_000;
-  assert.deepEqual(await service.status(), { configured: false, operation: undefined, notice: GONE_NOTICE });
+  const restarted = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), options);
+  assert.equal(await restarted.forgetInstanceIfGone(), false);
   assert.deepEqual(removed, ["cloud", "older"]);
+  assert.deepEqual(settings.leaving, []);
+  assert.deepEqual(await restarted.status(), { configured: false, operation: undefined, notice: GONE_NOTICE });
 });
 
 test("a preparation that starts while a gone instance is forgotten waits, and keeps the connection it saves", async () => {
@@ -1714,4 +1740,178 @@ test("a look while Recreate takes the old instance down forgets nothing", async 
   release();
   await recreating;
   assert.equal(settings.goneNotice, undefined);
+});
+
+// ---- an instance replaced by a new one ---------------------------------------
+
+/** Each instance answers for itself; a launch makes a new running one. */
+class InstancesEc2Client extends FakeEc2Client {
+  readonly instances = new Map<string, AwsWorkerInstanceInfo>();
+  readonly events: string[] = [];
+
+  constructor(...initial: AwsWorkerInstanceInfo[]) {
+    super(undefined);
+    for (const info of initial) this.instances.set(info.instanceId, info);
+    this.discovered = initial.filter((info) => info.state !== "terminated");
+  }
+
+  override async describeInstance(instanceId?: string): Promise<AwsWorkerInstanceInfo | undefined> {
+    this.describeCalls += 1;
+    if (this.describeError) throw this.describeError;
+    return instanceId ? this.instances.get(instanceId) : undefined;
+  }
+
+  override async runInstance(spec: Parameters<Ec2Client["runInstance"]>[0]): Promise<string> {
+    this.runCount += 1;
+    const instanceId = `i-new${this.runCount}`;
+    const info: AwsWorkerInstanceInfo = { instanceId, state: "running", publicIp: "198.51.100.20", region: "us-east-1",
+      securityGroupId: "sg-new", keyName: "accordagents-worker-new", instanceType: spec.instanceType, rootVolumeSizeGb: 8 };
+    this.instances.set(instanceId, info);
+    this.discovered = [info];
+    this.events.push(`launch:${instanceId}`);
+    return instanceId;
+  }
+
+  override async terminateInstance(instanceId: string): Promise<void> {
+    this.terminatedInstances.push(instanceId);
+    if (this.terminateError) throw this.terminateError;
+    const info = this.instances.get(instanceId);
+    if (info) this.instances.set(instanceId, { ...info, state: "terminated" });
+    this.discovered = this.discovered.filter((item) => item.instanceId !== instanceId);
+    this.events.push(`terminate:${instanceId}`);
+  }
+}
+
+const OLD_RUNNING: AwsWorkerInstanceInfo = { instanceId: OLD_HANDLE.instanceId, state: "running", publicIp: "198.51.100.10", region: "us-east-1",
+  securityGroupId: OLD_HANDLE.securityGroupId, keyName: OLD_HANDLE.keyName, instanceType: "t3.small", rootVolumeSizeGb: 8 };
+
+function recreateRequest(): PreparedAwsWorker {
+  return {
+    credentials: OLD_CREDS, handle: OLD_HANDLE, info: OLD_RUNNING, created: false,
+    actualSpec: { instanceId: OLD_HANDLE.instanceId, region: "us-east-1", instanceType: "t3.small", rootVolumeSizeGb: 8 },
+    desiredSpec: { instanceType: "t3.medium", rootVolumeSizeGb: 8 }
+  };
+}
+
+test("Recreate removes the old instance's machines once it is terminated, before the new instance is launched", async () => {
+  const { settings, removeMachine } = instanceWithMachines();
+  const client = new InstancesEc2Client(OLD_RUNNING);
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), {
+    removeMachine: async (machineId) => { client.events.push(`remove:${machineId}`); await removeMachine(machineId); }
+  });
+
+  const recreated = await service.recreateWorker(recreateRequest(), OLD_HANDLE.instanceId, "recreate");
+
+  assert.deepEqual(client.events, [`terminate:${OLD_HANDLE.instanceId}`, "remove:cloud", "remove:older", "launch:i-new1"]);
+  assert.equal(recreated.handle.instanceId, "i-new1");
+  assert.equal(settings.handle?.instanceId, "i-new1");
+  assert.deepEqual(settings.machines.map((machine) => machine.id), ["elsewhere"], "the new instance enrolls as a new machine");
+  assert.deepEqual(settings.credentials, OLD_CREDS);
+  assert.equal(settings.goneNotice, undefined, "the User replaced it: nothing to tell her");
+});
+
+test("Recreate that cannot terminate the old instance removes no machine", async () => {
+  const { settings, removed, removeMachine } = instanceWithMachines();
+  const client = new InstancesEc2Client(OLD_RUNNING);
+  client.terminateError = Object.assign(new Error("connect ETIMEDOUT"), { name: "TimeoutError" });
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), { removeMachine });
+  await assert.rejects(service.recreateWorker(recreateRequest(), OLD_HANDLE.instanceId, "recreate"), /could not be confirmed terminated/);
+  assert.deepEqual(removed, []);
+  assert.deepEqual(settings.handle, OLD_HANDLE);
+  assert.equal(client.runCount, 0);
+});
+
+test("Recreate whose machine removal fails still launches the new instance, and a later look removes the old machines", async () => {
+  const { settings, removed, removeMachine } = instanceWithMachines();
+  let now = Date.parse("2026-10-22T10:00:00.000Z");
+  let failing = true;
+  const client = new InstancesEc2Client(OLD_RUNNING);
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), {
+    now: () => now,
+    removeMachine: async (machineId) => { if (failing) throw new Error("disk full"); await removeMachine(machineId); }
+  });
+  const recreated = await service.recreateWorker(recreateRequest(), OLD_HANDLE.instanceId, "recreate");
+  assert.equal(recreated.handle.instanceId, "i-new1", "the type the User chose, not a stalled old instance");
+  assert.deepEqual(settings.leaving.map((entry) => entry.machineId), ["cloud", "older"]);
+  failing = false;
+  now += 5 * 60_000;
+  const status = await service.status();
+  assert.equal(status.configured, true);
+  assert.equal(status.handle?.instanceId, "i-new1");
+  await waitFor(() => removed.length === 2);
+  assert.deepEqual(settings.machines.map((machine) => machine.id), ["elsewhere"]);
+  assert.deepEqual(settings.credentials, OLD_CREDS);
+  assert.equal(settings.goneNotice, undefined);
+});
+
+test("a new instance started over a terminated saved one removes the old instance's machines first", async () => {
+  const { settings, removeMachine } = instanceWithMachines();
+  const client = new InstancesEc2Client({ ...OLD_RUNNING, state: "terminated" });
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), {
+    removeMachine: async (machineId) => { client.events.push(`remove:${machineId}`); await removeMachine(machineId); }
+  });
+  const prepared = await service.prepareWorker({ operationId: "start" });
+  assert.deepEqual(client.events, ["remove:cloud", "remove:older", "launch:i-new1"]);
+  assert.equal(prepared.handle.instanceId, "i-new1");
+  assert.deepEqual(settings.machines.map((machine) => machine.id), ["elsewhere"]);
+});
+
+test("a new instance keeps the machines of a saved instance that is stopped or whose keys are unreadable", async () => {
+  // Stopped in its own region while discovery adopts another instance.
+  {
+    const { settings, removed, removeMachine } = instanceWithMachines();
+    settings.handle = { ...OLD_HANDLE, region: "eu-west-1" };
+    const west = new InstancesEc2Client({ ...OLD_RUNNING, state: "stopped", region: "eu-west-1" });
+    const east = new InstancesEc2Client({ ...OLD_RUNNING, instanceId: "i-shared", region: "us-east-1" });
+    const logs: Array<[string, Record<string, unknown>]> = [];
+    const service = serviceWith(settings, new Map([[`${OLD_CREDS.accessKeyId}:eu-west-1`, west], [`${OLD_CREDS.accessKeyId}:us-east-1`, east]]),
+      { removeMachine, logger: (event, payload) => { logs.push([event, payload]); } });
+    assert.equal((await service.prepareWorker({ operationId: "adopt" })).handle.instanceId, "i-shared");
+    assert.deepEqual(removed, [], "stopped");
+    assert.deepEqual(logs.find(([event]) => event === "aws-worker.replaced.kept")?.[1], { instanceId: OLD_HANDLE.instanceId, state: "stopped" },
+      "looked at in its own region");
+  }
+  // The saved keys cannot be read: pasted keys of another account must not
+  // decide that the old instance is gone.
+  {
+    const { settings, removed, removeMachine } = instanceWithMachines();
+    settings.credentials = undefined;
+    const other = new InstancesEc2Client();
+    const service = serviceWith(settings, new Map([[NEW_CREDS.accessKeyId, other]]), { removeMachine });
+    await service.prepareWorker({ operationId: "other-account", blob: encodeWorkerBlob(NEW_CREDS) });
+    assert.deepEqual(removed, [], "keys unreadable");
+    assert.equal(other.describeCalls, 0, "the old instance is never looked up with someone else's keys");
+  }
+});
+
+test("a new instance is not started over a saved instance that cannot be checked or is not visible yet", async () => {
+  {
+    const { settings, removed, removeMachine } = instanceWithMachines();
+    const client = new InstancesEc2Client({ ...OLD_RUNNING, state: "terminated" });
+    client.describeError = Object.assign(new Error("Rate exceeded"), { name: "RequestLimitExceeded" });
+    const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), { removeMachine });
+    await assert.rejects(service.prepareWorker({ operationId: "throttled" }),
+      /Could not check the previous instance i-old in AWS: Rate exceeded\. Nothing was changed; try again\./);
+    assert.equal(client.runCount, 0);
+    assert.deepEqual(removed, []);
+    assert.deepEqual(settings.handle, OLD_HANDLE);
+  }
+  {
+    const { settings, removed, removeMachine } = instanceWithMachines();
+    settings.handle = { ...OLD_HANDLE, createdAt: new Date(Date.now() - 60_000).toISOString() };
+    const client = new InstancesEc2Client();
+    const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), { removeMachine });
+    await assert.rejects(service.prepareWorker({ operationId: "fresh" }), /AWS does not show the previous instance i-old yet/);
+    assert.equal(client.runCount, 0, "no second instance beside one AWS has not shown yet");
+    assert.deepEqual(removed, []);
+  }
+});
+
+test("starting the saved instance again touches no machine", async () => {
+  const { settings, removed, removeMachine } = instanceWithMachines();
+  const client = new InstancesEc2Client({ ...OLD_RUNNING, state: "stopped" });
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), { removeMachine });
+  assert.equal((await service.prepareWorker({ operationId: "start" })).handle.instanceId, OLD_HANDLE.instanceId);
+  assert.deepEqual(removed, []);
+  assert.equal(client.runCount, 0);
 });
