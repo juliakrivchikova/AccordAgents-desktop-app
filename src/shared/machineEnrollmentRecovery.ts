@@ -10,5 +10,6 @@ export function assertRecoverableMachineEnrollment(requested: unknown, installed
     || requested.issuer.publicKeyDerBase64 !== installed.issuer.publicKeyDerBase64) {
     throw new Error("This installation belongs to another environment; nothing was replaced.");
   }
-  if (!installed.relayUrl) throw new Error("The saved machine connection has no relay address.");
+  // A machine that talks only to the User's server is met there instead.
+  if (!installed.relayUrl && !installed.hubUrl) throw new Error("The saved machine connection has neither a relay nor a server address.");
 }

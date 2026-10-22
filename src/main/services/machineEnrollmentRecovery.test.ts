@@ -127,3 +127,11 @@ test("a never-connected replacement restores the original immutable home id and 
     assert.equal((await settings.listMachines()).find(m => m.id === record.id)?.deviceId, "already-used");
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });
+
+test("an installation that talks only to the User's server is recovered like a relay one; one with no address is not", () => {
+  const requested = recoveryPairing("recreated");
+  const { relayUrl: _relay, ...serverOnly } = { ...recoveryPairing("installed"), hubUrl: "https://hub.example/" };
+  assert.doesNotThrow(() => assertRecoverableMachineEnrollment(requested, serverOnly));
+  const { hubUrl: _hub, ...nowhere } = serverOnly;
+  assert.throws(() => assertRecoverableMachineEnrollment(requested, nowhere), /neither a relay nor a server/);
+});
