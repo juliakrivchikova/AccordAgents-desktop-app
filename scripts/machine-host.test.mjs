@@ -682,6 +682,48 @@ test("through the hub two machines name their channel after the pair, never afte
   }
 });
 
+test("through the hub a machine owes nothing to anyone: no delivery rows, no re-sharing to devices that may never come", async () => {
+  const { MachinePeerFabric } = await import("../dist/main/main/services/machinePeerFabric.js");
+  const home = pairing();
+  // A device that never comes (a phone that does not read this machine) and
+  // another machine: through the relay both would be owed the room's events.
+  const { createChatEventDeviceIdentity } = await import("../dist/main/main/services/chatEventLog.js");
+  const phone = createChatEventDeviceIdentity(new Date().toISOString());
+  const absentPhone = { deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone", name: "Phone",
+    relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: home.rendezvousId, fingerprint: "F" };
+  const otherMachine = { deviceId: DESKTOP_ID, publicKeyDerBase64: desktopEvents.identity.publicKeyDerBase64, role: "machine", name: "Other",
+    machineId: "machine-2", relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: "rv-other-machine", fingerprint: "F", chatChanges: true };
+  const shares = [];
+  const storage = new Proxy(hostEvents.eventStorage, {
+    get(target, property) {
+      if (property !== "deviceEvents") return Reflect.get(target, property, target);
+      return () => new Proxy(target.deviceEvents(), {
+        get(events, name) {
+          if (name === "shareUnacknowledged") return async (...args) => { shares.push(args); return 0; };
+          const value = Reflect.get(events, name, events);
+          return typeof value === "function" ? value.bind(events) : value;
+        }
+      });
+    }
+  });
+  const viaHub = new MachinePeerFabric({
+    hubMode: true, selfDeviceId: MACHINE_ID, storage, eventLog: hostEvents.eventLog, home,
+    homeClient: stubClient(), createClient: () => stubClient(), isPeerConnected: () => true,
+    apply: async () => "applied", onError: () => undefined, logger: () => undefined
+  });
+  try {
+    await viaHub.reconcile([absentPhone, otherMachine]);
+    viaHub.start();
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    assert.deepEqual(viaHub.recipients(), [], "a result names no device to wait for");
+    assert.deepEqual(viaHub.machineRecipients(), [], "a chat change names no machine to wait for");
+    assert.deepEqual(shares, [], "nothing is re-offered on joining or on the timer");
+    assert.equal(viaHub.peerDeviceIds().length, 2, "the devices are still trusted: their events from the hub are taken");
+  } finally {
+    viaHub.close();
+  }
+});
+
 test("a member's background work on the machine is reported to the desktop as it changes and again with each hello", async () => {
   const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
   const client = stubClient();

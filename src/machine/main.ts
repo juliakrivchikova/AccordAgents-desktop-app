@@ -387,9 +387,10 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     },
     postNote: (conversationId, eventId, content) => chatService.postArtifactChatNote(conversationId, eventId, content),
     onChanged: () => undefined,
-    ...artifactEventWriter(storageService, chatEventLogService, () => hostRef?.chatActionRecipients() ?? [{
+    // Through the User's hub nobody is waited on (see MachineHostService).
+    ...artifactEventWriter(storageService, chatEventLogService, () => hostRef?.chatActionRecipients() ?? (enrollment.hubUrl ? [] : [{
       deviceId: enrollment.issuer.originId, channelId: enrollment.rendezvousId
-    }], artifactStore),
+    }]), artifactStore),
     logger: (event, payload) => {
       void debugLogService.write(event, payload);
     }

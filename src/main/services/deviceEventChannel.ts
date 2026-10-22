@@ -55,7 +55,8 @@ interface DeviceEventChannelOptions {
   /** The User's hub carries this channel's events: they are delivered by the
    *  hub's order (HubSync hands each in through `receiveFromHub`), so the
    *  channel sends no events, acknowledgements or repair requests itself,
-   *  and keeps no mailbox. */
+   *  keeps no mailbox, and publishes without delivery rows (`recipients` is
+   *  ignored): a hub reader is never waited on. */
   hubMode?: boolean;
   onError(error: Error): void;
   /** First wait before a held (deferred or failing) event is tried again; it
@@ -137,9 +138,14 @@ export class DeviceEventChannel {
       // use the same HLC, immutable event log and gap rules.
       logScopeId: request.sharedScope ? CHAT_ACTION_LOG_SCOPE : this.scope(request.conversationId, request.scope ?? "actions"),
       payload,
-      recipients: request.recipients?.length
-        ? request.recipients
-        : [{ deviceId: this.options.peerDeviceId, channelId: this.options.channelId }]
+      // Through the hub nobody waits on this device for the event: the
+      // writer is done once the hub holds it, and each reader's place in the
+      // hub's order is its only acknowledgement. No delivery row is kept.
+      recipients: this.options.hubMode
+        ? []
+        : request.recipients?.length
+          ? request.recipients
+          : [{ deviceId: this.options.peerDeviceId, channelId: this.options.channelId }]
     });
     this.scheduleFlush();
     return result.event;
@@ -586,8 +592,12 @@ export class DeviceEventChannel {
       if (!originKey || !this.inScope(event.logScopeId) || !verifySignedChatEvent(event, originKey)) {
         throw new DevicePacketAuthenticationError("Device event signature or channel scope is invalid.");
       }
+      // A peer's own chat change goes on to whoever this device still
+      // reaches another way (a machine on the relay), as from the peer.
+      const forward = event.originId === this.options.peerDeviceId ? this.options.forwardTo?.(event) ?? [] : [];
       const stored = await this.options.storage.appendChatEvent(event, {
-        ingress: { deviceId: this.options.peerDeviceId, channelId: this.options.channelId }
+        ingress: { deviceId: this.options.peerDeviceId, channelId: this.options.channelId },
+        ...(forward.length ? { recipients: forward } : {})
       });
       if (stored.status === "conflict") return "conflict";
       this.receivePending = true;

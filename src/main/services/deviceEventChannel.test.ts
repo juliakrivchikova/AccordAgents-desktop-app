@@ -417,3 +417,57 @@ test("from the hub's order a second-hand event is taken only when it is a chat c
     } finally { channel.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test("through the hub a channel publishes without delivery rows, whoever the caller names, and never sends or re-offers the event itself", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-device-channel-hub-publish-"));
+  try {
+    const storage = new StorageService({ dbPath: path.join(directory, "writer.sqlite3") });
+    const eventLog = new ChatEventLogService(storage);
+    const peerLog = new ChatEventLogService(new StorageService({ dbPath: path.join(directory, "peer.sqlite3") }));
+    const local = await eventLog.getOrCreateDeviceIdentity();
+    const peer = await peerLog.getOrCreateDeviceIdentity();
+    const sent: DeviceEventPacket[] = [];
+    const channel = new DeviceEventChannel({ storage, eventLog, channelId: "room", hubMode: true,
+      localDeviceId: local.originId, peerDeviceId: peer.originId, peerPublicKeyDerBase64: peer.publicKeyDerBase64,
+      isPeerConnected: () => true,
+      send: async (packet) => { sent.push(packet); }, apply: async () => "applied", onError: () => undefined });
+    try {
+      channel.start();
+      const own = await channel.publish({ conversationId: "chat", kind: "machine.turn.request", payload: { runId: "r1" } });
+      const named = await channel.publish({ conversationId: "chat", kind: "machine.turn.finished", payload: { runId: "r1" },
+        recipients: [{ deviceId: peer.originId, channelId: "room" }, { deviceId: "device-phone", channelId: "room" }] });
+      const shared = await channel.publish({ conversationId: "chat", kind: "permission.decided", payload: { targetKey: "t" }, sharedScope: true });
+      await channel.flush();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      for (const event of [own, named, shared]) assert.ok(await storage.getChatEvent(event.eventId), "the event is written for the hub to carry");
+      assert.equal((await storage.deviceEvents().listPending("room")).length, 0, "nobody is waited on");
+      assert.deepEqual(await storage.deviceEvents().pressure("room"), { events: 0, bytes: 0, recipients: 0 });
+      assert.deepEqual(sent, [], "the channel itself sends nothing; the hub's order carries it");
+    } finally { channel.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a hub reader's own chat change taken from the hub goes on to a machine still on the relay, and to nobody else", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-device-channel-hub-forward-"));
+  try {
+    const storage = new StorageService({ dbPath: path.join(directory, "desktop.sqlite3") });
+    const peerStorage = new StorageService({ dbPath: path.join(directory, "hub-machine.sqlite3") });
+    const peerLog = new ChatEventLogService(peerStorage);
+    const local = await new ChatEventLogService(storage).getOrCreateDeviceIdentity();
+    const peer = await peerLog.getOrCreateDeviceIdentity();
+    const relayMachine = { deviceId: "device-relay-machine", channelId: "rv-relay-machine" };
+    const channel = new DeviceEventChannel({ storage, eventLog: new ChatEventLogService(storage), channelId: "rv-hub-machine", hubMode: true,
+      localDeviceId: local.originId, peerDeviceId: peer.originId, peerPublicKeyDerBase64: peer.publicKeyDerBase64,
+      forwardTo: (event) => event.kind === "chat.changes" ? [relayMachine] : [],
+      send: async () => undefined, apply: async () => "applied", onError: () => undefined });
+    try {
+      const change = (await peerLog.appendLocalEvent({ conversationId: "chat", logScopeId: "chat-changes:chat", kind: "chat.changes", payload: { version: 1 } })).event;
+      const command = (await peerLog.appendLocalEvent({ conversationId: "chat", logScopeId: "device:rv-hub-machine:[\"chat\",\"actions\"]", kind: "machine.turn.finished", payload: {} })).event;
+      assert.equal(await channel.receiveFromHub(change), "stored");
+      assert.equal(await channel.receiveFromHub(command), "stored");
+      const pending = await storage.deviceEvents().listPending(relayMachine.channelId, 0, relayMachine.deviceId);
+      assert.deepEqual(pending.map((item) => item.event.eventId), [change.eventId], "only the chat change is passed on, to the relay machine");
+      assert.equal((await storage.deviceEvents().listPending("rv-hub-machine")).length, 0, "the hub reader itself is owed nothing");
+    } finally { channel.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

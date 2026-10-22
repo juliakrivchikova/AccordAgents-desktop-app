@@ -2142,6 +2142,8 @@ export class MachineHostService {
    * asking members to run, not an audience for this machine's results.
    */
   private resultRecipients(): Array<{ deviceId: string; channelId: string }> {
+    // Through the hub nobody is waited on: each device reads the hub's order.
+    if (this.options.hubMode) return [];
     const room = this.options.pairing.rendezvousId;
     const issuer = { deviceId: this.options.pairing.issuer.originId, channelId: room };
     const peers = this.peers.recipients()
@@ -2151,8 +2153,10 @@ export class MachineHostService {
 
   /** Where this machine's own chat changes go: the desktop that installed it,
    *  and every other machine of the owner it knows (each holds every chat).
-   *  Phones are not addressed; they read the chat from the desktop. */
+   *  Phones are not addressed; they read the chat from the desktop. Through
+   *  the hub nobody is addressed: every device reads the hub's order. */
   chatChangeRecipients(): Array<{ deviceId: string; channelId: string }> {
+    if (this.options.hubMode) return [];
     return [
       { deviceId: this.options.pairing.issuer.originId, channelId: this.options.pairing.rendezvousId },
       ...this.peers.machineRecipients()

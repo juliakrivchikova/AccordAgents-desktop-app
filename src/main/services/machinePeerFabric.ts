@@ -92,8 +92,10 @@ export class MachinePeerFabric {
     return connection ? this.channelIdFor(connection.peer) : undefined;
   }
 
-  /** Everyone a result should be delivered to, as outbox recipients. */
+  /** Everyone a result should be delivered to, as outbox recipients; none
+   *  through the hub, which every device reads for itself. */
   recipients(): Array<{ deviceId: string; channelId: string }> {
+    if (this.options.hubMode) return [];
     return [...this.connections.values()].map((connection) => ({
       deviceId: connection.peer.deviceId,
       channelId: this.channelIdFor(connection.peer)
@@ -105,8 +107,10 @@ export class MachinePeerFabric {
     for (const connection of this.connections.values()) connection.channel.nudge();
   }
 
-  /** The owner's other machines among them, each in the room it is met in. */
+  /** The owner's other machines among them, each in the room it is met in;
+   *  none through the hub (they read its order). */
   machineRecipients(): Array<{ deviceId: string; channelId: string }> {
+    if (this.options.hubMode) return [];
     return [...this.connections.values()]
       .filter((connection) => connection.peer.role === "machine")
       .map((connection) => ({ deviceId: connection.peer.deviceId, channelId: this.channelIdFor(connection.peer) }));
@@ -115,6 +119,9 @@ export class MachinePeerFabric {
   start(): void {
     this.started = true;
     for (const connection of this.connections.values()) connection.channel.start();
+    // Through the hub nothing is owed to anyone: every device reads the
+    // hub's order from its own place, so there is nothing to share.
+    if (this.options.hubMode) return;
     // Whatever this machine still owes anyone in a room is owed to every
     // trusted device in it. Keeping that true on a timer, rather than only at
     // the moment an event is published, is what makes it independent of which
@@ -204,7 +211,8 @@ export class MachinePeerFabric {
       });
       // Whatever this room still owes anyone is owed to this device too:
       // a result published while it was not yet trusted must still reach it.
-      const shared = await this.options.storage.deviceEvents()
+      // Through the hub it reads that from the hub's order instead.
+      const shared = this.options.hubMode ? 0 : await this.options.storage.deviceEvents()
         .shareUnacknowledged(this.channelIdFor(peer), peer.deviceId)
         .catch(() => 0);
       this.options.logger("machine-host.trust.peer-added", {

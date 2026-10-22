@@ -164,6 +164,34 @@ test("a change to a chat the hub does not hold yet waits until the chat arrives"
   assert.deepEqual(folded?.messages.map((item) => item.id), ["n1"], "the change that waited is in it");
 });
 
+test("a machine member's reply is folded from the machine it runs on, with no desktop involved; another machine cannot write it", async (t) => {
+  const h = await hub(t);
+  const home = createChatEventDeviceIdentity(new Date().toISOString());
+  const other = createChatEventDeviceIdentity(new Date().toISOString());
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [
+    { deviceId: home.originId, publicKeyDerBase64: home.publicKeyDerBase64, role: "machine", name: "Cloud box", machineId: "machine-home" },
+    { deviceId: other.originId, publicKeyDerBase64: other.publicKeyDerBase64, role: "machine", name: "Other box", machineId: "machine-other" }
+  ] });
+  const member = { id: "p-bot", handle: "bot", kind: "claude-code", homeMachineId: "machine-home" };
+  const bubble = { id: "reply-1", role: "participant", participantId: member.id, participantLabel: "@bot", content: "", status: "pending", createdAt: new Date().toISOString() } as ChatMessage;
+  // The desktop creates the chat and the member's pending bubble, then goes away.
+  const createdChat = changesEvent(h.owner, "chat-machine", 1, undefined, [{ type: "conversation.created", conversation: { title: "Cloud", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [member] } } }]);
+  const pending = changesEvent(h.owner, "chat-machine", 2, createdChat.eventHash, [{ type: "message.created", message: bubble }]);
+  await h.call(h.owner, "POST", "/v1/events", { events: [createdChat, pending] });
+  // Another machine of the User's cannot write a reply for a member it does not host.
+  const forged = changesEvent(other, "chat-machine", 1, undefined, [{ type: "message.updated", message: { ...bubble, content: "not mine to write", status: "done" } }]);
+  await h.call(other, "POST", "/v1/events", { events: [forged] });
+  await h.folder.idle();
+  assert.equal((await h.storage.getConversation("chat-machine"))?.messages.find((item) => item.id === "reply-1")?.status, "pending");
+  // The member's own machine writes it, and the phone's copy has it.
+  const answered = changesEvent(home, "chat-machine", 1, undefined, [{ type: "message.updated", message: { ...bubble, content: "answered on the machine", status: "done" } }]);
+  assert.equal((await h.call(home, "POST", "/v1/events", { events: [answered] })).status, 200);
+  await h.folder.idle();
+  const reply = (await h.storage.getConversation("chat-machine"))?.messages.find((item) => item.id === "reply-1");
+  assert.equal(reply?.content, "answered on the machine");
+  assert.equal(reply?.status, "done");
+});
+
 test("more changes than one fold reads wait for a chat whose creation comes after them", async (t) => {
   const h = await hub(t);
   const machine = createChatEventDeviceIdentity(new Date().toISOString());

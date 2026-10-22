@@ -166,7 +166,7 @@ import {
   fulfilledMobileEventKeysFromMailboxEvents,
   mobileMailboxEventScopeKey
 } from "./services/mobileMailboxOutbox";
-import { mobilePairingRequestWithEndpointDefaults, mobilePairingWithStartKey, mobilePhoneScopeOfPairing, type MobilePairingPackage } from "../shared/mobilePairing";
+import { mobilePairingRequestWithEndpointDefaults, mobilePairingWithStartKey, mobilePhoneScopeOfPairing, type CreateMobilePairingResult, type MobilePairingPackage } from "../shared/mobilePairing";
 import type { ChatEventEnvelope } from "../shared/chatEvents";
 import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
 import { readActiveRunIds } from "../shared/chatRunState";
@@ -511,8 +511,9 @@ async function startHubLink(): Promise<void> {
     // the event is held until it is there.
     deliver: async (event) => machineLinkService ? machineLinkService.receiveFromHub(event) : "not-ready",
     applyChatChange: hubChatChangeApplier(storageService, chatService),
-    // Only machines that read the hub stop waiting; one still on the relay
-    // is sent the event the relay way.
+    // A machine that reads the hub is never given a delivery row; any that
+    // exists (an older version wrote it) lets go once the hub holds the
+    // event. One still on the relay is sent the event the relay way.
     onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString(), machineLinkService?.hubReaders() ?? []),
     // A machine on the relay is sent its channel the relay way: only the
     // channels of machines that read the hub go there. Read from settings,
@@ -914,15 +915,10 @@ function moveMachinesToHub(): Promise<void> {
 }
 
 
-async function createMachine(request: CreateMachineRequest, awsInstanceId?: string): Promise<CreateMachineResult> {
-  const name = typeof request?.name === "string" ? request.name.trim() : "";
-  if (!name) {
-    throw new Error("A machine needs a name.");
-  }
+/** A machine's enrollment on the shared relay: its room and a sealed
+ *  mailbox, registered before its credentials are handed out. */
+async function createRelayMachinePairing(): Promise<CreateMobilePairingResult> {
   const settings = await settingsService.getPublicSettings();
-  // The machine meets this desktop and the phone in the relay's room and
-  // sealed mailbox: on the User's own server once it is set up (the
-  // defaults name it then), otherwise on the shared relay.
   const pairing = await mobilePairingService.createPairing({
     purpose: "machine-host",
     ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES,
@@ -939,6 +935,29 @@ async function createMachine(request: CreateMachineRequest, awsInstanceId?: stri
   if (!await ensureMailboxRegisteredForPairing(pairing.package)) {
     throw new Error("The machine's relay mailbox could not be registered. Try adding the machine again.");
   }
+  return pairing;
+}
+
+async function createMachine(request: CreateMachineRequest, awsInstanceId?: string): Promise<CreateMachineResult> {
+  const name = typeof request?.name === "string" ? request.name.trim() : "";
+  if (!name) {
+    throw new Error("A machine needs a name.");
+  }
+  // Read, not guessed: a machine put on the relay by mistake would stay there.
+  const hub = await settingsService.getHubConfig();
+  // With the User's own server the machine talks only to it: it meets this
+  // desktop in the server's rooms and every durable event goes through the
+  // server's one order, which every device reads from its own place. No
+  // relay, no mailbox, nothing kept here until the machine confirms.
+  // Without a server it meets this desktop and the phone in the shared
+  // relay's room and sealed mailbox, as before.
+  const pairing = hub
+    ? await mobilePairingService.createPairing({
+      purpose: "machine-host",
+      ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES,
+      hubUrl: hub.url
+    })
+    : await createRelayMachinePairing();
   const record = {
     id: randomUUID(),
     name,
@@ -1767,7 +1786,10 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
         for (const machine of machines) {
           const machinePairing = await settingsService.getMachinePairing(machine.pairingKey);
           const publicKeyDerBase64 = machine.lastHello?.publicKeyDerBase64;
-          if (!machinePairing?.relayUrl || !machine.deviceId || !publicKeyDerBase64) continue;
+          // A machine that talks only to the User's server is not reached by
+          // the phone directly: the phone reads its replies from the server,
+          // and what the phone asks of it goes through this desktop for now.
+          if (!machinePairing?.relayUrl || machinePairing.hubUrl || !machine.deviceId || !publicKeyDerBase64) continue;
           access.push({
             machineId: machine.id,
             name: machine.name,
@@ -4219,7 +4241,10 @@ void app.whenReady().then(async () => {
         machineLinkService?.nudgeEventChannels();
       },
       machineOriginId: (machineId) => machineLinkService?.machineDeviceId(machineId),
-      alwaysEmit: () => Boolean(hubSync) || hubLinking
+      // A machine that reads the hub is addressed by no delivery row: its
+      // changes are written for the hub to carry, also while the link to the
+      // hub is not up yet (they go once it is).
+      alwaysEmit: () => Boolean(hubSync) || hubLinking || (machineLinkService?.hubReaders().length ?? 0) > 0
     }));
     await startHubLink().catch((error: unknown) => {
       void debugLogService.write("hub.link.start-error", { message: error instanceof Error ? error.message : String(error) });
@@ -4393,8 +4418,9 @@ void app.whenReady().then(async () => {
     machineRecovery = new MachineRecoveryService({
       now: () => Date.now(),
       linkStartedAt: () => machineLinkStartedAt,
-      linkState: (machineId) => link.isMachineConnected(machineId) ? "connected"
-        : link.reachesRelay(machineId) ? "out-of-touch" : "unknown",
+      // Where the machine is met says whether it is there: its room on the
+      // relay, or on the User's server for a machine that talks only to it.
+      linkState: (machineId) => link.presenceState(machineId),
       machineOnInstance: () => cloudRunAwsService.autoStopMachineRecord(),
       instanceRunningSince: () => cloudRunAwsService.instanceRunningSince(),
       setupRunning: (machineId) => Boolean(machineInstallerService.activeOperation(machineId)),
