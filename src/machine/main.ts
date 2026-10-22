@@ -648,6 +648,10 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await idlePower.start();
   }
   await host.start();
+  // Same as the desktop: approved member removals left waiting by a restart.
+  void chatService.resumeQueuedMemberRemovals().catch((error) => {
+    void debugLogService.write("chat.member-removal.resume-error", { message: String(error) });
+  });
   const hubSync = enrollment.hubUrl ? new HubSync({
     client: new HubClient({ url: enrollment.hubUrl, identity: () => chatEventLogService.getOrCreateDeviceIdentity(), storage: storageService }),
     storage: storageService,

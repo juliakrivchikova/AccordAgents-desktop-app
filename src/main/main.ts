@@ -4511,6 +4511,13 @@ void app.whenReady().then(async () => {
       message: error instanceof Error ? error.message : String(error)
     });
   });
+  // A member removal the User approved before the app quit, still waiting for
+  // a turn to end; nothing runs after a restart, so it is applied now.
+  void chatService.resumeQueuedMemberRemovals().catch((error) => {
+    void debugLogService.write("chat.member-removal.resume-error", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+  });
   createWindow();
   void ensureLoginShellEnvPrimed();
   await detectAgentsWithAppSkills().catch((error) => {

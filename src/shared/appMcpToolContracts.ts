@@ -1958,7 +1958,7 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
     capability: "participants.manage",
     desktop: {
       "title": "Request Member Change",
-      "description": "Request adding a new member to the current chat, optionally saving it as a reusable preset, or adding an existing saved member preset to the chat.",
+      "description": "Request adding a new member to the current chat, optionally saving it as a reusable preset, adding an existing saved member preset to the chat, or removing another member from the chat. A removal always waits for the User's approval on a card and takes effect after your turn ends and no member is running; request removals on their own, not together with additions. You cannot remove yourself or the Chat Assistant.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1978,7 +1978,8 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
                   "type": "string",
                   "enum": [
                     "add_new_participant_to_chat",
-                    "add_existing_participant_to_chat"
+                    "add_existing_participant_to_chat",
+                    "remove_participant_from_chat"
                   ]
                 },
                 "saveAsPreset": {
@@ -1986,6 +1987,14 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
                 },
                 "participantConfigId": {
                   "type": "string"
+                },
+                "participantId": {
+                  "type": "string",
+                  "description": "For remove_participant_from_chat: the current chat member's id. Give this or handle."
+                },
+                "handle": {
+                  "type": "string",
+                  "description": "For remove_participant_from_chat: the current chat member's @handle. Give this or participantId."
                 },
                 "participant": {
                   "type": "object",

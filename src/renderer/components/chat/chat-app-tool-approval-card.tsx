@@ -29,7 +29,8 @@ import { ChatAppToolRoleChangeOperation } from "./chat-app-tool-role-operation";
 import { ChatAppToolParticipantChangeOperation } from "./chat-app-tool-participant-operation";
 import { ChatCodexApprovalOperation } from "./chat-codex-approval-operation";
 import { ChatScriptApprovalCard } from "./chat-script-approval-card";
-import { chatScriptChangeRequest } from "./chat-app-tool-data";
+import { chatParticipantRemovalRequest, chatScriptChangeRequest } from "./chat-app-tool-data";
+import { ChatAppToolMemberRemovalOperation, ChatAppToolMemberRemovalResult, memberRemovalOptions, memberRemovalQuestion } from "./chat-app-tool-member-removal";
 
 /** Scheduled-script proposals have their own card; every other approval uses the generic one. */
 export function ChatAppToolApprovalCard(props: Parameters<typeof GenericChatAppToolApprovalCard>[0]): JSX.Element {
@@ -61,6 +62,7 @@ function GenericChatAppToolApprovalCard(props: {
   const combinedRequest = chatRoleParticipantChangeRequest(props.approval);
   const roleRequest = chatRoleChangeRequest(props.approval);
   const participantChange = chatParticipantChangeRequest(props.approval);
+  const memberRemoval = chatParticipantRemovalRequest(props.approval);
   const participantRequest = chatParticipantRequestApprovalRequest(props.approval);
   const selfCompactionRequest = chatSelfCompactionRequest(props.approval);
   const codexRequest = chatCodexApprovalRequest(props.approval);
@@ -103,7 +105,7 @@ function GenericChatAppToolApprovalCard(props: {
         approve: option.outcome === "approve",
         codexDecisionId: option.id
       }))
-    : approvalOptions(
+    : memberRemoval ? memberRemovalOptions(memberRemoval) : approvalOptions(
     props.approval,
     permissionRequest,
     effectiveRoleRequest,
@@ -126,7 +128,7 @@ function GenericChatAppToolApprovalCard(props: {
       : `${chatParticipantReference(props.approval.requesterHandle)} needs approval before Codex can continue`
     : effectiveCombinedRequest
       ? `${chatParticipantReference(props.approval.requesterHandle)} wants to create a role and add a member`
-      : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, selfCompactionRequest, toolPermissionRequest);
+      : memberRemoval ? memberRemovalQuestion(props.approval, memberRemoval) : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, selfCompactionRequest, toolPermissionRequest);
   const displayPrompt = rosterApproval ? rosterApprovalQuestion(props.approval, added) : approvalPrompt;
 
   const queuedDecision = props.approval.machineDecisionPending;
@@ -143,7 +145,7 @@ function GenericChatAppToolApprovalCard(props: {
     );
   }
 
-  if (reviewChange && readOnly) {
+  if ((reviewChange || memberRemoval) && readOnly) {
     return (
       <section
         className={`chat-app-tool-approval-card is-review-change is-compact-result is-${props.approval.status}`}
@@ -158,13 +160,13 @@ function GenericChatAppToolApprovalCard(props: {
             {requester && <span className="message-provider">Proposed changes</span>}
             <span className="message-when">{formatChatTime(props.approval.createdAt)}</span>
           </div>
-          <ChatAppToolReviewResult
+          {memberRemoval ? <ChatAppToolMemberRemovalResult approval={props.approval} request={memberRemoval} /> : <ChatAppToolReviewResult
             approval={props.approval}
             roleRequest={combinedRequest?.roleRequest ?? roleRequest}
             participantChange={combinedRequest?.participantRequest ?? participantChange}
             combinedRequest={combinedRequest}
             savedParticipants={props.savedParticipants}
-          />
+          />}
         </div>
       </section>
     );
@@ -311,6 +313,8 @@ function GenericChatAppToolApprovalCard(props: {
               cliProviderHosts={props.cliProviderHosts ?? []}
               onChange={setParticipantDraft}
             />
+          ) : memberRemoval ? (
+            <ChatAppToolMemberRemovalOperation approval={props.approval} request={memberRemoval} />
           ) : participantRequest ? (
             <ChatAppToolParticipantRequestOperation request={participantRequest} requesterHandle={props.approval.requesterHandle} />
           ) : selfCompactionRequest ? (

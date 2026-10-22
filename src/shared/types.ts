@@ -1109,6 +1109,22 @@ export interface ChatParticipantChangeRequest {
   operations: ChatParticipantChangeOperation[];
 }
 
+// A member asks to take another member out of the chat. The app resolves the
+// target when the request is made; the stored handle is for display only.
+export interface ChatParticipantRemoveOperation {
+  type: "remove_participant_from_chat";
+  participantId: string;
+  handle: string;
+}
+
+// Always reviewed by the User on a card, never auto-applied; once approved it
+// is applied when the chat has no live work (see ChatAppToolApproval.memberRemovalQueuedAt).
+export interface ChatParticipantRemovalRequest {
+  kind: "participant_removal";
+  reason?: string;
+  operations: ChatParticipantRemoveOperation[];
+}
+
 export interface ChatRoleParticipantChangeRequest {
   kind: "role_participant_change";
   reason?: string;
@@ -1318,6 +1334,7 @@ export type ChatAppToolApprovalRequest =
   | ChatRosterChangeRequest
   | ChatRoleChangeRequest
   | ChatParticipantChangeRequest
+  | ChatParticipantRemovalRequest
   | ChatRoleParticipantChangeRequest
   | ChatPermissionChangeRequest
   | ChatToolPermissionRequest
@@ -1414,6 +1431,9 @@ export interface ChatAppToolApproval {
   };
   consumedAt?: string;
   error?: string;
+  /** An approved member removal that is waiting for the chat's running turns
+   *  to finish; cleared when the removal is applied or could not be. */
+  memberRemovalQueuedAt?: string;
   /** Machines transport: the approval was raised by a member on this machine;
    *  the desktop shows it and forwards the decision there. */
   homeMachineId?: string;
