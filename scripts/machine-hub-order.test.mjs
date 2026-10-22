@@ -6,7 +6,8 @@
 // hub holds the event, and each reader's place in the order is its only
 // acknowledgement.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -35,11 +36,11 @@ async function device(directory, name) {
   return { dbPath, eventStorage, eventLog, identity, publicKeyDerBase64: identity.publicKeyDerBase64 };
 }
 
-/** Rows straight from the file, not through the code under test. */
-function outboxRows(dbPath, where = "1 = 1") {
-  // Read-only, and waiting out the writers' locks rather than failing on them.
-  const out = execFileSync("sqlite3", ["-readonly", "-cmd", ".timeout 10000", dbPath, `select count(*) from device_event_outbox where ${where};`], { encoding: "utf8" });
-  return Number(out.trim()) || 0;
+/** Rows straight from the file, not through the code under test: read-only,
+ *  waiting out the writers' locks, and off the event loop the services run on. */
+async function outboxRows(dbPath, where = "1 = 1") {
+  const { stdout } = await promisify(execFile)("sqlite3", ["-readonly", "-cmd", ".timeout 10000", dbPath, `select count(*) from device_event_outbox where ${where};`], { encoding: "utf8" });
+  return Number(stdout.trim()) || 0;
 }
 
 async function waitFor(predicate, timeoutMs = 10_000) {
@@ -72,6 +73,13 @@ test("through the User's hub a machine runs turns, streams, answers approvals an
     search: new ChatSearchService(hubStore.eventStorage), vapidPublicKey: "B" });
   const http = await server.listenHttp(0, "127.0.0.1");
   const hubUrl = `http://127.0.0.1:${http.address().port}`;
+  const closers = [];
+  t.after(async () => {
+    for (const close of closers.reverse()) await Promise.resolve().then(close).catch(() => undefined);
+    folder.close();
+    await server.close();
+    await rm(directory, { recursive: true, force: true });
+  });
 
   const now = Date.now();
   const pairing = {
@@ -106,6 +114,7 @@ test("through the User's hub a machine runs turns, streams, answers approvals an
     trustedDevices: async (room) => [{ deviceId: phone.identity.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone", name: "iPhone",
       relayUrl: room.relayUrl, rendezvousId: room.rendezvousId, fingerprint: room.fingerprint }]
   });
+  closers.push(() => link.close());
   await link.loadMachines();
   assert.deepEqual(link.hubReaders(), [MACHINE_ID], "known as a hub reader before it connects");
   assert.deepEqual(link.chatChangeRecipients(), [], "a machine that reads the hub is never addressed");
@@ -121,6 +130,7 @@ test("through the User's hub a machine runs turns, streams, answers approvals an
     onPushed: (eventIds) => desktop.eventStorage.hub().acknowledgeOutbox(eventIds, new Date().toISOString(), link.hubReaders()),
     scopePrefixes: [...HUB_SHARED_SCOPE_PREFIXES, `device:${pairing.rendezvousId}:`]
   });
+  closers.push(() => desktopSync.stop());
   desktop.eventLog.onLocalAppend(() => desktopSync.nudgePush());
 
   // What the desktop's ChatService does on every save: one signed change.
@@ -200,6 +210,7 @@ test("through the User's hub a machine runs turns, streams, answers approvals an
     onPushed: (eventIds) => machine.eventStorage.hub().acknowledgeOutbox(eventIds, new Date().toISOString()),
     scopePrefixes: HUB_SCOPE_PREFIXES
   });
+  closers.push(() => host.close(), () => machineSync.stop());
   machine.eventLog.onLocalAppend(() => machineSync.nudgePush());
 
   // "Ever": every 25 ms during the whole session, on both sides.
@@ -208,20 +219,13 @@ test("through the User's hub a machine runs turns, streams, answers approvals an
   let sampling = true;
   const sampler = (async () => {
     while (sampling) {
-      desktopMax = Math.max(desktopMax, outboxRows(desktop.dbPath, `device_id = '${MACHINE_ID}'`));
-      machineMax = Math.max(machineMax, outboxRows(machine.dbPath));
+      const [desktopRows, machineRows] = await Promise.all([outboxRows(desktop.dbPath, `device_id = '${MACHINE_ID}'`), outboxRows(machine.dbPath)]);
+      desktopMax = Math.max(desktopMax, desktopRows);
+      machineMax = Math.max(machineMax, machineRows);
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   })();
-
-  t.after(async () => {
-    sampling = false;
-    await sampler.catch(() => undefined);
-    link.close(); host.close(); desktopSync.stop(); machineSync.stop();
-    folder.close();
-    await server.close();
-    await rm(directory, { recursive: true, force: true });
-  });
+  closers.push(async () => { sampling = false; await sampler.catch(() => undefined); });
 
   desktopSync.startPushing();
   await link.start();
@@ -306,11 +310,9 @@ test("through the User's hub a machine runs turns, streams, answers approvals an
   await sampler;
   assert.equal(desktopMax, 0, "the desktop never kept a delivery row for the machine that reads the hub");
   assert.equal(machineMax, 0, "the machine never kept a delivery row for anyone");
-  assert.equal(outboxRows(desktop.dbPath, `device_id = '${MACHINE_ID}'`), 0);
-  assert.equal(outboxRows(machine.dbPath), 0);
-  // Every event either side wrote reached the hub.
-  const own = async (storage, originId) => (await storage.hub().ownEventsAfter(originId, 0, 1000)).length;
-  assert.ok(await own(machine.eventStorage, MACHINE_ID) > 0);
-  assert.equal(Number(await machine.eventStorage.hub().clientState("pushed-rowid")) >= (await machine.eventStorage.hub().newestOwnRowid(MACHINE_ID)), true, "the machine pushed all it wrote");
-  void own;
+  assert.equal(await outboxRows(desktop.dbPath, `device_id = '${MACHINE_ID}'`), 0);
+  assert.equal(await outboxRows(machine.dbPath), 0);
+  // Every event the machine wrote reached the hub.
+  assert.ok((await machine.eventStorage.hub().ownEventsAfter(MACHINE_ID, 0, 1000)).length > 0);
+  assert.ok(Number(await machine.eventStorage.hub().clientState("pushed-rowid")) >= await machine.eventStorage.hub().newestOwnRowid(MACHINE_ID), "the machine pushed all it wrote");
 });

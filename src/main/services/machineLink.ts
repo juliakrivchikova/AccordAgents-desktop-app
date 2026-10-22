@@ -48,6 +48,7 @@ import type { ChatActionDependency } from "../../shared/deviceEventChannel";
 import type { MachineTrustRoster, TrustedPeerAccess } from "../../shared/machineTrust";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { CHAT_CHANGES_EVENT_KIND, CHAT_CHANGES_VERSION, isChatChangesLogScope, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
+import type { MachineRecoveryLinkState } from "./machineRecovery";
 
 export interface MachineLinkOptions {
   repositoryPaths?: (sourcePath: string) => Promise<Record<string, string>>;
@@ -63,8 +64,9 @@ export interface MachineLinkOptions {
    *  address (tests); the relay's own client by default. */
   createProbeClient?: (pairing: MobilePairingPackage) => Pick<TunnelClient, "on" | "connect" | "close">;
   /** The User's hub carries the events of machines enrolled with it: their
-   *  channels deliver nothing themselves and forward nothing (every device
-   *  reads the hub's order). A machine enrolled with the relay keeps it. */
+   *  channels deliver nothing themselves, forward nothing and keep no
+   *  delivery rows (every device reads the hub's order). A machine enrolled
+   *  with the relay keeps it. */
   hubMode?: boolean;
   /** The set of machines (or their keys) changed: whoever admits devices by
    *  key, the User's hub, is told again. */
@@ -504,33 +506,47 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
   }
 
-  /** Reads the enrolled machines, so chat changes are addressed to all of
-   *  them from the first save on. Called before any chat activity. */
+  /** Reads the enrolled machines and which of them read the hub, so the
+   *  chat changes of the first save on are addressed to every machine on the
+   *  relay and to none that reads the hub. Called before any chat activity. */
   async loadMachines(): Promise<void> {
-    for (const record of await this.settings.listMachines()) {
+    await this.enrollAll(await this.settings.listMachines());
+  }
+
+  private async enrollAll(records: MachineRecord[]): Promise<void> {
+    for (const record of records) {
       await this.noteTransport(record);
       if (!this.connections.has(record.id)) this.enrolled.set(record.id, record);
     }
   }
 
-  /** Whether a machine reads the hub, from its enrollment. A failure to read
-   *  it fails the caller: taking a hub machine for a relay one would keep
-   *  delivery rows for it that nothing ever confirms. */
+  /** Whether a machine reads the hub, from its enrollment. An enrollment that
+   *  cannot be read is logged and changes nothing: the machine keeps what it
+   *  was counted as (one read failure must not stop the others from being
+   *  enrolled), and its connection reads the enrollment again. */
   private async noteTransport(record: MachineRecord, pairing?: MobilePairingPackage): Promise<void> {
-    const enrollment = pairing ?? await this.settings.getMachinePairing(record.pairingKey);
-    if (this.options.hubMode && enrollment?.hubUrl) this.hubMachines.add(record.id);
+    let enrollment = pairing;
+    if (!enrollment) {
+      try {
+        enrollment = await this.settings.getMachinePairing(record.pairingKey);
+      } catch (error) {
+        void this.debugLogs.write("machine-link.transport.read-error", { machineId: record.id, message: errorMessage(error) });
+        return;
+      }
+    }
+    if (this.readsHubEnrollment(enrollment)) this.hubMachines.add(record.id);
     else this.hubMachines.delete(record.id);
+  }
+
+  /** The one rule for whether a machine's enrollment puts it on the hub. */
+  private readsHubEnrollment(pairing: Pick<MobilePairingPackage, "hubUrl"> | undefined): boolean {
+    return Boolean(this.options.hubMode && pairing?.hubUrl);
   }
 
   async start(): Promise<void> {
     this.closed = false;
     const machines = await this.settings.listMachines();
-    for (const record of machines) {
-      await this.noteTransport(record).catch((error: unknown) => {
-        void this.debugLogs.write("machine-link.transport.read-error", { machineId: record.id, message: errorMessage(error) });
-      });
-      if (!this.connections.has(record.id)) this.enrolled.set(record.id, record);
-    }
+    await this.enrollAll(machines);
     void this.debugLogs.write("machine-link.start", { machines: machines.length, desktopDeviceId: this.options.desktopDeviceId });
     for (const record of machines) {
       await this.connectMachine(record).catch((error) => {
@@ -830,11 +846,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   /** A machine enrolled with the User's hub, which carries its events. */
   private viaHub(connection: MachineConnection): boolean {
-    return Boolean(this.options.hubMode && connection.pairing.hubUrl);
-  }
-
-  private readsHub(deviceId: string): boolean {
-    return this.machineRecords().some((record) => record.deviceId === deviceId && this.hubMachines.has(record.id));
+    return this.readsHubEnrollment(connection.pairing);
   }
 
   /** The machines that read the hub, connected or not (the rest are reached
@@ -951,12 +963,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   /**
-   * Where this desktop's chat changes go: every enrolled machine, connected
-   * or not. A change is kept for each of them until it confirms; one whose
-   * runtime cannot fold changes yet is sent none (see `holdsBack`) and gets
-   * them all, in order, once it is updated, so it is never left with a gap.
-   * A machine that reads the hub takes them from the hub's order and is not
-   * addressed.
+   * Where this desktop's chat changes go: every enrolled machine on the
+   * relay, connected or not. A change is kept for each of them until it
+   * confirms; one whose runtime cannot fold changes yet is sent none (see
+   * `holdsBack`) and gets them all, in order, once it is updated, so it is
+   * never left with a gap. A machine that reads the hub takes them from the
+   * hub's order and is not addressed.
    */
   chatChangeRecipients(): Array<{ deviceId: string; channelId: string }> {
     return this.relayRecipients();
@@ -965,11 +977,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
   /**
    * Machine setup reads the identity of the runtime it installs before it
    * copies the chats, and records it here: from then on every chat change is
-   * addressed to that machine, although it has not connected yet.
+   * addressed to that machine (one on the relay), or the User's hub admits it
+   * (one that reads the hub), although it has not connected yet.
    */
   async adoptMachineIdentity(machineId: string, identity: { originId: string; publicKeyDerBase64: string }): Promise<void> {
     const connection = this.connections.get(machineId);
-    if (!connection) throw new Error("This machine is not connected to the relay from this desktop.");
+    if (!connection) throw new Error("This machine is not connected from this desktop.");
     if (connection.record.deviceId && connection.record.deviceId !== identity.originId) {
       throw new Error("The machine's enrolled device identity changed; its history cannot be accepted as the previous machine.");
     }
@@ -1065,6 +1078,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
         const pairing = await this.settings.getMachinePairing(machine.pairingKey);
         const publicKeyDerBase64 = machineSigningKey(machine);
         if (!pairing || !meetingUrl(pairing) || !publicKeyDerBase64) continue;
+        // Two machines meet only where both are: one that reads the hub and
+        // one on the relay never reach each other, and naming one to the
+        // other would have it keep, and send for ever, what can never be
+        // confirmed. Each reaches the other's members through this desktop.
+        if (this.readsHubEnrollment(pairing) !== this.viaHub(connection)) continue;
         peers.push({
           deviceId: machine.deviceId,
           publicKeyDerBase64,
@@ -1312,9 +1330,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return Boolean(this.connections.get(machineId)?.machineDeviceId);
   }
 
-  /** This desktop's own way to a machine through the relay is open, so a
-   *  machine missing there is missing, not hidden by a relay or network
-   *  outage on this side. */
+  /** This desktop's own way into the machine's room is open (on the relay,
+   *  or on the User's hub for a machine that reads it), so a machine missing
+   *  there is missing, not hidden by an outage on this side. */
   reachesRelay(machineId: string): boolean {
     return this.connections.get(machineId)?.client.currentState() === "connected";
   }
@@ -1327,7 +1345,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
    * when the machine's socket goes. "unknown": this desktop is not there
    * either, so nothing is known about the machine.
    */
-  presenceState(machineId: string): "connected" | "out-of-touch" | "unknown" {
+  presenceState(machineId: string): MachineRecoveryLinkState {
     if (this.isMachineConnected(machineId)) return "connected";
     return this.reachesRelay(machineId) ? "out-of-touch" : "unknown";
   }
@@ -1963,11 +1981,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
         onDependencyUnavailable: (dependency) => {
           void this.debugLogs.write("machine-link.action.dependency-unavailable", { ...dependency, machineId: connection.record.id });
         },
-        // Every chat is on every machine: a chat change this machine wrote
-        // goes on, unchanged and signed by it, to every other machine.
-        // Through the hub, only a machine still on the relay needs it passed on.
+        // Every chat is on every machine on the relay: a chat change this
+        // machine wrote goes on, unchanged and signed by it, to every other
+        // one. A machine that reads the hub finds it there when this machine
+        // reads the hub too, and is not addressed.
         forwardTo: (event) => event.kind === CHAT_CHANGES_EVENT_KIND && isChatChangesLogScope(event.logScopeId) && event.originId === deviceId
-          ? this.chatChangeRecipients().filter((recipient) => recipient.deviceId !== deviceId && !this.readsHub(recipient.deviceId))
+          ? this.chatChangeRecipients().filter((recipient) => recipient.deviceId !== deviceId)
           : [],
         peerHoldsEveryChat: true,
         // Kept for a runtime that cannot fold chat changes yet; sent once it can.

@@ -1219,3 +1219,39 @@ test("a machine is a hub reader exactly while its enrollment names the hub, also
     assert.deepEqual(link.chatActionRecipients(), [{ deviceId: MACHINE_ID, channelId: relayPairing.rendezvousId }]);
   } finally { link.close(); }
 });
+
+test("with machines on the hub and on the relay, each is addressed its own way and neither is named to the other", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { createChatEventDeviceIdentity } = await import("../dist/main/main/services/chatEventLog.js");
+  const relayPairing = machinePairing("ws://127.0.0.1:1/v1/relay");
+  const { relayUrl: _relay, ...rest } = machinePairing("ws://unused/v1/relay");
+  const hubPairing = { ...rest, rendezvousId: "rv-hub-machine", hubUrl: "http://127.0.0.1:1/" };
+  const other = createChatEventDeviceIdentity(new Date().toISOString());
+  const onRelay = { id: "machine-relay", name: "Old box", deviceId: MACHINE_ID, pairingKey: relayPairing.rendezvousId, chatChanges: true,
+    createdAt: new Date().toISOString(), lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } };
+  const onHub = { id: "machine-hub", name: "New box", deviceId: other.originId, devicePublicKeyDerBase64: other.publicKeyDerBase64, pairingKey: hubPairing.rendezvousId,
+    chatChanges: true, createdAt: new Date().toISOString() };
+  const pairings = new Map([[relayPairing.rendezvousId, relayPairing], [hubPairing.rendezvousId, hubPairing]]);
+  const stubClient = () => ({ on() { return () => undefined; }, connect: async () => undefined, close() {}, sendCiphertext: async () => [], currentState: () => "connected" });
+  const link = new MachineLinkService({
+    listMachines: async () => [onRelay, onHub], getMachinePairing: async (key) => pairings.get(key),
+    saveMachine: async () => [onRelay, onHub], removeMachine: async () => [],
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
+  }, { write: async () => undefined }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, hubMode: true,
+    createClient: () => stubClient(), trustedDevices: async () => [] });
+  const rosters = new Map();
+  link.send = async (connection, body) => { if (body.type === "machine.trust.roster") rosters.set(connection.record.id, body.roster.peers.map((peer) => peer.deviceId)); };
+  try {
+    await link.loadMachines();
+    assert.deepEqual(link.hubReaders(), [other.originId]);
+    assert.deepEqual(link.chatChangeRecipients(), [{ deviceId: MACHINE_ID, channelId: relayPairing.rendezvousId }], "only the relay machine is kept for");
+    assert.deepEqual(link.chatActionRecipients(), [{ deviceId: MACHINE_ID, channelId: relayPairing.rendezvousId }]);
+    assert.equal(await link.shareChatChangesAfterCopy("machine-hub", []), 0, "a machine that reads the hub is given no rows after its copy");
+    await link.connectMachine(onRelay);
+    await link.connectMachine(onHub);
+    await link.sendTrustRoster(link.connections.get("machine-relay"));
+    await link.sendTrustRoster(link.connections.get("machine-hub"));
+    assert.deepEqual(rosters.get("machine-relay"), [DESKTOP_ID], "the relay machine is not told of the hub machine it could never reach");
+    assert.deepEqual(rosters.get("machine-hub"), [DESKTOP_ID], "and the other way round");
+  } finally { link.close(); }
+});

@@ -127,7 +127,7 @@ export class DeviceEventChannel {
     /** Every device that should receive this event. Defaults to this peer.
      *  A machine's result is minted once and delivered to each of the owner's
      *  devices, so whichever of them is online receives it and retention waits
-     *  for all of them. */
+     *  for all of them. Ignored through the hub: no delivery row is kept. */
     recipients?: Array<{ deviceId: string; channelId: string }>;
   }): Promise<ChatEventEnvelope> {
     if (this.stopped) throw new Error("Device event channel is closed.");
@@ -592,12 +592,8 @@ export class DeviceEventChannel {
       if (!originKey || !this.inScope(event.logScopeId) || !verifySignedChatEvent(event, originKey)) {
         throw new DevicePacketAuthenticationError("Device event signature or channel scope is invalid.");
       }
-      // A peer's own chat change goes on to whoever this device still
-      // reaches another way (a machine on the relay), as from the peer.
-      const forward = event.originId === this.options.peerDeviceId ? this.options.forwardTo?.(event) ?? [] : [];
       const stored = await this.options.storage.appendChatEvent(event, {
-        ingress: { deviceId: this.options.peerDeviceId, channelId: this.options.channelId },
-        ...(forward.length ? { recipients: forward } : {})
+        ingress: { deviceId: this.options.peerDeviceId, channelId: this.options.channelId }
       });
       if (stored.status === "conflict") return "conflict";
       this.receivePending = true;

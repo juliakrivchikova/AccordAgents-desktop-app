@@ -92,10 +92,8 @@ export class MachinePeerFabric {
     return connection ? this.channelIdFor(connection.peer) : undefined;
   }
 
-  /** Everyone a result should be delivered to, as outbox recipients; none
-   *  through the hub, which every device reads for itself. */
+  /** Everyone a result should be delivered to, as outbox recipients. */
   recipients(): Array<{ deviceId: string; channelId: string }> {
-    if (this.options.hubMode) return [];
     return [...this.connections.values()].map((connection) => ({
       deviceId: connection.peer.deviceId,
       channelId: this.channelIdFor(connection.peer)
@@ -107,10 +105,8 @@ export class MachinePeerFabric {
     for (const connection of this.connections.values()) connection.channel.nudge();
   }
 
-  /** The owner's other machines among them, each in the room it is met in;
-   *  none through the hub (they read its order). */
+  /** The owner's other machines among them, each in the room it is met in. */
   machineRecipients(): Array<{ deviceId: string; channelId: string }> {
-    if (this.options.hubMode) return [];
     return [...this.connections.values()]
       .filter((connection) => connection.peer.role === "machine")
       .map((connection) => ({ deviceId: connection.peer.deviceId, channelId: this.channelIdFor(connection.peer) }));

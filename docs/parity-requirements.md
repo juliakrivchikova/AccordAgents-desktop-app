@@ -79,6 +79,45 @@ is expected; a second paid instance is not the solution. Stated by the User on
 2026-09-11, including the same-iPhone clarification at 21:30 UTC. Verification
 status and remaining real-device checks are in `docs/qa-cloud-environments.md`.
 
+### Every device talks only to the User's own server
+
+The User's own server (the hub: a small machine in the User's own AWS
+account) is the one place every device talks to. It keeps every chat change
+as a signed event in one order, folds them into its own copy of every chat,
+and serves that copy to the phone; each device reads the order from its own
+place, and that place is the only acknowledgement a writer waits for. The
+desktop, the phone and every cloud machine do not need to know or care about
+each other.
+
+This reverses the decision of 2026-09-05 (Rule 1 of the signed accord "Cloud
+transport cutover — accord resolution", artifact a6f1e5ad v4) that the relay
+is a dumb pipe and that there is no shared journal: the shared journal now
+exists, on the User's own server, never on a shared relay. Approved by the
+User on 2026-10-18 with the plan "Свой сервер на AWS вместо Cloudflare relay"
+(one road, no relay left in the end).
+
+How far it is built, so the two are not confused:
+
+- Since 2026-10-22 (`taylor/server-only-machines`, phase 1) a machine set up
+  on a desktop that has a server is enrolled with the server only: it meets
+  the desktop in the server's rooms, every durable event (commands, results,
+  progress, approvals, chat changes) goes through the server's order, and
+  nobody keeps a delivery row for it. Its members' replies reach the server's
+  copy of the chat, and so the phone, with the desktop closed.
+- Machines set up before keep the relay they were set up with until the
+  relay-removal phase; they are not moved. A desktop without a server still
+  uses the relay. A machine on the relay and one on the server never reach
+  each other: a member on one asking a member on the other is refused at
+  once ("not in this machine's trust roster"), and neither holds the other's
+  members' replies in its copy of the chats. The desktop still shows both.
+- Transitional, never released on its own: a phone does not reach such a
+  machine directly yet; what it asks of a member there, and that member's
+  approval and choice cards while the desktop is closed, go through the
+  desktop. The next phase moves that to the server, and both ship together.
+- The Stop exception below holds unchanged on this path: when the machine
+  cannot be reached through the server (the server down, the machine offline
+  or frozen), Stop shows waiting until the machine confirms.
+
 ## Exceptions
 
 An exception is a deliberate, user-visible divergence from Requirement 1 or 2.

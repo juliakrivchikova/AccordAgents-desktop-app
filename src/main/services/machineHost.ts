@@ -2241,6 +2241,7 @@ export class MachineHostService {
       const published = await this.eventChannel.publish({ conversationId, kind: body.type, payload: body,
         // One result, delivered to every device the owner has: whichever of
         // them is online gets it, and the outbox holds it for the others.
+        // Through the hub nobody is named: every device reads its order.
         recipients: this.resultRecipients(),
         ...(body.type === "machine.approval.requested" || body.type === "machine.approval.updated" ? { scope: `approval:${body.approval.id}` } : {}),
         ...(body.type === "machine.choice.result" ? { eventId: machineChoiceResultId(body.decisionId), scope: `choice:${body.choiceId}` } : {}),

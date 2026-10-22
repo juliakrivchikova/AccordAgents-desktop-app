@@ -706,19 +706,32 @@ test("through the hub a machine owes nothing to anyone: no delivery rows, no re-
       });
     }
   });
-  const viaHub = new MachinePeerFabric({
-    hubMode: true, selfDeviceId: MACHINE_ID, storage, eventLog: hostEvents.eventLog, home,
+  const fabric = (hubMode) => new MachinePeerFabric({
+    ...(hubMode ? { hubMode: true } : {}), selfDeviceId: MACHINE_ID, storage, eventLog: hostEvents.eventLog, home,
     homeClient: stubClient(), createClient: () => stubClient(), isPeerConnected: () => true,
     apply: async () => "applied", onError: () => undefined, logger: () => undefined
   });
+  // Through the relay the same devices are re-offered what the room owes.
+  const viaRelay = fabric(false);
+  try {
+    await viaRelay.reconcile([absentPhone, otherMachine]);
+    assert.ok(shares.length >= 2, "the relay shares on joining (the spy sees it)");
+  } finally {
+    viaRelay.close();
+  }
+  shares.length = 0;
+  const viaHub = fabric(true);
   try {
     await viaHub.reconcile([absentPhone, otherMachine]);
     viaHub.start();
+    // Past the share timer's first tick (2 s).
     await new Promise((resolve) => setTimeout(resolve, 2_300));
-    assert.deepEqual(viaHub.recipients(), [], "a result names no device to wait for");
-    assert.deepEqual(viaHub.machineRecipients(), [], "a chat change names no machine to wait for");
     assert.deepEqual(shares, [], "nothing is re-offered on joining or on the timer");
     assert.equal(viaHub.peerDeviceIds().length, 2, "the devices are still trusted: their events from the hub are taken");
+    const published = await viaHub.channel(absentPhone.deviceId).publish({ conversationId: "chat", kind: "machine.turn.finished", payload: { runId: "r" },
+      recipients: viaHub.recipients() });
+    assert.ok(await hostEvents.eventStorage.getChatEvent(published.eventId));
+    assert.equal((await hostEvents.eventStorage.deviceEvents().pressure(viaHub.roomFor(absentPhone.deviceId))).events, 0, "a result keeps no delivery row");
   } finally {
     viaHub.close();
   }

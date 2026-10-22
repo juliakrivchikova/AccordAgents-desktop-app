@@ -128,10 +128,15 @@ test("a never-connected replacement restores the original immutable home id and 
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });
 
-test("an installation that talks only to the User's server is recovered like a relay one; one with no address is not", () => {
-  const requested = recoveryPairing("recreated");
+test("an installation that talks only to the User's server is recovered like a relay one, only on the server this desktop uses", () => {
+  const { relayUrl: _requestedRelay, ...requestedServerOnly } = { ...recoveryPairing("recreated"), hubUrl: "https://hub.example" };
   const { relayUrl: _relay, ...serverOnly } = { ...recoveryPairing("installed"), hubUrl: "https://hub.example/" };
-  assert.doesNotThrow(() => assertRecoverableMachineEnrollment(requested, serverOnly));
+  assert.doesNotThrow(() => assertRecoverableMachineEnrollment(requestedServerOnly, serverOnly));
+  // Set up on a server this desktop no longer uses, or by a desktop with none.
+  assert.throws(() => assertRecoverableMachineEnrollment({ ...requestedServerOnly, hubUrl: "https://new-hub.example" }, serverOnly), /another server/);
+  assert.throws(() => assertRecoverableMachineEnrollment(recoveryPairing("recreated"), serverOnly), /another server/);
+  // An installation on the relay is still recovered for a desktop with a server.
+  assert.doesNotThrow(() => assertRecoverableMachineEnrollment(requestedServerOnly, recoveryPairing("installed")));
   const { hubUrl: _hub, ...nowhere } = serverOnly;
-  assert.throws(() => assertRecoverableMachineEnrollment(requested, nowhere), /neither a relay nor a server/);
+  assert.throws(() => assertRecoverableMachineEnrollment(requestedServerOnly, nowhere), /neither a relay nor a server/);
 });

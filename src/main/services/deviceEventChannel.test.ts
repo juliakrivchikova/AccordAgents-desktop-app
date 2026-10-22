@@ -447,7 +447,7 @@ test("through the hub a channel publishes without delivery rows, whoever the cal
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("a hub reader's own chat change taken from the hub goes on to a machine still on the relay, and to nobody else", async () => {
+test("a hub reader's chat change taken from the hub is not passed on: a machine on the relay could not check it", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accord-device-channel-hub-forward-"));
   try {
     const storage = new StorageService({ dbPath: path.join(directory, "desktop.sqlite3") });
@@ -458,16 +458,13 @@ test("a hub reader's own chat change taken from the hub goes on to a machine sti
     const relayMachine = { deviceId: "device-relay-machine", channelId: "rv-relay-machine" };
     const channel = new DeviceEventChannel({ storage, eventLog: new ChatEventLogService(storage), channelId: "rv-hub-machine", hubMode: true,
       localDeviceId: local.originId, peerDeviceId: peer.originId, peerPublicKeyDerBase64: peer.publicKeyDerBase64,
-      forwardTo: (event) => event.kind === "chat.changes" ? [relayMachine] : [],
+      forwardTo: () => [relayMachine],
       send: async () => undefined, apply: async () => "applied", onError: () => undefined });
     try {
       const change = (await peerLog.appendLocalEvent({ conversationId: "chat", logScopeId: "chat-changes:chat", kind: "chat.changes", payload: { version: 1 } })).event;
-      const command = (await peerLog.appendLocalEvent({ conversationId: "chat", logScopeId: "device:rv-hub-machine:[\"chat\",\"actions\"]", kind: "machine.turn.finished", payload: {} })).event;
       assert.equal(await channel.receiveFromHub(change), "stored");
-      assert.equal(await channel.receiveFromHub(command), "stored");
-      const pending = await storage.deviceEvents().listPending(relayMachine.channelId, 0, relayMachine.deviceId);
-      assert.deepEqual(pending.map((item) => item.event.eventId), [change.eventId], "only the chat change is passed on, to the relay machine");
-      assert.equal((await storage.deviceEvents().listPending("rv-hub-machine")).length, 0, "the hub reader itself is owed nothing");
+      assert.equal((await storage.deviceEvents().listPending(relayMachine.channelId, 0, relayMachine.deviceId)).length, 0, "no row for the relay machine");
+      assert.equal((await storage.deviceEvents().listPending("rv-hub-machine")).length, 0, "and none for the hub reader");
     } finally { channel.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

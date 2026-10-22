@@ -511,9 +511,9 @@ async function startHubLink(): Promise<void> {
     // the event is held until it is there.
     deliver: async (event) => machineLinkService ? machineLinkService.receiveFromHub(event) : "not-ready",
     applyChatChange: hubChatChangeApplier(storageService, chatService),
-    // A machine that reads the hub is never given a delivery row; any that
-    // exists (an older version wrote it) lets go once the hub holds the
-    // event. One still on the relay is sent the event the relay way.
+    // A machine that reads the hub is never given a delivery row; one that
+    // an older version wrote lets go when its event is pushed. One still on
+    // the relay is sent the event the relay way.
     onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString(), machineLinkService?.hubReaders() ?? []),
     // A machine on the relay is sent its channel the relay way: only the
     // channels of machines that read the hub go there. Read from settings,
@@ -915,6 +915,12 @@ function moveMachinesToHub(): Promise<void> {
 }
 
 
+/** A machine's enrollment with the User's own server: its rooms and its one
+ *  order, nothing else. */
+function createHubMachinePairing(hubUrl: string): Promise<CreateMobilePairingResult> {
+  return mobilePairingService.createPairing({ purpose: "machine-host", ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES, hubUrl });
+}
+
 /** A machine's enrollment on the shared relay: its room and a sealed
  *  mailbox, registered before its credentials are handed out. */
 async function createRelayMachinePairing(): Promise<CreateMobilePairingResult> {
@@ -951,13 +957,7 @@ async function createMachine(request: CreateMachineRequest, awsInstanceId?: stri
   // relay, no mailbox, nothing kept here until the machine confirms.
   // Without a server it meets this desktop and the phone in the shared
   // relay's room and sealed mailbox, as before.
-  const pairing = hub
-    ? await mobilePairingService.createPairing({
-      purpose: "machine-host",
-      ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES,
-      hubUrl: hub.url
-    })
-    : await createRelayMachinePairing();
+  const pairing = hub ? await createHubMachinePairing(hub.url) : await createRelayMachinePairing();
   const record = {
     id: randomUUID(),
     name,
@@ -1788,7 +1788,8 @@ async function startMobileRelayControlForPairing(pairing: MobilePairingPackage):
           const publicKeyDerBase64 = machine.lastHello?.publicKeyDerBase64;
           // A machine that talks only to the User's server is not reached by
           // the phone directly: the phone reads its replies from the server,
-          // and what the phone asks of it goes through this desktop for now.
+          // and what the phone asks of it, and its cards, go through this
+          // desktop for now.
           if (!machinePairing?.relayUrl || machinePairing.hubUrl || !machine.deviceId || !publicKeyDerBase64) continue;
           access.push({
             machineId: machine.id,
@@ -4207,9 +4208,11 @@ void app.whenReady().then(async () => {
         fingerprint: room.fingerprint
       }))
     });
-    // Every chat goes to every enrolled machine, as one change event per save.
-    // The machines are read before any chat is saved, so a save made while
-    // they are still connecting is addressed to them too.
+    // Every chat goes to every enrolled machine, as one change event per save:
+    // addressed to each machine on the relay, and through the hub's order to
+    // each one that reads it. The machines (and which of them read the hub)
+    // are read before any chat is saved, so a save made while they are still
+    // connecting is addressed right too.
     // Until they are read, a save has no machine to go to and what it changed
     // never reaches them; a passing failure to read is tried again first.
     for (let attempt = 1; ; attempt += 1) {

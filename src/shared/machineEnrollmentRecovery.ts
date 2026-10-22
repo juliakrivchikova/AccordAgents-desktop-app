@@ -10,6 +10,19 @@ export function assertRecoverableMachineEnrollment(requested: unknown, installed
     || requested.issuer.publicKeyDerBase64 !== installed.issuer.publicKeyDerBase64) {
     throw new Error("This installation belongs to another environment; nothing was replaced.");
   }
-  // A machine that talks only to the User's server is met there instead.
+  // A machine that talks only to the User's server is met there instead,
+  // and only on the server this desktop uses now: reconnecting to another
+  // (one set up before this one) would send its commands where nobody reads.
   if (!installed.relayUrl && !installed.hubUrl) throw new Error("The saved machine connection has neither a relay nor a server address.");
+  if (installed.hubUrl && (!requested.hubUrl || serverOrigin(installed.hubUrl) !== serverOrigin(requested.hubUrl))) {
+    throw new Error("This installation talks to another server than the one this desktop uses; nothing was replaced.");
+  }
+}
+
+function serverOrigin(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url;
+  }
 }
