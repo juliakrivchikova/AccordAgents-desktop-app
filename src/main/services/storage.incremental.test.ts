@@ -362,3 +362,31 @@ test("a database can be put back into the shape an older version opens", async (
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("startup finds exactly the chats holding an approved member removal that was not applied", async () => {
+  const { storage, directory } = await openStorage();
+  try {
+    const queued = {
+      id: "approval-1",
+      toolName: "app_participants_request_change",
+      status: "approved",
+      memberRemovalQueuedAt: "2026-01-01T00:00:05.000Z"
+    };
+    const waiting = { ...conversation([message("m-1", "hello", 1)]), id: "chat-waiting" } as Conversation;
+    waiting.metadata = { pendingAppToolApprovals: [queued] };
+    // The marker typed into a message is not a queued removal: messages are
+    // stored outside the chat body the query reads.
+    const mentioned = { ...conversation([message("m-2", "\"memberRemovalQueuedAt\": in text", 2)]), id: "chat-mentioned" } as Conversation;
+    await storage.saveConversation(waiting);
+    await storage.saveConversation(mentioned);
+
+    assert.deepEqual(await storage.conversationIdsWithQueuedMemberRemovals(), ["chat-waiting"]);
+
+    const { memberRemovalQueuedAt: _applied, ...decided } = queued;
+    waiting.metadata = { pendingAppToolApprovals: [{ ...decided, appliedParticipantIds: ["member-1"] }] };
+    await storage.saveConversation(waiting);
+    assert.deepEqual(await storage.conversationIdsWithQueuedMemberRemovals(), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

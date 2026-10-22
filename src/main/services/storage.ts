@@ -2580,6 +2580,15 @@ export class StorageService {
     await this.setSchemaMeta(INFERRED_REQUEST_THREAD_MIGRATION_KEY, SCHEMA_META_COMPLETE);
   }
 
+  /** Chats holding an approved member removal that had not been applied yet
+   *  (ChatAppToolApproval.memberRemovalQueuedAt); read once at startup. */
+  async conversationIdsWithQueuedMemberRemovals(): Promise<string[]> {
+    await this.init();
+    return this.queryConversationIds(
+      `coalesce(nullif(body_json, ''), payload_json) like '%"memberRemovalQueuedAt":%'`
+    );
+  }
+
   private async queryConversationIds(whereSql: string): Promise<string[]> {
     const rows = await this.queryJson<{ id: string }>(`select id from conversations where ${whereSql};`);
     return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);

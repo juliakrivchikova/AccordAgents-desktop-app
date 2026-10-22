@@ -138,9 +138,30 @@ test("stored v11 Chat Assistant is reseeded with member greeting", () => {
   const assistant = roles.find((role) => role.id === "administrator");
 
   assert.ok(assistant);
-  assert.equal(assistant.version, 12);
+  assert.equal(assistant.version, 13);
   assert.match(assistant.instructions, /I can help set up roles and members for this chat/);
   assert.doesNotMatch(assistant.instructions, /I can help set up roles and participants for this chat/);
+});
+
+test("stored v12 Chat Assistant is reseeded with the member removal instructions", () => {
+  const { service } = settingsServiceWith();
+  const defaults = (service as any).mergeDefaultRoles(undefined) as ChatRoleConfig[];
+  const currentAssistant = defaults.find((role) => role.id === "administrator");
+  assert.ok(currentAssistant);
+  assert.match(currentAssistant.instructions, /remove_participant_from_chat/);
+
+  const storedAssistant: ChatRoleConfig = {
+    ...currentAssistant,
+    instructions: currentAssistant.instructions.split("\n").filter((line) => !line.includes("remove_participant_from_chat")).join("\n"),
+    version: 12,
+    updatedAt: "2026-07-06T00:00:00.000Z"
+  };
+  const roles = (service as any).mergeDefaultRoles([storedAssistant]) as ChatRoleConfig[];
+  const assistant = roles.find((role) => role.id === "administrator");
+
+  assert.ok(assistant);
+  assert.equal(assistant.version, 13);
+  assert.match(assistant.instructions, /User always approves a removal on a card/);
 });
 
 test("default Workflow Manager only follows implementation workflow when explicitly selected", () => {
