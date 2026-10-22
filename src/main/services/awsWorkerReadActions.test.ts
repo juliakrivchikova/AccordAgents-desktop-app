@@ -27,6 +27,7 @@ function harness() {
     getPublicSettings: async () => ({ cloudRuns: { mode: "aws", awsHandle: handle, awsInstanceType: "t3.medium", awsRootVolumeSizeGb: 80 } }),
     getAwsWorkerCredentials: async () => ({ accessKeyId: "synthetic", secretAccessKey: "synthetic", region: "us-east-1" }),
     getAwsWorkerOperation: async () => operation,
+    getAwsWorkerGoneNotice: async () => undefined,
     saveAwsWorkerOperation: async (next: AwsWorkerOperationSnapshot) => { operation = next; },
     getAwsWorkerVolumeExpansion: async () => expansion,
     saveAwsWorkerVolumeExpansion: async () => forbidden("save-expansion"),

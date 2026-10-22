@@ -320,29 +320,38 @@ export class AwsWorkerLifecycle {
     this.idleTimer.unref?.();
   }
 
-  async deleteWorker(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle): Promise<AwsWorkerDeleteResult> {
+  /** Terminates the instance and removes what the app made for it. With
+   *  `alreadyGone` (AWS already says it is terminated or has no such
+   *  instance) nothing is terminated: there is nothing left to stop, and the
+   *  tag-scoped policy can refuse a terminate for an id AWS no longer knows. */
+  async deleteWorker(credentials: AwsWorkerCredentials, handle: AwsWorkerHandle,
+    options: { alreadyGone?: boolean } = {}): Promise<AwsWorkerDeleteResult> {
     this.clearIdleTimer();
     this.activeRuns = 0;
     const client = this.options.createEc2Client(credentials);
     const result: AwsWorkerDeleteResult = { terminationConfirmed: false, cleanupFailures: [] };
-    const terminateFailed = await this.bestEffort("aws-worker.terminate", { instanceId: handle.instanceId }, async () => {
-      await client.terminateInstance(handle.instanceId);
-      this.log("aws-worker.terminated", { instanceId: handle.instanceId });
-    });
-    if (terminateFailed) {
-      result.terminateFailed = terminateFailed;
-      return result;
-    }
-    const waitFailed = await this.bestEffort("aws-worker.wait-terminated", { instanceId: handle.instanceId }, async () => {
-      await this.options.waitForState(
-        () => client.describeInstance(handle.instanceId),
-        (current) => !current || current.state === "terminated" || current.state === "absent",
-        TERMINATED_WAIT_TIMEOUT_MS
-      );
-    });
-    if (waitFailed) {
-      result.terminateFailed = waitFailed;
-      return result;
+    if (options.alreadyGone) {
+      this.log("aws-worker.already-gone", { instanceId: handle.instanceId });
+    } else {
+      const terminateFailed = await this.bestEffort("aws-worker.terminate", { instanceId: handle.instanceId }, async () => {
+        await client.terminateInstance(handle.instanceId);
+        this.log("aws-worker.terminated", { instanceId: handle.instanceId });
+      });
+      if (terminateFailed) {
+        result.terminateFailed = terminateFailed;
+        return result;
+      }
+      const waitFailed = await this.bestEffort("aws-worker.wait-terminated", { instanceId: handle.instanceId }, async () => {
+        await this.options.waitForState(
+          () => client.describeInstance(handle.instanceId),
+          (current) => !current || current.state === "terminated" || current.state === "absent",
+          TERMINATED_WAIT_TIMEOUT_MS
+        );
+      });
+      if (waitFailed) {
+        result.terminateFailed = waitFailed;
+        return result;
+      }
     }
     result.terminationConfirmed = true;
     const keyFailed = await this.bestEffort("aws-worker.delete-key-pair", { keyName: handle.keyName }, () => client.deleteKeyPair(handle.keyName));

@@ -36,6 +36,19 @@ test("Delete asks first and hands back to Settings once AWS confirms", async () 
   await unmount();
 });
 
+test("an instance the app removed by itself is said in one line on the page that offers a new one", async () => {
+  const gone = { configured: false, notice: "Your cloud machine no longer exists in AWS, so it was removed." } as AwsWorkerStatus;
+  const ui = await mount({ status: gone });
+  assert.equal(ui.find("aws-instance-gone-notice")?.textContent, "Your cloud machine no longer exists in AWS, so it was removed.");
+  assert.ok(ui.find("aws-worker-connect"), "the page offers a new instance");
+  assert.deepEqual(ui.deleted, [], "nothing is saved for it");
+  await unmount();
+
+  const plain = await mount({ status: { configured: false } as AwsWorkerStatus, settings: { ...SETTINGS, hasAwsCredentials: false } });
+  assert.equal(plain.find("aws-instance-gone-notice"), null, "no notice without a removal");
+  await unmount();
+});
+
 test("growing the disk keeps the instance and refuses a smaller size", async () => {
   const ui = await mount();
   await ui.click(ui.find("aws-disk-grow"));

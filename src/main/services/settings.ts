@@ -144,6 +144,21 @@ interface StoredAgentEnvironmentSettings {
   variables?: StoredAgentEnvironmentVariable[];
 }
 
+/** Which instance the app removed by itself, and when: only that it
+ *  happened is shown, the instance id is kept for the debug trail. */
+export interface AwsWorkerGoneNotice {
+  instanceId: string;
+  at: string;
+}
+
+function normalizeAwsWorkerGoneNotice(value: unknown): AwsWorkerGoneNotice | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Partial<AwsWorkerGoneNotice>;
+  return typeof record.instanceId === "string" && record.instanceId.trim() && typeof record.at === "string" && record.at
+    ? { instanceId: record.instanceId.trim(), at: record.at }
+    : undefined;
+}
+
 interface StoredSettings {
   settingsVersion?: number;
   roundLimitDefault: number;
@@ -166,6 +181,9 @@ interface StoredSettings {
     desired: AwsWorkerSpec;
   };
   awsWorkerVolumeExpansion?: AwsWorkerVolumeExpansion;
+  /** The app removed its instance by itself because AWS no longer has it;
+   *  the AWS page says so until another instance is connected. */
+  awsWorkerGoneNotice?: AwsWorkerGoneNotice;
   agentEnvironment?: StoredAgentEnvironmentSettings;
   cliProviderHosts?: StoredCliProviderHost[];
   assistantProviderKind?: ChatProviderKind;
@@ -2927,6 +2945,7 @@ export class SettingsService {
         : undefined,
       awsWorkerSpecAcceptance: this.normalizeAwsWorkerSpecAcceptance(settings.awsWorkerSpecAcceptance),
       awsWorkerVolumeExpansion: this.normalizeAwsWorkerVolumeExpansion(settings.awsWorkerVolumeExpansion),
+      awsWorkerGoneNotice: normalizeAwsWorkerGoneNotice(settings.awsWorkerGoneNotice),
       agentEnvironment: {
         variables: this.normalizeAgentEnvironmentVariables(settings.agentEnvironment?.variables)
       },
@@ -3396,6 +3415,8 @@ export class SettingsService {
     stored.awsWorkerRegion = credentials.region;
     stored.awsWorkerHandle = handle;
     stored.cloudRunsMode = "aws";
+    // Another instance is connected: the old one's removal is no longer news.
+    stored.awsWorkerGoneNotice = undefined;
     await this.writeStored(stored);
   }
 
@@ -3778,6 +3799,7 @@ export class SettingsService {
       awsWorkerProvisioningToken: _token,
       awsWorkerSpecAcceptance: _spec,
       awsWorkerVolumeExpansion: _volume,
+      awsWorkerGoneNotice: _goneNotice,
       cloudRuns: _cloudRuns,
       cloudRunsMode: _cloudRunsMode,
       cloudRunsDeviceId: _cloudRunsDeviceId,
@@ -3847,6 +3869,7 @@ export class SettingsService {
       awsWorkerProvisioningToken: stored.awsWorkerProvisioningToken,
       awsWorkerSpecAcceptance: stored.awsWorkerSpecAcceptance,
       awsWorkerVolumeExpansion: stored.awsWorkerVolumeExpansion,
+      awsWorkerGoneNotice: stored.awsWorkerGoneNotice,
       cloudRuns: stored.cloudRuns,
       cloudRunsMode: stored.cloudRunsMode,
       cloudRunsDeviceId: stored.cloudRunsDeviceId,
@@ -3964,6 +3987,37 @@ export class SettingsService {
   async getAwsWorkerVolumeExpansion(): Promise<AwsWorkerVolumeExpansion | undefined> {
     const stored = await this.readStored();
     return this.normalizeAwsWorkerVolumeExpansion(stored.awsWorkerVolumeExpansion);
+  }
+
+  /** Forgets the AWS instance `instanceId` in one write, and only while it
+   *  is still the saved one; false when another instance was saved meanwhile.
+   *  Without `keepCredentials` this app's AWS keys go too (Delete). The
+   *  notice, when given, is what the AWS page says about it; otherwise any
+   *  earlier one ends. */
+  async forgetAwsWorkerInstance(instanceId: string, options: {
+    keepCredentials: boolean;
+    notice?: AwsWorkerGoneNotice;
+    mode?: CloudRunWorkerMode;
+  }): Promise<boolean> {
+    const stored = await this.readStored();
+    if (stored.awsWorkerHandle?.instanceId !== instanceId) return false;
+    stored.awsWorkerHandle = undefined;
+    stored.awsWorkerOperation = undefined;
+    stored.awsWorkerSpecAcceptance = undefined;
+    stored.awsWorkerVolumeExpansion = undefined;
+    if (!options.keepCredentials) {
+      stored.encryptedAwsCredentials = undefined;
+      stored.awsWorkerRegion = undefined;
+      stored.awsWorkerProvisioningToken = undefined;
+    }
+    if (options.mode) stored.cloudRunsMode = options.mode;
+    stored.awsWorkerGoneNotice = normalizeAwsWorkerGoneNotice(options.notice);
+    await this.writeStored(stored);
+    return true;
+  }
+
+  async getAwsWorkerGoneNotice(): Promise<AwsWorkerGoneNotice | undefined> {
+    return normalizeAwsWorkerGoneNotice((await this.readStored()).awsWorkerGoneNotice);
   }
 
   async saveAwsWorkerSpecAcceptance(instanceId: string, desired: AwsWorkerSpec): Promise<void> {

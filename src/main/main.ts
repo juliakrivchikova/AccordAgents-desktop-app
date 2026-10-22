@@ -757,6 +757,9 @@ const cloudRunAwsService = new CloudRunAwsService(settingsService, {
       : { ...lease, expiresAt: new Date(Date.now() + 30_000).toISOString() },
     releaseAutomaticWorkerStopLease: async () => undefined
   },
+  // An instance deleted in Settings → AWS, or one AWS terminated or no longer
+  // has, takes its machines along exactly as Settings → Remove removes one.
+  removeMachine: async (machineId) => { await removeMachine(machineId); },
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
   }
@@ -4422,11 +4425,21 @@ void app.whenReady().then(async () => {
     const autoUpgradeTimer = setInterval(() => { if (autoUpgrade.hasWaiting()) void autoUpgrade.evaluate(); }, ACTIVITY_RECHECK_MS);
     autoUpgradeTimer.unref?.();
     machineLinkStartedAt = Date.now();
+    // An instance that was terminated while this desktop was closed leaves
+    // no machine behind and no pile of chat changes kept for it. Looked at
+    // once the link has its machines, so a removal is not undone by start.
+    const forgetGoneInstance = (): void => {
+      void cloudRunAwsService.forgetInstanceIfGone().catch((error: unknown) => {
+        void debugLogService.write("aws-worker.gone-check.error", { message: error instanceof Error ? error.message : String(error) });
+      });
+    };
     void machineLinkService.start().then(() => {
       startHubReading();
+      forgetGoneInstance();
       return autoUpgrade.evaluate();
     }).catch((error) => {
       startHubReading();
+      forgetGoneInstance();
       void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });
     });
     // While a machine stays away, this desktop keeps every chat change for it.
