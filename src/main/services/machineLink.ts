@@ -281,7 +281,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
   /** Machines (by record id) enrolled with the User's hub: they read every
    *  event from the hub's order, so this desktop keeps no delivery rows for
    *  them. Known from the enrollment as soon as a machine is read, connected
-   *  or not; an enrollment never changes from the hub to the relay. */
+   *  or not, and read again whenever its enrollment is (a setup that restores
+   *  an installation's own connection can put the machine back on a relay). */
   private readonly hubMachines = new Set<string>();
   /** Events whose deferral was already reported, so a retry is not logged again. */
   private readonly reportedDeferrals = new Set<string>();
@@ -516,9 +517,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
    *  it fails the caller: taking a hub machine for a relay one would keep
    *  delivery rows for it that nothing ever confirms. */
   private async noteTransport(record: MachineRecord, pairing?: MobilePairingPackage): Promise<void> {
-    if (this.hubMachines.has(record.id)) return;
     const enrollment = pairing ?? await this.settings.getMachinePairing(record.pairingKey);
     if (this.options.hubMode && enrollment?.hubUrl) this.hubMachines.add(record.id);
+    else this.hubMachines.delete(record.id);
   }
 
   async start(): Promise<void> {
@@ -834,11 +835,6 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   private readsHub(deviceId: string): boolean {
     return this.machineRecords().some((record) => record.deviceId === deviceId && this.hubMachines.has(record.id));
-  }
-
-  /** Whether this machine reads the hub's order (enrolled with the hub). */
-  machineReadsHub(machineId: string): boolean {
-    return this.hubMachines.has(machineId);
   }
 
   /** The machines that read the hub, connected or not (the rest are reached

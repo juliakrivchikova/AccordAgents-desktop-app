@@ -1191,3 +1191,31 @@ test("a reconnect for a move keeps the turns waiting for the machine's answer", 
   await link.disconnectMachine("m");
   assert.equal(outcome.status, "failed");
 });
+
+test("a machine is a hub reader exactly while its enrollment names the hub, also after a setup restores a relay connection into it", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const relayPairing = machinePairing("ws://127.0.0.1:1/v1/relay");
+  const { relayUrl: _relay, ...hubOnly } = relayPairing;
+  const hubPairing = { ...hubOnly, hubUrl: "http://127.0.0.1:1/" };
+  let current = hubPairing;
+  const record = { id: "machine-restored", name: "Restored", deviceId: MACHINE_ID, pairingKey: relayPairing.rendezvousId, chatChanges: true,
+    createdAt: new Date().toISOString(), lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } };
+  const stubClient = () => ({ on() { return () => undefined; }, connect: async () => undefined, close() {}, sendCiphertext: async () => [], currentState: () => "connected" });
+  const link = new MachineLinkService({
+    listMachines: async () => [record], getMachinePairing: async () => current,
+    saveMachine: async () => [record], removeMachine: async () => [],
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
+  }, { write: async () => undefined }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, hubMode: true, createClient: () => stubClient() });
+  try {
+    await link.loadMachines();
+    assert.deepEqual(link.hubReaders(), [MACHINE_ID]);
+    assert.deepEqual(link.chatChangeRecipients(), []);
+    await link.connectMachine(record);
+    // The setup found the installation's own relay connection and put it back.
+    current = relayPairing;
+    await link.reconnectMachine(record.id);
+    assert.deepEqual(link.hubReaders(), [], "back on the relay, it is not a hub reader");
+    assert.deepEqual(link.chatChangeRecipients(), [{ deviceId: MACHINE_ID, channelId: relayPairing.rendezvousId }], "and is sent chat changes the relay way again");
+    assert.deepEqual(link.chatActionRecipients(), [{ deviceId: MACHINE_ID, channelId: relayPairing.rendezvousId }]);
+  } finally { link.close(); }
+});
