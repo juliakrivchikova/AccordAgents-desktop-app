@@ -3,7 +3,7 @@ import test from "node:test";
 import { act } from "react";
 
 import type { AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStatus, CloudRunWorkerSetupProgress } from "../../../shared/types";
-import { SETTINGS, mount, unmount } from "./aws-settings-page-harness.test";
+import { RUNNING, SETTINGS, mount, unmount } from "./aws-settings-page-harness.test";
 
 test("the page is sections: status, program, instance, disk and setup", async () => {
   const ui = await mount();
@@ -37,7 +37,7 @@ test("Delete asks first and hands back to Settings once AWS confirms", async () 
 });
 
 test("an instance the app removed by itself is said in one line on the page that offers a new one", async () => {
-  const gone = { configured: false, notice: "Your cloud machine no longer exists in AWS, so it was removed." } as AwsWorkerStatus;
+  const gone = { configured: false, notices: ["Your cloud machine no longer exists in AWS, so it was removed."] } as AwsWorkerStatus;
   const ui = await mount({ status: gone });
   assert.equal(ui.find("aws-instance-gone-notice")?.textContent, "Your cloud machine no longer exists in AWS, so it was removed.");
   assert.ok(ui.find("aws-worker-connect"), "the page offers a new instance");
@@ -46,6 +46,38 @@ test("an instance the app removed by itself is said in one line on the page that
 
   const plain = await mount({ status: { configured: false } as AwsWorkerStatus, settings: { ...SETTINGS, hasAwsCredentials: false } });
   assert.equal(plain.find("aws-instance-gone-notice"), null, "no notice without a removal");
+  await unmount();
+});
+
+test("Delete that finished with something to say shows it, and the old-machine line, on the page that offers a new instance", async () => {
+  const line = "Your old cloud machine could not be removed from this computer yet: disk full. The app tries again by itself.";
+  const ui = await mount({ remove: async () => ({ configured: false, message: "Worker terminated with 1 cleanup warning(s).", notices: [line] } as AwsWorkerStatus) });
+  await ui.click(ui.find("aws-instance-delete"));
+  await ui.click(ui.find("aws-delete-dialog-confirm"));
+  assert.deepEqual(ui.deleted, ["deleted"]);
+  assert.equal(ui.find("aws-delete-message")?.textContent, "Worker terminated with 1 cleanup warning(s).");
+  assert.equal(ui.find("aws-instance-gone-notice")?.textContent, line);
+  assert.equal(document.querySelector("[role=alert]"), null, "a finished Delete is not shown as a failure");
+  await unmount();
+});
+
+test("a running instance's page says when an old cloud machine is still on this computer", async () => {
+  const line = "Your old cloud machine could not be removed from this computer yet: disk full. The app tries again by itself.";
+  const ui = await mount({ status: { ...RUNNING, notices: [line] } as AwsWorkerStatus });
+  assert.equal(ui.find("aws-instance-notice")?.textContent, line);
+  assert.equal(ui.find("aws-worker-state")?.textContent, "Running · billable", "the instance itself is fine");
+  await unmount();
+  const plain = await mount();
+  assert.equal(plain.find("aws-instance-notice"), null);
+  await unmount();
+});
+
+test("both lines show, each on its own line, when the instance is gone and one of its machines is still here", async () => {
+  const gone = "Your cloud machine no longer exists in AWS, so it was removed.";
+  const unconfirmed = "We couldn't confirm your old cloud machine is gone, so it is still listed on this computer: AWS refused the keys its instance was made with.";
+  const ui = await mount({ status: { configured: false, notices: [gone, unconfirmed] } as AwsWorkerStatus, settings: { ...SETTINGS, hasAwsCredentials: false } });
+  const lines = [...(ui.find("aws-instance-gone-notice")?.children ?? [])].map((line) => line.textContent);
+  assert.deepEqual(lines, [gone, unconfirmed]);
   await unmount();
 });
 

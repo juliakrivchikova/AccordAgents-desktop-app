@@ -524,3 +524,63 @@ test("machines leaving with a gone instance are recorded durably, cleared one by
     assert.deepEqual(await make().listLeavingMachines(), []);
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });
+
+test("a leaving-machines write that fails leaves the settings in memory as the disk has them; the limit reports what it drops", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-write-"));
+  const settingsDir = path.join(dir, "data");
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(settingsDir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const { chmod, mkdir } = await import("node:fs/promises");
+  try {
+    await mkdir(settingsDir, { recursive: true });
+    const at = "2026-10-22T10:00:00.000Z";
+    const service = make();
+    await service.addLeavingMachines([{ machineId: "m1", instanceId: "i-0943b28f7231ab93c", at }]);
+    await chmod(settingsDir, 0o500);
+    await assert.rejects(service.addLeavingMachines([{ machineId: "m2", instanceId: "i-0943b28f7231ab93c", at }]));
+    assert.deepEqual((await service.listLeavingMachines()).map((entry) => entry.machineId), ["m1"], "memory still matches the disk");
+    await chmod(settingsDir, 0o700);
+
+    const many = Array.from({ length: 50 }, (_, index) => ({ machineId: `x${index}`, instanceId: "i-0123456789abcdef0", at, unverified: "refused" as const }));
+    const dropped = await service.addLeavingMachines(many);
+    assert.deepEqual(dropped.map((entry) => entry.machineId), ["m1"], "the oldest entry is reported, not silently lost");
+    const kept = await make().listLeavingMachines();
+    assert.equal(kept.length, 50);
+    assert.equal(kept[0].unverified, "refused", "the reason an entry may not be removed survives a restart");
+  } finally {
+    await (await import("node:fs/promises")).chmod(settingsDir, 0o700).catch(() => undefined);
+    setHostPlatform(undefined);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a machine already waiting for removal is never turned into one the app may not remove", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-downgrade-"));
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  try {
+    const at = "2026-10-22T10:00:00.000Z";
+    await make().addLeavingMachines([{ machineId: "m1", instanceId: "i-0943b28f7231ab93c", at }]);
+    await make().addLeavingMachines([{ machineId: "m1", instanceId: "i-0943b28f7231ab93c", at, unverified: "refused" }]);
+    assert.equal((await make().listLeavingMachines())[0].unverified, undefined);
+    await make().addLeavingMachines([{ machineId: "m2", instanceId: "i-0123456789abcdef0", at, unverified: "refused" }]);
+    await make().addLeavingMachines([{ machineId: "m2", instanceId: "i-0123456789abcdef0", at }]);
+    assert.equal((await make().listLeavingMachines()).find((entry) => entry.machineId === "m2")?.unverified, undefined,
+      "one the app could not check becomes removable once its instance is seen gone");
+  } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("an unconfirmed leaving machine keeps where to look again and a well-formed account only", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-recheck-"));
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  try {
+    const at = "2026-10-22T10:00:00.000Z";
+    await make().addLeavingMachines([
+      { machineId: "m1", instanceId: "i-0943b28f7231ab93c", at, unverified: "refused", region: "us-east-1", accountId: "018089055817" },
+      { machineId: "m2", instanceId: "i-0943b28f7231ab93c", at, unverified: "unreadable", region: "us-east-1", accountId: "not-an-account" }
+    ]);
+    assert.deepEqual((await make().listLeavingMachines()).map((entry) => [entry.machineId, entry.region, entry.accountId]),
+      [["m1", "us-east-1", "018089055817"], ["m2", "us-east-1", undefined]]);
+  } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
+});

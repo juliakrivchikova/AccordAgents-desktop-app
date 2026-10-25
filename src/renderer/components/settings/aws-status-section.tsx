@@ -85,6 +85,11 @@ export function AwsStatusSection(props: { control: AwsWorkerControl }): JSX.Elem
             ) : null}
             {transition ? <AwsTransitionLine control={c} /> : null}
             {failure ? <div className="gen-row-error" role="alert" data-testid="aws-worker-message">{failure}</div> : null}
+            {status?.notices?.length ? (
+              <div role="status" data-testid="aws-instance-notice">
+                {status.notices.map((line) => <div className="gen-row-desc" key={line}>{line}</div>)}
+              </div>
+            ) : null}
           </div>
           {c.showProgress && operation && operation.intent !== "check" ? <WorkerProgress operation={operation} /> : null}
           {c.configured && status?.autoStop ? (

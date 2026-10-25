@@ -37,6 +37,8 @@ export interface AwsWorkerInstanceInfo {
   securityGroupId?: string;
   keyName?: string;
   launchedAt?: string;
+  /** The AWS account the instance belongs to (its reservation's owner). */
+  ownerId?: string;
 }
 
 export interface AwsWorkerImageInfo {

@@ -192,6 +192,14 @@ test("describeInstance of a terminated instance says terminated without asking f
   assert.deepEqual(sent, ["DescribeInstancesCommand"]);
 });
 
+test("describeInstance says which account the instance belongs to", async () => {
+  const ec2 = fakeClient(async (command) => command.constructor.name === "DescribeInstancesCommand"
+    ? { Reservations: [{ OwnerId: "018089055817", Instances: [{ InstanceId: "i-gone", State: { Name: "terminated" } }] }] }
+    : {});
+  const client = new SdkEc2Client(ec2 as EC2Client, fakeClient(async () => ({})) as EC2InstanceConnectClient, "us-east-1");
+  assert.equal((await client.describeInstance("i-gone"))?.ownerId, "018089055817");
+});
+
 test("terminateInstance treats InvalidInstanceID.NotFound as an idempotent success", async () => {
   const ec2 = fakeClient(async () => {
     const error = new Error("The instance ID 'i-gone' does not exist");

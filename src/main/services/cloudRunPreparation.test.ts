@@ -136,9 +136,17 @@ test("selecting Cloud never provisions an absent or stopped server", async () =>
   assert.deepEqual(h.calls, []);
 });
 
+test("selecting Cloud on a stopped instance asks to start it, whatever old-machine line the page shows", async () => {
+  const h = harness();
+  h.options.aws.status = async () => ({ configured: true, state: "stopped", handle: { instanceId: "i-abc", region: "eu-west-1" },
+    notices: ["Your old cloud machine could not be removed from this computer yet: disk full. The app tries again by itself."] } as AwsWorkerStatus);
+  await assert.rejects(new CloudRunPreparationService(h.options).prepare(request, () => {}), /Start your AWS instance/);
+  assert.deepEqual(h.calls, []);
+});
+
 test("selecting Cloud on an instance the app just found gone says so and sets nothing up", async () => {
   const h = harness();
-  h.options.aws.status = async () => ({ configured: false, notice: "Your cloud machine no longer exists in AWS, so it was removed." } as AwsWorkerStatus);
+  h.options.aws.status = async () => ({ configured: false, notices: ["Your cloud machine no longer exists in AWS, so it was removed."] } as AwsWorkerStatus);
   await assert.rejects(new CloudRunPreparationService(h.options).prepare(request, () => {}), /no longer exists in AWS, so it was removed/);
   assert.deepEqual(h.calls, []);
 });

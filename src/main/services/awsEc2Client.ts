@@ -137,7 +137,7 @@ export class SdkEc2Client implements Ec2Client {
       }));
       for (const reservation of result.Reservations ?? []) {
         for (const instance of reservation.Instances ?? []) {
-          const mapped = await this.mapInstance(instance);
+          const mapped = await this.mapInstance(instance, reservation.OwnerId);
           if (mapped) instances.push(mapped);
         }
       }
@@ -349,8 +349,9 @@ export class SdkEc2Client implements Ec2Client {
   async describeInstance(instanceId: string): Promise<AwsWorkerInstanceInfo | undefined> {
     try {
       const result = await this.client.send(new DescribeInstancesCommand({ InstanceIds: [instanceId] }));
-      const instance = result.Reservations?.[0]?.Instances?.[0];
-      return instance ? this.mapInstance(instance) : undefined;
+      const reservation = result.Reservations?.[0];
+      const instance = reservation?.Instances?.[0];
+      return instance ? this.mapInstance(instance, reservation?.OwnerId) : undefined;
     } catch (error) {
       if (isAwsError(error, "InvalidInstanceID.NotFound")) return undefined;
       throw error;
@@ -404,11 +405,11 @@ export class SdkEc2Client implements Ec2Client {
     }
   }
 
-  private async mapInstance(instance: Instance): Promise<AwsWorkerInstanceInfo | undefined> {
+  private async mapInstance(instance: Instance, ownerId?: string): Promise<AwsWorkerInstanceInfo | undefined> {
     const base = awsWorkerInstanceInfoFromSdkInstance(instance);
     if (!base) return undefined;
     const described = { ...base, region: this.region, instanceType: instance.InstanceType, keyName: instance.KeyName,
-      launchedAt: instance.LaunchTime?.toISOString() };
+      launchedAt: instance.LaunchTime?.toISOString(), ...(ownerId ? { ownerId } : {}) };
     // Nothing of a terminated instance is looked up: its disk and security
     // group may already be deleted, and asking for them would turn the one
     // answer that matters, "terminated", into an error.
