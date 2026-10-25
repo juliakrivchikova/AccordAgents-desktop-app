@@ -118,6 +118,9 @@ export function HubServerSection(): JSX.Element {
             <div className="gen-row-desc" data-testid="hub-server-status">{description}</div>
             {!open && (error || failed) ? <div className="gen-row-error" role="alert">{error ?? `Setup stopped: ${failed}`}</div> : null}
             {unreachable ? <div className="gen-row-error" data-testid="hub-server-unreachable">This computer is not reaching the server right now; it keeps trying.</div> : null}
+            {ready && !installing ? (state?.notices ?? []).map((notice) => (
+              <div key={notice} className="gen-row-desc" data-testid="hub-server-notice">{notice}</div>
+            )) : null}
           </div>
           <Button type="button" variant="outline" size="sm" data-testid="hub-server-setup"
             onClick={() => (updateAvailable ? void run({}) : setOpen(true))}>
