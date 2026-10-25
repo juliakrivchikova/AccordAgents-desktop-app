@@ -819,8 +819,7 @@ test("hydrateContextUsage refreshes stale stored context usage for existing sess
 
 test("hydrateContextUsage reads each session log once instead of waiting for missing logs", async () => {
   // Opening a chat hydrates it. Old sessions' CLI logs are deleted by the CLI, and
-  // waiting for them (four attempts, 80 ms apart, per session) made every open of
-  // a big chat take a second.
+  // retrying each of them made every open of a big chat take a second.
   const participant = chatParticipant({ model: "gpt-5.5" });
   const conversation = chatConversation({
     metadata: {

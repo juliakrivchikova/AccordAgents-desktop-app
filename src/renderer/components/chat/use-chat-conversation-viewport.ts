@@ -5,7 +5,7 @@ import type { ChatMessage, Conversation, ReviewProgress } from "../../../shared/
 import { focusRenderedMessage } from "../content/markdown-text";
 import type { ChatTimelineRow } from "./chat-conversation-data";
 import type { ChatMessageFocusRequest } from "./chat-conversation-types";
-import { shouldLoadOlderMessages, useAnchoredVirtualItems, useOlderMessagesTopUp } from "./chat-timeline-scroll";
+import { useAnchoredVirtualItems, useOlderMessagesTopUp } from "./chat-timeline-scroll";
 import { useChatFocusNavigation } from "./use-chat-focus-navigation";
 
 type ThreadSummaryMap = Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>;
@@ -74,13 +74,18 @@ export function useChatConversationViewport(props: {
     },
     getItemKey: (index) => props.chatTimelineRows[index]?.id ?? index,
     // A chat opens at its newest message: lay the first frame out at the end rather
-    // than at the top and then jump, which painted blank frames while opening.
-    initialOffset: () => (stickToBottomRef.current ? Number.MAX_SAFE_INTEGER : 0),
+    // than at the top and then jump, which painted blank frames while opening. Not
+    // when it opens to jump to a message: that would scroll to the bottom first.
+    initialOffset: () => (stickToBottomRef.current && !hasUnconsumedFocusIntent() ? Number.MAX_SAFE_INTEGER : 0),
     overscan: 8,
     useFlushSync: false
   });
-  const chatVirtualItems = useAnchoredVirtualItems(chatVirtualizer, timelineRef, () => stickToBottomRef.current);
-  useOlderMessagesTopUp(timelineRef, props, () => stickToBottomRef.current);
+  const rowsRef = useRef(props.chatTimelineRows);
+  rowsRef.current = props.chatTimelineRows;
+  // While the User is turning the wheel the view does not snap back to the bottom.
+  const chatVirtualItems = useAnchoredVirtualItems(chatVirtualizer, timelineRef, () => stickToBottomRef.current && !hasRecentUserScrollIntent());
+  // A jump to a message is not interrupted by older pages arriving under it.
+  const requestOlderMessages = useOlderMessagesTopUp(timelineRef, { ...props, loadedMessageCount: props.messages.length }, () => !viewRef.current?.hasAttribute("data-focus-navigating"));
   const focusNavigation = useChatFocusNavigation({
     viewRef,
     renderedMessageElement,
@@ -126,9 +131,7 @@ export function useChatConversationViewport(props: {
     } else if (hasRecentUserScrollIntent() || !stickToBottomRef.current) {
       detachFromBottom();
     }
-    if (shouldLoadOlderMessages(timeline) && props.hasOlderMessages && !props.olderMessagesLoading) {
-      props.onLoadOlderMessages();
-    }
+    requestOlderMessages();
   }
 
   function scrollToChatBottom(): void {
@@ -292,7 +295,7 @@ export function useChatConversationViewport(props: {
     return timelineRef.current ?? undefined;
   }
 
-  function scheduleScrollToRowAndFocus(messageId: string, rowIndex: number): void {
+  function scheduleScrollToRowAndFocus(messageId: string): void {
     const generation = focusAttemptGenerationRef.current;
     let focused = false;
     const attempt = (): boolean => {
@@ -300,7 +303,11 @@ export function useChatConversationViewport(props: {
         return true;
       }
       detachFromBottom();
-      chatVirtualizer.scrollToIndex(rowIndex, { align: "start" });
+      // Looked up on every attempt: rows added above in between move the message to another index.
+      const rowIndex = rowsRef.current.findIndex((row) => row.type === "message" && row.message.id === messageId);
+      if (rowIndex >= 0) {
+        chatVirtualizer.scrollToIndex(rowIndex, { align: "start" });
+      }
       focused = alignRenderedMessageToTimelineStart(messageId);
       return focused;
     };
@@ -320,9 +327,8 @@ export function useChatConversationViewport(props: {
   }
 
   function focusLoadedChatMessage(messageId: string, threadRootId?: string): boolean {
-    const rowIndex = props.chatTimelineRows.findIndex((row) => row.type === "message" && row.message.id === messageId);
-    if (rowIndex >= 0) {
-      scheduleScrollToRowAndFocus(messageId, rowIndex);
+    if (props.chatTimelineRows.some((row) => row.type === "message" && row.message.id === messageId)) {
+      scheduleScrollToRowAndFocus(messageId);
       return true;
     }
 

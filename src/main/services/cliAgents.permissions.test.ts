@@ -26,22 +26,84 @@ function makeRunner(): CliAgentRunner {
   return new CliAgentRunner();
 }
 
-test("context usage for a session whose log is gone is read once when asked not to wait", async () => {
-  const runner = makeRunner();
-  const claude = { id: "claude-missing-log", kind: "claude-code" as const, label: "Claude" };
-  const reads: string[] = [];
-  (runner as unknown as { findClaudeSessionLogPath(sessionId: string): Promise<string | undefined> }).findClaudeSessionLogPath = async (sessionId) => {
-    reads.push(sessionId);
-    return undefined;
-  };
+for (const kind of ["claude-code", "codex-cli"] as const) {
+  test(`${kind}: context usage for a session whose log is gone is read once when asked not to wait`, async () => {
+    const runner = makeRunner();
+    const participant = { id: `${kind}-missing-log`, kind, label: kind };
+    const reads: string[] = [];
+    const lookups = runner as unknown as Record<"findClaudeSessionLogPath" | "findCodexSessionLogPath", (sessionId: string) => Promise<string | undefined>>;
+    lookups[kind === "claude-code" ? "findClaudeSessionLogPath" : "findCodexSessionLogPath"] = async (sessionId) => {
+      reads.push(sessionId);
+      return undefined;
+    };
 
-  assert.equal(await runner.contextUsageForSession(claude, "gone-session", { waitForLog: false }), undefined);
-  assert.deepEqual(reads, ["gone-session"]);
+    assert.equal(await runner.contextUsageForSession(participant, "gone-session", { waitForLog: false }), undefined);
+    assert.deepEqual(reads, ["gone-session"]);
 
-  // The default still waits for a log that may not be written yet (after a turn or a compaction).
-  reads.length = 0;
-  assert.equal(await runner.contextUsageForSession(claude, "fresh-session"), undefined);
-  assert.equal(reads.length, 4);
+    // The default still waits for a log that may not be written yet (after a turn or a compaction).
+    reads.length = 0;
+    assert.equal(await runner.contextUsageForSession(participant, "fresh-session"), undefined);
+    assert.ok(reads.length > 1, `the default retries a missing log (read ${reads.length} times)`);
+  });
+}
+
+test("Claude context usage read from the end of the log matches reading the whole log", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-claude-log-"));
+  try {
+    const runner = makeRunner();
+    const claude = { id: "claude-log", kind: "claude-code" as const, label: "Claude", model: "claude-opus-5-5" };
+    const usage = (input: number): string => JSON.stringify({ type: "assistant", message: { model: "claude-opus-5-5", usage: { input_tokens: input, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 10 } } });
+    const boundary = JSON.stringify({ type: "system", subtype: "compact_boundary" });
+    const filler = JSON.stringify({ type: "user", message: { content: "п".repeat(300_000) } });
+    const internals = runner as unknown as {
+      findClaudeSessionLogPath(sessionId: string): Promise<string | undefined>;
+      agentContextUsageFromEvent(event: unknown, participant: unknown, source: string): unknown;
+      isClaudeCompactBoundary(event: unknown): boolean;
+    };
+    // The whole-log reading this replaced: the last usage after the last compaction boundary.
+    const wholeLog = (content: string): unknown => {
+      let latest: unknown;
+      for (const line of content.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line) as unknown;
+          if (internals.isClaudeCompactBoundary(event)) {
+            latest = undefined;
+            continue;
+          }
+          latest = internals.agentContextUsageFromEvent(event, claude, "claude-code") ?? latest;
+        } catch {
+          // partial line
+        }
+      }
+      return latest;
+    };
+    const cases: Record<string, string[]> = {
+      "usage then filler": [usage(1000), filler, usage(52_000), filler, "{\"type\":\"last-prompt\"}"],
+      "usage before a boundary only": [usage(90_000), boundary, filler],
+      "usage after a boundary": [usage(90_000), boundary, usage(12_000), "{partial"],
+      "no usage at all": [filler, "not json"]
+    };
+    const results: Record<string, number | undefined> = {};
+    for (const [name, lines] of Object.entries(cases)) {
+      const content = `${lines.join("\n")}\n`;
+      const file = path.join(dir, `${name.replace(/ /g, "-")}.jsonl`);
+      await writeFile(file, content);
+      internals.findClaudeSessionLogPath = async () => file;
+      const fromEnd = await runner.contextUsageForSession(claude, "session", { waitForLog: false });
+      const strip = (value: unknown): unknown => value && typeof value === "object" ? { ...(value as Record<string, unknown>), updatedAt: undefined } : value;
+      assert.deepEqual(strip(fromEnd), strip(wholeLog(content)), name);
+      results[name] = (fromEnd as { usedTokens?: number } | undefined)?.usedTokens;
+    }
+    assert.deepEqual(results, {
+      "usage then filler": 52_000,
+      "usage before a boundary only": undefined,
+      "usage after a boundary": 12_000,
+      "no usage at all": undefined
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("idle accounts for native operations before a warm session exists and releases failed operations", async () => {

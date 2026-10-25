@@ -16,6 +16,7 @@
 //     wheel input could explain),
 //   - blank frames: frames in which rendered rows cover less than 90% of the
 //     timeline viewport,
+//   - overlap frames: frames in which two visible rows are drawn over each other,
 //   - remounts: a message row that is visible in two consecutive frames but is a
 //     different DOM element in the second (it re-rendered from scratch),
 //   - page loads that moved the view: an older page arrived and nothing that
@@ -26,7 +27,7 @@
 //
 //   node scripts/chat-scroll-repro.mjs --port=9476 --chat="<sidebar title>" \
 //     [--out=dir] [--wheel=-300] [--interval=400] [--max-steps=800] [--label=before]
-//     [--mode=wheel|trackpad] [--video]
+//     [--mode=wheel|trackpad] [--video] [--from="<chat to start from>"]
 //
 // It never sends a message; it only opens and scrolls.
 import { createRequire } from "node:module";
@@ -42,7 +43,7 @@ const args = Object.fromEntries(process.argv.slice(2).map((arg) => {
 }));
 function usage(problem) {
   console.error(problem);
-  console.error('usage: node scripts/chat-scroll-repro.mjs --chat="<sidebar title>" [--port=9476] [--out=dir] [--wheel=-300] [--interval=400] [--max-steps=400] [--label=name] [--from="<other chat title>"]');
+  console.error('usage: node scripts/chat-scroll-repro.mjs --chat="<sidebar title>" [--port=9476] [--out=dir] [--wheel=-300] [--interval=400] [--max-steps=800] [--label=name] [--mode=wheel|trackpad] [--video] [--from="<other chat title>"]');
   process.exit(2);
 }
 if (typeof args.chat !== "string" || args.chat === "true" || !args.chat.trim()) usage("--chat is required");
@@ -130,6 +131,9 @@ const RECORDER = String.raw`(() => {
         cursor = end;
       }
       frame.cov = Math.round((covered / Math.max(1, box.height)) * 1000) / 1000;
+      // Visible rows drawn on top of each other (a row grew before the rows under it moved).
+      const shown = rows.filter((row) => row.v).sort((a, b) => a.top - b.top);
+      frame.ov = shown.filter((row, index) => index > 0 && shown[index - 1].top + shown[index - 1].h > row.top + 2).length;
       frame.rows = rows;
       frame.rm = remounts;
       frame.olderLoading = Boolean(timeline.querySelector(".timeline-load-more-row .spin"));
@@ -268,7 +272,7 @@ async function main() {
   };
   let removeScreencast = () => {};
   if (args.video === "true") {
-    // Subscribe through a raw listener: cdp.cjs exposes waitForEvent only, so poll it.
+    // cdp.cjs exposes only waitForEvent, so poll it for screencast frames.
     let active = true;
     (async () => {
       while (active) {
@@ -340,6 +344,7 @@ async function main() {
   const openAfterPaint = openFrames.filter((frame) => firstPaintAt !== undefined && frame.t >= firstPaintAt);
   const openMotion = analyseScroll(openAfterPaint);
   open.jumpsAfterPaint = openMotion.jumps;
+  open.overlapFramesAfterPaint = openMotion.overlapFrames;
   open.contentSwapsAfterPaint = openMotion.contentSwaps;
   const summary = {
     label,
@@ -383,6 +388,7 @@ function analyseScroll(frames) {
   const jumps = [];
   let swaps = 0;
   let blankFrames = 0;
+  let overlapFrames = 0;
   let remounts = 0;
   let noRowFrames = 0;
   const gaps = [];
@@ -392,6 +398,7 @@ function analyseScroll(frames) {
     gaps.push(b.t - a.t);
     if (!b.rows) continue;
     if (b.cov < 0.9) blankFrames += 1;
+    if (b.ov > 0) overlapFrames += 1;
     if (!b.rows.some((row) => row.v)) noRowFrames += 1;
     remounts += b.rm ?? 0;
     if (!a.rows) continue;
@@ -441,6 +448,7 @@ function analyseScroll(frames) {
     jumpPxTotal: round(measured.reduce((sum, jump) => sum + Math.abs(jump.move), 0)),
     jumpPxMax: round(Math.max(0, ...measured.map((jump) => Math.abs(jump.move)))),
     blankFrames,
+    overlapFrames,
     noRowFrames,
     remounts,
     frameGapP95Ms: round(percentile(gaps, 95)),

@@ -17,6 +17,9 @@ export interface ChatThinkingRow {
   updatedAt: string;
 }
 
+/** Row id (and virtualizer key) of the "Load older messages" row. */
+export const LOAD_OLDER_ROW_ID = "load-older";
+
 export type ChatTimelineRow =
   | { type: "load-older"; id: string }
   | { type: "message"; id: string; message: ChatMessage }
@@ -35,7 +38,7 @@ export type ChatTimelineRow =
  * place in time, and each older page then had to be slotted in above and between
  * them, reshuffling what the User was looking at.
  */
-export function chatTimelineRows(input: {
+export function buildChatTimelineRows(input: {
   hasOlderMessages: boolean;
   olderMessagesLoading: boolean;
   isRunning: boolean;
@@ -47,7 +50,7 @@ export function chatTimelineRows(input: {
   const rows: ChatTimelineRow[] = [];
   const windowed = input.hasOlderMessages || input.olderMessagesLoading;
   if (windowed) {
-    rows.push({ type: "load-older", id: "load-older" });
+    rows.push({ type: "load-older", id: LOAD_OLDER_ROW_ID });
   }
   let loadedFrom: string | undefined;
   if (input.hasOlderMessages) {

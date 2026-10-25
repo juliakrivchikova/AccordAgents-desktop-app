@@ -14,6 +14,7 @@
     "src/renderer/components/chat/chat-composer-mention-token.test.ts",
     "src/renderer/components/chat/chat-composer-plugin-token.test.ts",
     "src/renderer/components/chat/chat-participant-drafts.test.ts",
+    "src/renderer/components/chat/chat-timeline-layout.test.ts",
     "src/renderer/components/chat/chat-timeline-scroll.test.tsx",
     "src/renderer/lib/chat-split-sizing.test.ts",
     "src/renderer/components/artifacts/artifact-drafts.test.tsx",

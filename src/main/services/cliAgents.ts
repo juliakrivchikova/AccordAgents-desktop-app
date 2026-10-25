@@ -6,6 +6,7 @@ import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { readCliHelpText } from "./cliHelpText";
+import { visitLinesFromEnd } from "./linesFromEnd";
 import type {
   AgentContextUsage,
   AgentContextUsageSource,
@@ -8158,29 +8159,29 @@ export class CliAgentRunner {
     if (!filePath) {
       return undefined;
     }
-    const content = await this.readOptionalFile(filePath);
+    // The newest usage wins, so the log is read from its end: opening a chat used to
+    // read and parse every line of logs that reach 120 MB, blocking the app for half a
+    // second per open.
     let latest: AgentContextUsage | undefined;
-    for (const line of content.split(/\r?\n/)) {
+    await visitLinesFromEnd(filePath, (line) => {
       if (!line.trim()) {
-        continue;
+        return false;
       }
       try {
         const event = JSON.parse(line) as unknown;
         // A compaction boundary resets the conversation: usage recorded before it
-        // is stale (pre-compact). Discard anything seen so far so we never report
-        // the old, larger context after a /compact.
+        // is stale (pre-compact), so meeting one first means there is no usage
+        // yet and we never report the old, larger context after a /compact.
         if (this.isClaudeCompactBoundary(event)) {
-          latest = undefined;
-          continue;
+          return true;
         }
-        const usage = this.agentContextUsageFromEvent(event, participant, "claude-code");
-        if (usage) {
-          latest = usage;
-        }
+        latest = this.agentContextUsageFromEvent(event, participant, "claude-code");
+        return latest !== undefined;
       } catch {
         // Ignore partial or diagnostic lines in Claude's local session log.
+        return false;
       }
-    }
+    });
     return latest;
   }
 

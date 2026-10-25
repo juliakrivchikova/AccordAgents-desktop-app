@@ -21,6 +21,7 @@ import { IconButton } from "../primitives";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatComposer } from "./chat-composer";
 import {
+  buildChatTimelineRows,
   chatAppToolApprovals,
   chatApprovalPlacement,
   chatContinuedMentionRequestIds,
@@ -32,7 +33,6 @@ import {
   chatSessionsByParticipant,
   chatThinkingRows,
   chatThreadSummaryMap,
-  chatTimelineRows as buildChatTimelineRows,
   chatTopLevelMessages,
   liveMessageProgressById
 } from "./chat-conversation-data";
