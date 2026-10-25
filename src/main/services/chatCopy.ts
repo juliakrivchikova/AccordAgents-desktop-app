@@ -13,6 +13,7 @@ import {
 } from "./chatChanges";
 import type { MachineChatCopyProvider } from "./machineInstaller";
 import type { ChatCopyMark, StorageService } from "./storage";
+import { HUB_CLIENT_PULLED_KEY } from "./hubStorage";
 
 /**
  * The first copy of every chat a machine gets, made over the SSH connection
@@ -41,7 +42,20 @@ export interface ChatCopyManifest {
   bytes: number;
   marks: ChatCopyMark[];
   stateTables: string[];
+  /** Where the copy stands in the order of the User's server, when the
+   *  desktop reads one: a machine starts reading there, not from the start. */
+  hub?: ChatCopyHubPosition;
 }
+
+/** A position in the order of one particular server. */
+export interface ChatCopyHubPosition {
+  hubId: string;
+  hubSeq: number;
+}
+
+/** Where a machine that imported a copy starts reading its server (set once,
+ *  read by the hub link on its first start). */
+export const CHAT_COPY_HUB_POSITION_KEY = "copy-hub-position";
 
 export interface CopiedConversation {
   id: string;
@@ -94,17 +108,36 @@ function removedIds(conversation: Pick<Conversation, "metadata">): string[] {
   return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
 }
 
+/** One chat as a copy carries it: its shared content, not this device's run
+ *  state, and who wrote the messages this device did not. */
+export function copiedConversation(conversation: Conversation): CopiedConversation {
+  const authors: Record<string, string> = {};
+  for (const message of conversation.messages) {
+    const author = (message.metadata as Record<string, unknown> | undefined)?.remoteAuthorOriginId;
+    if (typeof author === "string" && author) authors[message.id] = author;
+  }
+  return {
+    id: conversation.id,
+    updatedAt: conversation.updatedAt,
+    shared: sharedConversationState(conversation),
+    messages: conversation.messages.map((message) => sharedMessage(message, { withReactions: true })),
+    removed: removedIds(conversation),
+    ...(Object.keys(authors).length ? { authors } : {})
+  };
+}
+
 /** Desktop: writes the copy into `dir` (created empty) and returns its manifest. */
 export async function exportChatCopy(
   storage: Pick<StorageService, "listConversations" | "getConversation" | "chatChangeMarks" | "exportChatCopyState">,
   dir: string,
-  options: { desktopOriginId: string; now?: () => Date }
+  options: { desktopOriginId: string; now?: () => Date; hubPosition?: () => Promise<ChatCopyHubPosition | undefined>; otherAuthors?: () => Promise<string[]> }
 ): Promise<ChatCopyManifest> {
   const now = options.now ?? (() => new Date());
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true, mode: 0o700 });
-  // Marks before data: see the module comment.
-  const marks = await storage.chatChangeMarks(options.desktopOriginId);
+  // Position, then marks, then data: each one read later can only hold more.
+  const hub = await options.hubPosition?.().catch(() => undefined);
+  const marks = await storage.chatChangeMarks(options.desktopOriginId, await options.otherAuthors?.().catch(() => []) ?? []);
   const stream = createWriteStream(path.join(dir, CHAT_COPY_CONVERSATIONS_FILE), { mode: 0o600 });
   let conversations = 0;
   let messages = 0;
@@ -114,19 +147,7 @@ export async function exportChatCopy(
       if (summary.kind !== "chat") continue;
       const conversation = await storage.getConversation(summary.id);
       if (!conversation || conversation.kind !== "chat") continue;
-      const authors: Record<string, string> = {};
-      for (const message of conversation.messages) {
-        const author = (message.metadata as Record<string, unknown> | undefined)?.remoteAuthorOriginId;
-        if (typeof author === "string" && author) authors[message.id] = author;
-      }
-      const copied: CopiedConversation = {
-        id: conversation.id,
-        updatedAt: conversation.updatedAt,
-        shared: sharedConversationState(conversation),
-        messages: conversation.messages.map((message) => sharedMessage(message, { withReactions: true })),
-        removed: removedIds(conversation),
-        ...(Object.keys(authors).length ? { authors } : {})
-      };
+      const copied = copiedConversation(conversation);
       const line = `${jsonLine(copied)}\n`;
       bytes += Buffer.byteLength(line);
       if (!stream.write(line)) await once(stream, "drain");
@@ -146,7 +167,8 @@ export async function exportChatCopy(
     messages,
     bytes,
     marks,
-    stateTables: state.tables
+    stateTables: state.tables,
+    ...(hub ? { hub } : {})
   };
   await writeFile(path.join(dir, CHAT_COPY_MANIFEST_FILE), JSON.stringify(manifest), { mode: 0o600 });
   return manifest;
@@ -174,6 +196,11 @@ export function machineChatCopyProvider(options: {
   /** The desktop's `chats` directory, whose pictures go along. */
   attachmentsDir?: string;
   tempDir: string;
+  /** Where the desktop stands in its server's order (with a server). */
+  hubPosition?: () => Promise<ChatCopyHubPosition | undefined>;
+  /** Devices whose chat changes reach this desktop through its server (the
+   *  User's phones): their chains' heads go with the copy. */
+  otherAuthors?: () => Promise<string[]>;
 }): MachineChatCopyProvider {
   return {
     export: async (machineId, identity) => {
@@ -182,7 +209,11 @@ export function machineChatCopyProvider(options: {
       const dir = await mkdtemp(path.join(options.tempDir, "accordagents-chat-copy-"));
       const cleanup = (): Promise<void> => rm(dir, { recursive: true, force: true });
       try {
-        const manifest = await exportChatCopy(options.storage, dir, { desktopOriginId: await options.desktopOriginId() });
+        const manifest = await exportChatCopy(options.storage, dir, {
+          desktopOriginId: await options.desktopOriginId(),
+          ...(options.hubPosition ? { hubPosition: options.hubPosition } : {}),
+          ...(options.otherAuthors ? { otherAuthors: options.otherAuthors } : {})
+        });
         await options.shareAfterCopy?.(machineId, manifest.marks);
         return {
           dir,
@@ -362,7 +393,7 @@ export function mergeCopiedConversation(
 /** Machine: imports a copy made by `exportChatCopy`. Running it again with the
  *  same copy changes nothing. Saves here are plain writes: nothing is emitted. */
 export async function importChatCopy(
-  storage: Pick<StorageService, "getConversation" | "saveConversation" | "importChatCopyState" | "applyChatCopyMarks" | "conversationTombstones">,
+  storage: Pick<StorageService, "getConversation" | "saveConversation" | "importChatCopyState" | "applyChatCopyMarks" | "conversationTombstones"> & Partial<Pick<StorageService, "hub">>,
   dir: string,
   options: { hostMachineId?: string; localOriginId?: string; now?: () => Date }
 ): Promise<ChatCopyImportSummary> {
@@ -396,5 +427,12 @@ export async function importChatCopy(
   }
   await storage.applyChatCopyMarks(manifest.marks, now().toISOString(), options.localOriginId);
   summary.marks = manifest.marks.length;
+  // A machine reading the server starts where the copy stands in its order.
+  // Only once: a machine that already reads it keeps its own place.
+  const hub = manifest.hub;
+  if (storage.hub && hub && typeof hub.hubId === "string" && Number.isSafeInteger(hub.hubSeq) && hub.hubSeq >= 0 &&
+      await storage.hub().clientState(HUB_CLIENT_PULLED_KEY) === undefined) {
+    await storage.hub().setClientState(CHAT_COPY_HUB_POSITION_KEY, JSON.stringify({ hubId: hub.hubId, hubSeq: hub.hubSeq }));
+  }
   return summary;
 }

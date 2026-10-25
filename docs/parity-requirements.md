@@ -110,13 +110,50 @@ How far it is built, so the two are not confused:
   each other: a member on one asking a member on the other is refused at
   once ("not in this machine's trust roster"), and neither holds the other's
   members' replies in its copy of the chats. The desktop still shows both.
-- Transitional, never released on its own: a phone does not reach such a
-  machine directly yet; what it asks of a member there, and that member's
-  approval and choice cards while the desktop is closed, go through the
-  desktop. The next phase moves that to the server, and both ship together.
+- Since phase 3 (`taylor/server-only-phone`) the phone talks only to the
+  server: it pairs with the server by a code the desktop shows, its messages,
+  card answers and Stops are signed events in the server's order, and the
+  member's home (the desktop for its own members, the machine for the
+  members it hosts) starts each turn once. Cards, live progress, the
+  composer's catalog, pictures and notifications come from the server, with
+  the desktop closed too. A phone paired the old way pairs again.
 - The Stop exception below holds unchanged on this path: when the machine
   cannot be reached through the server (the server down, the machine offline
   or frozen), Stop shows waiting until the machine confirms.
+- Since phase 2 (`taylor/server-retention`) the server's storage stays
+  bounded: it forgets what every device that reads it has read, after a
+  grace period (chat changes a week after they are folded into its copy of
+  the chat; a machine's channel three days, a run's events a day after the
+  run; chat actions thirty days). A device that stops reading keeps
+  everything after its place on the server, is never dropped automatically,
+  and is named in Settings → Your server after a week ("… hasn't read from
+  your server since …: start it or remove it"); removing it lets go. A device
+  that was away while what it needed was forgotten, and a new machine,
+  start from the server's copy of the chats instead of the whole history.
+  A phone never holds the server back: it reads the server's copy, not the
+  order, and what it has not sent yet stays on the phone until the server
+  has it. Its sent changes and answers are forgotten like everyone's, the
+  pictures messages name and the avatars the composer shows are kept as
+  long as they are named, and a picture the phone put up is kept a month
+  for the message naming it to arrive.
+  Desktop, phone and machine see the same chats either way; nothing here is
+  a difference between a local and a cloud member.
+- A change a device holds for two weeks because it cannot apply it (it
+  failed, its body is gone, its chat never arrived) is given up, never in
+  silence: a debug-log line, and a line in Settings → Your server ("Some
+  changes from <device> could not be applied and were given up on <date>")
+  the User can dismiss. The two weeks count from when it stopped waiting
+  for its author. A change held only because its author is not known yet
+  waits until the server's roster says that author was removed, and one
+  written by a newer version of the app waits for this device's update.
+- The server's copy is trusted as it is. A machine that starts again from
+  it takes the chats' shared content (title, members and their permissions,
+  messages) from that copy, which the desktop does not sign. This is
+  accepted because the server is the User's own, in her own AWS account,
+  and only the desktop that set it up changes who may use it; a server that
+  is not hers is not a case this guards against. The desktop never takes its
+  own chats' title, members or permissions from the copy. Settled on
+  2026-10-25 when phase 2 was built.
 
 ## Exceptions
 

@@ -468,3 +468,29 @@ test("a hub reader's chat change taken from the hub is not passed on: a machine 
     } finally { channel.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test("through the hub a channel's gap is asked of the hub, never of the peer, and not again at once", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-device-channel-gap-"));
+  try {
+    const storage = new StorageService({ dbPath: path.join(directory, "receiver.sqlite3") });
+    const peerLog = new ChatEventLogService(new StorageService({ dbPath: path.join(directory, "peer.sqlite3") }));
+    const local = await new ChatEventLogService(storage).getOrCreateDeviceIdentity();
+    const peer = await peerLog.getOrCreateDeviceIdentity();
+    const asked: Array<{ fromSeq: number; toSeq: number }> = [];
+    const sent: unknown[] = [];
+    const channel = new DeviceEventChannel({ storage, eventLog: new ChatEventLogService(storage), channelId: "room", hubMode: true,
+      localDeviceId: local.originId, peerDeviceId: peer.originId, peerPublicKeyDerBase64: peer.publicKeyDerBase64,
+      hubRepair: (gap) => { asked.push({ fromSeq: gap.fromSeq, toSeq: gap.toSeq }); },
+      send: async (packet) => { sent.push(packet); }, apply: async () => "applied", onError: () => undefined });
+    try {
+      const scope = `device:room:${JSON.stringify(["chat", "actions"])}`;
+      await peerLog.appendLocalEvent({ conversationId: "chat", logScopeId: scope, kind: "message.created", payload: { n: 1 } });
+      const second = (await peerLog.appendLocalEvent({ conversationId: "chat", logScopeId: scope, kind: "message.created", payload: { n: 2 } })).event;
+      assert.equal(await channel.receiveFromHub(second), "stored");
+      const third = (await peerLog.appendLocalEvent({ conversationId: "chat", logScopeId: scope, kind: "message.created", payload: { n: 3 } })).event;
+      assert.equal(await channel.receiveFromHub(third), "stored");
+      assert.deepEqual(asked, [{ fromSeq: 1, toSeq: 1 }], "asked once");
+      assert.equal(sent.length, 0, "nothing sent to the peer");
+    } finally { channel.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

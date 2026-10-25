@@ -48,6 +48,7 @@ import type { StorageService } from "./storage";
 import type { ChatActionApplier } from "./chatActionApplier";
 import { permissionDecisionAction, choiceDecisionAction, chatActionEventId } from "./chatActionEmitter";
 import type { ChatActionDependency } from "../../shared/deviceEventChannel";
+import type { DeviceEventGap } from "../../shared/deviceEventDelivery";
 import type { MachineTrustRoster, TrustedPeerAccess } from "../../shared/machineTrust";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { CHAT_CHANGES_EVENT_KIND, CHAT_CHANGES_VERSION, isChatChangesLogScope, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
@@ -71,6 +72,8 @@ export interface MachineLinkOptions {
    *  delivery rows (every device reads the hub's order). A machine enrolled
    *  with the relay keeps it. */
   hubMode?: boolean;
+  /** Through the hub: a channel's gap is asked of the hub (HubSync.repairGap). */
+  hubRepair?: (gap: DeviceEventGap) => void;
   /** The set of machines (or their keys) changed: whoever admits devices by
    *  key, the User's hub, is told again. */
   onDevicesChanged?: () => void;
@@ -894,12 +897,14 @@ export class MachineLinkService implements MachineTurnDispatcher {
    * An event the hub's order brought, to the channel of the machine that
    * wrote it. A machine whose channel is not set up yet (this desktop just
    * started, the machine has not greeted it) has the event held for it;
-   * traffic between two other devices is not this desktop's.
+   * traffic between two other devices is not this desktop's. `fetchBody`
+   * stores the event's large body, fetched only for an event one of this
+   * desktop's machine channels takes.
    */
-  async receiveFromHub(event: ChatEventEnvelope): Promise<HubDeliverOutcome> {
+  async receiveFromHub(event: ChatEventEnvelope, fetchBody?: () => Promise<void>): Promise<HubDeliverOutcome> {
     for (const connection of this.connections.values()) {
       if (!connection.eventChannel?.accepts(event)) continue;
-      return await deliverToChannel(connection.eventChannel, event);
+      return await deliverToChannel(connection.eventChannel, event, fetchBody);
     }
     const waiting = [...this.connections.values()].some((connection) => !connection.eventChannel &&
       (connection.record.deviceId === event.originId || event.logScopeId.startsWith(`device:${connection.pairing.rendezvousId}:`)));
@@ -2099,7 +2104,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         storage: this.options.eventStorage, eventLog: this.options.eventLog,
         pairing: { ...connection.pairing, relaySealKeyBase64: deriveMachineChannelKey(identity, publicKeyDerBase64, connection.pairing.rendezvousId) },
         isPeerConnected: () => Boolean(connection.machineDeviceId),
-        ...(this.viaHub(connection) ? { hubMode: true } : {}),
+        ...(this.viaHub(connection) ? { hubMode: true, ...(this.options.hubRepair ? { hubRepair: this.options.hubRepair } : {}) } : {}),
         channelId: connection.pairing.rendezvousId, localDeviceId: this.options.desktopDeviceId,
         peerDeviceId: deviceId, peerPublicKeyDerBase64: publicKeyDerBase64,
         send: async (packet) => {

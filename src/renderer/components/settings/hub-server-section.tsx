@@ -118,6 +118,18 @@ export function HubServerSection(): JSX.Element {
             <div className="gen-row-desc" data-testid="hub-server-status">{description}</div>
             {!open && (error || failed) ? <div className="gen-row-error" role="alert">{error ?? `Setup stopped: ${failed}`}</div> : null}
             {unreachable ? <div className="gen-row-error" data-testid="hub-server-unreachable">This computer is not reaching the server right now; it keeps trying.</div> : null}
+            {ready && !installing ? (state?.notices ?? []).map((notice) => (
+              <div key={notice} className="gen-row-desc" data-testid="hub-server-notice">{notice}</div>
+            )) : null}
+            {ready && !installing ? (state?.dismissableNotices ?? []).map((notice) => (
+              <div key={notice.id} className="gen-row-desc" data-testid="hub-server-given-up">
+                {notice.text}{" "}
+                <Button type="button" variant="ghost" size="sm" data-testid="hub-server-given-up-dismiss"
+                  onClick={() => void window.consensus.dismissHubNotice(notice.id).then((next) => { if (mounted.current) setState(next); }).catch(() => undefined)}>
+                  Dismiss
+                </Button>
+              </div>
+            )) : null}
           </div>
           <Button type="button" variant="outline" size="sm" data-testid="hub-server-setup"
             onClick={() => (updateAvailable ? void run({}) : setOpen(true))}>

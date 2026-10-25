@@ -10,6 +10,7 @@ import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/ty
 import { ChatService } from "./chat";
 import { createChatActionEffects } from "./chatActionEffects";
 import { createChatChangeTransport } from "./chatChangeTransport";
+import { copiedConversation } from "./chatCopy";
 import { CHAT_CHANGES_EVENT_KIND, chatChangesLogScope, type ChatChangesPayload } from "./chatChanges";
 import { ChatEventLogService, createChatEventDeviceIdentity, createSignedChatEvent } from "./chatEventLog";
 import { StorageService } from "./storage";
@@ -311,6 +312,32 @@ test("a Stop given before the start is said once, however often the home looks a
     const stored = await machine.storage.getConversation("chat-phone");
     assert.equal(stored?.messages.filter((item) => item.role === "system" && item.content === "@drew stopped by user.").length, 1);
     assert.equal(machine.started.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("a phone's message a machine takes from the server's copy (it could not read it in order) starts its member there, once", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-phone-copy-"));
+  try {
+    const phone = createChatEventDeviceIdentity(new Date().toISOString());
+    const machine = await device(path.join(directory, "machine.sqlite3"), "machine", phone.originId);
+    machine.service.setPhoneOrigins((origin) => origin === phone.originId, new Date(Date.now() - 60 * 60_000).toISOString());
+    await (machine.service as unknown as { saveConversation(conversation: Conversation): Promise<void> }).saveConversation(chat());
+    const recent = randomUUID();
+    const old = randomUUID();
+    const base = chat();
+    const recentMessage: ChatMessage = { id: recent, role: "user", content: "@drew while you were away", createdAt: new Date().toISOString(), status: "done",
+      metadata: { deliveryTargets: [remote.id], threadId: recent, remoteAuthorOriginId: phone.originId } as ChatMessage["metadata"] };
+    const oldMessage: ChatMessage = { ...recentMessage, id: old, content: "@drew long ago", createdAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(),
+      metadata: { deliveryTargets: [remote.id], threadId: old, remoteAuthorOriginId: phone.originId } as ChatMessage["metadata"] };
+    const copied = copiedConversation({ ...base, messages: [...base.messages, oldMessage, recentMessage] });
+    await machine.service.mergeServerCopy(copied, { desktopOriginId: "desktop-peer", localOriginId: machine.originId });
+    await settle();
+    assert.deepEqual(machine.started.map((item) => item.runId), [phoneTurnRunId(recent, remote.id)], "the recent one, not the one from before it read the server");
+    await machine.service.mergeServerCopy(copied, { desktopOriginId: "desktop-peer", localOriginId: machine.originId });
+    await settle();
+    assert.equal(machine.started.length, 1, "merging the same copy again starts nothing more");
   } finally {
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }

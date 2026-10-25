@@ -225,7 +225,13 @@ export class HubPhonePublisher {
     });
     const content = JSON.stringify({ ...parts, avatars });
     if (content === this.catalogPublished) return;
-    await client.setCatalog({ version: 1, publishedAt: new Date().toISOString(), ...parts, avatars });
+    try {
+      await client.setCatalog({ version: 1, publishedAt: new Date().toISOString(), ...parts, avatars });
+    } catch (error) {
+      // Not named by a catalog, the avatars put up may be swept: put up again.
+      this.uploadedAvatars.clear();
+      throw error;
+    }
     this.catalogPublished = content;
     this.options.log("hub.phone.catalog-published", { prompts: parts.prompts.length, skills: parts.skills.length, avatars: Object.keys(avatars).length });
   }

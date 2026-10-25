@@ -1,3 +1,4 @@
+import { isDeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import { createHash } from "node:crypto";
 import { CHAT_CHANGES_EVENT_KIND, applyChatChanges, isChatChangesPayload, type ChatChangeApplyPolicy, type ChatChangesPayload } from "../main/services/chatChanges";
 import type { SavedMessageRow, StorageService } from "../main/services/storage";
@@ -117,14 +118,17 @@ export class HubFolder {
     const settled = new Map<string, ChatMessage>();
     const phoneMessages = new Map<string, { message: ChatMessage; hubSeq: number }>();
     const phones = new Map<string, boolean>();
+    // Pictures the chat's messages name: kept on the server with the chat.
+    const pictures = new Set<string>();
     const apply = async (payload: ChatChangesPayload, originId: string, hubSeq: number): Promise<boolean> => {
-      const before = new Map((conversation?.messages ?? []).map((message) => [message.id, message.status]));
+      const touched = new Set(payload.changes.flatMap((change) => change.type === "message.created" || change.type === "message.updated" ? [change.message.id] : []));
+      const before = new Map<string, string | undefined>();
+      if (touched.size > 0) for (const message of conversation?.messages ?? []) if (touched.has(message.id)) before.set(message.id, message.status);
       const result = applyChatChanges(conversation, payload, originId, policy);
       if (result.status === "missing-conversation") return false;
       if (result.status === "applied") {
         conversation = result.conversation;
         changed = true;
-        const touched = new Set(payload.changes.flatMap((change) => change.type === "message.created" || change.type === "message.updated" ? [change.message.id] : []));
         if (!phones.has(originId)) phones.set(originId, await this.isPhone(originId).catch(() => false));
         for (const message of conversation.messages) {
           if (!touched.has(message.id)) continue;
@@ -132,6 +136,10 @@ export class HubFolder {
           if (message.role === "participant" && (message.status === "done" || message.status === "error") &&
               (before.get(message.id) === undefined || before.get(message.id) === "pending")) settled.set(message.id, message);
           if (message.role === "user" && phones.get(originId) && !before.has(message.id)) phoneMessages.set(message.id, { message, hubSeq });
+          for (const attachment of Array.isArray(message.metadata?.imageAttachments) ? message.metadata.imageAttachments : []) {
+            const blob = (attachment as { hubBlob?: unknown }).hubBlob;
+            if (isDeviceEventBlobReference(blob)) pictures.add(blob.blobHash);
+          }
         }
       }
       return true;
@@ -171,6 +179,7 @@ export class HubFolder {
     }
     if (changed && conversation) {
       await this.storage.saveConversation(conversation, { rows: this.rowsFor(conversation) });
+      if (pictures.size > 0) await this.storage.deviceEventBlobs().pin([...pictures], "attachment");
       const folded: Conversation = conversation;
       try {
         this.onFolded(conversationId, {

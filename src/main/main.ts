@@ -101,14 +101,16 @@ import { ArtifactService } from "./services/artifacts";
 import { ArtifactStore } from "./services/artifactStore";
 import { artifactEventWriter, artifactProjectionPort } from "./services/artifactReplication";
 import { createChatChangeTransport, scheduleChatChangePruning } from "./services/chatChangeTransport";
+import { scheduleHubDeviceRetention } from "./services/deviceRetention";
 import { machineChatCopyProvider } from "./services/chatCopy";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "./appToolWiring";
 import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
-import { HUB_ID_KEY, HUB_SHARED_SCOPE_PREFIXES, HubSync, PULLED_KEY, PUSHED_KEY, hubChatChangeApplier, hubPushedThrough } from "./services/hubSync";
+import { HUB_ID_KEY, HUB_SHARED_SCOPE_PREFIXES, HubSync, PULLED_KEY, PUSHED_KEY, hubChatChangeApplier, hubPushedThrough, readGivenUp } from "./services/hubSync";
 import { deviceIdForPublicKey, hubCertificateCrypto, signHubRequest, signHubText } from "./services/hubAuth";
 import { HubPhonePublisher } from "./services/hubPhonePublisher";
+import { isDeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import { phoneTurnsSince } from "./services/phoneTurnClaims";
 import {
   HUB_PHONE_ENROLLED_EVENT_KIND,
@@ -143,6 +145,7 @@ import { MachineLinkService } from "./services/machineLink";
 import { MachineInstallerService, machinePowerNeedsDelivery } from "./services/machineInstaller";
 import { MACHINE_POWER_MAX_ATTEMPTS, MACHINE_POWER_RETRY_MS, compareVersions } from "../shared/machineInstall";
 import { HUB_RELAY_FIRST_VERSION } from "../shared/hubSetup";
+import type { HubReadersResponse } from "../shared/hubProtocol";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
 import type { MachinePowerHandoff } from "../shared/machinePowerHandoff";
 import { ChatActionApplier } from "./services/chatActionApplier";
@@ -500,8 +503,9 @@ const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
  * trusted here, on the server's roster and on every machine. A certificate
  * for an invite this desktop revoked admits nobody.
  */
-async function admitEnrolledPhone(event: ChatEventEnvelope): Promise<string | undefined> {
+async function admitEnrolledPhone(event: ChatEventEnvelope, fetchBody: () => Promise<void>): Promise<string | undefined> {
   if (event.kind !== HUB_PHONE_ENROLLED_EVENT_KIND || event.logScopeId !== HUB_PHONE_ENROLLMENT_SCOPE) return undefined;
+  if (isDeviceEventBlobReference(event.payload)) await fetchBody().catch(() => undefined);
   const identity = await chatEventLogService.getOrCreateDeviceIdentity();
   const certificate = await storageService.deviceEventBlobs().hydrate(event.payload).catch(() => undefined) as HubPhoneCertificate | undefined;
   if (!verifyHubPhoneCertificate(certificate, { issuerDeviceId: identity.originId, issuerPublicKeyDerBase64: identity.publicKeyDerBase64, ...hubCertificateCrypto }) ||
@@ -535,7 +539,9 @@ async function admitEnrolledPhone(event: ChatEventEnvelope): Promise<string | un
  * answers (for this desktop's own members, this desktop). One that names what
  * has not arrived here yet is held and offered again.
  */
-async function applyPhoneChatAction(event: ChatEventEnvelope): Promise<"delivered" | "waiting" | "refused"> {
+async function applyPhoneChatAction(event: ChatEventEnvelope, fetchBody: () => Promise<void>): Promise<"delivered" | "waiting" | "refused"> {
+  // A body too large to travel inline is fetched for an event taken here.
+  if (isDeviceEventBlobReference(event.payload)) await fetchBody();
   const [stored] = await storageService.appendChatEvents([event]);
   if (stored?.status === "conflict") return "refused";
   const payload = await storageService.deviceEventBlobs().hydrate(event.payload);
@@ -574,6 +580,14 @@ function publishHubRoster(): void {
       }
       return [{ deviceId: machine.deviceId, publicKeyDerBase64, role: "machine" as const, name: machine.name, machineId: machine.id }];
     });
+    // Which of them read the hub's order (enrolled with it, not a relay),
+    // and their channel: the hub keeps what they have not read yet.
+    const records = new Map((await settingsService.listMachines()).map((machine) => [machine.id, machine]));
+    for (const entry of machines) {
+      const machine = records.get(entry.machineId);
+      const pairing = machine ? await settingsService.getMachinePairing(machine.pairingKey).catch(() => undefined) : undefined;
+      if (pairing?.hubUrl) Object.assign(entry, { reader: true, rendezvousId: pairing.rendezvousId });
+    }
     // The phones paired with the server, as their invites allowed; and the
     // invites this desktop has settled, so a phone it removed stays out.
     const phones = (await hubPhones()).map((phone) => ({
@@ -613,6 +627,150 @@ function publishHubRoster(): void {
   });
 }
 
+/** The channels of the machines that read the hub (`device:<room>:`). A
+ *  pairing that cannot be read fails the caller: taking that machine for a
+ *  relay one would pass its events over. */
+async function hubMachineScopes(): Promise<string[]> {
+  const rooms: string[] = [];
+  for (const machine of await settingsService.listMachines()) {
+    const pairing = await settingsService.getMachinePairing(machine.pairingKey);
+    if (pairing?.hubUrl) rooms.push(`device:${pairing.rendezvousId}:`);
+  }
+  return rooms;
+}
+
+/** Where the hub's readers stand, asked at most once a minute (Settings and
+ *  the inactive-machine question read it). */
+let hubReadersCache: { at: number; value?: HubReadersResponse; pending?: Promise<HubReadersResponse | undefined> } = { at: 0 };
+const HUB_READERS_MAX_AGE_MS = 60_000;
+function hubReaders(): Promise<HubReadersResponse | undefined> {
+  const client = hubClient;
+  if (!client) return Promise.resolve(undefined);
+  if (Date.now() - hubReadersCache.at < HUB_READERS_MAX_AGE_MS) return Promise.resolve(hubReadersCache.value);
+  hubReadersCache.pending ??= client.readers().then((value) => {
+    hubReadersCache = { at: Date.now(), value };
+    return value;
+  }, () => {
+    // An older server cannot say; asked again later.
+    hubReadersCache = { at: Date.now(), ...(hubReadersCache.value ? { value: hubReadersCache.value } : {}) };
+    return hubReadersCache.value;
+  });
+  return hubReadersCache.pending;
+}
+
+/** A reader that has not read for this long, or holds something this long,
+ *  is named in Settings (it is never dropped: the hub keeps what it needs). */
+const HUB_STUCK_READER_MS = (() => {
+  const value = Number(process.env.ACCORDAGENTS_HUB_STUCK_READER_MS);
+  return Number.isSafeInteger(value) && value > 0 ? value : 7 * 24 * 60 * 60_000;
+})();
+
+function noticeDate(iso: string): string {
+  return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/**
+ * Plain lines for Settings → Your server: a device that has not read from
+ * the server for a long time (the server keeps everything it has not read,
+ * so it is the User's to start or remove), and changes a device has held for
+ * a long time because it cannot take them yet.
+ */
+async function hubReaderNotices(): Promise<string[]> {
+  if (!hubClient) return [];
+  const now = Date.now();
+  const lines: string[] = [];
+  const own = (await chatEventLogService.getOrCreateDeviceIdentity()).originId;
+  // What was last heard: Settings never waits on the server for these lines
+  // (an unreachable one would hold its whole status for the request's timeout).
+  void hubReaders();
+  const status = hubReadersCache.value;
+  for (const reader of status?.readers ?? []) {
+    if (reader.deviceId === own) continue;
+    const readAt = reader.readAt ? Date.parse(reader.readAt) : NaN;
+    if (Number.isFinite(readAt) && now - readAt > HUB_STUCK_READER_MS) {
+      lines.push(reader.neverRead
+        ? `${reader.name} hasn't read from your server since it was set up on ${noticeDate(reader.readAt!)}: start it or remove it.`
+        : `${reader.name} hasn't read from your server since ${noticeDate(reader.readAt!)}: start it or remove it.`);
+      continue;
+    }
+    const heldSince = reader.heldSince ? Date.parse(reader.heldSince) : NaN;
+    if (Number.isFinite(heldSince) && now - heldSince > HUB_STUCK_READER_MS) {
+      const count = reader.heldCount ?? 0;
+      lines.push(`${reader.name} has ${count} change${count === 1 ? "" : "s"} from your server it can't apply yet, the oldest since ${noticeDate(reader.heldSince!)}.`);
+    }
+  }
+  const held = await storageService.hub().heldSummary().catch(() => undefined);
+  const heldAt = held?.oldestAt ? Date.parse(held.oldestAt) : NaN;
+  if (held && held.count > 0 && Number.isFinite(heldAt) && now - heldAt > HUB_STUCK_READER_MS) {
+    lines.push(`This computer has ${held.count} change${held.count === 1 ? "" : "s"} from your server it can't apply yet, the oldest since ${noticeDate(held.oldestAt!)}.`);
+  }
+  return lines;
+}
+
+/** Notices the User dismissed (kept on this desktop, the last hundred). */
+const DISMISSED_HUB_NOTICES_KEY = "dismissed-notices";
+
+async function dismissedHubNotices(): Promise<string[]> {
+  try {
+    const parsed = JSON.parse(await storageService.hub().clientState(DISMISSED_HUB_NOTICES_KEY) ?? "[]") as unknown;
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+let dismissingHubNotice: Promise<void> = Promise.resolve();
+/** One dismissal at a time: two quick clicks must not lose one. */
+function dismissHubNotice(id: string): Promise<void> {
+  if (typeof id !== "string" || !id || id.length > 512) return Promise.reject(new Error("Invalid notice."));
+  const run = dismissingHubNotice.then(async () => {
+    const dismissed = (await dismissedHubNotices()).filter((item) => item !== id);
+    await storageService.hub().setClientState(DISMISSED_HUB_NOTICES_KEY, JSON.stringify([...dismissed, id].slice(-100)));
+  });
+  dismissingHubNotice = run.catch(() => undefined);
+  return run;
+}
+
+/**
+ * Lines the User can dismiss: changes a device could not apply for two
+ * weeks and gave up on. This desktop's own (by who wrote them), and each
+ * machine's as it reports them to the server. One line per device and date.
+ */
+async function hubGivenUpNotices(): Promise<Array<{ id: string; text: string }>> {
+  if (!hubClient) return [];
+  const dismissed = new Set(await dismissedHubNotices());
+  const machines = await settingsService.listMachines().catch(() => []);
+  const trusted = await settingsService.listTrustedDevices().catch(() => []);
+  const nameOf = (deviceId: string): string => machines.find((item) => item.deviceId === deviceId)?.name
+    ?? trusted.find((item) => item.deviceId === deviceId)?.name ?? "another of your devices";
+  const notices: Array<{ id: string; text: string }> = [];
+  for (const [originId, entry] of Object.entries(await readGivenUp(storageService))) {
+    notices.push({ id: `given-up:${originId}:${entry.at}`, text: `Some changes from ${nameOf(originId)} could not be applied and were given up on ${noticeDate(entry.at)}.` });
+  }
+  const own = (await chatEventLogService.getOrCreateDeviceIdentity()).originId;
+  for (const reader of hubReadersCache.value?.readers ?? []) {
+    if (reader.deviceId === own || !reader.givenUpAt) continue;
+    notices.push({ id: `given-up-on:${reader.deviceId}:${reader.givenUpAt}`, text: `Some changes could not be applied on ${reader.name} and were given up on ${noticeDate(reader.givenUpAt)}.` });
+  }
+  return notices.filter((notice) => !dismissed.has(notice.id));
+}
+
+/** Where this desktop stands in its hub's order: everything at or before it
+ *  that concerns it was taken (or is held, and the lowest held place comes
+ *  before it). A machine's first copy of the chats starts there. */
+async function hubCopyPosition(): Promise<{ hubId: string; hubSeq: number } | undefined> {
+  if (!await settingsService.getHubConfig()) return undefined;
+  const hub = storageService.hub();
+  const hubId = await hub.clientState(HUB_ID_KEY);
+  const pulled = await hub.clientState(PULLED_KEY);
+  if (!hubId || pulled === undefined) return undefined;
+  // A phone's answer waiting for its member is not a chat change a new
+  // machine's copy lacks: it does not move the copy's position back.
+  const held = await hub.heldSummary({ exceptReasons: ["deferred-action"] });
+  const hubSeq = Math.max(0, held.lowest > 0 ? Math.min(Number(pulled) || 0, held.lowest - 1) : Number(pulled) || 0);
+  return { hubId, hubSeq };
+}
+
 async function startHubLink(): Promise<void> {
   const config = await settingsService.getHubConfig();
   if (!config || hubSync) return;
@@ -635,17 +793,24 @@ async function startHubLink(): Promise<void> {
       return (await settingsService.listTrustedDevices()).find((device) => device.deviceId === originId)?.publicKeyDerBase64;
     },
     // A phone proves itself with its first event, its certificate.
-    admit: (event) => admitEnrolledPhone(event),
+    admit: (event, fetchBody) => admitEnrolledPhone(event, fetchBody),
     // A machine's event goes to that machine's channel, which applies it as
     // if the machine had sent it; a phone's chat change is applied here, and
     // so is its answer to a card or its Stop.
     // Without the machine link (it failed to start) nothing is passed over:
     // the event is held until it is there.
-    deliver: async (event) => {
-      if (isChatActionKind(event.kind) && (await hubPhones()).some((phone) => phone.deviceId === event.originId)) return applyPhoneChatAction(event);
-      return machineLinkService ? machineLinkService.receiveFromHub(event) : "not-ready";
+    deliver: async (event, fetchBody) => {
+      if (isChatActionKind(event.kind) && (await hubPhones()).some((phone) => phone.deviceId === event.originId)) return applyPhoneChatAction(event, fetchBody);
+      return machineLinkService ? machineLinkService.receiveFromHub(event, fetchBody) : "not-ready";
     },
     applyChatChange: hubChatChangeApplier(storageService, chatService),
+    // Where it starts again after the hub forgot what it needed: before
+    // anything of its machines' channels, from the hub's copy of the chats.
+    ownScopes: hubMachineScopes,
+    mergeCopy: async (copied) => {
+      const originId = (await identity()).originId;
+      await chatService.mergeServerCopy(copied, { desktopOriginId: originId, localOriginId: originId, ownsSharedFields: true });
+    },
     // A machine that reads the hub is never given a delivery row; one that
     // an older version wrote lets go when its event is pushed. One still on
     // the relay is sent the event the relay way.
@@ -655,14 +820,7 @@ async function startHubLink(): Promise<void> {
     // so a machine whose link has not started yet is not passed over.
     // A pairing that cannot be read fails the pass (and the cursor stays):
     // taking that machine for a relay one would pass its events over.
-    scopePrefixes: async () => {
-      const rooms: string[] = [];
-      for (const machine of await settingsService.listMachines()) {
-        const pairing = await settingsService.getMachinePairing(machine.pairingKey);
-        if (pairing?.hubUrl) rooms.push(`device:${pairing.rendezvousId}:`);
-      }
-      return [...HUB_SHARED_SCOPE_PREFIXES, ...rooms];
-    },
+    scopePrefixes: async () => [...HUB_SHARED_SCOPE_PREFIXES, ...await hubMachineScopes()],
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
   // What this desktop writes goes up at once; reading waits for the
@@ -838,6 +996,8 @@ const hubInstaller = new HubInstaller({
   },
   currentLink: () => settingsService.getHubConfig().catch(() => undefined),
   reachable: () => hubSync ? hubSync.isReachable() : undefined,
+  notices: () => hubReaderNotices(),
+  dismissableNotices: () => hubGivenUpNotices(),
   defaultRegion: async () => (await settingsService.getPublicSettings()).cloudRuns.awsRegion,
   log: (event, payload) => { void debugLogService.write(event, payload); }
 });
@@ -1134,7 +1294,9 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
     shareAfterCopy: (machineId, marks) => requireMachineLink().shareChatChangesAfterCopy(machineId, marks),
     confirmCopied: (machineId, marks) => requireMachineLink().confirmChatCopy(machineId, marks),
     attachmentsDir: path.join(app.getPath("userData"), "chats"),
-    tempDir: app.getPath("temp")
+    tempDir: app.getPath("temp"),
+    hubPosition: hubCopyPosition,
+    otherAuthors: async () => (await hubPhones()).map((phone) => phone.deviceId)
   }),
   // Minutes pass between the preflight and the drain; a member may have
   // started on the machine meanwhile. Asked afresh, and a stale answer is not
@@ -3980,6 +4142,10 @@ function registerIpc(): void {
     return { machine, enrollmentJson: JSON.stringify(pairing, null, 2) };
   });
   ipcMain.handle("hub:setup-state", () => hubInstaller.state());
+  ipcMain.handle("hub:dismiss-notice", async (_event, id: string) => {
+    await dismissHubNotice(id);
+    return hubInstaller.state();
+  });
   ipcMain.handle("hub:setup-command", async (_event, request: import("../shared/hubSetup").HubSetupCommandRequest) => {
     const region = typeof request?.region === "string" ? request.region.trim() : "";
     return { command: await hubInstaller.command(region), region };
@@ -4397,6 +4563,8 @@ void app.whenReady().then(async () => {
       // machine by its enrollment, so a hub set up while the app runs is used
       // by the machines made after it without a restart.
       hubMode: true,
+      // A channel's gap is asked of the hub, which holds the order.
+      hubRepair: (gap) => { void hubSync?.repairGap(gap); },
       onDevicesChanged: () => {
         publishHubRoster();
         hubSync?.nudgeHeld();
@@ -4485,6 +4653,16 @@ void app.whenReady().then(async () => {
       storage: storageService,
       originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
       unpushedAfter: async () => (await settingsService.getHubConfig()) ? hubPushedThrough(storageService) : undefined,
+      log: (event, payload) => { void debugLogService.write(event, payload); }
+    });
+    // With the hub: this desktop's own events of its hub machines' channels
+    // go once the hub has them and they are a week old; bodies nothing
+    // refers to go too. A relay machine's channel keeps its own retention.
+    scheduleHubDeviceRetention({
+      storage: storageService,
+      originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+      hubScopes: async () => (await settingsService.getHubConfig()) ? hubMachineScopes() : undefined,
+      pushedThrough: () => hubPushedThrough(storageService),
       log: (event, payload) => { void debugLogService.write(event, payload); }
     });
     // A saved setting (an environment value, a role, a rule, a prompt, a
@@ -4700,9 +4878,16 @@ void app.whenReady().then(async () => {
     new MachineInactivityCheck({
       listMachines: () => settingsService.listMachines(),
       isConnected: (machineId) => link.isMachineConnected(machineId),
-      lastAcknowledgedAt: async (machine) => machine.deviceId
-        ? storageService.deviceEvents().lastAcknowledgedAt(machine.pairingKey, machine.deviceId)
-        : undefined,
+      // A machine on the relay confirms what it was sent; one on the hub
+      // confirms nothing, and its last read of the hub is its activity (the
+      // hub keeps everything it has not read, which is why it is asked about).
+      lastAcknowledgedAt: async (machine) => {
+        if (!machine.deviceId) return undefined;
+        const acknowledged = await storageService.deviceEvents().lastAcknowledgedAt(machine.pairingKey, machine.deviceId);
+        const reader = (await hubReaders())?.readers.find((item) => item.deviceId === machine.deviceId);
+        const read = reader && !reader.neverRead ? reader.readAt : undefined;
+        return [acknowledged, read].filter((value): value is string => Boolean(value)).sort().pop();
+      },
       lastCheckAt: () => settingsService.getMachineInactivityCheckAt(),
       saveLastCheckAt: (at) => settingsService.saveMachineInactivityCheckAt(at),
       ask: (machine) => new Promise((resolve) => {

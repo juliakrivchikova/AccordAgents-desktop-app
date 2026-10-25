@@ -17,6 +17,7 @@ import { encodeMachineProgress } from "../shared/machineProgress";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ReviewProgress } from "../shared/types";
 import { composeHub } from "./main";
 import { HubWaker } from "./hubPhoneState";
+import { HubRetention, HUB_RETENTION_DEFAULTS } from "./hubRetention";
 
 type Identity = ReturnType<typeof createChatEventDeviceIdentity>;
 
@@ -534,4 +535,85 @@ test("after a restart the server rings a phone for what it missed, not again for
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(h.rings.length, 2, "and not again");
   assert.equal(await h.storage.hub().phoneRungNotice(identity.deviceId), first + 1);
+});
+
+test("under retention a phone holds nothing back, keeps writing its chain, and its pictures, avatars and cards stay", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await seedChat(h, machine);
+  const { identity, client, answer } = await pairPhone(h);
+  const mint = phoneChains(identity);
+  // A picture the phone sends, and one it put up but never sent.
+  const picture = new Uint8Array(randomBytes(2_000));
+  const pictureBlob = await client.uploadBlob(picture);
+  const stray = await client.uploadBlob(new Uint8Array(randomBytes(1_500)));
+  const messageId = crypto.randomUUID();
+  const sentMessage: ChatMessage = { id: messageId, role: "user", content: "look", createdAt: new Date().toISOString(), status: "done",
+    metadata: { deliveryTargets: [machineMember.id], threadId: messageId, imageAttachments: [{ id: "att-r", filename: "p.png", mimeType: "image/png", sizeBytes: picture.length, width: 1, height: 1,
+      storageKey: "attachments/att-r.png", createdAt: new Date().toISOString(), hubBlob: pictureBlob }] } as unknown as ChatMessage["metadata"] };
+  const enrolled = await mint("device-enrollment", "device.enrolled", "device-enrollment", answer.certificate);
+  const first = await mint(chatChangesLogScope("chat-1"), CHAT_CHANGES_EVENT_KIND, "chat-1", { version: 1, conversationId: "chat-1", updatedAt: sentMessage.createdAt, changes: [{ type: "message.created", message: sentMessage }] }, messageId);
+  const secondId = crypto.randomUUID();
+  const second = await mint(chatChangesLogScope("chat-1"), CHAT_CHANGES_EVENT_KIND, "chat-1", { version: 1, conversationId: "chat-1", updatedAt: new Date().toISOString(),
+    changes: [{ type: "message.created", message: { ...sentMessage, id: secondId, content: "and this", metadata: { threadId: secondId } as ChatMessage["metadata"] } }] }, secondId);
+  assert.deepEqual((await client.pushEvents([enrolled, first, second])).results.map((result) => result.status), ["accepted", "accepted", "accepted"]);
+  // A desktop's card for its own member, and the catalog with an avatar.
+  const avatarBlob = await client.uploadBlob(new Uint8Array(randomBytes(1_000)));
+  await h.call(h.owner, "PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(), roles: {}, prompts: [], skills: [], avatars: { "custom:a": { mimeType: "image/png", blob: avatarBlob } } } });
+  const approval: ChatAppToolApproval = {
+    id: "approval-old", conversationId: "chat-1", requesterParticipantId: localMember.id, requesterHandle: "mac", requesterRoleConfigId: "software-engineer",
+    toolName: "Bash", capability: "artifacts.write" as ChatAppToolApproval["capability"], status: "pending", request: {} as ChatAppToolApproval["request"],
+    summary: "Run", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+  };
+  let cardSeq = 0;
+  let cardPrev: string | undefined;
+  const card = (status: ChatAppToolApproval["status"]) => {
+    cardSeq += 1;
+    const event = createSignedChatEvent(h.owner, { conversationId: "chat-1", logScopeId: HUB_APPROVAL_CARD_SCOPE, kind: HUB_APPROVAL_CARD_EVENT_KIND,
+      payload: { conversationId: "chat-1", approval: { ...approval, status, updatedAt: new Date().toISOString() } }, originSeq: cardSeq, ...(cardPrev ? { prevHash: cardPrev } : {}), createdAt: new Date().toISOString() });
+    cardPrev = event.eventHash;
+    return event;
+  };
+  await h.call(h.owner, "POST", "/v1/events", { events: [card("pending"), card("pending")] });
+  await h.settle();
+  // Every reader read everything; the phone never reads the order.
+  const head = await h.storage.hub().head();
+  await h.call(h.owner, "GET", `/v1/events?after=${head}&limit=200&held=0&heldSince=0&heldCount=0`);
+  const later = 40 * 24 * 60 * 60_000;
+  const retention = new HubRetention({ storage: h.storage, config: { ...HUB_RETENTION_DEFAULTS, batch: 50 }, now: () => Date.now() + later });
+  let report = await retention.runOnce();
+  assert.equal(report.sharedFloor, head, "a phone does not hold the order back");
+  assert.ok(report.chatChanges.events >= 1, "the phone's older chat change is forgotten");
+  assert.equal(report.chatActions.events, 1, "the older card event too (the newest stays)");
+  report = await retention.runOnce();
+  report = await retention.runOnce();
+  // The card is still shown; the picture, the avatar stay; the stray goes.
+  const timeline = await client.getJson<{ cards: Array<{ id: string }> }>("/v1/phone/timeline", { conversationId: "chat-1" });
+  assert.deepEqual(timeline.cards.map((item) => item.id), ["approval-old"]);
+  const shown = await client.getJson<{ dataBase64?: string }>("/v1/phone/attachment", { conversationId: "chat-1", messageId, attachmentId: "att-r" });
+  assert.equal(Buffer.from(shown.dataBase64 ?? "", "base64").equals(Buffer.from(picture)), true, "the picture a message names stays");
+  const avatar = await client.getJson<{ dataBase64?: string }>("/v1/phone/avatar", { conversationId: "chat-1", avatarId: "custom:a" });
+  assert.ok(avatar.dataBase64, "the catalog's avatar stays");
+  assert.ok(stray.blobHash, "a body nothing names is the sweep's (see the next test)");
+  // The phone's chain goes on after what was forgotten; what it sends again
+  // that the server forgot is a duplicate, not a gap or a refusal.
+  const thirdId = crypto.randomUUID();
+  const third = await mint(chatChangesLogScope("chat-1"), CHAT_CHANGES_EVENT_KIND, "chat-1", { version: 1, conversationId: "chat-1", updatedAt: new Date().toISOString(),
+    changes: [{ type: "message.created", message: { ...sentMessage, id: thirdId, content: "back again", metadata: { threadId: thirdId } as ChatMessage["metadata"] } }] }, thirdId);
+  assert.deepEqual((await client.pushEvents([first, third])).results.map((result) => result.status), ["duplicate", "accepted"]);
+});
+
+test("a phone's picture put up before its message arrives is kept for a month, then let go", async (t) => {
+  const h = await hub(t);
+  const { client } = await pairPhone(h);
+  const early = await client.uploadBlob(new Uint8Array(randomBytes(1_200)));
+  const blobs = h.storage.deviceEventBlobs();
+  const sweep = (afterMs: number) => blobs.collectOrphans({ now: Date.now() + afterMs, graceMs: 60 * 60_000, scanRows: 50_000 });
+  await sweep(2 * 60 * 60_000);
+  await sweep(4 * 60 * 60_000);
+  assert.equal((await sweep(6 * 60 * 60_000)).deleted, 0, "a day later it is still there");
+  // A sweep is a look at everything, then a deletion a while later.
+  const deleted = (await sweep(31 * 24 * 60 * 60_000)).deleted + (await sweep(32 * 24 * 60 * 60_000)).deleted + (await sweep(33 * 24 * 60 * 60_000)).deleted;
+  assert.equal(deleted, 1, "a month later, never named, it goes");
+  assert.ok(early.blobHash);
 });

@@ -11,9 +11,11 @@ import { hubApplyPolicy } from "./hubPolicy";
 import { HubLog } from "./hubLog";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
 import { HubRelayMailboxes, HubRelayRooms } from "./hubRelay";
+import { HubRetention, hubRetentionConfig } from "./hubRetention";
 import { HubChangeFeed, HubPhoneApi } from "./hubPhone";
 import { HUB_CARD_EVENT_KINDS, HubProgress, HubWaker, approvalNotice, foldApprovalCards, phoneMessageHomes, replyNotice } from "./hubPhoneState";
 import { HUB_APPROVAL_CARD_EVENT_KIND } from "../shared/hubProtocol";
+import { isDeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import { HubServer } from "./hubServer";
 
 declare const __HUB_VERSION__: string | undefined;
@@ -211,11 +213,13 @@ export function composeHub(options: {
     close: async () => {
       push.close();
       waker.close();
+      // The folding stops after the chat it is on; what is left is folded on
+      // the next start (it is read from the order, not kept in memory).
+      folder.close();
       await server.close();
       await folder.idle();
       // What was placed before the stop reaches the phone's views (cards).
       await views;
-      folder.close();
     }
   };
 }
@@ -272,16 +276,45 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
   await server.listenHttp(args.httpPort, args.host, { openOnly: !args.insecureHttp });
   await folder.start();
   await hub.catchUpCards();
+  // Bodies the chats and the catalog name, pinned once on a server updated
+  // from a program that did not pin them (the sweep would take them).
+  await pinNamedBodies(storage).catch((error: unknown) => log("hub.blob-pins.error", { message: error instanceof Error ? error.message : String(error) }));
   // Rings the stopped program had scheduled and did not ring.
   await hub.push.rearm().catch((error: unknown) => log("hub.push.rearm-error", { message: error instanceof Error ? error.message : String(error) }));
+  // The order stays bounded: what every reader read, past its grace period.
+  const retention = new HubRetention({
+    storage, config: hubRetentionConfig(), log,
+    bodiesReady: async () => Boolean(await storage.hub().document(BLOB_PINS_DONE_KEY)),
+    renewPins: () => renewPicturePins(storage)
+  });
+  retention.start();
   log("hub.started", { version: HUB_VERSION, https, httpPort: args.httpPort });
-  return hub.close;
+  return async () => {
+    const closing = hub.close();
+    await retention.close();
+    await closing;
+  };
 }
+
+/** A stop that has not finished by then exits anyway: everything the hub
+ *  keeps is written in transactions, and a stop that hangs only makes the
+ *  service manager wait for its kill timeout. */
+const SHUTDOWN_DEADLINE_MS = 5_000;
 
 if (require.main === module) {
   let stop: (() => Promise<void>) | undefined;
+  let stopping = false;
   const shutdown = (): void => {
-    void (stop ? stop() : Promise.resolve()).finally(() => process.exit(0));
+    if (stopping) return;
+    stopping = true;
+    const started = Date.now();
+    setTimeout(() => {
+      process.stdout.write(`${JSON.stringify({ event: "hub.stop.deadline", at: new Date().toISOString(), ms: Date.now() - started })}\n`);
+      process.exit(0);
+    }, SHUTDOWN_DEADLINE_MS).unref();
+    void (stop ? stop() : Promise.resolve()).finally(() => {
+      process.stdout.write(`${JSON.stringify({ event: "hub.stopped", at: new Date().toISOString(), ms: Date.now() - started })}\n`, () => process.exit(0));
+    });
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
@@ -289,6 +322,31 @@ if (require.main === module) {
     process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     process.exit(1);
   });
+}
+
+async function pinNamedBodies(storage: StorageService): Promise<void> {
+  const hub = storage.hub();
+  if (await hub.document(BLOB_PINS_DONE_KEY)) return;
+  const blobs = storage.deviceEventBlobs();
+  await blobs.pin(await hub.namedPictureHashes(), "attachment");
+  const catalog = (await hub.document("composer-catalog"))?.value as { avatars?: Record<string, { blob?: unknown }> } | undefined;
+  const avatars = Object.values(catalog?.avatars ?? {}).map((entry) => entry?.blob).filter(isDeviceEventBlobReference).map((blob) => blob.blobHash);
+  if (avatars.length > 0) await blobs.pin(avatars, "catalog");
+  await hub.setDocument(BLOB_PINS_DONE_KEY, { at: new Date().toISOString() }, new Date().toISOString());
+}
+
+const BLOB_PINS_DONE_KEY = "blob-pins-v1";
+const PICTURE_PINS_RENEWED_KEY = "picture-pins-renewed";
+/** How often the pictures the chats name are looked up again (a picture
+ *  whose message or chat went is let go then). */
+const PICTURE_PINS_RENEW_MS = 24 * 60 * 60_000;
+
+async function renewPicturePins(storage: StorageService): Promise<void> {
+  const hub = storage.hub();
+  const last = Date.parse(((await hub.document(PICTURE_PINS_RENEWED_KEY))?.value as { at?: string } | undefined)?.at ?? "");
+  if (Number.isFinite(last) && Date.now() - last < PICTURE_PINS_RENEW_MS) return;
+  await storage.deviceEventBlobs().pinOnly(await hub.namedPictureHashes(), "attachment");
+  await hub.setDocument(PICTURE_PINS_RENEWED_KEY, { at: new Date().toISOString() }, new Date().toISOString());
 }
 
 function loopbackEndpoint(value: string | undefined): string | undefined {

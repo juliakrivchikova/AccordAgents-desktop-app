@@ -58,11 +58,19 @@ interface DeviceEventChannelOptions {
    *  keeps no mailbox, and publishes without delivery rows (`recipients` is
    *  ignored): a hub reader is never waited on. */
   hubMode?: boolean;
+  /** Through the hub: a gap in a chain this channel waits on (or a body it
+   *  lacks) is asked of the hub instead of the peer. Called without waiting
+   *  (the answer comes back through `receiveFromHub`), at most every
+   *  HUB_GAP_REPAIR_MS per gap. */
+  hubRepair?: (gap: DeviceEventGap) => void;
   onError(error: Error): void;
   /** First wait before a held (deferred or failing) event is tried again; it
    *  doubles per attempt up to sixty times this. Tests shorten it. */
   heldRetryBaseMs?: number;
 }
+
+/** Through the hub, a gap is asked about again at most this often. */
+const HUB_GAP_REPAIR_MS = 30_000;
 
 /** A deferred application that named what it is waiting for. */
 export interface DeferredWithDependency {
@@ -455,8 +463,10 @@ export class DeviceEventChannel {
     for (const gap of gaps) {
       const key = JSON.stringify(gap);
       const previous = this.requestedGaps.get(key);
-      if (previous !== undefined && performance.now() - previous < 5_000) continue;
-      await this.sendControl(this.packet({ type: "resend", gap, requestId: randomUUID() }));
+      if (previous !== undefined && performance.now() - previous < (this.options.hubMode ? HUB_GAP_REPAIR_MS : 5_000)) continue;
+      // Through the hub the peer is never asked: the hub holds the order.
+      if (this.options.hubMode) this.options.hubRepair?.(gap);
+      else await this.sendControl(this.packet({ type: "resend", gap, requestId: randomUUID() }));
       this.requestedGaps.set(key, performance.now());
     }
     for (const [key, dependency] of dependencies) {

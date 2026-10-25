@@ -1695,8 +1695,19 @@ export class StorageService {
    * artifact actions, and the rest of it (choices, approvals, stops) is about
    * runs elsewhere that a new machine has no use for.
    */
-  async chatChangeMarks(localOriginId: string): Promise<ChatCopyMark[]> {
+  async chatChangeMarks(localOriginId: string, extraOrigins: readonly string[] = []): Promise<ChatCopyMark[]> {
     await this.init();
+    // Devices whose chat changes this device took through its server rather
+    // than a channel (the User's phones): their heads are their newest event.
+    const extra = [...new Set(extraOrigins)].filter((origin) => origin && origin !== localOriginId).slice(0, 50);
+    const extraHeads = extra.length ? `
+      union all
+      select originId, logScopeId, originSeq, eventHash from (
+        select e.origin_id as originId, e.log_scope_id as logScopeId, e.origin_seq as originSeq, e.event_hash as eventHash,
+          row_number() over (partition by e.origin_id, e.log_scope_id order by e.origin_seq desc) as rn
+        from chat_events e
+        where e.origin_id in (${extra.map(sqlString).join(", ")}) and e.log_scope_id >= 'chat-changes:' and e.log_scope_id < 'chat-changes;'
+      ) where rn = 1` : "";
     return this.queryJson<ChatCopyMark>(`
       select originId, logScopeId, originSeq, eventHash from (
         select e.origin_id as originId, e.log_scope_id as logScopeId, e.origin_seq as originSeq, e.event_hash as eventHash,
@@ -1715,7 +1726,9 @@ export class StorageService {
       union all
       select origin_id as originId, log_scope_id as logScopeId, origin_seq as originSeq, event_hash as eventHash
       from device_event_applied_heads
-      where substr(log_scope_id, 1, 13) = 'chat-changes:' and origin_id <> ${sqlString(localOriginId)};
+      where substr(log_scope_id, 1, 13) = 'chat-changes:' and origin_id <> ${sqlString(localOriginId)}
+        ${extra.length ? `and origin_id not in (${extra.map(sqlString).join(", ")})` : ""}
+      ${extraHeads};
     `);
   }
 

@@ -46,7 +46,7 @@ import type { SettingsService } from "./settings";
 import type { StorageService } from "./storage";
 import type { ChatEventLogService } from "./chatEventLog";
 import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
-import type { DeviceEventApplyOutcome } from "../../shared/deviceEventDelivery";
+import type { DeviceEventApplyOutcome, DeviceEventGap } from "../../shared/deviceEventDelivery";
 import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { isMachineDurableMessage } from "../../shared/machineLink";
 import { NativeProcessUnavailableError } from "./nativeProcess";
@@ -55,6 +55,7 @@ import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload, type ChatChangesPayload,
 import { machineProgressEventId } from "../../shared/machineProgress";
 import { MachineProgressSender } from "./machineProgressSender";
 import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
+import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { HUB_PHONE_ENROLLED_EVENT_KIND, HUB_PHONE_ENROLLMENT_SCOPE, hubWebSocketUrl, parsePhoneTurnRunId, verifyHubPhoneCertificate, type HubPhoneCertificate } from "../../shared/hubProtocol";
 import { hubCertificateCrypto } from "./hubAuth";
 import { readPosixProcessTableAsync } from "./processTermination";
@@ -110,6 +111,8 @@ export interface MachineHostOptions {
   /** The User's hub carries this machine's events instead of the relay's
    *  per-peer delivery (see DeviceEventChannel.hubMode). */
   hubMode?: boolean;
+  /** Through the hub: a channel's gap is asked of the hub (HubSync.repairGap). */
+  hubRepair?: (gap: DeviceEventGap) => void;
   /** Scheduled scripts on this machine, operated by the enrolling desktop. */
   scripts?: {
     handle(operation: MachineScriptsOperation): Promise<unknown>;
@@ -346,8 +349,9 @@ export class MachineHostService {
    * desktop is away; the desktop's next roster then decides. Returns the key
    * the phone signs with, or undefined for anything else.
    */
-  async admitPhoneCertificate(event: ChatEventEnvelope): Promise<string | undefined> {
+  async admitPhoneCertificate(event: ChatEventEnvelope, fetchBody?: () => Promise<void>): Promise<string | undefined> {
     if (event.kind !== HUB_PHONE_ENROLLED_EVENT_KIND || event.logScopeId !== HUB_PHONE_ENROLLMENT_SCOPE) return undefined;
+    if (fetchBody && isDeviceEventBlobReference(event.payload)) await fetchBody().catch(() => undefined);
     const certificate = await this.options.eventStorage.deviceEventBlobs().hydrate(event.payload).catch(() => undefined) as HubPhoneCertificate | undefined;
     const issuer = this.options.pairing.issuer;
     if (!verifyHubPhoneCertificate(certificate, { issuerDeviceId: issuer.originId, issuerPublicKeyDerBase64: issuer.publicKeyDerBase64, ...hubCertificateCrypto }) ||
@@ -372,12 +376,20 @@ export class MachineHostService {
     return certificate.enrollment.publicKeyDerBase64;
   }
 
-  /** An event the hub's order brought: to the owner's channel, or to the
-   *  channel of another of the owner's devices. */
-  async receiveFromHub(event: ChatEventEnvelope): Promise<HubDeliverOutcome> {
+  /** An event the hub's order brought: to the desktop's channel when the
+   *  desktop (or a machine's chat change it would forward) wrote it, else to
+   *  the channel of the peer that did. `fetchBody` stores the event's large
+   *  body, fetched only for an event one of this machine's channels takes. */
+  async receiveFromHub(event: ChatEventEnvelope, fetchBody?: () => Promise<void>): Promise<HubDeliverOutcome> {
     await this.initializeOwnerChannel();
-    if (this.eventChannel?.accepts(event)) return deliverToChannel(this.eventChannel, event);
-    return this.peers.receiveFromHub(event);
+    if (this.eventChannel?.accepts(event)) return deliverToChannel(this.eventChannel, event, fetchBody);
+    return this.peers.receiveFromHub(event, fetchBody);
+  }
+
+  /** Through the hub: this machine's channels' scopes, with the desktop and
+   *  with its peers (where it starts again, it starts before their events). */
+  hubChannelScopes(): string[] {
+    return [`device:${this.options.pairing.rendezvousId}:`, ...this.peers.hubChannelScopes()];
   }
 
   applyApprovalAction(event: ChatEventEnvelope, payload: import("../../shared/chatActionEvents").ChatActionPayload): Promise<import("../../shared/machineLink").MachineApprovalResultBody> {
@@ -492,7 +504,7 @@ export class MachineHostService {
     // The owner's other devices reach this machine here. Each gets its own
     // sealed channel with its own signing key; anyone else is not answered.
     this.peers = new MachinePeerFabric({
-      ...(options.hubMode ? { hubMode: true } : {}),
+      ...(options.hubMode ? { hubMode: true, ...(options.hubRepair ? { hubRepair: options.hubRepair } : {}) } : {}),
       selfDeviceId: options.deviceId,
       storage: options.eventStorage,
       eventLog: options.eventLog,
@@ -594,7 +606,7 @@ export class MachineHostService {
       storage: options.eventStorage, eventLog: options.eventLog,
       pairing: { ...pairing, relaySealKeyBase64: deriveMachineChannelKey(identity, pairing.issuer.publicKeyDerBase64, pairing.rendezvousId) },
       isPeerConnected: () => Boolean(this.desktopDeviceId),
-      ...(options.hubMode ? { hubMode: true } : {}),
+      ...(options.hubMode ? { hubMode: true, ...(options.hubRepair ? { hubRepair: options.hubRepair } : {}) } : {}),
       channelId: pairing.rendezvousId, localDeviceId: options.deviceId,
       peerDeviceId: pairing.issuer.originId, peerPublicKeyDerBase64: pairing.issuer.publicKeyDerBase64,
       send: async (packet) => {

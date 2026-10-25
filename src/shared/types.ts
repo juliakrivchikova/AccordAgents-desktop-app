@@ -2998,6 +2998,8 @@ export interface AppBridge {
   getHubSetupCommand(request: import("./hubSetup").HubSetupCommandRequest): Promise<import("./hubSetup").HubSetupCommandResult>;
   installHub(request: import("./hubSetup").HubInstallRequest): Promise<import("./hubSetup").HubSetupState>;
   onHubSetupProgress(callback: (state: import("./hubSetup").HubSetupState) => void): () => void;
+  /** Hides one of the server's dismissable lines (by its id) on this desktop. */
+  dismissHubNotice(id: string): Promise<import("./hubSetup").HubSetupState>;
   revokeMobilePairing(request: RevokeMobilePairingRequest): Promise<RevokeMobilePairingResult>;
   startReview(request: ReviewRequest): Promise<StartReviewResult>;
   continueReview(request: ContinueReviewRequest): Promise<StartReviewResult>;

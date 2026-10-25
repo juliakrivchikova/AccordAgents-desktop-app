@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
 import { applyChatChanges, applyHeldReactions, CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges, isSupportedChatChangesVersion, type ChatChangeApplyPolicy, type ChatChangeBaseline, type ChatChangeDiffPolicy, type ChatChangesPayload, isSafeChatId } from "./chatChanges";
+import { mergeCopiedConversation, type CopiedConversation } from "./chatCopy";
 import type {
   AgentContextUsage,
   AgentHealth,
@@ -20323,6 +20324,94 @@ export class ChatService {
     const participant = this.chatParticipants(opened.conversation).find((item) => item.id === parsed.participantId);
     if (!participant) return undefined;
     return this.startsPhoneTurnFor(participant);
+  }
+
+  /**
+   * One chat of the User's server's copy, for a device that starts again
+   * from it (events it needed were forgotten while it was away, or a chain
+   * of this chat's changes was): merged the way a machine merges its first
+   * copy. The copy's shared content wins; this device keeps its own run
+   * bookkeeping, sessions and what it wrote itself. Saved without being
+   * announced (it is nobody's new change), and a chat deleted here stays
+   * deleted.
+   */
+  async mergeServerCopy(copied: CopiedConversation, options: {
+    desktopOriginId: string;
+    localOriginId?: string;
+    /** The desktop: the device a chat's own fields (title, members and their
+     *  permissions, the project) come from. From the copy it takes only the
+     *  messages it does not have yet, into chats it has, never those fields:
+     *  its own changes the server has not folded yet would be rolled back. */
+    ownsSharedFields?: boolean;
+  }): Promise<void> {
+    if (this.deletedConversationIds.has(copied.id) || await this.storage.conversationTombstones?.().isDeleted(copied.id)) return;
+    const merge = (local: Conversation | undefined): Conversation => mergeCopiedConversation(local, copied, {
+      desktopOriginId: options.desktopOriginId,
+      ...(options.localOriginId ? { localOriginId: options.localOriginId } : {}),
+      ...(this.hostMachineId ? { hostMachineId: this.hostMachineId } : {})
+    });
+    const existing = await this.storage.getConversation(copied.id);
+    if (existing && existing.kind !== "chat") return;
+    const held = new Set((existing?.messages ?? []).map((message) => message.id));
+    // A phone's messages this copy brings (they reached the server while this
+    // device could not read them) start their members here as if read in
+    // order; the same guards keep an old or already-run turn from starting.
+    const startPhoneMessagesFrom = (conversation: Conversation): void => {
+      const byOrigin = new Map<string, string[]>();
+      for (const message of conversation.messages) {
+        const author = copied.authors?.[message.id];
+        if (message.role !== "user" || held.has(message.id) || !author) continue;
+        byOrigin.set(author, [...(byOrigin.get(author) ?? []), message.id]);
+      }
+      for (const [author, ids] of byOrigin) {
+        const changes = conversation.messages.filter((message) => ids.includes(message.id)).map((message) => ({ type: "message.created" as const, message }));
+        this.notePhoneMessages(author, conversation.id, { version: CHAT_CHANGES_VERSION, conversationId: conversation.id, updatedAt: conversation.updatedAt, changes }, new Set(ids));
+      }
+    };
+    if (!existing) {
+      if (options.ownsSharedFields) return;
+      const created = merge(undefined);
+      await this.saveConversation(created, { emitChanges: false });
+      startPhoneMessagesFrom(created);
+      return;
+    }
+    await this.withChatMutation(existing, async () => {
+      if (options.ownsSharedFields) {
+        // Messages it lacks, and the copy's version of those another device
+        // wrote (a machine member's finished reply); its own stay as they are.
+        const merged = new Map(merge(existing).messages.map((message) => [message.id, message]));
+        const theirs = (id: string): boolean => {
+          const author = copied.authors?.[id];
+          return Boolean(author) && author !== options.localOriginId && author !== options.desktopOriginId;
+        };
+        let changed = false;
+        const messages = existing.messages.map((message) => {
+          const incoming = merged.get(message.id);
+          if (!incoming || !theirs(message.id) || JSON.stringify(incoming) === JSON.stringify(message)) return message;
+          changed = true;
+          return incoming;
+        });
+        const known = new Set(existing.messages.map((message) => message.id));
+        const added = [...merged.values()].filter((message) => !known.has(message.id));
+        if (!changed && added.length === 0) return;
+        existing.messages = [...messages, ...added]
+          .map((message, index) => ({ message, index }))
+          .sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.index - right.index)
+          .map((entry) => entry.message);
+        await this.saveConversation(existing, { emitChanges: false });
+        startPhoneMessagesFrom(existing);
+        return;
+      }
+      const merged = merge(existing);
+      existing.title = merged.title;
+      existing.messages = merged.messages;
+      existing.metadata = merged.metadata;
+      existing.updatedAt = merged.updatedAt;
+      if (merged.repoPath) existing.repoPath = merged.repoPath;
+      else delete existing.repoPath;
+      await this.saveConversation(existing, { emitChanges: false });
+      startPhoneMessagesFrom(existing);
+    });
   }
 
   private clone(conversation: Conversation): Conversation {
