@@ -1,4 +1,4 @@
-const ASSET_VERSION = "2026-10-20-wake-in-settings";
+const ASSET_VERSION = "2026-10-25-server-only-phone";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
 const CACHE_NAME = `accordagents-mobile-shell-v70-${ASSET_VERSION}`;
@@ -19,6 +19,8 @@ const APP_SHELL = [
   "./mobile-machine-sealing.js?v=2026-09-07-pair-sealing-v1",
   `./mobile-machine-channel.js?v=${ASSET_VERSION}`,
   `./mobile-shared.js?v=${ASSET_VERSION}`,
+  `./mobile-hub-client.js?v=${ASSET_VERSION}`,
+  "./mobile-hub-client.js",
   `./mobile-activity.js?v=${ASSET_VERSION}`,
   "./manifest.webmanifest",
   "./assets/accordagents-mark.png"
@@ -102,6 +104,11 @@ self.addEventListener("fetch", (event) => {
 // push-woken sync failed at the open, silently, because a push handler has
 // nobody to tell. Neither side can move alone now.
 importScripts("./mobile-db.js");
+// A phone paired with the User's server reads what a push is about from the
+// server, with a request signed by the phone's own key (the page made it and
+// keeps it in this database). Signing proves who asks; it opens nothing: the
+// server answers with which chat and what kind, and the page reads the rest.
+importScripts("./mobile-hub-client.js");
 const SCHEMA = self.AccordMobileDb;
 const META_STORE = SCHEMA.STORES.meta;
 const SEALED_STORE = SCHEMA.STORES.sealed;
@@ -116,6 +123,8 @@ const UNREAD_META_KEY = "unreadConversations";
 // without a notice says nothing about what happened in it.
 const REPLY_NOTICE_KIND = "mobile.notice.reply";
 const APPROVAL_NOTICE_KIND = "mobile.notice.approval";
+const HUB_PAIRING_META_KEY = "hub-pairing";
+const HUB_IDENTITY_META_KEY = "hub-identity";
 
 /** Only the two stores a push-woken sync actually touches: a worker that is a
  *  build behind must still deliver, not force a version for a store it will
@@ -129,6 +138,54 @@ function dbRequest(request) {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
+}
+
+/** What a push from the User's server is about: the notices this phone has
+ *  not seen, read from the server. Undefined when this phone is not paired
+ *  with a server (the mailbox path answers then). */
+async function backgroundHubSync() {
+  let db;
+  let pairing;
+  let identity;
+  try {
+    db = await openControlDb();
+    pairing = await dbRequest(db.transaction(META_STORE).objectStore(META_STORE).get(HUB_PAIRING_META_KEY));
+    identity = await dbRequest(db.transaction(META_STORE).objectStore(META_STORE).get(HUB_IDENTITY_META_KEY));
+  } catch {
+    return undefined;
+  } finally {
+    if (db) db.close();
+  }
+  if (!pairing || !pairing.hubUrl || !identity || !identity.privateKeyDerBase64 || !self.AccordHubClient) return undefined;
+  try {
+    const client = self.AccordHubClient.createHubDeviceClient({ hubUrl: pairing.hubUrl, identity: async () => identity });
+    const answer = await client.getJson("/v1/phone/notices", {}, { timeoutMs: 8_000 });
+    const notices = Array.isArray(answer && answer.notices) ? answer.notices : [];
+    return {
+      synced: true,
+      stored: notices.length,
+      arrivals: notices.map((notice) => ({
+        conversationId: typeof notice.conversationId === "string" ? notice.conversationId : "",
+        kind: notice.kind === "approval" ? APPROVAL_NOTICE_KIND : REPLY_NOTICE_KIND,
+        title: typeof notice.title === "string" ? notice.title : ""
+      })),
+      hubAcknowledge: Number.isSafeInteger(answer && answer.head) ? { hubUrl: pairing.hubUrl, through: answer.head, identity } : undefined
+    };
+  } catch (error) {
+    return { synced: false, reason: String(error && error.message || error) };
+  }
+}
+
+/** Tells the server this phone has shown what it was rung for. */
+async function acknowledgeHubNotices(result) {
+  const ack = result && result.hubAcknowledge;
+  if (!ack || !self.AccordHubClient) return;
+  try {
+    const client = self.AccordHubClient.createHubDeviceClient({ hubUrl: ack.hubUrl, identity: async () => ack.identity });
+    await client.postJson("/v1/phone/seen", { through: ack.through }, { timeoutMs: 5_000 });
+  } catch {
+    // The next push reads them again; a repeated notice replaces the old one.
+  }
 }
 
 async function backgroundMailboxSync() {
@@ -227,10 +284,13 @@ async function backgroundMailboxSync() {
 async function describeArrivals(arrivals) {
   const byConversation = new Map();
   const touched = new Set();
+  // A server names the chat itself; the page's mirror wins when it has one.
+  const named = new Map();
   for (const arrival of arrivals) {
     if (!arrival.conversationId) {
       continue;
     }
+    if (typeof arrival.title === "string" && arrival.title.trim()) named.set(arrival.conversationId, arrival.title.trim());
     touched.add(arrival.conversationId);
     if (arrival.kind !== REPLY_NOTICE_KIND && arrival.kind !== APPROVAL_NOTICE_KIND) {
       continue;
@@ -277,7 +337,7 @@ async function describeArrivals(arrivals) {
   await tellPagesUnreadChanged();
   const notifications = [];
   for (const [conversationId, entry] of byConversation) {
-    const title = typeof titles[conversationId] === "string" ? titles[conversationId].trim() : "";
+    const title = typeof titles[conversationId] === "string" && titles[conversationId].trim() ? titles[conversationId].trim() : named.get(conversationId) || "";
     if (!title) {
       continue;
     }
@@ -385,7 +445,7 @@ self.addEventListener("push", (event) => {
     // that does not surface a notification counts against the subscription on
     // iOS. The page catches up on open regardless.
     let result;
-    const sync = backgroundMailboxSync();
+    const sync = backgroundHubSync().then((hub) => hub || backgroundMailboxSync());
     try {
       // A sync that takes too long is the same thing to iOS as no sync at all:
       // the handler is cut off with nothing shown, and that counts against the
@@ -419,6 +479,7 @@ self.addEventListener("push", (event) => {
       }
     }
     await acknowledgeStored(settled);
+    await acknowledgeHubNotices(settled);
   })());
 });
 
@@ -439,9 +500,9 @@ self.addEventListener("message", (event) => {
       }
       return;
     }
-    const result = await backgroundMailboxSync();
+    const result = (await backgroundHubSync()) || await backgroundMailboxSync();
     if (event.source) {
-      event.source.postMessage({ type: "accord-test-push-done", result });
+      event.source.postMessage({ type: "accord-test-push-done", result: result && result.hubAcknowledge ? { ...result, hubAcknowledge: { through: result.hubAcknowledge.through } } : result });
     }
   })());
 });

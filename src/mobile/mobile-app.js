@@ -383,6 +383,42 @@
   // each other's).
   let pushSubscriptionInFlight;
 
+  /** The push subscription goes to the User's server, signed: the server
+   *  rings this phone itself, desktop or no desktop. Replaced on each launch
+   *  for the reason ensurePushSubscriptionNow gives. */
+  async function ensureHubPushSubscription() {
+    const client = hubClient();
+    if (!client) return;
+    const registration = await navigator.serviceWorker.ready;
+    let subscription = await registration.pushManager.getSubscription();
+    // The server's key before anything is given up (see below).
+    const publicKey = await client.vapidKey();
+    if (subscription) {
+      try {
+        await subscription.unsubscribe();
+        subscription = undefined;
+      } catch {
+        // Keeping a subscription that might be dead beats having none.
+      }
+    }
+    if (!subscription) {
+      subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64UrlToBytes(publicKey) });
+    }
+    try {
+      await client.registerPushSubscription(subscription.toJSON());
+      pushSubscriptionEnsured = true;
+    } catch (error) {
+      if (error && error.status === 400) {
+        // Terminal for this browser: its push service is not one the server
+        // rings.
+        pushEndpointRejected = true;
+        pushSubscriptionEnsured = true;
+        return;
+      }
+      throw error;
+    }
+  }
+
   function ensurePushSubscription() {
     if (pushSubscriptionInFlight) return pushSubscriptionInFlight;
     pushSubscriptionInFlight = ensurePushSubscriptionNow().finally(function () {
@@ -403,6 +439,10 @@
         return;
       }
       const pairing = loadPairing();
+      if (isHubPairing(pairing)) {
+        await ensureHubPushSubscription();
+        return;
+      }
       const endpoint = outboxEndpoint();
       if (!pairing?.relaySealKeyBase64 || !endpoint) {
         return;
@@ -479,7 +519,7 @@
   async function reconnectMessageAlerts() {
     const endpoint = outboxEndpoint();
     const pairing = loadPairing();
-    if (!endpoint || !pairing?.relaySealKeyBase64) return "failed";
+    if (!isHubPairing(pairing) && (!endpoint || !pairing?.relaySealKeyBase64)) return "failed";
     if (!navigator.serviceWorker || !("PushManager" in globalThis)) return "failed";
     try {
       // ensurePushSubscription replaces the subscription itself, and only once
@@ -1321,11 +1361,6 @@
     return (record && record.machines) || [];
   }
 
-  async function machineAccessFor(machineId) {
-    const machines = await machineAccessList();
-    return machineId ? machines.find((machine) => machine.machineId === machineId) : machines[0];
-  }
-
   /** One IndexedDB transaction over the phone's machine journal. */
   function machineLogPort() {
     return {
@@ -1461,10 +1496,6 @@
       return undefined;
     });
     return machineChannelsPromise.then(function (built) { return built && built.channels; });
-  }
-
-  function machineJournal() {
-    return machineChannels().then(function () { return machineChannelsPromise; }).then(function (built) { return built; });
   }
 
   /**
@@ -1815,151 +1846,6 @@
   }
 
   /**
-   * Asks a machine to run a member's turn, with nothing else in between.
-   *
-   * The ask is minted into this phone's journal -- its identity, its place in
-   * this device's sequence, its hash chain, its signature and its delivery row
-   * in one write -- and only then offered to the machine. It stays there until
-   * the machine acknowledges it, so a reload, a dead connection or a closed tab
-   * in the middle is a delivery that resumes, not a turn the User never got.
-   */
-  async function commandMachineTurn(request) {
-    if (await isMachineConversationDeleted(request.conversationId)) throw new Error("This chat was permanently deleted.");
-    const built = await machineJournal();
-    const machine = await machineAccessFor(request.machineId);
-    if (!built || !machine) throw new Error("This phone cannot reach that machine directly yet.");
-    const api = globalThis.AccordMachineCommand;
-    const scope = api.deviceEventScope(machine.rendezvousId, request.conversationId, "actions");
-    // The machine runs against its own copy of the chat, so the row the turn
-    // answers travels with the command rather than being assumed to be there.
-    // A long paste is larger than one event carries, so it goes as a body the
-    // event names and the fragments beside it -- the same shape a machine uses
-    // to send this phone a long answer.
-    if (request.message) {
-      const body = await built.channels.prepare({
-        type: "machine.conversation.delta",
-        conversationId: request.conversationId,
-        messages: [request.message],
-        updatedAt: nowIso()
-      });
-      try {
-        await built.channels.append({
-          eventId: "phone-delta-" + request.runId,
-          conversationId: request.conversationId,
-          logScopeId: scope,
-          kind: "machine.conversation.delta",
-          recipients: [machine.deviceId],
-          payload: body
-        });
-      } catch (error) {
-        // The event was never recorded, so nothing will ever release the body
-        // it named. Dropping it here is what keeps a failing write from
-        // leaving a fresh copy behind on every retry.
-        await built.channels.discard(body);
-        throw error;
-      }
-    }
-    const event = await built.log.append({
-      eventId: api.machineCommandEventId(request.runId),
-      conversationId: request.conversationId,
-      logScopeId: scope,
-      kind: "machine.turn.request",
-      recipients: [machine.deviceId],
-      payload: api.turnRequest(request)
-    });
-    await built.channels.deliver(machine.machineId).catch(function (error) {
-      // Held, not lost: the connection retries and the journal still owes it.
-      recordRelayDebug({ event: "machine-command-holding", runId: request.runId, message: String(error && error.message || error) });
-    });
-    return event.eventId;
-  }
-
-  /**
-   * Asks a machine to stop a run.
-   *
-   * Recorded and delivered the same way, which is the point: until the machine
-   * acknowledges it, the User is told the stop is being delivered. Calling it
-   * stopped at the moment of sending would be a claim this phone cannot make.
-   */
-  async function commandMachineCancel(request) {
-    const built = await machineJournal();
-    const machine = await machineAccessFor(request.machineId);
-    if (!built || !machine) throw new Error("This phone cannot reach that machine directly yet.");
-    const api = globalThis.AccordMachineCommand;
-    const event = await built.log.append({
-      eventId: api.machineCancelEventId(request.runId),
-      conversationId: request.conversationId,
-      logScopeId: api.deviceEventScope(machine.rendezvousId, request.conversationId, "actions"),
-      kind: "machine.turn.cancel",
-      recipients: [machine.deviceId],
-      payload: api.cancelRequest(request)
-    });
-    await built.channels.deliver(machine.machineId).catch(function (error) {
-      recordRelayDebug({ event: "machine-cancel-holding", runId: request.runId, message: String(error && error.message || error) });
-    });
-    return event.eventId;
-  }
-
-  /**
-   * Drives a machine for what the desktop did not take.
-   *
-   * The desktop is asked first: it owns the chat and does the routing. When it
-   * is not there, a member that lives on a machine can still be asked, by this
-   * phone, over the machine's own channel. The two are exclusive on purpose --
-   * the same message going down both paths would be two runs of the member.
-   */
-  async function driveMachineForPendingMessages(conversationId) {
-    const entries = (await listOutboxEntries()).filter(function (entry) {
-      return entry.status !== "acked" && entry.conversationId === conversationId && isMessageOutboxEntry(entry);
-    });
-    let driven = 0;
-    for (const entry of entries) {
-      const content = (entry.payload && entry.payload.content) || "";
-      const member = machineMemberFor(conversationId, content);
-      if (!member) continue;
-      const machine = await machineAccessFor(member.homeMachineId);
-      if (!machine) {
-        machineUnavailableReason = "This phone has not been told how to reach " + member.displayName + "'s machine.";
-        continue;
-      }
-      const runId = "mobile-" + entry.eventId;
-      machineRunState.set(runId, { status: "requested", machineId: machine.machineId,
-        participantLabel: "@" + member.handle, conversationId: conversationId });
-      try {
-        await commandMachineTurn({
-          machineId: machine.machineId,
-          conversationId: conversationId,
-          participant: member.participant,
-          runId: runId,
-          messageId: entry.eventId,
-          pendingMessageId: "pending-" + entry.eventId,
-          requestedAt: entry.createdAt,
-          message: {
-            id: entry.eventId,
-            role: "user",
-            content: content,
-            createdAt: entry.createdAt,
-            status: "done"
-          }
-        });
-      } catch (error) {
-        const message = String((error && error.message) || error);
-        recordRelayDebug({ event: "machine-drive-failed", eventId: entry.eventId, message: message });
-        machineUnavailableReason = message;
-        await putOutboxEntry({ ...entry, lastError: message, updatedAt: nowIso() });
-        continue;
-      }
-      // Handed to the machine, so it does not also go to the desktop: the
-      // desktop learns this message from the machine's own copy. It is not
-      // called delivered until the machine acknowledges the command.
-      await putOutboxEntry({ ...entry, status: "syncing", deliveredVia: "machine", machineId: machine.machineId,
-        machineRunId: runId, updatedAt: nowIso() });
-      driven += 1;
-    }
-    return driven;
-  }
-
-  /**
    * The machine confirmed it has the ask. Only now is the message delivered.
    *
    * Until this, the entry stays pending and is offered again -- which is what
@@ -1977,38 +1863,6 @@
         updatedAt: nowIso(), lastError: undefined });
       await render("synced");
     }
-  }
-
-  /** A run this phone asked a machine for, rather than the desktop. */
-  async function machineRunForCancel(conversationId, runId) {
-    const entries = await listOutboxEntries();
-    const entry = entries.find(function (item) { return item.machineRunId === runId; });
-    if (entry) return { machineId: entry.machineId, runId: runId };
-    const chat = loadChats().find(function (item) { return item.id === conversationId; });
-    const members = ((chat && chat.members) || []).filter(function (member) { return member.homeMachineId; });
-    return members.length === 1 ? { machineId: members[0].homeMachineId, runId: runId } : undefined;
-  }
-
-  /** Answers a card on the machine that raised it, as the same chat action
-   *  every device emits, so one answer is one decision wherever it is applied. */
-  async function commandMachineAction(conversationId, decision) {
-    const built = await machineJournal();
-    if (!built) throw new Error("This phone cannot reach a machine directly yet.");
-    const roster = built.channels.roster();
-    if (!roster.length) throw new Error("This phone has no machine to answer on.");
-    const event = await built.log.append({
-      eventId: "phone-action:" + decision.payload.operationId,
-      conversationId: conversationId,
-      logScopeId: "chat:actions",
-      kind: decision.kind,
-      recipients: roster,
-      payload: decision.payload
-    });
-    await built.channels.deliver().catch(function (error) {
-      recordRelayDebug({ event: "machine-action-holding", operationId: decision.payload.operationId,
-        message: String(error && error.message || error) });
-    });
-    return event.eventId;
   }
 
   const machineRunState = new Map();
@@ -2674,21 +2528,6 @@
     };
   }
 
-  /** The member a message is addressed to, when that member lives on a
-   *  machine this phone can reach itself. */
-  function machineMemberFor(conversationId, content) {
-    const chat = loadChats().find(function (item) { return item.id === conversationId; });
-    const members = (chat && chat.members) || [];
-    const mentioned = String(content || "").match(/(?:^|\s)@([A-Za-z0-9_-]+)/g) || [];
-    const handles = mentioned.map(function (raw) { return raw.trim().replace(/^@/, "").toLowerCase(); });
-    const candidates = members.filter(function (member) { return member.homeMachineId && member.participant; });
-    if (!candidates.length) return undefined;
-    if (!handles.length) return candidates.length === 1 ? candidates[0] : undefined;
-    return candidates.find(function (member) {
-      return handles.indexOf(member.handle.toLowerCase()) >= 0 || handles.indexOf(member.mentionHandle.toLowerCase()) >= 0;
-    });
-  }
-
   function activeMentionQuery(value) {
     const match = String(value || "").match(/(?:^|\s)@([A-Za-z0-9_-]*)$/);
     return match ? match[1] : undefined;
@@ -2768,6 +2607,9 @@
   }
 
   function loadPairing() {
+    // A phone paired with the User's server reads and writes only there.
+    const hub = loadHubPairing();
+    if (hub) return hubPairingAsPairing(hub);
     try {
       const raw = localStorage.getItem(PAIRING_KEY);
       return raw ? JSON.parse(raw) : undefined;
@@ -2790,7 +2632,7 @@
   // debug flag) survive, and the app never re-reads credentials from
   // location after boot. Pasted-link pairing passes a synthetic location, so
   // the address bar is credential-free there and this is a no-op.
-  const CREDENTIAL_URL_PARAMS = ["rid", "rendezvousId", "route", "routingId", "cap", "fingerprint", "relay", "endpoint", "mailbox", "mailboxUrl", "outbox", "outboxUrl", "conversationId", "relaySealKey"];
+  const CREDENTIAL_URL_PARAMS = ["pair", "rid", "rendezvousId", "route", "routingId", "cap", "fingerprint", "relay", "endpoint", "mailbox", "mailboxUrl", "outbox", "outboxUrl", "conversationId", "relaySealKey"];
 
   function scrubCredentialsFromLocation() {
     try {
@@ -2850,6 +2692,14 @@
 
   function readBootstrapFromLocation(locationValue) {
     const url = new URL(locationValue.href);
+    // The code for the User's server: paired with it now, in the background
+    // of the first screen; the address bar keeps none of it.
+    const invite = readHubInvite(url);
+    if (invite) {
+      scrubCredentialsFromLocation();
+      void pairWithServer(invite);
+      return loadPairing();
+    }
     const fragment = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
     const wake = readWakeFromFragment(fragment);
     const compactKey = fragment.get("k") || fragment.get("relaySealKey");
@@ -2932,6 +2782,7 @@
 
   async function createOutboxEvent(input) {
     const pairing = loadPairing();
+    if (isHubPairing(pairing)) return hubOutboxEntry(input);
     const eventId = input.eventId || createEventId();
     const createdAt = input.createdAt || nowIso();
     const conversationId = activeConversationId(input.conversationId);
@@ -3212,6 +3063,9 @@
    * will ever hear about is worse than one the User can retry.
    */
   function persistOutboundEvent(entry) {
+    // An entry for the server is its own record: its event is made, signed
+    // and kept with it when it is first sent (mintHubEntry).
+    if (entry && entry.hub) return putOutboxEntry(entry).then(function () { return entry; });
     return eventLogPort().runAtomic([EVENT_STORE, OUTBOX_STORE], function (tx) {
       return tx.get(EVENT_STORE, entry.eventId).then(function (existing) {
         if (existing) return entry;
@@ -3279,19 +3133,9 @@
     await render("waiting-to-sync");
     await enqueueRunCancel({ conversationId, runId: runId.trim() });
     await render("waiting-to-sync");
+    // A stop goes where every other write goes; the member's home stops it
+    // when it reads it, and the row keeps saying "Stopping" until it has.
     const flushResult = await flushOutbox();
-    if (desktopDidNotTake(flushResult.status)) {
-      // A stop this phone could not hand over is held, not done. The row keeps
-      // saying "Stopping" until the machine acknowledges the cancel; calling
-      // it stopped here would be a claim about a member still running.
-      const target = await machineRunForCancel(conversationId, runId.trim());
-      if (target && target.machineId) {
-        await commandMachineCancel({ machineId: target.machineId, conversationId: conversationId, runId: target.runId })
-          .catch(function (error) {
-            recordRelayDebug({ event: "machine-cancel-failed", runId: target.runId, message: String(error && error.message || error) });
-          });
-      }
-    }
     await pollMailboxTimeline().catch(function () {
       return 0;
     });
@@ -3389,6 +3233,12 @@
         pairing?.fingerprint &&
         relayEndpoint()
     );
+  }
+
+  /** Whether this phone can read and write at all: through the User's
+   *  server, or (paired the old way) through the desktop's relay. */
+  function canSync(pairing) {
+    return isHubPairing(pairing) || relayCanSync(pairing);
   }
 
   async function flushOutboxViaRelay(entries, pairing) {
@@ -3801,6 +3651,610 @@
   // relay) leaves the phone asking the desktop as before, and is asked again
   // a few minutes later.
 
+  // --- pairing with the User's own server ----------------------------------
+  // The phone pairs with her server itself: the desktop shows a code (the
+  // server's address, a one-time token, the server's id), the phone makes a
+  // key of its own and enrolls it, and from then on every read and every
+  // write is a request signed with that key, straight to the server. No
+  // desktop has to be awake, and the phone never addresses one.
+
+  const HUB_PAIRING_KEY = "accordagents.mobile.hub.v1";
+  const HUB_IDENTITY_META_KEY = "hub-identity";
+  const HUB_PENDING_IDENTITY_META_KEY = "hub-identity-pending";
+  const HUB_PAIRING_META_KEY = "hub-pairing";
+  const HUB_HEAD_META_PREFIX = "hubHead:";
+  const HUB_CLOCK_META_KEY = "hubClock";
+  const HUB_PHONE_PROTOCOL = 2;
+  /** A sent event is kept this long, so a server that lost it (restored
+   *  from an older copy) can be given it again. */
+  const HUB_SENT_KEEP_MS = 7 * 24 * 60 * 60_000;
+  /** A payload over this travels as a body the server holds (as every
+   *  device does it), not inside its event. */
+  const HUB_INLINE_PAYLOAD_BYTES = 32 * 1024;
+  const HUB_PUSH_PAGE = 50;
+  // Where pairing with the server stands, for the screen: "pairing",
+  // "outdated" (the Mac or its server is older), "failed", "revoked".
+  let hubPairingState;
+  let hubClientCache;
+
+  function loadHubPairing() {
+    try {
+      const raw = localStorage.getItem(HUB_PAIRING_KEY);
+      const parsed = raw ? JSON.parse(raw) : undefined;
+      return parsed && typeof parsed.hubUrl === "string" && typeof parsed.deviceId === "string" ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function isHubPairing(pairing) {
+    return Boolean(pairing && pairing.hub === true && pairing.hubUrl);
+  }
+
+  /** The hub pairing in the shape the rest of the app reads a pairing in:
+   *  no relay fields, so nothing here talks to a relay or a mailbox. */
+  function hubPairingAsPairing(hub) {
+    return {
+      hub: true,
+      hubUrl: hub.hubUrl,
+      hubId: hub.hubId,
+      deviceId: hub.deviceId,
+      ...(hub.scope && hub.scope.scope === "conversation" ? { conversationId: hub.scope.conversationId } : {}),
+      pairedAt: hub.pairedAt
+    };
+  }
+
+  function hubIdentity() {
+    return readMetaRecord(HUB_IDENTITY_META_KEY).then(function (identity) {
+      if (!identity || !identity.deviceId || !identity.privateKeyDerBase64) throw new Error("This phone has lost its pairing key. Pair it again.");
+      return identity;
+    });
+  }
+
+  function hubClient() {
+    const pairing = loadHubPairing();
+    const api = globalThis.AccordHubClient;
+    if (!pairing || !api) return undefined;
+    if (!hubClientCache || hubClientCache.hubUrl !== pairing.hubUrl) {
+      hubClientCache = { hubUrl: pairing.hubUrl, client: api.createHubDeviceClient({ hubUrl: pairing.hubUrl, identity: hubIdentity }) };
+    }
+    return hubClientCache.client;
+  }
+
+  /** The code the desktop shows, from the link it opened: `#hub=…&t=…&id=…`. */
+  function readHubInvite(url) {
+    const fragment = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
+    const hubUrl = fragment.get("hub");
+    const token = fragment.get("t");
+    const hubId = fragment.get("id");
+    if (!hubUrl || !token || !hubId) return undefined;
+    try {
+      const parsed = new URL(hubUrl);
+      const local = parsed.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname);
+      if (parsed.protocol !== "https:" && !local) return undefined;
+    } catch {
+      return undefined;
+    }
+    return { hubUrl: hubUrl.replace(/\/+$/, ""), token: token, hubId: hubId };
+  }
+
+  function phoneName() {
+    const agent = String(globalThis.navigator && navigator.userAgent || "");
+    if (/iPhone/.test(agent)) return "iPhone";
+    if (/iPad/.test(agent)) return "iPad";
+    if (/Android/.test(agent)) return "Android phone";
+    return "Phone";
+  }
+
+  function hubPairingFailure(error) {
+    const status = error && typeof error.status === "number" ? error.status : 0;
+    if (status === 410) return { status: "failed", message: "This pairing code was already used or has expired. Make a new one on your Mac (Settings → Device Pairing)." };
+    if (status === 404 || status === 405) return { status: "outdated", message: "Update AccordAgents on your Mac, then pair this phone again." };
+    if (error && error.unreachable) return { status: "failed", message: "Could not reach your server. Check the phone's connection and scan the code again." };
+    if (status === 400 || status === 429) {
+      // The server says what was wrong (a clock that is off, too many tries).
+      let said = "";
+      try { said = String(JSON.parse(error.body || "{}").error || ""); } catch { said = ""; }
+      if (said) return { status: "failed", message: said };
+    }
+    return { status: "failed", message: "Pairing did not work: " + String(error && error.message || error) };
+  }
+
+  /**
+   * Pairs this phone with the User's server from the code the desktop shows.
+   * The key is made (and kept) before it is offered, so a lost answer is
+   * asked again with the same key and the same code; the server answers the
+   * same phone again rather than refusing it.
+   */
+  async function pairWithServer(invite) {
+    const api = globalThis.AccordHubClient;
+    if (!api) {
+      hubPairingState = { status: "failed", message: "This copy of the app cannot pair yet. Reload it and scan the code again." };
+      await render();
+      return false;
+    }
+    hubPairingState = { status: "pairing" };
+    await render();
+    try {
+      const probe = api.createHubDeviceClient({ hubUrl: invite.hubUrl, identity: function () { return Promise.reject(new Error("not paired")); } });
+      const health = await probe.health();
+      if (!health || !(Number(health.protocol) >= HUB_PHONE_PROTOCOL)) {
+        hubPairingState = { status: "outdated", message: "Update AccordAgents on your Mac, then pair this phone again." };
+        await render();
+        return false;
+      }
+      if (health.hubId !== invite.hubId) {
+        hubPairingState = { status: "failed", message: "This code is for another server. Make a new one on your Mac." };
+        await render();
+        return false;
+      }
+      const tokenHash = await sha256Hex(invite.token);
+      const pending = await readMetaRecord(HUB_PENDING_IDENTITY_META_KEY);
+      const identity = pending && pending.tokenHash === tokenHash && pending.identity ? pending.identity : await api.createHubDeviceIdentity();
+      await writeMetaRecord(HUB_PENDING_IDENTITY_META_KEY, { tokenHash: tokenHash, identity: identity });
+      const answer = await api.enrollHubPhone({ hubUrl: invite.hubUrl, hubId: invite.hubId, token: invite.token, identity: identity, name: phoneName() });
+      // The key the server now knows this phone by, before the pairing that
+      // names it: a pairing without its key could never sign again.
+      await writeMetaRecord(HUB_IDENTITY_META_KEY, identity);
+      const pairing = { hubUrl: invite.hubUrl, hubId: invite.hubId, deviceId: identity.deviceId, scope: answer.scope, pairedAt: nowIso(), protocol: answer.protocol };
+      setStoredValue(HUB_PAIRING_KEY, JSON.stringify(pairing));
+      hubClientCache = undefined;
+      // The worker reads these to fetch what a push is about.
+      await writeMetaRecord(HUB_PAIRING_META_KEY, { hubUrl: invite.hubUrl, hubId: invite.hubId, deviceId: identity.deviceId });
+      if (answer.scope && answer.scope.scope === "conversation") {
+        localStorage.setItem(ACTIVE_CONVERSATION_KEY, answer.scope.conversationId);
+      }
+      // The certificate is the first thing this phone writes: every device
+      // that reads the server learns from it that this phone is the User's.
+      await putOutboxEntry(await hubOutboxEntry({ kind: "device.enrolled", conversationId: "device-enrollment", payload: answer.certificate }));
+      hubPairingState = undefined;
+      recordRelayDebug({ event: "hub-paired", deviceId: identity.deviceId });
+      await render();
+      // From here on the phone works as it does after a launch: what it owes
+      // goes out, the chats come in, live progress and alerts start.
+      await initHubSession(loadPairing());
+      return true;
+    } catch (error) {
+      hubPairingState = hubPairingFailure(error);
+      recordRelayDebug({ event: "hub-pairing-failed", message: String(error && error.message || error) });
+      await render();
+      return false;
+    }
+  }
+
+  /** The log scope and event kind an outbox entry becomes on the server. */
+  function hubEventShape(entry) {
+    if (entry.kind === "device.enrolled") return { logScopeId: "device-enrollment", kind: "device.enrolled" };
+    if (entry.kind === "run.cancel.requested") return { logScopeId: "chat:actions", kind: "turn.stop.requested" };
+    if (entry.kind === "permission.decided" || entry.kind === "choice.answered") return { logScopeId: "chat:actions", kind: entry.kind };
+    return { logScopeId: "chat-changes:" + entry.conversationId, kind: "chat.changes" };
+  }
+
+  async function hubOutboxEntry(input) {
+    const eventId = input.eventId || createEventId();
+    const createdAt = input.createdAt || nowIso();
+    const kind = input.kind || "message.created";
+    const conversationId = activeConversationId(input.conversationId);
+    const payload = input.payload || {
+      content: input.content,
+      ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {})
+    };
+    const shape = hubEventShape({ kind: kind, conversationId: conversationId });
+    return {
+      eventId: eventId,
+      conversationId: conversationId,
+      logScopeId: shape.logScopeId,
+      kind: kind,
+      payload: payload,
+      createdAt: createdAt,
+      status: "queued",
+      attempts: 0,
+      updatedAt: createdAt,
+      hub: true,
+      // Who the message is for, decided now, from what this phone showed the
+      // User when she sent it — the same rules the desktop applies to what is
+      // typed there.
+      ...(kind === "message.created" ? { hubDelivery: await resolvePhoneDelivery(conversationId, payload) } : {})
+    };
+  }
+
+  /** The members a draft is for, by the desktop's own rules (bundled from
+   *  src/shared/chatDeliveryPolicy.ts), over the chat as this phone holds it. */
+  async function resolvePhoneDelivery(conversationId, payload) {
+    const shared = mobileSharedRules();
+    const chat = loadChats().find(function (item) { return item.id === conversationId; });
+    const members = chat && Array.isArray(chat.members) ? chat.members : [];
+    if (!shared || typeof shared.resolveChatDeliveryTargets !== "function") return { targets: [], unknownHandles: [], resolved: false };
+    const participants = members.map(function (member) {
+      return {
+        id: member.id,
+        handle: member.handle,
+        roleConfigId: member.roleConfigId || (member.isAssistant ? "administrator" : "generic-participant"),
+        kind: member.kind,
+        ...(member.homeMachineId ? { homeMachineId: member.homeMachineId } : {})
+      };
+    });
+    const rows = await listTimelineEntries(conversationId).catch(function () { return []; });
+    const messages = rows.map(function (row) {
+      return {
+        id: row.messageId || row.sourceId || row.id,
+        role: row.role === "you" ? "user" : row.role,
+        content: row.content || "",
+        createdAt: row.createdAt,
+        ...(row.participantId ? { participantId: row.participantId } : {}),
+        metadata: {
+          ...(row.threadId ? { threadId: row.threadId } : {}),
+          ...(row.threadRootId ? { chatThreadRootId: row.threadRootId } : {})
+        }
+      };
+    });
+    const threadRootId = payload && typeof payload.threadRootId === "string" ? payload.threadRootId : undefined;
+    const result = shared.resolveChatDeliveryTargets({
+      conversation: { id: conversationId, messages: messages, metadata: { participants: participants } },
+      participants: participants,
+      content: String(payload && payload.content || ""),
+      context: threadRootId ? { chatThreadRootId: threadRootId } : {},
+      options: shared.CHAT_DELIVERY_POLICY_OPTIONS
+    });
+    return {
+      targets: result.targets.map(function (participant) { return participant.id; }),
+      unknownHandles: result.unknownHandles,
+      resolved: true
+    };
+  }
+
+  function imageExtension(mimeType) {
+    return mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
+  }
+
+  /** The chat change a message from this phone is: the User's message, and
+   *  the line the desktop adds for a name that is no member. */
+  async function hubMessagePayload(entry, client) {
+    const payload = entry.payload || {};
+    const content = typeof payload.content === "string" ? payload.content : "";
+    const messageId = entry.eventId;
+    const delivery = entry.hubDelivery || { targets: [], unknownHandles: [] };
+    const threadRootId = typeof payload.threadRootId === "string" && payload.threadRootId ? payload.threadRootId : undefined;
+    const imageAttachments = [];
+    for (const attachment of Array.isArray(payload.attachments) ? payload.attachments : []) {
+      const bytes = base64ToBytesStd(attachment.dataBase64);
+      const id = createEventId();
+      const reference = await client.uploadBlob(bytes);
+      imageAttachments.push({
+        id: id,
+        filename: attachment.filename || ("photo." + imageExtension(attachment.mimeType)),
+        mimeType: attachment.mimeType,
+        sizeBytes: bytes.length,
+        width: Number(attachment.width) || 0,
+        height: Number(attachment.height) || 0,
+        storageKey: "attachments/" + id + "." + imageExtension(attachment.mimeType),
+        createdAt: entry.createdAt,
+        hubBlob: reference
+      });
+    }
+    const shared = mobileSharedRules();
+    let nativeCommand;
+    if (shared && typeof shared.parseNativeGoalCommand === "function") {
+      const goal = shared.parseNativeGoalCommand(content);
+      if (goal.kind === "valid" && delivery.targets.length === 1) {
+        const member = (loadChats().find(function (chat) { return chat.id === entry.conversationId; }) || {}).members || [];
+        const target = member.find(function (item) { return item.id === delivery.targets[0]; });
+        nativeCommand = { name: "goal", objective: shared.nativeGoalObjective(goal.contentWithoutCommand, target ? target.handle : "") };
+      }
+    }
+    const message = {
+      id: messageId,
+      role: "user",
+      content: content,
+      createdAt: entry.createdAt,
+      status: "done",
+      metadata: {
+        appMessageSource: "mobile-relay",
+        mobileEventId: entry.eventId,
+        threadId: messageId,
+        ...(threadRootId ? { chatThreadRootId: threadRootId } : {}),
+        deliveryTargets: delivery.targets,
+        ...(Array.isArray(payload.skillMentions) && payload.skillMentions.length ? { skillMentions: payload.skillMentions } : {}),
+        ...(imageAttachments.length ? { imageAttachments: imageAttachments } : {}),
+        ...(nativeCommand ? { nativeCommand: nativeCommand } : {})
+      }
+    };
+    const changes = [{ type: "message.created", message: message }];
+    for (const handle of delivery.unknownHandles || []) {
+      changes.push({ type: "message.created", message: {
+        id: createEventId(), role: "system", content: "No member named @" + handle + ".", createdAt: entry.createdAt, status: "done",
+        metadata: { threadId: messageId, parentMessageId: messageId, ...(threadRootId ? { chatThreadRootId: threadRootId } : {}) }
+      } });
+    }
+    return { version: 1, conversationId: entry.conversationId, updatedAt: entry.createdAt, changes: changes };
+  }
+
+  function base64ToBytesStd(value) {
+    const binary = atob(String(value || ""));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  }
+
+  /** What an outbox entry says, as the event the server and every device
+   *  apply. A card answer says it was given on the phone. */
+  async function hubEventPayload(entry, client) {
+    if (entry.kind === "device.enrolled") return entry.payload;
+    if (entry.kind === "run.cancel.requested") {
+      const runId = String(entry.payload && entry.payload.runId || "");
+      return { operationId: "stop:" + runId, targetKey: "run:" + runId, stateId: "stop-requested", detail: { by: "phone", runId: runId } };
+    }
+    if (entry.kind === "permission.decided" || entry.kind === "choice.answered") {
+      const payload = entry.payload || {};
+      return { ...payload, detail: { ...(payload.detail || {}), decidedOn: "phone" } };
+    }
+    return hubMessagePayload(entry, client);
+  }
+
+  /** The next stamp of this phone's clock (the desktop's form, hlc:…). */
+  async function hubLogicalTs(deviceId) {
+    const record = (await readMetaRecord(HUB_CLOCK_META_KEY)) || {};
+    const now = Date.now();
+    let wall = Number(record.wallMs) || 0;
+    let counter = Number(record.counter) || 0;
+    if (now > wall) {
+      wall = now;
+      counter = 0;
+    } else {
+      counter += 1;
+    }
+    await writeMetaRecord(HUB_CLOCK_META_KEY, { wallMs: wall, counter: counter });
+    return "hlc:" + String(wall).padStart(13, "0") + ":" + String(counter).padStart(6, "0") + ":" + deviceId;
+  }
+
+  /**
+   * Makes an entry's event once, signed, in its place in this phone's chain
+   * of that scope, and keeps it with the entry. Sending it again (after a
+   * lost answer, after a restart) sends these very bytes: the server takes
+   * the same event once.
+   */
+  async function mintHubEntry(entry) {
+    const api = globalThis.AccordHubClient;
+    const client = hubClient();
+    if (!api || !client) throw new Error("This phone is not paired with a server.");
+    const identity = await hubIdentity();
+    const shape = hubEventShape(entry);
+    let payload = await hubEventPayload(entry, client);
+    const json = JSON.stringify(payload);
+    if (new TextEncoder().encode(json).length > HUB_INLINE_PAYLOAD_BYTES) {
+      payload = await client.uploadBlob(new TextEncoder().encode(json));
+    }
+    const headKey = HUB_HEAD_META_PREFIX + shape.logScopeId;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const head = hubHeadFor(await readMetaRecord(headKey), identity.deviceId);
+      const seq = head.seq + 1;
+      const event = await api.mintHubEvent(identity, {
+        eventId: entry.eventId,
+        conversationId: shape.kind === "device.enrolled" ? "device-enrollment" : entry.conversationId,
+        logScopeId: shape.logScopeId,
+        kind: shape.kind,
+        payload: payload,
+        originSeq: seq,
+        ...(head.hash ? { prevHash: head.hash } : {}),
+        logicalTs: await hubLogicalTs(identity.deviceId),
+        createdAt: entry.createdAt
+      });
+      const minted = { ...entry, logScopeId: shape.logScopeId, minted: event, updatedAt: nowIso() };
+      // The event and the chain's new head land together, or neither does.
+      const taken = await eventLogPort().runAtomic([OUTBOX_STORE, META_STORE], function (tx) {
+        return tx.get(META_STORE, headKey).then(function (current) {
+          if (hubHeadFor(current, identity.deviceId).seq !== seq - 1) return false;
+          return tx.get(OUTBOX_STORE, entry.eventId).then(function (stored) {
+            if (stored && stored.minted && stored.minted.originId === identity.deviceId) return false;
+            return tx.put(OUTBOX_STORE, minted).then(function () {
+              return tx.put(META_STORE, { key: headKey, seq: seq, hash: event.eventHash, deviceId: identity.deviceId });
+            }).then(function () { return true; });
+          });
+        });
+      });
+      if (taken) {
+        noteOutboxStatus(minted);
+        return minted;
+      }
+      const stored = (await listOutboxEntries()).find(function (item) { return item.eventId === entry.eventId; });
+      if (stored && stored.minted && stored.minted.originId === identity.deviceId) return stored;
+    }
+    throw new Error("Could not place this in the phone's queue.");
+  }
+
+  /** Where this phone's chain in a scope stands, for its current identity: a
+   *  phone paired again starts its chains afresh (a head without an owner is
+   *  from before heads named one, so it is the identity's own). */
+  function hubHeadFor(record, deviceId) {
+    if (!record || (record.deviceId && record.deviceId !== deviceId)) return { seq: 0, hash: undefined };
+    return { seq: Number(record.seq) || 0, hash: record.hash };
+  }
+
+  /** The server refused an event (it never will take it): what this phone
+   *  minted after it in the same chain is minted again from the event before
+   *  it, so one refusal does not hold every later message back. */
+  async function rechainAfterRefusal(refused) {
+    const identity = await hubIdentity();
+    const scope = refused.minted && refused.minted.logScopeId;
+    if (!scope || refused.minted.originId !== identity.deviceId) return;
+    const headKey = HUB_HEAD_META_PREFIX + scope;
+    const later = (await listOutboxEntries()).filter(function (item) {
+      return item.minted && item.minted.logScopeId === scope && item.minted.originId === identity.deviceId &&
+        item.minted.originSeq > refused.minted.originSeq && item.status !== "acked";
+    });
+    await eventLogPort().runAtomic([OUTBOX_STORE, META_STORE], function (tx) {
+      return tx.get(META_STORE, headKey).then(function (current) {
+        // Already moved past (another flush did this): nothing to undo.
+        if (hubHeadFor(current, identity.deviceId).seq < refused.minted.originSeq) return undefined;
+        let chain = Promise.resolve();
+        for (const item of later) {
+          const { minted: _minted, ...unminted } = item;
+          chain = chain.then(function () { return tx.put(OUTBOX_STORE, { ...unminted, status: "waiting-to-sync", updatedAt: nowIso() }); });
+        }
+        return chain.then(function () {
+          return tx.put(META_STORE, { key: headKey, seq: refused.minted.originSeq - 1, hash: refused.minted.prevHash, deviceId: identity.deviceId });
+        });
+      });
+    });
+    for (const item of later) noteOutboxStatus({ ...item, status: "waiting-to-sync" });
+  }
+
+  /**
+   * Sends what this phone still owes its server, in the order it was written.
+   * Each entry is acknowledged only when the server says it holds it
+   * (accepted, or already there); until then it stays queued here and is
+   * offered again.
+   */
+  async function flushOutboxViaHub(entries) {
+    const client = hubClient();
+    const pending = entries.filter(function (entry) { return entry.hub && desktopOwesEntry(entry); });
+    if (!client || pending.length === 0) return { status: client ? "synced" : "unreachable", sent: 0, pending: pending.length };
+    let sent = 0;
+    const minted = [];
+    const identity = await hubIdentity();
+    for (const entry of pending) {
+      try {
+        // An entry minted under an identity this phone no longer pairs with
+        // (paired again) is minted again under the current one.
+        minted.push(entry.minted && entry.minted.originId === identity.deviceId ? entry : await mintHubEntry(entry));
+      } catch (error) {
+        await putOutboxEntry({ ...entry, status: "waiting-to-sync", updatedAt: nowIso(), lastError: String(error && error.message || error) });
+        return { status: error && error.unreachable ? "unreachable" : "waiting-to-sync", sent: sent, pending: pending.length - sent };
+      }
+    }
+    for (let start = 0; start < minted.length; start += HUB_PUSH_PAGE) {
+      const page = minted.slice(start, start + HUB_PUSH_PAGE);
+      let response;
+      try {
+        response = await client.pushEvents(page.map(function (entry) { return entry.minted; }));
+        response = await repairHubGaps(client, page, response);
+      } catch (error) {
+        for (const entry of page) await putOutboxEntry({ ...entry, status: "waiting-to-sync", updatedAt: nowIso(), lastError: String(error && error.message || error) });
+        return { status: error && error.unreachable ? "unreachable" : "waiting-to-sync", sent: sent, pending: pending.length - sent };
+      }
+      const results = Array.isArray(response && response.results) ? response.results : [];
+      const refused = [];
+      for (const [index, entry] of page.entries()) {
+        const result = results[index] || {};
+        if (result.status === "accepted" || result.status === "duplicate") {
+          await putOutboxEntry({ ...entry, status: "acked", ack: { hubSeq: result.hubSeq, ackRole: "server" }, updatedAt: nowIso(), lastError: undefined });
+          sent += 1;
+        } else if (result.status === "rejected" || result.status === "conflict") {
+          await putOutboxEntry({ ...entry, status: "refused", attempts: entry.attempts + 1, updatedAt: nowIso(), lastError: result.error || result.status });
+          refused.push(entry);
+        } else {
+          await putOutboxEntry({ ...entry, status: "waiting-to-sync", attempts: entry.attempts + 1, updatedAt: nowIso(), lastError: result.status || "not taken" });
+        }
+      }
+      // The earliest refusal in each chain decides where it is minted again.
+      const firstRefusal = new Map();
+      for (const entry of refused) {
+        const known = firstRefusal.get(entry.minted.logScopeId);
+        if (!known || entry.minted.originSeq < known.minted.originSeq) firstRefusal.set(entry.minted.logScopeId, entry);
+      }
+      for (const entry of firstRefusal.values()) await rechainAfterRefusal(entry).catch(function () { return undefined; });
+    }
+    return { status: sent === pending.length ? "synced" : "waiting-to-sync", sent: sent, pending: pending.length - sent };
+  }
+
+  /** A server missing the start of a chain (restored from an older copy) is
+   *  given it again from what this phone still keeps, then the page again. */
+  async function repairHubGaps(client, page, response) {
+    const results = Array.isArray(response && response.results) ? response.results : [];
+    const gaps = new Map();
+    results.forEach(function (result, index) {
+      if (result && result.status === "gap" && page[index]) gaps.set(page[index].logScopeId, Number(result.expectedSeq) || 1);
+    });
+    if (gaps.size === 0) return response;
+    const kept = await listOutboxEntries();
+    const identity = await hubIdentity();
+    for (const [scope, fromSeq] of gaps) {
+      const chain = kept.filter(function (entry) {
+        return entry.minted && entry.minted.logScopeId === scope && entry.minted.originSeq >= fromSeq &&
+          entry.minted.originId === identity.deviceId && entry.status !== "refused" &&
+          !page.some(function (item) { return item.eventId === entry.eventId; });
+      }).sort(function (left, right) { return left.minted.originSeq - right.minted.originSeq; });
+      if (chain.length) await client.pushEvents(chain.map(function (entry) { return entry.minted; }));
+    }
+    return client.pushEvents(page.map(function (entry) { return entry.minted; }));
+  }
+
+  /** Sent entries are kept a week (see HUB_SENT_KEEP_MS), then let go. */
+  async function pruneSentHubEntries() {
+    const cutoff = Date.now() - HUB_SENT_KEEP_MS;
+    const entries = await listOutboxEntries();
+    for (const entry of entries) {
+      if (entry.hub && entry.status === "acked" && Date.parse(entry.updatedAt || entry.createdAt) < cutoff) {
+        await withOutbox("readwrite", function (store) { return requestToPromise(store.delete(entry.eventId)); }).catch(function () { return undefined; });
+      }
+    }
+  }
+
+  /** The app is open and showing what happened: the notices so far are
+   *  seen, so the server does not ring this phone for them, nor does a later
+   *  ring show them again. At most every ten seconds. */
+  let hubNoticesSeenAt = 0;
+  async function markHubNoticesSeen() {
+    if (!isHubPairing(loadPairing()) || document.visibilityState === "hidden" || Date.now() - hubNoticesSeenAt < 10_000) return;
+    hubNoticesSeenAt = Date.now();
+    try {
+      const client = hubClient();
+      const answer = await hubPhoneGet("/v1/phone/notices", {});
+      if (client && answer && Number.isSafeInteger(answer.head) && answer.head > (Number(answer.seen) || 0)) {
+        await client.postJson("/v1/phone/seen", { through: answer.head });
+      }
+    } catch {
+      // The next look marks them.
+    }
+  }
+
+  /** A signed read from the server, as serverPhoneGet answers it. */
+  async function hubPhoneGet(path, params, options) {
+    const client = hubClient();
+    if (!client) throw Object.assign(new Error("Not paired with a server"), { serverStatus: 0, unavailable: true });
+    try {
+      return await client.getJson(path, params || {}, { timeoutMs: (options && options.timeoutMs) || SERVER_FETCH_TIMEOUT_MS });
+    } catch (error) {
+      const status = error && typeof error.status === "number" ? error.status : 0;
+      if (status === 401 && String(error && error.body || "").indexOf("not on the hub's roster") >= 0) {
+        // Taken off the server's devices (removed on the Mac): this phone
+        // reads nothing more and says so. Any other refusal (a clock that is
+        // off) is not a removal.
+        hubPairingState = { status: "revoked", message: "This phone was removed from your server. Pair it again from your Mac." };
+      }
+      throw Object.assign(new Error(String(error && error.message || error)), { serverStatus: status, serverBody: error && error.body || "", unavailable: Boolean(error && error.unreachable) });
+    }
+  }
+
+  // Live progress of the open chat's running members, read from the server
+  // while one runs: the same pending rows the desktop's live frames carried.
+  let hubProgressTimer;
+  let hubProgressBusy = false;
+  function startHubProgressPolling() {
+    if (hubProgressTimer) return;
+    let ticks = 0;
+    hubProgressTimer = setInterval(function () {
+      // What the server says about the machines (waking, last seen) every
+      // fifteen seconds while the app is open.
+      ticks += 1;
+      if (ticks % 10 === 0 && document.visibilityState !== "hidden") void refreshHubMachines();
+      // A send the server never answered (a dropped connection, a server
+      // restarting) is offered again while the app is open, as the relay's
+      // timeline poll does; the server keeps one copy whatever arrives twice.
+      if (!catchingUp) void retryPendingOutbox();
+      const pairing = loadPairing();
+      const conversationId = selectedConversationId();
+      if (!isHubPairing(pairing) || !conversationId || document.visibilityState === "hidden" || hubProgressBusy) return;
+      hubProgressBusy = true;
+      void listTimelineEntries(conversationId).then(function (rows) {
+        if (!rows.some(function (row) { return row.role === "participant" && row.status === "pending"; })) return undefined;
+        return hubPhoneGet("/v1/phone/progress", { conversationId: conversationId }).then(function (payload) {
+          return handleRelayTimelinePayload(payload, conversationId, { live: true });
+        });
+      }).catch(function () { return undefined; }).finally(function () { hubProgressBusy = false; });
+    }, 1_500);
+  }
+
   const SERVER_READ_RETRY_MS = 5 * 60_000;
   const SERVER_FETCH_TIMEOUT_MS = 20_000;
   const SERVER_CHANGES_WAIT_MS = 25_000;
@@ -3809,10 +4263,13 @@
   let serverReadsCheckedAt = 0;
 
   function serverReadsAvailable() {
+    // Paired with the server, the server is the only place to read from.
+    if (isHubPairing(loadPairing())) return true;
     return serverReads !== "no" || Date.now() - serverReadsCheckedAt > SERVER_READ_RETRY_MS;
   }
 
   async function serverPhoneGet(path, params, options) {
+    if (isHubPairing(loadPairing())) return hubPhoneGet(path, params, options);
     const pairing = loadPairing();
     const endpoint = outboxEndpoint();
     const access = pairing ? await mailboxAccessForPairing(pairing) : undefined;
@@ -3864,6 +4321,10 @@
       // is asked of the desktop; the server still answers everything else.
       if (status === 404 && body.indexOf("chat_not_found") >= 0) {
         return undefined;
+      }
+      if (isHubPairing(loadPairing())) {
+        if (hubPairingState && hubPairingState.status === "revoked") void render("revoked");
+        throw error;
       }
       if (status === 404 || status === 403 || status === 401 || status === 405 || (error && error.unavailable)) {
         if (serverReads !== "no") recordRelayDebug({ event: "server-reads", state: "no", status: status || 0 });
@@ -3938,6 +4399,7 @@
           const changed = Array.isArray(answer.conversationIds) ? answer.conversationIds : [];
           if (!reset && changed.length === 0) continue;
           const openConversationId = selectedConversationId();
+          void markHubNoticesSeen();
           await requestChatListFromServer().catch(function () { return []; });
           if (openConversationId && (reset || changed.indexOf(openConversationId) >= 0)) {
             await requestTimelineFromServer(openConversationId).catch(function () { return 0; });
@@ -3955,6 +4417,12 @@
   }
 
   async function requestChatListViaRelay(pairing) {
+    if (isHubPairing(pairing)) {
+      const chats = await requestChatListFromServer();
+      serverReads = "yes";
+      startServerChanges();
+      return chats;
+    }
     const fromServer = await readFromServer(requestChatListFromServer);
     if (fromServer) {
       startServerChanges();
@@ -4002,6 +4470,7 @@
   }
 
   async function requestTimelineViaRelay(pairing, conversationId, options) {
+    if (isHubPairing(pairing)) return requestTimelineFromServer(conversationId, options);
     const fromServer = await readFromServer(function () {
       return requestTimelineFromServer(conversationId, options);
     });
@@ -4404,7 +4873,7 @@
     });
   }
 
-  function loadAttachmentInto(image, conversationId, attachment) {
+  function loadAttachmentInto(image, conversationId, attachment, messageId) {
     if (attachment.dataBase64) {
       // Already in hand — a picture queued on this phone, not yet echoed back.
       applyAttachmentResult(image, "data:" + attachment.mimeType + ";base64," + attachment.dataBase64);
@@ -4418,7 +4887,11 @@
     if (!attachmentFetches.has(attachment.id)) {
       const pairing = loadPairing();
       attachmentFetches.set(attachment.id, (async function () {
-        const payload = await requestAttachmentViaRelay(pairing, conversationId, attachment.id);
+        // From the server the picture is read by its message: the server
+        // holds the body the device that posted it put there.
+        const payload = isHubPairing(pairing)
+          ? await hubPhoneGet("/v1/phone/attachment", { conversationId: conversationId, attachmentId: attachment.id, messageId: messageId })
+          : await requestAttachmentViaRelay(pairing, conversationId, attachment.id);
         if (payload && payload.type === "mobile.attachment" && typeof payload.dataBase64 === "string") {
           const mimeType = typeof payload.mimeType === "string" ? payload.mimeType : attachment.mimeType;
           return "data:" + mimeType + ";base64," + payload.dataBase64;
@@ -4500,7 +4973,7 @@
         }
       });
       container.append(image, note);
-      loadAttachmentInto(image, entry.conversationId, attachment);
+      loadAttachmentInto(image, entry.conversationId, attachment, entry.messageId || entry.sourceId);
     }
   }
 
@@ -4771,6 +5244,10 @@
           ? event.threadRootId
           : undefined,
         mobileEventId,
+        // Who wrote it and in which thread: what the phone resolves an
+        // unaddressed message to the member that spoke last by.
+        ...(typeof event.participantId === "string" && event.participantId ? { participantId: event.participantId } : {}),
+        ...(typeof event.threadId === "string" && event.threadId ? { threadId: event.threadId } : {}),
         ...(settledAt ? { settledAt: settledAt } : {})
       });
       if (written) {
@@ -4898,6 +5375,13 @@
     // acknowledge and must not go to the desktop as well — the same message
     // down both paths is two runs of the member.
     const entries = (await listOutboxEntries()).filter(desktopOwesEntry);
+    if (isHubPairing(pairing)) {
+      try {
+        return await flushOutboxViaHub(entries);
+      } catch (error) {
+        return { status: "unreachable", sent: 0, pending: entries.filter((entry) => entry.hub).length, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
     if (relayCanSync(pairing)) {
       try {
         return await flushOutboxViaRelay(entries, pairing);
@@ -4992,7 +5476,7 @@
       return "Syncing";
     }
     if (status === "refused") {
-      return "Not taken by the desktop";
+      return isHubPairing(loadPairing()) ? "Not taken by your server" : "Not taken by the desktop";
     }
     if (status === "superseded") {
       return "Replaced";
@@ -5272,10 +5756,12 @@
       }
       const pairing = loadPairing();
       customAvatarFetches.set(avatarId, (async function () {
-        if (!pairing || !relayCanSync(pairing) || !conversationId) {
+        if (!pairing || !canSync(pairing) || !conversationId) {
           return "retry";
         }
-        const payload = await sendRelayPayload(pairing, "avatar-" + customId + "-" + createEventId(), {
+        const payload = isHubPairing(pairing)
+          ? await hubPhoneGet("/v1/phone/avatar", { conversationId: conversationId, avatarId: avatarId })
+          : await sendRelayPayload(pairing, "avatar-" + customId + "-" + createEventId(), {
           type: "mobile.avatar.request",
           conversationId: conversationId,
           avatarId: avatarId
@@ -5572,7 +6058,7 @@
     dropCachedChatRows();
     return render("synced").then(function () {
       const pairing = loadPairing();
-      if (pairing && relayCanSync(pairing)) {
+      if (pairing && canSync(pairing)) {
         return requestTimelineViaRelay(pairing, conversationId).then(function () {
           return render("synced");
         }).catch(function () {
@@ -5665,8 +6151,8 @@
     if (chats.length === 0) {
       const empty = document.createElement("div");
       empty.className = "mobile-empty";
-      if (!relayCanSync(loadPairing())) {
-        empty.textContent = "Scan the desktop QR to connect this phone.";
+      if (!canSync(loadPairing())) {
+        empty.textContent = "Scan the code from your Mac (Settings → Device Pairing) to connect this phone.";
       } else {
         empty.textContent = "";
         const line = document.createElement("div");
@@ -6213,21 +6699,8 @@
     markCardSent(card.id, queued && queued.eventId, answerOutcomeText(card, answer), decision.payload.operationId);
     await render("waiting-to-sync");
     const flushResult = await flushOutbox();
-    if (desktopDidNotTake(flushResult.status)) {
-      await commandMachineAction(conversationId, decision).catch(function (error) {
-        // Sent is not applied: if it could not even be handed over, the card
-        // says so rather than showing an answer that went nowhere.
-        clearCardSent(card.id);
-        controlCardErrors.set(card.id, "Not delivered yet: " + String(error && error.message || error));
-      });
-    }
     await pollMailboxTimeline().catch(function () { return 0; });
     await render(flushResult.status);
-  }
-
-  /** The desktop did not take this: it is not there, or its tunnel is down. */
-  function desktopDidNotTake(status) {
-    return status === "waiting-for-desktop" || status === "tunnel-reconnecting" || status === "waiting-to-sync" || status === "unreachable";
   }
 
   function enqueueDecision(input) {
@@ -7247,7 +7720,7 @@
       chatListRefreshTimer = undefined;
       lastChatListRefreshAt = Date.now();
       const pairing = loadPairing();
-      if (!pairing || !relayCanSync(pairing)) return;
+      if (!pairing || !canSync(pairing)) return;
       void requestChatListViaRelay(pairing).then(function () {
         return render("synced");
       }).catch(function () {
@@ -7881,15 +8354,18 @@
     const list = document.getElementById("settings-list");
     if (!list) return;
     const permission = "Notification" in globalThis ? Notification.permission : "unsupported";
-    const pushable = Boolean(outboxEndpoint()) && "Notification" in globalThis && "PushManager" in globalThis;
-    const power = machinePowerHandoff();
-    const signature = JSON.stringify([permission, pushable, pushEndpointRejected, Boolean(power), machineWakeState, alertsReconnect]);
+    const hubPaired = isHubPairing(loadPairing());
+    const pushable = (Boolean(outboxEndpoint()) || hubPaired) && "Notification" in globalThis && "PushManager" in globalThis;
+    const power = hubPaired ? undefined : machinePowerHandoff();
+    const signature = JSON.stringify([permission, pushable, pushEndpointRejected, Boolean(power), machineWakeState, alertsReconnect, hubPaired, hubMachines]);
     if (signature === lastSettingsRenderSignature) return;
     lastSettingsRenderSignature = signature;
     list.replaceChildren();
 
     list.append(settingsGroup("This phone", [
-      settingsRow("Paired with your desktop", "Chats and replies come through the AccordAgents relay.")
+      hubPaired
+        ? settingsRow("Paired with your server", "Chats, replies and alerts come from your own server, with or without your Mac.")
+        : settingsRow("Paired with your desktop", "Chats and replies come through the AccordAgents relay.")
     ]));
 
     let alertsSub;
@@ -7931,6 +8407,21 @@
     }
     list.append(settingsGroup("Notifications", [settingsRow("Message alerts", alertsSub, alertsControl)]));
 
+    if (hubPaired && hubMachines.length > 0) {
+      // The server wakes a machine itself when work waits for it; the button
+      // asks it to now. This phone holds no key of its own.
+      list.append(settingsGroup("Machines", hubMachines.map(function (machine) {
+        const state = hubMachineWake.get(machine.machineId);
+        const waking = machine.waking || (state && state.status === "waking");
+        const detail = state && state.detail ? state.detail
+          : machine.waking ? "Starting… It appears once its runtime connects."
+            : machine.wakeError ? machine.wakeError
+              : machine.lastSeenAt ? "Last seen " + relativeTime(machine.lastSeenAt) + " ago." : "Asleep? Wake it to keep working.";
+        return settingsRow(machine.name || "Cloud machine", detail, machine.canWake ? settingsButton(waking ? "Waking…" : "Wake", function () {
+          void wakeHubMachine(machine.machineId);
+        }, Boolean(waking)) : undefined);
+      })));
+    }
     if (power) {
       const waking = machineWakeState.status === "waking";
       list.append(settingsGroup("Machines", [
@@ -8048,6 +8539,39 @@
     await pollMailboxTimeline().catch(function () { return 0; });
   }
 
+  // The machines the server knows, and what it says about waking each.
+  let hubMachines = [];
+  const hubMachineWake = new Map();
+
+  async function refreshHubMachines() {
+    if (!isHubPairing(loadPairing())) return;
+    const answer = await hubPhoneGet("/v1/phone/machines", {}).catch(function () { return undefined; });
+    if (answer && Array.isArray(answer.machines) && JSON.stringify(answer.machines) !== JSON.stringify(hubMachines)) {
+      hubMachines = answer.machines;
+      lastSettingsRenderSignature = "";
+      await render();
+    }
+  }
+
+  /** Asks the server to start a stopped machine now. */
+  async function wakeHubMachine(machineId) {
+    hubMachineWake.set(machineId, { status: "waking", detail: "Asking your server to start the machine…" });
+    lastSettingsRenderSignature = "";
+    await render();
+    try {
+      const client = hubClient();
+      if (!client) throw new Error("This phone is not paired with a server.");
+      const answer = await client.postJson("/v1/phone/wake", { machineId: machineId });
+      hubMachineWake.set(machineId, { status: answer && answer.started ? "started" : "error",
+        detail: answer && answer.message ? String(answer.message) : "Start requested." });
+    } catch (error) {
+      hubMachineWake.set(machineId, { status: "error", detail: "Could not reach your server: " + String(error && error.message || error) });
+    }
+    lastSettingsRenderSignature = "";
+    await render();
+    void refreshHubMachines();
+  }
+
   let renderRevision = 0;
 
   async function render(connectionStatus) {
@@ -8082,8 +8606,22 @@
       lastRowsFingerprint = undefined;
       lastScrolledConversationId = undefined;
     }
+    if (hubPairingState && (!loadHubPairing() || hubPairingState.status === "revoked")) {
+      // Pairing with the server, or why it did not work: in place of the
+      // chats, with the code scanner to try again.
+      renderUnpairedNotice(hubPairingState.status === "pairing" ? "Pairing with your server…" : hubPairingState.message,
+        "hub-" + hubPairingState.status);
+      showScreen("chats");
+      return;
+    }
     if (!loadPairing()) {
-      renderUnpairedNotice();
+      renderUnpairedNotice("Scan the code from your Mac (Settings → Device Pairing) to connect this phone. " +
+        "An installed app has its own storage, so it pairs separately from the browser.");
+      showScreen("chats");
+      return;
+    }
+    if (legacyPairingReplaced && !isHubPairing(loadPairing())) {
+      renderUnpairedNotice("This phone was paired the old way. On your Mac open Settings → Device Pairing and scan the new code: the phone now connects to your server.", "repair");
       showScreen("chats");
       return;
     }
@@ -8101,7 +8639,7 @@
     // while permission is still undecided.
     const alertsButton = document.getElementById("enable-alerts");
     if (alertsButton) {
-      const canOffer = Boolean(outboxEndpoint()) &&
+      const canOffer = (Boolean(outboxEndpoint()) || isHubPairing(loadPairing())) &&
         "Notification" in globalThis &&
         "PushManager" in globalThis &&
         Notification.permission === "default";
@@ -8265,6 +8803,9 @@
         mobileEventId: entry.mobileEventId
       };
     }));
+    if (isHubPairing(loadPairing())) {
+      rows = rows.concat(routedRows(activeId, messageEntries, timelineEntries, requestedStopRunIds));
+    }
     rows = dedupeRenderRowsByKey(rows).sort(function (left, right) {
       return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
     });
@@ -8682,6 +9223,65 @@
       dots.append(document.createElement("span"));
     }
     item.append(dots);
+  }
+
+  /** How long after a message a member it was for may still be shown as
+   *  not started yet. */
+  const ROUTED_ROW_MAX_MS = 30 * 60_000;
+
+  /**
+   * A member a message from this phone is for, whose home has not started it
+   * yet: shown under the message as waiting for that home ("waking" while the
+   * server is starting its machine), with Stop, which names the turn's own
+   * run id so its home never starts it. Gone once the home's own row for the
+   * turn arrives.
+   */
+  function routedRows(conversationId, messageEntries, timelineEntries, requestedStopRunIds) {
+    const chat = loadChats().find(function (item) { return item.id === conversationId; });
+    const members = chat && Array.isArray(chat.members) ? chat.members : [];
+    const runIds = new Set(timelineEntries.map(function (entry) { return entry.runId; }).filter(Boolean));
+    const stoppedLines = timelineEntries.filter(function (entry) {
+      return entry.role === "system" && /stopped by user\.$/.test(String(entry.content || ""));
+    });
+    const rows = [];
+    for (const entry of messageEntries) {
+      if (!entry.hub || !entry.hubDelivery || !Array.isArray(entry.hubDelivery.targets)) continue;
+      if (Date.now() - Date.parse(entry.createdAt) > ROUTED_ROW_MAX_MS) continue;
+      for (const participantId of entry.hubDelivery.targets) {
+        const runId = globalThis.AccordHubClient.phoneTurnRunId(entry.eventId, participantId);
+        if (runIds.has(runId)) continue;
+        const member = members.find(function (item) { return item.id === participantId; });
+        if (!member) continue;
+        const label = "@" + member.handle;
+        if (stoppedLines.some(function (line) { return line.content.indexOf(label + " stopped") === 0 && line.createdAt >= entry.createdAt; })) continue;
+        const machine = member.homeMachineId ? hubMachines.find(function (item) { return item.machineId === member.homeMachineId; }) : undefined;
+        const where = member.homeMachineName || (machine && machine.name) || "its machine";
+        // Not on the server yet (offline): nobody can start it, so the row
+        // says what the message itself says.
+        const content = entry.status !== "acked" ? "Waiting to sync…"
+          : !member.homeMachineId ? "Waiting for your Mac to start it…"
+          : machine && machine.waking ? "Waking " + where + "…" : "Waiting for " + where + "…";
+        rows.push({
+          rowKey: "routed\0" + runId,
+          id: runId,
+          conversationId: conversationId,
+          threadRootId: entry.payload && typeof entry.payload.threadRootId === "string" ? entry.payload.threadRootId : undefined,
+          author: "agent",
+          participantLabel: label,
+          identified: true,
+          scaffolding: false,
+          cancellable: true,
+          content: content,
+          status: "Running",
+          createdAt: entry.createdAt + "~",
+          sourceId: runId,
+          runId: runId,
+          routed: true,
+          stopRequested: requestedStopRunIds.has(runId) || stopRequestedRunIds.has(runId)
+        });
+      }
+    }
+    return rows;
   }
 
   function isCancellableMobileRow(entry) {
@@ -9177,7 +9777,7 @@
     const pairing = loadPairing();
     const show = Boolean(page && page.hasMoreBefore && page.beforeMessageId) &&
       !openThread &&
-      Boolean(pairing && relayCanSync(pairing));
+      Boolean(pairing && canSync(pairing));
     button.hidden = !show;
     button.disabled = loadEarlierBusy;
     button.textContent = loadEarlierBusy ? "Loading…" : "Show earlier messages";
@@ -9187,7 +9787,7 @@
     const conversationId = selectedConversationId();
     const pairing = loadPairing();
     const page = conversationId ? timelinePageFor(conversationId) : undefined;
-    if (!conversationId || !pairing || !relayCanSync(pairing) || !page || !page.beforeMessageId || loadEarlierBusy) {
+    if (!conversationId || !pairing || !canSync(pairing) || !page || !page.beforeMessageId || loadEarlierBusy) {
       return;
     }
     loadEarlierBusy = true;
@@ -9292,7 +9892,7 @@
 
   async function refreshChatList() {
     const pairing = loadPairing();
-    if (!pairing || !relayCanSync(pairing)) {
+    if (!pairing || !canSync(pairing)) {
       await render();
       return;
     }
@@ -9307,7 +9907,7 @@
   async function refreshOpenTimeline() {
     const pairing = loadPairing();
     const conversationId = selectedConversationId();
-    if (!pairing || !relayCanSync(pairing) || !conversationId) {
+    if (!pairing || !canSync(pairing) || !conversationId) {
       await pollMailboxTimeline().catch(function () { return 0; });
       await render();
       return;
@@ -9354,8 +9954,20 @@
       recordRelayDebug({ event: "foreground-resync", awayMs });
       await adoptWorkerUnread();
       const pairing = loadPairing();
-      if (!pairing || !relayCanSync(pairing)) {
+      if (!pairing || !canSync(pairing)) {
         await render();
+        return;
+      }
+      if (isHubPairing(pairing)) {
+        // Back in front: what was missed is read from the server, and what
+        // this phone still owes it goes.
+        await flushOutbox().catch(function () { return undefined; });
+        await requestChatListViaRelay(pairing).catch(function () { return []; });
+        const openId = selectedConversationId();
+        if (openId) await requestTimelineViaRelay(pairing, openId).catch(function () { return 0; });
+        startServerChanges();
+        void markHubNoticesSeen();
+        await render("synced");
         return;
       }
       if (awayMs > FOREGROUND_RECONNECT_AFTER_MS) {
@@ -9484,12 +10096,15 @@
   }
 
   async function requestComposerOptionsViaRelay(pairing, conversationId, query, content) {
-    const payload = await sendRelayPayload(pairing, "composer-" + createEventId(), {
-      type: "mobile.composer.request",
-      conversationId,
-      query,
-      content
-    });
+    // The catalog the desktop published on the server, answered there.
+    const payload = isHubPairing(pairing)
+      ? await hubPhoneGet("/v1/phone/composer", { conversationId: conversationId, query: query, content: String(content || "").slice(0, 2_000) })
+      : await sendRelayPayload(pairing, "composer-" + createEventId(), {
+        type: "mobile.composer.request",
+        conversationId,
+        query,
+        content
+      });
     if (!payload || payload.type !== "mobile.composer") {
       return { commands: [], prompts: [], skills: [] };
     }
@@ -9873,7 +10488,7 @@
         clearTimeout(slashDebounceTimer);
         const pairing = loadPairing();
         const conversationId = selectedConversationId();
-        if (!pairing || !relayCanSync(pairing) || !conversationId) {
+        if (!pairing || !canSync(pairing) || !conversationId) {
           slashOptions = [];
           renderSlashMenu("offline");
           return;
@@ -10097,13 +10712,6 @@
         // Sending is a deliberate action, so following it is expected.
         scrollToLatestWhenSettled("auto");
         const flushResult = await flushOutbox();
-        // The desktop first; if it is not there, the member's own machine.
-        if (desktopDidNotTake(flushResult.status)) {
-          await driveMachineForPendingMessages(conversationId).catch(function (error) {
-            recordRelayDebug({ event: "machine-drive-failed", message: String(error && error.message || error) });
-            return 0;
-          });
-        }
         await pollMailboxTimeline().catch(function () {
           return 0;
         });
@@ -10131,12 +10739,21 @@
     // desktop a phone that could do nothing: everything the machine owes this
     // phone, and everything this phone still owes the machine, is settled on
     // this connection whether or not the desktop is anywhere.
-    await restoreMachineTerminals().catch(function () { return 0; });
-    void machineChannels().then(function (channels) {
-      if (channels) return channels.deliver().catch(function () { return undefined; });
-      return undefined;
-    }).catch(function () { return undefined; });
     const pairing = loadPairing();
+    // Paired with the server, the phone talks to the server and to nothing
+    // else: no machine is addressed from here.
+    if (!isHubPairing(pairing)) {
+      await restoreMachineTerminals().catch(function () { return 0; });
+      void machineChannels().then(function (channels) {
+        if (channels) return channels.deliver().catch(function () { return undefined; });
+        return undefined;
+      }).catch(function () { return undefined; });
+    }
+    if (isHubPairing(pairing)) {
+      await initHubSession(pairing);
+      return;
+    }
+    if (pairing) void probeLegacyPairing(pairing);
     if (pairing && relayCanSync(pairing)) {
       try {
         await requestChatListViaRelay(pairing);
@@ -10163,6 +10780,58 @@
     startMailboxTimelinePolling();
     ensureLiveRelayForOpenConversation();
     startRelayTimelineKeepAlive();
+  }
+
+  /** A phone paired with the User's server: what it owes goes out, the chats
+   *  are read from the server, and it is rung by the server. */
+  async function initHubSession(pairing) {
+    const client = hubClient();
+    if (client) {
+      void client.health().then(function (health) {
+        if (!(Number(health && health.protocol) >= HUB_PHONE_PROTOCOL)) {
+          hubPairingState = { status: "outdated", message: "Update AccordAgents on your Mac: its server runs an older program than this app." };
+          return render();
+        }
+        return undefined;
+      }).catch(function () { return undefined; });
+    }
+    const flushResult = await flushOutbox().catch(function () { return { status: "unreachable" }; });
+    try {
+      await requestChatListViaRelay(pairing);
+      await render("synced");
+      const conversationId = selectedConversationId();
+      if (conversationId) {
+        await requestTimelineViaRelay(pairing, conversationId);
+        await render("synced");
+      }
+    } catch (error) {
+      await render(error && error.unavailable ? "unreachable" : flushResult.status);
+    }
+    void ensurePushSubscription().catch(function () { return undefined; });
+    startHubProgressPolling();
+    void refreshHubMachines();
+    void markHubNoticesSeen();
+    void pruneSentHubEntries().catch(function () { return undefined; });
+  }
+
+  /** Set when this phone holds an old pairing (through the desktop's relay)
+   *  and the User's own server answers at that address: the desktop no
+   *  longer serves it, so the phone asks to be paired again. */
+  let legacyPairingReplaced = false;
+
+  async function probeLegacyPairing(pairing) {
+    const endpoint = outboxEndpoint();
+    if (!endpoint || isHubPairing(pairing)) return;
+    try {
+      const response = await fetch(new URL("/v1/health", endpoint).toString(), { cache: "no-store", signal: AbortSignal.timeout(8_000) });
+      const health = response.ok ? await response.json() : undefined;
+      if (health && Number(health.protocol) >= HUB_PHONE_PROTOCOL && typeof health.hubId === "string") {
+        legacyPairingReplaced = true;
+        await render();
+      }
+    } catch {
+      // Not the User's server, or not reachable: the old pairing goes on.
+    }
   }
 
   globalThis.AccordAgentsMobile = {
@@ -10197,11 +10866,6 @@
     isCancellableMobileRow,
     requestChatListViaRelay,
     announceMachineIdentityViaRelay,
-    commandMachineTurn,
-    commandMachineCancel,
-    commandMachineAction,
-    driveMachineForPendingMessages,
-    machineMemberFor,
     machineChannels,
     machineAccessList,
     storeMachineAccess,
@@ -10209,6 +10873,10 @@
     requestTimelineViaRelay,
     openRelayPayload,
     readBootstrapFromLocation,
+    pairWithServer,
+    flushOutboxViaHub,
+    resolvePhoneDelivery,
+    loadHubPairing,
     machineWakeFailure,
     reassembleRelayCiphertext,
     sealRelayPayload,
