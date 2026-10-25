@@ -2988,6 +2988,10 @@ export interface AppBridge {
   respondToChatChoice(request: RespondToChatChoiceRequest): Promise<StartReviewResult>;
   respondToChatAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;
   createMobilePairing(request: CreateMobilePairingRequest): Promise<CreateMobilePairingResult>;
+  /** A one-time code a phone pairs with the User's server by. */
+  createPhoneInvite(request?: CreatePhoneInviteRequest): Promise<CreatePhoneInviteResult>;
+  /** Revokes a phone code: unused, it stops working; used, its phone is removed. */
+  revokePhoneInvite(request: { inviteId: string }): Promise<RevokePhoneInviteResult>;
   /** The User's own hub: what is set up, the command that creates its server,
    *  and the installation from the line that command prints. */
   getHubSetupState(): Promise<import("./hubSetup").HubSetupState>;
@@ -3068,4 +3072,25 @@ export interface AppBridge {
   /** Live background work of the chat's members, by member id. */
   getChatBackgroundTasks(conversationId: string): Promise<Record<string, string[]>>;
   onChatBackgroundTasks(callback: (event: ChatBackgroundTasksEvent) => void): () => void;
+}
+
+/** A one-time code a phone pairs with the User's server by. */
+export interface CreatePhoneInviteRequest {
+  /** The phone app's address, when it is not the usual one. */
+  staticOriginUrl?: string;
+}
+
+export interface CreatePhoneInviteResult {
+  inviteId: string;
+  expiresAt: string;
+  /** The phone app's address with the server, the token and its id in the
+   *  fragment: what the QR code shows. */
+  pwaUrl: string;
+  qrPayload: string;
+}
+
+export interface RevokePhoneInviteResult {
+  revoked: boolean;
+  inviteId: string;
+  deviceId?: string;
 }

@@ -112,7 +112,7 @@ import { CLI_PROVIDER_SETUP, preferredReadyAssistantProviderKind } from "../../s
 import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import { readCrashReportsChoice, writeCrashReportsChoice } from "./crashReportPreferences";
-import { isAcceptableHubUrl } from "../../shared/hubProtocol";
+import { HUB_PHONE_INVITE_MAX_LIFETIME_MS, isAcceptableHubUrl } from "../../shared/hubProtocol";
 import { compareVersions } from "../../shared/machineInstall";
 import { HUB_RELAY_FIRST_VERSION } from "../../shared/hubSetup";
 import { isHubServerAddress, type HubLinkConfig } from "../../shared/hubSetup";
@@ -212,6 +212,9 @@ interface StoredSettings {
    *  keys are what a machine checks a command's signature against; there is
    *  nothing secret in them. */
   trustedDevices?: TrustedDeviceRecord[];
+  /** Phone invites this desktop made for its server, and what became of
+   *  each: a phone enrolled with it, or it was revoked. */
+  hubPhoneInvites?: StoredHubPhoneInvite[];
   machinePairingBindings?: Record<string, string>;
   revokedMachinePairingKeys?: string[];
   machineDeviceRevocations?: Record<string, string>;
@@ -2969,6 +2972,9 @@ export class SettingsService {
       // trusted, machines were handed an empty roster, and a revocation the
       // owner made was forgotten just as completely.
       trustedDevices: (settings.trustedDevices ?? []).filter(isTrustedDeviceRecord).map(record => ({ ...record })),
+      hubPhoneInvites: Array.isArray(settings.hubPhoneInvites)
+        ? settings.hubPhoneInvites.filter(isStoredHubPhoneInvite).map((invite) => ({ ...invite }))
+        : undefined,
       machinePairingBindings: settings.machinePairingBindings && typeof settings.machinePairingBindings === "object"
         ? { ...settings.machinePairingBindings } : undefined,
       revokedMachinePairingKeys: Array.isArray(settings.revokedMachinePairingKeys)
@@ -3623,9 +3629,95 @@ export class SettingsService {
       const stored = await this.readStored();
       if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
       this.removeDeviceTrust(stored, deviceId);
+      // The invite it enrolled with is settled as revoked: it can never bring
+      // the phone back, on the server or on a machine.
+      stored.hubPhoneInvites = (stored.hubPhoneInvites ?? []).map((invite) =>
+        invite.deviceId === deviceId ? { ...invite, state: "revoked" as const, settledAt: new Date().toISOString() } : invite);
       await this.writeStored(stored, true);
       return (stored.trustedDevices ?? []).map(entry => ({ ...entry }));
     });
+  }
+
+  /** A phone invite this desktop just registered with its server. */
+  savePhoneInvite(invite: Omit<StoredHubPhoneInvite, "state">): Promise<void> {
+    return this.serializeDeviceTrust(async () => {
+      const stored = await this.readStored();
+      if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+      const kept = (stored.hubPhoneInvites ?? []).filter((entry) => entry.inviteId !== invite.inviteId);
+      kept.push({ ...invite, state: "pending" });
+      // The settled ones are what the server and the machines are told; an
+      // unused one that expired is of no use to anyone.
+      const now = Date.now();
+      stored.hubPhoneInvites = keptPhoneInvites(kept
+        .filter((entry) => entry.state !== "pending" || Date.parse(entry.expiresAt) > now - HUB_PHONE_INVITE_MAX_LIFETIME_MS));
+      await this.writeStored(stored, true);
+    });
+  }
+
+  /**
+   * A phone that enrolled with one of this desktop's invites (its certificate
+   * already checked against this desktop's key). Trusted unless the invite
+   * was revoked: then it stays out, whatever it shows again.
+   */
+  admitInvitedPhone(record: TrustedDeviceRecord & { inviteId: string }): Promise<boolean> {
+    return this.serializeDeviceTrust(async () => {
+      if (!isTrustedDeviceRecord(record) || !trustedDeviceIdMatchesKey(record, bytes => createHash("sha256").update(bytes).digest("hex"))) {
+        throw new Error("The phone's identity does not match its signing key.");
+      }
+      const stored = await this.readStored();
+      if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
+      const invites = stored.hubPhoneInvites ?? [];
+      const invite = invites.find((entry) => entry.inviteId === record.inviteId);
+      if (invite?.state === "revoked") return false;
+      // A phone removed here comes back only through an invite this desktop
+      // knows; an old certificate it no longer has a record of does not.
+      if (!invite && stored.machineDeviceRevocations?.[record.deviceId]) return false;
+      if (invite?.state === "enrolled" && invite.deviceId && invite.deviceId !== record.deviceId) return false;
+      const settledAt = new Date().toISOString();
+      const next: StoredHubPhoneInvite = invite
+        ? { ...invite, state: "enrolled", deviceId: record.deviceId, settledAt }
+        : { inviteId: record.inviteId, issuedAt: record.addedAt, expiresAt: record.addedAt, state: "enrolled", deviceId: record.deviceId, settledAt };
+      stored.hubPhoneInvites = keptPhoneInvites([...invites.filter((entry) => entry.inviteId !== record.inviteId), next]);
+      const records = (stored.trustedDevices ?? []).filter((entry) => entry.deviceId !== record.deviceId);
+      records.push({ ...record });
+      stored.trustedDevices = records;
+      // A device removed before is trusted again only through a new invite,
+      // which this is.
+      if (stored.machineDeviceRevocations?.[record.deviceId]) {
+        const { [record.deviceId]: _removed, ...rest } = stored.machineDeviceRevocations;
+        stored.machineDeviceRevocations = rest;
+      }
+      await this.writeStored(stored, true);
+      return true;
+    });
+  }
+
+  /** Revokes an invite: unused, it can no longer be used; used, its phone
+   *  is removed. Returns the phone removed, if any. */
+  revokePhoneInvite(inviteId: string): Promise<string | undefined> {
+    return this.serializeDeviceTrust(async () => {
+      const stored = await this.readStored();
+      if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+      const invite = (stored.hubPhoneInvites ?? []).find((entry) => entry.inviteId === inviteId);
+      if (!invite) return undefined;
+      const deviceId = invite.deviceId;
+      if (deviceId) this.removeDeviceTrust(stored, deviceId);
+      stored.hubPhoneInvites = (stored.hubPhoneInvites ?? []).map((entry) =>
+        entry.inviteId === inviteId ? { ...entry, state: "revoked" as const, settledAt: new Date().toISOString() } : entry);
+      await this.writeStored(stored, true);
+      return deviceId;
+    });
+  }
+
+  async listPhoneInvites(): Promise<StoredHubPhoneInvite[]> {
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read.");
+    return (stored.hubPhoneInvites ?? []).map((invite) => ({ ...invite }));
+  }
+
+  /** The invites the server and the machines are told are settled. */
+  async resolvedPhoneInviteIds(): Promise<string[]> {
+    return (await this.listPhoneInvites()).filter((invite) => invite.state !== "pending").map((invite) => invite.inviteId);
   }
 
   revokeMachinePairingTrust(key: string): Promise<void> {
@@ -3804,6 +3896,7 @@ export class SettingsService {
       encryptedMachinePowerPrevious: _previousPower,
       machinePowerHandoffs: _powerHandoffs,
       trustedDevices: _trustedDevices,
+      hubPhoneInvites: _hubPhoneInvites,
       machinePairingBindings: _machinePairingBindings,
       revokedMachinePairingKeys: _revokedMachinePairingKeys,
       machineDeviceRevocations: _machineDeviceRevocations,
@@ -3873,6 +3966,7 @@ export class SettingsService {
       encryptedMachinePowerPrevious: stored.encryptedMachinePowerPrevious,
       machinePowerHandoffs: stored.machinePowerHandoffs,
       trustedDevices: stored.trustedDevices,
+      hubPhoneInvites: stored.hubPhoneInvites,
       machinePairingBindings: stored.machinePairingBindings,
       revokedMachinePairingKeys: stored.revokedMachinePairingKeys,
       machineDeviceRevocations: stored.machineDeviceRevocations,
@@ -4553,4 +4647,33 @@ function normalizeMachineMoves(value: unknown): MachineMoveRecord[] | undefined 
       requestedAt: item.requestedAt
     }));
   return records.length ? records : undefined;
+}
+
+/** A phone invite this desktop made, and what became of it. */
+export interface StoredHubPhoneInvite {
+  inviteId: string;
+  issuedAt: string;
+  expiresAt: string;
+  state: "pending" | "enrolled" | "revoked";
+  /** The phone that enrolled with it. */
+  deviceId?: string;
+  settledAt?: string;
+}
+
+/** Settled invites this desktop remembers (the newest). */
+const HUB_PHONE_INVITES_KEPT = 200;
+
+/** The phone invites kept: every revoked one (each keeps its phone out for
+ *  good), and the newest others. */
+function keptPhoneInvites(invites: StoredHubPhoneInvite[]): StoredHubPhoneInvite[] {
+  const revoked = invites.filter((invite) => invite.state === "revoked");
+  const others = invites.filter((invite) => invite.state !== "revoked").slice(-HUB_PHONE_INVITES_KEPT);
+  return [...revoked, ...others];
+}
+
+function isStoredHubPhoneInvite(value: unknown): value is StoredHubPhoneInvite {
+  const invite = value as Partial<StoredHubPhoneInvite> | undefined;
+  return Boolean(invite && typeof invite.inviteId === "string" && invite.inviteId && typeof invite.issuedAt === "string" &&
+    typeof invite.expiresAt === "string" && (invite.state === "pending" || invite.state === "enrolled" || invite.state === "revoked") &&
+    (invite.deviceId === undefined || typeof invite.deviceId === "string"));
 }

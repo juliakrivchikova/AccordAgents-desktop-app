@@ -86,6 +86,9 @@ export interface MachineLinkOptions {
     relaySealKeyBase64?: string;
     fingerprint: string;
   }) => Promise<TrustedPeerAccess[]>;
+  /** Phone invites the owner has settled: told to every machine with its
+   *  roster, so a phone enrolled with one is trusted only while listed. */
+  resolvedInviteIds?: () => Promise<string[]>;
   /** Produces the state a peer says a held action of its own is waiting for,
    *  by re-emitting the action that carries it. */
   serveChatActionDependency?: (dependency: ChatActionDependency) => Promise<boolean>;
@@ -1131,15 +1134,18 @@ export class MachineLinkService implements MachineTurnDispatcher {
         rendezvousId: connection.pairing.rendezvousId,
         fingerprint: connection.pairing.fingerprint
       }));
+      const resolvedInviteIds = await this.options.resolvedInviteIds?.() ?? [];
       const roster: MachineTrustRoster = {
         version: 1,
         issuerDeviceId: identity.originId,
         updatedAt: this.now().toISOString(),
-        peers
+        peers,
+        ...(resolvedInviteIds.length ? { resolvedInviteIds } : {})
       };
       // The same peers again are not a new roster: every one of them is a
       // durable event the User's hub keeps, and the machine applies nothing.
-      const digest = this.publishedDigest(connection, stableJson({ version: roster.version, issuerDeviceId: roster.issuerDeviceId, peers }));
+      const digest = this.publishedDigest(connection, stableJson({ version: roster.version, issuerDeviceId: roster.issuerDeviceId, peers,
+        ...(resolvedInviteIds.length ? { resolvedInviteIds } : {}) }));
       if (digest && connection.record.published?.roster === digest) return;
       await this.send(connection, {
         type: "machine.trust.roster",

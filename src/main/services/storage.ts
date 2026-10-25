@@ -41,6 +41,7 @@ import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEv
 import { HubRelayStorage } from "./hubRelayStorage";
 import { HubStorage } from "./hubStorage";
 import { NATIVE_COMMAND_SCHEMA_SQL, NativeCommandStore } from "./nativeCommandStore";
+import { PHONE_TURN_CLAIM_SCHEMA_SQL, PhoneTurnClaimStore } from "./phoneTurnClaims";
 import { MACHINE_PROGRESS_SCHEMA, MachineProgressStore } from "./machineProgressStore";
 import { MACHINE_POWER_SCHEMA, MachinePowerStore } from "./machinePowerStore";
 
@@ -467,6 +468,7 @@ export class StorageService {
       ${DEVICE_EVENT_SCHEMA_SQL}
       ${DEVICE_EVENT_BLOB_SCHEMA_SQL}
       ${NATIVE_COMMAND_SCHEMA_SQL}
+      ${PHONE_TURN_CLAIM_SCHEMA_SQL}
       ${MACHINE_PROGRESS_SCHEMA}
       ${MACHINE_POWER_SCHEMA}
     `);
@@ -1874,6 +1876,10 @@ export class StorageService {
 
   nativeCommands(): NativeCommandStore {
     return new NativeCommandStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
+  }
+
+  phoneTurnClaims(): PhoneTurnClaimStore {
+    return new PhoneTurnClaimStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
   }
 
   machineProgress(): MachineProgressStore {

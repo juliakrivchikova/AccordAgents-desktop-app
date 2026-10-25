@@ -16,16 +16,12 @@ assert.ok(
     "which passes `--import ./scripts/renderer-jsdom-setup.mjs`"
 );
 
+// The code for the User's server: its address, a one-time token and its id.
 const PAIRING = {
-  pwaUrl: "https://mobile.example.com/?v=1#k=key",
-  qrPayload: "https://mobile.example.com/?v=1#k=key",
-  package: {
-    stableRoutingId: "route-1",
-    rendezvousId: "rv-1",
-    fingerprint: "fp-1",
-    purpose: "phone-control",
-    expiresAt: "2026-08-17T00:00:00.000Z"
-  }
+  inviteId: "invite-1",
+  expiresAt: "2026-08-17T00:00:00.000Z",
+  pwaUrl: "https://mobile.example.com/?pair=server#hub=https%3A%2F%2Fhub.example&t=token&id=hub-1",
+  qrPayload: "https://mobile.example.com/?pair=server#hub=https%3A%2F%2Fhub.example&t=token&id=hub-1"
 };
 
 const MOBILE_CONTROL = {
@@ -65,8 +61,8 @@ test("the untouched section shows no QR panel and no copy or revoke", async () =
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
     getHubSetupState: async () => ({ status: "ready", url: "https://52.72.175.0", bundledVersion: "1.0.0" }),
     onHubSetupProgress: () => () => undefined,
-    createMobilePairing: async () => PAIRING,
-    revokeMobilePairing: async () => undefined
+    createPhoneInvite: async () => PAIRING,
+    revokePhoneInvite: async () => undefined
   };
 
   forgetDevicePairingForTests();
@@ -103,8 +99,8 @@ test("device pairing does not revoke until the confirmation is accepted", async 
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
     getHubSetupState: async () => ({ status: "ready", url: "https://52.72.175.0", bundledVersion: "1.0.0" }),
     onHubSetupProgress: () => () => undefined,
-    createMobilePairing: async () => PAIRING,
-    revokeMobilePairing: async (request: unknown) => {
+    createPhoneInvite: async () => PAIRING,
+    revokePhoneInvite: async (request: unknown) => {
       revokeCalls.push(request);
     }
   };
@@ -154,8 +150,8 @@ test("the pairing survives leaving and reopening settings", async () => {
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
     getHubSetupState: async () => ({ status: "ready", url: "https://52.72.175.0", bundledVersion: "1.0.0" }),
     onHubSetupProgress: () => () => undefined,
-    createMobilePairing: async () => PAIRING,
-    revokeMobilePairing: async () => undefined
+    createPhoneInvite: async () => PAIRING,
+    revokePhoneInvite: async () => undefined
   };
 
   forgetDevicePairingForTests();
@@ -197,7 +193,7 @@ test("without the User's server the phone cannot be paired, and the section says
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
     getHubSetupState: async () => ({ status: "none", bundledVersion: "1.0.0" }),
     onHubSetupProgress: () => () => undefined,
-    createMobilePairing: async () => { created += 1; throw new Error("not reached"); }
+    createPhoneInvite: async () => { created += 1; throw new Error("not reached"); }
   };
   const host = document.createElement("div");
   document.body.append(host);

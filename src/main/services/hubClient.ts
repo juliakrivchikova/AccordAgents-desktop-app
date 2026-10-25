@@ -1,7 +1,9 @@
-import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
+import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
+import { BLOB_FRAGMENT_MAX_BYTES } from "../../shared/machineEvents";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import { HUB_PULL_MAX_EVENTS, hubBlobFragmentPath, hubWebSocketUrl, type HubDevice, type HubEventPullResponse, type HubEventPushResponse, type HubHealth, type HubLiveHead } from "../../shared/hubProtocol";
-import { signHubRequest, type HubSigningIdentity } from "./hubAuth";
+import { HUB_PROGRESS_PATH, HUB_PULL_MAX_EVENTS, hubBlobFragmentPath, hubWebSocketUrl, type HubComposerCatalog, type HubDevice, type HubEventPullResponse, type HubEventPushResponse, type HubHealth, type HubLiveHead, type HubMachineWakeRequest, type HubPhoneInvite, type HubProgressPost } from "../../shared/hubProtocol";
+import type { MachineProgressFrame } from "../../shared/machineProgress";
+import { sha256Hex, signHubRequest, type HubSigningIdentity } from "./hubAuth";
 import type { StorageService } from "./storage";
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -144,8 +146,65 @@ export class HubClient {
     return this.request("PUT", "/v1/phone-links", JSON.stringify({ mailboxIds }), "application/json");
   }
 
-  setRoster(devices: Array<Omit<HubDevice, "addedAt">>): Promise<{ devices: HubDevice[] }> {
-    return this.request("PUT", "/v1/roster", JSON.stringify({ devices }), "application/json");
+  setRoster(devices: Array<Omit<HubDevice, "addedAt">>, resolvedInviteIds?: string[]): Promise<{ devices: HubDevice[] }> {
+    return this.request("PUT", "/v1/roster", JSON.stringify({ devices, ...(resolvedInviteIds ? { resolvedInviteIds } : {}) }), "application/json");
+  }
+
+  /** Registers a phone invite this desktop signed (owner only). */
+  putPhoneInvite(invite: HubPhoneInvite, signature: string): Promise<{ ok: boolean; inviteId: string }> {
+    return this.request("PUT", "/v1/phone-invites", JSON.stringify({ invite, signature }), "application/json");
+  }
+
+  /** The composer's catalog the phone reads (owner only). */
+  setCatalog(catalog: HubComposerCatalog): Promise<{ ok: boolean }> {
+    return this.request("PUT", "/v1/catalog", JSON.stringify({ catalog }), "application/json");
+  }
+
+  /** This desktop's members' live progress, for the phone to show while
+   *  they run (held in the hub's memory only). */
+  postProgress(frames: MachineProgressFrame[]): Promise<{ ok: boolean }> {
+    return this.request("POST", HUB_PROGRESS_PATH, JSON.stringify({ frames } satisfies HubProgressPost), "application/json");
+  }
+
+  /** The start-only keys the hub may wake the machines with (owner only). */
+  setMachineWake(machines: HubMachineWakeRequest["machines"]): Promise<{ ok: boolean; machines: number }> {
+    return this.request("PUT", "/v1/machine-wake", JSON.stringify({ machines } satisfies HubMachineWakeRequest), "application/json");
+  }
+
+  /** Puts bytes on the hub as a blob (a picture, an avatar) that an event or
+   *  a message names by its reference; fragments already there are sent
+   *  again harmlessly. */
+  async uploadBytes(bytes: Buffer): Promise<DeviceEventBlobReference> {
+    const reference: DeviceEventBlobReference = {
+      type: "device.event.blob",
+      blobHash: `sha256:${sha256Hex(bytes)}`,
+      byteLength: bytes.length,
+      fragments: Math.max(1, Math.ceil(bytes.length / BLOB_FRAGMENT_MAX_BYTES))
+    };
+    for (let index = 0; index < reference.fragments; index += 1) {
+      const part = bytes.subarray(index * BLOB_FRAGMENT_MAX_BYTES, Math.min(bytes.length, (index + 1) * BLOB_FRAGMENT_MAX_BYTES));
+      await this.request("PUT", hubBlobFragmentPath(reference, index), part, "application/octet-stream");
+    }
+    return reference;
+  }
+
+  /** Reads a blob's bytes from the hub (a picture a phone posted). */
+  async downloadBytes(reference: DeviceEventBlobReference): Promise<Buffer> {
+    if (!isDeviceEventBlobReference(reference)) throw new Error("Not a blob reference.");
+    const identity = await this.options.identity();
+    const parts: Buffer[] = [];
+    for (let index = 0; index < reference.fragments; index += 1) {
+      const pathWithQuery = hubBlobFragmentPath(reference, index);
+      const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}${pathWithQuery}`, {
+        headers: { authorization: signHubRequest(identity, { method: "GET", pathWithQuery }) },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      });
+      if (!response.ok) throw new HubHttpError(response.status, `The hub could not give a fragment (${response.status}).`);
+      parts.push(Buffer.from(await response.arrayBuffer()));
+    }
+    const bytes = Buffer.concat(parts);
+    if (`sha256:${sha256Hex(bytes)}` !== reference.blobHash || bytes.length !== reference.byteLength) throw new Error("The hub's copy of that body does not match its name.");
+    return bytes;
   }
 
   /**

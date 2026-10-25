@@ -324,7 +324,7 @@ test("a ChatService native resume is listed, stopped and delivered through the h
   const logs = { write: async () => undefined };
   const chat = Object.create(ChatService.prototype);
   Object.assign(chat, {
-    chatRunMeta: new Map(), chatRunControllers: new Map(), activeConversationRunIds: new Map(), activeRunIds: new Set(),
+    chatRunMeta: new Map(), chatRunControllers: new Map(), activeConversationRunIds: new Map(), activeRunIds: new Set(), pendingPhoneRuns: new Map(), phoneStartsInFlight: new Map(),
     participantRequestRunners: new Map(), remoteRunHandlesByRun: new Map(), participantRunSettledListeners: new Set(),
     appSendMessageCountsByRun: new Map(), appSendMessageImageBytesByRun: new Map(), debugLogs: logs,
     memberBackgroundTasks: new Map(), backgroundTaskListeners: new Set(),

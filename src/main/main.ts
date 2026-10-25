@@ -5,7 +5,7 @@ import { HUB_COPY_TEMP_PREFIX, HubInstaller, removeStaleHubTemp } from "./servic
 import { exportChatCopy } from "./services/chatCopy";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, powerMonitor, shell } from "electron";
 import { parseCustomAvatarId, type AvatarStudioTurnRequest, type SaveCustomAvatarRequest } from "../shared/avatarStudio";
 import type {
@@ -107,7 +107,20 @@ import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
 import { HUB_ID_KEY, HUB_SHARED_SCOPE_PREFIXES, HubSync, PULLED_KEY, PUSHED_KEY, hubChatChangeApplier, hubPushedThrough } from "./services/hubSync";
-import { deviceIdForPublicKey, signHubRequest } from "./services/hubAuth";
+import { deviceIdForPublicKey, hubCertificateCrypto, signHubRequest, signHubText } from "./services/hubAuth";
+import { HubPhonePublisher } from "./services/hubPhonePublisher";
+import {
+  HUB_PHONE_ENROLLED_EVENT_KIND,
+  HUB_PHONE_ENROLLMENT_SCOPE,
+  HUB_PHONE_PROTOCOL_VERSION,
+  PHONE_TURN_RESUME_EVERY_MS,
+  PHONE_TURN_RESUME_WINDOW_MS,
+  hubPhoneInviteSigningText,
+  verifyHubPhoneCertificate,
+  type HubPhoneCertificate,
+  type HubPhoneInvite
+} from "./../shared/hubProtocol";
+import { isChatActionKind } from "../shared/chatActionEvents";
 import { machineSigningKey } from "../shared/machineLink";
 import { HubTunnelClient } from "./services/hubTunnelClient";
 import { ScriptSecretStore, ScriptStore } from "./services/scriptStore";
@@ -387,6 +400,8 @@ const chatService = new ChatService(storageService, settingsService, cliAgentRun
   for (const control of mobileRelayControls.values()) {
     control.pushConversationSnapshot(conversation);
   }
+  // The phone reads the cards of this desktop's own members from the server.
+  hubPhonePublisher.noteConversation(conversation);
 }, userSkillsService, (progress) => emitReviewProgress(progress), chatEventMirrorService, (conversation, messages) => {
   // W-C: an interrupted run's recovered terminals are the only thing that will
   // ever tell a paired phone that run is over.
@@ -404,6 +419,8 @@ function emitReviewProgress(progress: ReviewProgress): void {
   for (const control of mobileRelayControls.values()) {
     control.noteExternalChatProgress(progress);
   }
+  // A local member's live text, for the phone to show from the server.
+  hubPhonePublisher.noteProgress(progress, chatService.conversationIdForRun(progress.runId));
 }
 
 const cloudRunDoctorService: CloudRunDoctorService = new CloudRunDoctorService({
@@ -435,6 +452,92 @@ let hubRosterRetryMs = 5_000;
 /** The server took this desktop's device list, which only its owner may set. */
 let hubOwnerConfirmed = false;
 
+/** Phones paired with the User's server (the ones it admits). */
+async function hubPhones(): Promise<import("../shared/machineTrust").TrustedDeviceRecord[]> {
+  return (await settingsService.listTrustedDevices().catch(() => [])).filter((device) => device.role === "phone" && device.inviteId && device.phoneScope);
+}
+
+const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
+  storage: storageService,
+  eventLog: chatEventLogService,
+  client: () => hubOwnerConfirmed ? hubClient : undefined,
+  hasPhones: async () => (await hubPhones()).length > 0,
+  buildCatalog: async (upload) => {
+    const settings = await settingsService.getPublicSettings();
+    for (const avatar of settings.chatCustomAvatars ?? []) {
+      await upload(`custom:${avatar.id}`, `${avatar.id}:${avatar.createdAt}`, async () => {
+        const read = await settingsService.readCustomAvatar(avatar.id);
+        return { mimeType: read.mediaType, bytes: Buffer.from(read.dataBase64, "base64") };
+      }).catch(() => undefined);
+    }
+    const skills = await userSkillsService.listAll({ limit: 300 }).catch(() => ({ skills: [] as import("../shared/types").UserSkillSummary[] }));
+    return {
+      roles: Object.fromEntries(settings.chatRoleConfigs.map((role) => [role.id,
+        role.id === "generic-participant" && role.label === "Generic Participant" ? "Generic Member" : role.label])),
+      prompts: (settings.chatSavedPrompts ?? []).slice(0, 200).map((prompt) => ({ id: prompt.id, label: prompt.label, trigger: prompt.trigger, body: prompt.body.slice(0, 20_000) })),
+      skills: skills.skills
+        .filter((skill) => skill.capabilityState === "invocable" && !skill.ambiguous)
+        .map(({ scopeKinds: _scopeKinds, statusMessage: _statusMessage, ambiguous: _ambiguous, ...skill }) => ({ ...skill, description: skill.description?.slice(0, 400) }))
+    };
+  },
+  wakeKeys: async () => {
+    const wake = await cloudRunAwsService.deviceWakePower().catch(() => undefined);
+    if (!wake?.machineId) return [];
+    return [{ machineId: wake.machineId, instanceId: wake.config.instanceId, region: wake.config.credentials.region, credentials: wake.config.credentials }];
+  },
+  log: (event, payload) => { void debugLogService.write(event, payload); }
+});
+
+/**
+ * A phone that enrolled with one of this desktop's invites writes its
+ * certificate first: checked with this desktop's own key, the phone is
+ * trusted here, on the server's roster and on every machine. A certificate
+ * for an invite this desktop revoked admits nobody.
+ */
+async function admitEnrolledPhone(event: ChatEventEnvelope): Promise<string | undefined> {
+  if (event.kind !== HUB_PHONE_ENROLLED_EVENT_KIND || event.logScopeId !== HUB_PHONE_ENROLLMENT_SCOPE) return undefined;
+  const identity = await chatEventLogService.getOrCreateDeviceIdentity();
+  const certificate = await storageService.deviceEventBlobs().hydrate(event.payload).catch(() => undefined) as HubPhoneCertificate | undefined;
+  if (!verifyHubPhoneCertificate(certificate, { issuerDeviceId: identity.originId, issuerPublicKeyDerBase64: identity.publicKeyDerBase64, ...hubCertificateCrypto }) ||
+      certificate.enrollment.deviceId !== event.originId) {
+    void debugLogService.write("hub.phone.certificate-refused", { originId: event.originId });
+    return undefined;
+  }
+  const admitted = await settingsService.admitInvitedPhone({
+    deviceId: certificate.enrollment.deviceId,
+    publicKeyDerBase64: certificate.enrollment.publicKeyDerBase64,
+    role: "phone",
+    name: certificate.enrollment.name || certificate.invite.name || "Phone",
+    addedAt: certificate.enrollment.enrolledAt,
+    inviteId: certificate.invite.inviteId,
+    phoneScope: certificate.invite.scope
+  });
+  void debugLogService.write("hub.phone.admitted", { deviceId: certificate.enrollment.deviceId, inviteId: certificate.invite.inviteId, admitted });
+  if (!admitted) return undefined;
+  publishHubRoster();
+  await machineLinkService?.refreshTrustRosters().catch(() => undefined);
+  hubPhonePublisher.scheduleCatalog(0);
+  hubPhonePublisher.publishWakeKeys();
+  return certificate.enrollment.publicKeyDerBase64;
+}
+
+/**
+ * A card answer, an approval or a Stop the User gave on her phone, read from
+ * the server: recorded here, then acted on by whichever device holds what it
+ * answers (for this desktop's own members, this desktop). One that names what
+ * has not arrived here yet is held and offered again.
+ */
+async function applyPhoneChatAction(event: ChatEventEnvelope): Promise<"delivered" | "waiting" | "refused"> {
+  const [stored] = await storageService.appendChatEvents([event]);
+  if (stored?.status === "conflict") return "refused";
+  const payload = await storageService.deviceEventBlobs().hydrate(event.payload);
+  const outcome = await chatActionApplier.apply(event, payload);
+  void debugLogService.write("mobile.decision.applied", {
+    conversationId: event.conversationId, kind: event.kind, targetKey: outcome.targetKey, status: outcome.status, detail: outcome.detail ?? "", via: "hub"
+  });
+  return outcome.status === "deferred" ? "waiting" : "delivered";
+}
+
 /**
  * Tells the hub which devices are the User's: this desktop and every machine
  * whose key it knows. The hub admits nobody else, so a machine set up here
@@ -463,15 +566,24 @@ function publishHubRoster(): void {
       }
       return [{ deviceId: machine.deviceId, publicKeyDerBase64, role: "machine" as const, name: machine.name, machineId: machine.id }];
     });
+    // The phones paired with the server, as their invites allowed; and the
+    // invites this desktop has settled, so a phone it removed stays out.
+    const phones = (await hubPhones()).map((phone) => ({
+      deviceId: phone.deviceId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone" as const, name: phone.name,
+      scope: phone.phoneScope!, inviteId: phone.inviteId!
+    }));
     await client.setRoster([
       { deviceId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64, role: "desktop", name: "This computer" },
-      ...machines
-    ]);
+      ...machines,
+      ...phones
+    ], await settingsService.resolvedPhoneInviteIds());
     hubRosterRetryMs = 5_000;
     hubOwnerConfirmed = true;
-    void debugLogService.write("hub.roster.published", { machines: machines.length });
+    void debugLogService.write("hub.roster.published", { machines: machines.length, phones: phones.length });
     publishPhoneLinks();
     hubSync?.nudgeHeld();
+    hubPhonePublisher.scheduleCatalog();
+    hubPhonePublisher.publishWakeKeys();
   })().catch((error: unknown) => {
     // A machine set up while the hub was away would be refused by it: the
     // list goes up again until the hub has it.
@@ -494,6 +606,10 @@ async function startHubLink(): Promise<void> {
   hubOwnerConfirmed = false;
   const identity = () => chatEventLogService.getOrCreateDeviceIdentity();
   hubClient = new HubClient({ url: config.url, identity, storage: storageService });
+  const blobClient = hubClient;
+  // A picture the User sent from the phone is read from the server.
+  chatService.setHubBlobReader((reference) => blobClient.downloadBytes(reference));
+  hubPhonePublisher.reset();
   hubSync = new HubSync({
     client: hubClient,
     storage: storageService,
@@ -505,11 +621,17 @@ async function startHubLink(): Promise<void> {
       if (machineKey) return machineKey;
       return (await settingsService.listTrustedDevices()).find((device) => device.deviceId === originId)?.publicKeyDerBase64;
     },
+    // A phone proves itself with its first event, its certificate.
+    admit: (event) => admitEnrolledPhone(event),
     // A machine's event goes to that machine's channel, which applies it as
-    // if the machine had sent it; a phone's chat change is applied here.
+    // if the machine had sent it; a phone's chat change is applied here, and
+    // so is its answer to a card or its Stop.
     // Without the machine link (it failed to start) nothing is passed over:
     // the event is held until it is there.
-    deliver: async (event) => machineLinkService ? machineLinkService.receiveFromHub(event) : "not-ready",
+    deliver: async (event) => {
+      if (isChatActionKind(event.kind) && (await hubPhones()).some((phone) => phone.deviceId === event.originId)) return applyPhoneChatAction(event);
+      return machineLinkService ? machineLinkService.receiveFromHub(event) : "not-ready";
+    },
     applyChatChange: hubChatChangeApplier(storageService, chatService),
     // A machine that reads the hub is never given a delivery row; one that
     // an older version wrote lets go when its event is pushed. One still on
@@ -1110,6 +1232,18 @@ chatService.setCloudRunPreparation(async (selection, provider, progress) => {
   return result.machine.id;
 });
 chatService.setCloudRunAwsService(cloudRunAwsService);
+// A message the User wrote on her phone starts this desktop's own members.
+chatService.setPhoneOrigins(async (originId) => (await hubPhones()).some((phone) => phone.deviceId === originId));
+// Phone messages taken in but never started here (a quit between the two)
+// start once the link has settled, and again now and then.
+const resumePhoneTurns = (): void => {
+  void (async () => {
+    if (!await settingsService.getHubConfig().catch(() => undefined)) return;
+    await chatService.resumePhoneTurns(new Date(Date.now() - PHONE_TURN_RESUME_WINDOW_MS).toISOString());
+  })().catch((error) => { void debugLogService.write("chat.phone-turns.resume-error", { message: error instanceof Error ? error.message : String(error) }); });
+};
+setTimeout(resumePhoneTurns, 20_000).unref?.();
+setInterval(resumePhoneTurns, PHONE_TURN_RESUME_EVERY_MS).unref?.();
 chatService.setPromptSuggestionsListener((update) => sendToMainWindow("chat:prompt-suggestions", update));
 chatService.onBackgroundTasksChanged((event) => sendToMainWindow("chat:background-tasks", event));
 chatService.setMachineProjectPreparation((machineId, localPath, signal, progress) => cloudRunPreparation.prepareProject(machineId, localPath, signal, progress));
@@ -2243,7 +2377,20 @@ async function restoreMobilePairedDevices(): Promise<void> {
   // A file that could not be read is not "no phones": the list of phones
   // this desktop knows is then not whole, and is not sent to the server.
   const stored = await settingsService.readMobilePairedDevicesState();
-  const devices = stored.devices;
+  // Phones pair with the User's server now and talk only to it: a phone
+  // paired the old way (through this desktop's relay mailbox) is paired
+  // again, and this desktop no longer serves it (its record goes the next
+  // time the list of pairings is saved).
+  const devices = stored.devices.filter((device) => {
+    try {
+      return (JSON.parse(device.pairingJson) as MobilePairingPackage).purpose !== "phone-control";
+    } catch {
+      return false;
+    }
+  });
+  if (devices.length < stored.devices.length) {
+    void debugLogService.write("mobile.pairing.relay-phones-not-served", { count: stored.devices.length - devices.length });
+  }
   // Each relay connect can burn its full timeout, so devices come back
   // together rather than in turn, and one unreadable record cannot strand the
   // phones behind it.
@@ -2984,7 +3131,8 @@ function mobileRelayChatCatalog(): MobileRelayChatCatalog {
       return opened ? timelineEventsFromSnapshot(opened.conversation, 80) : [];
     },
     async listTimelinePage(conversationId: string, options: { beforeMessageId?: string }): Promise<MobileTimelinePage> {
-      return buildMobileTimelinePage(storageService, conversationId, options);
+      const { conversation: _page, ...page } = await buildMobileTimelinePage(storageService, conversationId, options);
+      return page;
     },
     async composerOptions(request: { conversationId: string; query: string; content: string }): Promise<MobileComposerOptions> {
       const opened = await storageService.openConversation(request.conversationId, MOBILE_COMPOSER_TARGET_WINDOW);
@@ -3054,6 +3202,52 @@ function mobileComposerCommandOptions(
     options.push({ id: "goal", label: "/goal", description: "Run the mentioned member until the goal is finished" });
   }
   return options;
+}
+
+/** How long a phone pairing code may wait to be scanned. */
+const PHONE_INVITE_TTL_MS = 10 * 60_000;
+
+/**
+ * A one-time code for a phone: the desktop signs an invite with its own key,
+ * registers it with the User's server, and shows the address of the server,
+ * the token and the server's id as a QR code. The phone pairs with the server
+ * itself, so the desktop may be closed by then.
+ */
+async function createPhoneInvite(request: import("../shared/types").CreatePhoneInviteRequest): Promise<import("../shared/types").CreatePhoneInviteResult> {
+  const hub = await settingsService.getHubConfig().catch(() => undefined);
+  if (!hub || !hubClient) throw new Error("Set up your server first (Your server, above): the phone connects through it.");
+  const health = await hubClient.health();
+  if (!Number.isSafeInteger(health.protocol) || health.protocol < HUB_PHONE_PROTOCOL_VERSION) {
+    throw new Error("Your server runs an older program. Update it from Settings → Your server, then pair the phone.");
+  }
+  if (!hubOwnerConfirmed) throw new Error("Your server has not confirmed this computer yet. Try again in a moment.");
+  const identity = await chatEventLogService.getOrCreateDeviceIdentity();
+  const token = randomBytes(32).toString("base64url");
+  const issuedAt = new Date();
+  const invite: HubPhoneInvite = {
+    version: 1,
+    inviteId: `invite-${randomUUID()}`,
+    hubId: health.hubId,
+    issuerDeviceId: identity.originId,
+    tokenHash: sha256Hex(token),
+    // A phone reads and writes every chat, as the desktop does: the server's
+    // order carries no per-chat fences, so a one-chat phone is not offered.
+    scope: { scope: "device" },
+    name: "Phone",
+    issuedAt: issuedAt.toISOString(),
+    expiresAt: new Date(issuedAt.getTime() + PHONE_INVITE_TTL_MS).toISOString()
+  };
+  await hubClient.putPhoneInvite(invite, signHubText(identity, hubPhoneInviteSigningText(invite)));
+  await settingsService.savePhoneInvite({ inviteId: invite.inviteId, issuedAt: invite.issuedAt, expiresAt: invite.expiresAt });
+  const settings = await settingsService.getPublicSettings();
+  const origin = request.staticOriginUrl?.trim() || settings.mobileControl.defaults.staticOriginUrl;
+  if (!origin) throw new Error("The phone app's address is not set.");
+  const pwaUrl = new URL(origin);
+  pwaUrl.searchParams.set("pair", "server");
+  // All three only in the fragment: the phone's app site never sees them.
+  pwaUrl.hash = new URLSearchParams({ hub: hub.url, t: token, id: health.hubId }).toString();
+  void debugLogService.write("hub.phone.invite-created", { inviteId: invite.inviteId, scope: invite.scope.scope });
+  return { inviteId: invite.inviteId, expiresAt: invite.expiresAt, pwaUrl: pwaUrl.toString(), qrPayload: pwaUrl.toString() };
 }
 
 function registerIpc(): void {
@@ -3778,10 +3972,24 @@ function registerIpc(): void {
     ...(typeof request?.blob === "string" ? { blob: request.blob } : {}),
     ...(request?.startOver === true ? { startOver: true } : {})
   }));
+  ipcMain.handle("mobile:create-phone-invite", async (_event, request: import("../shared/types").CreatePhoneInviteRequest | undefined) => createPhoneInvite(request ?? {}));
+  ipcMain.handle("mobile:revoke-phone-invite", async (_event, request: { inviteId?: string } | undefined) => {
+    const inviteId = typeof request?.inviteId === "string" ? request.inviteId.trim() : "";
+    if (!inviteId) throw new Error("Revoking a phone needs its invite.");
+    const removed = await settingsService.revokePhoneInvite(inviteId);
+    publishHubRoster();
+    await machineLinkService?.refreshTrustRosters().catch(() => undefined);
+    return { revoked: true, inviteId, ...(removed ? { deviceId: removed } : {}) };
+  });
   ipcMain.handle("mobile:create-pairing", async (_event, request: CreateMobilePairingRequest) => {
     // A phone connects through the User's own server, not a shared relay.
     if (!await settingsService.getHubConfig().catch(() => undefined)) {
       throw new Error("Set up your server first (Your server, above): the phone connects through it.");
+    }
+    // A phone pairs with the server itself now (mobile:create-phone-invite);
+    // only an invitation for another person still takes this path.
+    if ((request?.purpose ?? "phone-control") === "phone-control") {
+      throw new Error("Pair the phone from Settings → Device Pairing: it connects to your server now.");
     }
     const settings = await settingsService.getPublicSettings();
     const minted = await mobilePairingService.createPairing(
@@ -4198,6 +4406,7 @@ void app.whenReady().then(async () => {
       // Every device the User has trusted is named to each machine, in the
       // room that machine is met in. That is what lets a machine keep working
       // when this desktop is closed.
+      resolvedInviteIds: () => settingsService.resolvedPhoneInviteIds(),
       trustedDevices: async (room) => (await settingsService.listTrustedDevices()).map((device) => ({
         deviceId: device.deviceId,
         publicKeyDerBase64: device.publicKeyDerBase64,
@@ -4264,6 +4473,7 @@ void app.whenReady().then(async () => {
     // connection. Bursts of writes are sent once.
     let machineSettingsSync: ReturnType<typeof setTimeout> | undefined;
     settingsService.onStoredChange(() => {
+      hubPhonePublisher.scheduleCatalog();
       if (machineSettingsSync) clearTimeout(machineSettingsSync);
       machineSettingsSync = setTimeout(() => {
         machineSettingsSync = undefined;

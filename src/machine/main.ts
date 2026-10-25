@@ -61,6 +61,7 @@ import { signHubRequest } from "../main/services/hubAuth";
 import { setMailboxRegistrationSigner } from "../main/services/mailboxAccess";
 import { ScriptSecretStore, ScriptStore } from "../main/services/scriptStore";
 import { machineScriptHostPhrase } from "../shared/scripts";
+import { PHONE_TURN_RESUME_EVERY_MS, PHONE_TURN_RESUME_WINDOW_MS } from "../shared/hubProtocol";
 
 interface MachineArgs {
   enrollmentPath: string;
@@ -655,11 +656,31 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await idlePower.start();
   }
   await host.start();
-  const hubSync = enrollment.hubUrl ? new HubSync({
-    client: new HubClient({ url: enrollment.hubUrl, identity: () => chatEventLogService.getOrCreateDeviceIdentity(), storage: storageService }),
+  const hubClient = enrollment.hubUrl
+    ? new HubClient({ url: enrollment.hubUrl, identity: () => chatEventLogService.getOrCreateDeviceIdentity(), storage: storageService })
+    : undefined;
+  if (hubClient) {
+    // A picture the User sent from her phone is read from her server.
+    chatService.setHubBlobReader((reference) => hubClient.downloadBytes(reference));
+  }
+  // A message the User wrote on her phone starts the members that live here.
+  chatService.setPhoneOrigins((originId) => host.isPhone(originId));
+  // Phone messages taken in but never started here (a restart between the
+  // two, or an older runtime took them in) start once the roster is known.
+  const resumePhoneTurns = (): void => {
+    void chatService.resumePhoneTurns(new Date(Date.now() - PHONE_TURN_RESUME_WINDOW_MS).toISOString()).catch((error) => {
+      void debugLogService.write("chat.phone-turns.resume-error", { message: error instanceof Error ? error.message : String(error) });
+    });
+  };
+  setTimeout(resumePhoneTurns, 30_000).unref?.();
+  setInterval(resumePhoneTurns, PHONE_TURN_RESUME_EVERY_MS).unref?.();
+  const hubSync = hubClient ? new HubSync({
+    client: hubClient,
     storage: storageService,
     localOriginId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
     trustedKey: async (originId) => host.trustedKey(originId),
+    // A phone paired while the desktop was away proves itself here.
+    admit: (event) => host.admitPhoneCertificate(event),
     deliver: (event) => host.receiveFromHub(event),
     applyChatChange: hubChatChangeApplier(storageService, chatService),
     onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString()),

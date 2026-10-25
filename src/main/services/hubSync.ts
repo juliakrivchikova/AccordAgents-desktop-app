@@ -1,5 +1,5 @@
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import { HUB_PUSH_MAX_EVENTS, type HubEventPushResult, type HubLoggedEvent } from "../../shared/hubProtocol";
+import { HUB_APPROVAL_CARD_SCOPE, HUB_PUSH_MAX_EVENTS, type HubEventPushResult, type HubLoggedEvent } from "../../shared/hubProtocol";
 import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
 import { verifySignedChatEvent } from "./chatEventLog";
@@ -31,7 +31,10 @@ const RETRY_MAX_MS = 5 * 60_000;
  *  events and chat actions; never what a desktop wrote for the old phone
  *  mailbox. A desktop narrows `device:` to the machines that read the hub. */
 export const HUB_SCOPE_PREFIXES = ["chat-changes:", "device:", CHAT_ACTION_LOG_SCOPE] as const;
-export const HUB_SHARED_SCOPE_PREFIXES = ["chat-changes:", CHAT_ACTION_LOG_SCOPE] as const;
+/** What a desktop sends besides its machines' channels: chat changes, chat
+ *  actions, and for the phone the cards and the live progress of its own
+ *  members. */
+export const HUB_SHARED_SCOPE_PREFIXES = ["chat-changes:", CHAT_ACTION_LOG_SCOPE, HUB_APPROVAL_CARD_SCOPE] as const;
 
 /** What a channel did with an event from the hub's order. */
 export type HubDeliverOutcome =
@@ -42,6 +45,9 @@ export type HubDeliverOutcome =
   | "not-ready"
   /** Its channel refused it for good (scope, signature, conflict). */
   | "refused"
+  /** Taken, but what it acts on is not here yet: held on its own and offered
+   *  again (an answer to a card that has not arrived yet). */
+  | "waiting"
   /** No channel of this device is about it. */
   | "not-mine";
 
@@ -77,7 +83,7 @@ export function hubChatChangeApplier(storage: StorageService, chat: {
   };
 }
 
-type ReceiveOutcome = "done" | "unknown-origin" | "not-ready" | "waiting" | "blob-missing" | "error";
+type ReceiveOutcome = "done" | "unknown-origin" | "not-ready" | "waiting" | "deferred-action" | "blob-missing" | "error";
 
 /** A failure that says nothing about the event: the hub or the network was
  *  away (the client says so), or a channel was closing. The page is read
@@ -127,6 +133,10 @@ export class HubSync {
     /** The key a device signs with, when it is one of the User's devices
      *  this device knows. */
     trustedKey: (originId: string) => Promise<string | undefined>;
+    /** An author this device does not know yet may prove itself with the
+     *  event itself (a phone's enrollment, signed by the owner's invite): the
+     *  key it signs with, once it is admitted. */
+    admit?: (event: ChatEventEnvelope) => Promise<string | undefined>;
     /** Hands an event to the channel it belongs to. */
     deliver?: (event: ChatEventEnvelope) => Promise<HubDeliverOutcome>;
     /** Applies a chat change no channel took. */
@@ -494,7 +504,8 @@ export class HubSync {
     // A hub that sends a device its own events back (an older one) is not
     // telling it anything.
     if (event.originId === await this.options.localOriginId()) return "done";
-    const key = await this.options.trustedKey(event.originId);
+    let key = await this.options.trustedKey(event.originId);
+    if (!key && this.options.admit) key = await this.options.admit(event);
     if (!key) return "unknown-origin";
     if (!verifySignedChatEvent(event, key)) {
       // Claims to be one of the User's devices but is not signed by it.
@@ -510,6 +521,8 @@ export class HubSync {
     const delivered = this.options.deliver ? await this.options.deliver(event) : "not-mine";
     if (delivered === "delivered") return "done";
     if (delivered === "not-ready") return "not-ready";
+    // Held on its own: a chat change of the same author is not kept behind it.
+    if (delivered === "waiting") return "deferred-action";
     if (delivered === "refused") {
       this.options.log?.("hub.sync.refused", { eventId: event.eventId, kind: event.kind });
       return "done";

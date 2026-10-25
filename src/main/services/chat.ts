@@ -168,6 +168,7 @@ import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
 import { chatParticipantHome, chatParticipantHomeUnassignedMessage, preservedRemoteExecution } from "../../shared/chatParticipantHome";
 import {
+  CHAT_DELIVERY_POLICY_OPTIONS,
   chatParticipantForMentionHandle,
   extractChatMentions,
   mentionHandlesForChatParticipant,
@@ -175,6 +176,8 @@ import {
   resolveChatMentionTargets
 } from "../../shared/chatDeliveryPolicy";
 import { chatActionOperationId } from "./chatActionEmitter";
+import { parsePhoneTurnRunId, phoneTurnRunId } from "../../shared/hubProtocol";
+import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { ChatEventMirrorService } from "./chatEventMirror";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
 import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
@@ -378,7 +381,6 @@ type InferredParticipantRequestSuppressionScope =
   | "tool-source-segment"
   | "final-source-tool-origin-run"
   | "final-source-tool-origin-segment";
-const CHAT_LEGACY_ADMINISTRATOR_HANDLE = "admin";
 const CHAT_ROLE_LABEL_MAX_CHARS = 80;
 const CHAT_ROLE_INSTRUCTIONS_MAX_CHARS = 40_000;
 const CHAT_COMPACT_INSTRUCTIONS_MAX_CHARS = 20_000;
@@ -407,11 +409,10 @@ const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
 const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
 const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
 
+/** The options shared with the phone and the User's server, so a draft
+ *  is routed the same way wherever it is resolved. */
 function chatDeliveryPolicyOptions() {
-  return {
-    administratorRoleId: CHAT_ADMINISTRATOR_ROLE_ID,
-    administratorHandles: [CHAT_ADMINISTRATOR_HANDLE, CHAT_LEGACY_ADMINISTRATOR_HANDLE]
-  };
+  return { ...CHAT_DELIVERY_POLICY_OPTIONS, administratorHandles: [...CHAT_DELIVERY_POLICY_OPTIONS.administratorHandles] };
 }
 const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 2_000_000;
 const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
@@ -944,6 +945,14 @@ export class ChatService {
   /** Chat changes waiting for desktop changes they were written after: the
    *  applied head seen when each was last tried (see applyRemoteChatChanges). */
   private readonly waitingChatChanges = new Map<string, number>();
+  /** Which devices are the User's phones (their messages start turns here). */
+  private phoneOrigin?: (originId: string) => boolean | Promise<boolean>;
+  private hubBlobReader?: (reference: DeviceEventBlobReference) => Promise<Buffer>;
+  /** Turns for a phone's message this device is starting: the turn's run id
+   *  is known before its run begins, so a Stop for it is not lost. */
+  private readonly pendingPhoneRuns = new Map<string, { conversationId: string; controller: AbortController; started: boolean }>();
+  /** Chats with a phone's message whose members are being claimed. */
+  private readonly phoneStartsInFlight = new Map<string, number>();
   private static readonly CHAT_CHANGE_BASELINE_LIMIT = 256;
   private chatChangeTransport?: ChatChangeTransport;
   private readonly chatSavesInFlight = new Set<Promise<void>>();
@@ -16525,7 +16534,7 @@ export class ChatService {
   }
 
   private chatImageAttachmentForTool(attachment: ChatImageAttachment): Omit<ChatImageAttachment, "storageKey"> {
-    const { storageKey: _storageKey, ...safeAttachment } = attachment;
+    const { storageKey: _storageKey, hubBlob: _hubBlob, ...safeAttachment } = attachment as ChatImageAttachment & { hubBlob?: unknown };
     return safeAttachment;
   }
 
@@ -17087,11 +17096,21 @@ export class ChatService {
    *  machine's own store so one fetch serves every later read. A copy that is
    *  not a machine has no owner to ask and simply reports it missing. */
   private async fetchAttachmentFromOwner(conversationId: string, attachment: ChatImageAttachment): Promise<string | undefined> {
+    // A picture the User sent from her phone is on her server, named by its
+    // body: every device reads it from there, the desktop too.
+    const hubBlob = (attachment as ChatImageAttachment & { hubBlob?: unknown }).hubBlob;
+    // A server that cannot answer now leaves the machine link to try.
+    const fromHub = this.hubBlobReader && isDeviceEventBlobReference(hubBlob)
+      ? await this.hubBlobReader(hubBlob).then((bytes) => bytes.toString("base64"), (error: unknown) => {
+        void this.debugLogs.write("chat.attachment.hub-read-error", { conversationId, attachmentId: attachment.id, message: error instanceof Error ? error.message : String(error) });
+        return undefined;
+      })
+      : undefined;
     const fetch = this.machineLink?.fetchAttachment;
-    if (!fetch) {
+    if (!fromHub && !fetch) {
       return undefined;
     }
-    const result = await fetch.call(this.machineLink, conversationId, attachment.id);
+    const result = fromHub ? { dataBase64: fromHub } : await fetch!.call(this.machineLink, conversationId, attachment.id);
     const dataBase64 = typeof result?.dataBase64 === "string" ? result.dataBase64 : "";
     if (!dataBase64) {
       return undefined;
@@ -18937,6 +18956,8 @@ export class ChatService {
     if (!targetRunId) {
       return false;
     }
+    // A phone's turn that is still being claimed: stopped before it starts.
+    this.pendingPhoneRuns.get(targetRunId)?.controller.abort();
     const controllers = this.chatRunControllers.get(targetRunId);
     void this.debugLogs.write("chat.cancel.requested", {
       runId: targetRunId,
@@ -18974,6 +18995,10 @@ export class ChatService {
     const fromMeta = this.chatRunMeta.get(targetRunId)?.conversationId;
     if (fromMeta) {
       return fromMeta;
+    }
+    const pendingPhone = this.pendingPhoneRuns.get(targetRunId)?.conversationId;
+    if (pendingPhone) {
+      return pendingPhone;
     }
     for (const [conversationId, runIds] of this.activeConversationRunIds) {
       if (runIds.has(targetRunId)) {
@@ -19557,7 +19582,10 @@ export class ChatService {
   private chatHasLiveWork(conversationId: string): boolean {
     return (
       (this.activeConversationRunIds.get(conversationId)?.size ?? 0) > 0 ||
-      (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0
+      (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0 ||
+      // A phone's message whose members are still being claimed: its runs
+      // are not registered yet.
+      (this.phoneStartsInFlight.get(conversationId) ?? 0) > 0
     );
   }
 
@@ -19857,7 +19885,286 @@ export class ChatService {
     if (waiting) return wait();
     this.waitingChatChanges.delete(event.eventId);
     this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
+    this.notePhoneMessages(event.originId, conversationId, payload);
     return "applied";
+  }
+
+  /** Reads a body from the User's server by its reference (a picture sent
+   *  from the phone). */
+  setHubBlobReader(reader: ((reference: DeviceEventBlobReference) => Promise<Buffer>) | undefined): void {
+    this.hubBlobReader = reader;
+  }
+
+  /** Says which devices are the User's phones. A message one of them wrote
+   *  starts its members here when they live here (see startPhoneTurns). */
+  setPhoneOrigins(resolver: ((originId: string) => boolean | Promise<boolean>) | undefined): void {
+    this.phoneOrigin = resolver;
+  }
+
+  private notePhoneMessages(originId: string, conversationId: string, payload: ChatChangesPayload): void {
+    const resolver = this.phoneOrigin;
+    if (!resolver) return;
+    const messages = payload.changes.flatMap((change) =>
+      change.type === "message.created" && change.message.role === "user" ? [change.message] : []);
+    if (messages.length === 0) return;
+    // Until its members are claimed the chat counts as busy, so a watcher
+    // evaluating meanwhile does not take the same message as well.
+    this.phoneStartsInFlight.set(conversationId, (this.phoneStartsInFlight.get(conversationId) ?? 0) + 1);
+    void Promise.resolve(resolver(originId)).then((phone) => {
+      if (phone) return this.startPhoneTurns(conversationId, messages);
+      return undefined;
+    }).catch((error) => {
+      void this.debugLogs.write("chat.phone-turns.error", { conversationId, message: error instanceof Error ? error.message : String(error) });
+    }).finally(() => {
+      const left = (this.phoneStartsInFlight.get(conversationId) ?? 1) - 1;
+      if (left > 0) this.phoneStartsInFlight.set(conversationId, left);
+      else this.phoneStartsInFlight.delete(conversationId);
+    });
+  }
+
+  /**
+   * Phone messages this device took in recently whose members living here
+   * were never started: the device stopped (a quit, a crash, an update)
+   * between taking a message in and claiming its turns, or this program is
+   * newer than the one that took it in. Their claims keep the ones that did
+   * start from starting again.
+   */
+  async resumePhoneTurns(sinceIso: string): Promise<void> {
+    const resolver = this.phoneOrigin;
+    if (!resolver) return;
+    const claims = this.storage.phoneTurnClaims();
+    const phones: string[] = [];
+    for (const originId of await claims.chatChangeOriginsSince(sinceIso)) {
+      if (await Promise.resolve(resolver(originId)).catch(() => false)) phones.push(originId);
+    }
+    if (phones.length === 0) return;
+    const byChat = new Map<string, ChatMessage[]>();
+    for (const row of await claims.chatChangesFrom(phones, sinceIso, 500)) {
+      try {
+        const envelope = JSON.parse(Buffer.from(row.envelopeHex, "hex").toString("utf8")) as ChatEventEnvelope;
+        const payload = await this.storage.deviceEventBlobs().hydrate(envelope.payload) as ChatChangesPayload;
+        for (const change of Array.isArray(payload?.changes) ? payload.changes : []) {
+          if (change.type !== "message.created" || change.message.role !== "user") continue;
+          byChat.set(envelope.conversationId, [...(byChat.get(envelope.conversationId) ?? []), change.message]);
+        }
+      } catch {
+        // An event this device cannot read back is not one it can start.
+      }
+    }
+    for (const [conversationId, messages] of byChat) {
+      await this.startPhoneTurns(conversationId, messages).catch((error) => {
+        void this.debugLogs.write("chat.phone-turns.error", { conversationId, message: error instanceof Error ? error.message : String(error) });
+      });
+    }
+  }
+
+  /** Whether this device starts this member's turns: the desktop starts its
+   *  own members (and prepares cloud ones), a machine the members it hosts. */
+  private startsPhoneTurnFor(participant: ChatParticipant): boolean {
+    const home = chatParticipantHome(participant);
+    return this.machineRuntime
+      ? Boolean(this.hostMachineId) && home.kind === "machine" && home.machineId === this.hostMachineId
+      : home.kind !== "machine";
+  }
+
+  /** The members a phone's message is for: the ones the phone resolved when
+   *  the User sent it (by the desktop's rules, from what the phone showed),
+   *  or, for a message that names none, the same rules here. */
+  private phoneMessageTargets(conversation: Conversation, message: ChatMessage): ChatParticipant[] {
+    const participants = this.chatParticipants(conversation);
+    const named = (message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets;
+    if (Array.isArray(named)) {
+      return named.flatMap((id) => {
+        const participant = typeof id === "string" ? participants.find((item) => item.id === id) : undefined;
+        return participant ? [participant] : [];
+      });
+    }
+    return this.resolveDispatchTargetsForContent(conversation, message.content, this.replyContextFromMessage(message)).targets;
+  }
+
+  /**
+   * The User wrote a message on her phone; it reached this device through the
+   * hub. The members it is for whose home is here start now, as they would for
+   * a message typed here; members that live elsewhere are started by their own
+   * home. Each turn is claimed under its run id before it starts (the same id
+   * on every device), so applying the message again — a redelivery, a
+   * restart — never runs a member twice, and a Stop that came first keeps it
+   * from starting.
+   */
+  async startPhoneTurns(conversationId: string, messages: ChatMessage[]): Promise<void> {
+    const presence = await this.storage.conversationPresence(conversationId);
+    if (!presence || presence.kind !== "chat") return;
+    // The chat's body names its members; the whole chat is read only when a
+    // member of this message lives here.
+    const opened = await this.storage.openConversation(conversationId, 1);
+    if (!opened || opened.conversation.metadata.archived === true) return;
+    let conversation: Conversation | undefined;
+    for (const message of messages) {
+      if (message.role !== "user") continue;
+      const named = Array.isArray((message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets);
+      if (named && !this.phoneMessageTargets(opened.conversation, message).some((participant) => this.startsPhoneTurnFor(participant))) continue;
+      conversation ??= await this.requireChat(conversationId);
+      const stored = conversation.messages.find((item) => item.id === message.id && item.role === "user");
+      if (!stored) continue;
+      const everyTarget = this.phoneMessageTargets(conversation, stored);
+      // What the desktop refuses to send it refuses here too, said once (by
+      // the home of the first member named) and nobody starts.
+      const goal = parseNativeGoalCommand(stored.content);
+      const refusal = goal.kind === "invalid" ? goal.error
+        : goal.kind === "valid" && everyTarget.length !== 1 ? "/goal requires exactly one resolved chat member." : undefined;
+      if (refusal) {
+        if (everyTarget[0] && this.startsPhoneTurnFor(everyTarget[0])) await this.notePhoneMessageRefused(conversation, stored, refusal);
+        continue;
+      }
+      const targets = everyTarget.filter((participant) => this.startsPhoneTurnFor(participant));
+      if (targets.length === 0) continue;
+      await this.startPhoneTurnsFor(conversation, stored, targets);
+    }
+  }
+
+  private async startPhoneTurnsFor(conversation: Conversation, message: ChatMessage, targets: ChatParticipant[]): Promise<void> {
+    const conversationId = conversation.id;
+    // A watcher member addressed directly has seen this message, as for a
+    // message typed here.
+    if (targets.some((participant) => participant.autoWatch === true)) {
+      await this.withChatMutation(conversation, async () => {
+        const before = JSON.stringify(conversation.metadata.participantWatchers ?? null);
+        this.advanceAutoWatchCursorForDirectTargets(conversation, targets, message);
+        if (JSON.stringify(conversation.metadata.participantWatchers ?? null) === before) return;
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+    }
+    const compact = this.compactCommand(message.content);
+    for (const participant of targets) {
+      const runId = phoneTurnRunId(message.id, participant.id);
+      if (this.pendingPhoneRuns.has(runId) || this.conversationIdForRun(runId)) continue;
+      // Taken already (an earlier application, a restart): nothing to read.
+      if (await this.storage.phoneTurnClaims().state(runId) === "claimed") continue;
+      const controller = new AbortController();
+      // Registered before the claim's write, so a Stop arriving meanwhile
+      // finds the run here and stops it before it starts.
+      const pending = { conversationId, controller, started: false };
+      this.pendingPhoneRuns.set(runId, pending);
+      let outcome: Awaited<ReturnType<ReturnType<StorageService["phoneTurnClaims"]>["claim"]>>;
+      try {
+        outcome = await this.storage.phoneTurnClaims().claim({ runId, conversationId, messageId: message.id, participantId: participant.id, at: new Date().toISOString() });
+      } catch (error) {
+        // Not claimed: the next resume tries again. The other members go on.
+        this.pendingPhoneRuns.delete(runId);
+        void this.debugLogs.write("chat.phone-turn.claim-error", { conversationId, runId, message: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+      if (outcome === "taken") {
+        this.pendingPhoneRuns.delete(runId);
+        continue;
+      }
+      void this.debugLogs.write("chat.phone-turn", { conversationId, runId, participantId: participant.id, outcome });
+      if (outcome === "cancelled" || controller.signal.aborted) {
+        this.pendingPhoneRuns.delete(runId);
+        await this.notePhoneTurnStoppedBeforeStart(conversation, message, participant);
+        continue;
+      }
+      const warnings: string[] = [];
+      pending.started = true;
+      const started = (async () => {
+        const settings = await this.settings.getPublicSettings();
+        // What a message typed here checks before it starts a member.
+        this.assertParticipantProvidersEnabled([participant], settings.providers ?? []);
+        if (compact && compact.handle.toLowerCase() === participant.handle.toLowerCase()) {
+          await this.compactParticipant({
+            conversationId, participantId: participant.id, handle: participant.handle, instructions: compact.instructions, triggeredBy: "user", runId,
+            threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id, chatThreadRootId: message.metadata?.chatThreadRootId
+          }, controller.signal, this.onReviewProgress);
+          return;
+        }
+        await this.runParticipantBatch(conversation, [participant], message, runId, controller.signal, this.onReviewProgress, warnings, {
+          targetRunIds: new Map([[participant.id, runId]])
+        });
+      })();
+      void started.catch(async (error) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        void this.debugLogs.write("chat.phone-turn.error", { conversationId, runId, message: reason });
+        // Said in the chat, where the User sees it on her phone too.
+        warnings.push(`@${participant.handle} could not start for your message: ${reason}`);
+      }).finally(async () => {
+        this.pendingPhoneRuns.delete(runId);
+        if (warnings.length > 0) await this.appendConversationWarnings(conversation, warnings).catch(() => undefined);
+      });
+    }
+  }
+
+  /** A phone's message the desktop would not have sent: the reason, under
+   *  it, once (a claim keeps a redelivery from saying it again). */
+  private async notePhoneMessageRefused(conversation: Conversation, message: ChatMessage, reason: string): Promise<void> {
+    const outcome = await this.storage.phoneTurnClaims().claim({ runId: `phone-refused-${message.id}`, conversationId: conversation.id, messageId: message.id,
+      participantId: "", at: new Date().toISOString() });
+    if (outcome !== "claimed") return;
+    await this.withChatMutation(conversation, async () => {
+      conversation.messages.push(this.message("system", reason, undefined, {
+        threadId: message.metadata?.threadId ?? message.id,
+        parentMessageId: message.id,
+        chatThreadRootId: message.metadata?.chatThreadRootId
+      }));
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
+  }
+
+  /** A member stopped before its turn for a phone's message started: the
+   *  line a member stopped while queued gets. */
+  private async notePhoneTurnStoppedBeforeStart(conversation: Conversation, message: ChatMessage, participant: ChatParticipant): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      conversation.messages.push(this.message("system", `@${participant.handle} stopped by user.`, undefined, {
+        threadId: message.metadata?.threadId ?? message.id,
+        parentMessageId: message.id,
+        chatThreadRootId: message.metadata?.chatThreadRootId
+      }));
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
+  }
+
+  /** A Stop for a phone's turn that is not running here. True when this
+   *  device is that member's home: the turn is then recorded as stopped and
+   *  never starts (or was stopped while starting). */
+  async stopUnstartedPhoneRun(conversationId: string, runId: string): Promise<boolean> {
+    const parsed = parsePhoneTurnRunId(runId);
+    if (!parsed) return false;
+    const pending = this.pendingPhoneRuns.get(runId);
+    if (pending) {
+      // Still being claimed: it never starts. Started: a Stop like any other.
+      if (pending.started) return false;
+      pending.controller.abort();
+      return true;
+    }
+    const opened = await this.storage.openConversation(conversationId, 1);
+    if (!opened || opened.conversation.kind !== "chat") return false;
+    const participant = this.chatParticipants(opened.conversation).find((item) => item.id === parsed.participantId);
+    if (!participant || !this.startsPhoneTurnFor(participant)) return false;
+    const cancelled = await this.storage.phoneTurnClaims().cancelUnstarted({
+      runId, conversationId, messageId: parsed.messageId, participantId: participant.id, at: new Date().toISOString()
+    });
+    // Claimed before: it ran (or runs, and the ordinary Stop reaches it).
+    if (!cancelled) return false;
+    // The message is here already but the start had not decided yet: it reads
+    // the cancelled claim and writes the stopped line itself.
+    return true;
+  }
+
+  /** Whether a run named in a Stop is a phone turn whose member lives here;
+   *  undefined while this copy of the chat does not know the member yet (the
+   *  Stop waits for it rather than being lost). */
+  async ownsPhoneRun(conversationId: string, runId: string): Promise<boolean | undefined> {
+    const parsed = parsePhoneTurnRunId(runId);
+    if (!parsed) return false;
+    if (this.pendingPhoneRuns.has(runId)) return true;
+    // The chat's body names its members: no need to read every message.
+    const opened = await this.storage.openConversation(conversationId, 1);
+    if (!opened || opened.conversation.kind !== "chat") return false;
+    const participant = this.chatParticipants(opened.conversation).find((item) => item.id === parsed.participantId);
+    if (!participant) return undefined;
+    return this.startsPhoneTurnFor(participant);
   }
 
   private clone(conversation: Conversation): Conversation {

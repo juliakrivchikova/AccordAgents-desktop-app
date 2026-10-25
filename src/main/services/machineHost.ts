@@ -55,6 +55,8 @@ import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload, type ChatChangesPayload,
 import { machineProgressEventId } from "../../shared/machineProgress";
 import { MachineProgressSender } from "./machineProgressSender";
 import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
+import { HUB_PHONE_ENROLLED_EVENT_KIND, HUB_PHONE_ENROLLMENT_SCOPE, hubWebSocketUrl, parsePhoneTurnRunId, verifyHubPhoneCertificate, type HubPhoneCertificate } from "../../shared/hubProtocol";
+import { hubCertificateCrypto } from "./hubAuth";
 import { readPosixProcessTableAsync } from "./processTermination";
 import { verifyNativeExecutorGone } from "./nativeExecutorRecovery";
 import { MachineApprovalExecutor, machineApprovalResultId } from "./machineApprovalExecutor";
@@ -332,9 +334,44 @@ export class MachineHostService {
     return this.trust.peers().find((peer) => peer.deviceId === originId)?.publicKeyDerBase64;
   }
 
-  /** An event the hub's order brought: to the desktop's channel when the
-   *  desktop (or a machine's chat change it would forward) wrote it, else to
-   *  the channel of the peer that did. */
+  /** Whether a device is one of the owner's phones this machine trusts. */
+  isPhone(originId: string): boolean {
+    return this.trust.peer(originId)?.role === "phone";
+  }
+
+  /**
+   * A phone that paired with the User's server writes its certificate first.
+   * Checked with the key of the desktop that enrolled this machine, it makes
+   * the phone one of the devices this machine answers, even while that
+   * desktop is away; the desktop's next roster then decides. Returns the key
+   * the phone signs with, or undefined for anything else.
+   */
+  async admitPhoneCertificate(event: ChatEventEnvelope): Promise<string | undefined> {
+    if (event.kind !== HUB_PHONE_ENROLLED_EVENT_KIND || event.logScopeId !== HUB_PHONE_ENROLLMENT_SCOPE) return undefined;
+    const certificate = await this.options.eventStorage.deviceEventBlobs().hydrate(event.payload).catch(() => undefined) as HubPhoneCertificate | undefined;
+    const issuer = this.options.pairing.issuer;
+    if (!verifyHubPhoneCertificate(certificate, { issuerDeviceId: issuer.originId, issuerPublicKeyDerBase64: issuer.publicKeyDerBase64, ...hubCertificateCrypto }) ||
+        certificate.enrollment.deviceId !== event.originId) {
+      void this.debugLogs.write("machine-host.trust.certificate-refused", { originId: event.originId });
+      return undefined;
+    }
+    const home = this.options.pairing;
+    const admitted = await this.trust.admitCertified({
+      deviceId: certificate.enrollment.deviceId,
+      publicKeyDerBase64: certificate.enrollment.publicKeyDerBase64,
+      role: "phone",
+      name: certificate.enrollment.name || "Phone",
+      relayUrl: home.relayUrl ?? (home.hubUrl ? hubWebSocketUrl(home.hubUrl, "") : ""),
+      rendezvousId: home.rendezvousId,
+      fingerprint: home.fingerprint,
+      inviteId: certificate.invite.inviteId
+    });
+    void this.debugLogs.write("machine-host.trust.phone-certified", { deviceId: certificate.enrollment.deviceId, admitted });
+    if (!admitted) return undefined;
+    await this.peers.reconcile(this.rosterPeersToConnect(this.trust.peers()));
+    return certificate.enrollment.publicKeyDerBase64;
+  }
+
   /** An event the hub's order brought: to the owner's channel, or to the
    *  channel of another of the owner's devices. */
   async receiveFromHub(event: ChatEventEnvelope): Promise<HubDeliverOutcome> {
@@ -590,9 +627,9 @@ export class MachineHostService {
       this.durableTerminalIds.add(eventId);
     }
     const roster = await this.trust.load();
-    if (roster) {
-      await this.peers.reconcile(this.rosterPeersToConnect(roster.peers));
-      void this.debugLogs.write("machine-host.trust.restored", { peers: roster.peers.length, updatedAt: roster.updatedAt });
+    if (roster || this.trust.peers().length) {
+      await this.peers.reconcile(this.rosterPeersToConnect(this.trust.peers()));
+      void this.debugLogs.write("machine-host.trust.restored", { peers: this.trust.peers().length, updatedAt: roster?.updatedAt ?? "" });
     }
     this.peers.start();
     await this.reconcileDeletedConversations().catch(error => {
@@ -1225,7 +1262,8 @@ export class MachineHostService {
         // inside its own sealed, signed channel.
         if (!event || !isMachineTrustRoster(body.roster)) throw new Error("Machine trust roster requires its signed event.");
         const accepted = await this.trust.accept(body.roster, event);
-        await this.peers.reconcile(this.rosterPeersToConnect(accepted.roster.peers));
+        // The roster's peers and the phones trusted by their certificates.
+        await this.peers.reconcile(this.rosterPeersToConnect(this.trust.peers()));
         void this.debugLogs.write("machine-host.trust.applied", {
           changed: accepted.changed,
           peers: accepted.roster.peers.length,
@@ -2345,6 +2383,16 @@ export class MachineHostService {
       this.progressSenders.set(progress.runId, sender);
     }
     sender.note(progress);
+    // A turn started here for a phone's message has no desktop dispatch to
+    // finish it (machine.turn.finished): its last progress closes it.
+    const terminal = progress.phase === "done" || progress.phase === "error" || progress.phase === "cancelled" || progress.agentProgress?.state === "finished";
+    if (terminal && parsePhoneTurnRunId(progress.runId)) {
+      const finished = sender;
+      void finished.finish()
+        .then(() => this.options.eventStorage.machineProgress().close(progress.runId))
+        .catch(() => undefined)
+        .finally(() => { if (this.progressSenders.get(progress.runId) === finished) this.progressSenders.delete(progress.runId); });
+    }
   }
 
   private async sendNow(body: MachineLinkMessage, recipient?: string): Promise<void> {

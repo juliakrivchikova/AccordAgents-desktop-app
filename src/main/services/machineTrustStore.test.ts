@@ -93,3 +93,29 @@ test("presence is bound to the enrolled signer, room, recipient and complete bod
   assert.equal(verifyMachineControl(signed, { ...expected, room: "another-room" }), false);
   assert.equal(verifyMachineControl(signed, { ...expected, to: "another-recipient" }), false);
 });
+
+test("a phone trusted by its certificate stays until a roster settles its invite, which then decides, across a restart", async t => {
+  const file = await fixture(t);
+  const phone = createChatEventDeviceIdentity(new Date().toISOString());
+  const certified = { deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone" as const, name: "iPhone",
+    relayUrl: "ws://127.0.0.1:1", rendezvousId: "room", inviteId: "invite-aaaaaaaa-1" };
+  const store = new MachineTrustStore(file, "self", owner.originId);
+  await store.accept(roster(), event(1));
+  assert.equal(await store.admitCertified(certified), true);
+  assert.equal(store.peer(phone.originId)?.role, "phone");
+  // A roster that knows nothing of the invite (sent before it) keeps it.
+  await store.accept(roster(), event(2));
+  assert.equal(store.peer(phone.originId)?.role, "phone");
+  const restarted = new MachineTrustStore(file, "self", owner.originId);
+  await restarted.load();
+  assert.equal(restarted.peer(phone.originId)?.role, "phone", "kept across a restart");
+  // The owner settles the invite and leaves the phone out: removed, and its
+  // certificate cannot bring it back.
+  await restarted.accept({ ...roster(), resolvedInviteIds: [certified.inviteId] }, event(3));
+  assert.equal(restarted.peer(phone.originId), undefined);
+  assert.equal(await restarted.admitCertified(certified), false);
+  // Listed by the owner: trusted by the roster itself.
+  const listed = { deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone" as const, name: "iPhone", relayUrl: "ws://127.0.0.1:1", rendezvousId: "room" };
+  await restarted.accept({ ...roster(), peers: [peer, listed], resolvedInviteIds: [certified.inviteId] }, event(4));
+  assert.equal(restarted.peer(phone.originId)?.role, "phone");
+});
