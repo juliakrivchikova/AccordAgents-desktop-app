@@ -1,6 +1,9 @@
 import type { StorageService } from "./storage";
 
 const HOUR_MS = 60 * 60_000;
+/** Own events forgotten per transaction, and transactions per run. */
+const PRUNE_BATCH = 2_000;
+const PRUNE_MAX_BATCHES = 10;
 
 /** Positive integers from the environment (QA shortens them). */
 function envMs(name: string, fallback: number): number {
@@ -45,12 +48,12 @@ export function scheduleHubDeviceRetention(options: {
       const originId = await options.originId();
       const pushedThrough = await options.pushedThrough();
       let events = 0;
-      for (let batch = 0; batch < 10; batch += 1) {
+      for (let batch = 0; batch < PRUNE_MAX_BATCHES; batch += 1) {
         const pruned = await options.storage.deviceEvents().pruneOwnDeviceEvents(originId, {
-          pushedThroughRowid: pushedThrough, cutoffIso: new Date(now - keepMs).toISOString(), scopePrefixes: scopes, limit: 2_000
+          pushedThroughRowid: pushedThrough, cutoffIso: new Date(now - keepMs).toISOString(), scopePrefixes: scopes, limit: PRUNE_BATCH
         });
         events += pruned;
-        if (pruned < 2_000) break;
+        if (pruned < PRUNE_BATCH) break;
       }
       const blobs = await options.storage.deviceEventBlobs().collectOrphans({ now, graceMs: blobGraceMs, scanRows: blobScanRows });
       if (events || blobs.deleted) options.log("device.events.pruned", { events, blobs: blobs.deleted, blobBytes: blobs.bytes });

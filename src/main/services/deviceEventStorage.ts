@@ -494,6 +494,7 @@ export class DeviceEventStorage {
         select e.event_id from chat_events e
         where e.origin_id = ${quote(localOriginId)} and e.log_scope_id >= 'device:' and e.log_scope_id < 'device;' and (${scopes})
           and e.rowid <= ${Math.floor(options.pushedThroughRowid)} and e.received_at < ${quote(options.cutoffIso)}
+          and e.kind not in (${OWN_EVENTS_KEPT_KINDS.map(quote).join(", ")})
           and e.origin_seq < (select max(n.origin_seq) from chat_events n where n.origin_id = e.origin_id and n.log_scope_id = e.log_scope_id)
           and not exists (select 1 from device_event_outbox o where o.event_id = e.event_id and o.acknowledged_at is null)
         limit ${Math.max(1, Math.floor(options.limit ?? 2_000))};
@@ -741,6 +742,12 @@ export class DeviceEventStorage {
     return events;
   }
 }
+
+/** Own events that are looked up by their id later, as proof that something
+ *  was already sent or done (a turn's command while its run is pending, a
+ *  stop, an approval's or a choice's result): they are never forgotten here,
+ *  or a late repeat would be taken for a first time. */
+const OWN_EVENTS_KEPT_KINDS = ["machine.turn.request", "machine.turn.cancel", "machine.approval.result", "machine.choice.result"] as const;
 
 function quote(value: string): string {
   // The sqlite3 shell reads statements line by line and a NUL ends a line:

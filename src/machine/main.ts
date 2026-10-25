@@ -680,7 +680,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     scopePrefixes: HUB_SCOPE_PREFIXES,
     // Where it starts again (a first start, or after being away while the
     // hub forgot what it needed): before anything of its own channel.
-    ownScopes: async () => [`device:${enrollment.rendezvousId}:`],
+    ownScopes: async () => host.hubChannelScopes(),
     mergeCopy: async (copied) => chatService.mergeServerCopy(copied, {
       desktopOriginId: enrollment.issuer.originId,
       localOriginId: (await chatEventLogService.getOrCreateDeviceIdentity()).originId

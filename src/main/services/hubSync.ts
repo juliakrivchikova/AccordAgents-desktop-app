@@ -1,19 +1,20 @@
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { DeviceEventGap } from "../../shared/deviceEventDelivery";
-import { HUB_PUSH_MAX_EVENTS, type HubCopyMark, type HubCopyPart, type HubEventPushResult, type HubLoggedEvent, type HubReadReport } from "../../shared/hubProtocol";
+import { HUB_PUSH_MAX_EVENTS, type HubCopyMark, type HubCopyPart, type HubEventPushResult, type HubLoggedEvent, type HubReadReport, type HubSnapshotResponse } from "../../shared/hubProtocol";
 import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
-import { CHAT_CHANGES_EVENT_KIND, isChatChangesLogScope, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
+import { CHAT_CHANGES_EVENT_KIND, CHAT_CHANGES_LOG_SCOPE_PREFIX, isChatChangesLogScope, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
 import { CHAT_COPY_HUB_POSITION_KEY, type CopiedConversation } from "./chatCopy";
 import { verifySignedChatEvent } from "./chatEventLog";
 import type { DeviceEventChannel } from "./deviceEventChannel";
 import { DevicePacketAuthenticationError } from "./devicePacketAuthentication";
 import { HubHttpError, HubTransientError, isHubResyncRequired, type HubClient } from "./hubClient";
+import { HUB_CLIENT_HUB_ID_KEY, HUB_CLIENT_PULLED_KEY, HUB_CLIENT_PUSHED_KEY } from "./hubStorage";
 import type { StorageService } from "./storage";
 
 /** Where this device keeps its place with the hub (setup moves them). */
-export const PUSHED_KEY = "pushed-rowid";
-export const PULLED_KEY = "pulled-hub-seq";
-export const HUB_ID_KEY = "hub-id";
+export const PUSHED_KEY = HUB_CLIENT_PUSHED_KEY;
+export const PULLED_KEY = HUB_CLIENT_PULLED_KEY;
+export const HUB_ID_KEY = HUB_CLIENT_HUB_ID_KEY;
 const PUSH_BATCH = Math.min(100, HUB_PUSH_MAX_EVENTS);
 /** Without the live link nothing announces new events: read anyway. With
  *  it, read now and then as well, in case it died without a word. */
@@ -28,8 +29,23 @@ const HELD_PAGE = 500;
  *  most this often: one that is not was removed, and only then is what was
  *  held for it let go. Nothing is dropped for its age. */
 const HELD_AUTHORS_CHECK_MS = 10 * 60_000;
-/** Starting again from the hub's copy happens at most this often. */
+/** Starting again from the hub's copy happens at most this often; a start
+ *  that failed is taken up again after RESYNC_RETRY_MS, doubling per failure. */
 const RESYNC_MIN_INTERVAL_MS = 30 * 60_000;
+const RESYNC_RETRY_MS = 30_000;
+
+/** A start from the hub's copy in progress (kept across a failed attempt). */
+interface ResyncProgress {
+  hubSeq: number;
+  hubId?: string;
+  marks: HubCopyMark[];
+  /** The next page; none for the first. */
+  page?: string;
+  firstPage?: HubSnapshotResponse;
+  partial: Map<string, HubCopyPart>;
+  failed: Set<string>;
+  chats: number;
+}
 const RETRY_MIN_MS = 5_000;
 const RETRY_MAX_MS = 5 * 60_000;
 
@@ -96,7 +112,7 @@ export function hubChatChangeApplier(storage: StorageService, chat: {
   };
 }
 
-type ReceiveOutcome = "done" | "unknown-origin" | "not-ready" | "waiting" | "blob-missing" | "error" | "refused";
+type ReceiveOutcome = "done" | "unknown-origin" | "not-ready" | "waiting" | "blob-missing" | "error" | "refused" | "forged";
 
 /** A failure that says nothing about the event: the hub or the network was
  *  away (the client says so), or a channel was closing. The page is read
@@ -140,8 +156,11 @@ export class HubSync {
   private readonly unplaceable = new Set<string>();
   private heldAuthorsCheckedAt = 0;
   private resyncing?: Promise<void>;
-  private lastResyncAt = 0;
+  private resyncNotBefore = 0;
+  private resyncFailures = 0;
+  private resyncProgress?: ResyncProgress;
   private readonly repairing = new Set<string>();
+  private repairQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: {
     client: HubClient;
@@ -389,12 +408,19 @@ export class HubSync {
     let next = fromSeq;
     for (;;) {
       const chain = await hub.chainFrom(originId, logScopeId, next, PUSH_BATCH);
-      if (chain.length === 0 || chain[0].originSeq !== next) return next > fromSeq;
-      let response = await this.options.client.push(chain);
+      if (chain.length === 0) return next > fromSeq;
+      // This device forgot the start of what the hub misses (it keeps its own
+      // channel events a week once the hub had them; this hub never did: it
+      // was set up again, or restored). The chain goes on from what it still
+      // holds, and readers are told the stretch before is gone.
+      const anchor = chain[0].originSeq !== next;
+      if (anchor && next > fromSeq) return true;
+      if (anchor) this.options.log?.("hub.sync.chain-anchored", { logScopeId, fromSeq, at: chain[0].originSeq });
+      let response = await this.options.client.push(chain, anchor ? { anchor: [logScopeId] } : undefined);
       const missing = response.results.flatMap((result, index) => result.status === "blob-missing" ? [index] : []);
       if (missing.length > 0) {
         for (const index of missing) await this.options.client.uploadBlob(chain[index]);
-        response = await this.options.client.push(chain);
+        response = await this.options.client.push(chain, anchor ? { anchor: [logScopeId] } : undefined);
       }
       if (response.results.some((result) => result.status !== "accepted" && result.status !== "duplicate")) return false;
       next = chain[chain.length - 1].originSeq + 1;
@@ -415,6 +441,18 @@ export class HubSync {
         // The hub forgot what this device would need from here: it starts
         // again from the hub's copy, once per pass.
         if (!isHubResyncRequired(error) || resynced) throw error;
+        const known = await hub.clientState(HUB_ID_KEY);
+        const answering = typeof error.detail.hubId === "string" ? error.detail.hubId : undefined;
+        if (known && answering && known !== answering) {
+          // Another hub at this address: what this device held was another
+          // order's, and its place there means nothing here.
+          this.options.log?.("hub.sync.hub-changed", { from: known, to: answering });
+          this.resyncProgress = undefined;
+          await hub.clearHeld();
+          await hub.setClientState(PULLED_KEY, "0");
+          await hub.setClientState(HUB_ID_KEY, answering);
+          cursor = 0;
+        }
         resynced = true;
         await this.resync(Number(error.detail.prunedThrough) || 0);
         cursor = Number(await hub.clientState(PULLED_KEY) ?? "0") || 0;
@@ -427,6 +465,7 @@ export class HubSync {
             // Another hub at this address: its order starts over, and so does
             // this device's reading of it.
             this.options.log?.("hub.sync.hub-changed", { from: known, to: response.hubId });
+            this.resyncProgress = undefined;
             await hub.clearHeld();
             cursor = 0;
             await hub.setClientState(PULLED_KEY, "0");
@@ -524,12 +563,21 @@ export class HubSync {
    * harmless, so a resync that stopped half way simply runs again.
    */
   async resync(prunedThrough = 0): Promise<void> {
-    if (!this.resyncing && this.lastResyncAt && this.now() - this.lastResyncAt < RESYNC_MIN_INTERVAL_MS) {
+    if (!this.resyncing && this.now() < this.resyncNotBefore) {
       // A hub that keeps saying so is not answered with a copy every few
       // seconds: the read fails and is tried again later.
-      throw new HubTransientError("The server asked to start again right after a start from its copy.");
+      throw new HubTransientError("The server asked to start again too soon after the last start from its copy.");
     }
-    this.resyncing ??= this.resyncNow(prunedThrough).then(() => { this.lastResyncAt = this.now(); }).finally(() => { this.resyncing = undefined; });
+    this.resyncing ??= this.resyncNow(prunedThrough).then(() => {
+      this.resyncFailures = 0;
+      this.resyncNotBefore = this.now() + RESYNC_MIN_INTERVAL_MS;
+    }, (error: unknown) => {
+      // A start that failed is taken up again where it stopped, after a
+      // wait that grows with each failure.
+      this.resyncFailures += 1;
+      this.resyncNotBefore = this.now() + Math.min(RESYNC_MIN_INTERVAL_MS, RESYNC_RETRY_MS * 2 ** (this.resyncFailures - 1));
+      throw error;
+    }).finally(() => { this.resyncing = undefined; });
     return this.resyncing;
   }
 
@@ -538,47 +586,70 @@ export class HubSync {
     const merge = this.options.mergeCopy;
     if (!merge) throw new Error("This device cannot start again from the server's copy.");
     const started = this.now();
-    this.options.log?.("hub.sync.resync.started", { prunedThrough });
-    const scopes = await this.ownScopes();
-    let page: string | undefined;
-    let hubSeq: number | undefined;
-    let hubId: string | undefined;
-    let marks: HubCopyMark[] = [];
-    let chats = 0;
-    let bytes = 0;
-    const partial = new Map<string, HubCopyPart>();
+    const bytesBefore = this.options.client.receivedBytes;
+    // Taken up where a failed attempt stopped: its position and marks hold,
+    // and the hub keeps everything after that position for this device.
+    const progress = this.resyncProgress ?? await this.startResync();
+    this.resyncProgress = progress;
+    this.options.log?.("hub.sync.resync.started", { prunedThrough, hubSeq: progress.hubSeq, resumed: progress.chats > 0 || Boolean(progress.page) });
     for (;;) {
       if (this.stopped) throw new HubTransientError("Stopped while starting again from the server's copy.");
-      const response = await this.options.client.snapshot({ copy: true, scopes, ...(page ? { page } : {}) });
-      bytes += Buffer.byteLength(JSON.stringify(response));
-      if (hubSeq === undefined) {
-        hubSeq = response.hubSeq;
-        hubId = response.hubId;
-        marks = response.marks ?? [];
-      }
+      const response = progress.firstPage ?? await this.options.client.snapshot({ copy: true, ...(progress.page ? { page: progress.page } : {}) });
+      progress.firstPage = undefined;
       for (const part of response.conversations) {
-        const earlier = partial.get(part.id);
+        const earlier = progress.partial.get(part.id);
         const joined = earlier ? { ...part, messages: [...earlier.messages, ...part.messages] } : part;
         if (part.more) {
-          partial.set(part.id, joined);
+          progress.partial.set(part.id, joined);
           continue;
         }
-        partial.delete(part.id);
-        await merge(copiedFromPart(joined));
-        chats += 1;
+        progress.partial.delete(part.id);
+        await this.mergeOne(merge, joined, progress);
       }
       if (!response.next) break;
-      page = response.next;
+      progress.page = response.next;
     }
     // A chat the last page left open (it went away meanwhile) is merged as far as it came.
-    for (const part of partial.values()) {
-      await merge(copiedFromPart(part));
-      chats += 1;
-    }
+    for (const part of progress.partial.values()) await this.mergeOne(merge, part, progress);
+    // A chat that could not be merged keeps its own marks: its changes after
+    // its own position still come as events.
+    const marks = progress.marks.filter((mark) => !progress.failed.has(mark.logScopeId.slice(CHAT_CHANGES_LOG_SCOPE_PREFIX.length)));
     await this.options.storage.applyChatCopyMarks(marks.map((mark) => ({ ...mark })), new Date(this.now()).toISOString(), await this.options.localOriginId());
-    if (hubId) await hub.setClientState(HUB_ID_KEY, hubId);
-    await hub.setClientState(PULLED_KEY, String(hubSeq ?? 0));
-    this.options.log?.("hub.sync.resync.finished", { hubSeq, chats, marks: marks.length, bytes, ms: this.now() - started });
+    if (progress.hubId) await hub.setClientState(HUB_ID_KEY, progress.hubId);
+    await hub.setClientState(PULLED_KEY, String(progress.hubSeq));
+    this.resyncProgress = undefined;
+    this.options.log?.("hub.sync.resync.finished", {
+      hubSeq: progress.hubSeq, chats: progress.chats, failed: progress.failed.size, marks: marks.length,
+      bytes: this.options.client.receivedBytes - bytesBefore, ms: this.now() - started
+    });
+  }
+
+  /** The first page of a start from the hub's copy, which fixes where this
+   *  device reads from next. */
+  private async startResync(): Promise<ResyncProgress> {
+    // What this device still holds stays kept for it: it starts before them,
+    // and before what came after where it stood that the copy does not carry.
+    const hub = this.options.storage.hub();
+    const held = await hub.heldSummary();
+    const since = Number(await hub.clientState(PULLED_KEY) ?? "0") || 0;
+    const first = await this.options.client.snapshot({
+      copy: true, scopes: await this.ownScopes(), since, ...(held.lowest > 0 ? { atMost: held.lowest - 1 } : {})
+    });
+    return {
+      hubSeq: first.hubSeq, ...(first.hubId ? { hubId: first.hubId } : {}), marks: first.marks ?? [],
+      partial: new Map(), failed: new Set(), chats: 0, firstPage: first
+    };
+  }
+
+  private async mergeOne(merge: (copied: CopiedConversation) => Promise<void>, part: HubCopyPart, progress: ResyncProgress): Promise<void> {
+    try {
+      await merge(copiedFromPart(part));
+      progress.chats += 1;
+    } catch (error) {
+      // One chat that cannot be merged does not stop the others.
+      progress.failed.add(part.id);
+      this.options.log?.("hub.sync.resync.chat-failed", { conversationId: part.id, message: errorMessage(error) });
+    }
   }
 
   /**
@@ -592,6 +663,22 @@ export class HubSync {
     const key = `${gap.originId}\n${gap.logScopeId}\n${gap.fromSeq}`;
     if (this.repairing.has(key) || this.stopped) return "unavailable";
     this.repairing.add(key);
+    // One repair at a time: channels ask without waiting, and a burst of
+    // gaps must not become a burst of requests to the small server.
+    const turn = this.repairQueue.then(() => this.repairNow(gap));
+    this.repairQueue = turn.then(() => undefined, () => undefined);
+    try {
+      return await turn;
+    } finally {
+      this.repairing.delete(key);
+    }
+  }
+
+  private async repairNow(gap: DeviceEventGap): Promise<HubGapRepair> {
+    // While this device starts again from the copy, a gap is asked about
+    // later: the copy's marks may close it, and an older change must not be
+    // put over a chat already taken from the copy.
+    if (this.stopped || this.resyncing) return "unavailable";
     try {
       const response = await this.options.client.chain(gap.originId, gap.logScopeId, gap.fromSeq, Math.max(gap.fromSeq, gap.toSeq));
       const pruned = response.pruned;
@@ -605,12 +692,17 @@ export class HubSync {
           this.options.log?.("hub.sync.gap-unavailable", { ...gap, retained: response.events.length });
           return "unavailable";
         }
-        outcome = await this.passOver(gap, forgotten);
+        outcome = await this.passOver(gap, await this.passOverPoint(gap, forgotten));
       }
       // What the hub still holds after what it forgot is handed in.
       for (const item of response.events) {
         if (forgotten && item.event.originSeq <= forgotten.originSeq) continue;
-        if (await this.receiveOrHold(item, { gapRepair: true }) !== "refused") continue;
+        const received = await this.receiveOrHold(item, { gapRepair: true });
+        if (received === "forged") {
+          this.options.log?.("hub.sync.gap-unavailable", { ...gap, forged: item.event.originSeq });
+          return "unavailable";
+        }
+        if (received !== "refused") continue;
         // Refused here for good (a signature, a scope, a conflict): the chain
         // goes on past it instead of waiting for it for ever.
         this.options.log?.("hub.sync.gap-refused", { ...gap, originSeq: item.event.originSeq, eventId: item.event.eventId });
@@ -622,9 +714,15 @@ export class HubSync {
     } catch (error) {
       this.options.log?.("hub.sync.gap-error", { ...gap, message: errorMessage(error) });
       return "unavailable";
-    } finally {
-      this.repairing.delete(key);
     }
+  }
+
+  /** How far to pass over: what the hub forgot, but not past what this
+   *  device already holds (the event after the gap names the hash before it). */
+  private async passOverPoint(gap: DeviceEventGap, forgotten: { originSeq: number; eventHash: string }): Promise<{ originSeq: number; eventHash: string }> {
+    if (forgotten.originSeq <= gap.toSeq) return forgotten;
+    const [after] = await this.options.storage.hub().chainFrom(gap.originId, gap.logScopeId, gap.toSeq + 1, 1);
+    return after?.originSeq === gap.toSeq + 1 && after.prevHash ? { originSeq: gap.toSeq, eventHash: after.prevHash } : forgotten;
   }
 
   /** A stretch of a chain this device will never get from the hub: a chat
@@ -632,7 +730,7 @@ export class HubSync {
    *  continues from), any other chain continues after it. */
   private async passOver(gap: DeviceEventGap, through: { originSeq: number; eventHash: string }): Promise<HubGapRepair> {
     if (isChatChangesLogScope(gap.logScopeId)) {
-      await this.resyncChat(gap.logScopeId.slice("chat-changes:".length));
+      await this.resyncChat(gap.logScopeId.slice(CHAT_CHANGES_LOG_SCOPE_PREFIX.length));
       // The copy covers at least this far: what the hub folded of the chain.
       await this.options.storage.deviceEvents().skipTo(gap.originId, gap.logScopeId, through.originSeq, through.eventHash, new Date(this.now()).toISOString());
       return "resynced";
@@ -677,6 +775,8 @@ export class HubSync {
     this.heldRetryAt = this.now() + HELD_RETRY_MS;
     const hub = this.options.storage.hub();
     await this.releaseRemovedAuthors();
+    // A look moves nothing on the hub: what this device holds is said once.
+    const report = { ...await this.readReport(), peek: true };
     const authorsStillMissing = new Set<string>();
     let fetches = 0;
     let after = 0;
@@ -695,7 +795,17 @@ export class HubSync {
         }
         fetches += 1;
         // A look at one held place, not this device's place in the order.
-        const read = await this.options.client.pull(held.hubSeq - 1, 1, { ...await this.readReport(), peek: true });
+        let read;
+        try {
+          read = await this.options.client.pull(held.hubSeq - 1, 1, report);
+        } catch (error) {
+          if (!isHubResyncRequired(error)) throw error;
+          // The hub forgot what was there and this device started again past
+          // it: the held place has nothing left to take.
+          this.options.log?.("hub.sync.held-forgotten", { hubSeq: held.hubSeq, eventId: held.eventId, reason: held.reason });
+          await hub.releaseHeld([held.hubSeq]);
+          continue;
+        }
         const item = read.events[0];
         if (!item || item.hubSeq !== held.hubSeq || item.event.eventId !== held.eventId) {
           // The hub no longer has that event there: nothing to take.
@@ -760,7 +870,9 @@ export class HubSync {
     if (!verifySignedChatEvent(event, key)) {
       // Claims to be one of the User's devices but is not signed by it.
       this.options.log?.("hub.sync.bad-signature", { eventId: event.eventId, originId: event.originId });
-      return options.gapRepair ? "refused" : "done";
+      // Asked for to fill a gap, it is not what the gap misses: its hash
+      // proves nothing, so the chain is not moved past it.
+      return options.gapRepair ? "forged" : "done";
     }
     // A large body is fetched only for an event this device takes: another
     // pair's traffic is passed over without it.

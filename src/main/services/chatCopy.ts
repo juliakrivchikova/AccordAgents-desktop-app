@@ -13,6 +13,7 @@ import {
 } from "./chatChanges";
 import type { MachineChatCopyProvider } from "./machineInstaller";
 import type { ChatCopyMark, StorageService } from "./storage";
+import { HUB_CLIENT_PULLED_KEY } from "./hubStorage";
 
 /**
  * The first copy of every chat a machine gets, made over the SSH connection
@@ -426,7 +427,7 @@ export async function importChatCopy(
   // Only once: a machine that already reads it keeps its own place.
   const hub = manifest.hub;
   if (storage.hub && hub && typeof hub.hubId === "string" && Number.isSafeInteger(hub.hubSeq) && hub.hubSeq >= 0 &&
-      await storage.hub().clientState("pulled-hub-seq") === undefined) {
+      await storage.hub().clientState(HUB_CLIENT_PULLED_KEY) === undefined) {
     await storage.hub().setClientState(CHAT_COPY_HUB_POSITION_KEY, JSON.stringify({ hubId: hub.hubId, hubSeq: hub.hubSeq }));
   }
   return summary;

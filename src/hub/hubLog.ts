@@ -18,9 +18,11 @@ import {
 } from "../shared/hubProtocol";
 import { CHAT_CHANGES_EVENT_KIND, isChatChangesLogScope } from "../main/services/chatChanges";
 import { copiedConversation } from "../main/services/chatCopy";
+import { hubPairChannelId } from "../main/services/hubChannels";
 import { verifySignedChatEvent } from "../main/services/chatEventLog";
 import { sha256Hex } from "../main/services/hubAuth";
 import type { StorageService } from "../main/services/storage";
+import type { ChatMessage } from "../shared/types";
 
 /** The largest event envelope the hub stores inline: a device turns a
  *  payload over DEVICE_EVENT_INLINE_BYTES into a blob reference, so a real
@@ -57,13 +59,21 @@ export class HubLog {
   }
 
   /** Stores the device's events in order; one invalid event does not block the others. */
-  push(device: HubDevice, events: unknown): Promise<HubEventPushResponse> {
-    const run = this.queue.then(() => this.pushNow(device, events));
+  push(device: HubDevice, events: unknown, anchor?: string[]): Promise<HubEventPushResponse> {
+    const run = this.queue.then(() => this.pushNow(device, events, new Set(anchor ?? [])));
     this.queue = run.catch(() => undefined);
     return run;
   }
 
-  private async pushNow(device: HubDevice, events: unknown): Promise<HubEventPushResponse> {
+  /**
+   * `anchor` names chains the device asks to continue from its first event
+   * here although the hub misses events before it: the device no longer
+   * holds them (it keeps its own channel events a week once a hub had them,
+   * and this hub never did: it was set up again, or restored). The missing
+   * stretch is recorded as forgotten, so a reader that finds the gap is told
+   * so instead of waiting for it. Only a device's own chains are pushed.
+   */
+  private async pushNow(device: HubDevice, events: unknown, anchor: Set<string> = new Set()): Promise<HubEventPushResponse> {
     if (!Array.isArray(events)) throw new HubRequestError(400, "The request has no events.");
     if (events.length > HUB_PUSH_MAX_EVENTS) throw new HubRequestError(413, `At most ${HUB_PUSH_MAX_EVENTS} events per request.`);
     const results: HubEventPushResult[] = [];
@@ -94,6 +104,15 @@ export class HubLog {
       if (basis.anchorSeq !== undefined && event.originSeq <= basis.anchorSeq && event.originSeq < basis.originSeq) {
         // Already in the chats the hub was set up with: not added again.
         results.push({ eventId, status: "duplicate" });
+        continue;
+      }
+      if (event.originSeq > basis.originSeq && anchor.has(event.logScopeId) && event.prevHash) {
+        await this.storage.hub().markChain(event.originId, event.logScopeId, event.originSeq - 1, event.prevHash);
+        chains.set(key, { originSeq: event.originSeq, prevHash: event.prevHash, anchorSeq: event.originSeq - 1 });
+        anchor.delete(event.logScopeId);
+        results.push({ eventId, status: "accepted" });
+        chains.set(key, { originSeq: event.originSeq + 1, prevHash: event.eventHash, anchorSeq: event.originSeq - 1 });
+        extending.push({ index, event });
         continue;
       }
       if (event.originSeq > basis.originSeq) { results.push({ eventId, status: "gap", expectedSeq: basis.originSeq }); continue; }
@@ -212,18 +231,18 @@ export class HubLog {
     if (!report?.peek) {
       // What a device asked from is what it already holds: a phone that read
       // past an event is not rung for it.
-      await hub.setCursor(device.deviceId, after, now);
       if (report) {
         const floor = report.held > 0 ? Math.min(after, report.held - 1) : after;
-        await hub.recordRead(device.deviceId, floor, {
+        await hub.recordRead(device.deviceId, after, floor, {
           from: report.held, count: report.heldCount,
           ...(report.heldSince > 0 ? { since: new Date(report.heldSince).toISOString() } : {})
         }, now);
       } else if (device.role !== "phone") {
         // An older device does not say what it holds: its place is where it
-        // reads from, as it was before floors (it drops what it held for
-        // long itself).
-        await hub.recordRead(device.deviceId, after, { from: 0, count: 0 }, now);
+        // reads from, and while it reads nothing it reads is forgotten.
+        await hub.recordRead(device.deviceId, after, after, undefined, now);
+      } else {
+        await hub.setCursor(device.deviceId, after, now);
       }
     }
     return { events: page.events, through: page.through, head };
@@ -239,7 +258,9 @@ export class HubLog {
     if (device.role !== "machine") return [...shared, ...all];
     const rids = new Set((await hub.deviceReads()).filter((row) => row.deviceId === device.deviceId && row.rendezvousId).map((row) => row.rendezvousId as string));
     for (const row of await hub.pairAuthors()) if (row.originId === device.deviceId) rids.add(row.rendezvousId);
-    return rids.size ? [...shared, ...[...rids].map((rid) => `pair:${rid}`)] : [...shared, ...all];
+    // Its channels with the other devices on the roster, written or not.
+    for (const other of await hub.devices()) if (other.deviceId !== device.deviceId && other.role !== "owner") rids.add(hubPairChannelId(device.deviceId, other.deviceId));
+    return [...shared, ...[...rids].map((rid) => `pair:${rid}`)];
   }
 
   /** One chain's events in a range, for a reader that found a gap; with how
@@ -261,7 +282,7 @@ export class HubLog {
    * kept for the device from now on. `marks` say how far the copy covers
    * each chat change chain; a change after a mark arrives as an event.
    */
-  async snapshot(device: HubDevice, request: { page?: string; scopes: string[]; atMost?: number; copy: boolean; chat?: string }): Promise<HubSnapshotResponse> {
+  async snapshot(device: HubDevice, request: { page?: string; scopes: string[]; atMost?: number; since?: number; copy: boolean; chat?: string }): Promise<HubSnapshotResponse> {
     const hub = this.storage.hub();
     let position: SnapshotPosition;
     let marks: HubCopyMark[] | undefined;
@@ -269,8 +290,8 @@ export class HubLog {
       // One chat's copy, for a reader whose chain of its changes the hub
       // forgot: it does not move where that reader stands.
       const scope = `chat-changes:${request.chat}`;
-      position = request.page ? parseSnapshotPage(request.page) : { hubSeq: await hub.head(), afterId: "", offset: 0 };
-      if (!request.page) marks = (await hub.copyMarks()).filter((mark) => mark.logScopeId === scope);
+      position = request.page ? parseSnapshotPage(request.page) : { hubSeq: await hub.head(), afterId: "" };
+      if (!request.page) marks = (await hub.copyMarks(request.chat)).filter((mark) => mark.logScopeId === scope);
       const page = await this.copyPage(position, request.chat);
       return { hubSeq: position.hubSeq, ...(marks ? { marks } : {}), conversations: page.parts, ...(page.next ? { next: formatSnapshotPage(page.next) } : {}) };
     }
@@ -283,59 +304,90 @@ export class HubLog {
         const unfolded = await hub.lowestUnfolded();
         if (unfolded > 0) hubSeq = Math.min(hubSeq, unfolded - 1);
       }
-      const own = await hub.lowestInScopes(request.scopes, device.deviceId);
+      // Before anything the device reads that the copy does not carry: its
+      // own channels, and (starting again after `since`, where it stood) the
+      // chat actions after it, which are folded where they arrive.
+      const own = await hub.lowestInScopes([...request.scopes, ...(request.since !== undefined ? ["chat:actions"] : [])], device.deviceId, request.since ?? 0);
       if (own > 0) hubSeq = Math.min(hubSeq, own - 1);
       // Marks first, chats after: a chat read later can only hold more.
       if (request.copy) marks = await hub.copyMarks();
       await hub.startReader(device.deviceId, hubSeq, this.now().toISOString());
-      position = { hubSeq, afterId: "", offset: 0 };
+      position = { hubSeq, afterId: "" };
     }
     if (!request.copy) return { hubSeq: position.hubSeq, conversations: [] };
     const page = await this.copyPage(position);
     return { hubSeq: position.hubSeq, ...(marks ? { marks } : {}), conversations: page.parts, ...(page.next ? { next: formatSnapshotPage(page.next) } : {}) };
   }
 
-  /** One page of the hub's copy after `position`: whole chats in id order,
-   *  and a chat too large for one page in parts. */
+  /**
+   * One page of the hub's copy after `position`: chats in id order, each read
+   * a bounded number of messages at a time (newest first) rather than whole,
+   * so a page costs about its own size in memory however large a chat is
+   * (the User's largest is 13.5 MB). A chat larger than a page goes in parts,
+   * continued before the oldest message the last part carried (by id: the
+   * folder may insert or remove messages in between, which moves positions).
+   * A message that is gone by then restarts that chat: a message twice is
+   * harmless, one skipped is not. A change after the first page arrives as an
+   * event anyway (it is placed after the snapshot's position).
+   */
   private async copyPage(position: SnapshotPosition, only?: string): Promise<{ parts: HubCopyPart[]; next?: SnapshotPosition }> {
     const tombstones = this.storage.conversationTombstones();
     const ids = only ? [only] : (await this.storage.listConversations()).filter((summary) => summary.kind === "chat").map((summary) => summary.id).sort();
-    const continuing = position.offset > 0;
+    const continuing = position.before !== undefined;
     let index = continuing ? ids.indexOf(position.afterId) : -1;
     if (index < 0) index = position.afterId ? ids.findIndex((id) => id > position.afterId) : 0;
     if (index < 0) return { parts: [] };
     const parts: HubCopyPart[] = [];
-    const next = (afterId: string, offset: number): SnapshotPosition => ({ hubSeq: position.hubSeq, afterId, offset });
+    const next = (afterId: string, before?: string): SnapshotPosition => ({ hubSeq: position.hubSeq, afterId, ...(before !== undefined ? { before } : {}) });
     let bytes = 0;
     // The last chat carried whole: the next page starts after it.
     let lastDone = continuing ? "" : position.afterId;
     for (; index < ids.length; index += 1) {
       const id = ids[index];
-      const conversation = await tombstones.isDeleted(id) ? undefined : await this.storage.getConversation(id);
-      if (!conversation || conversation.kind !== "chat") {
+      const opened = await tombstones.isDeleted(id) ? undefined : await this.storage.openConversation(id, 1);
+      if (!opened || opened.conversation.kind !== "chat") {
         lastDone = id;
         continue;
       }
-      const copied = copiedConversation(conversation);
-      const start = continuing && id === position.afterId ? Math.min(position.offset, copied.messages.length) : 0;
-      const head = { id, updatedAt: copied.updatedAt, shared: copied.shared, removed: copied.removed, ...(copied.authors ? { authors: copied.authors } : {}) };
+      const body = copiedConversation({ ...opened.conversation, messages: [] });
+      const head = { id, updatedAt: body.updatedAt, shared: body.shared, removed: body.removed };
       const headBytes = Buffer.byteLength(JSON.stringify(head));
-      if (parts.length > 0 && bytes + headBytes > this.snapshotPageBytes) return { parts, next: next(lastDone, 0) };
+      if (parts.length > 0 && bytes + headBytes > this.snapshotPageBytes) return { parts, next: next(lastDone) };
       bytes += headBytes;
-      let end = start;
-      // Messages until the page is full; the first item of a page always goes.
-      while (end < copied.messages.length) {
-        const size = Buffer.byteLength(JSON.stringify(copied.messages[end]));
-        if (bytes + size > this.snapshotPageBytes && (end > start || parts.length > 0)) break;
-        bytes += size;
-        end += 1;
+      let before = continuing && id === position.afterId ? position.before : undefined;
+      if (before && (await this.storage.hub().messageSequences(id, [before]))[0] === undefined) {
+        // The message this part continued from is gone: the chat again, whole.
+        before = undefined;
       }
-      if (end === start && start < copied.messages.length) return { parts, next: start > 0 ? next(id, start) : next(lastDone, 0) };
-      const more = end < copied.messages.length;
-      parts.push({ ...head, messages: copied.messages.slice(start, end), ...(more ? { more: true } : {}) });
-      if (more) return { parts, next: next(id, end) };
+      const taken: ChatMessage[] = [];
+      let more = true;
+      let full = false;
+      while (more && !full) {
+        const page = await this.storage.listConversationMessages({ conversationId: id, limit: COPY_MESSAGES_PER_READ, ...(before ? { beforeMessageId: before } : {}) });
+        // Newest first within the chat; each read is in order, oldest first.
+        for (let offset = page.messages.length - 1; offset >= 0; offset -= 1) {
+          const message = page.messages[offset];
+          const size = Buffer.byteLength(JSON.stringify(message));
+          // The first item of a page always goes.
+          if (bytes + size > this.snapshotPageBytes && (taken.length > 0 || parts.length > 0)) {
+            full = true;
+            break;
+          }
+          bytes += size;
+          taken.push(message);
+          before = message.id;
+        }
+        if (!full) more = page.hasMoreBefore && page.messages.length > 0;
+      }
+      if (taken.length === 0 && more) {
+        // Nothing of this chat fit: it starts the next page.
+        return { parts, next: continuing && id === position.afterId && before ? next(id, before) : next(lastDone) };
+      }
+      const messages = copiedConversation({ ...opened.conversation, messages: taken.reverse() });
+      parts.push({ ...head, messages: messages.messages, ...(messages.authors ? { authors: messages.authors } : {}), ...(more ? { more: true } : {}) });
+      if (more) return { parts, next: next(id, before) };
       lastDone = id;
-      if (bytes >= this.snapshotPageBytes && index + 1 < ids.length) return { parts, next: next(id, 0) };
+      if (bytes >= this.snapshotPageBytes && index + 1 < ids.length) return { parts, next: next(id) };
     }
     return { parts };
   }
@@ -371,24 +423,28 @@ export class HubLog {
 /** A snapshot page is at most about this much JSON. */
 const SNAPSHOT_PAGE_BYTES = 4 * 1024 * 1024;
 
+/** Messages read from storage at a time while a page is filled. */
+const COPY_MESSAGES_PER_READ = 50;
+
 interface SnapshotPosition {
   hubSeq: number;
   /** The last chat (by id) the previous page carried. */
   afterId: string;
-  /** Messages of that chat already carried (0: it was complete). */
-  offset: number;
+  /** Set while that chat is carried in parts: its messages older than this
+   *  one (by id) are still to come (newest first). */
+  before?: string;
 }
 
 function formatSnapshotPage(position: SnapshotPosition): string {
-  return Buffer.from(JSON.stringify([position.hubSeq, position.afterId, position.offset])).toString("base64url");
+  return Buffer.from(JSON.stringify([position.hubSeq, position.afterId, position.before ?? null])).toString("base64url");
 }
 
 function parseSnapshotPage(page: string): SnapshotPosition {
   try {
-    const [hubSeq, afterId, offset] = JSON.parse(Buffer.from(page, "base64url").toString("utf8")) as [unknown, unknown, unknown];
+    const [hubSeq, afterId, before] = JSON.parse(Buffer.from(page, "base64url").toString("utf8")) as [unknown, unknown, unknown];
     if (Number.isSafeInteger(hubSeq) && (hubSeq as number) >= 0 && typeof afterId === "string" && afterId.length <= 512 &&
-        Number.isSafeInteger(offset) && (offset as number) >= 0) {
-      return { hubSeq: hubSeq as number, afterId, offset: offset as number };
+        (before === null || (typeof before === "string" && before.length > 0 && before.length <= 512))) {
+      return { hubSeq: hubSeq as number, afterId, ...(typeof before === "string" ? { before } : {}) };
     }
   } catch { /* refused below */ }
   throw new HubRequestError(400, "Invalid snapshot page.");

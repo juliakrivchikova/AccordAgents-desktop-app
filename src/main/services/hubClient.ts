@@ -66,6 +66,8 @@ async function reach(fetchImpl: typeof fetch, url: string, init: RequestInit): P
  */
 export class HubClient {
   private readonly base: string;
+  /** Response bytes read from the hub so far (as their length says). */
+  receivedBytes = 0;
 
   constructor(private readonly options: {
     url: string;
@@ -88,6 +90,7 @@ export class HubClient {
       ...(body !== undefined ? { body } : {}),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
     });
+    this.receivedBytes += Number(response.headers.get("content-length")) || 0;
     if (!response.ok) {
       const detail = await response.json().catch(() => ({})) as { error?: string } & Record<string, unknown>;
       throw new HubHttpError(response.status, detail.error || `The hub answered ${response.status}.`, detail);
@@ -103,8 +106,8 @@ export class HubClient {
 
   /** Pushes this device's events in order. A large body is uploaded only
    *  when the hub answers that it lacks it (`uploadBlob`). */
-  push(events: ChatEventEnvelope[]): Promise<HubEventPushResponse> {
-    return this.request<HubEventPushResponse>("POST", "/v1/events", JSON.stringify({ events }), "application/json");
+  push(events: ChatEventEnvelope[], options: { anchor?: string[] } = {}): Promise<HubEventPushResponse> {
+    return this.request<HubEventPushResponse>("POST", "/v1/events", JSON.stringify({ events, ...(options.anchor?.length ? { anchor: options.anchor } : {}) }), "application/json");
   }
 
   /** Uploads the fragments of one event's large body; false when this
@@ -137,13 +140,14 @@ export class HubClient {
 
   /** Where to start reading again (and, with `copy`, the hub's copy of the
    *  chats), one page per call; see HubSnapshotResponse. */
-  snapshot(request: { page?: string; scopes?: readonly string[]; atMost?: number; copy: boolean; chat?: string }): Promise<HubSnapshotResponse> {
+  snapshot(request: { page?: string; scopes?: readonly string[]; atMost?: number; since?: number; copy: boolean; chat?: string }): Promise<HubSnapshotResponse> {
     const params = new URLSearchParams();
     params.set("copy", request.copy ? "1" : "0");
     if (request.chat) params.set("chat", request.chat);
     if (request.page) params.set("page", request.page);
     if (request.scopes?.length) params.set("scopes", request.scopes.join(","));
     if (request.atMost !== undefined) params.set("atMost", String(Math.max(0, Math.floor(request.atMost))));
+    if (request.since !== undefined) params.set("since", String(Math.max(0, Math.floor(request.since))));
     return this.request<HubSnapshotResponse>("GET", `/v1/snapshot?${params.toString()}`);
   }
 
@@ -178,6 +182,7 @@ export class HubClient {
       });
       if (!response.ok) throw new HubHttpError(response.status, `The hub could not give a fragment (${response.status}).`);
       const bytes = Buffer.from(await response.arrayBuffer());
+      this.receivedBytes += bytes.length;
       await this.options.storage.deviceEventBlobs().store({ reference, index, bytesBase64: bytes.toString("base64") });
     }
   }

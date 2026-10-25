@@ -551,7 +551,10 @@ async function hubReaderNotices(): Promise<string[]> {
   const now = Date.now();
   const lines: string[] = [];
   const own = (await chatEventLogService.getOrCreateDeviceIdentity()).originId;
-  const status = await hubReaders();
+  // What was last heard: Settings never waits on the server for these lines
+  // (an unreachable one would hold its whole status for the request's timeout).
+  void hubReaders();
+  const status = hubReadersCache.value;
   for (const reader of status?.readers ?? []) {
     if (reader.deviceId === own) continue;
     const readAt = reader.readAt ? Date.parse(reader.readAt) : NaN;
@@ -617,7 +620,7 @@ async function startHubLink(): Promise<void> {
     ownScopes: hubMachineScopes,
     mergeCopy: async (copied) => {
       const originId = (await identity()).originId;
-      await chatService.mergeServerCopy(copied, { desktopOriginId: originId, localOriginId: originId });
+      await chatService.mergeServerCopy(copied, { desktopOriginId: originId, localOriginId: originId, ownsSharedFields: true });
     },
     // A machine that reads the hub is never given a delivery row; one that
     // an older version wrote lets go when its event is pushed. One still on

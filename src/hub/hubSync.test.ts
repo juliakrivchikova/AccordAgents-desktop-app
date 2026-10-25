@@ -8,6 +8,8 @@ import test from "node:test";
 import { CHAT_CHANGES_EVENT_KIND, chatChangesLogScope } from "../main/services/chatChanges";
 import { ChatEventLogService } from "../main/services/chatEventLog";
 import { ChatSearchService } from "../main/services/chatSearch";
+import { ChatService } from "../main/services/chat";
+import type { ChatMessage, Conversation } from "../shared/types";
 import { HubClient } from "../main/services/hubClient";
 import { HubSync, type HubApplyOutcome, type HubDeliverOutcome } from "../main/services/hubSync";
 import { StorageService } from "../main/services/storage";
@@ -476,7 +478,7 @@ test("a device the hub no longer holds enough for starts again from the hub's co
   await s.folder.idle();
   // The machine is taken off and put back (its place released), and the
   // hub forgot what everyone else had read meanwhile.
-  await s.hubStore.storage.hub().recordRead(s.desktop.identity.originId, 3, { from: 0, count: 0 }, new Date().toISOString());
+  await s.hubStore.storage.hub().recordRead(s.desktop.identity.originId, 3, 3, { from: 0, count: 0 }, new Date().toISOString());
   await s.hubStore.storage.hub().replaceRoster([], new Date().toISOString());
   s.server.invalidateRoster();
   await new HubRetention({ storage: s.hubStore.storage, config: { ...HUB_RETENTION_DEFAULTS }, now: () => Date.now() + 40 * DAY }).runOnce();
@@ -507,10 +509,10 @@ test("starting again merges every chat of the hub's copy and continues each chai
   await pushAll(s.link(s.desktop, []), s, 3);
   await s.folder.idle();
   // The machine was away while all of it was forgotten.
-  await s.hubStore.storage.hub().recordRead(s.desktop.identity.originId, 3, { from: 0, count: 0 }, new Date().toISOString());
+  await s.hubStore.storage.hub().recordRead(s.desktop.identity.originId, 3, 3, { from: 0, count: 0 }, new Date().toISOString());
   await s.hubStore.storage.hub().replaceRoster([], new Date().toISOString());
   await new HubRetention({ storage: s.hubStore.storage, config: { ...HUB_RETENTION_DEFAULTS }, now: () => Date.now() + 40 * DAY }).runOnce();
-  assert.equal((await s.hubStore.storage.hub().logSize()).events, 0);
+  assert.equal((await s.hubStore.storage.hub().logSize()).events, 1, "the chain's newest stays");
   await addMachine(s, machine);
   const merged: CopiedConversation[] = [];
   const machineSync = s.link(machine, [], { mergeCopy: async (copied) => { merged.push(copied); } });
@@ -595,8 +597,8 @@ test("a gap a channel finds is filled from the hub; a stretch the hub forgot is 
   assert.equal(await machineSync.repairGap(gap), "repaired");
   assert.deepEqual(delivered, [1, 2]);
   // Both ends read it, a day passed: the hub forgot the run.
-  await s.hubStore.storage.hub().recordRead(s.desktop.identity.originId, 3, { from: 0, count: 0 }, new Date().toISOString());
-  await s.hubStore.storage.hub().recordRead(machine.identity.originId, 3, { from: 0, count: 0 }, new Date().toISOString());
+  await s.hubStore.storage.hub().recordRead(s.desktop.identity.originId, 3, 3, { from: 0, count: 0 }, new Date().toISOString());
+  await s.hubStore.storage.hub().recordRead(machine.identity.originId, 3, 3, { from: 0, count: 0 }, new Date().toISOString());
   await new HubRetention({ storage: s.hubStore.storage, config: { ...HUB_RETENTION_DEFAULTS }, now: () => Date.now() + 2 * DAY }).runOnce();
   assert.equal(await machineSync.repairGap(gap), "skipped");
   assert.equal(await machine.storage.deviceEvents().appliedHead(s.desktop.identity.originId, scope), 3, "the chain continues after what was forgotten");
@@ -623,4 +625,138 @@ test("an event the channel refuses for good does not leave its chain waiting for
   assert.ok(logs.includes("hub.sync.gap-refused"));
   assert.equal(await machine.storage.deviceEvents().appliedHead(s.desktop.identity.originId, scope), 1, "past the refused event");
   assert.deepEqual(delivered, [], "nothing after it was asked for");
+});
+
+test("a chat taken from the hub's copy: a machine takes its shared content, the desktop only messages it lacks, and a deleted chat stays deleted", async (t) => {
+  const s = await setup(t);
+  const fakes = {
+    settings: { async getPublicSettings() { return { chatRoleConfigs: [], chatParticipantConfigs: [] }; } },
+    cliRunner: { async detectAgents() { return []; }, async contextUsageForSession() { return undefined; }, async closeConversationSessions() { return undefined; } },
+    debugLogs: { async write() { return undefined; } }
+  };
+  const service = (storage: StorageService) => {
+    const chat = new ChatService(storage as never, fakes.settings as never, fakes.cliRunner as never, fakes.debugLogs as never);
+    (chat as unknown as { ensureHistoryFiles(): Promise<string> }).ensureHistoryFiles = async () => "/mock/history";
+    return chat;
+  };
+  const at = new Date().toISOString();
+  const local: Conversation = {
+    id: "chat-m", kind: "chat", title: "Local title", createdAt: at, updatedAt: at, findings: [],
+    messages: [{ id: "mine", role: "user", content: "written here, newer", createdAt: at } as ChatMessage],
+    metadata: { participants: [{ id: "p1", handle: "bot", kind: "claude-code", permissions: { shell: false } }], running: true } as never
+  };
+  const copied: CopiedConversation = {
+    id: "chat-m", updatedAt: at, removed: [],
+    shared: { title: "Server title", kind: "chat", createdAt: at, metadata: { participants: [{ id: "p1", handle: "bot", kind: "claude-code", permissions: { shell: true } }] } } as never,
+    messages: [{ id: "mine", role: "user", content: "older text on the server", createdAt: at } as ChatMessage, { id: "theirs", role: "participant", participantId: "p1", content: "from a machine", createdAt: at } as ChatMessage],
+    authors: { mine: s.desktop.identity.originId, theirs: "device-machine" }
+  };
+  // The desktop: its own fields and its own message stay; it gains the message it lacked.
+  await s.desktop.storage.saveConversation(local);
+  const desktopChat = service(s.desktop.storage);
+  await desktopChat.mergeServerCopy(copied, { desktopOriginId: s.desktop.identity.originId, localOriginId: s.desktop.identity.originId, ownsSharedFields: true });
+  const onDesktop = (await s.desktop.storage.getConversation("chat-m"))!;
+  assert.equal(onDesktop.title, "Local title");
+  assert.equal((onDesktop.metadata.participants as Array<{ permissions: { shell: boolean } }>)[0].permissions.shell, false, "no permission comes from the copy");
+  assert.deepEqual(onDesktop.messages.map((message) => [message.id, message.content]), [["mine", "written here, newer"], ["theirs", "from a machine"]]);
+  // The desktop takes no chat it does not have.
+  await desktopChat.mergeServerCopy({ ...copied, id: "chat-new" }, { desktopOriginId: s.desktop.identity.originId, localOriginId: s.desktop.identity.originId, ownsSharedFields: true });
+  assert.equal(await s.desktop.storage.getConversation("chat-new"), undefined);
+  // A machine takes the copy's shared content, and keeps what it wrote itself.
+  const machine = await store(s.dir, "machine-merge");
+  await machine.storage.saveConversation({ ...local, messages: [{ id: "theirs", role: "participant", participantId: "p1", content: "the machine's own newer reply", createdAt: at } as ChatMessage] });
+  const machineChat = service(machine.storage);
+  await machineChat.mergeServerCopy({ ...copied, authors: { mine: s.desktop.identity.originId, theirs: machine.identity.originId } },
+    { desktopOriginId: s.desktop.identity.originId, localOriginId: machine.identity.originId });
+  const onMachine = (await machine.storage.getConversation("chat-m"))!;
+  assert.equal(onMachine.title, "Server title");
+  assert.equal(onMachine.messages.find((message) => message.id === "theirs")?.content, "the machine's own newer reply");
+  assert.equal(onMachine.metadata.running, true, "its own run state stays");
+  // A chat deleted here is not brought back.
+  await machine.storage.conversationTombstones().mark("chat-gone", at);
+  await machineChat.mergeServerCopy({ ...copied, id: "chat-gone" }, { desktopOriginId: s.desktop.identity.originId, localOriginId: machine.identity.originId });
+  assert.equal(await machine.storage.getConversation("chat-gone"), undefined);
+});
+
+test("a start from the hub's copy that keeps being asked for is not repeated within half an hour; one that failed is taken up where it stopped", async (t) => {
+  const s = await setup(t);
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine);
+  await s.desktop.log.appendLocalEvent(createdChat("chat-r1"));
+  await s.desktop.log.appendLocalEvent(createdChat("chat-r2"));
+  await pushAll(s.link(s.desktop, []), s, 2);
+  await s.folder.idle();
+  let clock = Date.now();
+  let failOn: string | undefined = "chat-r2";
+  const merged: string[] = [];
+  const machineSync = s.link(machine, [], {
+    now: () => clock,
+    mergeCopy: async (copied) => {
+      if (copied.id === failOn) { failOn = undefined; throw new Error("this chat cannot be saved now"); }
+      merged.push(copied.id);
+    }
+  });
+  await machineSync.resync();
+  assert.deepEqual(merged, ["chat-r1"], "one chat failed, the other went on");
+  await assert.rejects(machineSync.resync(), /too soon/, "not again right away");
+  clock += 31 * 60_000;
+  await machineSync.resync();
+  assert.deepEqual(merged, ["chat-r1", "chat-r1", "chat-r2"]);
+});
+
+test("a gap whose start was refused goes on past it, the next event applies; a forged event moves nothing", async (t) => {
+  const s = await setup(t);
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine, "room-1");
+  const scope = `device:room-1:${JSON.stringify(["chat-n2", "actions"])}`;
+  for (const n of [1, 2]) await s.desktop.log.appendLocalEvent({ conversationId: "chat-n2", logScopeId: scope, kind: "machine.turn.cancel", payload: { n } });
+  await pushAll(s.link(s.desktop, []), s, 2);
+  const machineSync = s.link(machine, [], { deliver: async (event) => event.originSeq === 1 ? "refused" : "delivered" });
+  assert.equal(await machineSync.repairGap({ originId: s.desktop.identity.originId, logScopeId: scope, fromSeq: 1, toSeq: 1 }), "skipped");
+  // The next event of the chain, received now, is ready to apply.
+  const [second] = await s.hubStore.storage.hub().chainEvents(s.desktop.identity.originId, scope, 2, 2, 10);
+  await machine.storage.appendChatEvent(second.event, { ingress: { deviceId: s.desktop.identity.originId, channelId: "room-1" } });
+  assert.deepEqual((await machine.storage.deviceEvents().ready("room-1")).map((event) => event.originSeq), [2]);
+  // A hub that hands over an event its author did not sign moves nothing.
+  const other = `device:room-1:${JSON.stringify(["chat-n3", "actions"])}`;
+  await s.desktop.log.appendLocalEvent({ conversationId: "chat-n3", logScopeId: other, kind: "machine.turn.cancel", payload: { n: 1 } });
+  await pushAll(s.link(s.desktop, []), s, 3);
+  await (s.hubStore.storage as unknown as { runSql(sql: string): Promise<void> }).runSql(
+    `update chat_events set envelope_json = json_set(envelope_json, '$.signature', 'forged') where log_scope_id = '${other.replace(/'/g, "''")}';`);
+  assert.equal(await machineSync.repairGap({ originId: s.desktop.identity.originId, logScopeId: other, fromSeq: 1, toSeq: 1 }), "unavailable");
+  assert.equal(await machine.storage.deviceEvents().appliedHead(s.desktop.identity.originId, other), 0);
+});
+
+test("passing over what the hub forgot stops at what this device already holds", async (t) => {
+  const s = await setup(t);
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine, "room-1");
+  const scope = `device:room-1:${JSON.stringify(["chat-pp", "terminal:run-pp"])}`;
+  for (const n of [1, 2, 3, 4]) await s.desktop.log.appendLocalEvent({ conversationId: "chat-pp", logScopeId: scope, kind: "machine.turn.cancel", payload: { n } });
+  await pushAll(s.link(s.desktop, []), s, 4);
+  // This device holds 3 and 4, waiting on 1 and 2; the hub forgot all four.
+  const held = await s.hubStore.storage.hub().chainEvents(s.desktop.identity.originId, scope, 3, 4, 10);
+  for (const item of held) await machine.storage.appendChatEvent(item.event, { ingress: { deviceId: s.desktop.identity.originId, channelId: "room-1" } });
+  await s.hubStore.storage.hub().recordRead(s.desktop.identity.originId, 4, 4, { from: 0, count: 0 }, new Date().toISOString());
+  await s.hubStore.storage.hub().recordRead(machine.identity.originId, 4, 4, { from: 0, count: 0 }, new Date().toISOString());
+  await new HubRetention({ storage: s.hubStore.storage, config: { ...HUB_RETENTION_DEFAULTS }, now: () => Date.now() + 2 * DAY }).runOnce();
+  const machineSync = s.link(machine, [], { deliver: async () => "delivered" });
+  assert.equal(await machineSync.repairGap({ originId: s.desktop.identity.originId, logScopeId: scope, fromSeq: 1, toSeq: 2 }), "skipped");
+  assert.equal(await machine.storage.deviceEvents().appliedHead(s.desktop.identity.originId, scope), 2, "up to what it holds, not past it");
+  assert.deepEqual((await machine.storage.deviceEvents().ready("room-1")).map((event) => event.originSeq), [3], "what it holds still applies");
+});
+
+test("a device whose chain start is gone sends it to a hub set up again from where it still holds it", async (t) => {
+  const s = await setup(t);
+  const scope = `device:room-1:${JSON.stringify(["chat-cs", "actions"])}`;
+  for (const n of [1, 2, 3]) await s.desktop.log.appendLocalEvent({ conversationId: "chat-cs", logScopeId: scope, kind: "machine.settings.sealed", payload: { n } });
+  // The first one was forgotten here (pushed long ago to a hub that is gone).
+  await (s.desktop.storage as unknown as { runSql(sql: string): Promise<void> }).runSql(
+    `delete from chat_events where log_scope_id = '${scope.replace(/'/g, "''")}' and origin_seq = 1;`);
+  const logs: string[] = [];
+  await pushAll(s.link(s.desktop, [], { log: (event) => logs.push(event) }), s, 2);
+  assert.ok(logs.includes("hub.sync.chain-anchored"));
+  const pulled = await s.hubStore.storage.hub().pull(0, 10);
+  assert.deepEqual(pulled.events.map((item) => item.event.originSeq), [2, 3]);
+  assert.equal((await s.hubStore.storage.hub().chainMark(s.desktop.identity.originId, scope))?.originSeq, 1);
 });

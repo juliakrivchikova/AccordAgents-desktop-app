@@ -1,6 +1,7 @@
 import type { HubDevice } from "../shared/hubProtocol";
 import type { HubPruneResult, HubReaderFloor } from "../main/services/hubStorage";
 import type { StorageService } from "../main/services/storage";
+import { hubPairChannelId } from "../main/services/hubChannels";
 
 const HOUR_MS = 60 * 60_000;
 const DAY_MS = 24 * HOUR_MS;
@@ -141,14 +142,24 @@ export class HubRetention {
     const config = this.config;
     const now = this.now();
     const cutoff = (ms: number): string => new Date(now - ms).toISOString();
-    const floors = readerFloors(await hub.devices(), await hub.deviceReads(), await hub.readerFloors(), await hub.pairAuthors());
+    const devices = await hub.devices();
+    const reads = await hub.deviceReads();
+    const authors = await hub.pairAuthors();
+    // Readers' floors as they stand now: read again before every batch, so a
+    // reader that starts again meanwhile is not passed by what was picked.
+    const current = async () => readerFloors(devices, reads, await hub.readerFloors(), authors);
+    const floors = await current();
     const report: HubRetentionReport = {
       chatChanges: { events: 0, bytes: 0 }, chatActions: { events: 0, bytes: 0 }, pairs: { events: 0, bytes: 0 },
       blobs: { deleted: 0, bytes: 0 }, log: { events: 0, bytes: 0 }, sharedFloor: floors.shared
     };
-    const drain = async (batch: () => Promise<HubPruneResult>, into: HubPruneResult): Promise<void> => {
+    const most = config.batch * config.maxBatches;
+    // One look per rule picks what may go; batches then forget it.
+    const drain = async (collect: () => Promise<number>, into: HubPruneResult): Promise<void> => {
+      if (this.closed || await collect() === 0) return;
       for (let index = 0; index < config.maxBatches && !this.closed; index += 1) {
-        const result = await batch();
+        const now = await current();
+        const result = await hub.pruneCandidates(now.shared, now.pairs, config.batch);
         into.events += result.events;
         into.bytes += result.bytes;
         if (result.events < config.batch) return;
@@ -157,10 +168,10 @@ export class HubRetention {
       }
     };
     if (floors.shared > 0) {
-      await drain(() => hub.pruneChatChanges(floors.shared, cutoff(config.chatChangesMs), config.batch), report.chatChanges);
-      await drain(() => hub.pruneChatActions(floors.shared, cutoff(config.chatActionsMs), config.batch), report.chatActions);
+      await drain(() => hub.collectChatChanges(floors.shared, cutoff(config.chatChangesMs), most), report.chatChanges);
+      await drain(() => hub.collectChatActions(floors.shared, cutoff(config.chatActionsMs), most), report.chatActions);
     }
-    await drain(() => hub.prunePairEvents(floors.pairs, cutoff(config.pairMs), cutoff(config.runMs), config.batch), report.pairs);
+    await drain(() => hub.collectPairEvents(floors.pairs, cutoff(config.pairMs), cutoff(config.runMs), most), report.pairs);
     if (!this.closed) {
       // The order is small once kept short: one look reaches most of it.
       const blobs = await this.options.storage.deviceEventBlobs().collectOrphans({ now, graceMs: config.blobGraceMs, scanRows: config.blobScanRows });
@@ -184,50 +195,60 @@ export class HubRetention {
  * every device that has read here, and machines the desktop says read it
  * (a machine still on a relay does not, and holds nothing). A reader that
  * has not read yet is kept for from where it was set up. Chat changes and
- * chat actions are read by all of them; a channel between the desktop and a
- * machine by those two, the machine known from the roster or from what it
- * wrote there. A machine taken off the roster no longer holds its channel;
- * a channel whose machine is not known is kept whole.
+ * chat actions are read by all of them. A channel between two devices is
+ * read by its two ends: the desktop and a machine it enrolled (`rv-...`,
+ * the machine known from the roster or from what it wrote there), or any
+ * two other devices (`pair-...`, named after both, which the hub computes
+ * for every two devices on the roster). A device taken off the roster no
+ * longer holds its channels; a channel with an end that does not read here
+ * (a phone, a machine that never read) or whose ends are not known is kept
+ * whole.
  */
 export function readerFloors(
   devices: HubDevice[],
   reads: Array<{ deviceId: string; reader: boolean; rendezvousId?: string }>,
   floors: HubReaderFloor[],
   pairAuthors: Array<{ rendezvousId: string; originId: string }>
-): { shared: number; pairs: Map<string, number>; readers: string[] } {
+): { shared: number; pairs: Map<string, number> } {
   const byId = new Map(devices.map((device) => [device.deviceId, device]));
-  const floorById = new Map(floors.map((row) => [row.deviceId, row.floor]));
+  // A reader that does not say what it holds (an older program) holds
+  // everything while it reads: what it holds cannot be told apart.
+  const floorById = new Map(floors.map((row) => [row.deviceId, row.reports ? row.floor : 0]));
   const readFlag = new Map(reads.map((row) => [row.deviceId, row]));
-  const readers = devices.filter((device) => device.role !== "phone" &&
-    (device.role === "owner" || floorById.has(device.deviceId) || readFlag.get(device.deviceId)?.reader === true));
+  const readers = new Set(devices.filter((device) => device.role !== "phone" &&
+    (device.role === "owner" || floorById.has(device.deviceId) || readFlag.get(device.deviceId)?.reader === true)).map((device) => device.deviceId));
   const floorOf = (deviceId: string): number => floorById.get(deviceId) ?? 0;
-  const shared = readers.length ? Math.min(...readers.map((device) => floorOf(device.deviceId))) : 0;
-  const desktops = readers.filter((device) => device.role === "owner" || device.role === "desktop");
-  const desktopFloor = desktops.length ? Math.min(...desktops.map((device) => floorOf(device.deviceId))) : 0;
-  const machinesOf = new Map<string, Set<string>>();
+  const shared = readers.size ? Math.min(...[...readers].map(floorOf)) : 0;
+  const desktops = [...readers].filter((id) => byId.get(id)?.role === "owner" || byId.get(id)?.role === "desktop");
+  const desktopFloor = desktops.length ? Math.min(...desktops.map(floorOf)) : 0;
+  const ends = new Map<string, Set<string>>();
   const note = (rid: string, deviceId: string): void => {
-    const set = machinesOf.get(rid) ?? new Set<string>();
+    const set = ends.get(rid) ?? new Set<string>();
     set.add(deviceId);
-    machinesOf.set(rid, set);
+    ends.set(rid, set);
   };
   for (const row of reads) if (row.rendezvousId) note(row.rendezvousId, row.deviceId);
-  for (const row of pairAuthors) {
-    const role = byId.get(row.originId)?.role;
-    // A desktop's own writing says nothing about which machine is the other end.
-    if (role === "owner" || role === "desktop" || role === "phone") continue;
-    note(row.rendezvousId, row.originId);
+  for (const row of pairAuthors) note(row.rendezvousId, row.originId);
+  for (const [index, first] of devices.entries()) {
+    for (const second of devices.slice(index + 1)) {
+      if (first.role === "owner" || second.role === "owner") continue;
+      const rid = hubPairChannelId(first.deviceId, second.deviceId);
+      note(rid, first.deviceId);
+      note(rid, second.deviceId);
+    }
   }
   const pairs = new Map<string, number>();
-  for (const [rid, ids] of machinesOf) {
-    const onRoster = [...ids].filter((id) => byId.get(id)?.role === "machine");
-    if (onRoster.length === 0) {
-      // Its machine was removed: only the desktop still reads this channel.
-      pairs.set(rid, desktopFloor);
-      continue;
-    }
-    const machineFloor = Math.min(...onRoster.map((id) => readers.some((device) => device.deviceId === id) ? floorOf(id) : 0));
-    pairs.set(rid, Math.min(desktopFloor, machineFloor));
+  for (const [rid, ids] of ends) {
+    const enrolled = !rid.startsWith("pair-");
+    // The desktop's own writing in a machine's channel says nothing about
+    // which machine is at its other end.
+    const members = [...ids].filter((id) => !(enrolled && (byId.get(id)?.role === "owner" || byId.get(id)?.role === "desktop")));
+    const present = members.filter((id) => byId.has(id));
+    let floor = enrolled ? desktopFloor : Number.POSITIVE_INFINITY;
+    for (const id of present) floor = Math.min(floor, byId.get(id)?.role !== "phone" && readers.has(id) ? floorOf(id) : 0);
+    // Every end taken off the roster: what is left is the desktop's to read.
+    if (present.length === 0) floor = desktopFloor;
+    if (Number.isFinite(floor) && floor > 0) pairs.set(rid, floor);
   }
-  for (const [rid, floor] of pairs) if (floor <= 0) pairs.delete(rid);
-  return { shared, pairs, readers: readers.map((device) => device.deviceId) };
+  return { shared, pairs };
 }

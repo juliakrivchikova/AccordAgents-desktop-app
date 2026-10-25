@@ -19870,7 +19870,15 @@ export class ChatService {
    * announced (it is nobody's new change), and a chat deleted here stays
    * deleted.
    */
-  async mergeServerCopy(copied: CopiedConversation, options: { desktopOriginId: string; localOriginId?: string }): Promise<void> {
+  async mergeServerCopy(copied: CopiedConversation, options: {
+    desktopOriginId: string;
+    localOriginId?: string;
+    /** The desktop: the device a chat's own fields (title, members and their
+     *  permissions, the project) come from. From the copy it takes only the
+     *  messages it does not have yet, into chats it has, never those fields:
+     *  its own changes the server has not folded yet would be rolled back. */
+    ownsSharedFields?: boolean;
+  }): Promise<void> {
     if (this.deletedConversationIds.has(copied.id) || await this.storage.conversationTombstones?.().isDeleted(copied.id)) return;
     const merge = (local: Conversation | undefined): Conversation => mergeCopiedConversation(local, copied, {
       desktopOriginId: options.desktopOriginId,
@@ -19880,10 +19888,22 @@ export class ChatService {
     const existing = await this.storage.getConversation(copied.id);
     if (existing && existing.kind !== "chat") return;
     if (!existing) {
+      if (options.ownsSharedFields) return;
       await this.saveConversation(merge(undefined), { emitChanges: false });
       return;
     }
     await this.withChatMutation(existing, async () => {
+      if (options.ownsSharedFields) {
+        const known = new Set(existing.messages.map((message) => message.id));
+        const added = merge(existing).messages.filter((message) => !known.has(message.id));
+        if (added.length === 0) return;
+        existing.messages = [...existing.messages, ...added]
+          .map((message, index) => ({ message, index }))
+          .sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.index - right.index)
+          .map((entry) => entry.message);
+        await this.saveConversation(existing, { emitChanges: false });
+        return;
+      }
       const merged = merge(existing);
       existing.title = merged.title;
       existing.messages = merged.messages;

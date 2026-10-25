@@ -18,7 +18,7 @@
  * A device that is not in the roster gets no channel, so its packets are
  * dropped before any signature or command is considered.
  */
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { stableJson } from "../../shared/stableJson";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { DeviceEventApplyOutcome, DeviceEventGap } from "../../shared/deviceEventDelivery";
@@ -34,6 +34,7 @@ import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
 import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
 import type { StorageService } from "./storage";
 import { CHAT_CHANGES_EVENT_KIND } from "./chatChanges";
+import { hubPairChannelId } from "./hubChannels";
 
 export interface MachinePeerFabricOptions {
   /** The User's hub carries every channel's events (see DeviceEventChannel). */
@@ -297,8 +298,13 @@ export class MachinePeerFabric {
    */
   private channelIdFor(peer: TrustedPeerAccess): string {
     if (!this.options.hubMode) return this.meetingRoomFor(peer);
-    const [first, second] = [this.options.selfDeviceId, peer.deviceId].sort();
-    return `pair-${createHash("sha256").update(`${first}\n${second}`).digest("hex").slice(0, 32)}`;
+    return hubPairChannelId(this.options.selfDeviceId, peer.deviceId);
+  }
+
+  /** Through the hub: the scopes of this machine's channels with its peers. */
+  hubChannelScopes(): string[] {
+    if (!this.options.hubMode) return [];
+    return [...this.connections.values()].map((connection) => `device:${this.channelIdFor(connection.peer)}:`);
   }
 
   /** Hands an event from the hub's order to the channel of the peer that

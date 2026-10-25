@@ -255,7 +255,7 @@ test("with the hub, a device forgets its own channel events once pushed and a we
   const db = await database();
   try {
     const log = new ChatEventLogService(db.storage);
-    const room = (n: number) => ({ conversationId: "c", logScopeId: `device:room-1:${JSON.stringify(["c", "actions"])}`, kind: "machine.turn.request", payload: { n } });
+    const room = (n: number) => ({ conversationId: "c", logScopeId: `device:room-1:${JSON.stringify(["c", "actions"])}`, kind: "machine.settings.sealed", payload: { n } });
     const e1 = (await log.appendLocalEvent(room(1))).event;
     // A recipient on the relay still waits for this one.
     const e2 = (await log.appendLocalEvent({ ...room(2), recipients: [recipient] })).event;
@@ -273,12 +273,17 @@ test("with the hub, a device forgets its own channel events once pushed and a we
     assert.equal(await db.storage.getChatEvent(e3.eventId), undefined);
     assert.ok(await db.storage.getChatEvent(e4.eventId), "not pushed yet, and the chain's newest");
     assert.ok(await db.storage.getChatEvent(relay.eventId) && await db.storage.getChatEvent(relayNext.eventId), "a relay channel is not the hub's");
+    // A command and a result are proof of what was sent or done: kept.
+    const command = (await log.appendLocalEvent({ conversationId: "c", logScopeId: `device:room-1:${JSON.stringify(["c", "actions"])}`, kind: "machine.turn.request", payload: { runId: "r" } })).event;
+    await log.appendLocalEvent(room(6));
+    await db.sql(`update chat_events set received_at = '2026-01-01T00:00:00.000Z';`);
+    await db.storage.deviceEvents().pruneOwnDeviceEvents(origin, { pushedThroughRowid: 1_000, cutoffIso: now, scopePrefixes: ["device:room-1:"] });
+    assert.ok(await db.storage.getChatEvent(command.eventId), "a turn's command stays");
     // Young events stay whatever their state.
     assert.equal(await db.storage.deviceEvents().pruneOwnDeviceEvents(origin, { pushedThroughRowid: 1_000, cutoffIso: "2025-01-01T00:00:00.000Z", scopePrefixes: ["device:room-1:"] }), 0);
     // The next event still continues the chain.
-    const e5 = (await log.appendLocalEvent(room(5))).event;
-    assert.equal(e5.originSeq, 5);
-    assert.equal(e5.prevHash, e4.eventHash);
+    const e7 = (await log.appendLocalEvent(room(7))).event;
+    assert.equal(e7.originSeq, 7);
   } finally { await db.cleanup(); }
 });
 
@@ -332,5 +337,23 @@ test("a body no stored event refers to is deleted after a whole look at the even
     assert.ok(!left.includes(orphan.blobHash));
     assert.equal((await (db.storage as any).queryJson("select count(*) as n from device_event_blob_fragments where blob_hash = '" + orphan.blobHash + "';"))[0].n, 0);
     assert.deepEqual(await blobs.hydrate(kept), { text: "k".repeat(200_000) });
+  } finally { await db.cleanup(); }
+});
+
+test("a body referred to again by an event written while the look was under way is kept", async () => {
+  const db = await database();
+  try {
+    const blobs = db.storage.deviceEventBlobs();
+    const log = new ChatEventLogService(db.storage);
+    for (let n = 0; n < 4; n += 1) await log.appendLocalEvent({ conversationId: "c", logScopeId: "c", kind: "message.created", payload: { n } });
+    // Stored before the look began; its event comes only after the look's events.
+    const late = await blobs.prepare({ text: "l".repeat(200_000) });
+    const t0 = Date.parse(now);
+    let result = await blobs.collectOrphans({ now: t0, graceMs: 60_000, scanRows: 100 });
+    await log.appendLocalEvent({ conversationId: "c", logScopeId: "chat-changes:c", kind: "chat.changes", payload: late });
+    result = await blobs.collectOrphans({ now: t0 + 120_000, graceMs: 60_000, scanRows: 100 });
+    assert.equal(result.swept, true);
+    assert.equal(result.deleted, 0);
+    assert.deepEqual(await blobs.hydrate(late), { text: "l".repeat(200_000) });
   } finally { await db.cleanup(); }
 });

@@ -894,10 +894,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
    * An event the hub's order brought, to the channel of the machine that
    * wrote it. A machine whose channel is not set up yet (this desktop just
    * started, the machine has not greeted it) has the event held for it;
-   * traffic between two other devices is not this desktop's.
+   * traffic between two other devices is not this desktop's. `fetchBody`
+   * stores the event's large body, fetched only for an event one of this
+   * desktop's machine channels takes.
    */
-  /** `fetchBody` stores the event's large body, fetched only for an event
-   *  one of this desktop's machine channels takes. */
   async receiveFromHub(event: ChatEventEnvelope, fetchBody?: () => Promise<void>): Promise<HubDeliverOutcome> {
     for (const connection of this.connections.values()) {
       if (!connection.eventChannel?.accepts(event)) continue;

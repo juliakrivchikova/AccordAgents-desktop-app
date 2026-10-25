@@ -43,7 +43,8 @@ interface BlobGcPass {
 
 /** A blob reference is a short payload: longer ones are never looked into. */
 const BLOB_REFERENCE_PAYLOAD_MAX = 512;
-const BLOB_REFERENCE_PREFIX = '{"type":"device.event.blob"';
+/** Unreferenced bodies deleted per transaction. */
+const ORPHANS_PER_TRANSACTION = 25;
 
 interface Database {
   init(): Promise<void>;
@@ -195,26 +196,38 @@ export class DeviceEventBlobStorage {
       if (pass.cursor < pass.endRowid) return { scanned, deleted: 0, bytes: 0, swept: false };
     }
     if (options.now - pass.startedAt < options.graceMs) return { scanned: 0, deleted: 0, bytes: 0, swept: false };
-    // Events written while the pass ran are looked at now, then the bodies
-    // nothing refers to go, in one transaction with that last look.
-    const [result] = await this.database.query<{ deleted: number; bytes: number | null }>(`
-      pragma synchronous = full; pragma fullfsync = on;
-      begin immediate;
-      ${references(pass.endRowid)}
-      create temp table if not exists blob_gc_orphans(blob_hash text primary key, byte_length integer);
-      delete from temp.blob_gc_orphans;
-      insert into temp.blob_gc_orphans(blob_hash, byte_length)
-        select blob_hash, byte_length from device_event_blobs
-        where rowid <= ${Math.floor(pass.blobRowid)} and blob_hash not in (select blob_hash from device_event_blob_gc_refs);
-      delete from device_event_blob_fragments where blob_hash in (select blob_hash from temp.blob_gc_orphans);
-      delete from device_event_blobs where blob_hash in (select blob_hash from temp.blob_gc_orphans);
-      delete from device_event_blob_gc where key = 'pass';
-      delete from device_event_blob_gc_refs;
-      select count(*) as deleted, sum(byte_length) as bytes from temp.blob_gc_orphans;
-      delete from temp.blob_gc_orphans;
-      commit;
-    `);
-    return { scanned: 0, deleted: Number(result?.deleted ?? 0) || 0, bytes: Number(result?.bytes ?? 0) || 0, swept: true };
+    // The bodies nothing refers to go a few at a time, each batch in one
+    // transaction with a look at the events written since the last one (a
+    // body may have been referred to again meanwhile: bodies are shared by
+    // content).
+    let lastLook = pass.endRowid;
+    let deleted = 0;
+    let bytes = 0;
+    for (;;) {
+      const [result] = await this.database.query<{ deleted: number; bytes: number | null; seen: number | null }>(`
+        pragma synchronous = full; pragma fullfsync = on;
+        begin immediate;
+        ${references(lastLook)}
+        create temp table if not exists blob_gc_orphans(blob_hash text primary key, byte_length integer);
+        delete from temp.blob_gc_orphans;
+        insert into temp.blob_gc_orphans(blob_hash, byte_length)
+          select blob_hash, byte_length from device_event_blobs
+          where rowid <= ${Math.floor(pass.blobRowid)} and blob_hash not in (select blob_hash from device_event_blob_gc_refs)
+          limit ${ORPHANS_PER_TRANSACTION};
+        delete from device_event_blob_fragments where blob_hash in (select blob_hash from temp.blob_gc_orphans);
+        delete from device_event_blobs where blob_hash in (select blob_hash from temp.blob_gc_orphans);
+        select count(*) as deleted, sum(byte_length) as bytes, (select max(rowid) from chat_events) as seen from temp.blob_gc_orphans;
+        delete from temp.blob_gc_orphans;
+        commit;
+      `);
+      deleted += Number(result?.deleted ?? 0) || 0;
+      bytes += Number(result?.bytes ?? 0) || 0;
+      lastLook = Math.max(lastLook, Number(result?.seen ?? 0) || 0);
+      if ((Number(result?.deleted ?? 0) || 0) < ORPHANS_PER_TRANSACTION) break;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await this.database.execute(`delete from device_event_blob_gc where key = 'pass'; delete from device_event_blob_gc_refs;`);
+    return { scanned: 0, deleted, bytes, swept: true };
   }
 
   private byteLength?: Promise<string>;

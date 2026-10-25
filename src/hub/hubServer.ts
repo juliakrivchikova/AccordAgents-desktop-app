@@ -69,6 +69,8 @@ const HEARTBEAT_MS = 30_000;
 /** A device that cannot keep up with its room is disconnected rather than
  *  buffered without end; it reconnects and continues. */
 const ROOM_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+/** Pages of the chat copy (/v1/snapshot?copy=1) built at the same time. */
+const COPY_PAGES_IN_FLIGHT_MAX = 1;
 /** Requests slower than this are logged; the rest only count. */
 const SLOW_REQUEST_MS = 500;
 /** Search text and cursors are plain text. */
@@ -98,6 +100,8 @@ export class HubServer {
   private readonly nonces = new HubNonceCache();
   /** Relay request bodies being read now, by their declared size. */
   private relayBodyBytes = 0;
+  /** Pages of the chat copy being built now. */
+  private copyPagesInFlight = 0;
   /** Live head sockets and the device each one belongs to. */
   private readonly live = new Map<LiveSocket, string>();
   private readonly sockets: LiveSocketServer = new WebSocketServer({ noServer: true, maxPayload: 1024 });
@@ -441,8 +445,13 @@ export class HubServer {
       const body = await readBody(request, large ? HUB_MAX_BODY_BYTES : HUB_MAX_SMALL_BODY_BYTES);
       const device = await this.authenticate(request.method ?? "GET", body, request.headers.authorization, pathWithQuery, checked);
       if (request.method === "POST" && url.pathname === "/v1/events") {
-        const parsed = parseJson(body) as { events?: unknown };
-        return json(response, 200, await this.options.log.push(device, parsed?.events));
+        const parsed = parseJson(body) as { events?: unknown; anchor?: unknown };
+        const anchor = parsed?.anchor;
+        if (anchor !== undefined && (!Array.isArray(anchor) || anchor.length > 200 ||
+            !anchor.every((scope) => typeof scope === "string" && scope.length > 0 && scope.length <= 512 && !CONTROL_CHARACTER.test(scope)))) {
+          throw new HubRequestError(400, "Invalid anchor.");
+        }
+        return json(response, 200, await this.options.log.push(device, parsed?.events, anchor as string[] | undefined));
       }
       if (request.method === "GET" && url.pathname === "/v1/events") {
         const after = Number(url.searchParams.get("after") ?? "0");
@@ -474,14 +483,27 @@ export class HubServer {
         const scopes = (url.searchParams.get("scopes") ?? "").split(",").filter(Boolean);
         const atMostText = url.searchParams.get("atMost");
         const atMost = atMostText === null ? undefined : Number(atMostText);
+        const sinceText = url.searchParams.get("since");
+        const since = sinceText === null ? undefined : Number(sinceText);
+        if (since !== undefined && (!Number.isSafeInteger(since) || since < 0)) throw new HubRequestError(400, "Invalid snapshot request.");
         if ((page && (page.length > 2048 || CONTROL_CHARACTER.test(page))) || scopes.length > 200 ||
             scopes.some((scope) => scope.length > 512 || CONTROL_CHARACTER.test(scope)) ||
             (atMost !== undefined && (!Number.isSafeInteger(atMost) || atMost < 0))) throw new HubRequestError(400, "Invalid snapshot request.");
         const chat = url.searchParams.get("chat") ?? undefined;
         if (chat !== undefined && (!chat || chat.length > 256 || CONTROL_CHARACTER.test(chat))) throw new HubRequestError(400, "Invalid snapshot request.");
-        const snapshot = await this.options.log.snapshot(device, {
-          ...(page ? { page } : {}), scopes, ...(atMost !== undefined ? { atMost } : {}), copy: url.searchParams.get("copy") === "1", ...(chat ? { chat } : {})
-        });
+        const copy = url.searchParams.get("copy") === "1";
+        // A page of the copy costs the small server about a hundred MB while
+        // it is built: one at a time, the others asked to come back.
+        if (copy && this.copyPagesInFlight >= COPY_PAGES_IN_FLIGHT_MAX) throw new HubRequestError(503, "The hub is busy; try again.");
+        if (copy) this.copyPagesInFlight += 1;
+        let snapshot;
+        try {
+          snapshot = await this.options.log.snapshot(device, {
+            ...(page ? { page } : {}), scopes, ...(atMost !== undefined ? { atMost } : {}), ...(since !== undefined ? { since } : {}), copy, ...(chat ? { chat } : {})
+          });
+        } finally {
+          if (copy) this.copyPagesInFlight -= 1;
+        }
         if (!page) this.options.debugLog?.("hub.snapshot.started", { deviceId: device.deviceId, hubSeq: snapshot.hubSeq, copy: url.searchParams.get("copy") === "1", ...(chat ? { chat } : {}) });
         return json(response, 200, { ...snapshot, hubId: this.options.hubId });
       }
@@ -635,11 +657,13 @@ function readReport(params: URLSearchParams): (HubReadReport & { peek?: boolean 
   const held = Number(params.get("held"));
   const heldSince = Number(params.get("heldSince") ?? "0");
   const heldCount = Number(params.get("heldCount") ?? "0");
-  if (![held, heldSince, heldCount].every((value) => Number.isSafeInteger(value) && value >= 0)) throw new HubRequestError(400, "Invalid read report.");
+  // heldSince is a time: no later than any date can be.
+  if (![held, heldSince, heldCount].every((value) => Number.isSafeInteger(value) && value >= 0) || heldSince > MAX_DATE_MS) throw new HubRequestError(400, "Invalid read report.");
   return { held, heldSince, heldCount, ...(params.get("peek") === "1" ? { peek: true } : {}) };
 }
 
 const RENDEZVOUS_ID = /^[A-Za-z0-9._-]{1,128}$/;
+const MAX_DATE_MS = 8_640_000_000_000_000;
 
 function validRoster(value: unknown): HubDevice[] {
   const devices = (value as HubRosterRequest | undefined)?.devices;

@@ -336,15 +336,18 @@ export class MachineHostService {
 
   /** An event the hub's order brought: to the desktop's channel when the
    *  desktop (or a machine's chat change it would forward) wrote it, else to
-   *  the channel of the peer that did. */
-  /** An event the hub's order brought: to the owner's channel, or to the
-   *  channel of another of the owner's devices. */
-  /** `fetchBody` stores the event's large body, fetched only for an event
-   *  one of this machine's channels takes. */
+   *  the channel of the peer that did. `fetchBody` stores the event's large
+   *  body, fetched only for an event one of this machine's channels takes. */
   async receiveFromHub(event: ChatEventEnvelope, fetchBody?: () => Promise<void>): Promise<HubDeliverOutcome> {
     await this.initializeOwnerChannel();
     if (this.eventChannel?.accepts(event)) return deliverToChannel(this.eventChannel, event, fetchBody);
     return this.peers.receiveFromHub(event, fetchBody);
+  }
+
+  /** Through the hub: this machine's channels' scopes, with the desktop and
+   *  with its peers (where it starts again, it starts before their events). */
+  hubChannelScopes(): string[] {
+    return [`device:${this.options.pairing.rendezvousId}:`, ...this.peers.hubChannelScopes()];
   }
 
   applyApprovalAction(event: ChatEventEnvelope, payload: import("../../shared/chatActionEvents").ChatActionPayload): Promise<import("../../shared/machineLink").MachineApprovalResultBody> {
