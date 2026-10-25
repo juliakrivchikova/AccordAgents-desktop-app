@@ -23,6 +23,54 @@ export type ChatTimelineRow =
   | { type: "approval"; id: string; approval: ChatAppToolApproval }
   | { type: "thinking"; id: string; row: ChatThinkingRow };
 
+/**
+ * The rows of the main timeline: messages and resolved approval cards in time
+ * order, the "Load older messages" row first while older messages exist, and the
+ * thinking rows last while a run is active.
+ *
+ * Approvals come from chat metadata, which holds all of them, while messages are
+ * a window of the newest pages. An approval older than the oldest loaded message
+ * belongs to a page that is not loaded yet; it stays out until that page loads.
+ * Otherwise every such card was stacked at the top of the window, out of its
+ * place in time, and each older page then had to be slotted in above and between
+ * them, reshuffling what the User was looking at.
+ */
+export function chatTimelineRows(input: {
+  hasOlderMessages: boolean;
+  olderMessagesLoading: boolean;
+  isRunning: boolean;
+  loadedMessages: readonly ChatMessage[];
+  topLevelMessages: readonly ChatMessage[];
+  resolvedApprovals: readonly ChatAppToolApproval[];
+  thinkingRows: readonly ChatThinkingRow[];
+}): ChatTimelineRow[] {
+  const rows: ChatTimelineRow[] = [];
+  const windowed = input.hasOlderMessages || input.olderMessagesLoading;
+  if (windowed) {
+    rows.push({ type: "load-older", id: "load-older" });
+  }
+  let loadedFrom: string | undefined;
+  if (input.hasOlderMessages) {
+    for (const message of input.loadedMessages) {
+      if (loadedFrom === undefined || message.createdAt < loadedFrom) {
+        loadedFrom = message.createdAt;
+      }
+    }
+  }
+  const entries: Array<{ createdAt: string; row: ChatTimelineRow }> = [
+    ...input.topLevelMessages.map((message) => ({ createdAt: message.createdAt, row: { type: "message" as const, id: message.id, message } })),
+    ...input.resolvedApprovals
+      .filter((approval) => loadedFrom === undefined || approval.createdAt >= loadedFrom)
+      .map((approval) => ({ createdAt: approval.createdAt, row: { type: "approval" as const, id: approval.id, approval } }))
+  ];
+  entries.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  rows.push(...entries.map((entry) => entry.row));
+  if (input.isRunning) {
+    rows.push(...input.thinkingRows.map((row) => ({ type: "thinking" as const, id: row.key, row })));
+  }
+  return rows;
+}
+
 export function chatThinkingRows(progress: ReviewProgress[]): ChatThinkingRow[] {
   const rows = new Map<string, ChatThinkingRow>();
   for (const item of progress) {

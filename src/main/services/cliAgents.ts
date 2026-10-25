@@ -1491,18 +1491,29 @@ export class CliAgentRunner {
     }
   }
 
+  /**
+   * Reads the latest context usage from the CLI's own session log.
+   *
+   * By default a missing log is retried for a moment, because right after a turn
+   * or a compaction the CLI may not have written it yet. `waitForLog: false`
+   * reads once: opening a chat refreshes usage for every session it holds, and
+   * the logs of old sessions are gone for good (Claude Code deletes them after
+   * its cleanup period), so waiting there only delayed every open.
+   */
   async contextUsageForSession(
     participant: ParticipantConfig,
-    sessionId: string | undefined
+    sessionId: string | undefined,
+    options: { waitForLog?: boolean } = {}
   ): Promise<AgentContextUsage | undefined> {
     if (!sessionId) {
       return undefined;
     }
+    const attempts = options.waitForLog === false ? 1 : SESSION_LOG_RETRIES;
     if (participant.kind === "codex-cli") {
-      return this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant);
+      return this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant, attempts);
     }
     if (participant.kind === "claude-code") {
-      return this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant);
+      return this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant, attempts);
     }
     if (participant.kind === "gemini-cli") {
       return this.geminiSessionUsage.get(sessionId);
@@ -8094,14 +8105,15 @@ export class CliAgentRunner {
 
   private async extractCodexSessionLogContextUsageWithRetry(
     sessionId: string | undefined,
-    participant: ParticipantConfig
+    participant: ParticipantConfig,
+    attempts = SESSION_LOG_RETRIES
   ): Promise<AgentContextUsage | undefined> {
     if (!sessionId) {
       return undefined;
     }
-    for (let attempt = 0; attempt < SESSION_LOG_RETRIES; attempt += 1) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       const usage = await this.extractCodexSessionLogContextUsage(sessionId, participant);
-      if (usage || attempt === SESSION_LOG_RETRIES - 1) {
+      if (usage || attempt === attempts - 1) {
         return usage;
       }
       await this.delay(SESSION_LOG_RETRY_MS);
@@ -8122,14 +8134,15 @@ export class CliAgentRunner {
 
   private async extractClaudeSessionLogContextUsageWithRetry(
     sessionId: string | undefined,
-    participant: ParticipantConfig
+    participant: ParticipantConfig,
+    attempts = SESSION_LOG_RETRIES
   ): Promise<AgentContextUsage | undefined> {
     if (!sessionId) {
       return undefined;
     }
-    for (let attempt = 0; attempt < SESSION_LOG_RETRIES; attempt += 1) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       const usage = await this.extractClaudeSessionLogContextUsage(sessionId, participant);
-      if (usage || attempt === SESSION_LOG_RETRIES - 1) {
+      if (usage || attempt === attempts - 1) {
         return usage;
       }
       await this.delay(SESSION_LOG_RETRY_MS);

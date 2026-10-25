@@ -5,6 +5,7 @@ import type { ChatMessage, Conversation, ReviewProgress } from "../../../shared/
 import { focusRenderedMessage } from "../content/markdown-text";
 import type { ChatTimelineRow } from "./chat-conversation-data";
 import type { ChatMessageFocusRequest } from "./chat-conversation-types";
+import { shouldLoadOlderMessages, useAnchoredVirtualItems, useOlderMessagesTopUp } from "./chat-timeline-scroll";
 import { useChatFocusNavigation } from "./use-chat-focus-navigation";
 
 type ThreadSummaryMap = Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>;
@@ -72,10 +73,14 @@ export function useChatConversationViewport(props: {
       return 56;
     },
     getItemKey: (index) => props.chatTimelineRows[index]?.id ?? index,
+    // A chat opens at its newest message: lay the first frame out at the end rather
+    // than at the top and then jump, which painted blank frames while opening.
+    initialOffset: () => (stickToBottomRef.current ? Number.MAX_SAFE_INTEGER : 0),
     overscan: 8,
     useFlushSync: false
   });
-  const chatVirtualItems = chatVirtualizer.getVirtualItems();
+  const chatVirtualItems = useAnchoredVirtualItems(chatVirtualizer, timelineRef, () => stickToBottomRef.current);
+  useOlderMessagesTopUp(timelineRef, props, () => stickToBottomRef.current);
   const focusNavigation = useChatFocusNavigation({
     viewRef,
     renderedMessageElement,
@@ -121,7 +126,7 @@ export function useChatConversationViewport(props: {
     } else if (hasRecentUserScrollIntent() || !stickToBottomRef.current) {
       detachFromBottom();
     }
-    if (timeline.scrollTop < 96 && props.hasOlderMessages && !props.olderMessagesLoading) {
+    if (shouldLoadOlderMessages(timeline) && props.hasOlderMessages && !props.olderMessagesLoading) {
       props.onLoadOlderMessages();
     }
   }

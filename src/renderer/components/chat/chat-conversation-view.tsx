@@ -32,6 +32,7 @@ import {
   chatSessionsByParticipant,
   chatThinkingRows,
   chatThreadSummaryMap,
+  chatTimelineRows as buildChatTimelineRows,
   chatTopLevelMessages,
   liveMessageProgressById
 } from "./chat-conversation-data";
@@ -152,22 +153,15 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     () => chatApprovalPlacement(pendingAppToolApprovals, visibleApprovalMessages),
     [pendingAppToolApprovals, visibleApprovalMessages]
   );
-  const chatTimelineRows = useMemo(() => {
-    const rows = [];
-    if (props.hasOlderMessages || props.olderMessagesLoading) {
-      rows.push({ type: "load-older" as const, id: "load-older" });
-    }
-    const entries = [
-      ...topLevelMessages.map((message) => ({ createdAt: message.createdAt, row: { type: "message" as const, id: message.id, message } })),
-      ...resolvedTimelineApprovals.map((approval) => ({ createdAt: approval.createdAt, row: { type: "approval" as const, id: approval.id, approval } }))
-    ];
-    entries.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-    rows.push(...entries.map((entry) => entry.row));
-    if (props.isRunning) {
-      rows.push(...thinkingRows.map((row) => ({ type: "thinking" as const, id: row.key, row })));
-    }
-    return rows;
-  }, [props.hasOlderMessages, props.isRunning, props.olderMessagesLoading, resolvedTimelineApprovals, thinkingRows, topLevelMessages]);
+  const chatTimelineRows = useMemo(() => buildChatTimelineRows({
+    hasOlderMessages: props.hasOlderMessages,
+    olderMessagesLoading: props.olderMessagesLoading,
+    isRunning: props.isRunning,
+    loadedMessages: props.conversation.messages,
+    topLevelMessages,
+    resolvedApprovals: resolvedTimelineApprovals,
+    thinkingRows
+  }), [props.conversation.messages, props.hasOlderMessages, props.isRunning, props.olderMessagesLoading, resolvedTimelineApprovals, thinkingRows, topLevelMessages]);
   const viewport = useChatConversationViewport({
     conversationId: props.conversation.id,
     messages: props.conversation.messages,

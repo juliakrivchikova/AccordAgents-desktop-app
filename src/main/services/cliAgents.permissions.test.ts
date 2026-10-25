@@ -26,6 +26,24 @@ function makeRunner(): CliAgentRunner {
   return new CliAgentRunner();
 }
 
+test("context usage for a session whose log is gone is read once when asked not to wait", async () => {
+  const runner = makeRunner();
+  const claude = { id: "claude-missing-log", kind: "claude-code" as const, label: "Claude" };
+  const reads: string[] = [];
+  (runner as unknown as { findClaudeSessionLogPath(sessionId: string): Promise<string | undefined> }).findClaudeSessionLogPath = async (sessionId) => {
+    reads.push(sessionId);
+    return undefined;
+  };
+
+  assert.equal(await runner.contextUsageForSession(claude, "gone-session", { waitForLog: false }), undefined);
+  assert.deepEqual(reads, ["gone-session"]);
+
+  // The default still waits for a log that may not be written yet (after a turn or a compaction).
+  reads.length = 0;
+  assert.equal(await runner.contextUsageForSession(claude, "fresh-session"), undefined);
+  assert.equal(reads.length, 4);
+});
+
 test("idle accounts for native operations before a warm session exists and releases failed operations", async () => {
   const runner = makeRunner();
   const participant = { id: "idle-native", kind: "codex-cli" as const, label: "Codex" };

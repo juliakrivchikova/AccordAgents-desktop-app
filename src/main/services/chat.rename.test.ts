@@ -817,6 +817,25 @@ test("hydrateContextUsage refreshes stale stored context usage for existing sess
   assert.equal(savedUsage?.[participant.id]?.usedTokens, 193_000);
 });
 
+test("hydrateContextUsage reads each session log once instead of waiting for missing logs", async () => {
+  // Opening a chat hydrates it. Old sessions' CLI logs are deleted by the CLI, and
+  // waiting for them (four attempts, 80 ms apart, per session) made every open of
+  // a big chat take a second.
+  const participant = chatParticipant({ model: "gpt-5.5" });
+  const conversation = chatConversation({
+    metadata: {
+      participants: [participant],
+      participantSessions: [chatSession(participant, "019ed183-1d77-7450-9070-6ea6f0b6dead")]
+    }
+  });
+  const contextUsageRequests: Array<{ sessionId: string | undefined; waitForLog: boolean | undefined }> = [];
+  const { service } = testService([conversation], { contextUsageRequests });
+
+  await service.hydrateContextUsage(conversation);
+
+  assert.deepEqual(contextUsageRequests, [{ sessionId: "019ed183-1d77-7450-9070-6ea6f0b6dead", waitForLog: false }]);
+});
+
 test("hydrateContextUsage does not overwrite newer stored context usage from a stale caller snapshot", async () => {
   const participant = chatParticipant({ model: "gpt-5.5" });
   const staleUsage: AgentContextUsage = {
@@ -952,6 +971,7 @@ function testService(conversationList: Conversation[], options: {
   closeSessions?: (conversationId: string) => Promise<void>;
   participantConfigs?: ChatParticipantConfig[];
   contextUsageBySession?: Record<string, AgentContextUsage | undefined>;
+  contextUsageRequests?: Array<{ sessionId: string | undefined; waitForLog: boolean | undefined }>;
   failSaves?: number;
 } = {}): {
   service: ChatService;
@@ -1005,7 +1025,12 @@ function testService(conversationList: Conversation[], options: {
     async detectAgents(): Promise<[]> {
       return [];
     },
-    async contextUsageForSession(_participant: unknown, sessionId: string | undefined): Promise<AgentContextUsage | undefined> {
+    async contextUsageForSession(
+      _participant: unknown,
+      sessionId: string | undefined,
+      requestOptions: { waitForLog?: boolean } = {}
+    ): Promise<AgentContextUsage | undefined> {
+      options.contextUsageRequests?.push({ sessionId, waitForLog: requestOptions.waitForLog });
       return sessionId ? options.contextUsageBySession?.[sessionId] : undefined;
     }
   };
