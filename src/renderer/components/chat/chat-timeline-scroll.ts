@@ -5,6 +5,8 @@ import { LOAD_OLDER_ROW_ID } from "./chat-conversation-progress";
 
 // Smaller layout changes than this are rounding, not movement.
 const SUBPIXEL_PX = 0.5;
+// A scroll with no scrollend after this long is taken as ended (see the listener).
+const SCROLL_END_FALLBACK_MS = 300;
 // New rows ending at least this far above the viewport top count as off screen.
 const DEFER_MARGIN_PX = 64;
 // How long after a click or key press inside a row a resize counts as the User's own.
@@ -244,11 +246,30 @@ export function useAnchoredVirtualItems(
         lastRowInteractionAtRef.current = performance.now();
       }
     };
+    // The virtualizer learns that a scroll ended from the scrollend event, but Chromium
+    // sends none after a scroll caused by the content getting shorter (a finished reply's
+    // activity row going away at the bottom). Without it the virtualizer believes the User
+    // is still scrolling and stops measuring new rows as they mount. Send it then.
+    let endTimer: number | undefined;
+    const expectScrollEnd = (): void => {
+      window.clearTimeout(endTimer);
+      endTimer = window.setTimeout(() => element.dispatchEvent(new Event("scrollend")), SCROLL_END_FALLBACK_MS);
+    };
+    const scrollEnded = (event: Event): void => {
+      if (event.isTrusted) {
+        window.clearTimeout(endTimer);
+      }
+    };
     element.addEventListener("pointerdown", noteRowInteraction, true);
     element.addEventListener("keydown", noteRowInteraction, true);
+    element.addEventListener("scroll", expectScrollEnd, { passive: true });
+    element.addEventListener("scrollend", scrollEnded);
     return () => {
+      window.clearTimeout(endTimer);
       element.removeEventListener("pointerdown", noteRowInteraction, true);
       element.removeEventListener("keydown", noteRowInteraction, true);
+      element.removeEventListener("scroll", expectScrollEnd);
+      element.removeEventListener("scrollend", scrollEnded);
     };
   }, [timelineRef]);
   return items;
