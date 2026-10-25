@@ -91,6 +91,8 @@ const MAX_CLI_ERROR_CHARS = 500;
 const MAX_CLI_ERROR_LINES = 8;
 const MAX_CLI_EVENT_SUMMARIES = 2;
 const CLI_AGENT_COMPACT_TIMEOUT_MS = 5 * 60_000;
+/** How long the CLI gets to answer `get_context_usage`. */
+const CLAUDE_CONTEXT_USAGE_TIMEOUT_MS = 15_000;
 const WARM_AGENT_KILL_GRACE_MS = 1500;
 const WINDOWS_WARM_AGENT_KILL_GRACE_MS = 750;
 const CLAUDE_BACKGROUND_PROCESS_CAPTURE_INTERVAL_MS = 100;
@@ -411,6 +413,12 @@ interface WarmAgentEntry {
    *  becomes idle after work it did on its own. */
   idleTimeoutMs?: number;
   compact?: (instructions?: string, signal?: AbortSignal, onSessionId?: CliAgentSessionIdCallback) => Promise<CliAgentCompactResult>;
+  /** Claude only: the context the live session holds now, as the CLI's own
+   *  `/context` counts it (`get_context_usage`); after a `/compact`, the
+   *  compacted figure. Undefined when the CLI does not answer it. */
+  contextUsage?: (signal?: AbortSignal) => Promise<AgentContextUsage | undefined>;
+  /** Claude only: the CLI's figures for the last compaction it ran. */
+  lastCompactBoundary?: () => ClaudeCompactBoundary | undefined;
   queue: Promise<void>;
   idleTimer?: NodeJS.Timeout;
   closed: boolean;
@@ -442,6 +450,10 @@ interface ClaudeWarmRunContext {
   onPromptSuggestion?: (suggestion: string) => void;
   allowEmptyContent?: boolean;
   roleRuntime?: ParticipantRunResult["roleRuntime"];
+  /** The reply answers a slash command (`/compact`): it reports no usage of
+   *  its own and none is read from the session log (the caller asks the CLI),
+   *  and what the CLI printed counts as its text although the result is empty. */
+  localCommand?: boolean;
 }
 
 /** One reply of a warm Claude process: the model output of the step that
@@ -476,6 +488,7 @@ interface ClaudeWarmReply {
   origin?: CliAgentReplyOrigin;
   roleRuntime?: ParticipantRunResult["roleRuntime"];
   allowEmptyContent: boolean;
+  localCommand?: boolean;
   timer?: NodeJS.Timeout;
   stopTimer?: NodeJS.Timeout;
   detachSignal?: () => void;
@@ -541,6 +554,17 @@ interface ClaudeWarmProcessState {
    *  on its way) is reported as stopped with it, not as a failure. */
   interruptTarget?: ClaudeWarmReply;
   interruptRequestId?: string;
+  /** control_request ids of our own questions to the CLI, and who waits. */
+  controlWaiters: Map<string, (response: Record<string, unknown> | undefined) => void>;
+  /** What the CLI said about the last compaction of this session, numbered,
+   *  so a /compact that compacted nothing is told from one that did. */
+  lastCompactBoundary?: ClaudeCompactBoundary;
+}
+
+interface ClaudeCompactBoundary {
+  /** How many compactions this process has reported. */
+  count: number;
+  postTokens?: number;
 }
 
 interface ClaudeWarmProcessHooks {
@@ -5009,6 +5033,20 @@ export class CliAgentRunner {
     return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, options);
   }
 
+  /**
+   * `/compact` as the dedicated CLI runs it: in the member's live session.
+   *
+   * The member's warm process holds the whole conversation in memory and
+   * appends every turn to the session file. Compacting the file from another
+   * process left it holding the full context: the next turn continued from it
+   * (the context grew past its size before the compaction) and wrote on the
+   * uncompacted branch, so the compaction was lost for later resumes too. The
+   * command now goes to the live process itself; with none alive, to a process
+   * of its own resumed on the session, closed afterwards, so the next turn
+   * resumes the compacted session. Either way the CLI's own count of the
+   * compacted context (`get_context_usage`, what its `/context` shows) is what
+   * is reported.
+   */
   private async compactClaudeSession(
     participant: ParticipantConfig,
     repoPath: string | undefined,
@@ -5019,33 +5057,126 @@ export class CliAgentRunner {
     const compactPrompt = options.compactInstructions?.trim()
       ? `/compact ${options.compactInstructions.trim()}`
       : "/compact";
-    // Compaction rewrites the session in its own process; wait until the
-    // member's warm process has nothing running on that session.
-    const idle = await this.waitForClaudeWarmScopeIdle(options.warm, undefined, participant, "compacting", signal, undefined);
-    if (!idle || signal?.aborted) {
-      return { participant, ok: false, error: "Compaction was cancelled." };
+    // Nothing may run on the session while it is compacted: no reply, nothing
+    // queued, no background task (the same wait a settings change uses). A
+    // process is never closed or compacted while it works.
+    const warm = options.warm;
+    const scopeKey = warm ? this.warmAgentScopeKey(warm) : undefined;
+    const liveProcesses = (): WarmAgentEntry[] => Array.from(this.warmAgents.values()).filter((entry) =>
+      entry.scopeKey === scopeKey && !entry.closed && !entry.unusable && entry.process.exitCode === null);
+    for (;;) {
+      const idle = await this.waitForClaudeWarmScopeIdle(warm, undefined, participant, "compacting", signal, undefined);
+      if (!idle || signal?.aborted) {
+        return { participant, ok: false, error: "Compaction was cancelled." };
+      }
+      if (liveProcesses().every((entry) => entry.isIdle?.() !== false)) break;
     }
-    // Run one-shot (no warm process): the one-shot result parses the final
-    // result JSON, whose usage reflects the post-compaction summary size. The
-    // warm streaming path does not surface usage for the /compact local command,
-    // so it would leave the stale pre-compact figure on the hover.
-    const result = await this.runClaude(participant, compactPrompt, repoPath, kind, signal, {
-      ...options,
-      warm: undefined,
-      role: undefined,
-      appMcp: undefined,
-      onOutput: undefined,
-      timeoutMs: options.timeoutMs ?? CLI_AGENT_COMPACT_TIMEOUT_MS,
-      allowEmptyContent: true
+    if (warm && scopeKey) {
+      const key = this.warmAgentKey(participant, repoPath, kind, options);
+      const entry = liveProcesses().find((candidate) => candidate.key === key);
+      // Held from here, so the idle timer cannot retire it before /compact.
+      if (entry) this.clearWarmIdleTimer(entry);
+      // Any other live process of the member holds the session as it was
+      // before; the next turn would replace it anyway, and it must not carry
+      // the old context past the compaction. It is idle (waited for above).
+      await this.closeStaleWarmAgents(scopeKey, key, (stale) => stale.isIdle?.() !== false, "compacted-elsewhere");
+      if (entry && !entry.closed && entry.process.exitCode === null) {
+        try {
+          return await this.trackWarmRun(entry, async () => {
+            this.clearWarmIdleTimer(entry);
+            try {
+              // The member's own process: its turns' timeout, and Stop.
+              return await this.compactClaudeThroughProcess(entry, participant, compactPrompt, signal, options, options.timeoutMs ?? this.runTimeoutMs);
+            } finally {
+              if (!entry.closed && this.warmAgents.get(entry.key) === entry) {
+                if (entry.unusable) {
+                  this.warmAgents.delete(entry.key);
+                  await this.closeWarmAgent(entry, "unusable");
+                } else {
+                  this.scheduleWarmIdleTimer(entry, warm.idleTimeoutMs);
+                }
+              }
+            }
+          });
+        } catch (error) {
+          return this.failedCompact(participant, error);
+        }
+      }
+    }
+    // No live process: one of its own, resumed on the session and closed
+    // afterwards (it carries no app tools, so it never serves a turn).
+    const sessionId = options.sessionId ?? "";
+    const finishPreparation = this.beginWarmPreparation(`compact:${sessionId}`);
+    let entry: WarmAgentEntry | undefined;
+    try {
+      await ensureLoginShellEnvPrimed();
+      const claudeExecutable = await this.providerExecutableForRun("claude", options, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
+      entry = await this.createClaudeWarmAgent(
+        `compact:${sessionId}:${randomUUID()}`,
+        `compact:${sessionId}`,
+        participant,
+        repoPath,
+        kind,
+        { ...this.withoutWarm(options), role: undefined, appMcp: undefined },
+        claudeExecutable
+      );
+    } catch (error) {
+      return this.failedCompact(participant, error);
+    } finally { finishPreparation(); }
+    const ownProcess = entry;
+    try {
+      return await this.trackWarmRun(ownProcess, () => this.compactClaudeThroughProcess(ownProcess, participant, compactPrompt, signal, options,
+        options.timeoutMs ?? CLI_AGENT_COMPACT_TIMEOUT_MS));
+    } catch (error) {
+      return this.failedCompact(participant, error);
+    } finally {
+      await this.closeWarmAgent(ownProcess, "compact-complete").catch(() => undefined);
+    }
+  }
+
+  private async compactClaudeThroughProcess(
+    entry: WarmAgentEntry,
+    participant: ParticipantConfig,
+    compactPrompt: string,
+    signal: AbortSignal | undefined,
+    options: CliAgentRunOptions,
+    timeoutMs: number
+  ): Promise<CliAgentCompactResult> {
+    const boundaryBefore = entry.lastCompactBoundary?.()?.count ?? 0;
+    let result: ParticipantRunResult;
+    try {
+      result = await entry.run(compactPrompt, signal, undefined, options.onSessionId, timeoutMs,
+        undefined, undefined, { allowEmptyContent: true, localCommand: true });
+    } catch (error) {
+      return signal?.aborted || (error instanceof Error && error.message === CLAUDE_WARM_CANCELLED_MESSAGE)
+        ? { participant, ok: false, error: "Compaction was cancelled." }
+        : this.failedCompact(participant, error);
+    }
+    if (!result.ok) {
+      return { participant, ok: false, sessionId: result.sessionId, error: result.error, providerNative: true };
+    }
+    const boundary = entry.lastCompactBoundary?.();
+    if ((boundary?.count ?? 0) <= boundaryBefore) {
+      // The CLI answered without compacting ("Error: No messages to
+      // compact", say): what it said is the outcome, as in its own terminal.
+      const said = (result.content ?? "").trim().replace(/^error:\s*/i, "");
+      return { participant, ok: false, sessionId: result.sessionId, error: said || "The CLI did not compact the conversation", providerNative: true };
+    }
+    // The CLI's own count after compacting; failing that, its compaction
+    // figure for the conversation (which leaves out the system prompt).
+    const contextUsage = await entry.contextUsage?.(signal) ?? buildAgentContextUsage({
+      usedTokens: boundary?.postTokens,
+      contextWindowTokens: contextWindowForModel(participant.kind, participant.model),
+      source: "claude-code",
+      model: participant.model
     });
     return {
       participant,
-      ok: result.ok,
+      ok: true,
       sessionId: result.sessionId,
-      contextUsage: result.contextUsage,
-      providerNative: false,
-      content: result.content,
-      error: result.error
+      ...(contextUsage ? { contextUsage } : {}),
+      providerNative: true,
+      content: result.content
     };
   }
 
@@ -5483,7 +5614,8 @@ export class CliAgentRunner {
       cancelRequests: new Map(),
       reportedBackgroundTasks: "[]",
       lastTaskEventAt: 0,
-      selfResumeExpectedUntil: 0
+      selfResumeExpectedUntil: 0,
+      controlWaiters: new Map()
     };
     const capturedBackgroundProcesses = new Map<string, CapturedPosixProcess>();
     const idleWaiters = new Set<() => void>();
@@ -5562,6 +5694,8 @@ export class CliAgentRunner {
     /** The process itself failed (exit, stdin error): every reply still open
      *  fails with it. */
     const failProcess = (error: Error): void => {
+      for (const waiter of Array.from(state.controlWaiters.values())) waiter(undefined);
+      state.controlWaiters.clear();
       const replies = Array.from(state.replies);
       state.replies = [];
       state.active = undefined;
@@ -5711,6 +5845,31 @@ export class CliAgentRunner {
       }),
       capturedBackgroundProcesses: () => Array.from(capturedBackgroundProcesses.values()),
       refreshCapturedBackgroundProcesses: captureBackgroundProcesses,
+      contextUsage: async (signal?: AbortSignal) => {
+        if (closed || child.exitCode !== null || child.killed || signal?.aborted) return undefined;
+        const response = await new Promise<Record<string, unknown> | undefined>((resolve) => {
+          const requestId = this.sendClaudeWarmControl(hooks, { subtype: "get_context_usage" });
+          const timer = setTimeout(() => finish(undefined), CLAUDE_CONTEXT_USAGE_TIMEOUT_MS);
+          timer.unref();
+          const onAbort = (): void => finish(undefined);
+          const finish = (value: Record<string, unknown> | undefined): void => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
+            state.controlWaiters.delete(requestId);
+            resolve(value);
+          };
+          state.controlWaiters.set(requestId, finish);
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+        const answer = response && this.stringField(response, "subtype") === "success" ? this.asRecord(response.response) : undefined;
+        return buildAgentContextUsage({
+          usedTokens: typeof answer?.totalTokens === "number" ? answer.totalTokens : undefined,
+          contextWindowTokens: typeof answer?.maxTokens === "number" ? answer.maxTokens : undefined,
+          source: "claude-code",
+          model: state.model ?? participant.model
+        });
+      },
+      lastCompactBoundary: () => state.lastCompactBoundary,
       run: (
         turnPrompt: string,
         signal?: AbortSignal,
@@ -5742,6 +5901,7 @@ export class CliAgentRunner {
             onPromptSuggestion: claude?.onPromptSuggestion,
             roleRuntime: claude?.roleRuntime,
             allowEmptyContent: claude?.allowEmptyContent ?? false,
+            localCommand: claude?.localCommand,
             sessionId: state.sessionId,
             model: state.model ?? participant.model,
             onOutput,
@@ -5911,6 +6071,13 @@ export class CliAgentRunner {
       return;
     }
     if (type === "system") {
+      if (subtype === "compact_boundary") {
+        const metadata = this.asRecord(record.compact_metadata) ?? {};
+        state.lastCompactBoundary = {
+          count: (state.lastCompactBoundary?.count ?? 0) + 1,
+          ...(typeof metadata.post_tokens === "number" ? { postTokens: metadata.post_tokens } : {})
+        };
+      }
       if (subtype === "init") {
         this.startClaudeWarmStep(state, participant, hooks);
       } else {
@@ -6195,6 +6362,11 @@ export class CliAgentRunner {
   ): void {
     const response = this.asRecord(record.response) ?? {};
     const requestId = this.stringField(response, "request_id");
+    const waiter = requestId ? state.controlWaiters.get(requestId) : undefined;
+    if (waiter) {
+      waiter(response);
+      return;
+    }
     if (requestId && requestId === state.interruptRequestId) {
       // The CLI has taken the interrupt. With no step running it stopped
       // nothing, and must not be blamed for a later step's failure.
@@ -6383,7 +6555,7 @@ export class CliAgentRunner {
 
   private claudeWarmSegmentText(reply: ClaudeWarmReply, event: unknown): string {
     const resultText = event === undefined ? undefined : this.extractClaudeWarmResultText(event);
-    if (resultText !== undefined) {
+    if (resultText !== undefined && !(reply.localCommand && !resultText.trim() && reply.messages.length > 0)) {
       return resultText;
     }
     if (reply.messages.length > 0) {
@@ -6426,7 +6598,7 @@ export class CliAgentRunner {
     for (const raw of reply.resultEvents) {
       result = this.withClaudePermissionDenialWarning(result, raw, participant, "warm");
     }
-    if (contextUsage || !sessionId) {
+    if (contextUsage || !sessionId || reply.localCommand) {
       reply.resolve(result);
       return;
     }
@@ -6855,11 +7027,11 @@ export class CliAgentRunner {
     }
   }
 
-  private async closeStaleWarmAgents(scopeKey: string, nextKey: string, closable: (entry: WarmAgentEntry) => boolean = () => true): Promise<void> {
+  private async closeStaleWarmAgents(scopeKey: string, nextKey: string, closable: (entry: WarmAgentEntry) => boolean = () => true, reason = "context-changed"): Promise<void> {
     const stale = Array.from(this.warmAgents.values()).filter((entry) => entry.scopeKey === scopeKey && entry.key !== nextKey && closable(entry));
     for (const entry of stale) {
       this.warmAgents.delete(entry.key);
-      await this.closeWarmAgent(entry, "context-changed");
+      await this.closeWarmAgent(entry, reason);
     }
   }
 

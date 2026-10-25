@@ -118,6 +118,7 @@ import type {
 import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { isMachineCompactionLine, normalizeMachineTurnCompaction, type MachineCompactionDelegateRequest, type MachineTurnCompaction } from "../../shared/machineLink";
+import { machineStopPendingText, machineWaitingText } from "../../shared/machineWaitingText";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES,
@@ -714,7 +715,8 @@ export interface MachineTurnDispatchRequest {
    *  honest state instead of a silent wait. */
   onStopPending?: (machineName: string) => void;
   /** The machine is not ready to take the turn: not connected, or its
-   *  runtime is being updated (`reason`). Shown on the pending bubble. */
+   *  runtime is being updated (`reason`). Shown on the pending bubble (on a
+   *  compaction's status line for a compaction). */
   onMachineWaiting?: (machineName: string, reason?: string) => Promise<void>;
 }
 
@@ -1012,6 +1014,9 @@ export class ChatService {
   private scriptHost?: ChatScriptHost;
   private participantRequestDelegate?: ChatParticipantRequestDelegate;
   private compactionDelegate?: ChatCompactionDelegate;
+  /** Machine compactions in flight here: puts their status line back to
+   *  "Compacting" once the machine has started them. */
+  private readonly machineCompactionStatus = new Map<string, () => void>();
   /** Run ids of compactions machines delegated here, so a redelivery is one run. */
   private readonly delegatedCompactionRunIds = new Set<string>();
   private cloudRunAws?: CloudRunAwsResolver;
@@ -2094,16 +2099,35 @@ export class ChatService {
     } else if (!link?.compactOnMachine) {
       result = { status: "failed", messages: [], warnings: [], sent: false, error: `@${participant.handle} is hosted on a machine, but the machine link is not available` };
     } else {
-      result = await link.compactOnMachine({
-        conversation,
-        participant,
-        runId,
-        signal,
-        compaction: normalizeMachineTurnCompaction({ ...request, instructions: compactInstructions }),
-        onStopPending: (machineName) => {
-          void this.debugLogs.write("chat.compaction.stop-pending", { conversationId: conversation.id, runId, machineName });
-        }
-      });
+      // The compaction's own status line says what a turn's bubble says
+      // while its machine is away, and returns to "Compacting" once it runs.
+      const compacting = `Compacting @${participant.handle}.`;
+      const status = (message: string): void => {
+        this.emitProgress(runId, progress, "initial", message, { participantLabel: `@${participant.handle}` });
+      };
+      // Once Stop is waiting for the machine, that stays until the outcome,
+      // as on a turn's bubble.
+      let stopPending = false;
+      this.machineCompactionStatus.set(runId, () => { if (!stopPending) status(compacting); });
+      try {
+        result = await link.compactOnMachine({
+          conversation,
+          participant,
+          runId,
+          signal,
+          compaction: normalizeMachineTurnCompaction({ ...request, instructions: compactInstructions }),
+          onMachineWaiting: async (machineName, reason) => {
+            if (!stopPending) status(`${compacting} ${machineWaitingText(machineName, reason)}`);
+          },
+          onStopPending: (machineName) => {
+            void this.debugLogs.write("chat.compaction.stop-pending", { conversationId: conversation.id, runId, machineName });
+            stopPending = true;
+            status(`${compacting} ${machineStopPendingText(machineName)}`);
+          }
+        });
+      } finally {
+        this.machineCompactionStatus.delete(runId);
+      }
     }
     // Only the lines the machine's compaction of this run wrote are taken.
     const compactionLines = result.messages.filter((message) => isMachineCompactionLine(message, runId, participant.id));
@@ -6829,6 +6853,8 @@ export class ChatService {
 
   async applyMachineRunStarted(request: { conversationId: string; runId: string }): Promise<void> {
     if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return;
+    // A compaction that waited for its machine is running now.
+    this.machineCompactionStatus.get(request.runId)?.();
     const conversation = await this.requireChat(request.conversationId);
     await this.withChatMutation(conversation, async () => {
       for (const message of conversation.messages) {
