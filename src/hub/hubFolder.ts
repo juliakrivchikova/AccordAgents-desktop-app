@@ -3,6 +3,15 @@ import { CHAT_CHANGES_EVENT_KIND, applyChatChanges, isChatChangesPayload, type C
 import type { SavedMessageRow, StorageService } from "../main/services/storage";
 import type { ChatMessage, Conversation } from "../shared/types";
 
+/** What one fold of a chat came to, for the phone. */
+export interface HubFoldDetails {
+  conversation: Conversation;
+  /** Members' replies that finished in this fold. */
+  settled: ChatMessage[];
+  /** Messages the User wrote on a phone, new in this fold, with their place. */
+  phoneMessages: Array<{ message: ChatMessage; hubSeq: number }>;
+}
+
 /** Chats kept in memory between folds, by their messages: re-reading a chat
  *  of thousands of messages for every change would be the slow part, and
  *  the hub runs on a small instance. */
@@ -32,8 +41,12 @@ export class HubFolder {
     private readonly storage: StorageService,
     private readonly policy: () => Promise<ChatChangeApplyPolicy>,
     private readonly log: (event: string, payload: Record<string, unknown>) => void = () => undefined,
-    /** A chat's hub copy changed (search reads it again). */
-    private readonly onFolded: (conversationId: string) => void = () => undefined
+    /** A chat's hub copy changed (search reads it again), with what the
+     *  phone is told about: members' replies that settled, and messages a
+     *  phone wrote (their members' homes may need waking). */
+    private readonly onFolded: (conversationId: string, details: HubFoldDetails) => void = () => undefined,
+    /** Whether a device is one of the User's phones. */
+    private readonly isPhone: (originId: string) => Promise<boolean> = async () => false
   ) {}
 
   /** Folds whatever is left from before a restart. */
@@ -101,12 +114,25 @@ export class HubFolder {
     let changed = false;
     // Changes to a chat the hub does not hold yet, in order.
     let waiting: Array<{ hubSeq: number; originId: string; payload: ChatChangesPayload }> = [];
-    const apply = (payload: ChatChangesPayload, originId: string): boolean => {
+    const settled = new Map<string, ChatMessage>();
+    const phoneMessages = new Map<string, { message: ChatMessage; hubSeq: number }>();
+    const phones = new Map<string, boolean>();
+    const apply = async (payload: ChatChangesPayload, originId: string, hubSeq: number): Promise<boolean> => {
+      const before = new Map((conversation?.messages ?? []).map((message) => [message.id, message.status]));
       const result = applyChatChanges(conversation, payload, originId, policy);
       if (result.status === "missing-conversation") return false;
       if (result.status === "applied") {
         conversation = result.conversation;
         changed = true;
+        const touched = new Set(payload.changes.flatMap((change) => change.type === "message.created" || change.type === "message.updated" ? [change.message.id] : []));
+        if (!phones.has(originId)) phones.set(originId, await this.isPhone(originId).catch(() => false));
+        for (const message of conversation.messages) {
+          if (!touched.has(message.id)) continue;
+          // A member's reply that is done now and was running (or new).
+          if (message.role === "participant" && (message.status === "done" || message.status === "error") &&
+              (before.get(message.id) === undefined || before.get(message.id) === "pending")) settled.set(message.id, message);
+          if (message.role === "user" && phones.get(originId) && !before.has(message.id)) phoneMessages.set(message.id, { message, hubSeq });
+        }
       }
       return true;
     };
@@ -124,12 +150,12 @@ export class HubFolder {
           if (waiting.length === 0) foldedTo = hubSeq;
           continue;
         }
-        if (!apply(payload, event.originId)) {
+        if (!await apply(payload, event.originId, hubSeq)) {
           waiting.push({ hubSeq, originId: event.originId, payload });
           continue;
         }
         if (waiting.length > 0) {
-          for (const held of waiting) apply(held.payload, held.originId);
+          for (const held of waiting) await apply(held.payload, held.originId, held.hubSeq);
           waiting = [];
         }
         foldedTo = hubSeq;
@@ -145,7 +171,14 @@ export class HubFolder {
     }
     if (changed && conversation) {
       await this.storage.saveConversation(conversation, { rows: this.rowsFor(conversation) });
-      this.onFolded(conversationId);
+      const folded: Conversation = conversation;
+      try {
+        this.onFolded(conversationId, {
+          conversation: folded,
+          settled: [...settled.values()].filter((message) => folded.messages.some((item) => item.id === message.id)),
+          phoneMessages: [...phoneMessages.values()]
+        });
+      } catch { /* a listener never breaks a fold */ }
     }
     if (conversation) this.remember(conversation);
     if (foldedTo > await hub.foldedThrough(conversationId)) await hub.setFoldedThrough(conversationId, foldedTo);

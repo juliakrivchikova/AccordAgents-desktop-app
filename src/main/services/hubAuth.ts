@@ -108,3 +108,25 @@ export class HubNonceCache {
     for (const [key, at] of this.seen) if (now - at > this.windowMs) this.seen.delete(key);
   }
 }
+
+/** An Ed25519 signature over a text, standard base64 (invites, enrollments). */
+export function signHubText(identity: Pick<HubSigningIdentity, "privateKeyDerBase64">, text: string): string {
+  const key = createPrivateKey({ key: Buffer.from(identity.privateKeyDerBase64, "base64"), format: "der", type: "pkcs8" });
+  return sign(null, Buffer.from(text, "utf8"), key).toString("base64");
+}
+
+export function verifyHubText(publicKeyDerBase64: string, text: string, signatureBase64: string): boolean {
+  try {
+    const key = createPublicKey({ key: Buffer.from(publicKeyDerBase64, "base64"), format: "der", type: "spki" });
+    return verify(null, Buffer.from(text, "utf8"), key, Buffer.from(signatureBase64, "base64"));
+  } catch {
+    return false;
+  }
+}
+
+/** The node half of a phone certificate check (see verifyHubPhoneCertificate). */
+export const hubCertificateCrypto = {
+  verify: verifyHubText,
+  sha256Hex: (text: string) => sha256Hex(text),
+  deviceIdForPublicKey
+};

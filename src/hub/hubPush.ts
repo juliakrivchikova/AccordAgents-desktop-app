@@ -1,6 +1,15 @@
 import { createPrivateKey, generateKeyPairSync, sign, type JsonWebKey } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { StorageService } from "../main/services/storage";
+import { scopeCovers } from "./hubPhoneState";
+
+/** A phone that looked open when it was to be rung is asked again this
+ *  often (an app put away keeps its last wait open for a while), at most
+ *  this many times. */
+const ACTIVE_RECHECK_MS = 40_000;
+const ACTIVE_RECHECKS_MAX = 4;
+/** After a restart, notices this recent that a phone has not seen ring it. */
+const REARM_WITHIN_MS = 10 * 60_000;
 
 /** Push services a phone may name (same list the relay allowed). */
 const PUSH_ENDPOINT_HOSTS = [
@@ -11,10 +20,25 @@ const PUSH_ENDPOINT_HOSTS = [
   /(^|\.)notify\.windows\.com$/
 ];
 
+/** Local QA only: a push service on this computer that stands in for a
+ *  real one (`ACCORDAGENTS_HUB_TEST_PUSH_ORIGIN`). */
+function testPushOrigin(): string | undefined {
+  const value = process.env.ACCORDAGENTS_HUB_TEST_PUSH_ORIGIN?.trim();
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" && ["127.0.0.1", "localhost"].includes(url.hostname) ? url.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function isAllowedPushEndpoint(endpoint: unknown): endpoint is string {
   if (typeof endpoint !== "string" || endpoint.length > 2048) return false;
   try {
     const url = new URL(endpoint);
+    const test = testPushOrigin();
+    if (test && url.origin === test) return true;
     return url.protocol === "https:" && PUSH_ENDPOINT_HOSTS.some((pattern) => pattern.test(url.hostname));
   } catch {
     return false;
@@ -46,61 +70,108 @@ export function vapidJwt(audience: string, subject: string, privateJwk: JsonWebK
 }
 
 /**
- * Rings a phone when something it has not read arrives: an empty push, and
- * the phone's service worker reads the news from the hub itself. Debounced,
- * so a burst of events is one ring.
+ * Rings a phone when something it has not seen happened: a member's reply
+ * settled, or a card is waiting for the User. An empty push; the phone's
+ * service worker reads the notice from the hub itself and shows it. Not while
+ * the phone's app is open (it shows the news there), and not for a notice the
+ * phone already marked seen. Debounced per phone, so a burst is one ring.
  */
 export class HubPush {
-  private timer?: ReturnType<typeof setTimeout>;
-  private lastSentAt = 0;
-  /** What arrived since the last ring: the newest position and who wrote. */
-  private window?: { head: number; origins: Set<string> };
+  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly lastSentAt = new Map<string, number>();
+  /** The newest notice each phone has a ring scheduled for. */
+  private readonly pendingFor = new Map<string, number>();
+  /** How many times each phone's ring found the app open. */
+  private readonly activeChecks = new Map<string, number>();
 
   constructor(private readonly options: {
     storage: StorageService;
     keys: { publicKey: string; privateJwk: JsonWebKey };
     subject: string;
+    /** Whether the phone's app is open now. */
+    isActive?: (deviceId: string) => boolean;
+    debounceMs?: number;
     minIntervalMs?: number;
     fetchImpl?: typeof fetch;
     now?: () => number;
     log?: (event: string, payload: Record<string, unknown>) => void;
   }) {}
 
-  /** New events landed up to `head`, written by `originId`. */
-  noteAppended(head: number, originId: string): void {
-    this.window ??= { head, origins: new Set() };
-    this.window.head = Math.max(this.window.head, head);
-    this.window.origins.add(originId);
-    if (this.timer) return;
-    const now = this.options.now?.() ?? Date.now();
-    const wait = Math.max(0, (this.options.minIntervalMs ?? 10_000) - (now - this.lastSentAt));
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
-      const window = this.window;
-      this.window = undefined;
-      if (window) void this.ring(window.head, window.origins).catch((error) => this.options.log?.("hub.push.error", { message: error instanceof Error ? error.message : String(error) }));
-    }, wait);
-    this.timer.unref?.();
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
   }
 
-  private async ring(head: number, origins: Set<string>): Promise<void> {
+  /** A notice landed: every phone it is for is rung, unless it is looking. */
+  async noteNotice(notice: { seq: number; conversationId: string }): Promise<void> {
+    const devices = (await this.options.storage.hub().devices())
+      .filter((device) => device.role === "phone" && scopeCovers(device.scope, notice.conversationId));
+    for (const device of devices) {
+      this.activeChecks.delete(device.deviceId);
+      this.schedule(device.deviceId, notice.seq);
+    }
+  }
+
+  /** After a restart: a phone that has not seen a recent notice is rung (its
+   *  ring was scheduled in the program that stopped). */
+  async rearm(): Promise<void> {
     const hub = this.options.storage.hub();
-    const subscriptions = await hub.pushSubscriptions();
-    this.lastSentAt = this.options.now?.() ?? Date.now();
+    const head = await hub.noticeHead();
+    if (head === 0) return;
+    for (const device of (await hub.devices()).filter((item) => item.role === "phone")) {
+      const seen = await hub.phoneSeenNotice(device.deviceId);
+      if (seen >= head) continue;
+      const unseen = (await hub.notices(seen, 50)).filter((notice) => scopeCovers(device.scope, notice.conversationId) &&
+        this.now() - Date.parse(notice.createdAt) < REARM_WITHIN_MS);
+      const newest = unseen.at(-1);
+      if (newest) this.schedule(device.deviceId, newest.seq);
+    }
+  }
+
+  private schedule(deviceId: string, noticeSeq: number, delayMs?: number): void {
+    this.pendingFor.set(deviceId, Math.max(this.pendingFor.get(deviceId) ?? 0, noticeSeq));
+    if (this.timers.has(deviceId)) return;
+    const sinceLast = this.now() - (this.lastSentAt.get(deviceId) ?? 0);
+    const wait = delayMs ?? Math.max(this.options.debounceMs ?? 2_000, (this.options.minIntervalMs ?? 10_000) - sinceLast);
+    const timer = setTimeout(() => {
+      this.timers.delete(deviceId);
+      const seq = this.pendingFor.get(deviceId) ?? 0;
+      this.pendingFor.delete(deviceId);
+      void this.ring(deviceId, seq).catch((error) => this.options.log?.("hub.push.error", { deviceId, message: error instanceof Error ? error.message : String(error) }));
+    }, wait);
+    timer.unref?.();
+    this.timers.set(deviceId, timer);
+  }
+
+  private async ring(deviceId: string, noticeSeq: number): Promise<void> {
+    const hub = this.options.storage.hub();
+    if (this.options.isActive?.(deviceId)) {
+      // Asked again a little later: an app just put away still looks open,
+      // and what it did not see then still rings it (unless it saw it).
+      const checks = (this.activeChecks.get(deviceId) ?? 0) + 1;
+      this.activeChecks.set(deviceId, checks);
+      this.options.log?.("hub.push.skipped", { deviceId, reason: "app-open", checks });
+      if (checks < ACTIVE_RECHECKS_MAX) this.schedule(deviceId, noticeSeq, ACTIVE_RECHECK_MS);
+      return;
+    }
+    this.activeChecks.delete(deviceId);
+    if (await hub.phoneSeenNotice(deviceId) >= noticeSeq) {
+      this.options.log?.("hub.push.skipped", { deviceId, reason: "seen" });
+      return;
+    }
+    const subscriptions = (await hub.pushSubscriptions()).filter((subscription) => subscription.deviceId === deviceId);
+    if (subscriptions.length === 0) return;
+    this.lastSentAt.set(deviceId, this.now());
     for (const subscription of subscriptions) {
-      // A phone that wrote all of the news is not rung for it, nor one that
-      // already read it.
-      if ((origins.size === 1 && origins.has(subscription.deviceId)) || await hub.cursor(subscription.deviceId) >= head) continue;
       try {
         const audience = new URL(subscription.endpoint).origin;
-        const jwt = vapidJwt(audience, this.options.subject, this.options.keys.privateJwk, this.lastSentAt);
+        const jwt = vapidJwt(audience, this.options.subject, this.options.keys.privateJwk, this.now());
         const response = await (this.options.fetchImpl ?? fetch)(subscription.endpoint, {
           method: "POST",
-          headers: { TTL: "300", Urgency: "normal", "content-length": "0", Authorization: `vapid t=${jwt}, k=${this.options.keys.publicKey}` },
+          headers: { TTL: "300", Urgency: "high", "content-length": "0", Authorization: `vapid t=${jwt}, k=${this.options.keys.publicKey}` },
           signal: AbortSignal.timeout(5_000)
         });
         if (response.status === 404 || response.status === 410) await hub.deletePushSubscription(subscription.deviceId, subscription.endpoint);
-        this.options.log?.("hub.push.sent", { deviceId: subscription.deviceId, status: response.status });
+        this.options.log?.("hub.push.sent", { deviceId: subscription.deviceId, status: response.status, noticeSeq });
       } catch (error) {
         // One push service that does not answer does not keep the others quiet.
         this.options.log?.("hub.push.error", { deviceId: subscription.deviceId, message: error instanceof Error ? error.message : String(error) });
@@ -109,7 +180,7 @@ export class HubPush {
   }
 
   close(): void {
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = undefined;
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    this.timers.clear();
   }
 }

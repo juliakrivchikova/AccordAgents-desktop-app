@@ -115,6 +115,8 @@ export interface MobileRelayChatMember {
   homeMachineId?: string;
   /** That machine's name, as Settings shows it, for the phone's member list. */
   homeMachineName?: string;
+  /** The member's role, which the phone resolves a draft's administrator by. */
+  roleConfigId?: string;
   /** The member record a machine needs to run a turn. Sent only for members
    *  with a home machine, so the list does not grow for every local member. */
   participant?: ChatParticipant;
@@ -259,6 +261,11 @@ interface MobileTimelineEvent {
    *  of a run: the phone settles the run's pending row on it and stores no
    *  bubble. Internal system and user rows are not sent at all. */
   hidden?: true;
+  /** The member that wrote it, so the phone resolves an unaddressed draft to
+   *  the last member that spoke, as the desktop does. */
+  participantId?: string;
+  /** The message's own thread (the desktop's reply context). */
+  threadId?: string;
 }
 
 export interface MobileTimelineEvents {
@@ -1943,6 +1950,8 @@ function timelineEventFromMessage(
     // author, so it shows as an author named after the script.
     role: message.role === "participant" || message.role === "script" ? "participant" : message.role === "system" ? "system" : "you",
     ...(message.participantLabel ? { participantLabel: message.participantLabel } : {}),
+    ...(message.role === "participant" && message.participantId ? { participantId: message.participantId } : {}),
+    ...(typeof message.metadata?.threadId === "string" && message.metadata.threadId !== message.id ? { threadId: message.metadata.threadId } : {}),
     content: message.content.trim() || message.role !== "participant" || message.status !== "pending"
       ? message.content
       : pendingParticipantContent(message.participantLabel),

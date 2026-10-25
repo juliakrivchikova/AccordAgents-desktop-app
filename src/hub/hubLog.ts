@@ -1,6 +1,9 @@
 import type { ChatEventEnvelope } from "../shared/chatEvents";
 import { DEVICE_EVENT_INLINE_BYTES, isDeviceEventBlobReference, type DeviceEventBlobReference } from "../shared/deviceEventBlobs";
+import { CHAT_ACTION_LOG_SCOPE, isChatActionKind } from "../shared/chatActionEvents";
 import {
+  HUB_PHONE_ENROLLED_EVENT_KIND,
+  HUB_PHONE_ENROLLMENT_SCOPE,
   HUB_PULL_MAX_EVENTS,
   HUB_PUSH_MAX_EVENTS,
   type HubDevice,
@@ -65,6 +68,11 @@ export class HubLog {
       // A chat change is the one kind that may be read second-hand; nothing
       // else may travel under its scope.
       if (isChatChangesLogScope(event.logScopeId) !== (event.kind === CHAT_CHANGES_EVENT_KIND)) { results.push(reject("The event's kind does not match its scope.")); continue; }
+      // A phone writes the User's messages, her answers and Stops, and its
+      // own enrollment: nothing a desktop or a machine is the author of.
+      if (device.role === "phone" && !isChatChangesLogScope(event.logScopeId) &&
+          !(event.logScopeId === CHAT_ACTION_LOG_SCOPE && isChatActionKind(event.kind)) &&
+          !(event.logScopeId === HUB_PHONE_ENROLLMENT_SCOPE && event.kind === HUB_PHONE_ENROLLED_EVENT_KIND)) { results.push(reject("A phone does not write that.")); continue; }
       if (Buffer.byteLength(JSON.stringify(event)) > MAX_INLINE_EVENT_JSON_BYTES) { results.push(reject("The event is too large to travel inline.")); continue; }
       if (event.keyId !== keyIdForPublicKey(device.publicKeyDerBase64) || !verifySignedChatEvent(event, device.publicKeyDerBase64)) {
         results.push(reject("The event's signature does not verify."));
@@ -94,6 +102,7 @@ export class HubLog {
     }
     const placedConversations = new Set<string>();
     const placedChanges = new Set<string>();
+    const placedEvents: Array<{ hubSeq: number; event: ChatEventEnvelope }> = [];
     for (const batch of byteBatches(extending, (item) => Buffer.byteLength(JSON.stringify(item.event)), STORE_BATCH_BYTES)) {
       const stored = await this.storage.appendChatEvents(batch.map((item) => item.event));
       const toPlace = batch.filter((item, position) => {
@@ -113,6 +122,7 @@ export class HubLog {
         // Placed now, even when the event itself was stored before (a hub
         // that stopped between the two writes): devices are told about it.
         if (place.placed) {
+          placedEvents.push({ hubSeq: place.hubSeq, event: item.event });
           placedConversations.add(item.event.conversationId);
           if (item.event.kind === CHAT_CHANGES_EVENT_KIND) placedChanges.add(item.event.conversationId);
         }
@@ -122,7 +132,7 @@ export class HubLog {
     if (placedConversations.size > 0) {
       for (const listener of this.listeners) {
         try {
-          listener({ head, conversationIds: [...placedConversations], changedConversationIds: [...placedChanges], originId: device.deviceId });
+          listener({ head, conversationIds: [...placedConversations], changedConversationIds: [...placedChanges], originId: device.deviceId, events: placedEvents });
         } catch { /* a listener never breaks a push */ }
       }
     }
@@ -186,6 +196,8 @@ export interface HubAppended {
   /** Chats whose content changed (chat change events), not only their traffic. */
   changedConversationIds: string[];
   originId: string;
+  /** The events placed, in order (what the phone's views fold beyond chats). */
+  events: Array<{ hubSeq: number; event: ChatEventEnvelope }>;
 }
 
 export type HubAppendListener = (appended: HubAppended) => void;

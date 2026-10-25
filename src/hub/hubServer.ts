@@ -9,17 +9,30 @@ import {
   HUB_AUTH_MAX_SKEW_MS,
   HUB_MAX_BODY_BYTES,
   HUB_MAX_SMALL_BODY_BYTES,
+  HUB_PROGRESS_PATH,
   HUB_PROTOCOL_VERSION,
   HUB_ROOM_MAX_MESSAGE_BYTES,
   HUB_ROOM_REPLACED_CLOSE_CODE,
   HUB_ROSTER_ROLES,
+  hubPhoneEnrollmentSigningText,
+  hubPhoneInviteSigningText,
+  HUB_PHONE_INVITE_MAX_LIFETIME_MS,
   hubRoomRole,
+  isHubPhoneInviteId,
+  isHubPhoneScope,
   type HubDevice,
   type HubHealth,
   type HubLiveHead,
+  type HubPhoneCertificate,
+  type HubPhoneEnrollRequest,
+  type HubPhoneEnrollResponse,
+  type HubPhoneEnrollment,
+  type HubPhoneInvite,
+  type HubProgressPost,
   type HubRosterRequest
 } from "../shared/hubProtocol";
-import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, verifyHubRequest, type ParsedHubAuthorization } from "../main/services/hubAuth";
+import type { MachineProgressFrame } from "../shared/machineProgress";
+import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, sha256Hex, verifyHubRequest, verifyHubText, type ParsedHubAuthorization } from "../main/services/hubAuth";
 import { HUB_RELAY_MANIFEST } from "../shared/relayProtocol";
 import { HubRelayRooms, RELAY_BODY_BYTES_IN_FLIGHT_MAX, RELAY_HEALTH_PATH, RELAY_MAILBOX_APPEND_MAX_BYTES, RELAY_MAILBOX_PATHS, RELAY_MAILBOX_SMALL_MAX_BYTES, RELAY_MAILBOX_TINY_MAX_BYTES, RELAY_MANIFEST_PATH, RELAY_ROOM_PATH, type HubRelayMailboxes } from "./hubRelay";
 import { MAILBOX_HUB_AUTHORIZATION_HEADER } from "../shared/mailboxSealedPayload";
@@ -42,11 +55,17 @@ export interface HubServerOptions {
   relay?: { mailboxes: HubRelayMailboxes; rooms: HubRelayRooms };
   /** The phone's reads: chat list, pages and changes from the server's copy. */
   phone?: HubPhoneApi;
+  /** The owner published the composer catalog. */
+  onCatalogChanged?: () => void;
+  /** The owner's members' live progress (kept in memory, never stored). */
+  onProgress?: (frames: MachineProgressFrame[]) => void;
   now?: () => number;
   debugLog?: (event: string, payload: Record<string, unknown>) => void;
 }
 
 const BLOB_PATH = /^\/v1\/blobs\/(sha256:[0-9a-f]{64})$/;
+/** A pairing request is a key, a signature and a token. */
+const ENROLL_MAX_BODY_BYTES = 16 * 1024;
 
 /** The little of `ws` the live socket uses (the package ships no types here). */
 interface LiveSocket {
@@ -92,6 +111,13 @@ const { WebSocketServer } = require("ws") as { WebSocketServer: new (options: { 
  * order's head is, and devices read the rest over HTTP; rooms forward live
  * messages between the User's devices without keeping them.
  */
+/** Pairing attempts per address, and from everywhere, in a minute. */
+const ENROLL_ATTEMPTS_PER_ADDRESS = 10;
+const ENROLL_ATTEMPTS_ALL = 600;
+
+/** What the hub answers a signed request from a device not on its roster. */
+export const HUB_NOT_ON_ROSTER = "This device is not on the hub's roster.";
+
 export class HubServer {
   private readonly nonces = new HubNonceCache();
   /** Relay request bodies being read now, by their declared size. */
@@ -238,7 +264,10 @@ export class HubServer {
     const auth = parseHubAuthorization(header);
     if (!auth) throw new HubRequestError(401, "The request is not signed.");
     const device = await this.device(auth.deviceId);
-    if (!device || Math.abs(this.now() - auth.timestampMs) > HUB_AUTH_MAX_SKEW_MS) throw new HubRequestError(401, "The request's signature is not accepted.");
+    // Said apart: a phone taken off the roster asks to be paired again, one
+    // whose clock is off does not.
+    if (!device) throw new HubRequestError(401, HUB_NOT_ON_ROSTER);
+    if (Math.abs(this.now() - auth.timestampMs) > HUB_AUTH_MAX_SKEW_MS) throw new HubRequestError(401, "The request's clock is more than five minutes off.");
     return { auth, device };
   }
 
@@ -367,9 +396,12 @@ export class HubServer {
         return json(response, 200, { ok: true, publicKey: this.options.vapidPublicKey });
       }
       if (openOnly) throw new HubRequestError(403, "Use HTTPS.");
-      if (this.options.phone && HUB_PHONE_PATHS.has(url.pathname)) {
-        status = await this.options.phone.handle(request, response, url);
-        return;
+      if (request.method === "POST" && url.pathname === "/v1/phone/enroll") {
+        // Unsigned: the phone is not on the roster yet. Its body proves the
+        // key it enrolls, and the invite's token proves the owner sent it.
+        this.limitEnrollments(request.socket.remoteAddress ?? "");
+        const body = await readBody(request, ENROLL_MAX_BODY_BYTES);
+        return json(response, 200, await this.enroll(parseJson(body)));
       }
       const relay = this.options.relay;
       if (relay) {
@@ -426,10 +458,23 @@ export class HubServer {
           return json(response, answer.status, answer.body);
         }
       }
+      // A phone app from before (a mailbox token) is told it was removed, so
+      // it asks to be paired again instead of going quiet.
+      if (this.options.phone && HUB_PHONE_PATHS.has(url.pathname) && /^Bearer /i.test(request.headers.authorization ?? "")) {
+        status = 401;
+        return json(response, 401, { ok: false, error: "phone_revoked" });
+      }
       const checked = await this.preauthenticate(request.headers.authorization);
-      const large = (request.method === "POST" && url.pathname === "/v1/events") || (request.method === "PUT" && BLOB_PATH.test(url.pathname));
+      const large = (request.method === "POST" && url.pathname === "/v1/events") || (request.method === "PUT" && BLOB_PATH.test(url.pathname)) ||
+        (request.method === "PUT" && url.pathname === "/v1/catalog") || (request.method === "POST" && url.pathname === HUB_PROGRESS_PATH);
       const body = await readBody(request, large ? HUB_MAX_BODY_BYTES : HUB_MAX_SMALL_BODY_BYTES);
       const device = await this.authenticate(request.method ?? "GET", body, request.headers.authorization, pathWithQuery, checked);
+      if (this.options.phone && HUB_PHONE_PATHS.has(url.pathname)) {
+        // Only a phone reads the phone's views, as what its invite allowed.
+        if (device.role !== "phone") throw new HubRequestError(403, "Only a phone reads this.");
+        status = await this.options.phone.handle(request, response, url, device, body);
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/v1/events") {
         const parsed = parseJson(body) as { events?: unknown };
         return json(response, 200, await this.options.log.push(device, parsed?.events));
@@ -492,12 +537,47 @@ export class HubServer {
         if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub changes its devices.");
         if (request.method === "GET") return json(response, 200, { devices: await this.options.storage.hub().devices() });
         if (request.method === "PUT") {
-          const devices = validRoster(parseJson(body));
-          await this.options.storage.hub().replaceRoster(devices, new Date(this.now()).toISOString());
+          const parsed = parseJson(body);
+          const devices = validRoster(parsed);
+          const resolved = validInviteIds((parsed as HubRosterRequest | undefined)?.resolvedInviteIds);
+          await this.options.storage.hub().replaceRoster(devices, new Date(this.now()).toISOString(), resolved);
           this.invalidateRoster();
           await this.disconnectRemoved();
           return json(response, 200, { devices: await this.options.storage.hub().devices() });
         }
+      }
+      if (url.pathname === "/v1/phone-invites" && request.method === "PUT") {
+        if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub invites phones.");
+        const parsed = parseJson(body) as { invite?: HubPhoneInvite; signature?: unknown };
+        const invite = this.validInvite(parsed?.invite, device);
+        if (typeof parsed?.signature !== "string" || !verifyHubText(device.publicKeyDerBase64, hubPhoneInviteSigningText(invite), parsed.signature)) {
+          throw new HubRequestError(400, "The invite's signature does not verify.");
+        }
+        await this.options.storage.hub().savePhoneInvite(invite, parsed.signature, new Date(this.now()).toISOString());
+        return json(response, 200, { ok: true, inviteId: invite.inviteId });
+      }
+      if (url.pathname === "/v1/catalog" && request.method === "PUT") {
+        if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub publishes its catalog.");
+        const parsed = parseJson(body) as { catalog?: unknown };
+        if (!parsed?.catalog || typeof parsed.catalog !== "object") throw new HubRequestError(400, "Invalid catalog.");
+        await this.options.storage.hub().setDocument("composer-catalog", parsed.catalog, new Date(this.now()).toISOString());
+        this.options.onCatalogChanged?.();
+        return json(response, 200, { ok: true });
+      }
+      if (url.pathname === "/v1/machine-wake" && request.method === "PUT") {
+        if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub gives it start keys.");
+        const entries = validMachineWake(parseJson(body));
+        await this.options.storage.hub().replaceMachineWake(entries.map((entry) => ({ machineId: entry.machineId, configJson: JSON.stringify(entry) })), new Date(this.now()).toISOString());
+        return json(response, 200, { ok: true, machines: entries.length });
+      }
+      if (url.pathname === HUB_PROGRESS_PATH && request.method === "POST") {
+        // The desktop's own members run there; a machine's progress travels
+        // in its channel, a phone runs nothing.
+        if (device.role !== "owner" && device.role !== "desktop") throw new HubRequestError(403, "Only a desktop posts its members' progress.");
+        const frames = (parseJson(body) as Partial<HubProgressPost> | undefined)?.frames;
+        if (!Array.isArray(frames) || frames.length > 100) throw new HubRequestError(400, "Invalid progress.");
+        this.options.onProgress?.(frames);
+        return json(response, 200, { ok: true });
       }
       throw new HubRequestError(404, "Not found.");
     } catch (error) {
@@ -510,6 +590,110 @@ export class HubServer {
       // A phone's wait for news is long on purpose.
       if (status >= 500 || (ms > SLOW_REQUEST_MS && path !== "/v1/phone/changes")) this.options.debugLog?.("hub.request", { method: request.method, path, status, ms });
     }
+  }
+
+  /** Enrollment attempts per address in the last minute, and all together:
+   *  nobody can make the hub check tokens without end. */
+  private readonly enrollAttempts = new Map<string, number[]>();
+  private enrollQueue: Promise<unknown> = Promise.resolve();
+
+  private limitEnrollments(address: string): void {
+    const now = this.now();
+    const recent = (this.enrollAttempts.get(address) ?? []).filter((at) => now - at < 60_000);
+    const all = [...this.enrollAttempts.values()].reduce((count, list) => count + list.filter((at) => now - at < 60_000).length, 0);
+    // Per address against guessing (a code is 256 bits: nobody guesses it);
+    // all together only against load, high enough that strangers cannot
+    // keep the User's own phone from pairing.
+    if (recent.length >= ENROLL_ATTEMPTS_PER_ADDRESS || all >= ENROLL_ATTEMPTS_ALL) throw new HubRequestError(429, "Too many pairing attempts; try again in a minute.");
+    recent.push(now);
+    this.enrollAttempts.set(address, recent);
+    if (this.enrollAttempts.size > 1_000) {
+      for (const [key, list] of this.enrollAttempts) if (!list.some((at) => now - at < 60_000)) this.enrollAttempts.delete(key);
+    }
+  }
+
+  private validInvite(value: unknown, owner: HubDevice): HubPhoneInvite {
+    const invite = value as Partial<HubPhoneInvite> | undefined;
+    const now = this.now();
+    const expiresAt = Date.parse(invite?.expiresAt ?? "");
+    const issuedAt = Date.parse(invite?.issuedAt ?? "");
+    if (!invite || invite.version !== 1 || !isHubPhoneInviteId(invite.inviteId) ||
+        invite.hubId !== this.options.hubId || invite.issuerDeviceId !== owner.deviceId ||
+        typeof invite.tokenHash !== "string" || !/^[0-9a-f]{64}$/.test(invite.tokenHash) ||
+        // Every chat: the order has no per-chat fences for a phone's writes.
+        !isHubPhoneScope(invite.scope) || invite.scope.scope !== "device" ||
+        typeof invite.name !== "string" || invite.name.length > 200 || CONTROL_CHARACTER.test(invite.name) ||
+        !Number.isFinite(expiresAt) || !Number.isFinite(issuedAt) || expiresAt <= now || expiresAt - now > HUB_PHONE_INVITE_MAX_LIFETIME_MS) {
+      throw new HubRequestError(400, "Invalid invite.");
+    }
+    return {
+      version: 1, inviteId: invite.inviteId, hubId: invite.hubId, issuerDeviceId: invite.issuerDeviceId, tokenHash: invite.tokenHash,
+      scope: invite.scope, name: invite.name, issuedAt: invite.issuedAt!, expiresAt: invite.expiresAt!
+    };
+  }
+
+  /** A phone shows an invite's token and signs its acceptance with its key:
+   *  it is on the roster from then on, as the invite said. One at a time, so
+   *  a token is spent once. */
+  private enroll(value: unknown): Promise<HubPhoneEnrollResponse> {
+    const run = this.enrollQueue.then(() => this.enrollNow(value));
+    this.enrollQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async enrollNow(value: unknown): Promise<HubPhoneEnrollResponse> {
+    const request = value as Partial<HubPhoneEnrollRequest> | undefined;
+    const enrollment = request?.enrollment as Partial<HubPhoneEnrollment> | undefined;
+    const refused = (message: string) => new HubRequestError(400, message);
+    if (!request || typeof request.token !== "string" || !/^[A-Za-z0-9_-]{20,200}$/.test(request.token) || typeof request.signature !== "string" ||
+        !enrollment || enrollment.version !== 1 || enrollment.hubId !== this.options.hubId || typeof enrollment.publicKeyDerBase64 !== "string" ||
+        enrollment.publicKeyDerBase64.length > 200 || typeof enrollment.deviceId !== "string" || deviceIdForPublicKey(enrollment.publicKeyDerBase64) !== enrollment.deviceId ||
+        typeof enrollment.name !== "string" || enrollment.name.length > 100 || CONTROL_CHARACTER.test(enrollment.name) ||
+        typeof enrollment.enrolledAt !== "string" || !Number.isFinite(Date.parse(enrollment.enrolledAt))) {
+      throw refused("Invalid pairing request.");
+    }
+    const tokenHash = sha256Hex(request.token);
+    if (enrollment.tokenHash !== tokenHash) throw refused("Invalid pairing request.");
+    const accepted: HubPhoneEnrollment = {
+      version: 1, hubId: enrollment.hubId, tokenHash, deviceId: enrollment.deviceId, publicKeyDerBase64: enrollment.publicKeyDerBase64,
+      name: enrollment.name, enrolledAt: enrollment.enrolledAt
+    };
+    if (!verifyHubText(accepted.publicKeyDerBase64, hubPhoneEnrollmentSigningText(accepted), request.signature)) throw refused("The pairing request's signature does not verify.");
+    const hub = this.options.storage.hub();
+    const stored = await hub.phoneInviteByTokenHash(tokenHash);
+    const gone = new HubRequestError(410, "This pairing code was already used or has expired. Make a new one on your Mac.");
+    if (!stored || stored.cancelledAt) throw gone;
+    const answer = (enrollmentJson: string, enrollmentSignature: string): HubPhoneEnrollResponse => {
+      const kept = JSON.parse(enrollmentJson) as HubPhoneEnrollment;
+      const certificate: HubPhoneCertificate = {
+        invite: stored.invite, inviteSignature: stored.signature, enrollment: kept, enrollmentSignature, token: request.token!
+      };
+      return { ok: true, hubId: this.options.hubId, deviceId: kept.deviceId, scope: stored.invite.scope, certificate, protocol: HUB_PROTOCOL_VERSION };
+    };
+    if (stored.usedAt) {
+      // The same phone asking again (its answer was lost on the way) is told
+      // again; anyone else is refused.
+      if (stored.deviceId === accepted.deviceId && stored.enrollment) return answer(stored.enrollment.json, stored.enrollment.signature);
+      throw gone;
+    }
+    const now = new Date(this.now()).toISOString();
+    if (Date.parse(stored.invite.expiresAt) <= this.now()) throw gone;
+    // Checked as every device checks the certificate later: a phone whose
+    // clock is far off is told now, not admitted here and refused elsewhere.
+    const enrolledAt = Date.parse(accepted.enrolledAt);
+    if (enrolledAt > Date.parse(stored.invite.expiresAt) + HUB_AUTH_MAX_SKEW_MS || enrolledAt < Date.parse(stored.invite.issuedAt) - HUB_AUTH_MAX_SKEW_MS ||
+        Math.abs(enrolledAt - this.now()) > HUB_AUTH_MAX_SKEW_MS) {
+      throw refused("This phone's clock is off. Set it to update automatically, then scan the code again.");
+    }
+    const enrollmentJson = JSON.stringify(accepted);
+    const taken = await hub.enrollPhone(stored.invite.inviteId, {
+      deviceId: accepted.deviceId, publicKeyDerBase64: accepted.publicKeyDerBase64, role: "phone", name: accepted.name || stored.invite.name,
+      addedAt: now, scope: stored.invite.scope
+    }, { json: enrollmentJson, signature: request.signature }, now);
+    if (!taken) throw gone;
+    this.invalidateRoster();
+    this.options.debugLog?.("hub.phone.enrolled", { deviceId: accepted.deviceId, inviteId: stored.invite.inviteId });
+    return answer(enrollmentJson, request.signature);
   }
 
   private serveChallenge(pathname: string, response: ServerResponse): void {
@@ -583,8 +767,40 @@ function validRoster(value: unknown): HubDevice[] {
         (device.machineId !== undefined && (typeof device.machineId !== "string" || device.machineId.length > 128))) {
       throw new HubRequestError(400, "Invalid roster entry.");
     }
+    // A phone is on the roster for every chat (see validInvite).
+    if ((device.scope !== undefined && (device.role !== "phone" || !isHubPhoneScope(device.scope) || device.scope.scope !== "device")) ||
+        (device.inviteId !== undefined && !isHubPhoneInviteId(device.inviteId))) {
+      throw new HubRequestError(400, "Invalid roster entry.");
+    }
     return { deviceId: device.deviceId, publicKeyDerBase64: device.publicKeyDerBase64, role: device.role, name: device.name, addedAt: "",
-      ...(device.machineId ? { machineId: device.machineId } : {}) };
+      ...(device.machineId ? { machineId: device.machineId } : {}),
+      ...(device.scope ? { scope: device.scope } : {}),
+      ...(device.inviteId ? { inviteId: device.inviteId } : {}) };
+  });
+}
+
+function validInviteIds(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 1_000 || !value.every(isHubPhoneInviteId)) {
+    throw new HubRequestError(400, "Invalid settled invites.");
+  }
+  return value as string[];
+}
+
+function validMachineWake(value: unknown): import("../shared/hubProtocol").HubMachineWakeRequest["machines"] {
+  const machines = (value as { machines?: unknown } | undefined)?.machines;
+  const text = (item: unknown, pattern: RegExp) => typeof item === "string" && pattern.test(item);
+  if (!Array.isArray(machines) || machines.length > 50) throw new HubRequestError(400, "Invalid start keys.");
+  return machines.map((entry) => {
+    const machine = entry as { machineId?: unknown; instanceId?: unknown; region?: unknown; credentials?: { accessKeyId?: unknown; secretAccessKey?: unknown; region?: unknown } };
+    if (!text(machine?.machineId, /^[A-Za-z0-9._:-]{1,128}$/) || !text(machine.instanceId, /^i-[0-9a-f]{8,32}$/) || !text(machine.region, /^[a-z]{2}(-[a-z]+)+-\d$/) ||
+        !text(machine.credentials?.accessKeyId, /^[A-Z0-9]{16,128}$/) || !text(machine.credentials?.secretAccessKey, /^[A-Za-z0-9/+=]{20,128}$/) || machine.credentials?.region !== machine.region) {
+      throw new HubRequestError(400, "Invalid start key.");
+    }
+    return {
+      machineId: machine.machineId as string, instanceId: machine.instanceId as string, region: machine.region as string,
+      credentials: { accessKeyId: machine.credentials!.accessKeyId as string, secretAccessKey: machine.credentials!.secretAccessKey as string, region: machine.region as string }
+    };
   });
 }
 

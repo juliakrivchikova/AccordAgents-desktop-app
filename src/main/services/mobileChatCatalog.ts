@@ -37,6 +37,9 @@ export interface MobileChatListOptions {
   runningFromMessages?: boolean;
   /** Only chats this returns true for are listed (a pairing's scope). */
   include?: (summary: ConversationSummary) => boolean;
+  /** Where a chat's approvals are read when they are not on the chat itself
+   *  (the server folds them from the devices that hold them). */
+  approvalsFor?: (conversationId: string) => ChatAppToolApproval[];
   onPendingCardsTruncated?: (listed: number) => void;
   /** The chat summaries when the caller already read them. */
   summaries?: ConversationSummary[];
@@ -71,7 +74,8 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
   // drop every card it does not name.
   const pendingCardsFor = (conversationId: string, conversation: Conversation | undefined): MobileControlCard[] | undefined =>
     !options.pendingCards || pendingTruncated ? undefined : [
-      ...((conversation?.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[] } | undefined)?.pendingAppToolApprovals ?? [])
+      ...(options.approvalsFor ? options.approvalsFor(conversationId)
+        : (conversation?.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[] } | undefined)?.pendingAppToolApprovals ?? [])
         .filter((approval) => approval.status === "pending")
         .map((approval) => controlCardFromApproval(conversationId, approval)),
       ...(pendingChoicesByConversation.get(conversationId) ?? [])
@@ -114,6 +118,8 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
         mentionHandle: mobileParticipantMentionHandle(participant, members),
         displayName: mobileParticipantDisplayName(participant),
         roleLabel: options.roleLabels.get(participant.roleConfigId) ?? participant.roleConfigId,
+        // What the phone resolves a draft's member with, as the desktop does.
+        roleConfigId: participant.roleConfigId,
         kind: participant.kind,
         ...(participant.avatarId ? { avatarId: participant.avatarId } : {}),
         ...(mobileParticipantIsAssistant(participant) ? { isAssistant: true } : {}),
@@ -139,7 +145,7 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
  *  already holds. The cursor is the oldest stored message of the page, not
  *  the oldest visible row: a page of rows the phone does not show would
  *  otherwise be asked for again and again. */
-export async function buildMobileTimelinePage(store: MobileCatalogStore, conversationId: string, options: { beforeMessageId?: string } = {}): Promise<MobileTimelinePage> {
+export async function buildMobileTimelinePage(store: MobileCatalogStore, conversationId: string, options: { beforeMessageId?: string } = {}): Promise<MobileTimelinePage & { conversation?: Conversation }> {
   const opened = await store.openConversation(conversationId, MOBILE_TIMELINE_PAGE_SIZE, options.beforeMessageId
     ? { beforeMessageId: options.beforeMessageId }
     : undefined);
@@ -150,7 +156,10 @@ export async function buildMobileTimelinePage(store: MobileCatalogStore, convers
   return {
     events: timelineEventsFromSnapshot(opened.conversation, MOBILE_TIMELINE_PAGE_SIZE),
     hasMoreBefore: opened.messagePage.hasMoreBefore,
-    ...(oldest ? { beforeMessageId: oldest.id } : {})
+    ...(oldest ? { beforeMessageId: oldest.id } : {}),
+    // The page itself, for a reader that needs more of it than the events
+    // (the server's cards); never sent as it is.
+    conversation: opened.conversation
   };
 }
 
