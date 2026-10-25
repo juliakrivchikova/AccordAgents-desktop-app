@@ -4,7 +4,8 @@ import { act, useCallback, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/react-virtual";
 
-import { measureRowAndRemember, unmeasuredRowClip, useAnchoredVirtualItems } from "./chat-timeline-scroll";
+import { measureRowAndRemember, unmeasuredRowClip } from "./chat-timeline-row-clip";
+import { useAnchoredVirtualItems } from "./chat-timeline-scroll";
 
 // jsdom has no animation frames; the virtualizer steers its scrolls on them.
 if (typeof window.requestAnimationFrame !== "function") {

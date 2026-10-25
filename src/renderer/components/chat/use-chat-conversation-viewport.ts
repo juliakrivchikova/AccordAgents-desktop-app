@@ -5,7 +5,8 @@ import type { ChatMessage, Conversation, ReviewProgress } from "../../../shared/
 import { focusRenderedMessage } from "../content/markdown-text";
 import type { ChatTimelineRow } from "./chat-conversation-data";
 import type { ChatMessageFocusRequest } from "./chat-conversation-types";
-import { measureRowAndRemember, useAnchoredVirtualItems, useOlderMessagesTopUp } from "./chat-timeline-scroll";
+import { measureRowAndRemember } from "./chat-timeline-row-clip";
+import { useAnchoredVirtualItems, useOlderMessagesTopUp } from "./chat-timeline-scroll";
 import { useChatFocusNavigation } from "./use-chat-focus-navigation";
 
 type ThreadSummaryMap = Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>;

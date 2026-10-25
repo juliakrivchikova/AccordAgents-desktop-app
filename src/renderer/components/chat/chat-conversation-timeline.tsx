@@ -24,7 +24,7 @@ import {
 import { ChatMessageItem, type ChatChoiceResponse } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { ChatThinkingRowItem } from "./chat-streaming";
-import { unmeasuredRowClip } from "./chat-timeline-scroll";
+import { unmeasuredRowClip } from "./chat-timeline-row-clip";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 type ThreadSummaryMap = Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>;
