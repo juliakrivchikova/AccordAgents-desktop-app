@@ -243,6 +243,8 @@ export function readerFloors(
     // The desktop's own writing in a machine's channel says nothing about
     // which machine is at its other end.
     const members = [...ids].filter((id) => !(enrolled && (byId.get(id)?.role === "owner" || byId.get(id)?.role === "desktop")));
+    // An enrolled channel whose machine is not known at all is kept whole.
+    if (members.length === 0) continue;
     const present = members.filter((id) => byId.has(id));
     let floor = enrolled ? desktopFloor : Number.POSITIVE_INFINITY;
     for (const id of present) floor = Math.min(floor, byId.get(id)?.role !== "phone" && readers.has(id) ? floorOf(id) : 0);

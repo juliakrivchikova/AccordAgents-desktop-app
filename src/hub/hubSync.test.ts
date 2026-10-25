@@ -30,14 +30,14 @@ async function store(dir: string, name: string) {
 
 type Device = Awaited<ReturnType<typeof store>>;
 
-async function setup(t: test.TestContext) {
+async function setup(t: test.TestContext, options: { snapshotPageBytes?: number } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-sync-"));
   const hubStore = await store(dir, "hub");
   const desktop = await store(dir, "desktop");
   const phone = await store(dir, "phone");
   await hubStore.storage.hub().setOwner({ deviceId: desktop.identity.originId, publicKeyDerBase64: desktop.identity.publicKeyDerBase64, name: "Desktop", addedAt: new Date().toISOString() });
   await hubStore.storage.hub().replaceRoster([{ deviceId: phone.identity.originId, publicKeyDerBase64: phone.identity.publicKeyDerBase64, role: "phone", name: "iPhone", addedAt: "" }], new Date().toISOString());
-  const hubLog = new HubLog(hubStore.storage);
+  const hubLog = new HubLog(hubStore.storage, () => new Date(), options.snapshotPageBytes);
   // The hub's copy of the chats, as the hub keeps it (a device starting again reads it).
   const folder = new HubFolder(hubStore.storage, hubApplyPolicy(hubStore.storage));
   hubLog.onAppended(({ changedConversationIds }) => folder.enqueue(changedConversationIds));
@@ -642,14 +642,16 @@ test("a chat taken from the hub's copy: a machine takes its shared content, the 
   const at = new Date().toISOString();
   const local: Conversation = {
     id: "chat-m", kind: "chat", title: "Local title", createdAt: at, updatedAt: at, findings: [],
-    messages: [{ id: "mine", role: "user", content: "written here, newer", createdAt: at } as ChatMessage],
+    messages: [{ id: "mine", role: "user", content: "written here, newer", createdAt: at } as ChatMessage,
+      { id: "reply", role: "participant", participantId: "p1", content: "", status: "pending", createdAt: at } as ChatMessage],
     metadata: { participants: [{ id: "p1", handle: "bot", kind: "claude-code", permissions: { shell: false } }], running: true } as never
   };
   const copied: CopiedConversation = {
     id: "chat-m", updatedAt: at, removed: [],
     shared: { title: "Server title", kind: "chat", createdAt: at, metadata: { participants: [{ id: "p1", handle: "bot", kind: "claude-code", permissions: { shell: true } }] } } as never,
-    messages: [{ id: "mine", role: "user", content: "older text on the server", createdAt: at } as ChatMessage, { id: "theirs", role: "participant", participantId: "p1", content: "from a machine", createdAt: at } as ChatMessage],
-    authors: { mine: s.desktop.identity.originId, theirs: "device-machine" }
+    messages: [{ id: "mine", role: "user", content: "older text on the server", createdAt: at } as ChatMessage, { id: "theirs", role: "participant", participantId: "p1", content: "from a machine", createdAt: at } as ChatMessage,
+      { id: "reply", role: "participant", participantId: "p1", content: "finished on the machine", status: "done", createdAt: at } as ChatMessage],
+    authors: { mine: s.desktop.identity.originId, theirs: "device-machine", reply: "device-machine" }
   };
   // The desktop: its own fields and its own message stay; it gains the message it lacked.
   await s.desktop.storage.saveConversation(local);
@@ -658,7 +660,8 @@ test("a chat taken from the hub's copy: a machine takes its shared content, the 
   const onDesktop = (await s.desktop.storage.getConversation("chat-m"))!;
   assert.equal(onDesktop.title, "Local title");
   assert.equal((onDesktop.metadata.participants as Array<{ permissions: { shell: boolean } }>)[0].permissions.shell, false, "no permission comes from the copy");
-  assert.deepEqual(onDesktop.messages.map((message) => [message.id, message.content]), [["mine", "written here, newer"], ["theirs", "from a machine"]]);
+  assert.deepEqual(onDesktop.messages.map((message) => [message.id, message.content]),
+    [["mine", "written here, newer"], ["reply", "finished on the machine"], ["theirs", "from a machine"]], "the machine's finished reply, its own message as it is");
   // The desktop takes no chat it does not have.
   await desktopChat.mergeServerCopy({ ...copied, id: "chat-new" }, { desktopOriginId: s.desktop.identity.originId, localOriginId: s.desktop.identity.originId, ownsSharedFields: true });
   assert.equal(await s.desktop.storage.getConversation("chat-new"), undefined);
@@ -666,7 +669,7 @@ test("a chat taken from the hub's copy: a machine takes its shared content, the 
   const machine = await store(s.dir, "machine-merge");
   await machine.storage.saveConversation({ ...local, messages: [{ id: "theirs", role: "participant", participantId: "p1", content: "the machine's own newer reply", createdAt: at } as ChatMessage] });
   const machineChat = service(machine.storage);
-  await machineChat.mergeServerCopy({ ...copied, authors: { mine: s.desktop.identity.originId, theirs: machine.identity.originId } },
+  await machineChat.mergeServerCopy({ ...copied, authors: { mine: s.desktop.identity.originId, theirs: machine.identity.originId, reply: machine.identity.originId } },
     { desktopOriginId: s.desktop.identity.originId, localOriginId: machine.identity.originId });
   const onMachine = (await machine.storage.getConversation("chat-m"))!;
   assert.equal(onMachine.title, "Server title");
@@ -696,12 +699,49 @@ test("a start from the hub's copy that keeps being asked for is not repeated wit
       merged.push(copied.id);
     }
   });
+  await assert.rejects(machineSync.resync(), /could not be merged/, "a chat that failed is tried again before reading on");
+  assert.deepEqual(merged, ["chat-r1"], "the other chat went on");
+  assert.equal(await machine.storage.hub().clientState("pulled-hub-seq"), undefined, "not read past it yet");
+  await assert.rejects(machineSync.resync(), /too soon/, "after a wait");
+  clock += 31_000;
   await machineSync.resync();
-  assert.deepEqual(merged, ["chat-r1"], "one chat failed, the other went on");
-  await assert.rejects(machineSync.resync(), /too soon/, "not again right away");
+  assert.deepEqual(merged, ["chat-r1", "chat-r2"], "only the chat that failed, taken anew");
+  assert.equal(await machine.storage.hub().clientState("pulled-hub-seq"), "2");
+  await assert.rejects(machineSync.resync(), /too soon/, "not again within half an hour");
   clock += 31 * 60_000;
   await machineSync.resync();
-  assert.deepEqual(merged, ["chat-r1", "chat-r1", "chat-r2"]);
+  assert.deepEqual(merged, ["chat-r1", "chat-r2", "chat-r1", "chat-r2"]);
+});
+
+test("a large chat of the copy comes in parts and keeps who wrote each message", async (t) => {
+  const s = await setup(t, { snapshotPageBytes: 900 });
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine);
+  await s.desktop.log.appendLocalEvent(createdChat("chat-parts"));
+  for (const n of [2, 3, 4, 5, 6, 7, 8]) await s.desktop.log.appendLocalEvent(change("chat-parts", n));
+  await pushAll(s.link(s.desktop, []), s, 8);
+  await s.folder.idle();
+  const merged: CopiedConversation[] = [];
+  const machineSync = s.link(machine, [], { mergeCopy: async (copied) => { merged.push(copied); } });
+  await machineSync.resync();
+  assert.equal(merged.length, 1);
+  assert.deepEqual(new Set(merged[0].messages.map((message) => message.id)), new Set(["m2", "m3", "m4", "m5", "m6", "m7", "m8"]));
+  for (const message of merged[0].messages) assert.equal(merged[0].authors?.[message.id], s.desktop.identity.originId, `${message.id} keeps its author`);
+});
+
+test("a gap below where a chain was continued is filled from what the hub still holds", async (t) => {
+  const s = await setup(t);
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine, "room-1");
+  const scope = `device:room-1:${JSON.stringify(["chat-am", "actions"])}`;
+  for (const n of [1, 2, 3]) await s.desktop.log.appendLocalEvent({ conversationId: "chat-am", logScopeId: scope, kind: "machine.settings.sealed", payload: { n } });
+  await pushAll(s.link(s.desktop, []), s, 3);
+  // Later the chain was continued past a stretch the hub never had.
+  await s.hubStore.storage.hub().markChain(s.desktop.identity.originId, scope, 6, "sha256:x");
+  const delivered: number[] = [];
+  const machineSync = s.link(machine, [], { deliver: async (event) => { delivered.push(event.originSeq); return "delivered"; } });
+  assert.equal(await machineSync.repairGap({ originId: s.desktop.identity.originId, logScopeId: scope, fromSeq: 1, toSeq: 2 }), "repaired");
+  assert.deepEqual(delivered, [1, 2], "handed in, not passed over");
 });
 
 test("a gap whose start was refused goes on past it, the next event applies; a forged event moves nothing", async (t) => {

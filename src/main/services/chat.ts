@@ -19920,10 +19920,24 @@ export class ChatService {
     }
     await this.withChatMutation(existing, async () => {
       if (options.ownsSharedFields) {
+        // Messages it lacks, and the copy's version of those another device
+        // wrote (a machine member's finished reply); its own stay as they are.
+        const merged = new Map(merge(existing).messages.map((message) => [message.id, message]));
+        const theirs = (id: string): boolean => {
+          const author = copied.authors?.[id];
+          return Boolean(author) && author !== options.localOriginId && author !== options.desktopOriginId;
+        };
+        let changed = false;
+        const messages = existing.messages.map((message) => {
+          const incoming = merged.get(message.id);
+          if (!incoming || !theirs(message.id) || JSON.stringify(incoming) === JSON.stringify(message)) return message;
+          changed = true;
+          return incoming;
+        });
         const known = new Set(existing.messages.map((message) => message.id));
-        const added = merge(existing).messages.filter((message) => !known.has(message.id));
-        if (added.length === 0) return;
-        existing.messages = [...existing.messages, ...added]
+        const added = [...merged.values()].filter((message) => !known.has(message.id));
+        if (!changed && added.length === 0) return;
+        existing.messages = [...messages, ...added]
           .map((message, index) => ({ message, index }))
           .sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.index - right.index)
           .map((entry) => entry.message);

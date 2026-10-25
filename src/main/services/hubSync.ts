@@ -33,6 +33,14 @@ const HELD_AUTHORS_CHECK_MS = 10 * 60_000;
  *  that failed is taken up again after RESYNC_RETRY_MS, doubling per failure. */
 const RESYNC_MIN_INTERVAL_MS = 30 * 60_000;
 const RESYNC_RETRY_MS = 30_000;
+/** A copy page the hub is too busy to build now is asked again after about
+ *  this long, this many times. */
+const SNAPSHOT_BUSY_WAIT_MS = 1_000;
+const SNAPSHOT_BUSY_RETRIES = 120;
+/** A chat of the copy that could not be merged is tried again this many
+ *  times (each after the start's backoff) before this device reads on
+ *  without it; a later change of that chat takes it from the copy again. */
+const RESYNC_CHAT_ATTEMPTS = 3;
 
 /** A start from the hub's copy in progress (kept across a failed attempt). */
 interface ResyncProgress {
@@ -45,6 +53,10 @@ interface ResyncProgress {
   partial: Map<string, HubCopyPart>;
   failed: Set<string>;
   chats: number;
+  /** Every page is in; what is left is the chats that failed. */
+  pagesDone: boolean;
+  /** Attempts so far at the chats that failed. */
+  attempts: number;
 }
 const RETRY_MIN_MS = 5_000;
 const RETRY_MAX_MS = 5 * 60_000;
@@ -598,13 +610,13 @@ export class HubSync {
     const progress = this.resyncProgress ?? await this.startResync();
     this.resyncProgress = progress;
     this.options.log?.("hub.sync.resync.started", { prunedThrough, hubSeq: progress.hubSeq, resumed: progress.chats > 0 || Boolean(progress.page) });
-    for (;;) {
+    while (!progress.pagesDone) {
       if (this.stopped) throw new HubTransientError("Stopped while starting again from the server's copy.");
-      const response = progress.firstPage ?? await this.options.client.snapshot({ copy: true, ...(progress.page ? { page: progress.page } : {}) });
+      const response = progress.firstPage ?? await this.snapshotPage({ copy: true, ...(progress.page ? { page: progress.page } : {}) });
       progress.firstPage = undefined;
       for (const part of response.conversations) {
         const earlier = progress.partial.get(part.id);
-        const joined = earlier ? { ...part, messages: [...earlier.messages, ...part.messages] } : part;
+        const joined = earlier ? joinParts(earlier, part) : part;
         if (part.more) {
           progress.partial.set(part.id, joined);
           continue;
@@ -612,11 +624,36 @@ export class HubSync {
         progress.partial.delete(part.id);
         await this.mergeOne(merge, joined, progress);
       }
-      if (!response.next) break;
+      if (!response.next) {
+        // A chat the last page left open (it went away meanwhile) is merged as far as it came.
+        for (const part of progress.partial.values()) await this.mergeOne(merge, part, progress);
+        progress.partial.clear();
+        progress.pagesDone = true;
+        break;
+      }
       progress.page = response.next;
     }
-    // A chat the last page left open (it went away meanwhile) is merged as far as it came.
-    for (const part of progress.partial.values()) await this.mergeOne(merge, part, progress);
+    if (progress.failed.size > 0 && progress.attempts > 0) {
+      // Taken up again: only the chats that could not be merged, each anew.
+      for (const conversationId of [...progress.failed]) {
+        try {
+          await this.resyncChat(conversationId, { applyMarks: false });
+          progress.failed.delete(conversationId);
+          progress.chats += 1;
+        } catch (error) {
+          this.options.log?.("hub.sync.resync.chat-failed", { conversationId, attempt: progress.attempts + 1, message: errorMessage(error) });
+        }
+      }
+    }
+    if (progress.failed.size > 0 && progress.attempts + 1 < RESYNC_CHAT_ATTEMPTS) {
+      progress.attempts += 1;
+      throw new HubTransientError(`${progress.failed.size} chat(s) from the server's copy could not be merged; tried again later.`);
+    }
+    if (progress.failed.size > 0) {
+      // Reported, not dropped in silence: a later change of such a chat
+      // finds a gap and takes it from the copy again.
+      this.options.log?.("hub.sync.resync.chats-skipped", { conversationIds: [...progress.failed] });
+    }
     // A chat that could not be merged keeps its own marks: its changes after
     // its own position still come as events.
     const marks = progress.marks.filter((mark) => !progress.failed.has(mark.logScopeId.slice(CHAT_CHANGES_LOG_SCOPE_PREFIX.length)));
@@ -638,13 +675,27 @@ export class HubSync {
     const hub = this.options.storage.hub();
     const held = await hub.heldSummary();
     const since = Number(await hub.clientState(PULLED_KEY) ?? "0") || 0;
-    const first = await this.options.client.snapshot({
+    const first = await this.snapshotPage({
       copy: true, scopes: await this.ownScopes(), since, ...(held.lowest > 0 ? { atMost: held.lowest - 1 } : {})
     });
     return {
       hubSeq: first.hubSeq, ...(first.hubId ? { hubId: first.hubId } : {}), marks: first.marks ?? [],
-      partial: new Map(), failed: new Set(), chats: 0, firstPage: first
+      partial: new Map(), failed: new Set(), chats: 0, firstPage: first, pagesDone: false, attempts: 0
     };
+  }
+
+  /** One page of the hub's copy. The hub builds one page at a time and asks
+   *  the others to come back (503): asked again shortly, not counted as a
+   *  failure of the start. */
+  private async snapshotPage(request: Parameters<HubClient["snapshot"]>[0]): Promise<HubSnapshotResponse> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.options.client.snapshot(request);
+      } catch (error) {
+        if (!(error instanceof HubHttpError && error.status === 503) || attempt >= SNAPSHOT_BUSY_RETRIES || this.stopped) throw error;
+        await new Promise((resolve) => setTimeout(resolve, SNAPSHOT_BUSY_WAIT_MS * (0.5 + Math.random())));
+      }
+    }
   }
 
   private async mergeOne(merge: (copied: CopiedConversation) => Promise<void>, part: HubCopyPart, progress: ResyncProgress): Promise<void> {
@@ -688,34 +739,49 @@ export class HubSync {
     try {
       const response = await this.options.client.chain(gap.originId, gap.logScopeId, gap.fromSeq, Math.max(gap.fromSeq, gap.toSeq));
       const pruned = response.pruned;
-      const forgotten = pruned && pruned.originSeq >= gap.fromSeq ? pruned : undefined;
+      const events = [...response.events].sort((left, right) => left.event.originSeq - right.event.originSeq);
+      let expected = gap.fromSeq;
       let outcome: HubGapRepair = "repaired";
-      if (response.events[0]?.event.originSeq !== gap.fromSeq) {
-        // The start of the gap is not on the hub.
-        if (!forgotten) {
-          // Never placed (its author's push was refused, or has not come):
-          // nothing to take yet; the author's side reports it.
-          this.options.log?.("hub.sync.gap-unavailable", { ...gap, retained: response.events.length });
-          return "unavailable";
+      let handedIn = 0;
+      // The chain in order: what the hub holds is handed in, and a stretch
+      // before an event it holds is passed over only if the hub forgot it.
+      for (const item of events) {
+        const seq = item.event.originSeq;
+        if (seq < expected) continue;
+        if (seq > expected) {
+          if (!pruned || pruned.originSeq < expected || !item.event.prevHash) {
+            this.options.log?.("hub.sync.gap-unavailable", { ...gap, missing: expected, retained: events.length });
+            return handedIn > 0 ? outcome : "unavailable";
+          }
+          outcome = await this.passOver(gap, { originSeq: seq - 1, eventHash: item.event.prevHash });
         }
-        outcome = await this.passOver(gap, await this.passOverPoint(gap, forgotten));
-      }
-      // What the hub still holds after what it forgot is handed in.
-      for (const item of response.events) {
-        if (forgotten && item.event.originSeq <= forgotten.originSeq) continue;
         const received = await this.receiveOrHold(item, { gapRepair: true });
         if (received === "forged") {
-          this.options.log?.("hub.sync.gap-unavailable", { ...gap, forged: item.event.originSeq });
+          // An event its author did not sign is not what the gap misses.
+          this.options.log?.("hub.sync.gap-unavailable", { ...gap, forged: seq });
           return "unavailable";
         }
-        if (received !== "refused") continue;
-        // Refused here for good (a signature, a scope, a conflict): the chain
-        // goes on past it instead of waiting for it for ever.
-        this.options.log?.("hub.sync.gap-refused", { ...gap, originSeq: item.event.originSeq, eventId: item.event.eventId });
-        outcome = await this.passOver(gap, { originSeq: item.event.originSeq, eventHash: item.event.eventHash });
-        break;
+        if (received === "refused") {
+          // Refused here for good (a scope, a conflict): the chain goes on
+          // past it instead of waiting for it for ever.
+          this.options.log?.("hub.sync.gap-refused", { ...gap, originSeq: seq, eventId: item.event.eventId });
+          outcome = await this.passOver(gap, { originSeq: seq, eventHash: item.event.eventHash });
+        }
+        handedIn += 1;
+        expected = seq + 1;
       }
-      this.options.log?.("hub.sync.gap-repaired", { ...gap, outcome, events: response.events.length, ...(forgotten ? { prunedThrough: forgotten.originSeq } : {}) });
+      if (expected <= gap.toSeq) {
+        // The rest of the gap is not on the hub.
+        if (pruned && pruned.originSeq >= expected) {
+          outcome = await this.passOver(gap, await this.passOverPoint({ ...gap, fromSeq: expected }, pruned));
+        } else if (handedIn === 0) {
+          // Never placed (its author's push was refused, or has not come):
+          // nothing to take yet; the author's side reports it.
+          this.options.log?.("hub.sync.gap-unavailable", { ...gap, retained: events.length });
+          return "unavailable";
+        }
+      }
+      this.options.log?.("hub.sync.gap-repaired", { ...gap, outcome, events: handedIn, ...(pruned ? { prunedThrough: pruned.originSeq } : {}) });
       return outcome;
     } catch (error) {
       this.options.log?.("hub.sync.gap-error", { ...gap, message: errorMessage(error) });
@@ -747,23 +813,23 @@ export class HubSync {
   }
 
   /** One chat from the hub's copy, for a chain of its changes the hub forgot. */
-  private async resyncChat(conversationId: string): Promise<void> {
+  private async resyncChat(conversationId: string, options: { applyMarks?: boolean } = {}): Promise<void> {
     const merge = this.options.mergeCopy;
     if (!merge) throw new Error("This device cannot take a chat from the server's copy.");
     let page: string | undefined;
     let marks: HubCopyMark[] = [];
     let joined: HubCopyPart | undefined;
     for (;;) {
-      const response = await this.options.client.snapshot({ copy: true, chat: conversationId, ...(page ? { page } : {}) });
+      const response = await this.snapshotPage({ copy: true, chat: conversationId, ...(page ? { page } : {}) });
       if (!page) marks = response.marks ?? [];
       for (const part of response.conversations) {
-        joined = joined && joined.id === part.id ? { ...part, messages: [...joined.messages, ...part.messages] } : part;
+        joined = joined && joined.id === part.id ? joinParts(joined, part) : part;
       }
       if (!response.next) break;
       page = response.next;
     }
     if (joined) await merge(copiedFromPart(joined));
-    await this.options.storage.applyChatCopyMarks(marks, new Date(this.now()).toISOString(), await this.options.localOriginId());
+    if (options.applyMarks !== false) await this.options.storage.applyChatCopyMarks(marks, new Date(this.now()).toISOString(), await this.options.localOriginId());
   }
 
   private async hold(item: HubLoggedEvent, reason: string): Promise<void> {
@@ -916,6 +982,13 @@ export class HubSync {
     const outcome = await this.options.applyChatChange(event);
     return outcome === "held" ? "waiting" : "done";
   }
+}
+
+/** Two parts of one chat of the hub's copy (newest messages first), joined:
+ *  every message once, and who wrote each from both. */
+function joinParts(earlier: HubCopyPart, part: HubCopyPart): HubCopyPart {
+  const authors = { ...(earlier.authors ?? {}), ...(part.authors ?? {}) };
+  return { ...part, messages: [...earlier.messages, ...part.messages], ...(Object.keys(authors).length ? { authors } : {}) };
 }
 
 /** A chat of the hub's copy, joined from its parts, as the copy merge takes it. */

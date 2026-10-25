@@ -79,6 +79,7 @@ export class HubLog {
     const results: HubEventPushResult[] = [];
     // Where each chain stands, moved along as this push extends it.
     const chains = new Map<string, ChainBasis>();
+    const scopesSeen = new Set<string>();
     const extending: Array<{ index: number; event: ChatEventEnvelope }> = [];
     for (const [index, candidate] of events.entries()) {
       const eventId = typeof (candidate as { eventId?: unknown })?.eventId === "string" ? (candidate as { eventId: string }).eventId : "";
@@ -94,6 +95,10 @@ export class HubLog {
         results.push(reject("The event's signature does not verify."));
         continue;
       }
+      // Only the first event of a chain in a push may anchor it: one after
+      // an event that was not taken (its body missing) would skip that one.
+      const anchorsHere = anchor.has(event.logScopeId) && !scopesSeen.has(event.logScopeId);
+      scopesSeen.add(event.logScopeId);
       if (isDeviceEventBlobReference(event.payload) && !await this.blobComplete(event.payload)) {
         results.push({ eventId, status: "blob-missing" });
         continue;
@@ -106,10 +111,8 @@ export class HubLog {
         results.push({ eventId, status: "duplicate" });
         continue;
       }
-      if (event.originSeq > basis.originSeq && anchor.has(event.logScopeId) && event.prevHash) {
+      if (event.originSeq > basis.originSeq && anchorsHere && event.prevHash) {
         await this.storage.hub().markChain(event.originId, event.logScopeId, event.originSeq - 1, event.prevHash);
-        chains.set(key, { originSeq: event.originSeq, prevHash: event.prevHash, anchorSeq: event.originSeq - 1 });
-        anchor.delete(event.logScopeId);
         results.push({ eventId, status: "accepted" });
         chains.set(key, { originSeq: event.originSeq + 1, prevHash: event.eventHash, anchorSeq: event.originSeq - 1 });
         extending.push({ index, event });
@@ -221,7 +224,9 @@ export class HubLog {
     const now = this.now().toISOString();
     if (report) {
       const standing = await hub.readerFloor(device.deviceId);
-      if (!standing || after < standing.floor) {
+      // A reader the hub has not heard report yet (set up again with an old
+      // place, or one the hub was updated under) is checked too.
+      if (!standing || !standing.reports || after < standing.floor) {
         const prunedThrough = await hub.prunedThrough(await this.readerClasses(device));
         if (prunedThrough > after) throw new HubResyncRequiredError(prunedThrough);
       }
@@ -362,8 +367,16 @@ export class HubLog {
       const taken: ChatMessage[] = [];
       let more = true;
       let full = false;
+      let restarted = false;
       while (more && !full) {
         const page = await this.storage.listConversationMessages({ conversationId: id, limit: COPY_MESSAGES_PER_READ, ...(before ? { beforeMessageId: before } : {}) });
+        if (page.messages.length === 0 && before && !restarted && (await this.storage.hub().messageSequences(id, [before]))[0] === undefined) {
+          // The message this read continued from went away meanwhile: the
+          // chat again from its newest (a message twice is harmless).
+          restarted = true;
+          before = undefined;
+          continue;
+        }
         // Newest first within the chat; each read is in order, oldest first.
         for (let offset = page.messages.length - 1; offset >= 0; offset -= 1) {
           const message = page.messages[offset];

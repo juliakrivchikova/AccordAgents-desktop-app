@@ -830,3 +830,40 @@ test("retention thresholds come from the environment only as positive whole numb
   assert.equal(config.batch, HUB_RETENTION_DEFAULTS.batch);
   assert.equal(config.chatActionsMs, HUB_RETENTION_DEFAULTS.chatActionsMs);
 });
+
+
+test("only the first event of a chain in a push may continue it past what the hub misses", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await rosterWithReader(h, machine);
+  const scope = `device:rv-box:${JSON.stringify(["chat-ab", "actions"])}`;
+  const body = await h.storage.deviceEventBlobs().prepare({ text: "b".repeat(80_000) });
+  // The body is on this side only: the hub must ask for it.
+  const sizeOnly = { ...(body as object) } as unknown;
+  const four = createSignedChatEvent(machine, { conversationId: "chat-ab", logScopeId: scope, kind: "machine.settings.sealed", payload: sizeOnly, originSeq: 4, prevHash: "sha256:three", createdAt: new Date().toISOString() });
+  const five = createSignedChatEvent(machine, { conversationId: "chat-ab", logScopeId: scope, kind: "machine.settings.sealed", payload: { n: 5 }, originSeq: 5, prevHash: four.eventHash, createdAt: new Date().toISOString() });
+  await (h.storage as unknown as { runSql(sql: string): Promise<void> }).runSql("delete from device_event_blob_fragments; delete from device_event_blobs;");
+  let results = ((await h.call(machine, "POST", "/v1/events", { events: [four, five], anchor: [scope] })).body as unknown as HubEventPushResponse).results;
+  assert.deepEqual(results.map((result) => result.status), ["blob-missing", "gap"], "the next one does not anchor in its place");
+  await h.storage.deviceEventBlobs().prepare({ text: "b".repeat(80_000) });
+  results = ((await h.call(machine, "POST", "/v1/events", { events: [four, five], anchor: [scope] })).body as unknown as HubEventPushResponse).results;
+  assert.deepEqual(results.map((result) => result.status), ["accepted", "accepted"]);
+  assert.equal((await h.storage.hub().chainMark(machine.originId, scope))?.originSeq, 3);
+});
+
+test("a reader put back on the roster with an old place is told to start again when what it needs was forgotten", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await rosterWithReader(h, machine);
+  await h.call(h.owner, "POST", "/v1/events", { events: changes(h.owner, "chat-back", 6) });
+  await h.folder.idle();
+  await h.call(machine, "GET", read(2));
+  // Taken off: what it held is let go; everything the owner read is forgotten.
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [] });
+  await h.call(h.owner, "GET", read(6));
+  assert.ok((await retention(h).runOnce()).chatChanges.events > 0);
+  // Put back: its old place (2) is where it stands, but it has not reported since.
+  await rosterWithReader(h, machine);
+  assert.equal((await h.storage.hub().readerFloor(machine.originId))?.reports, false);
+  assert.equal((await h.call(machine, "GET", read(2))).status, 410);
+});
