@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { ArrowDown } from "lucide-react";
 
@@ -315,6 +315,16 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     setSelectedThreadRootId(messageId);
   }
 
+  // Stable across renders: the message rows are memoized, and a new handler on every
+  // render re-rendered all of them on every scroll step, which made frames long.
+  const rowHandlersRef = useRef({ openThread, handleAppToolApproval });
+  rowHandlersRef.current = { openThread, handleAppToolApproval };
+  const stableOpenThread = useCallback((messageId: string) => rowHandlersRef.current.openThread(messageId), []);
+  const stableAppToolApproval = useCallback(
+    (...args: Parameters<typeof handleAppToolApproval>) => rowHandlersRef.current.handleAppToolApproval(...args),
+    []
+  );
+
   return (
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
@@ -351,9 +361,9 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onApproveMentions={chatMessageActions.onApproveMentions}
               onCompactParticipant={chatMessageActions.onCompactParticipant}
               onLoadOlderMessages={props.onLoadOlderMessages}
-              onOpenThread={openThread}
+              onOpenThread={stableOpenThread}
               onRejectMentions={chatMessageActions.onRejectMentions}
-              onRespondToAppToolApproval={handleAppToolApproval}
+              onRespondToAppToolApproval={stableAppToolApproval}
               onRespondToChoice={chatMessageActions.onRespondToChoice}
               onScroll={viewport.updateStickToBottom}
               onScrollIntent={viewport.markUserScrollIntent}

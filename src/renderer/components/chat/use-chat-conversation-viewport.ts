@@ -1,11 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/react-virtual";
 
 import type { ChatMessage, Conversation, ReviewProgress } from "../../../shared/types";
 import { focusRenderedMessage } from "../content/markdown-text";
 import type { ChatTimelineRow } from "./chat-conversation-data";
 import type { ChatMessageFocusRequest } from "./chat-conversation-types";
-import { useAnchoredVirtualItems, useOlderMessagesTopUp } from "./chat-timeline-scroll";
+import { measureRowAndRemember, useAnchoredVirtualItems, useOlderMessagesTopUp } from "./chat-timeline-scroll";
 import { useChatFocusNavigation } from "./use-chat-focus-navigation";
 
 type ThreadSummaryMap = Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>;
@@ -59,6 +59,10 @@ export function useChatConversationViewport(props: {
   const handledFocusNonceRef = useRef(0);
   const userScrollIntentUntilRef = useRef(0);
   const focusAttemptGenerationRef = useRef(0);
+  const rows = props.chatTimelineRows;
+  // New only when the rows change: a new key function makes the virtualizer lay out
+  // every row again, which it did on every scroll step.
+  const getItemKey = useCallback((index: number) => rows[index]?.id ?? index, [rows]);
   const chatVirtualizer = useVirtualizer({
     count: props.chatTimelineRows.length,
     getScrollElement: () => timelineRef.current,
@@ -72,13 +76,18 @@ export function useChatConversationViewport(props: {
       }
       return 56;
     },
-    getItemKey: (index) => props.chatTimelineRows[index]?.id ?? index,
+    getItemKey,
+    measureElement: measureRowAndRemember,
     // A chat opens at its newest message: lay the first frame out at the end rather
     // than at the top and then jump, which painted blank frames while opening. Not
     // when it opens to jump to a message: that would scroll to the bottom first.
     initialOffset: () => (stickToBottomRef.current && !hasUnconsumedFocusIntent() ? Number.MAX_SAFE_INTEGER : 0),
     overscan: 8,
-    useFlushSync: false
+    useFlushSync: false,
+    // The end of a scroll is read from the browser's scrollend event, which reports the
+    // position at that moment. The default timer instead re-applied the position of the
+    // last scroll event, undoing a position the anchoring had just set.
+    useScrollendEvent: true
   });
   const rowsRef = useRef(props.chatTimelineRows);
   rowsRef.current = props.chatTimelineRows;

@@ -1,10 +1,12 @@
-import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
-import type { VirtualItem, Virtualizer } from "@tanstack/react-virtual";
+import { useEffect, useLayoutEffect, useReducer, useRef, type RefObject } from "react";
+import { measureElement, type VirtualItem, type Virtualizer } from "@tanstack/react-virtual";
 
 import { LOAD_OLDER_ROW_ID } from "./chat-conversation-progress";
 
 // Smaller layout changes than this are rounding, not movement.
 const SUBPIXEL_PX = 0.5;
+// New rows ending at least this far above the viewport top count as off screen.
+const DEFER_MARGIN_PX = 64;
 // How long after a click or key press inside a row a resize counts as the User's own.
 const ROW_INTERACTION_MS = 1000;
 // Older messages start loading within this many screens of the top.
@@ -119,7 +121,12 @@ export function useAnchoredVirtualItems(
   // "bottom" pins to the real end of the scroller, padding and approval slot included.
   const pendingScrollRef = useRef<number | "bottom" | undefined>();
   const lastRowInteractionAtRef = useRef(0);
-  const measuredOnMountRef = useRef(new WeakSet<Element>());
+  const renderedKeysRef = useRef<ReadonlySet<VirtualItem["key"]>>(new Set());
+  // Rows held back until the next animation frame, and that frame's request.
+  const deferredKeysRef = useRef(new Set<VirtualItem["key"]>());
+  const deferFrameRef = useRef<number | undefined>();
+  const [, rerender] = useReducer((count: number) => count + 1, 0);
+  const deferNow = new Set<VirtualItem["key"]>();
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = keepScrollPositionOnResize;
   let items = virtualizer.getVirtualItems();
   const layout = virtualizer.measurementsCache;
@@ -159,28 +166,51 @@ export function useAnchoredVirtualItems(
         virtualizer.scrollOffset = target;
         items = virtualizer.getVirtualItems();
       }
-    }
-  }
-  useLayoutEffect(() => {
-    // Rows mounted while the User scrolls are not measured by the virtualizer until a
-    // ResizeObserver callback re-renders after the frame is painted, so for one frame a
-    // long message overlapped the rows under it. Measuring a row once when it mounts
-    // re-renders before paint; later size changes still come from the ResizeObserver.
-    for (const element of virtualizer.elementsCache.values()) {
-      if (!element.isConnected || measuredOnMountRef.current.has(element)) {
-        continue;
-      }
-      measuredOnMountRef.current.add(element);
-      const index = virtualizer.indexFromElement(element);
-      const item = virtualizer.measurementsCache[index];
-      if (item && item.key === virtualizer.options.getItemKey(index)) {
-        const size = virtualizer.options.measureElement(element, undefined, virtualizer);
-        if (Math.abs(size - item.size) >= 1) {
-          virtualizer.resizeItem(index, size);
+      if (change === "rows" && !stuck && renderedKeysRef.current.size > 0) {
+        // An older page just landed above the User. The new rows that fall into the
+        // overscan above the viewport are off screen: mount them in the next frame, so
+        // the frame that brings the page does not also build and lay out a screenful
+        // of long messages nobody can see yet (that made it long enough to stutter).
+        for (const item of items) {
+          if (!renderedKeysRef.current.has(item.key)) {
+            deferNow.add(item.key);
+          }
         }
       }
     }
+  }
+  if (deferNow.size > 0 || deferredKeysRef.current.size > 0) {
+    // Held back until the frame tick even through renders that follow in the same
+    // frame (a row measured on mount re-renders at once), but never once on screen.
+    // Row offsets start below the scroller's top padding; the margin covers it.
+    const viewportTop = (virtualizer.scrollOffset ?? 0) - DEFER_MARGIN_PX;
+    const held = (item: VirtualItem): boolean =>
+      (deferNow.has(item.key) || deferredKeysRef.current.has(item.key)) && item.end <= viewportTop;
+    const shown = items.filter((item) => !held(item));
+    for (const item of items) {
+      if (held(item)) {
+        deferNow.add(item.key);
+      }
+    }
+    items = shown;
+  }
+  const renderedKeys = new Set(items.map((item) => item.key));
+  useLayoutEffect(() => {
+    renderedKeysRef.current = renderedKeys;
+    deferredKeysRef.current = deferNow;
+    if (deferNow.size > 0 && deferFrameRef.current === undefined) {
+      deferFrameRef.current = window.requestAnimationFrame(() => {
+        deferFrameRef.current = undefined;
+        deferredKeysRef.current = new Set();
+        rerender();
+      });
+    }
   });
+  useEffect(() => () => {
+    if (deferFrameRef.current !== undefined) {
+      window.cancelAnimationFrame(deferFrameRef.current);
+    }
+  }, []);
   useLayoutEffect(() => {
     committedRef.current = layout;
     const pending = pendingScrollRef.current;
@@ -194,12 +224,12 @@ export function useAnchoredVirtualItems(
       // Through the virtualizer, so a jump it is still steering by row index (for up to
       // five seconds) is not steered back to that index, which now holds another row.
       virtualizer.scrollToOffset(pending, { align: "start" });
-    }
-    if (pending !== undefined && element) {
-      // The browser reports the new position with a scroll event only on the next frame.
-      // Until then the virtualizer still holds the old one, and its end-of-scroll timer
-      // could apply it and paint the rows of the old position: report it now.
-      element.dispatchEvent(new Event("scroll"));
+      // The browser may not scroll as far (the end of the chat is closer); then no scroll
+      // event tells the virtualizer, and it would keep rendering for the wrong position.
+      if (element && Math.abs(element.scrollTop - pending) >= 1) {
+        virtualizer.scrollOffset = element.scrollTop;
+        rerender();
+      }
     }
   });
   useEffect(() => {
@@ -222,6 +252,58 @@ export function useAnchoredVirtualItems(
     };
   }, [timelineRef]);
   return items;
+}
+
+const measuredKeysByVirtualizer = new WeakMap<object, Set<VirtualItem["key"]>>();
+// Far enough out that nothing a row draws outside its box (the hover toolbar above it,
+// the jump highlight around it) is cut while the clip is on.
+const CLIP_OUTSET_PX = 4096;
+
+/**
+ * The virtualizer's measureElement option: measures as it always does and remembers
+ * that the row has been measured, which `unmeasuredRowClip` needs. When the row turns
+ * out exactly as tall as it was laid out, its clip is taken off right away; otherwise
+ * the render that lays it out at its real height takes it off.
+ */
+export function measureRowAndRemember(
+  element: Element,
+  entry: ResizeObserverEntry | undefined,
+  instance: Virtualizer<HTMLDivElement, Element>
+): number {
+  const size = measureElement(element, entry, instance);
+  const index = instance.indexFromElement(element);
+  const key = instance.options.getItemKey(index);
+  let measured = measuredKeysByVirtualizer.get(instance);
+  if (!measured) {
+    measured = new Set();
+    measuredKeysByVirtualizer.set(instance, measured);
+  }
+  measured.add(key);
+  const item = instance.measurementsCache[index];
+  if (item?.key === key && Math.abs(item.size - size) < 1 && element instanceof HTMLElement) {
+    element.style.clipPath = "";
+  }
+  return size;
+}
+
+/**
+ * A row is laid out at its estimated height until the virtualizer has measured it,
+ * which for a row mounted during a scroll happens after the frame is painted. A long
+ * message drawn in that frame spilled over the rows under it; clipping what it draws
+ * below its estimated height hides the spill until the measured layout arrives.
+ * clip-path leaves the row's own size, which is what gets measured, untouched, and
+ * popovers render outside the row.
+ */
+export function unmeasuredRowClip(virtualizer: Virtualizer<HTMLDivElement, Element>, item: VirtualItem): { clipPath?: string } {
+  // The last row has nothing under it to spill over: a reply arriving at the bottom
+  // shows in full at once.
+  if (item.index >= virtualizer.options.count - 1 || measuredKeysByVirtualizer.get(virtualizer)?.has(item.key)) {
+    return {};
+  }
+  const out = CLIP_OUTSET_PX;
+  return {
+    clipPath: `polygon(-${out}px -${out}px, calc(100% + ${out}px) -${out}px, calc(100% + ${out}px) ${item.size}px, -${out}px ${item.size}px)`
+  };
 }
 
 // The scroller's own padding plus whatever it holds besides the rows (the pending

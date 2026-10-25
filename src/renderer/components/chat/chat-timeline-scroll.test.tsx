@@ -4,7 +4,7 @@ import { act, useCallback, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/react-virtual";
 
-import { useAnchoredVirtualItems, useOlderMessagesTopUp } from "./chat-timeline-scroll";
+import { measureRowAndRemember, unmeasuredRowClip, useAnchoredVirtualItems } from "./chat-timeline-scroll";
 
 // jsdom has no animation frames; the virtualizer steers its scrolls on them.
 if (typeof window.requestAnimationFrame !== "function") {
@@ -60,6 +60,7 @@ type HarnessProps = {
   onItems?: (items: VirtualItem[]) => void;
   onVirtualizer?: (virtualizer: Virtualizer<HTMLDivElement, Element>) => void;
   initialOffset?: number;
+  overscan?: number;
 };
 
 function Harness(props: HarnessProps): JSX.Element {
@@ -76,9 +77,14 @@ function Harness(props: HarnessProps): JSX.Element {
     getScrollElement: () => timelineRef.current,
     estimateSize,
     getItemKey,
+    measureElement: measureRowAndRemember,
     initialOffset: props.initialOffset ?? 0,
-    overscan: 1,
-    useFlushSync: false
+    overscan: props.overscan ?? 1,
+    useFlushSync: false,
+    // As in the app. jsdom has no scrollend event, so the virtualizer falls back to a
+    // timer that re-applies the last scroll event's position; keep it out of the way.
+    useScrollendEvent: true,
+    isScrollingResetDelay: 60_000
   });
   props.onVirtualizer?.(virtualizer);
   const items = useAnchoredVirtualItems(virtualizer, timelineRef, () => props.stuck);
@@ -102,6 +108,7 @@ function Harness(props: HarnessProps): JSX.Element {
             <div
               key={item.key}
               data-index={item.index}
+              style={unmeasuredRowClip(virtualizer, item)}
               ref={(node) => {
                 if (node) {
                   // jsdom lays nothing out: the row's real height is what the test says.
@@ -171,6 +178,30 @@ test("loading an older page keeps the message on screen in place, in the same co
   }
 });
 
+test("rows of a landed page that are off screen above are mounted one frame later", async () => {
+  let items: VirtualItem[] = [];
+  const onItems = (next: VirtualItem[]): void => { items = next; };
+  let virtualizer: Virtualizer<HTMLDivElement, Element> | undefined;
+  const onVirtualizer = (next: Virtualizer<HTMLDivElement, Element>): void => { virtualizer = next; };
+  // As in the app, several rows above the viewport are rendered ahead of time.
+  const view = await mount({ rows: rows(10, 30, 100), stuck: false, onItems, onVirtualizer, overscan: 8 });
+  try {
+    await view.scrollTo(518);
+    await view.rerender({ rows: [...rows(0, 10, 50), ...rows(10, 30, 100)], stuck: false, onItems, onVirtualizer, overscan: 8 });
+    const firstFrame = items.map((item) => String(item.key));
+    assert.ok(firstFrame.includes("m15"), "what the User sees is there at once");
+    assert.ok(!firstFrame.includes("m9"), "the new rows above the viewport wait");
+    // A row measured on mount re-renders the timeline before the frame is painted.
+    await act(async () => { virtualizer?.resizeItem(items.findIndex((item) => item.key === "m16") >= 0 ? items.find((item) => item.key === "m16")!.index : 0, 120); });
+    assert.ok(!items.some((item) => item.key === "m9"), "and keep waiting through that render");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 40)); });
+    assert.ok(items.some((item) => item.key === "m9"), "and arrive in the next frame");
+    assert.equal(screenTop(items, "m15", view.timeline().scrollTop), 0, "m15 did not move");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a jump the virtualizer is still steering is not pulled to another row when a page loads above", async () => {
   let items: VirtualItem[] = [];
   let virtualizer: Virtualizer<HTMLDivElement, Element> | undefined;
@@ -225,7 +256,7 @@ test("the row starting at the top of the viewport, below the padding, keeps its 
   }
 });
 
-test("rows mounted while the User scrolls are measured before they are painted", async () => {
+test("a row not measured yet is clipped to its estimated height, and not once it is measured", async () => {
   let items: VirtualItem[] = [];
   let virtualizer: Virtualizer<HTMLDivElement, Element> | undefined;
   const onItems = (next: VirtualItem[]): void => { items = next; };
@@ -234,18 +265,58 @@ test("rows mounted while the User scrolls are measured before they are painted",
   const view = await mount({ rows: tallRows, stuck: false, renderRows: true, onItems, onVirtualizer });
   try {
     await view.scrollTo(1518);
-    // The User is scrolling: the virtualizer itself would not measure m6 until later.
+    // The User is scrolling: the virtualizer does not measure rows that mount now.
     await act(async () => {
       if (virtualizer) virtualizer.isScrolling = true;
-      // m5 at the top of the viewport, m6 (not mounted yet) right under it.
       view.timeline().scrollTop = 518;
     });
     await act(async () => {
       if (virtualizer) virtualizer.isScrolling = true;
       view.timeline().dispatchEvent(new window.Event("scroll"));
     });
-    assert.equal(items.find((item) => item.key === "m6")?.size, 900, "m6 has its real height");
-    assert.equal(items.find((item) => item.key === "m7")?.start, (items.find((item) => item.key === "m6")?.start ?? 0) + 900, "and m7 starts below it");
+    const m6 = items.find((item) => item.key === "m6");
+    assert.ok(m6 && virtualizer, "m6 is rendered");
+    assert.match(unmeasuredRowClip(virtualizer, m6).clipPath ?? "", /calc\(100% \+ \d+px\) 100px/, "drawn no taller than its estimate");
+    const outset = Number(/^polygon\(-(\d+)px -(\d+)px/.exec(unmeasuredRowClip(virtualizer, m6).clipPath ?? "")?.[2]);
+    assert.ok(outset >= 100, "nothing above or beside it is cut (the hover toolbar sits 10 px above a row)");
+
+    // Its ResizeObserver reports it, as the virtualizer does after the frame is painted.
+    const element = view.timeline().querySelector(`[data-index="${m6.index}"]`);
+    assert.ok(element);
+    await act(async () => { virtualizer?.resizeItem(m6.index, virtualizer.options.measureElement(element, undefined, virtualizer)); });
+    const measured = items.find((item) => item.key === "m6");
+    assert.ok(measured);
+    assert.deepEqual(unmeasuredRowClip(virtualizer, measured), {}, "measured: not clipped");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the last row is never clipped: nothing under it can be painted over", async () => {
+  let items: VirtualItem[] = [];
+  let virtualizer: Virtualizer<HTMLDivElement, Element> | undefined;
+  const view = await mount({ rows: rows(0, 3, 100), stuck: false, onItems: (next) => { items = next; }, onVirtualizer: (next) => { virtualizer = next; } });
+  try {
+    const last = items.find((item) => item.key === "m2");
+    const middle = items.find((item) => item.key === "m1");
+    assert.ok(last && middle && virtualizer);
+    assert.deepEqual(unmeasuredRowClip(virtualizer, last), {});
+    assert.ok(unmeasuredRowClip(virtualizer, middle).clipPath, "an unmeasured row with rows under it is clipped");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a row exactly as tall as its estimate is not clipped once measured", async () => {
+  let items: VirtualItem[] = [];
+  let virtualizer: Virtualizer<HTMLDivElement, Element> | undefined;
+  const view = await mount({ rows: rows(0, 20, 100), stuck: false, renderRows: true, onItems: (next) => { items = next; }, onVirtualizer: (next) => { virtualizer = next; } });
+  try {
+    const m1 = items.find((item) => item.key === "m1");
+    assert.ok(m1 && virtualizer);
+    assert.deepEqual(unmeasuredRowClip(virtualizer, m1), {}, "measured on mount at its estimated height: no clip left on it");
+    const element = view.timeline().querySelector<HTMLElement>(`[data-index="${m1.index}"]`);
+    assert.equal(element?.style.clipPath ?? "", "", "and none on the element either");
   } finally {
     await view.unmount();
   }
@@ -295,73 +366,5 @@ test("a chat that opens at its end but fits on screen renders all of its rows", 
     assert.deepEqual(items.map((item) => item.key), ["m0", "m1", "m2", "m3", "m4", "m5"]);
   } finally {
     await view.unmount();
-  }
-});
-
-function TopUpHarness(props: {
-  loadedMessageCount: number;
-  loading: boolean;
-  scrollTop: number;
-  onLoad: () => void;
-  blocked?: boolean;
-  hasOlderMessages?: boolean;
-  onRequest?: (request: () => void) => void;
-}): JSX.Element {
-  const timelineRef = useRef<HTMLDivElement | null>(null);
-  const request = useOlderMessagesTopUp(timelineRef, {
-    loadedMessageCount: props.loadedMessageCount,
-    hasOlderMessages: props.hasOlderMessages ?? true,
-    olderMessagesLoading: props.loading,
-    onLoadOlderMessages: props.onLoad
-  }, () => !props.blocked);
-  props.onRequest?.(request);
-  return (
-    <div
-      ref={(node) => {
-        if (node) {
-          Object.defineProperty(node, "clientHeight", { configurable: true, get: () => 500 });
-          node.scrollTop = props.scrollTop;
-        }
-        timelineRef.current = node;
-      }}
-    />
-  );
-}
-
-test("a page that lands with the view still near the top asks for the next one, once", async () => {
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  let loads = 0;
-  let requestOnScroll: () => void = () => {};
-  const onLoad = (): void => { loads += 1; };
-  const render = async (props: Omit<Parameters<typeof TopUpHarness>[0], "onLoad">): Promise<void> => {
-    await act(async () => { root.render(<TopUpHarness {...props} onLoad={onLoad} onRequest={(request) => { requestOnScroll = request; }} />); });
-  };
-  try {
-    await render({ loadedMessageCount: 80, loading: true, scrollTop: 0 });
-    assert.equal(loads, 0, "nothing while a page is loading");
-
-    await render({ loadedMessageCount: 160, loading: false, scrollTop: 120 });
-    assert.equal(loads, 1, "the page landed near the top: the next one is requested without a scroll event");
-
-    await render({ loadedMessageCount: 160, loading: true, scrollTop: 120 });
-    await render({ loadedMessageCount: 160, loading: false, scrollTop: 120 });
-    requestOnScroll();
-    requestOnScroll();
-    assert.equal(loads, 1, "a load that added nothing (it failed) is not retried, not even on scroll");
-
-    await render({ loadedMessageCount: 240, loading: false, scrollTop: 4000 });
-    assert.equal(loads, 1, "far from the top nothing more is loaded");
-
-    await render({ loadedMessageCount: 241, loading: false, scrollTop: 0, blocked: true });
-    await render({ loadedMessageCount: 242, loading: false, scrollTop: 0, hasOlderMessages: false });
-    assert.equal(loads, 1, "nothing loads during a jump to a message, or when nothing older exists");
-
-    await render({ loadedMessageCount: 243, loading: false, scrollTop: 0 });
-    assert.equal(loads, 2, "a changed chat near the top loads again");
-  } finally {
-    await act(async () => root.unmount());
-    host.remove();
   }
 });

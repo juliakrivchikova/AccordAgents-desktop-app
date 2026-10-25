@@ -17,6 +17,7 @@ await build({
     "renderer/components/chat/chat-participant-drafts.test.ts",
     "renderer/components/chat/chat-timeline-layout.test.ts",
     "renderer/components/chat/chat-timeline-scroll.test.tsx",
+    "renderer/components/chat/chat-timeline-topup.test.tsx",
     "renderer/lib/chat-split-sizing.test.ts",
     "renderer/components/artifacts/artifact-drafts.test.tsx",
     "renderer/components/artifacts/artifacts-panel-selection.test.tsx",

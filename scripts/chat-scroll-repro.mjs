@@ -27,7 +27,7 @@
 //
 //   node scripts/chat-scroll-repro.mjs --port=9476 --chat="<sidebar title>" \
 //     [--out=dir] [--wheel=-300] [--interval=400] [--max-steps=800] [--label=before]
-//     [--mode=wheel|trackpad] [--video] [--from="<chat to start from>"]
+//     [--mode=wheel|trackpad] [--video] [--from="<chat to start from>"] [--trace=<file.json>]
 //
 // It never sends a message; it only opens and scrolls.
 import { createRequire } from "node:module";
@@ -105,8 +105,12 @@ const RECORDER = String.raw`(() => {
       const visible = new Map();
       let remounts = 0;
       for (const item of timeline.querySelectorAll(".virtual-timeline-item")) {
-        const rect = item.getBoundingClientRect();
-        if (rect.height === 0) continue;
+        const itemBox = item.getBoundingClientRect();
+        if (itemBox.height === 0) continue;
+        // What the eye sees: a row clipped to its estimated height (clip-path) shows no more than that.
+        const clip = /calc\(100% \+ \d+px\) ([\d.]+)px/.exec(item.style.clipPath || "");
+        const height = clip ? Math.min(itemBox.height, Number(clip[1])) : itemBox.height;
+        const rect = { top: itemBox.top, bottom: itemBox.top + height, height };
         const isVisible = rect.bottom > box.top && rect.top < box.bottom;
         const element = item.querySelector("[data-message-id], [data-app-tool-approval-id], .timeline-load-more-row") || item;
         const id = element.getAttribute("data-message-id")
@@ -264,7 +268,12 @@ async function main() {
     }
     throw new Error("No point of the timeline is reachable by the pointer");
   })()`)).result.value;
+  // --trace=<file>: record a Chrome performance trace of the scroll phase (devtools timeline
+  // plus JS samples), for finding what makes a frame long. Tracing adds overhead, so frame
+  // counts from a traced run are not comparable with an untraced one.
+  const tracing = typeof args.trace === "string" && args.trace !== "true" ? await startTrace(port) : undefined;
   const scrollStart = (await app.evaluate("performance.now()")).result.value;
+  await app.evaluate(`performance.mark("chat-scroll-start:" + ${JSON.stringify(String(Date.now()))})`);
   const screencastFrames = [];
   const onFrame = async (params) => {
     if (screencastFrames.length < 600) screencastFrames.push({ t: params.metadata.timestamp, data: params.data });
@@ -323,6 +332,10 @@ async function main() {
   }
   await sleep(1500);
   await removeScreencast();
+  if (tracing) {
+    await tracing.stop();
+    console.error(`trace written to ${args.trace}`);
+  }
   const scrollFrames = (await app.evaluate(`window.__chatScrollRecorder.frames.filter((f) => f.t >= ${scrollStart})`)).result.value;
   const scrollLongtasks = (await app.evaluate(`window.__chatScrollRecorder.longtasks.filter((l) => l.t >= ${scrollStart})`)).result.value;
   await app.evaluate("window.__chatScrollRecorder.stop()");
@@ -359,6 +372,55 @@ async function main() {
   fs.writeFileSync(path.join(outDir, `${label}-summary.json`), JSON.stringify(summary, null, 2));
   console.log(JSON.stringify(summary, null, 2));
   app.close();
+}
+
+async function startTrace(cdpPort) {
+  const WebSocket = require("ws");
+  const targets = await fetch(`http://127.0.0.1:${cdpPort}/json`).then((response) => response.json());
+  const page = targets.find((target) => target.type === "page" && target.title === "AccordAgents");
+  const ws = new WebSocket(page.webSocketDebuggerUrl, { maxPayload: 1024 * 1024 * 1024 });
+  await new Promise((resolve, reject) => { ws.once("open", resolve); ws.once("error", reject); });
+  // Events are written as they arrive: a long traced run does not fit in one string.
+  const file = args.trace;
+  const out = fs.createWriteStream(file);
+  out.write('{"traceEvents":[');
+  let first = true;
+  let nextId = 1;
+  let complete;
+  const done = new Promise((resolve) => { complete = resolve; });
+  ws.on("message", (raw) => {
+    const message = JSON.parse(raw.toString());
+    if (message.method === "Tracing.dataCollected") {
+      for (const event of message.params.value) {
+        out.write((first ? "" : ",") + JSON.stringify(event));
+        first = false;
+      }
+    }
+    if (message.method === "Tracing.tracingComplete") complete();
+  });
+  const send = (method, params = {}) => ws.send(JSON.stringify({ id: nextId++, method, params }));
+  send("Tracing.start", {
+    transferMode: "ReportEvents",
+    traceConfig: {
+      includedCategories: [
+        "devtools.timeline",
+        "disabled-by-default-devtools.timeline",
+        "disabled-by-default-devtools.timeline.frame",
+        "blink.user_timing",
+        "v8.execute",
+        "disabled-by-default-v8.cpu_profiler"
+      ]
+    }
+  });
+  await sleep(500);
+  return {
+    stop: async () => {
+      send("Tracing.end");
+      await done;
+      ws.close();
+      await new Promise((resolve) => out.end("]}", resolve));
+    }
+  };
 }
 
 function analyseOpen(frames, clickAt, firstPaintAt, settledAt) {
@@ -432,7 +494,8 @@ function analyseScroll(frames) {
     if (!a.rows || !b.rows || frames[index].sh - a.sh < Math.max(1500, a.ch ?? 0)) continue;
     pageLoads += 1;
     let wheel = 0;
-    for (let k = index; k <= last; k += 1) wheel += Math.abs(frames[k].w ?? 0);
+    // A wheel event recorded in the frame before can still be moving the content.
+    for (let k = index - 1; k <= last; k += 1) wheel += Math.abs(frames[k].w ?? 0);
     const before = new Map(a.rows.filter((row) => row.v && row.id !== "load-older").map((row) => [row.id, row.top]));
     const kept = b.rows.filter((row) => row.v && before.has(row.id) && Math.abs(row.top - before.get(row.id)) <= wheel + 8);
     if (before.size > 0 && kept.length === 0) pageLoadsThatMovedView += 1;

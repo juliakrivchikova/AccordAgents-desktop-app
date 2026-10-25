@@ -24,6 +24,7 @@ import {
 import { ChatMessageItem, type ChatChoiceResponse } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { ChatThinkingRowItem } from "./chat-streaming";
+import { unmeasuredRowClip } from "./chat-timeline-scroll";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 type ThreadSummaryMap = Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>;
@@ -100,7 +101,7 @@ export function ChatConversationTimeline(props: {
               data-index={virtualItem.index}
               key={virtualItem.key}
               ref={props.virtualizer.measureElement}
-              style={{ transform: `translateY(${virtualItem.start}px)` }}
+              style={{ transform: `translateY(${virtualItem.start}px)`, ...unmeasuredRowClip(props.virtualizer, virtualItem) }}
             >
               {row.type === "load-older" ? (
                 <TimelineLoadMoreRow
