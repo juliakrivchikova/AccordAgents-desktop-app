@@ -20,6 +20,8 @@ import type { StorageService } from "./storage";
 
 /** How often a running member's text goes to the server, at most. */
 const PROGRESS_TEXT_FLUSH_MS = 1_000;
+/** How long a reading of whether a phone is paired stands. */
+const PHONES_RECHECK_MS = 30_000;
 /** Runs whose progress is published at once, at most (the oldest stop). */
 const PROGRESS_RUNS_MAX = 32;
 
@@ -39,6 +41,11 @@ export class HubPhonePublisher {
   private readonly uploadedAvatars = new Map<string, { stamp: string; entry: HubComposerCatalog["avatars"][string] }>();
   private wakeQueue: Promise<void> = Promise.resolve();
   private wakePublished?: string;
+  /** Whether a phone is paired, as last read (progress is many updates a
+   *  second: it is not asked each time). */
+  private phones?: { has: boolean; at: number };
+  /** Chats whose members' homes are being read (their progress waits). */
+  private readonly membersLoading = new Set<string>();
   /** The catalog last published, without its stamp: an unchanged one is not
    *  sent again (settings are written often, the catalog rarely changes). */
   private catalogPublished?: string;
@@ -52,6 +59,10 @@ export class HubPhonePublisher {
     /** Whether a phone is paired with the server (nothing is published for
      *  nobody). */
     hasPhones: () => Promise<boolean>;
+    /** The members of a chat that live on a machine (read when the chat was
+     *  not saved here since this desktop started). */
+    machineMembersOf?: (conversationId: string) => Promise<Set<string>>;
+    now?: () => number;
     buildCatalog: (upload: (avatarId: string, stamp: string, read: () => Promise<{ mimeType: string; bytes: Buffer }>) => Promise<void>) => Promise<Omit<HubComposerCatalog, "avatars" | "version" | "publishedAt">>;
     wakeKeys: () => Promise<HubMachineWakeRequest["machines"]>;
     log: (event: string, payload: Record<string, unknown>) => void;
@@ -108,7 +119,18 @@ export class HubPhonePublisher {
   noteProgress(progress: ReviewProgress, conversationId: string | undefined): void {
     const agent = progress.agentProgress;
     if (!agent || !conversationId || !this.options.client()) return;
-    if (agent.participantId && this.machineMembers.get(conversationId)?.has(agent.participantId)) return;
+    if (!this.phonesPaired()) return;
+    let onMachines = this.machineMembers.get(conversationId);
+    if (!onMachines) {
+      if (this.options.machineMembersOf) {
+        // Not known yet whether this member lives on a machine (its
+        // progress is the machine's to publish): the next update knows.
+        this.loadMembers(conversationId);
+        return;
+      }
+      onMachines = new Set();
+    }
+    if (agent.participantId && onMachines.has(agent.participantId)) return;
     const terminal = progress.phase === "done" || progress.phase === "error" || progress.phase === "cancelled" || agent.state === "finished";
     let sender = this.progress.get(progress.runId);
     if (!sender) {
@@ -139,12 +161,6 @@ export class HubPhonePublisher {
         stale.close();
         this.progress.delete(oldest);
       }
-      void this.options.hasPhones().then((phones) => {
-        if (!phones && this.progress.get(progress.runId) === created) {
-          created.close();
-          this.progress.delete(progress.runId);
-        }
-      });
     }
     sender.note(progress);
     if (terminal) {
@@ -152,6 +168,31 @@ export class HubPhonePublisher {
       this.progress.delete(progress.runId);
       void finished.finish().catch(() => undefined);
     }
+  }
+
+  private phonesPaired(): boolean {
+    const now = this.options.now?.() ?? Date.now();
+    if (!this.phones || now - this.phones.at > PHONES_RECHECK_MS) {
+      const asked = now;
+      void this.options.hasPhones().then((has) => { this.phones = { has, at: asked }; }, () => undefined);
+      // Until the first answer: a phone is assumed (nothing is lost).
+      if (!this.phones) return true;
+    }
+    return this.phones.has;
+  }
+
+  /** A phone was paired or removed: asked again at the next update. */
+  phonesChanged(): void {
+    this.phones = undefined;
+  }
+
+  private loadMembers(conversationId: string): void {
+    const read = this.options.machineMembersOf;
+    if (!read || this.membersLoading.has(conversationId)) return;
+    this.membersLoading.add(conversationId);
+    void read(conversationId).then((members) => {
+      if (!this.machineMembers.has(conversationId)) this.machineMembers.set(conversationId, members);
+    }, () => undefined).finally(() => this.membersLoading.delete(conversationId));
   }
 
   /** Publishes the composer's catalog soon (a burst of setting writes is one). */
@@ -213,6 +254,7 @@ export class HubPhonePublisher {
     this.publishedApprovals.clear();
     this.unpublished.clear();
     this.uploadedAvatars.clear();
+    this.phones = undefined;
     this.wakePublished = undefined;
     this.catalogPublished = undefined;
     for (const sender of this.progress.values()) sender.close();

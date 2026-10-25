@@ -619,6 +619,28 @@ export class StorageService {
     return { rows, truncated };
   }
 
+  /** The most recently updated chats' bodies (no messages) that hold an
+   *  approval waiting for the User. */
+  async recentChatsWithPendingApprovals(limit: number): Promise<Conversation[]> {
+    await this.init();
+    const rows = await this.queryJson<{ id: string; bodyHex: string }>(`
+      select id, hex(coalesce(nullif(body_json, ''), json_set(payload_json, '$.messages', json_array()))) as bodyHex
+      from conversations where kind = 'chat'
+      order by updated_at desc limit ${normalizePositiveInteger(limit, 100)};
+    `);
+    const found: Conversation[] = [];
+    for (const row of rows) {
+      try {
+        const conversation = parseHexJson<Conversation>(row.bodyHex, `conversation ${row.id}`);
+        conversation.messages = [];
+        if (hasPendingAppToolApprovals(conversation)) found.push(conversation);
+      } catch {
+        // An unreadable chat holds no card to show.
+      }
+    }
+    return found;
+  }
+
   async listChatActivity(request: ListChatActivityRequest = {}): Promise<ListChatActivityResult> {
     await this.init();
     const limit = normalizePositiveInteger(request.limit, DEFAULT_CHAT_ACTIVITY_LIMIT);

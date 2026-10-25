@@ -955,6 +955,10 @@ export class ChatService {
   private readonly pendingPhoneRuns = new Map<string, { conversationId: string; controller: AbortController; started: boolean }>();
   /** Chats with a phone's message whose members are being claimed. */
   private readonly phoneStartsInFlight = new Map<string, number>();
+  /** When this device began reading the User's server: a phone's message
+   *  from before then is not this device's to start (a new or recreated
+   *  machine reads the whole order, turns other homes ran long ago). */
+  private phoneTurnsSince?: number;
   private static readonly CHAT_CHANGE_BASELINE_LIMIT = 256;
   private chatChangeTransport?: ChatChangeTransport;
   private readonly chatSavesInFlight = new Set<Promise<void>>();
@@ -19609,9 +19613,10 @@ export class ChatService {
     return (
       (this.activeConversationRunIds.get(conversationId)?.size ?? 0) > 0 ||
       (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0 ||
-      // A phone's message whose members are still being claimed: its runs
-      // are not registered yet.
-      (this.phoneStartsInFlight.get(conversationId) ?? 0) > 0
+      // A phone's message whose members are still being claimed: their runs
+      // are not registered yet (a started one is, or has ended).
+      (this.phoneStartsInFlight.get(conversationId) ?? 0) > 0 ||
+      [...this.pendingPhoneRuns.values()].some((pending) => pending.conversationId === conversationId && !pending.started)
     );
   }
 
@@ -19875,9 +19880,14 @@ export class ChatService {
     }
     if (existing.kind !== "chat") return "applied";
     let waiting = false;
+    // The phone's messages this application adds (one applied before, a
+    // redelivery, starts nothing again).
+    let addedMessageIds = new Set<string>();
     await this.withChatMutation(existing, async () => {
       const result = applyChatChanges(existing, payload, event.originId, transport.applyPolicy(existing));
       if (result.status !== "applied") return;
+      const held = new Set(existing.messages.map((message) => message.id));
+      addedMessageIds = new Set(result.conversation.messages.filter((message) => !held.has(message.id)).map((message) => message.id));
       if (!dependencyMet && result.ignored.length) {
         waiting = true;
         return;
@@ -19911,7 +19921,7 @@ export class ChatService {
     if (waiting) return wait();
     this.waitingChatChanges.delete(event.eventId);
     this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
-    this.notePhoneMessages(event.originId, conversationId, payload);
+    this.notePhoneMessages(event.originId, conversationId, payload, addedMessageIds);
     return "applied";
   }
 
@@ -19923,15 +19933,17 @@ export class ChatService {
 
   /** Says which devices are the User's phones. A message one of them wrote
    *  starts its members here when they live here (see startPhoneTurns). */
-  setPhoneOrigins(resolver: ((originId: string) => boolean | Promise<boolean>) | undefined): void {
+  setPhoneOrigins(resolver: ((originId: string) => boolean | Promise<boolean>) | undefined, since?: string): void {
     this.phoneOrigin = resolver;
+    const at = since ? Date.parse(since) : NaN;
+    this.phoneTurnsSince = Number.isFinite(at) ? at : undefined;
   }
 
-  private notePhoneMessages(originId: string, conversationId: string, payload: ChatChangesPayload): void {
+  private notePhoneMessages(originId: string, conversationId: string, payload: ChatChangesPayload, added: Set<string>): void {
     const resolver = this.phoneOrigin;
     if (!resolver) return;
     const messages = payload.changes.flatMap((change) =>
-      change.type === "message.created" && change.message.role === "user" ? [change.message] : []);
+      change.type === "message.created" && change.message.role === "user" && added.has(change.message.id) ? [change.message] : []);
     if (messages.length === 0) return;
     // Until its members are claimed the chat counts as busy, so a watcher
     // evaluating meanwhile does not take the same message as well.
@@ -20027,8 +20039,17 @@ export class ChatService {
     let conversation: Conversation | undefined;
     for (const message of messages) {
       if (message.role !== "user") continue;
+      // Written before this device read the server: another home's.
+      if (this.phoneTurnsSince !== undefined && Date.parse(message.createdAt) < this.phoneTurnsSince - PHONE_TURN_CLOCK_SKEW_MS) continue;
       const named = Array.isArray((message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets);
-      if (named && !this.phoneMessageTargets(opened.conversation, message).some((participant) => this.startsPhoneTurnFor(participant))) continue;
+      if (named) {
+        const here = this.phoneMessageTargets(opened.conversation, message).filter((participant) => this.startsPhoneTurnFor(participant));
+        if (here.length === 0) continue;
+        // Every turn here claimed already (the sweep finds most so): the
+        // whole chat is not read for them.
+        const claimed = await this.storage.phoneTurnClaims().claimedRunIds(here.map((participant) => phoneTurnRunId(message.id, participant.id)));
+        if (here.every((participant) => claimed.has(phoneTurnRunId(message.id, participant.id)))) continue;
+      }
       conversation ??= await this.requireChat(conversationId);
       const stored = conversation.messages.find((item) => item.id === message.id && item.role === "user");
       if (!stored) continue;
@@ -20039,7 +20060,8 @@ export class ChatService {
       const refusal = goal.kind === "invalid" ? goal.error
         : goal.kind === "valid" && everyTarget.length !== 1 ? "/goal requires exactly one resolved chat member." : undefined;
       if (refusal) {
-        if (everyTarget[0] && this.startsPhoneTurnFor(everyTarget[0])) await this.notePhoneMessageRefused(conversation, stored, refusal);
+        // Said by the first member's home, or by the desktop when it names none.
+        if (everyTarget[0] ? this.startsPhoneTurnFor(everyTarget[0]) : !this.machineRuntime) await this.notePhoneMessageRefused(conversation, stored, refusal);
         continue;
       }
       const targets = everyTarget.filter((participant) => this.startsPhoneTurnFor(participant));
@@ -20065,29 +20087,34 @@ export class ChatService {
     for (const participant of targets) {
       const runId = phoneTurnRunId(message.id, participant.id);
       if (this.pendingPhoneRuns.has(runId) || this.conversationIdForRun(runId)) continue;
-      // Taken already (an earlier application, a restart): nothing to read.
-      if (await this.storage.phoneTurnClaims().state(runId) === "claimed") continue;
+      // Its turn already shows in the chat (another home ran or stopped it,
+      // the member moved since): not again here.
+      if (this.phoneTurnShown(conversation, message, participant, runId)) continue;
       const controller = new AbortController();
-      // Registered before the claim's write, so a Stop arriving meanwhile
-      // finds the run here and stops it before it starts.
+      // Registered before anything is awaited, so a second start (the live
+      // one and a sweep) finds it, and a Stop arriving meanwhile stops the
+      // turn before it starts.
       const pending = { conversationId, controller, started: false };
       this.pendingPhoneRuns.set(runId, pending);
+      const release = (): void => {
+        if (this.pendingPhoneRuns.get(runId) === pending) this.pendingPhoneRuns.delete(runId);
+      };
       let outcome: Awaited<ReturnType<ReturnType<StorageService["phoneTurnClaims"]>["claim"]>>;
       try {
         outcome = await this.storage.phoneTurnClaims().claim({ runId, conversationId, messageId: message.id, participantId: participant.id, at: new Date().toISOString() });
       } catch (error) {
         // Not claimed: the next resume tries again. The other members go on.
-        this.pendingPhoneRuns.delete(runId);
+        release();
         void this.debugLogs.write("chat.phone-turn.claim-error", { conversationId, runId, message: error instanceof Error ? error.message : String(error) });
         continue;
       }
       if (outcome === "taken") {
-        this.pendingPhoneRuns.delete(runId);
+        release();
         continue;
       }
       void this.debugLogs.write("chat.phone-turn", { conversationId, runId, participantId: participant.id, outcome });
       if (outcome === "cancelled" || controller.signal.aborted) {
-        this.pendingPhoneRuns.delete(runId);
+        release();
         await this.notePhoneTurnStoppedBeforeStart(conversation, message, participant);
         continue;
       }
@@ -20114,7 +20141,7 @@ export class ChatService {
         // Said in the chat, where the User sees it on her phone too.
         warnings.push(`@${participant.handle} could not start for your message: ${reason}`);
       }).finally(async () => {
-        this.pendingPhoneRuns.delete(runId);
+        release();
         if (warnings.length > 0) await this.appendConversationWarnings(conversation, warnings).catch(() => undefined);
       });
     }
@@ -20135,6 +20162,12 @@ export class ChatService {
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
     });
+  }
+
+  private phoneTurnShown(conversation: Conversation, message: ChatMessage, participant: ChatParticipant, runId: string): boolean {
+    const stopped = `@${participant.handle} stopped by user.`;
+    return conversation.messages.some((item) => item.metadata?.runId === runId ||
+      (item.role === "system" && item.content === stopped && item.metadata?.parentMessageId === message.id));
   }
 
   /** A member stopped before its turn for a phone's message started: the
@@ -20164,10 +20197,13 @@ export class ChatService {
       pending.controller.abort();
       return true;
     }
-    const opened = await this.storage.openConversation(conversationId, 1);
+    // The chat's newest messages: a turn the Stop names is a recent one.
+    const opened = await this.storage.openConversation(conversationId, PHONE_TURN_STOP_WINDOW);
     if (!opened || opened.conversation.kind !== "chat") return false;
     const participant = this.chatParticipants(opened.conversation).find((item) => item.id === parsed.participantId);
     if (!participant || !this.startsPhoneTurnFor(participant)) return false;
+    // It ran already (on the member's earlier home): not stopped here.
+    if (opened.conversation.messages.some((item) => item.metadata?.runId === runId)) return false;
     const cancelled = await this.storage.phoneTurnClaims().cancelUnstarted({
       runId, conversationId, messageId: parsed.messageId, participantId: participant.id, at: new Date().toISOString()
     });
@@ -20506,6 +20542,12 @@ export class ChatService {
     });
   }
 }
+
+/** How far a phone's clock may be off from this device's. */
+const PHONE_TURN_CLOCK_SKEW_MS = 10 * 60_000;
+/** The newest messages a Stop for a phone turn not running here is checked
+ *  against. */
+const PHONE_TURN_STOP_WINDOW = 200;
 
 function mobileEventIdFromChatTrigger(triggerMessage: ChatMessage): string | undefined {
   if (triggerMessage.metadata?.appMessageSource !== "mobile-relay") {

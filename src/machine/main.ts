@@ -55,13 +55,14 @@ import { StorageService } from "../main/services/storage";
 import { UserSkillsService } from "../main/services/userSkills";
 import { ScriptService, handleScriptsOperation } from "../main/services/scripts";
 import { HubTunnelClient } from "../main/services/hubTunnelClient";
-import { HUB_SCOPE_PREFIXES, HubSync, hubChatChangeApplier, hubPushedThrough } from "../main/services/hubSync";
+import { HUB_SCOPE_PREFIXES, HubSync, PULLED_KEY, hubChatChangeApplier, hubPushedThrough } from "../main/services/hubSync";
 import { HubClient } from "../main/services/hubClient";
 import { signHubRequest } from "../main/services/hubAuth";
 import { setMailboxRegistrationSigner } from "../main/services/mailboxAccess";
 import { ScriptSecretStore, ScriptStore } from "../main/services/scriptStore";
 import { machineScriptHostPhrase } from "../shared/scripts";
 import { PHONE_TURN_RESUME_EVERY_MS, PHONE_TURN_RESUME_WINDOW_MS } from "../shared/hubProtocol";
+import { phoneTurnsSince } from "../main/services/phoneTurnClaims";
 
 interface MachineArgs {
   enrollmentPath: string;
@@ -664,16 +665,22 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     chatService.setHubBlobReader((reference) => hubClient.downloadBytes(reference));
   }
   // A message the User wrote on her phone starts the members that live here.
-  chatService.setPhoneOrigins((originId) => host.isPhone(originId));
+  const isUsersPhone = (originId: string): boolean | Promise<boolean> => host.isPhone(originId);
+  chatService.setPhoneOrigins(isUsersPhone, await phoneTurnsSince(storageService.hub(), PULLED_KEY, Date.now(), PHONE_TURN_RESUME_WINDOW_MS)
+    .catch(() => new Date().toISOString()));
   // Phone messages taken in but never started here (a restart between the
   // two, or an older runtime took them in) start once the roster is known.
+  let phoneTurnsStopped = false;
   const resumePhoneTurns = (): void => {
+    if (phoneTurnsStopped) return;
     void chatService.resumePhoneTurns(new Date(Date.now() - PHONE_TURN_RESUME_WINDOW_MS).toISOString()).catch((error) => {
       void debugLogService.write("chat.phone-turns.resume-error", { message: error instanceof Error ? error.message : String(error) });
     });
   };
-  setTimeout(resumePhoneTurns, 30_000).unref?.();
-  setInterval(resumePhoneTurns, PHONE_TURN_RESUME_EVERY_MS).unref?.();
+  const phoneTurnsFirst = setTimeout(resumePhoneTurns, 30_000);
+  const phoneTurnsEvery = setInterval(resumePhoneTurns, PHONE_TURN_RESUME_EVERY_MS);
+  phoneTurnsFirst.unref?.();
+  phoneTurnsEvery.unref?.();
   const hubSync = hubClient ? new HubSync({
     client: hubClient,
     storage: storageService,
@@ -725,6 +732,10 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   // shutdown again. A stop that failed may be asked for again.
   let stopping: Promise<void> | undefined;
   const stopOnce = async (): Promise<void> => {
+    // Nothing new is claimed while the runtime stops (it could not run it).
+    phoneTurnsStopped = true;
+    clearTimeout(phoneTurnsFirst);
+    clearInterval(phoneTurnsEvery);
     presenceClosed = true;
     stopChatChangePruning();
     if (presenceTimer) clearInterval(presenceTimer);

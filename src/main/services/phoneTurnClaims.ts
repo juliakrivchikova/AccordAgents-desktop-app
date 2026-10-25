@@ -66,6 +66,15 @@ export class PhoneTurnClaimStore {
     return Number(rows[0]?.mine ?? 0) === 1;
   }
 
+  /** Which of these turns were claimed (started) already. */
+  async claimedRunIds(runIds: string[]): Promise<Set<string>> {
+    const ids = [...new Set(runIds)].slice(0, 500);
+    if (ids.length === 0) return new Set();
+    await this.database.init();
+    const rows = await this.database.query<{ runId: string }>(`select run_id as runId from phone_turn_claims where state = 'claimed' and run_id in (${ids.map(quote).join(", ")});`);
+    return new Set(rows.map((row) => row.runId));
+  }
+
   async state(runId: string): Promise<"claimed" | "cancelled" | undefined> {
     await this.database.init();
     const rows = await this.database.query<{ state: "claimed" | "cancelled" }>(`select state from phone_turn_claims where run_id = ${quote(runId)};`);
@@ -88,13 +97,37 @@ export class PhoneTurnClaimStore {
   async chatChangesFrom(originIds: string[], sinceIso: string, limit: number): Promise<Array<{ envelopeHex: string }>> {
     if (originIds.length === 0) return [];
     await this.database.init();
+    // The newest ones, given oldest first: those are the likeliest to wait.
     return this.database.query<{ envelopeHex: string }>(`
-      select hex(envelope_json) as envelopeHex from chat_events
-      where received_at >= ${quote(sinceIso)} and kind = 'chat.changes' and origin_id in (${originIds.map(quote).join(", ")})
-      order by received_at limit ${Math.max(1, Math.min(Math.floor(limit), 2_000))};
+      select envelopeHex from (
+        select hex(envelope_json) as envelopeHex, received_at as receivedAt from chat_events
+        where received_at >= ${quote(sinceIso)} and kind = 'chat.changes' and origin_id in (${originIds.map(quote).join(", ")})
+        order by received_at desc limit ${Math.max(1, Math.min(Math.floor(limit), 2_000))}
+      ) order by receivedAt;
     `);
   }
 }
+
+/**
+ * Since when this device starts turns for the phone's messages it reads: from
+ * the moment it first read the User's server with this program. A device
+ * that was reading already (an update) also starts what it took in during
+ * the last `windowMs`; a new or recreated one reads the whole order, and the
+ * turns in it are other homes' or long over.
+ */
+export async function phoneTurnsSince(state: {
+  clientState(key: string): Promise<string | undefined>;
+  setClientState(key: string, value: string): Promise<void>;
+}, pulledKey: string, now: number, windowMs: number): Promise<string> {
+  const known = await state.clientState(PHONE_TURNS_SINCE_KEY);
+  if (known && Number.isFinite(Date.parse(known))) return known;
+  const pulled = Number(await state.clientState(pulledKey) ?? "0");
+  const since = new Date(pulled > 0 ? now - windowMs : now).toISOString();
+  await state.setClientState(PHONE_TURNS_SINCE_KEY, since);
+  return since;
+}
+
+const PHONE_TURNS_SINCE_KEY = "phone-turns-since";
 
 function quote(value: string): string {
   if (value.includes("\u0000")) throw new Error("A value with a NUL character cannot be stored.");

@@ -77,3 +77,27 @@ test("the server holds no start keys while no phone is paired, and a member's pr
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(posted.length, 2, "the last word goes at once");
 });
+
+test("a machine member's progress is left to its machine, even for a chat not saved here since the start", async () => {
+  const posted: unknown[] = [];
+  const hub = new HubPhonePublisher({
+    storage: { deviceEventBlobs: () => ({ prepare: async (value: unknown) => value }) } as never,
+    eventLog: { appendLocalEvent: async () => ({}) as never } as never,
+    client: () => ({ postProgress: async (frames: unknown[]) => { posted.push(...frames); return { ok: true }; } }) as never,
+    hasPhones: async () => true,
+    machineMembersOf: async () => new Set(["p-box"]),
+    buildCatalog: async () => ({ roles: {}, prompts: [], skills: [] }),
+    wakeKeys: async () => [],
+    log: () => undefined
+  });
+  const progress = (participantId: string, runId: string) => ({ runId, phase: "debate", message: "", createdAt: "2026-10-25T09:00:00.000Z",
+    agentProgress: { participantId, participantLabel: "@x", state: "running", messageId: `m-${runId}`, partialContent: "Hello" } }) as ReviewProgress;
+  hub.noteProgress(progress("p-box", "run-box"), "chat-2");
+  await tick();
+  for (let round = 0; round < 3; round += 1) {
+    hub.noteProgress(progress("p-box", "run-box"), "chat-2");
+    hub.noteProgress(progress("p-mac", "run-mac"), "chat-2");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  assert.deepEqual([...new Set(posted.map((frame) => (frame as { runId: string }).runId))], ["run-mac"]);
+});

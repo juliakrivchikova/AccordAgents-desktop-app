@@ -4185,6 +4185,11 @@
         if (!known || entry.minted.originSeq < known.minted.originSeq) firstRefusal.set(entry.minted.logScopeId, entry);
       }
       for (const entry of firstRefusal.values()) await rechainAfterRefusal(entry).catch(function () { return undefined; });
+      // Minted again: the next pages hold copies from before, so this pass
+      // ends here and the next one reads the queue afresh.
+      if (restarts.size > 0 || firstRefusal.size > 0) {
+        return { status: "waiting-to-sync", sent: sent, pending: pending.length - sent };
+      }
     }
     return { status: sent === pending.length ? "synced" : "waiting-to-sync", sent: sent, pending: pending.length - sent };
   }

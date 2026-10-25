@@ -109,6 +109,7 @@ import { HubClient } from "./services/hubClient";
 import { HUB_ID_KEY, HUB_SHARED_SCOPE_PREFIXES, HubSync, PULLED_KEY, PUSHED_KEY, hubChatChangeApplier, hubPushedThrough } from "./services/hubSync";
 import { deviceIdForPublicKey, hubCertificateCrypto, signHubRequest, signHubText } from "./services/hubAuth";
 import { HubPhonePublisher } from "./services/hubPhonePublisher";
+import { phoneTurnsSince } from "./services/phoneTurnClaims";
 import {
   HUB_PHONE_ENROLLED_EVENT_KIND,
   HUB_PHONE_ENROLLMENT_SCOPE,
@@ -462,6 +463,11 @@ const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
   eventLog: chatEventLogService,
   client: () => hubOwnerConfirmed ? hubClient : undefined,
   hasPhones: async () => (await hubPhones()).length > 0,
+  machineMembersOf: async (conversationId) => {
+    const opened = await storageService.openConversation(conversationId, 1);
+    const participants = Array.isArray(opened?.conversation.metadata?.participants) ? opened!.conversation.metadata.participants as Array<{ id?: string; homeMachineId?: string }> : [];
+    return new Set(participants.filter((participant) => participant?.id && participant.homeMachineId).map((participant) => participant.id as string));
+  },
   buildCatalog: async (upload) => {
     const settings = await settingsService.getPublicSettings();
     for (const avatar of settings.chatCustomAvatars ?? []) {
@@ -516,6 +522,7 @@ async function admitEnrolledPhone(event: ChatEventEnvelope): Promise<string | un
   if (!admitted) return undefined;
   publishHubRoster();
   await machineLinkService?.refreshTrustRosters().catch(() => undefined);
+  hubPhonePublisher.phonesChanged();
   hubPhonePublisher.scheduleCatalog(0);
   hubPhonePublisher.publishWakeKeys();
   hubPhonePublisher.flushApprovals();
@@ -585,7 +592,11 @@ function publishHubRoster(): void {
     hubSync?.nudgeHeld();
     hubPhonePublisher.scheduleCatalog();
     hubPhonePublisher.publishWakeKeys();
-    hubPhonePublisher.flushApprovals();
+    // Cards that waited while there was no link (a restart, another server).
+    void storageService.recentChatsWithPendingApprovals(100).then((chats) => {
+      for (const chat of chats) hubPhonePublisher.noteConversation(chat);
+      hubPhonePublisher.flushApprovals();
+    }).catch(() => hubPhonePublisher.flushApprovals());
   })().catch((error: unknown) => {
     // A machine set up while the hub was away would be refused by it: the
     // list goes up again until the hub has it.
@@ -1235,7 +1246,10 @@ chatService.setCloudRunPreparation(async (selection, provider, progress) => {
 });
 chatService.setCloudRunAwsService(cloudRunAwsService);
 // A message the User wrote on her phone starts this desktop's own members.
-chatService.setPhoneOrigins(async (originId) => (await hubPhones()).some((phone) => phone.deviceId === originId));
+const isUsersPhone = async (originId: string): Promise<boolean> => (await hubPhones()).some((phone) => phone.deviceId === originId);
+void phoneTurnsSince(storageService.hub(), PULLED_KEY, Date.now(), PHONE_TURN_RESUME_WINDOW_MS)
+  .then((since) => chatService.setPhoneOrigins(isUsersPhone, since))
+  .catch(() => chatService.setPhoneOrigins(isUsersPhone, new Date().toISOString()));
 // Phone messages taken in but never started here (a quit between the two)
 // start once the link has settled, and again now and then.
 const resumePhoneTurns = (): void => {
@@ -3979,6 +3993,9 @@ function registerIpc(): void {
     const inviteId = typeof request?.inviteId === "string" ? request.inviteId.trim() : "";
     if (!inviteId) throw new Error("Revoking a phone needs its invite.");
     const removed = await settingsService.revokePhoneInvite(inviteId);
+    hubPhonePublisher.phonesChanged();
+    // The last phone gone: the server keeps no start key for it.
+    hubPhonePublisher.publishWakeKeys();
     publishHubRoster();
     await machineLinkService?.refreshTrustRosters().catch(() => undefined);
     return { revoked: true, inviteId, ...(removed ? { deviceId: removed } : {}) };

@@ -247,3 +247,71 @@ test("a /goal for two members from the phone is refused in the chat, once, as on
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
+
+test("a device reading the whole order afresh does not run the phone's old messages, nor a turn another home already ran", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-phone-replay-"));
+  try {
+    const phone = createChatEventDeviceIdentity(new Date().toISOString());
+    const machine = await device(path.join(directory, "machine.sqlite3"), "machine", phone.originId);
+    await (machine.service as unknown as { saveConversation(conversation: Conversation): Promise<void> }).saveConversation(chat());
+    // This machine began reading the server now: what the phone wrote an
+    // hour ago is another home's (or long over).
+    machine.service.setPhoneOrigins((origin) => origin === phone.originId, new Date().toISOString());
+    const old = randomUUID();
+    const oldMessage: ChatMessage = { id: old, role: "user", content: "@drew old instruction", createdAt: new Date(Date.now() - 60 * 60_000).toISOString(), status: "done",
+      metadata: { deliveryTargets: [remote.id], threadId: old } as ChatMessage["metadata"] };
+    const first = phoneMessage(phone, 1, undefined, oldMessage);
+    await machine.storage.appendChatEvent(first.envelope);
+    await machine.service.applyRemoteChatChanges(first.envelope, first.payload);
+    await settle();
+    await machine.service.resumePhoneTurns(new Date(Date.now() - 24 * 60 * 60_000).toISOString());
+    await settle();
+    assert.equal(machine.started.length, 0, "an old message is not run again");
+    // A recent one whose turn the chat shows already (the member's earlier
+    // home ran it): not run here either.
+    const recent = randomUUID();
+    const recentMessage: ChatMessage = { ...oldMessage, id: recent, content: "@drew recent", createdAt: new Date().toISOString(), metadata: { deliveryTargets: [remote.id], threadId: recent } as ChatMessage["metadata"] };
+    const stored = await machine.storage.getConversation("chat-phone");
+    stored!.messages.push(recentMessage, { id: randomUUID(), role: "participant", participantId: remote.id, content: "done elsewhere", createdAt: new Date().toISOString(), status: "done",
+      metadata: { runId: phoneTurnRunId(recent, remote.id) } as ChatMessage["metadata"] });
+    await (machine.service as unknown as { saveConversation(conversation: Conversation): Promise<void> }).saveConversation(stored!);
+    await machine.service.startPhoneTurns("chat-phone", [recentMessage]);
+    await settle();
+    assert.equal(machine.started.length, 0, "a turn the chat shows is not run again");
+  } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("a Stop given before the start is said once, however often the home looks again", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-phone-stop-once-"));
+  try {
+    const phone = createChatEventDeviceIdentity(new Date().toISOString());
+    const machine = await device(path.join(directory, "machine.sqlite3"), "machine", phone.originId);
+    await (machine.service as unknown as { saveConversation(conversation: Conversation): Promise<void> }).saveConversation(chat());
+    const effects = createChatActionEffects({
+      chat: machine.service as never,
+      emitter: { beginExecution: async () => true, recordExecution: async () => undefined },
+      storage: { getConversation: (id) => machine.storage.getConversation(id) },
+      homeMachineId: () => "machine-1"
+    });
+    const messageId = randomUUID();
+    const runId = phoneTurnRunId(messageId, remote.id);
+    await effects.perform({ conversationId: "chat-phone", targetKey: `run:${runId}`, kind: "turn.stop.requested", payload: { operationId: `stop:${runId}`, targetKey: `run:${runId}` } });
+    const message: ChatMessage = { id: messageId, role: "user", content: "@drew go", createdAt: new Date().toISOString(), status: "done",
+      metadata: { deliveryTargets: [remote.id], threadId: messageId } as ChatMessage["metadata"] };
+    const { envelope, payload } = phoneMessage(phone, 1, undefined, message);
+    await machine.storage.appendChatEvent(envelope);
+    await machine.service.applyRemoteChatChanges(envelope, payload);
+    await settle();
+    for (let round = 0; round < 3; round += 1) {
+      await machine.service.resumePhoneTurns(new Date(Date.now() - 60_000).toISOString());
+      await settle();
+    }
+    const stored = await machine.storage.getConversation("chat-phone");
+    assert.equal(stored?.messages.filter((item) => item.role === "system" && item.content === "@drew stopped by user.").length, 1);
+    assert.equal(machine.started.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
