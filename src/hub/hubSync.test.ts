@@ -11,7 +11,7 @@ import { ChatSearchService } from "../main/services/chatSearch";
 import { ChatService } from "../main/services/chat";
 import type { ChatMessage, Conversation } from "../shared/types";
 import { HubClient } from "../main/services/hubClient";
-import { HubSync, type HubApplyOutcome, type HubDeliverOutcome } from "../main/services/hubSync";
+import { HubSync, hubChatChangeApplier, readGivenUp, type HubApplyOutcome, type HubDeliverOutcome } from "../main/services/hubSync";
 import { StorageService } from "../main/services/storage";
 import type { ChatEventEnvelope } from "../shared/chatEvents";
 import { CHAT_COPY_HUB_POSITION_KEY, type CopiedConversation } from "../main/services/chatCopy";
@@ -839,4 +839,41 @@ test("a change held two weeks for anything but its author is given up, said in t
   await until(async () => Boolean((await s.hubStore.storage.hub().readerFloor(machine.identity.originId))?.gaveUpAt));
   assert.equal((await s.hubStore.storage.hub().readerFloor(machine.identity.originId))?.gaveUpCount, 1);
   assert.equal((await s.hubLog.readers()).readers.find((reader) => reader.deviceId === machine.identity.originId)?.givenUpCount, 1);
+});
+
+test("the two weeks count from when a place stops waiting for its author, and a newer version's change waits for the update", async (t) => {
+  const s = await setup(t);
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine);
+  await s.desktop.log.appendLocalEvent(change("chat-clock", 1));
+  await s.desktop.log.appendLocalEvent({ ...change("chat-newer", 1), payload: { ...change("chat-newer", 1).payload, version: 99 } });
+  await pushAll(s.link(s.desktop, []), s, 2);
+  let clock = Date.now();
+  let known = false;
+  const logs: string[] = [];
+  const machineSync = s.link(machine, [], {
+    now: () => clock,
+    trustedKey: async () => known ? s.desktop.identity.publicKeyDerBase64 : undefined,
+    applyChatChange: hubChatChangeApplier(machine.storage, { applyRemoteChatChanges: async () => { throw new Error("cannot be applied"); } }),
+    log: (event) => logs.push(event)
+  });
+  machineSync.start();
+  await until(async () => (await machine.storage.hub().heldEvents(0, 10)).length === 2);
+  await machineSync.idle();
+  // Three weeks unknown, then known: one fails to apply, one is a newer version's.
+  clock += 21 * 24 * 60 * 60_000;
+  known = true;
+  machineSync.nudgeHeld();
+  await until(async () => (await machine.storage.hub().heldEvents(0, 10)).every((held) => held.reason !== "unknown-origin"));
+  await machineSync.idle();
+  assert.deepEqual((await machine.storage.hub().heldEvents(0, 10)).map((held) => held.reason).sort(), ["error", "newer-version"]);
+  machineSync.nudgeHeld();
+  await machineSync.idle();
+  assert.equal((await machine.storage.hub().heldEvents(0, 10)).length, 2, "not given up at once: its two weeks start now");
+  clock += 15 * 24 * 60 * 60_000;
+  machineSync.nudgeHeld();
+  await until(() => logs.includes("hub.sync.held-given-up"));
+  await machineSync.idle();
+  assert.deepEqual((await machine.storage.hub().heldEvents(0, 10)).map((held) => held.reason), ["newer-version"], "the newer version's change still waits");
+  assert.equal((await readGivenUp(machine.storage))[s.desktop.identity.originId]?.count, 1, "recorded with the give-up");
 });

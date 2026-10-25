@@ -133,8 +133,10 @@ How far it is built, so the two are not confused:
   failed, its body is gone, its chat never arrived) is given up, never in
   silence: a debug-log line, and a line in Settings → Your server ("Some
   changes from <device> could not be applied and were given up on <date>")
-  the User can dismiss. A change held only because its author is not known
-  yet waits until the server's roster says that author was removed.
+  the User can dismiss. The two weeks count from when it stopped waiting
+  for its author. A change held only because its author is not known yet
+  waits until the server's roster says that author was removed, and one
+  written by a newer version of the app waits for this device's update.
 - The server's copy is trusted as it is. A machine that starts again from
   it takes the chats' shared content (title, members and their permissions,
   messages) from that copy, which the desktop does not sign. This is

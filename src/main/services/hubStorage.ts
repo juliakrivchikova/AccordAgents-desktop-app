@@ -52,7 +52,10 @@ export const HUB_SCHEMA_SQL = `
     origin_id text not null,
     conversation_id text not null,
     reason text not null,
-    held_at text not null
+    held_at text not null,
+    -- When it started waiting for anything but its author (the two weeks
+    -- after which it is given up count from here).
+    due_from text
   );
   create index if not exists hub_client_held_chat on hub_client_held_events(origin_id, conversation_id);
   -- On the hub: where each reader stands. The hub forgets nothing a reader
@@ -156,6 +159,10 @@ export const HUB_CLIENT_HUB_ID_KEY = "hub-id";
 /** What this device gave up on: `{ [originId]: { count, at } }`. */
 export const HUB_CLIENT_GIVEN_UP_KEY = "given-up";
 
+/** Places held because of who wrote them: they wait for the roster, never
+ *  for a clock (a newer version's change waits for this device's update). */
+export const HELD_FOR_AUTHOR_REASONS = ["unknown-origin", "not-ready", "newer-version"] as const;
+
 /** A held place in the order, as the device keeps it. */
 export interface HubHeldEvent {
   hubSeq: number;
@@ -190,6 +197,8 @@ export class HubStorage {
       const columns = new Set((await this.database.query<{ name: string }>(`select name from pragma_table_info('hub_reader_floors');`)).map((row) => row.name));
       if (!columns.has("gave_up_count")) await this.database.execute(`alter table hub_reader_floors add column gave_up_count integer not null default 0;`);
       if (!columns.has("gave_up_at")) await this.database.execute(`alter table hub_reader_floors add column gave_up_at text;`);
+      const heldColumns = new Set((await this.database.query<{ name: string }>(`select name from pragma_table_info('hub_client_held_events');`)).map((row) => row.name));
+      if (!heldColumns.has("due_from")) await this.database.execute(`alter table hub_client_held_events add column due_from text;`);
       // A hub updated to floors: every device that read before stands where
       // it last read, not where the owner stands now (one stopped during the
       // update has not read what came since). Not marked as reporting.
@@ -800,10 +809,16 @@ export class HubStorage {
   async holdEvent(held: HubHeldEvent): Promise<void> {
     if (!Number.isSafeInteger(held.hubSeq) || held.hubSeq < 1) throw new Error("Invalid hub position.");
     await this.init();
+    // The give-up clock starts when it waits for anything but its author:
+    // a place that waited for its author for weeks starts afresh once known.
+    const forAuthor = HELD_FOR_AUTHOR_REASONS.map(quote).join(", ");
     await this.database.execute(`
-      insert into hub_client_held_events(hub_seq, event_id, origin_id, conversation_id, reason, held_at)
-        values (${held.hubSeq}, ${quote(held.eventId)}, ${quote(held.originId)}, ${quote(held.conversationId)}, ${quote(held.reason)}, ${quote(held.heldAt)})
-      on conflict(hub_seq) do update set reason = excluded.reason;
+      insert into hub_client_held_events(hub_seq, event_id, origin_id, conversation_id, reason, held_at, due_from)
+        values (${held.hubSeq}, ${quote(held.eventId)}, ${quote(held.originId)}, ${quote(held.conversationId)}, ${quote(held.reason)}, ${quote(held.heldAt)}, ${quote(held.heldAt)})
+      on conflict(hub_seq) do update set
+        due_from = case when hub_client_held_events.reason in (${forAuthor}) and excluded.reason not in (${forAuthor})
+          then excluded.held_at else hub_client_held_events.due_from end,
+        reason = excluded.reason;
     `);
   }
 
@@ -858,14 +873,30 @@ export class HubStorage {
    * wrote them (`keepReasons`: those wait for the roster): changes this device
    * could not apply for two weeks. Returns what was given up.
    */
-  async giveUpHeldBefore(beforeIso: string, keepReasons: readonly string[]): Promise<HubHeldEvent[]> {
+  async heldToGiveUp(beforeIso: string, keepReasons: readonly string[]): Promise<HubHeldEvent[]> {
     await this.init();
     const rows = await this.database.query<HubHeldEvent>(`
-      delete from hub_client_held_events
-      where held_at < ${quote(beforeIso)} ${keepReasons.length ? `and reason not in (${keepReasons.map(quote).join(", ")})` : ""}
-      returning hub_seq as hubSeq, event_id as eventId, origin_id as originId, conversation_id as conversationId, reason, held_at as heldAt;
+      select hub_seq as hubSeq, event_id as eventId, origin_id as originId, conversation_id as conversationId, reason, held_at as heldAt
+      from hub_client_held_events
+      where coalesce(due_from, held_at) < ${quote(beforeIso)} ${keepReasons.length ? `and reason not in (${keepReasons.map(quote).join(", ")})` : ""}
+      order by hub_seq limit ${HUB_STORAGE_PAGE_MAX};
     `);
     return rows.map((row) => ({ ...row, hubSeq: Number(row.hubSeq) }));
+  }
+
+  /** Gives up these places and records it, in one transaction: a give-up
+   *  is never without its record (which Settings shows). */
+  async giveUpHeld(hubSeqs: number[], record: { key: string; value: string }): Promise<void> {
+    const seqs = hubSeqs.filter((seq) => Number.isSafeInteger(seq));
+    if (seqs.length === 0) return;
+    await this.init();
+    await this.database.execute(`
+      begin immediate;
+      insert into hub_client_state(key, value) values (${quote(record.key)}, ${quote(record.value)})
+        on conflict(key) do update set value = excluded.value;
+      delete from hub_client_held_events where hub_seq in (${seqs.join(", ")});
+      commit;
+    `);
   }
 
   /** Authors whose places are held because of who they are (not known yet,

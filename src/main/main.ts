@@ -590,10 +590,16 @@ async function dismissedHubNotices(): Promise<string[]> {
   }
 }
 
-async function dismissHubNotice(id: string): Promise<void> {
-  if (typeof id !== "string" || !id || id.length > 512) throw new Error("Invalid notice.");
-  const dismissed = (await dismissedHubNotices()).filter((item) => item !== id);
-  await storageService.hub().setClientState(DISMISSED_HUB_NOTICES_KEY, JSON.stringify([...dismissed, id].slice(-100)));
+let dismissingHubNotice: Promise<void> = Promise.resolve();
+/** One dismissal at a time: two quick clicks must not lose one. */
+function dismissHubNotice(id: string): Promise<void> {
+  if (typeof id !== "string" || !id || id.length > 512) return Promise.reject(new Error("Invalid notice."));
+  const run = dismissingHubNotice.then(async () => {
+    const dismissed = (await dismissedHubNotices()).filter((item) => item !== id);
+    await storageService.hub().setClientState(DISMISSED_HUB_NOTICES_KEY, JSON.stringify([...dismissed, id].slice(-100)));
+  });
+  dismissingHubNotice = run.catch(() => undefined);
+  return run;
 }
 
 /**

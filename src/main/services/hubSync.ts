@@ -2,13 +2,13 @@ import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { DeviceEventGap } from "../../shared/deviceEventDelivery";
 import { HUB_PUSH_MAX_EVENTS, type HubCopyMark, type HubCopyPart, type HubEventPushResult, type HubLoggedEvent, type HubReadReport, type HubSnapshotResponse } from "../../shared/hubProtocol";
 import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
-import { CHAT_CHANGES_EVENT_KIND, CHAT_CHANGES_LOG_SCOPE_PREFIX, isChatChangesLogScope, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
+import { CHAT_CHANGES_EVENT_KIND, CHAT_CHANGES_LOG_SCOPE_PREFIX, isChatChangesLogScope, isChatChangesPayload, isSupportedChatChangesVersion, type ChatChangesPayload } from "./chatChanges";
 import { CHAT_COPY_HUB_POSITION_KEY, type CopiedConversation } from "./chatCopy";
 import { verifySignedChatEvent } from "./chatEventLog";
 import type { DeviceEventChannel } from "./deviceEventChannel";
 import { DevicePacketAuthenticationError } from "./devicePacketAuthentication";
 import { HubHttpError, HubTransientError, isHubResyncRequired, type HubClient } from "./hubClient";
-import { HUB_CLIENT_GIVEN_UP_KEY, HUB_CLIENT_HUB_ID_KEY, HUB_CLIENT_PULLED_KEY, HUB_CLIENT_PUSHED_KEY, type HubHeldEvent } from "./hubStorage";
+import { HELD_FOR_AUTHOR_REASONS, HUB_CLIENT_GIVEN_UP_KEY, HUB_CLIENT_HUB_ID_KEY, HUB_CLIENT_PULLED_KEY, HUB_CLIENT_PUSHED_KEY, type HubHeldEvent } from "./hubStorage";
 import type { StorageService } from "./storage";
 
 /** Where this device keeps its place with the hub (setup moves them). */
@@ -110,7 +110,7 @@ export type HubGapRepair =
   | "unavailable";
 
 /** What applying a chat change no channel took came to. */
-export type HubApplyOutcome = "applied" | "ignored" | "held";
+export type HubApplyOutcome = "applied" | "ignored" | "held" | "newer-version";
 
 /** Where this device's own events stop being held by the hub: those after
  *  this position have not reached it yet. */
@@ -126,12 +126,15 @@ export function hubChatChangeApplier(storage: StorageService, chat: {
   return async (event) => {
     const payload = await storage.deviceEventBlobs().hydrate(event.payload);
     if (!isChatChangesPayload(payload)) return "ignored";
+    // Written by a newer version: it waits for this device's update, never
+    // for a clock.
+    if (!isSupportedChatChangesVersion(payload)) return "newer-version";
     const outcome = await chat.applyRemoteChatChanges(event, payload);
     return outcome === "applied" ? "applied" : "held";
   };
 }
 
-type ReceiveOutcome = "done" | "unknown-origin" | "not-ready" | "waiting" | "blob-missing" | "error" | "refused" | "forged";
+type ReceiveOutcome = "done" | "unknown-origin" | "not-ready" | "newer-version" | "waiting" | "blob-missing" | "error" | "refused" | "forged";
 
 /** A failure that says nothing about the event: the hub or the network was
  *  away (the client says so), or a channel was closing. The page is read
@@ -554,20 +557,20 @@ export class HubSync {
    */
   private async giveUpOld(): Promise<void> {
     const at = new Date(this.now()).toISOString();
-    const given = await this.options.storage.hub().giveUpHeldBefore(new Date(this.now() - HELD_GIVE_UP_MS).toISOString(), [...BY_AUTHOR]);
+    const given = await this.options.storage.hub().heldToGiveUp(new Date(this.now() - HELD_GIVE_UP_MS).toISOString(), [...HELD_FOR_AUTHOR_REASONS]);
     if (given.length === 0) return;
     const byOrigin = new Map<string, HubHeldEvent[]>();
     for (const held of given) byOrigin.set(held.originId, [...(byOrigin.get(held.originId) ?? []), held]);
     const record = await readGivenUp(this.options.storage);
+    for (const [originId, places] of byOrigin) record[originId] = { count: (record[originId]?.count ?? 0) + places.length, at };
+    await this.options.storage.hub().giveUpHeld(given.map((held) => held.hubSeq), { key: HUB_CLIENT_GIVEN_UP_KEY, value: JSON.stringify(record) });
     for (const [originId, places] of byOrigin) {
       this.options.log?.("hub.sync.held-given-up", {
         originId, count: places.length, reasons: [...new Set(places.map((held) => held.reason))],
         conversationIds: [...new Set(places.map((held) => held.conversationId))].slice(0, 20),
         eventIds: places.map((held) => held.eventId).slice(0, 20), oldestHeldAt: places.map((held) => held.heldAt).sort()[0]
       });
-      record[originId] = { count: (record[originId]?.count ?? 0) + places.length, at };
     }
-    await this.options.storage.hub().setClientState(HUB_CLIENT_GIVEN_UP_KEY, JSON.stringify(record));
   }
 
   /**
@@ -1017,7 +1020,7 @@ export class HubSync {
       return "done";
     }
     const outcome = await this.options.applyChatChange(event);
-    return outcome === "held" ? "waiting" : "done";
+    return outcome === "held" ? "waiting" : outcome === "newer-version" ? "newer-version" : "done";
   }
 }
 
