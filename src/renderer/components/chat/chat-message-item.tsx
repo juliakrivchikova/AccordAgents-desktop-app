@@ -5,6 +5,7 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Copy, FileText, Li
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { canCompactParticipant } from "../../../shared/chatParticipantStatus";
+import { machineStopPendingText, machineWaitingText } from "../../../shared/machineWaitingText";
 import type {
   AgentContextUsage,
   AgentRunProgress,
@@ -395,15 +396,12 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           )}
           {stopPending && (
             <div className="chat-queued-badge">
-              <span>Stop requested — waiting for machine {stopPending.machineName}</span>
+              <span>{machineStopPendingText(stopPending.machineName)}</span>
             </div>
           )}
           {isStreaming && message.metadata?.machinePending && !stopPending && (
             <div className="chat-queued-badge">
-              <span>
-                Waiting for machine {message.metadata.machinePending.machineName}
-                {message.metadata.machinePending.reason ? `: ${message.metadata.machinePending.reason}` : ""}
-              </span>
+              <span>{machineWaitingText(message.metadata.machinePending.machineName, message.metadata.machinePending.reason)}</span>
             </div>
           )}
           {repoFileMentions.length > 0 && (

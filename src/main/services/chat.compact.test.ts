@@ -808,6 +808,72 @@ test("/compact on a member hosted on a machine is compacted there and shows the 
   ]);
 });
 
+test("while its machine is away a compaction's status line says what a turn's bubble says", async () => {
+  const participant = chatParticipant({ homeMachineId: "box" });
+  const conversation = chatConversation([participant], []);
+  const { service } = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
+  const lines: string[] = [];
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    compactOnMachine: async (request) => {
+      await request.onMachineWaiting?.("Box", "its runtime is being updated");
+      await request.onMachineWaiting?.("Box");
+      request.onStopPending?.("Box");
+      started();
+      await released;
+      return { status: "completed", warnings: [], messages: [{ id: "line", role: "system", content: "Compacted @admin context.", createdAt: NOW, status: "done",
+        metadata: { runId: request.runId, compaction: { triggeredBy: "user", participantId: participant.id, outcome: "completed", instructionsProvided: false } } } as any] };
+    }
+  });
+  const running = service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "waiting-run" }, undefined, (progress) => lines.push(progress.message));
+  await waiting;
+  // The machine started it before the held Stop landed: the Stop still waits
+  // for the machine, as on a turn's bubble.
+  await service.applyMachineRunStarted({ conversationId: conversation.id, runId: "waiting-run" });
+  release();
+  await running;
+  // A late or repeated start after the outcome says nothing.
+  await service.applyMachineRunStarted({ conversationId: conversation.id, runId: "waiting-run" });
+  assert.deepEqual(lines, [
+    "Compacting @admin.",
+    "Compacting @admin. Waiting for machine Box: its runtime is being updated",
+    "Compacting @admin. Waiting for machine Box",
+    "Compacting @admin. Stop requested — waiting for machine Box",
+    "Compacted @admin."
+  ]);
+});
+
+test("a compaction that waited for its machine says Compacting again once the machine starts it", async () => {
+  const participant = chatParticipant({ homeMachineId: "box" });
+  const conversation = chatConversation([participant], []);
+  const { service } = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
+  const lines: string[] = [];
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let waitingShown!: () => void;
+  const shown = new Promise<void>((resolve) => { waitingShown = resolve; });
+  service.setMachineLink({
+    runTurn: async () => { throw new Error("not a turn"); },
+    compactOnMachine: async (request) => {
+      await request.onMachineWaiting?.("Box");
+      waitingShown();
+      await released;
+      return { status: "completed", warnings: [], messages: [{ id: "line-2", role: "system", content: "Compacted @admin context.", createdAt: NOW, status: "done",
+        metadata: { runId: request.runId, compaction: { triggeredBy: "user", participantId: participant.id, outcome: "completed", instructionsProvided: false } } } as any] };
+    }
+  });
+  const running = service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "back-run" }, undefined, (progress) => lines.push(progress.message));
+  await shown;
+  await service.applyMachineRunStarted({ conversationId: conversation.id, runId: "back-run" });
+  release();
+  await running;
+  assert.deepEqual(lines, ["Compacting @admin.", "Compacting @admin. Waiting for machine Box", "Compacting @admin.", "Compacted @admin."]);
+});
+
 test("a machine compaction that could not start ends as a local one that could not", async () => {
   const participant = chatParticipant({ homeMachineId: "box" });
   const conversation = chatConversation([participant], []);
