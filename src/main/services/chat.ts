@@ -178,7 +178,7 @@ import {
 import { chatActionOperationId } from "./chatActionEmitter";
 import type { ChatEventMirrorService } from "./chatEventMirror";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
-import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
+import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
@@ -471,6 +471,18 @@ interface ChatAppMcpGateway {
 }
 
 type ChatAppMcpTokenGrant = Parameters<ChatAppMcpGateway["issueToken"]>[0];
+
+/** The line a compaction that did not happen leaves, local or on a machine,
+ *  whatever punctuation the reason ends with. */
+function compactionFailureLine(handle: string, error: string | undefined): string {
+  return `Could not compact @${handle} context: ${(error ?? "").replace(/[.\s]+$/, "") || "unknown error"}.`;
+}
+
+/** The same line for a compaction a machine ran (or never got to run): a
+ *  Stop before it started reads as a local one that never started. */
+function machineCompactionFailureLine(handle: string, status: string | undefined, error: string | undefined): string {
+  return compactionFailureLine(handle, status === "interrupted" && !error ? COMPACTION_CANCELLED_BEFORE_START : error);
+}
 
 /** The scheduled-scripts service on this host, as the chat side uses it. */
 export interface ChatScriptHost {
@@ -1962,31 +1974,18 @@ export class ChatService {
       const baseCliParticipant = this.cliParticipantForSession(participant, session);
       const agentEnvironment = await this.agentEnvironmentForParticipant(participant, baseCliParticipant.model);
       const cliParticipant = this.cliParticipantWithHost(baseCliParticipant, agentEnvironment.codexConfigOverrides);
-      const appMcpToolInventoryKey = this.appMcpToolInventoryKey(
-        this.appMcpToolNames(this.appToolCapabilitiesForRun(session, permissions))
-      );
       if (agentEnvironment.problem) {
         await this.closeWarmAgentsForParticipant(conversation.id, participant.id);
       }
       const result: CliAgentCompactResult = agentEnvironment.problem
         ? { participant: cliParticipant, ok: false, error: agentEnvironment.problem }
         : await this.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
-            persistSession: true,
-            sessionId: session.sessionId,
-            extraReadableDirs: [workspacePath],
-            agentMode,
-            permissions,
+            ...this.memberProcessOptionsForCompaction(conversation, participant, session, request, runId, runPath, workspacePath, agentMode, permissions),
             agentEnv: agentEnvironment.env,
             agentEnvKey: agentEnvironment.version,
             ...(compactInstructions ? { compactInstructions } : {}),
             onSessionId: (sessionId) => {
               this.persistParticipantSessionId(conversation, session, sessionId);
-            },
-            warm: {
-              conversationId: conversation.id,
-              participantId: participant.id,
-              contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
-              idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
             }
           });
       await this.refreshStoredChatState(conversation);
@@ -2019,7 +2018,7 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         const content = result.ok
           ? this.compactSuccessMessage(participant.handle, compactInstructions)
-          : `Could not compact @${participant.handle} context: ${result.error ?? "unknown error"}.`;
+          : compactionFailureLine(participant.handle, result.error);
         conversation.messages.push(this.message(
           "system",
           content,
@@ -2056,6 +2055,108 @@ export class ChatService {
       reservation.release();
       await this.endChatRun(ingest.conversation, runId);
     }
+  }
+
+  /**
+   * What the member's live process is started with when a compaction finds
+   * none alive: what its turn would start it with (session, role, app MCP
+   * connection and tools, permissions, observers), so the process stays the
+   * member's and serves its next turn. The app tool grant follows the turn's
+   * rules for each CLI: a Claude Code process that is alive keeps the grant
+   * its own replies act for, and one started for the compaction gets the
+   * member's current grant before it connects; Codex is granted before it
+   * runs. Gemini's compaction runs no app tools.
+   */
+  private memberProcessOptionsForCompaction(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession,
+    request: CompactChatParticipantRequest,
+    runId: string,
+    runPath: string,
+    workspacePath: string,
+    agentMode: ChatAgentMode,
+    permissions: ChatAgentPermissions
+  ): CliAgentRunOptions {
+    const appToolCapabilities = this.appToolCapabilitiesForRun(session, permissions);
+    const appMcpToolNames = this.appMcpToolNames(appToolCapabilities);
+    const appMcpToolInventoryKey = this.appMcpToolInventoryKey(appMcpToolNames);
+    const appMcpClientGenerationId = this.appMcpClientGenerationId(conversation, participant, session, appMcpToolInventoryKey);
+    const memberKey = `${conversation.id}:${participant.id}`;
+    const grant: ChatAppMcpTokenGrant = {
+      conversationId: conversation.id,
+      participantId: participant.id,
+      roleConfigId: session.roleConfigId,
+      roleConfigVersion: session.roleConfigVersion,
+      capabilities: appToolCapabilities,
+      clientGenerationId: appMcpClientGenerationId,
+      expectedToolNames: appMcpToolNames,
+      triggerMessageId: request.parentMessageId,
+      triggerThreadId: request.threadId ?? request.parentMessageId,
+      triggerParentMessageId: request.parentMessageId,
+      triggerChatThreadRootId: request.chatThreadRootId,
+      continuation: false,
+      runId,
+      turnSegmentId: randomUUID(),
+      agentMode,
+      runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, permissions),
+      participantRequestDepth: 0,
+      historyMarkdownPath: path.join(workspacePath, "history.md"),
+      historyJsonPath: path.join(workspacePath, "history.json")
+    };
+    const grantCompaction = (): { url: string; token: string } | undefined => {
+      const issued = this.issueAppMcpConnection(conversation, participant, grant);
+      if (issued && participant.kind === "claude-code") {
+        this.lastAppMcpGrants.set(memberKey, grant);
+      }
+      return issued;
+    };
+    let appMcp: { url: string; token: string } | undefined;
+    let grantBeforeStart: (() => void) | undefined;
+    if (participant.kind === "claude-code") {
+      const existingConnection = this.appMcpTokens.has(memberKey) ? this.appMcpConnections.get(memberKey) : undefined;
+      appMcp = existingConnection ?? grantCompaction();
+      grantBeforeStart = existingConnection ? () => { grantCompaction(); } : undefined;
+    } else if (participant.kind === "codex-cli") {
+      appMcp = grantCompaction();
+    }
+    return {
+      persistSession: true,
+      sessionId: session.sessionId,
+      extraReadableDirs: [workspacePath],
+      // A resumed session keeps the role it started with; the prompt fallback
+      // is never sent for it.
+      role: session.roleRuntime === "prompt-fallback" ? undefined : this.cliRoleOptions(participant, session, ""),
+      appMcp: appMcp
+        ? {
+            ...appMcp,
+            toolNames: appMcpToolNames,
+            autoPreauthorizedToolNames: this.autoPreauthorizedAppMcpToolNames(appMcpToolNames),
+            clientGenerationId: appMcpClientGenerationId,
+            clientStatus: (clientGenerationId: string) => this.appMcp?.clientStatus?.(clientGenerationId)
+          }
+        : undefined,
+      agentMode,
+      permissions,
+      warm: {
+        conversationId: conversation.id,
+        participantId: participant.id,
+        contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
+        idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS,
+        // Called only before a process is started for the compaction.
+        onReplyStarted: grantBeforeStart,
+        onSelfResumedTurn: (turn) => this.handleSelfResumedTurn(conversation.id, participant.id, turn),
+        onBackgroundTasksChanged: (tasks) => this.handleBackgroundTasksChanged(conversation.id, participant.id, tasks),
+        // Started with suggestions on, as a turn starts it; the compaction
+        // itself is not a reply a suggestion follows.
+        onPromptSuggestion: (text) => this.receiveMemberPromptSuggestion({
+          conversationId: conversation.id,
+          participantId: participant.id,
+          runId,
+          text
+        })
+      }
+    };
   }
 
   /** A member whose home is a machine (or will be one, once its cloud
@@ -2138,10 +2239,7 @@ export class ChatService {
       } else {
         // It never ran on the machine: the same line a local compaction that
         // could not start writes (a Stop before it started: word for word).
-        const error = result.status === "interrupted" && !result.error
-          ? COMPACTION_CANCELLED_BEFORE_START
-          : (result.error ?? "unknown error").replace(/[.\s]+$/, "");
-        const content = `Could not compact @${participant.handle} context: ${error}.`;
+        const content = machineCompactionFailureLine(participant.handle, result.status, result.error);
         conversation.messages.push(this.message("system", content, undefined, this.compactMessageMetadata(request, participant.id, "failed")));
         warnings.push(content);
         outcome = "failed";
@@ -6924,10 +7022,8 @@ export class ChatService {
       }
       if (ownMember && request.compaction && !bubble && request.status !== "completed" &&
           !conversation.messages.some((message) => isMachineCompactionLine(message, request.runId, ownMember.id))) {
-        const error = request.status === "interrupted" && !request.error
-          ? COMPACTION_CANCELLED_BEFORE_START
-          : (request.error ?? "unknown error").replace(/[.\s]+$/, "");
-        conversation.messages.push(this.message("system", `Could not compact @${ownMember.handle} context: ${error}.`, undefined,
+        const line = machineCompactionFailureLine(ownMember.handle, request.status, request.error);
+        conversation.messages.push(this.message("system", line, undefined,
           { ...this.compactMessageMetadata({ runId: request.runId, triggeredBy: request.compaction.triggeredBy }, ownMember.id, "failed"),
             ...(request.compaction.triggeredBy === "agent" ? { threadId: "system" } : {}) }));
       }
@@ -16231,7 +16327,7 @@ export class ChatService {
     await this.withChatMutation(latest, async () => {
       latest.messages.push(this.message(
         "system",
-        `Could not compact @${participant.handle} context: ${message}.`,
+        compactionFailureLine(participant.handle, message),
         undefined,
         {
           ...this.compactMessageMetadata({ runId, triggeredBy: "agent", instructions }, participant.id, "failed"),

@@ -1247,7 +1247,7 @@ test("a member on a machine is compacted there through its turns' command path, 
         compactions.push({ ...request, abortedAtStart: signal?.aborted === true, turnsRunning: typeof releaseTurn === "function" });
         if (holdCompaction) await new Promise((resolve) => signal?.addEventListener("abort", resolve, { once: true }));
         const outcome = signal?.aborted ? "failed" : "completed";
-        const message = { id: `outcome-${request.runId}`, role: "system", content: signal?.aborted ? "Could not compact @bot context: Compaction was cancelled.." : "Compacted @bot context.",
+        const message = { id: `outcome-${request.runId}`, role: "system", content: signal?.aborted ? "Could not compact @bot context: Compaction was cancelled." : "Compacted @bot context.",
           createdAt: new Date().toISOString(), status: "done",
           metadata: { runId: request.runId, threadId: request.threadId, compaction: { triggeredBy: request.triggeredBy, participantId: request.participantId, outcome, instructionsProvided: Boolean(request.instructions) } } };
         return { messages: [message], warnings: signal?.aborted ? [message.content] : [], contextUsage: usage };
