@@ -3584,6 +3584,14 @@ function testProcessExists(pid: number): boolean {
   }
 }
 
+async function waitForCondition(condition: () => boolean | Promise<boolean>, timeoutMs = 5_000): Promise<void> {
+  const start = Date.now();
+  while (!(await condition())) {
+    if (Date.now() - start > timeoutMs) assert.fail("Timed out waiting for condition.");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 async function assertFixtureProcessStops(pid: number): Promise<void> {
   for (let attempt = 0; attempt < 40 && testProcessExists(pid); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -3757,11 +3765,13 @@ input.on("line", (line) => {
  *  memory (what its next reply's context counts), compacts it on `/compact`
  *  with the boundary the real CLI emits, and answers `get_context_usage` as
  *  the real CLI does (verified against 2.1.280 on 2026-10-22). */
-async function writeClaudeCompactionFixture(fixtureDir: string, options: { contextUsageAnswer?: "success" | "error" } = {}): Promise<{ claudePath: string; log: string }> {
+async function writeClaudeCompactionFixture(fixtureDir: string, options: { contextUsageAnswer?: "success" | "error" } = {}): Promise<{ claudePath: string; log: string; finishBackground: () => Promise<void> }> {
   const claudePath = path.join(fixtureDir, "claude-fixture");
   const log = path.join(fixtureDir, "fixture-log.jsonl");
+  // The background task ends when the test says so, not after a delay.
+  const finishFile = path.join(fixtureDir, "finish-background");
   await writeFile(claudePath, `#!/usr/bin/env node
-const { appendFileSync } = require("node:fs");
+const { appendFileSync, existsSync } = require("node:fs");
 const readline = require("node:readline");
 const log = (entry) => appendFileSync(${JSON.stringify(log)}, JSON.stringify({ pid: process.pid, ...entry }) + "\\n");
 log({ started: process.argv.slice(2) });
@@ -3771,14 +3781,34 @@ const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 const resumed = process.argv.includes("--resume");
 let messagesTokens = resumed ? 9000 : 0;
 let holding;
+let running = false;
+let answerTaskAfter = false;
 const baseline = 20000;
+const compactNow = () => {
+  send({ type: "system", subtype: "init", session_id: "fixture-session" });
+  const pre = baseline + messagesTokens;
+  messagesTokens = 9000;
+  send({ type: "system", subtype: "compact_boundary", session_id: "fixture-session", compact_metadata: { trigger: "manual", pre_tokens: pre, post_tokens: messagesTokens } });
+  send({ type: "user", message: { role: "user", content: "<local-command-stdout>Compacted </local-command-stdout>" } });
+  send({ type: "result", subtype: "success", result: "", session_id: "fixture-session", usage: { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 } });
+};
+const answerTask = () => {
+  send({ type: "system", subtype: "init", session_id: "fixture-session" });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Background done." }] } });
+  send({ type: "result", subtype: "success", result: "Background done.", session_id: "fixture-session", usage: { input_tokens: 2, cache_read_input_tokens: 99997, cache_creation_input_tokens: 0, output_tokens: 1 } });
+};
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
   if (message.type === "control_request") {
     log({ control: message.request.subtype });
     if (message.request.subtype === "interrupt" && holding) {
+      // What Claude Code 2.1.280 answers when a /compact is interrupted
+      // (verified 2026-10-25): its words, a successful empty result.
       send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: {} } });
-      send({ type: "result", subtype: "error_during_execution", is_error: true, session_id: "fixture-session" });
+      send({ type: "system", subtype: "status", session_id: "fixture-session" });
+      send({ type: "system", subtype: "init", session_id: "fixture-session" });
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Compaction canceled." }] } });
+      send({ type: "result", subtype: "success", is_error: false, result: "", session_id: "fixture-session" });
       send({ type: "command_lifecycle", command_uuid: holding, state: "cancelled" });
       holding = undefined;
       return;
@@ -3803,14 +3833,46 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Started." }] } });
     send({ type: "result", subtype: "success", result: "Started.", session_id: "fixture-session" });
     send({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
-    setTimeout(() => {
+    const poll = setInterval(() => {
+      if (!existsSync(${JSON.stringify(finishFile)})) return;
+      clearInterval(poll);
       log({ background: "finished" });
       send({ type: "system", subtype: "background_tasks_changed", tasks: [] });
       send({ type: "system", subtype: "task_notification", task_id: "task-1", status: "completed" });
-      send({ type: "system", subtype: "init", session_id: "fixture-session" });
-      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Background done." }] } });
-      send({ type: "result", subtype: "success", result: "Background done.", session_id: "fixture-session" });
-    }, 600);
+      // As Claude Code 2.1.280 does (verified): a command running when the
+      // task ends finishes first; the answer to the task is a step after it.
+      if (running) answerTaskAfter = true;
+      else answerTask();
+    }, 20);
+    return;
+  }
+  if (text === "/compact meanwhile" || text === "/compact meanwhile-step") {
+    send({ type: "system", subtype: "status", session_id: "fixture-session" });
+    // A CLI that reports its compaction as a step from the start.
+    if (text.endsWith("-step")) send({ type: "system", subtype: "init", session_id: "fixture-session" });
+    running = true;
+    log({ compacting: text });
+    setTimeout(() => {
+      running = false;
+      log({ compacted: text });
+      compactNow();
+      send({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
+      if (answerTaskAfter) {
+        answerTaskAfter = false;
+        answerTask();
+      }
+    }, 800);
+    return;
+  }
+  if (text === "Reply slowly.") {
+    send({ type: "system", subtype: "init", session_id: "fixture-session" });
+    setTimeout(() => {
+      messagesTokens += 40000;
+      log({ replied: text });
+      send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Slow reply." }] } });
+      send({ type: "result", subtype: "success", result: "Slow reply.", session_id: "fixture-session" });
+      send({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
+    }, 400);
     return;
   }
   if (text.startsWith("/compact") && messagesTokens === 0) {
@@ -3822,18 +3884,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     return;
   }
   if (text === "/compact slowly") {
-    send({ type: "system", subtype: "init", session_id: "fixture-session" });
+    send({ type: "system", subtype: "status", session_id: "fixture-session" });
     holding = uuid;
     return;
   }
   if (text.startsWith("/compact")) {
     send({ type: "system", subtype: "status", session_id: "fixture-session" });
-    send({ type: "system", subtype: "init", session_id: "fixture-session" });
-    const pre = baseline + messagesTokens;
-    messagesTokens = 9000;
-    send({ type: "system", subtype: "compact_boundary", session_id: "fixture-session", compact_metadata: { trigger: "manual", pre_tokens: pre, post_tokens: messagesTokens } });
-    send({ type: "user", message: { role: "user", content: "<local-command-stdout>Compacted </local-command-stdout>" } });
-    send({ type: "result", subtype: "success", result: "", session_id: "fixture-session", usage: { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 } });
+    compactNow();
   } else {
     messagesTokens += 40000;
     send({ type: "system", subtype: "init", session_id: "fixture-session" });
@@ -3844,10 +3901,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `, "utf8");
   await chmod(claudePath, 0o755);
-  return { claudePath, log };
+  return { claudePath, log, finishBackground: () => writeFile(finishFile, "") };
 }
 
-async function readFixtureLog(log: string): Promise<Array<{ pid: number; started?: string[]; message?: string; control?: string; background?: string }>> {
+async function readFixtureLog(log: string): Promise<Array<{ pid: number; started?: string[]; message?: string; control?: string; background?: string; replied?: string; compacted?: string; compacting?: string }>> {
   return (await readFile(log, "utf8")).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
@@ -3887,26 +3944,225 @@ test("Claude /compact runs in the member's live process, so its next reply conti
   }
 });
 
-test("Claude /compact waits for the member's background work and never ends it", { timeout: 15_000 }, async () => {
+test("Claude /compact runs while the member's background work keeps running, as in the dedicated CLI, and the work survives it", { timeout: 15_000 }, async () => {
   if (process.platform === "win32") return;
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-busy-"));
-  const { claudePath, log } = await writeClaudeCompactionFixture(fixtureDir);
+  const { claudePath, log, finishBackground } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
   runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
   runner.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact-busy", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
+  const backgroundReports: string[][] = [];
+  let selfResumed: Promise<any> | undefined;
   const warm = { conversationId: "conversation-compact-busy", participantId: participant.id, contextKey: "context-busy", idleTimeoutMs: 60_000,
-    onSelfResumedTurn: (turn: any) => { void turn.attach({}); } };
+    onSelfResumedTurn: (turn: any) => { selfResumed = turn.attach({}); },
+    onBackgroundTasksChanged: (tasks: any[]) => { backgroundReports.push(tasks.map((task) => task.label)); } };
   try {
     const started = await runner.run(participant, "Start background.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
     assert.equal(started.ok, true);
+    const live = Array.from(runner.warmAgents.values())[0] as any;
+    assert.equal(live.hasLiveBackgroundWork(), true);
     const compact = await runner.compactSession(participant, fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
     assert.equal(compact.ok, true, JSON.stringify(compact));
+    assert.equal(live.hasLiveBackgroundWork(), true, "the background task is still running after the compaction");
+    assert.deepEqual(backgroundReports, [["fixture background task"]], "its status was never cleared");
+    let entries = await readFixtureLog(log);
+    assert.equal(entries.some((entry) => entry.background === "finished"), false, "compacted while the work ran, without waiting for it");
+
+    await finishBackground();
+    await waitForCondition(() => Boolean(selfResumed));
+    const finished = await selfResumed!;
+    assert.equal(finished.content, "Background done.", "the work finished in the same process and its answer still arrives");
+    assert.deepEqual(backgroundReports, [["fixture background task"], []]);
+    entries = await readFixtureLog(log);
+    assert.ok(entries.findIndex((entry) => entry.message === "/compact") < entries.findIndex((entry) => entry.background === "finished"));
+    assert.equal(new Set(entries.map((entry) => entry.pid)).size, 1, "in the same process, which was not ended");
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude /compact: background work that finishes during the compaction is answered after it, as a reply of its own", { timeout: 15_000 }, async () => {
+  if (process.platform === "win32") return;
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-meanwhile-"));
+  const { claudePath, log, finishBackground } = await writeClaudeCompactionFixture(fixtureDir);
+  const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  runner.providerExecutableForRun = async () => claudePath;
+  const participant = { id: "claude-compact-meanwhile", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
+  const backgroundReports: string[][] = [];
+  let selfResumed: Promise<any> | undefined;
+  const warm = { conversationId: "conversation-compact-meanwhile", participantId: participant.id, contextKey: "context-meanwhile", idleTimeoutMs: 60_000,
+    onSelfResumedTurn: (turn: any) => { selfResumed = turn.attach({}); },
+    onBackgroundTasksChanged: (tasks: any[]) => { backgroundReports.push(tasks.map((task) => task.label)); } };
+  try {
+    await runner.run(participant, "Start background.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    const compacting = runner.compactSession(participant, fixtureDir, undefined, "chat", undefined,
+      { agentMode: "default", warm, sessionId: "fixture-session", compactInstructions: "meanwhile" });
+    await waitForCondition(async () => (await readFixtureLog(log)).some((entry) => entry.compacting));
+    await finishBackground();
+    const compact = await compacting;
+    assert.equal(compact.ok, true, JSON.stringify(compact));
+    assert.equal(compact.content, "", "the compaction's reply is not the task's answer");
+    assert.equal(compact.contextUsage?.usedTokens, 29000, "the compaction's own figure, not the task answer's 100k");
+    await waitForCondition(() => Boolean(selfResumed));
+    assert.equal((await selfResumed!).content, "Background done.", "the task's answer is a reply of its own");
+    assert.deepEqual(backgroundReports, [["fixture background task"], []]);
     const entries = await readFixtureLog(log);
     const finishedAt = entries.findIndex((entry) => entry.background === "finished");
-    const compactedAt = entries.findIndex((entry) => entry.message === "/compact");
-    assert.ok(finishedAt >= 0 && compactedAt > finishedAt, "the compaction was sent only after the background work finished");
-    assert.equal(new Set(entries.map((entry) => entry.pid)).size, 1, "in the same process, which was not ended");
+    assert.ok(finishedAt > entries.findIndex((entry) => entry.message === "/compact meanwhile")
+      && finishedAt < entries.findIndex((entry) => entry.compacted), "the task ended while the compaction ran");
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude /compact: the answer to background work that ends during it gets the task's row and the thread that started the task", { timeout: 15_000 }, async () => {
+  if (process.platform === "win32") return;
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-meanwhile-step-"));
+  const { claudePath, log, finishBackground } = await writeClaudeCompactionFixture(fixtureDir);
+  const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  runner.providerExecutableForRun = async () => claudePath;
+  const participant = { id: "claude-compact-meanwhile-step", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
+  let resumed: { origin: unknown; outputs: string[]; done: Promise<any> } | undefined;
+  const warm = { conversationId: "conversation-compact-meanwhile-step", participantId: participant.id, contextKey: "context-meanwhile-step", idleTimeoutMs: 60_000,
+    onSelfResumedTurn: (turn: any) => {
+      const outputs: string[] = [];
+      resumed = { origin: turn.origin, outputs, done: turn.attach({ onOutput: (event: { text: string }) => outputs.push(event.text) }) };
+    } };
+  try {
+    await runner.run(participant, "Start background.", fixtureDir, undefined, "chat", undefined,
+      { agentMode: "default", sessionId: "fixture-session", warm: { ...warm, origin: { runId: "run-started-task", messageId: "reply-started-task" } } });
+    await runner.run(participant, "Write a lot.", fixtureDir, undefined, "chat", undefined,
+      { agentMode: "default", sessionId: "fixture-session", warm: { ...warm, origin: { runId: "run-later", messageId: "reply-later" } } });
+    const compacting = runner.compactSession(participant, fixtureDir, undefined, "chat", undefined,
+      { agentMode: "default", warm, sessionId: "fixture-session", compactInstructions: "meanwhile-step" });
+    await waitForCondition(async () => (await readFixtureLog(log)).some((entry) => entry.compacting));
+    await finishBackground();
+    assert.equal((await compacting).ok, true);
+    await waitForCondition(() => Boolean(resumed));
+    assert.equal((await resumed!.done).content, "Background done.");
+    assert.deepEqual(resumed!.origin, { runId: "run-started-task", messageId: "reply-started-task" }, "in the thread of the turn that started the task");
+    assert.ok(resumed!.outputs.some((text) => /Background task finished: fixture background task/.test(text)), "with the task's row");
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude /compact runs in a process started with other settings while it carries background work, instead of waiting for that work", { timeout: 15_000 }, async () => {
+  if (process.platform === "win32") return;
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-other-settings-"));
+  const { claudePath, log, finishBackground } = await writeClaudeCompactionFixture(fixtureDir);
+  const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  runner.providerExecutableForRun = async () => claudePath;
+  const participant = { id: "claude-compact-other-settings", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
+  const warm = { conversationId: "conversation-compact-other-settings", participantId: participant.id, contextKey: "context-once", idleTimeoutMs: 60_000,
+    onSelfResumedTurn: (turn: any) => { void turn.attach({}); } };
+  try {
+    // A turn with a one-time approval: its process has other settings.
+    await runner.run(participant, "Start background.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    const compact = await runner.compactSession(participant, fixtureDir, undefined, "chat", undefined,
+      { agentMode: "default", warm: { ...warm, contextKey: "context-usual" }, sessionId: "fixture-session" });
+    assert.equal(compact.ok, true, JSON.stringify(compact));
+    const entries = await readFixtureLog(log);
+    assert.equal(entries.filter((entry) => entry.started).length, 1, "no process was started or replaced");
+    assert.equal(entries.some((entry) => entry.background === "finished"), false, "compacted without waiting for the background work");
+    assert.equal((Array.from(runner.warmAgents.values())[0] as any).hasLiveBackgroundWork(), true, "which keeps running");
+    await finishBackground();
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude /compact waits for a reply in progress before it is sent", { timeout: 15_000 }, async () => {
+  if (process.platform === "win32") return;
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-reply-"));
+  const { claudePath, log } = await writeClaudeCompactionFixture(fixtureDir);
+  const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  runner.providerExecutableForRun = async () => claudePath;
+  const participant = { id: "claude-compact-reply", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
+  const warm = { conversationId: "conversation-compact-reply", participantId: participant.id, contextKey: "context-reply", idleTimeoutMs: 60_000 };
+  try {
+    const replying = runner.run(participant, "Reply slowly.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    await waitForCondition(async () => (await readFixtureLog(log).catch(() => [])).some((entry) => entry.message === "Reply slowly."));
+    const compact = await runner.compactSession(participant, fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    assert.equal((await replying).content, "Slow reply.");
+    assert.equal(compact.ok, true, JSON.stringify(compact));
+    assert.equal(compact.contextUsage?.usedTokens, 29000);
+    const entries = await readFixtureLog(log);
+    const repliedAt = entries.findIndex((entry) => entry.replied === "Reply slowly.");
+    const compactAt = entries.findIndex((entry) => entry.message === "/compact");
+    assert.ok(repliedAt >= 0 && compactAt > repliedAt, "the compaction was sent only once the reply had ended");
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude /compact queued behind a reply is sent when that reply ends, while background work keeps running", { timeout: 15_000 }, async () => {
+  if (process.platform === "win32") return;
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-queued-"));
+  const { claudePath, log, finishBackground } = await writeClaudeCompactionFixture(fixtureDir);
+  const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  runner.providerExecutableForRun = async () => claudePath;
+  const participant = { id: "claude-compact-queued", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
+  const warm = { conversationId: "conversation-compact-queued", participantId: participant.id, contextKey: "context-queued", idleTimeoutMs: 60_000,
+    onSelfResumedTurn: (turn: any) => { void turn.attach({}); } };
+  try {
+    await runner.run(participant, "Start background.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    const live = Array.from(runner.warmAgents.values())[0] as any;
+    const replying = runner.run(participant, "Reply slowly.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    await waitForCondition(async () => (await readFixtureLog(log)).some((entry) => entry.message === "Reply slowly."));
+    const compact = await runner.compactSession(participant, fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    assert.equal((await replying).content, "Slow reply.");
+    assert.equal(compact.ok, true, JSON.stringify(compact));
+    const entries = await readFixtureLog(log);
+    assert.ok(entries.findIndex((entry) => entry.message === "/compact") > entries.findIndex((entry) => entry.replied === "Reply slowly."),
+      "sent once the reply ended");
+    assert.equal(entries.some((entry) => entry.background === "finished"), false, "without waiting for the background work");
+    assert.equal(live.hasLiveBackgroundWork(), true);
+    await finishBackground();
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude /compact: Stop while it waits for a reply in progress cancels it before it is sent, and the process keeps serving", { timeout: 15_000 }, async () => {
+  if (process.platform === "win32") return;
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-stop-waiting-"));
+  const { claudePath, log } = await writeClaudeCompactionFixture(fixtureDir);
+  const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  runner.providerExecutableForRun = async () => claudePath;
+  const participant = { id: "claude-compact-stop-waiting", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
+  const warm = { conversationId: "conversation-compact-stop-waiting", participantId: participant.id, contextKey: "context-stop-waiting", idleTimeoutMs: 60_000 };
+  try {
+    const replying = runner.run(participant, "Reply slowly.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    await waitForCondition(async () => (await readFixtureLog(log).catch(() => [])).some((entry) => entry.message === "Reply slowly."));
+    const stop = new AbortController();
+    const compacting = runner.compactSession(participant, fixtureDir, undefined, "chat", stop.signal, { agentMode: "default", warm, sessionId: "fixture-session" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    stop.abort(new Error("Stopped by user."));
+    const stopped = await compacting;
+    assert.equal(stopped.ok, false);
+    assert.equal(stopped.error, "Compaction was cancelled.");
+    assert.equal((await replying).content, "Slow reply.", "the reply in progress is not touched");
+    const live = Array.from(runner.warmAgents.values())[0] as any;
+    assert.ok(live.idleTimer, "the member's idle timer is re-armed");
+    const next = await runner.run(participant, "Still there?", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    assert.equal(next.ok, true);
+    const entries = await readFixtureLog(log);
+    assert.equal(entries.some((entry) => entry.message?.startsWith("/compact")), false, "never sent");
+    assert.equal(new Set(entries.map((entry) => entry.pid)).size, 1);
   } finally {
     await runner.shutdownWarmAgents();
     await rm(fixtureDir, { recursive: true, force: true });
@@ -3969,31 +4225,40 @@ test("Claude /compact the CLI declines is reported with the CLI's own words, not
   }
 });
 
-test("Claude /compact with no live process runs in one of its own, which is closed so the next reply resumes the compacted session", { timeout: 15_000 }, async () => {
+test("Claude /compact with no live process starts the member's live process as its turn would, and the next turn continues in it", { timeout: 15_000 }, async () => {
   if (process.platform === "win32") return;
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-own-"));
-  const { claudePath, log } = await writeClaudeCompactionFixture(fixtureDir, { contextUsageAnswer: "error" });
+  const { claudePath, log } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
   runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
   runner.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact-own", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
   const warm = { conversationId: "conversation-compact-own", participantId: participant.id, contextKey: "context-a", idleTimeoutMs: 60_000 };
+  const appMcp = { url: "http://127.0.0.1:9/mcp", token: "member-token", toolNames: ["app_chat_send_message"] };
   try {
-    // A live process started with other settings: stale for the next reply.
-    await runner.run(participant, "Write a lot.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
-    const changed = { ...warm, contextKey: "context-b" };
-    const compact = await runner.compactSession(participant, fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm: changed, sessionId: "fixture-session" });
+    // A live process started with other settings: its next turn replaces it.
+    await runner.run(participant, "Write a lot.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, appMcp, sessionId: "fixture-session" });
+    const member = { agentMode: "default", warm: { ...warm, contextKey: "context-b" }, appMcp, sessionId: "fixture-session", persistSession: true };
+    const compact = await runner.compactSession(participant, fixtureDir, undefined, "chat", undefined, member);
     assert.equal(compact.ok, true, JSON.stringify(compact));
-    assert.equal(compact.contextUsage?.usedTokens, 9000, "a CLI that does not answer get_context_usage: its compaction figure");
+    assert.equal(compact.contextUsage?.usedTokens, 29000, "the figure of the process that holds the compacted session");
 
-    const entries = await readFixtureLog(log);
+    let entries = await readFixtureLog(log);
     const starts = entries.filter((entry) => entry.started);
-    assert.equal(starts.length, 2, "the stale process was closed and the compaction ran in a process of its own");
-    assert.ok(starts[1].started!.includes("--resume"), "resumed on the member's session");
+    assert.equal(starts.length, 2, "the stale process was replaced by the member's process");
+    const started = starts[1].started!;
+    assert.ok(started.includes("--resume") && started.includes("fixture-session"), "resumed on the member's session");
+    assert.ok(started.includes("--mcp-config"), "with the member's app tools, as its turns start it");
     assert.equal(entries.find((entry) => entry.message?.startsWith("/compact"))?.pid, starts[1].pid);
-    assert.equal(runner.warmAgents.size, 0, "no process of the member is left holding the old context, and the compaction's own is closed");
+    assert.equal(runner.warmAgents.size, 1, "kept as the member's live process");
     await assertFixtureProcessStops(starts[0].pid);
-    await assertFixtureProcessStops(starts[1].pid);
+
+    const next = await runner.run(participant, "Continue.", fixtureDir, undefined, "chat", undefined, member);
+    assert.equal(next.ok, true);
+    assert.equal(next.contextUsage?.usedTokens, 69000, "the next turn continues from the 29k shown after compacting");
+    entries = await readFixtureLog(log);
+    assert.equal(entries.filter((entry) => entry.started).length, 2, "no further process was started");
+    assert.equal(entries.find((entry) => entry.message === "Continue.")?.pid, starts[1].pid, "the next turn ran in the process the compaction started");
   } finally {
     await runner.shutdownWarmAgents();
     await rm(fixtureDir, { recursive: true, force: true });
@@ -5415,14 +5680,19 @@ test("agentContextUsageFromEvent resolves a window for current model ids", () =>
 /** A stand-in for the process a compaction runs in: records what it was
  *  asked and answers like the CLI. */
 function fakeCompactionProcess(answer: { ok?: boolean; contextUsage?: unknown; postTokens?: number } = {}) {
-  const calls: Array<{ prompt: string; timeoutMs?: number; allowEmptyContent?: boolean }> = [];
+  const calls: Array<{ prompt: string; timeoutMs?: number; allowEmptyContent?: boolean; observers?: string[] }> = [];
   let compactions = 0;
-  const entry = {
+  const entry: any = {
     key: "compact-entry", scopeKey: "compact-scope", providerKind: "claude-code", closed: false, queue: Promise.resolve(),
     process: { exitCode: null },
     isIdle: () => true,
-    run: async (prompt: string, _signal: unknown, _onOutput: unknown, _onSessionId: unknown, timeoutMs?: number, _goal?: unknown, _codex?: unknown, claude?: { allowEmptyContent?: boolean }) => {
-      calls.push({ prompt, timeoutMs, allowEmptyContent: claude?.allowEmptyContent });
+    run: async (prompt: string, _signal: unknown, _onOutput: unknown, _onSessionId: unknown, timeoutMs?: number, _goal?: unknown, _codex?: unknown, claude?: Record<string, unknown>) => {
+      calls.push({
+        prompt,
+        timeoutMs,
+        allowEmptyContent: claude?.allowEmptyContent as boolean | undefined,
+        observers: ["onSelfResumedTurn", "onBackgroundTasksChanged"].filter((name) => typeof claude?.[name] === "function")
+      });
       if (answer.ok === false) return { ok: false, sessionId: "session-1", error: "compaction failed" };
       compactions += 1;
       return { ok: true, sessionId: "session-1", content: "" };
@@ -5433,50 +5703,58 @@ function fakeCompactionProcess(answer: { ok?: boolean; contextUsage?: unknown; p
   return { entry, calls };
 }
 
-test("claude compact with no live process runs in a process of its own: compact timeout, no app tools or role, the CLI's count reported", async () => {
+const COMPACT_WARM = { conversationId: "c1", participantId: "p1", contextKey: "k", idleTimeoutMs: 60_000, onSelfResumedTurn: () => undefined, onBackgroundTasksChanged: () => undefined };
+
+function startsFakeMemberProcess(runner: any, entry: any): { created?: { key: string; scopeKey: string; options: any } } {
+  const record: { created?: { key: string; scopeKey: string; options: any } } = {};
+  runner.providerExecutableForRun = async () => "claude";
+  runner.createClaudeWarmAgent = async (key: string, scopeKey: string, _participant: unknown, _repoPath: unknown, _kind: unknown, options: any) => {
+    record.created = { key, scopeKey, options };
+    entry.key = key;
+    entry.scopeKey = scopeKey;
+    runner.warmAgents.set(key, entry);
+    return entry;
+  };
+  return record;
+}
+
+test("claude compact with no live process starts the member's process as its turn would and keeps it: its key, role and app tools, its turns' timeout, the CLI's count reported", async () => {
   const runner = makeRunner() as any;
   runner.setRunTimeoutMs(2 * 60 * 60_000);
   const usage = { usedTokens: 1995, contextWindowTokens: 1_000_000, percentage: 0, source: "claude-code", updatedAt: "2026-06-17T00:00:00.000Z" };
   const { entry, calls } = fakeCompactionProcess({ contextUsage: usage });
-  let created: { key: string; options: any } | undefined;
-  runner.providerExecutableForRun = async () => "claude";
-  runner.createClaudeWarmAgent = async (key: string, _scopeKey: string, _participant: unknown, _repoPath: unknown, _kind: unknown, options: any) => {
-    created = { key, options };
-    return entry;
+  const record = startsFakeMemberProcess(runner, entry);
+  const closed: string[] = [];
+  runner.closeWarmAgent = async (_entry: unknown, reason: string) => { closed.push(reason); };
+  const participant = { kind: "claude-code", label: "@claude" };
+  const options = {
+    sessionId: "session-1",
+    role: { name: "role", description: "d", instructions: "i", promptFallbackPrompt: "" },
+    appMcp: { url: "http://127.0.0.1:1", token: "t", toolNames: [] },
+    warm: COMPACT_WARM
   };
-  let closedWith: string | undefined;
-  runner.closeWarmAgent = async (_entry: unknown, reason: string) => { closedWith = reason; };
 
-  const result = await runner.compactClaudeSession(
-    { kind: "claude-code", label: "@claude" },
-    "/repo",
-    "chat",
-    undefined,
-    {
-      sessionId: "session-1",
-      role: { name: "role" },
-      appMcp: { url: "http://127.0.0.1:1", token: "t", toolNames: [] },
-      warm: { conversationId: "c1", participantId: "p1", contextKey: "k", idleTimeoutMs: 1000 }
-    }
-  );
+  const result = await runner.compactClaudeSession(participant, "/repo", "chat", undefined, options);
 
   assert.equal(result.ok, true);
-  assert.deepEqual(calls, [{ prompt: "/compact", timeoutMs: 5 * 60_000, allowEmptyContent: true }]);
-  assert.match(created!.key, /^compact:session-1:/);
-  assert.equal(created!.options.sessionId, "session-1", "resumed on the member's session");
-  assert.equal(created!.options.warm, undefined);
-  assert.equal(created!.options.role, undefined);
-  assert.equal(created!.options.appMcp, undefined);
-  assert.equal(closedWith, "compact-complete", "closed afterwards, so the next reply resumes the compacted session");
+  assert.deepEqual(calls, [{ prompt: "/compact", timeoutMs: 2 * 60 * 60_000, allowEmptyContent: true, observers: ["onSelfResumedTurn", "onBackgroundTasksChanged"] }]);
+  assert.equal(record.created!.key, runner.warmAgentKey(participant, "/repo", "chat", options), "under the key the member's next turn looks up");
+  assert.equal(record.created!.scopeKey, "c1:p1");
+  assert.equal(record.created!.options.sessionId, "session-1", "resumed on the member's session");
+  assert.equal(record.created!.options.role, options.role);
+  assert.equal(record.created!.options.appMcp, options.appMcp);
+  assert.equal(record.created!.options.warm, options.warm);
+  assert.deepEqual(closed, [], "not closed afterwards");
+  assert.equal(runner.warmAgents.get(record.created!.key), entry, "kept as the member's live process");
+  assert.ok(entry.idleTimer, "with the member's idle timer re-armed");
+  clearTimeout(entry.idleTimer);
   assert.equal(result.contextUsage.usedTokens, 1995);
 });
 
 test("claude compact instructions are sent as part of the native compact command", async () => {
   const runner = makeRunner() as any;
   const { entry, calls } = fakeCompactionProcess({ postTokens: 9000 });
-  runner.providerExecutableForRun = async () => "claude";
-  runner.createClaudeWarmAgent = async () => entry;
-  runner.closeWarmAgent = async () => undefined;
+  startsFakeMemberProcess(runner, entry);
 
   const result = await runner.compactClaudeSession(
     { kind: "claude-code", label: "@claude", model: "claude-opus-5-5[1m]" },
@@ -5485,32 +5763,61 @@ test("claude compact instructions are sent as part of the native compact command
     undefined,
     {
       sessionId: "session-1",
-      compactInstructions: "keep focus on user approval and test output"
+      compactInstructions: "keep focus on user approval and test output",
+      warm: COMPACT_WARM
     }
   );
 
   assert.equal(result.ok, true);
   assert.equal(calls[0].prompt, "/compact keep focus on user approval and test output");
   assert.equal(result.contextUsage?.usedTokens, 9000, "without get_context_usage, the CLI's own compaction figure");
+  clearTimeout(entry.idleTimer);
 });
 
-test("claude compact reports the CLI's failure as the compaction's", async () => {
+test("claude compact reports the CLI's failure as the compaction's and keeps the member's process; one left unusable is closed", async () => {
   const runner = makeRunner() as any;
   const { entry } = fakeCompactionProcess({ ok: false });
-  runner.providerExecutableForRun = async () => "claude";
-  runner.createClaudeWarmAgent = async () => entry;
-  let closedWith: string | undefined;
-  runner.closeWarmAgent = async (_entry: unknown, reason: string) => { closedWith = reason; };
-  const result = await runner.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, { sessionId: "session-1" });
+  startsFakeMemberProcess(runner, entry);
+  const closed: string[] = [];
+  runner.closeWarmAgent = async (_entry: unknown, reason: string) => { closed.push(reason); };
+  const options = { sessionId: "session-1", warm: COMPACT_WARM };
+  const result = await runner.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, options);
   assert.equal(result.ok, false);
   assert.equal(result.error, "compaction failed");
-  assert.equal(closedWith, "compact-complete", "a failed compaction's own process is closed too");
-  entry.run = async () => { throw new Error("claude warm process exited with code 1"); };
-  closedWith = undefined;
-  const crashed = await runner.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, { sessionId: "session-1" });
+  assert.equal(runner.warmAgents.get(entry.key), entry, "still the member's process");
+  assert.ok(entry.idleTimer, "with its idle timer");
+  entry.run = async () => { entry.unusable = true; throw new Error("claude warm process exited with code 1"); };
+  const crashed = await runner.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, options);
   assert.equal(crashed.ok, false);
   assert.match(crashed.error, /exited with code 1/);
-  assert.equal(closedWith, "compact-complete");
+  assert.deepEqual(closed, ["unusable"]);
+  assert.equal(runner.warmAgents.has(entry.key), false);
+  clearTimeout(entry.idleTimer);
+});
+
+test("claude compact that waited for a process with other settings does not start one once native sessions shut down", async () => {
+  const runner = makeRunner() as any;
+  let created = false;
+  runner.createClaudeWarmAgent = async () => { created = true; throw new Error("must not start"); };
+  const busy: any = {
+    key: "other-settings", scopeKey: "c1:p1", providerKind: "claude-code", closed: false, queue: Promise.resolve(), process: { exitCode: null },
+    isIdle: () => false,
+    whenIdle: async () => { runner.warmShutdown = true; }
+  };
+  runner.warmAgents.set(busy.key, busy);
+  const result = await runner.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, { sessionId: "session-1", warm: COMPACT_WARM });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /shutting down/);
+  assert.equal(created, false);
+  runner.warmShutdown = false;
+});
+
+test("claude compact without a member session has nothing to compact", async () => {
+  const runner = makeRunner() as any;
+  runner.createClaudeWarmAgent = async () => assert.fail("no process is started without a member session");
+  const result = await runner.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, { sessionId: "session-1" });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "@claude has no chat session to compact.");
 });
 
 test("codexPrompt chat envelope passes the inner prompt through and does not duplicate permission text", () => {

@@ -6,6 +6,7 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ChatParticipant, ChatParticipantSession, ChatRoleConfig, Conversation, ParticipantConfig } from "../../shared/types";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { readParticipantCompactions } from "../../shared/chatRunState";
 import { ChatService } from "./chat";
 
@@ -896,7 +897,7 @@ test("a machine compaction that could not start ends as a local one that could n
   stop.abort();
   await service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "machine-stopped" }, stop.signal);
   assert.deepEqual(calls, ["machine-offline"], "a stopped compaction is never sent");
-  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: Compaction was cancelled before native execution started..");
+  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: Compaction was cancelled before native execution started.");
   assert.equal(storage.current.metadata.activeRunIds, undefined);
 
   // A member whose cloud machine was never prepared has never run.
@@ -1102,7 +1103,7 @@ test("a compaction result that arrives after a desktop restart lands its line an
   // A compaction stopped on the machine before it ran, learned after a restart, still says so.
   await service.applyMachineLateTerminal({ conversationId: conversation.id, runId: "late-stopped", status: "interrupted", messages: [], warnings: [],
     machineName: "Box", machineId: "box", participantId: participant.id, compaction: { triggeredBy: "user" } });
-  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: Compaction was cancelled before native execution started..");
+  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: Compaction was cancelled before native execution started.");
   assert.equal(storage.current.messages.at(-1)?.metadata?.runId, "late-stopped");
   await service.applyMachineLateTerminal({ conversationId: conversation.id, runId: "late-failed", status: "failed", messages: [], warnings: [],
     machineName: "Box", machineId: "box", participantId: participant.id, compaction: { triggeredBy: "agent" },
@@ -1162,10 +1163,177 @@ test("Stop by run id reaches a compaction the machine runs for the desktop", asy
   }
 });
 
+test("a compaction that finds no live process starts the member's process exactly as its next turn would, and that turn continues in it", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-member-process-"));
+  try {
+    const participant = chatParticipant({ id: "claude-admin", kind: "claude-code", model: "claude-opus-5-5[1m]" });
+    const session = { ...chatSession(participant, "session-1"), roleRuntime: "claude-agent" as const };
+    const conversation = chatConversation([participant], [session]);
+    const issued: Array<Record<string, unknown>> = [];
+    const updated: Array<Record<string, unknown>> = [];
+    const appMcp = {
+      issueToken: (grant: Record<string, unknown>) => {
+        issued.push(grant);
+        return { url: "http://127.0.0.1:1/mcp", token: `token-${issued.length}` };
+      },
+      updateToken: (token: string, grant: Record<string, unknown>) => {
+        updated.push(grant);
+        return { url: "http://127.0.0.1:1/mcp", token };
+      },
+      clientStatus: () => undefined
+    };
+    const calls: Array<{ what: "compact" | "turn"; participant: ParticipantConfig; repoPath: string | undefined; options: any }> = [];
+    const { service } = testService({
+      conversation,
+      appMcp,
+      compactSession: async (runParticipant, repoPath, _diffMode, _kind, _signal, options) => {
+        calls.push({ what: "compact", participant: runParticipant, repoPath, options });
+        return { participant: runParticipant, ok: true, sessionId: "session-1" };
+      },
+      run: async (runParticipant, _prompt, repoPath, _diffMode, _kind, _signal, options: any) => {
+        calls.push({ what: "turn", participant: runParticipant, repoPath, options });
+        // The CLI hands the message to a step of the live process.
+        options.warm.onReplyStarted?.();
+        return { participant: runParticipant, ok: true, content: "Done.", durationMs: 1, sessionId: "session-1" };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+
+    // After a restart: no live process, no app tool connection yet.
+    await service.sendMessage({ conversationId: conversation.id, runId: "compact-run", content: "@admin /compact" });
+    await service.sendMessage({ conversationId: conversation.id, runId: "turn-run", content: "@admin continue" });
+    await waitFor(() => calls.some((call) => call.what === "turn"));
+
+    const compaction = calls.find((call) => call.what === "compact")!;
+    const turn = calls.find((call) => call.what === "turn")!;
+    assert.ok(compaction && turn);
+    // What decides which live process a turn uses, and how it is started.
+    assert.equal(compaction.repoPath, turn.repoPath);
+    assert.equal(compaction.participant.model, turn.participant.model);
+    assert.equal(compaction.participant.reasoningEffort, turn.participant.reasoningEffort);
+    assert.equal(compaction.options.warm.contextKey, turn.options.warm.contextKey, "the turn finds the process the compaction started");
+    assert.equal(compaction.options.warm.conversationId, turn.options.warm.conversationId);
+    assert.equal(compaction.options.warm.participantId, turn.options.warm.participantId);
+    assert.equal(compaction.options.warm.idleTimeoutMs, turn.options.warm.idleTimeoutMs);
+    for (const field of ["sessionId", "persistSession", "agentMode", "agentEnvKey"]) {
+      assert.deepEqual(compaction.options[field], turn.options[field], field);
+    }
+    assert.deepEqual(compaction.options.extraReadableDirs, turn.options.extraReadableDirs);
+    assert.deepEqual(compaction.options.permissions, turn.options.permissions);
+    assert.ok(compaction.options.role, "started with the member's role");
+    assert.equal(compaction.options.role.name, turn.options.role.name);
+    assert.equal(compaction.options.role.instructions, turn.options.role.instructions);
+    assert.ok(compaction.options.appMcp, "started with the member's app tools");
+    assert.equal(compaction.options.appMcp.url, turn.options.appMcp.url);
+    assert.equal(compaction.options.appMcp.token, turn.options.appMcp.token, "the turn's app tools act through the connection the process was started with");
+    assert.deepEqual(compaction.options.appMcp.toolNames, turn.options.appMcp.toolNames);
+    assert.deepEqual(compaction.options.appMcp.autoPreauthorizedToolNames, turn.options.appMcp.autoPreauthorizedToolNames);
+    assert.equal(compaction.options.appMcp.clientGenerationId, turn.options.appMcp.clientGenerationId);
+    for (const observer of ["onSelfResumedTurn", "onBackgroundTasksChanged", "onPromptSuggestion"]) {
+      assert.equal(typeof compaction.options.warm[observer], "function", observer);
+      assert.equal(typeof turn.options.warm[observer], "function", observer);
+    }
+    assert.equal(issued.length, 1, "one app tool connection, issued for the compaction's process");
+    assert.equal(issued[0].runId, "compact-run");
+    assert.deepEqual(issued[0].expectedToolNames, turn.options.appMcp.toolNames);
+    assert.equal(compaction.options.warm.onReplyStarted, undefined, "the grant was issued before the process was started");
+    assert.equal(updated.at(-1)?.runId, turn.options.warm.origin.runId, "the next turn's reply moved the grant to itself when it started");
+
+    // With a connection already live, a compaction leaves its grant alone,
+    // unless it has to start the process: then the member's current grant
+    // applies before the process connects, as for a turn.
+    const grantsBefore = updated.length;
+    await service.sendMessage({ conversationId: conversation.id, runId: "compact-run-2", content: "@admin /compact" });
+    await waitFor(() => calls.filter((call) => call.what === "compact").length === 2);
+    const second = calls.filter((call) => call.what === "compact")[1];
+    assert.equal(second.options.appMcp.token, turn.options.appMcp.token);
+    assert.equal(issued.length, 1);
+    assert.equal(updated.length, grantsBefore, "the compaction did not move the member's app tool grant");
+    second.options.warm.onReplyStarted();
+    assert.equal(updated.at(-1)?.runId, "compact-run-2");
+    assert.equal(updated.at(-1)?.clientGenerationId, turn.options.appMcp.clientGenerationId);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("a compaction gives Codex its app tools as a Codex turn does, gives Gemini none, and a prompt-fallback member no native role", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-providers-"));
+  try {
+    const codex = chatParticipant({ id: "codex-member", handle: "cx", kind: "codex-cli" });
+    const gemini = chatParticipant({ id: "gemini-member", handle: "gm", kind: "gemini-cli" });
+    const fallback = chatParticipant({ id: "claude-fallback", handle: "cf", kind: "claude-code" });
+    const conversation = chatConversation([codex, gemini, fallback], [
+      chatSession(codex, "codex-session"),
+      chatSession(gemini, "gemini-session"),
+      { ...chatSession(fallback, "fallback-session"), roleRuntime: "prompt-fallback" as const }
+    ]);
+    const issued: Array<Record<string, unknown>> = [];
+    const appMcp = {
+      issueToken: (grant: Record<string, unknown>) => {
+        issued.push(grant);
+        return { url: "http://127.0.0.1:1/mcp", token: `token-${issued.length}` };
+      },
+      updateToken: (token: string) => ({ url: "http://127.0.0.1:1/mcp", token }),
+      clientStatus: () => undefined
+    };
+    const options = new Map<string, any>();
+    const { service } = testService({
+      conversation,
+      appMcp,
+      compactSession: async (runParticipant, _repoPath, _diffMode, _kind, _signal, compactOptions) => {
+        options.set(runParticipant.id, compactOptions);
+        return { participant: runParticipant, ok: true, sessionId: compactOptions.sessionId as string };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    for (const handle of ["cx", "gm", "cf"]) {
+      await service.sendMessage({ conversationId: conversation.id, runId: `compact-${handle}`, content: `@${handle} /compact` });
+    }
+    assert.equal(options.get("codex-member").appMcp?.token, "token-1", "Codex: granted before it runs, as its turns are");
+    assert.equal(issued[0].participantId, "codex-member");
+    assert.ok(options.get("codex-member").role, "Codex: its role, as a turn starts it");
+    assert.equal(options.get("gemini-member").appMcp, undefined, "Gemini's compaction runs no app tools");
+    assert.equal(issued.some((grant) => grant.participantId === "gemini-member"), false);
+    assert.equal(options.get("claude-fallback").role, undefined, "a prompt-fallback session has no native role");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("a compaction failure line ends with one period whatever the reason ends with", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-line-"));
+  try {
+    const participant = chatParticipant();
+    const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    const errors: Array<string | undefined> = ["Compaction was cancelled.", undefined, "No messages to compact", " . "];
+    const { service, storage } = testService({
+      conversation,
+      compactSession: async (runParticipant) => ({ participant: runParticipant, ok: false, error: errors.shift() })
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    const lines: string[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      await service.sendMessage({ conversationId: conversation.id, runId: `compact-${index}`, content: "@admin /compact" });
+      lines.push(storage.current.messages.at(-1)?.content);
+    }
+    assert.deepEqual(lines, [
+      "Could not compact @admin context: Compaction was cancelled.",
+      "Could not compact @admin context: unknown error.",
+      "Could not compact @admin context: No messages to compact.",
+      "Could not compact @admin context: unknown error."
+    ]);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 function testService(options: {
   conversation: Conversation;
   compactSession: (participant: ParticipantConfig, repoPath: string | undefined, diffMode: undefined, kind: "chat", signal: AbortSignal | undefined, options: Record<string, unknown>) => Promise<Record<string, unknown>>;
   contextUsageForSession?: (participant: ParticipantConfig, sessionId: string | undefined) => Promise<Record<string, unknown> | undefined>;
+  run?: (participant: ParticipantConfig, prompt: string, repoPath: string | undefined, diffMode: undefined, kind: "chat", signal: AbortSignal | undefined, options: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  appMcp?: Record<string, unknown>;
   debugEvents?: Array<{ event: string; payload: Record<string, unknown> }>;
 }): { service: ChatService; storage: any } {
   const storage = {
@@ -1178,8 +1346,8 @@ function testService(options: {
     }
   };
   const settings = {
-    async getPublicSettings(): Promise<{ chatRoleConfigs: ChatRoleConfig[] }> {
-      return { chatRoleConfigs: [ROLE] };
+    async getPublicSettings(): Promise<{ chatRoleConfigs: ChatRoleConfig[]; chatPromptContext: typeof DEFAULT_CHAT_PROMPT_CONTEXT }> {
+      return { chatRoleConfigs: [ROLE], chatPromptContext: DEFAULT_CHAT_PROMPT_CONTEXT };
     }
   };
   const cliRunner = {
@@ -1188,6 +1356,13 @@ function testService(options: {
     },
     async contextUsageForSession(participant: ParticipantConfig, sessionId: string | undefined): Promise<Record<string, unknown> | undefined> {
       return options.contextUsageForSession?.(participant, sessionId);
+    },
+    async detectAgents(): Promise<[]> {
+      return [];
+    },
+    async run(...args: Parameters<NonNullable<typeof options.run>>): Promise<Record<string, unknown>> {
+      if (!options.run) throw new Error("No turn expected in this test.");
+      return options.run(...args);
     }
   };
   const debugLogs = {
@@ -1196,7 +1371,7 @@ function testService(options: {
     }
   };
   return {
-    service: new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never),
+    service: new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never, options.appMcp as never),
     storage
   };
 }
