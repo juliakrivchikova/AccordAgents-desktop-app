@@ -1,10 +1,12 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/react-virtual";
 
 import type { ChatMessage, Conversation, ReviewProgress } from "../../../shared/types";
 import { focusRenderedMessage } from "../content/markdown-text";
 import type { ChatTimelineRow } from "./chat-conversation-data";
 import type { ChatMessageFocusRequest } from "./chat-conversation-types";
+import { measureRowAndRemember } from "./chat-timeline-row-clip";
+import { useAnchoredVirtualItems, useOlderMessagesTopUp } from "./chat-timeline-scroll";
 import { useChatFocusNavigation } from "./use-chat-focus-navigation";
 
 type ThreadSummaryMap = Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>;
@@ -58,6 +60,10 @@ export function useChatConversationViewport(props: {
   const handledFocusNonceRef = useRef(0);
   const userScrollIntentUntilRef = useRef(0);
   const focusAttemptGenerationRef = useRef(0);
+  const rows = props.chatTimelineRows;
+  // New only when the rows change: a new key function makes the virtualizer lay out
+  // every row again, which it did on every scroll step.
+  const getItemKey = useCallback((index: number) => rows[index]?.id ?? index, [rows]);
   const chatVirtualizer = useVirtualizer({
     count: props.chatTimelineRows.length,
     getScrollElement: () => timelineRef.current,
@@ -71,11 +77,25 @@ export function useChatConversationViewport(props: {
       }
       return 56;
     },
-    getItemKey: (index) => props.chatTimelineRows[index]?.id ?? index,
+    getItemKey,
+    measureElement: measureRowAndRemember,
+    // A chat opens at its newest message: lay the first frame out at the end rather
+    // than at the top and then jump, which painted blank frames while opening. Not
+    // when it opens to jump to a message: that would scroll to the bottom first.
+    initialOffset: () => (stickToBottomRef.current && !hasUnconsumedFocusIntent() ? Number.MAX_SAFE_INTEGER : 0),
     overscan: 8,
-    useFlushSync: false
+    useFlushSync: false,
+    // The end of a scroll is read from the browser's scrollend event, which reports the
+    // position at that moment. The default timer instead re-applied the position of the
+    // last scroll event, undoing a position the anchoring had just set.
+    useScrollendEvent: true
   });
-  const chatVirtualItems = chatVirtualizer.getVirtualItems();
+  const rowsRef = useRef(props.chatTimelineRows);
+  rowsRef.current = props.chatTimelineRows;
+  // While the User is turning the wheel the view does not snap back to the bottom.
+  const chatVirtualItems = useAnchoredVirtualItems(chatVirtualizer, timelineRef, () => stickToBottomRef.current && !hasRecentUserScrollIntent());
+  // A jump to a message is not interrupted by older pages arriving under it.
+  const requestOlderMessages = useOlderMessagesTopUp(timelineRef, { ...props, loadedMessageCount: props.messages.length }, () => !viewRef.current?.hasAttribute("data-focus-navigating"));
   const focusNavigation = useChatFocusNavigation({
     viewRef,
     renderedMessageElement,
@@ -121,9 +141,7 @@ export function useChatConversationViewport(props: {
     } else if (hasRecentUserScrollIntent() || !stickToBottomRef.current) {
       detachFromBottom();
     }
-    if (timeline.scrollTop < 96 && props.hasOlderMessages && !props.olderMessagesLoading) {
-      props.onLoadOlderMessages();
-    }
+    requestOlderMessages();
   }
 
   function scrollToChatBottom(): void {
@@ -287,7 +305,7 @@ export function useChatConversationViewport(props: {
     return timelineRef.current ?? undefined;
   }
 
-  function scheduleScrollToRowAndFocus(messageId: string, rowIndex: number): void {
+  function scheduleScrollToRowAndFocus(messageId: string): void {
     const generation = focusAttemptGenerationRef.current;
     let focused = false;
     const attempt = (): boolean => {
@@ -295,7 +313,11 @@ export function useChatConversationViewport(props: {
         return true;
       }
       detachFromBottom();
-      chatVirtualizer.scrollToIndex(rowIndex, { align: "start" });
+      // Looked up on every attempt: rows added above in between move the message to another index.
+      const rowIndex = rowsRef.current.findIndex((row) => row.type === "message" && row.message.id === messageId);
+      if (rowIndex >= 0) {
+        chatVirtualizer.scrollToIndex(rowIndex, { align: "start" });
+      }
       focused = alignRenderedMessageToTimelineStart(messageId);
       return focused;
     };
@@ -315,9 +337,8 @@ export function useChatConversationViewport(props: {
   }
 
   function focusLoadedChatMessage(messageId: string, threadRootId?: string): boolean {
-    const rowIndex = props.chatTimelineRows.findIndex((row) => row.type === "message" && row.message.id === messageId);
-    if (rowIndex >= 0) {
-      scheduleScrollToRowAndFocus(messageId, rowIndex);
+    if (props.chatTimelineRows.some((row) => row.type === "message" && row.message.id === messageId)) {
+      scheduleScrollToRowAndFocus(messageId);
       return true;
     }
 

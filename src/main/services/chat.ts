@@ -1258,9 +1258,12 @@ export class ChatService {
       }
       let usage: AgentContextUsage | undefined;
       try {
+        // Read once: this runs on every chat open, and waiting for logs that
+        // no longer exist made opening a chat take a second.
         usage = await this.cliRunner.contextUsageForSession(
           this.cliParticipantForSession(participant, session),
-          session.sessionId
+          session.sessionId,
+          { waitForLog: false }
         );
       } catch (error) {
         await this.debugLogs.write("chat.context-usage-refresh.error", {

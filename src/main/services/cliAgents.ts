@@ -6,6 +6,7 @@ import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { readCliHelpText } from "./cliHelpText";
+import { visitLinesFromEnd } from "./linesFromEnd";
 import type {
   AgentContextUsage,
   AgentContextUsageSource,
@@ -1491,18 +1492,29 @@ export class CliAgentRunner {
     }
   }
 
+  /**
+   * Reads the latest context usage from the CLI's own session log.
+   *
+   * By default a missing log is retried for a moment, because right after a turn
+   * or a compaction the CLI may not have written it yet. `waitForLog: false`
+   * reads once: opening a chat refreshes usage for every session it holds, and
+   * the logs of old sessions are gone for good (Claude Code deletes them after
+   * its cleanup period), so waiting there only delayed every open.
+   */
   async contextUsageForSession(
     participant: ParticipantConfig,
-    sessionId: string | undefined
+    sessionId: string | undefined,
+    options: { waitForLog?: boolean } = {}
   ): Promise<AgentContextUsage | undefined> {
     if (!sessionId) {
       return undefined;
     }
+    const attempts = options.waitForLog === false ? 1 : SESSION_LOG_RETRIES;
     if (participant.kind === "codex-cli") {
-      return this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant);
+      return this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant, attempts);
     }
     if (participant.kind === "claude-code") {
-      return this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant);
+      return this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant, attempts);
     }
     if (participant.kind === "gemini-cli") {
       return this.geminiSessionUsage.get(sessionId);
@@ -8094,14 +8106,15 @@ export class CliAgentRunner {
 
   private async extractCodexSessionLogContextUsageWithRetry(
     sessionId: string | undefined,
-    participant: ParticipantConfig
+    participant: ParticipantConfig,
+    attempts = SESSION_LOG_RETRIES
   ): Promise<AgentContextUsage | undefined> {
     if (!sessionId) {
       return undefined;
     }
-    for (let attempt = 0; attempt < SESSION_LOG_RETRIES; attempt += 1) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       const usage = await this.extractCodexSessionLogContextUsage(sessionId, participant);
-      if (usage || attempt === SESSION_LOG_RETRIES - 1) {
+      if (usage || attempt === attempts - 1) {
         return usage;
       }
       await this.delay(SESSION_LOG_RETRY_MS);
@@ -8122,14 +8135,15 @@ export class CliAgentRunner {
 
   private async extractClaudeSessionLogContextUsageWithRetry(
     sessionId: string | undefined,
-    participant: ParticipantConfig
+    participant: ParticipantConfig,
+    attempts = SESSION_LOG_RETRIES
   ): Promise<AgentContextUsage | undefined> {
     if (!sessionId) {
       return undefined;
     }
-    for (let attempt = 0; attempt < SESSION_LOG_RETRIES; attempt += 1) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       const usage = await this.extractClaudeSessionLogContextUsage(sessionId, participant);
-      if (usage || attempt === SESSION_LOG_RETRIES - 1) {
+      if (usage || attempt === attempts - 1) {
         return usage;
       }
       await this.delay(SESSION_LOG_RETRY_MS);
@@ -8145,29 +8159,29 @@ export class CliAgentRunner {
     if (!filePath) {
       return undefined;
     }
-    const content = await this.readOptionalFile(filePath);
+    // The newest usage wins, so the log is read from its end: opening a chat used to
+    // read and parse every line of logs that reach 120 MB, blocking the app for half a
+    // second per open.
     let latest: AgentContextUsage | undefined;
-    for (const line of content.split(/\r?\n/)) {
+    await visitLinesFromEnd(filePath, (line) => {
       if (!line.trim()) {
-        continue;
+        return false;
       }
       try {
         const event = JSON.parse(line) as unknown;
         // A compaction boundary resets the conversation: usage recorded before it
-        // is stale (pre-compact). Discard anything seen so far so we never report
-        // the old, larger context after a /compact.
+        // is stale (pre-compact), so meeting one first means there is no usage
+        // yet and we never report the old, larger context after a /compact.
         if (this.isClaudeCompactBoundary(event)) {
-          latest = undefined;
-          continue;
+          return true;
         }
-        const usage = this.agentContextUsageFromEvent(event, participant, "claude-code");
-        if (usage) {
-          latest = usage;
-        }
+        latest = this.agentContextUsageFromEvent(event, participant, "claude-code");
+        return latest !== undefined;
       } catch {
         // Ignore partial or diagnostic lines in Claude's local session log.
+        return false;
       }
-    }
+    });
     return latest;
   }
 
