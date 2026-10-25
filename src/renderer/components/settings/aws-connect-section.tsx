@@ -27,7 +27,11 @@ export function AwsConnectSection(props: { control: AwsWorkerControl; hasCredent
             <div className="gen-row-title">AWS instance</div>
             <div className="gen-row-desc">Run cloud members on your own AWS instance. AWS bills it while it runs.</div>
             {deleted ? <div className="gen-row-desc" role="status" data-testid="aws-delete-message">{deleted}</div> : null}
-            {c.status?.notice ? <div className="gen-row-desc" role="status" data-testid="aws-instance-gone-notice">{c.status.notice}</div> : null}
+            {c.status?.notices?.length ? (
+              <div role="status" data-testid="aws-instance-gone-notice">
+                {c.status.notices.map((line) => <div className="gen-row-desc" key={line}>{line}</div>)}
+              </div>
+            ) : null}
             {failed && !open ? <div className="gen-row-error" role="alert">Connecting failed: {failed}</div> : null}
           </div>
           <label className="toggle">

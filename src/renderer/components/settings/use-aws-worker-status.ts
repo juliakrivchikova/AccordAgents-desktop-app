@@ -71,7 +71,7 @@ export function useAwsWorkerStatus() {
           next.handle.instanceId === previousInstance.instanceId && next.handle.region === previousInstance.region;
         const merged = previous && sameInstance
           ? { ...previous, ...next, state: previous.state, actualSpec: previous.actualSpec,
-              publicIp: previous.publicIp, operation: next.operation ?? previous.operation, notice: next.notice }
+              publicIp: previous.publicIp, operation: next.operation ?? previous.operation, notices: next.notices }
           : next;
         current.current = merged;
         setStatus(merged);

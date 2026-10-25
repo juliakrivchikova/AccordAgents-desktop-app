@@ -161,6 +161,11 @@ export interface LeavingMachine {
    *  made with or this computer can no longer read them: never removed by
    *  the app, only shown. */
   unverified?: "refused" | "unreadable";
+  /** Where to look at its instance again, and the AWS account it belongs to
+   *  when known: only that account's keys prove by "no such instance" that
+   *  it is gone. */
+  region?: string;
+  accountId?: string;
 }
 
 /** How many leaving machines are kept; one desktop has a handful. */
@@ -172,7 +177,9 @@ function normalizeLeavingMachines(value: unknown, limit = LEAVING_MACHINES_LIMIT
   const entries = value.filter((item): item is LeavingMachine => Boolean(item) && typeof item === "object"
     && text((item as LeavingMachine).machineId) && text((item as LeavingMachine).instanceId) && text((item as LeavingMachine).at))
     .map((item) => ({ machineId: item.machineId, instanceId: item.instanceId, at: item.at,
-      ...(item.unverified === "refused" || item.unverified === "unreadable" ? { unverified: item.unverified } : {}) }));
+      ...(item.unverified === "refused" || item.unverified === "unreadable" ? { unverified: item.unverified } : {}),
+      ...(text(item.region) ? { region: item.region } : {}),
+      ...(typeof item.accountId === "string" && /^\d{12}$/.test(item.accountId) ? { accountId: item.accountId } : {}) }));
   return entries.length ? entries.slice(-limit) : undefined;
 }
 

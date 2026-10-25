@@ -252,7 +252,7 @@ test("a status read that loses contact with AWS does not keep an old-machine lin
   const line = "Your old cloud machine could not be removed from this computer yet: disk full. The app tries again by itself.";
   // The access check the page then starts by itself stays pending, so what
   // is shown is the merged status of the failed read.
-  const ui = await mount({ status: { ...RUNNING, notice: line } as AwsWorkerStatus, start: () => new Promise(() => undefined) });
+  const ui = await mount({ status: { ...RUNNING, notices: [line] } as AwsWorkerStatus, start: () => new Promise(() => undefined) });
   assert.equal(ui.find("aws-instance-notice")?.textContent, line);
   ui.setStatus({ configured: true, handle: RUNNING.handle, message: "connect ETIMEDOUT" } as AwsWorkerStatus);
   await ui.tick(t, 30_000);

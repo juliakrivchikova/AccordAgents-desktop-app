@@ -569,3 +569,18 @@ test("a machine already waiting for removal is never turned into one the app may
       "one the app could not check becomes removable once its instance is seen gone");
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });
+
+test("an unconfirmed leaving machine keeps where to look again and a well-formed account only", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-recheck-"));
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  try {
+    const at = "2026-10-22T10:00:00.000Z";
+    await make().addLeavingMachines([
+      { machineId: "m1", instanceId: "i-0943b28f7231ab93c", at, unverified: "refused", region: "us-east-1", accountId: "018089055817" },
+      { machineId: "m2", instanceId: "i-0943b28f7231ab93c", at, unverified: "unreadable", region: "us-east-1", accountId: "not-an-account" }
+    ]);
+    assert.deepEqual((await make().listLeavingMachines()).map((entry) => [entry.machineId, entry.region, entry.accountId]),
+      [["m1", "us-east-1", "018089055817"], ["m2", "us-east-1", undefined]]);
+  } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
+});

@@ -214,10 +214,11 @@ export interface AwsWorkerStatus {
   message?: string;
   /** Failure of the requested mutation, independent of the observed EC2 state. */
   actionError?: string;
-  /** One line the AWS page tells the User about what the app did by itself:
-   *  the instance AWS no longer has was removed with its machine, or an old
-   *  cloud machine could not be removed from this computer yet, and why. */
-  notice?: string;
+  /** Lines the AWS page tells the User about what the app did by itself,
+   *  each only while it holds: the instance AWS no longer has was removed
+   *  with its machine; an old cloud machine could not be removed from this
+   *  computer yet; or the app could not confirm an old one is gone. */
+  notices?: string[];
   persistentStorage?: {
     rootVolumeBackedByEbs: boolean;
     rootDeviceName?: string;
