@@ -44,7 +44,8 @@ export const HUB_SCHEMA_SQL = `
   );
   -- On a device: places in the order it read but could not take yet (an
   -- author it does not know yet, a channel not set up yet, a chat it does
-  -- not hold yet). Read again from the hub until taken.
+  -- not hold yet). Read again from the hub until taken, or given up after
+  -- two weeks (one held for its author: until the roster drops it).
   create table if not exists hub_client_held_events (
     hub_seq integer primary key,
     event_id text not null,
@@ -67,7 +68,10 @@ export const HUB_SCHEMA_SQL = `
     held_count integer not null default 0,
     -- 1 once the device said what it holds on a read: an older one does not,
     -- and while it reads nothing it reads is forgotten.
-    reports integer not null default 0
+    reports integer not null default 0,
+    -- Changes the device gave up on after holding them two weeks.
+    gave_up_count integer not null default 0,
+    gave_up_at text
   );
   -- On the hub: which roster machines read the order, and the channel they
   -- share with the desktop (replaced with the roster).
@@ -123,6 +127,9 @@ export interface HubReaderFloor {
   heldCount: number;
   /** The device says what it holds on its reads (an older one does not). */
   reports: boolean;
+  /** Changes it gave up on after holding them two weeks, and when last. */
+  gaveUpCount?: number;
+  gaveUpAt?: string;
 }
 
 /** A roster machine's reading: whether it reads the order, and its channel. */
@@ -146,6 +153,8 @@ const CHAT_ACTIONS_SCOPE = "chat:actions";
 export const HUB_CLIENT_PUSHED_KEY = "pushed-rowid";
 export const HUB_CLIENT_PULLED_KEY = "pulled-hub-seq";
 export const HUB_CLIENT_HUB_ID_KEY = "hub-id";
+/** What this device gave up on: `{ [originId]: { count, at } }`. */
+export const HUB_CLIENT_GIVEN_UP_KEY = "given-up";
 
 /** A held place in the order, as the device keeps it. */
 export interface HubHeldEvent {
@@ -177,6 +186,10 @@ export class HubStorage {
     this.ready ??= (async () => {
       await this.database.init();
       await this.database.execute(HUB_SCHEMA_SQL);
+      // A table made by an earlier build of this program has no give-up columns yet.
+      const columns = new Set((await this.database.query<{ name: string }>(`select name from pragma_table_info('hub_reader_floors');`)).map((row) => row.name));
+      if (!columns.has("gave_up_count")) await this.database.execute(`alter table hub_reader_floors add column gave_up_count integer not null default 0;`);
+      if (!columns.has("gave_up_at")) await this.database.execute(`alter table hub_reader_floors add column gave_up_at text;`);
       // A hub updated to floors: every device that read before stands where
       // it last read, not where the owner stands now (one stopped during the
       // update has not read what came since). Not marked as reporting.
@@ -375,13 +388,15 @@ export class HubStorage {
 
   async readerFloors(deviceId?: string): Promise<HubReaderFloor[]> {
     await this.init();
-    const rows = await this.database.query<{ deviceId: string; floor: number; readAt: string; firstReadAt: string | null; heldSince: string | null; heldCount: number; reports: number }>(`
-      select device_id as deviceId, floor, read_at as readAt, first_read_at as firstReadAt, held_since as heldSince, held_count as heldCount, reports
+    const rows = await this.database.query<{ deviceId: string; floor: number; readAt: string; firstReadAt: string | null; heldSince: string | null; heldCount: number; reports: number; gaveUpCount: number; gaveUpAt: string | null }>(`
+      select device_id as deviceId, floor, read_at as readAt, first_read_at as firstReadAt, held_since as heldSince, held_count as heldCount, reports,
+        gave_up_count as gaveUpCount, gave_up_at as gaveUpAt
       from hub_reader_floors ${deviceId ? `where device_id = ${quote(deviceId)}` : ""};
     `);
     return rows.map((row) => ({
       deviceId: row.deviceId, floor: Number(row.floor) || 0, readAt: row.readAt, heldCount: Number(row.heldCount) || 0, reports: Number(row.reports) === 1,
-      ...(row.firstReadAt ? { firstReadAt: row.firstReadAt } : {}), ...(row.heldSince ? { heldSince: row.heldSince } : {})
+      ...(row.firstReadAt ? { firstReadAt: row.firstReadAt } : {}), ...(row.heldSince ? { heldSince: row.heldSince } : {}),
+      ...(row.gaveUpAt ? { gaveUpAt: row.gaveUpAt, gaveUpCount: Number(row.gaveUpCount) || 0 } : {})
     }));
   }
 
@@ -395,7 +410,7 @@ export class HubStorage {
    * it holds; without it the device does not report, and its floor is where
    * it reads from.
    */
-  async recordRead(deviceId: string, cursor: number, floor: number, held: { from: number; since?: string; count: number } | undefined, now: string): Promise<void> {
+  async recordRead(deviceId: string, cursor: number, floor: number, held: { from: number; since?: string; count: number; gaveUp?: { count: number; at: string } } | undefined, now: string): Promise<void> {
     await this.init();
     await this.database.execute(`
       begin immediate;
@@ -407,6 +422,8 @@ export class HubStorage {
       on conflict(device_id) do update set floor = excluded.floor, read_at = excluded.read_at,
         first_read_at = coalesce(hub_reader_floors.first_read_at, excluded.first_read_at),
         held_from = excluded.held_from, held_since = excluded.held_since, held_count = excluded.held_count, reports = excluded.reports;
+      ${held?.gaveUp ? `update hub_reader_floors set gave_up_count = ${Math.max(0, Math.floor(held.gaveUp.count))}, gave_up_at = ${quote(held.gaveUp.at)}
+        where device_id = ${quote(deviceId)};` : ""}
       commit;
     `);
   }
@@ -834,6 +851,21 @@ export class HubStorage {
     `);
     const row = rows[0];
     return { lowest: Number(row?.lowest ?? 0) || 0, count: Number(row?.count ?? 0) || 0, ...(row?.oldestAt ? { oldestAt: row.oldestAt } : {}) };
+  }
+
+  /**
+   * Lets go of places held since before `beforeIso` for any reason but who
+   * wrote them (`keepReasons`: those wait for the roster): changes this device
+   * could not apply for two weeks. Returns what was given up.
+   */
+  async giveUpHeldBefore(beforeIso: string, keepReasons: readonly string[]): Promise<HubHeldEvent[]> {
+    await this.init();
+    const rows = await this.database.query<HubHeldEvent>(`
+      delete from hub_client_held_events
+      where held_at < ${quote(beforeIso)} ${keepReasons.length ? `and reason not in (${keepReasons.map(quote).join(", ")})` : ""}
+      returning hub_seq as hubSeq, event_id as eventId, origin_id as originId, conversation_id as conversationId, reason, held_at as heldAt;
+    `);
+    return rows.map((row) => ({ ...row, hubSeq: Number(row.hubSeq) }));
   }
 
   /** Authors whose places are held because of who they are (not known yet,

@@ -194,6 +194,10 @@ export interface HubReadReport {
   /** When the oldest held position was first held (ms), 0 when none. */
   heldSince: number;
   heldCount: number;
+  /** Changes it gave up on after holding them two weeks (`gaveUp`,
+   *  `gaveUpAt` ms): the desktop says so in Settings. */
+  gaveUp?: number;
+  gaveUpAt?: number;
 }
 
 /** GET /v1/events answers 410 with this when the hub no longer holds every
@@ -276,6 +280,9 @@ export interface HubReaderStatus {
   /** Its oldest held position's age, when it holds any. */
   heldSince?: string;
   heldCount?: number;
+  /** Changes it gave up on after holding them two weeks, and when last. */
+  givenUpCount?: number;
+  givenUpAt?: string;
 }
 
 export interface HubReadersResponse {

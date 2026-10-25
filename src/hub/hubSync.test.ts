@@ -800,3 +800,43 @@ test("a device whose chain start is gone sends it to a hub set up again from whe
   assert.deepEqual(pulled.events.map((item) => item.event.originSeq), [2, 3]);
   assert.equal((await s.hubStore.storage.hub().chainMark(s.desktop.identity.originId, scope))?.originSeq, 1);
 });
+
+test("a change held two weeks for anything but its author is given up, said in the log and to the server; one held for its author stays", async (t) => {
+  const s = await setup(t);
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine);
+  await s.desktop.log.appendLocalEvent(change("chat-gu", 1));
+  await s.phone.log.appendLocalEvent(change("chat-gu2", 1));
+  await pushAll(s.link(s.desktop, []), s, 1);
+  await pushAll(s.link(s.phone, []), s, 2);
+  let clock = Date.now();
+  const logs: Array<[string, Record<string, unknown>]> = [];
+  const machineSync = s.link(machine, [], {
+    now: () => clock,
+    // The phone is on the roster but this machine does not know it yet.
+    trustedKey: async (originId) => originId === s.desktop.identity.originId ? s.desktop.identity.publicKeyDerBase64 : undefined,
+    // The desktop's change is known, but cannot be applied here.
+    applyChatChange: async () => { throw new Error("cannot be applied"); },
+    log: (event, payload) => logs.push([event, payload])
+  });
+  machineSync.start();
+  await until(async () => (await machine.storage.hub().heldEvents(0, 10)).length === 2);
+  await machineSync.idle();
+  clock += 13 * 24 * 60 * 60_000;
+  machineSync.nudgeHeld();
+  await machineSync.idle();
+  assert.equal((await machine.storage.hub().heldEvents(0, 10)).length, 2, "not yet two weeks");
+  clock += 2 * 24 * 60 * 60_000;
+  machineSync.nudgeHeld();
+  await until(() => logs.some(([event]) => event === "hub.sync.held-given-up"));
+  await machineSync.idle();
+  const line = logs.find(([event]) => event === "hub.sync.held-given-up")![1];
+  assert.equal(line.originId, s.desktop.identity.originId);
+  assert.equal(line.count, 1);
+  assert.deepEqual((await machine.storage.hub().heldEvents(0, 10)).map((held) => held.reason), ["unknown-origin"]);
+  // The next read says so to the server, which the owner reads.
+  machineSync.nudgePull();
+  await until(async () => Boolean((await s.hubStore.storage.hub().readerFloor(machine.identity.originId))?.gaveUpAt));
+  assert.equal((await s.hubStore.storage.hub().readerFloor(machine.identity.originId))?.gaveUpCount, 1);
+  assert.equal((await s.hubLog.readers()).readers.find((reader) => reader.deviceId === machine.identity.originId)?.givenUpCount, 1);
+});

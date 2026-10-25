@@ -107,7 +107,7 @@ import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolH
 import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
-import { HUB_ID_KEY, HUB_SHARED_SCOPE_PREFIXES, HubSync, PULLED_KEY, PUSHED_KEY, hubChatChangeApplier, hubPushedThrough } from "./services/hubSync";
+import { HUB_ID_KEY, HUB_SHARED_SCOPE_PREFIXES, HubSync, PULLED_KEY, PUSHED_KEY, hubChatChangeApplier, hubPushedThrough, readGivenUp } from "./services/hubSync";
 import { deviceIdForPublicKey, signHubRequest } from "./services/hubAuth";
 import { machineSigningKey } from "../shared/machineLink";
 import { HubTunnelClient } from "./services/hubTunnelClient";
@@ -578,6 +578,48 @@ async function hubReaderNotices(): Promise<string[]> {
   return lines;
 }
 
+/** Notices the User dismissed (kept on this desktop, the last hundred). */
+const DISMISSED_HUB_NOTICES_KEY = "dismissed-notices";
+
+async function dismissedHubNotices(): Promise<string[]> {
+  try {
+    const parsed = JSON.parse(await storageService.hub().clientState(DISMISSED_HUB_NOTICES_KEY) ?? "[]") as unknown;
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+async function dismissHubNotice(id: string): Promise<void> {
+  if (typeof id !== "string" || !id || id.length > 512) throw new Error("Invalid notice.");
+  const dismissed = (await dismissedHubNotices()).filter((item) => item !== id);
+  await storageService.hub().setClientState(DISMISSED_HUB_NOTICES_KEY, JSON.stringify([...dismissed, id].slice(-100)));
+}
+
+/**
+ * Lines the User can dismiss: changes a device could not apply for two
+ * weeks and gave up on. This desktop's own (by who wrote them), and each
+ * machine's as it reports them to the server. One line per device and date.
+ */
+async function hubGivenUpNotices(): Promise<Array<{ id: string; text: string }>> {
+  if (!hubClient) return [];
+  const dismissed = new Set(await dismissedHubNotices());
+  const machines = await settingsService.listMachines().catch(() => []);
+  const trusted = await settingsService.listTrustedDevices().catch(() => []);
+  const nameOf = (deviceId: string): string => machines.find((item) => item.deviceId === deviceId)?.name
+    ?? trusted.find((item) => item.deviceId === deviceId)?.name ?? "another of your devices";
+  const notices: Array<{ id: string; text: string }> = [];
+  for (const [originId, entry] of Object.entries(await readGivenUp(storageService))) {
+    notices.push({ id: `given-up:${originId}:${entry.at}`, text: `Some changes from ${nameOf(originId)} could not be applied and were given up on ${noticeDate(entry.at)}.` });
+  }
+  const own = (await chatEventLogService.getOrCreateDeviceIdentity()).originId;
+  for (const reader of hubReadersCache.value?.readers ?? []) {
+    if (reader.deviceId === own || !reader.givenUpAt) continue;
+    notices.push({ id: `given-up-on:${reader.deviceId}:${reader.givenUpAt}`, text: `Some changes could not be applied on ${reader.name} and were given up on ${noticeDate(reader.givenUpAt)}.` });
+  }
+  return notices.filter((notice) => !dismissed.has(notice.id));
+}
+
 /** Where this desktop stands in its hub's order: everything at or before it
  *  that concerns it was taken (or is held, and the lowest held place comes
  *  before it). A machine's first copy of the chats starts there. */
@@ -808,6 +850,7 @@ const hubInstaller = new HubInstaller({
   currentLink: () => settingsService.getHubConfig().catch(() => undefined),
   reachable: () => hubSync ? hubSync.isReachable() : undefined,
   notices: () => hubReaderNotices(),
+  dismissableNotices: () => hubGivenUpNotices(),
   defaultRegion: async () => (await settingsService.getPublicSettings()).cloudRuns.awsRegion,
   log: (event, payload) => { void debugLogService.write(event, payload); }
 });
@@ -3876,6 +3919,10 @@ function registerIpc(): void {
     return { machine, enrollmentJson: JSON.stringify(pairing, null, 2) };
   });
   ipcMain.handle("hub:setup-state", () => hubInstaller.state());
+  ipcMain.handle("hub:dismiss-notice", async (_event, id: string) => {
+    await dismissHubNotice(id);
+    return hubInstaller.state();
+  });
   ipcMain.handle("hub:setup-command", async (_event, request: import("../shared/hubSetup").HubSetupCommandRequest) => {
     const region = typeof request?.region === "string" ? request.region.trim() : "";
     return { command: await hubInstaller.command(region), region };

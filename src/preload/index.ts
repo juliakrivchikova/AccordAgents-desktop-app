@@ -227,6 +227,7 @@ const bridge: AppBridge = {
   getHubSetupState: () => ipcRenderer.invoke("hub:setup-state"),
   getHubSetupCommand: (request: HubSetupCommandRequest) => ipcRenderer.invoke("hub:setup-command", request),
   installHub: (request: HubInstallRequest) => ipcRenderer.invoke("hub:install", request),
+  dismissHubNotice: (id: string) => ipcRenderer.invoke("hub:dismiss-notice", id),
   onHubSetupProgress: (callback: (state: HubSetupState) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, state: HubSetupState) => callback(state);
     ipcRenderer.on("hub:setup-progress", listener);

@@ -659,7 +659,12 @@ function readReport(params: URLSearchParams): (HubReadReport & { peek?: boolean 
   const heldCount = Number(params.get("heldCount") ?? "0");
   // heldSince is a time: no later than any date can be.
   if (![held, heldSince, heldCount].every((value) => Number.isSafeInteger(value) && value >= 0) || heldSince > MAX_DATE_MS) throw new HubRequestError(400, "Invalid read report.");
-  return { held, heldSince, heldCount, ...(params.get("peek") === "1" ? { peek: true } : {}) };
+  const gaveUp = params.has("gaveUp") ? Number(params.get("gaveUp")) : undefined;
+  const gaveUpAt = params.has("gaveUpAt") ? Number(params.get("gaveUpAt")) : undefined;
+  if (gaveUp !== undefined && (!Number.isSafeInteger(gaveUp) || gaveUp < 1 || !Number.isSafeInteger(gaveUpAt) || (gaveUpAt as number) < 1 || (gaveUpAt as number) > MAX_DATE_MS)) {
+    throw new HubRequestError(400, "Invalid read report.");
+  }
+  return { held, heldSince, heldCount, ...(gaveUp !== undefined ? { gaveUp, gaveUpAt } : {}), ...(params.get("peek") === "1" ? { peek: true } : {}) };
 }
 
 const RENDEZVOUS_ID = /^[A-Za-z0-9._-]{1,128}$/;

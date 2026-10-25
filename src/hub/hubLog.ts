@@ -240,7 +240,8 @@ export class HubLog {
         const floor = report.held > 0 ? Math.min(after, report.held - 1) : after;
         await hub.recordRead(device.deviceId, after, floor, {
           from: report.held, count: report.heldCount,
-          ...(report.heldSince > 0 ? { since: new Date(report.heldSince).toISOString() } : {})
+          ...(report.heldSince > 0 ? { since: new Date(report.heldSince).toISOString() } : {}),
+          ...(report.gaveUp && report.gaveUpAt ? { gaveUp: { count: report.gaveUp, at: new Date(report.gaveUpAt).toISOString() } } : {})
         }, now);
       } else if (device.role !== "phone") {
         // An older device does not say what it holds: its place is where it
@@ -420,7 +421,8 @@ export class HubLog {
         floor: standing?.floor ?? 0,
         ...(standing?.readAt ? { readAt: standing.readAt } : device.addedAt ? { readAt: device.addedAt } : {}),
         ...(!standing?.firstReadAt ? { neverRead: true } : {}),
-        ...(standing?.heldSince ? { heldSince: standing.heldSince, heldCount: standing.heldCount } : {})
+        ...(standing?.heldSince ? { heldSince: standing.heldSince, heldCount: standing.heldCount } : {}),
+        ...(standing?.gaveUpAt ? { givenUpAt: standing.gaveUpAt, givenUpCount: standing.gaveUpCount ?? 0 } : {})
       });
     }
     return { head: await hub.head(), readers };

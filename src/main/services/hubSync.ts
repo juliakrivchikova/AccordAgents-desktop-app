@@ -8,7 +8,7 @@ import { verifySignedChatEvent } from "./chatEventLog";
 import type { DeviceEventChannel } from "./deviceEventChannel";
 import { DevicePacketAuthenticationError } from "./devicePacketAuthentication";
 import { HubHttpError, HubTransientError, isHubResyncRequired, type HubClient } from "./hubClient";
-import { HUB_CLIENT_HUB_ID_KEY, HUB_CLIENT_PULLED_KEY, HUB_CLIENT_PUSHED_KEY } from "./hubStorage";
+import { HUB_CLIENT_GIVEN_UP_KEY, HUB_CLIENT_HUB_ID_KEY, HUB_CLIENT_PULLED_KEY, HUB_CLIENT_PUSHED_KEY, type HubHeldEvent } from "./hubStorage";
 import type { StorageService } from "./storage";
 
 /** Where this device keeps its place with the hub (setup moves them). */
@@ -27,8 +27,15 @@ const HELD_RETRY_FETCHES = 100;
 const HELD_PAGE = 500;
 /** Whether the authors of held places are still on the roster is asked at
  *  most this often: one that is not was removed, and only then is what was
- *  held for it let go. Nothing is dropped for its age. */
+ *  held for it let go. Places held for any other reason are given up after
+ *  HELD_GIVE_UP_MS, and said so (giveUpOld). */
 const HELD_AUTHORS_CHECK_MS = 10 * 60_000;
+/** A change held this long for any reason but its author is given up (and
+ *  said so). ACCORDAGENTS_HUB_GIVE_UP_HELD_MS shortens it for QA. */
+const HELD_GIVE_UP_MS = (() => {
+  const value = Number(process.env.ACCORDAGENTS_HUB_GIVE_UP_HELD_MS);
+  return Number.isSafeInteger(value) && value > 0 ? value : 14 * 24 * 60 * 60_000;
+})();
 /** Starting again from the hub's copy happens at most this often; a start
  *  that failed is taken up again after RESYNC_RETRY_MS, doubling per failure. */
 const RESYNC_MIN_INTERVAL_MS = 30 * 60_000;
@@ -531,7 +538,36 @@ export class HubSync {
   private async readReport(): Promise<HubReadReport> {
     const held = await this.options.storage.hub().heldSummary();
     const since = held.oldestAt ? Date.parse(held.oldestAt) : 0;
-    return { held: held.lowest, heldSince: Number.isFinite(since) ? since : 0, heldCount: held.count };
+    const given = summarizeGivenUp(await readGivenUp(this.options.storage));
+    return {
+      held: held.lowest, heldSince: Number.isFinite(since) ? since : 0, heldCount: held.count,
+      ...(given ? { gaveUp: given.count, gaveUpAt: Date.parse(given.at) } : {})
+    };
+  }
+
+  /**
+   * A change held for two weeks for any reason but who wrote it (it failed
+   * to apply, its body is gone, its chat never arrived) is given up: never
+   * in silence. A line goes to the debug log, and the desktop says in
+   * Settings which device's changes were given up and when. Places held for
+   * their author wait for the roster instead (releaseRemovedAuthors).
+   */
+  private async giveUpOld(): Promise<void> {
+    const at = new Date(this.now()).toISOString();
+    const given = await this.options.storage.hub().giveUpHeldBefore(new Date(this.now() - HELD_GIVE_UP_MS).toISOString(), [...BY_AUTHOR]);
+    if (given.length === 0) return;
+    const byOrigin = new Map<string, HubHeldEvent[]>();
+    for (const held of given) byOrigin.set(held.originId, [...(byOrigin.get(held.originId) ?? []), held]);
+    const record = await readGivenUp(this.options.storage);
+    for (const [originId, places] of byOrigin) {
+      this.options.log?.("hub.sync.held-given-up", {
+        originId, count: places.length, reasons: [...new Set(places.map((held) => held.reason))],
+        conversationIds: [...new Set(places.map((held) => held.conversationId))].slice(0, 20),
+        eventIds: places.map((held) => held.eventId).slice(0, 20), oldestHeldAt: places.map((held) => held.heldAt).sort()[0]
+      });
+      record[originId] = { count: (record[originId]?.count ?? 0) + places.length, at };
+    }
+    await this.options.storage.hub().setClientState(HUB_CLIENT_GIVEN_UP_KEY, JSON.stringify(record));
   }
 
   /**
@@ -847,6 +883,7 @@ export class HubSync {
     this.heldRetryAt = this.now() + HELD_RETRY_MS;
     const hub = this.options.storage.hub();
     await this.releaseRemovedAuthors();
+    await this.giveUpOld();
     // A look moves nothing on the hub: what this device holds is said once.
     const report = { ...await this.readReport(), peek: true };
     const authorsStillMissing = new Set<string>();
@@ -982,6 +1019,26 @@ export class HubSync {
     const outcome = await this.options.applyChatChange(event);
     return outcome === "held" ? "waiting" : "done";
   }
+}
+
+/** What this device gave up on, by author. */
+export async function readGivenUp(storage: Pick<StorageService, "hub">): Promise<Record<string, { count: number; at: string }>> {
+  try {
+    const parsed = JSON.parse(await storage.hub().clientState(HUB_CLIENT_GIVEN_UP_KEY) ?? "{}") as Record<string, { count?: unknown; at?: unknown }>;
+    const record: Record<string, { count: number; at: string }> = {};
+    for (const [originId, entry] of Object.entries(parsed)) {
+      if (Number.isSafeInteger(entry?.count) && typeof entry?.at === "string" && Number.isFinite(Date.parse(entry.at))) record[originId] = { count: entry.count as number, at: entry.at };
+    }
+    return record;
+  } catch {
+    return {};
+  }
+}
+
+function summarizeGivenUp(record: Record<string, { count: number; at: string }>): { count: number; at: string } | undefined {
+  const entries = Object.values(record);
+  if (entries.length === 0) return undefined;
+  return { count: entries.reduce((sum, entry) => sum + entry.count, 0), at: entries.map((entry) => entry.at).sort().pop() as string };
 }
 
 /** Two parts of one chat of the hub's copy (newest messages first), joined:

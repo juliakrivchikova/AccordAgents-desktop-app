@@ -132,8 +132,9 @@ export class HubClient {
    *  hub keeps what it still needs, and answers 410 when it no longer has
    *  it (isHubResyncRequired); `peek` reads without moving this device's place. */
   pull(after: number, limit = HUB_PULL_MAX_EVENTS, report?: HubReadReport & { peek?: boolean }): Promise<HubEventPullResponse> {
+    const gaveUp = report?.gaveUp && report.gaveUpAt ? `&gaveUp=${Math.floor(report.gaveUp)}&gaveUpAt=${Math.floor(report.gaveUpAt)}` : "";
     const reported = report
-      ? `&held=${Math.max(0, Math.floor(report.held))}&heldSince=${Math.max(0, Math.floor(report.heldSince))}&heldCount=${Math.max(0, Math.floor(report.heldCount))}${report.peek ? "&peek=1" : ""}`
+      ? `&held=${Math.max(0, Math.floor(report.held))}&heldSince=${Math.max(0, Math.floor(report.heldSince))}&heldCount=${Math.max(0, Math.floor(report.heldCount))}${gaveUp}${report.peek ? "&peek=1" : ""}`
       : "";
     return this.request<HubEventPullResponse>("GET", `/v1/events?after=${after}&limit=${limit}${reported}`);
   }

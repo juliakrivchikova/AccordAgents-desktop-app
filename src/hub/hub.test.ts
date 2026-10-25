@@ -533,6 +533,8 @@ test("the new routes refuse what they do not take", async (t) => {
     [machine, `/v1/devices/known?ids=${Array.from({ length: 201 }, (_, i) => `d${i}`).join(",")}`, 400],
     [machine, "/v1/events?after=0&held=-1", 400],
     [machine, "/v1/events?after=0&held=0&heldSince=9000000000000000", 400],
+    [machine, "/v1/events?after=0&held=0&gaveUp=2", 400],
+    [machine, "/v1/events?after=0&held=0&gaveUp=0&gaveUpAt=5", 400],
     [machine, "/v1/readers", 403]
   ];
   for (const [identity, route, status] of cases) assert.equal((await h.call(identity, "GET", route)).status, status, route);

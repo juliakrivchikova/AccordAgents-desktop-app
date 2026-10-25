@@ -129,6 +129,20 @@ How far it is built, so the two are not confused:
   start from the server's copy of the chats instead of the whole history.
   Desktop, phone and machine see the same chats either way; nothing here is
   a difference between a local and a cloud member.
+- A change a device holds for two weeks because it cannot apply it (it
+  failed, its body is gone, its chat never arrived) is given up, never in
+  silence: a debug-log line, and a line in Settings → Your server ("Some
+  changes from <device> could not be applied and were given up on <date>")
+  the User can dismiss. A change held only because its author is not known
+  yet waits until the server's roster says that author was removed.
+- The server's copy is trusted as it is. A machine that starts again from
+  it takes the chats' shared content (title, members and their permissions,
+  messages) from that copy, which the desktop does not sign. This is
+  accepted because the server is the User's own, in her own AWS account,
+  and only the desktop that set it up changes who may use it; a server that
+  is not hers is not a case this guards against. The desktop never takes its
+  own chats' title, members or permissions from the copy. Settled on
+  2026-10-25 when phase 2 was built.
 
 ## Exceptions
 

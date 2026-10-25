@@ -67,6 +67,9 @@ export interface HubSetupState {
    *  from it for a long time (the server keeps everything it has not read:
    *  start it or remove it), or changes held for a long time. */
   notices?: string[];
+  /** Lines the User may dismiss: changes a device could not apply for two
+   *  weeks and gave up on. */
+  dismissableNotices?: Array<{ id: string; text: string }>;
   /** The region to offer for a new server: the one AWS is used in already. */
   defaultRegion?: string;
   updatedAt?: string;
