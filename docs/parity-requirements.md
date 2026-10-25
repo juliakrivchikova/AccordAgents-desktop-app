@@ -117,6 +117,18 @@ How far it is built, so the two are not confused:
 - The Stop exception below holds unchanged on this path: when the machine
   cannot be reached through the server (the server down, the machine offline
   or frozen), Stop shows waiting until the machine confirms.
+- Since phase 2 (`taylor/server-retention`) the server's storage stays
+  bounded: it forgets what every device that reads it has read, after a
+  grace period (chat changes a week after they are folded into its copy of
+  the chat; a machine's channel three days, a run's events a day after the
+  run; chat actions thirty days). A device that stops reading keeps
+  everything after its place on the server, is never dropped automatically,
+  and is named in Settings → Your server after a week ("… hasn't read from
+  your server since …: start it or remove it"); removing it lets go. A device
+  that was away while what it needed was forgotten, and a new machine,
+  start from the server's copy of the chats instead of the whole history.
+  Desktop, phone and machine see the same chats either way; nothing here is
+  a difference between a local and a cloud member.
 
 ## Exceptions
 
