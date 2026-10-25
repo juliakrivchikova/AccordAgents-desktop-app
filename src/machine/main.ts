@@ -57,6 +57,8 @@ import { ScriptService, handleScriptsOperation } from "../main/services/scripts"
 import { HubTunnelClient } from "../main/services/hubTunnelClient";
 import { HUB_SCOPE_PREFIXES, HubSync, hubChatChangeApplier, hubPushedThrough } from "../main/services/hubSync";
 import { HubClient } from "../main/services/hubClient";
+import { scheduleHubDeviceRetention } from "../main/services/deviceRetention";
+import type { DeviceEventGap } from "../shared/deviceEventDelivery";
 import { signHubRequest } from "../main/services/hubAuth";
 import { setMailboxRegistrationSigner } from "../main/services/mailboxAccess";
 import { ScriptSecretStore, ScriptStore } from "../main/services/scriptStore";
@@ -473,6 +475,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     .then((name) => typeof name === "string" && name.trim() ? name.trim() : undefined)
     .catch(() => undefined);
   const hubUrl = enrollment.hubUrl;
+  // Set once the hub link exists; a channel's gap is asked of the hub through it.
+  let hubSyncRef: HubSync | undefined;
   const hubRoom = (url: string, rendezvousId: string) => new HubTunnelClient({
     hubUrl: url, rendezvousId, role: "machine",
     identity: () => chatEventLogService.getOrCreateDeviceIdentity()
@@ -501,6 +505,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     // and its events travel in the hub's order (no relay, no mailbox).
     ...(hubUrl ? {
       hubMode: true,
+      hubRepair: (gap: DeviceEventGap) => { void hubSyncRef?.repairGap(gap); },
       createClient: (pairing: MobilePairingPackage) => hubRoom(hubUrl, pairing.rendezvousId),
       createPeerClient: (room: { rendezvousId: string }) => hubRoom(hubUrl, room.rendezvousId)
     } : {}),
@@ -577,6 +582,15 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     storage: storageService,
     originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
     unpushedAfter: async () => enrollment.hubUrl ? hubPushedThrough(storageService) : undefined,
+    log: (event, payload) => { void debugLogService.write(event, payload); }
+  });
+  // Through the hub, this machine's own channel events go once the hub has
+  // them and they are a week old; bodies nothing refers to go too.
+  const stopDeviceRetention = scheduleHubDeviceRetention({
+    storage: storageService,
+    originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+    hubScopes: async () => enrollment.hubUrl ? ["device:"] : undefined,
+    pushedThrough: () => hubPushedThrough(storageService),
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
   // Scheduled scripts that live on this machine: they run here with the lid
@@ -660,12 +674,20 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     storage: storageService,
     localOriginId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
     trustedKey: async (originId) => host.trustedKey(originId),
-    deliver: (event) => host.receiveFromHub(event),
+    deliver: (event, fetchBody) => host.receiveFromHub(event, fetchBody),
     applyChatChange: hubChatChangeApplier(storageService, chatService),
     onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString()),
     scopePrefixes: HUB_SCOPE_PREFIXES,
+    // Where it starts again (a first start, or after being away while the
+    // hub forgot what it needed): before anything of its own channel.
+    ownScopes: async () => [`device:${enrollment.rendezvousId}:`],
+    mergeCopy: async (copied) => chatService.mergeServerCopy(copied, {
+      desktopOriginId: enrollment.issuer.originId,
+      localOriginId: (await chatEventLogService.getOrCreateDeviceIdentity()).originId
+    }),
     log: (event, payload) => { void debugLogService.write(event, payload); }
   }) : undefined;
+  hubSyncRef = hubSync;
   if (hubSync) {
     chatEventLogService.onLocalAppend(() => hubSync.nudgePush());
     hubSync.start();
@@ -706,6 +728,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   const stopOnce = async (): Promise<void> => {
     presenceClosed = true;
     stopChatChangePruning();
+    stopDeviceRetention();
     if (presenceTimer) clearInterval(presenceTimer);
     await presenceRefresh;
     try { presence?.publish(true); } catch (error) {

@@ -1,6 +1,10 @@
 import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import { HUB_PULL_MAX_EVENTS, hubBlobFragmentPath, hubWebSocketUrl, type HubDevice, type HubEventPullResponse, type HubEventPushResponse, type HubHealth, type HubLiveHead } from "../../shared/hubProtocol";
+import {
+  HUB_PULL_MAX_EVENTS, hubBlobFragmentPath, hubWebSocketUrl,
+  type HubChainResponse, type HubDevice, type HubEventPullResponse, type HubEventPushResponse, type HubHealth, type HubKnownDevicesResponse,
+  type HubLiveHead, type HubReadReport, type HubReadersResponse, type HubSnapshotResponse
+} from "../../shared/hubProtocol";
 import { signHubRequest, type HubSigningIdentity } from "./hubAuth";
 import type { StorageService } from "./storage";
 
@@ -25,9 +29,15 @@ const LIVE_PING_MS = 25_000;
 const WebSocketClient = require("ws") as new (url: string) => LiveSocket;
 
 export class HubHttpError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly detail: Record<string, unknown> = {}) {
     super(message);
   }
+}
+
+/** The hub forgot events this device would need after its position: the
+ *  device starts again from the hub's copy (HubSync.resync). */
+export function isHubResyncRequired(error: unknown): error is HubHttpError {
+  return error instanceof HubHttpError && error.status === 410 && error.detail.resync === true;
 }
 
 /** The hub or the network was not there (no answer, a timeout): nothing is
@@ -79,8 +89,8 @@ export class HubClient {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
     });
     if (!response.ok) {
-      const detail = await response.json().catch(() => ({})) as { error?: string };
-      throw new HubHttpError(response.status, detail.error || `The hub answered ${response.status}.`);
+      const detail = await response.json().catch(() => ({})) as { error?: string } & Record<string, unknown>;
+      throw new HubHttpError(response.status, detail.error || `The hub answered ${response.status}.`, detail);
     }
     return await response.json() as T;
   }
@@ -115,8 +125,42 @@ export class HubClient {
     return true;
   }
 
-  pull(after: number, limit = HUB_PULL_MAX_EVENTS): Promise<HubEventPullResponse> {
-    return this.request<HubEventPullResponse>("GET", `/v1/events?after=${after}&limit=${limit}`);
+  /** The order after `after`. With `report` (what this device holds) the
+   *  hub keeps what it still needs, and answers 410 when it no longer has
+   *  it (isHubResyncRequired); `peek` reads without moving this device's place. */
+  pull(after: number, limit = HUB_PULL_MAX_EVENTS, report?: HubReadReport & { peek?: boolean }): Promise<HubEventPullResponse> {
+    const reported = report
+      ? `&held=${Math.max(0, Math.floor(report.held))}&heldSince=${Math.max(0, Math.floor(report.heldSince))}&heldCount=${Math.max(0, Math.floor(report.heldCount))}${report.peek ? "&peek=1" : ""}`
+      : "";
+    return this.request<HubEventPullResponse>("GET", `/v1/events?after=${after}&limit=${limit}${reported}`);
+  }
+
+  /** Where to start reading again (and, with `copy`, the hub's copy of the
+   *  chats), one page per call; see HubSnapshotResponse. */
+  snapshot(request: { page?: string; scopes?: readonly string[]; atMost?: number; copy: boolean; chat?: string }): Promise<HubSnapshotResponse> {
+    const params = new URLSearchParams();
+    params.set("copy", request.copy ? "1" : "0");
+    if (request.chat) params.set("chat", request.chat);
+    if (request.page) params.set("page", request.page);
+    if (request.scopes?.length) params.set("scopes", request.scopes.join(","));
+    if (request.atMost !== undefined) params.set("atMost", String(Math.max(0, Math.floor(request.atMost))));
+    return this.request<HubSnapshotResponse>("GET", `/v1/snapshot?${params.toString()}`);
+  }
+
+  /** One chain's events in a range (a gap this device found). */
+  chain(originId: string, logScopeId: string, fromSeq: number, toSeq: number): Promise<HubChainResponse> {
+    const params = new URLSearchParams({ origin: originId, scope: logScopeId, from: String(fromSeq), to: String(toSeq) });
+    return this.request<HubChainResponse>("GET", `/v1/chain?${params.toString()}`);
+  }
+
+  /** Which of these devices are on the roster now. */
+  known(deviceIds: readonly string[]): Promise<HubKnownDevicesResponse> {
+    return this.request<HubKnownDevicesResponse>("GET", `/v1/devices/known?ids=${deviceIds.map(encodeURIComponent).join(",")}`);
+  }
+
+  /** The owner only: every reader, where it stands and what it holds. */
+  readers(): Promise<HubReadersResponse> {
+    return this.request<HubReadersResponse>("GET", "/v1/readers");
   }
 
   /** Stores a pulled event's large body locally before the event is applied

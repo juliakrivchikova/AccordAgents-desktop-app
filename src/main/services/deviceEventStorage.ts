@@ -472,6 +472,65 @@ export class DeviceEventStorage {
     return { events, blobs };
   }
 
+  /**
+   * Forgets this device's own events of the channels the User's hub carries
+   * once the hub has them (at or before `pushedThroughRowid`) and they are
+   * older than the cutoff. The hub's order is where every reader reads them;
+   * this device keeps the newest event of each chain (the next one continues
+   * it) and anything a relay recipient still waits for. Bodies are left to
+   * the search for unreferenced ones (collectOrphans), which looks at every
+   * event that might still point to them.
+   */
+  async pruneOwnDeviceEvents(localOriginId: string, options: { pushedThroughRowid: number; cutoffIso: string; scopePrefixes: readonly string[]; limit?: number }): Promise<number> {
+    const prefixes = options.scopePrefixes.filter((prefix) => prefix.startsWith("device:") && prefix.length <= 512);
+    if (prefixes.length === 0 || options.pushedThroughRowid <= 0) return 0;
+    await this.database.init();
+    const scopes = prefixes.map((prefix) => `substr(e.log_scope_id, 1, ${prefix.length}) = ${quote(prefix)}`).join(" or ");
+    const rows = await this.database.query<{ events: number }>(durable(`
+      begin immediate;
+      create temp table if not exists device_events_pruned(event_id text primary key);
+      delete from temp.device_events_pruned;
+      insert into temp.device_events_pruned(event_id)
+        select e.event_id from chat_events e
+        where e.origin_id = ${quote(localOriginId)} and e.log_scope_id >= 'device:' and e.log_scope_id < 'device;' and (${scopes})
+          and e.rowid <= ${Math.floor(options.pushedThroughRowid)} and e.received_at < ${quote(options.cutoffIso)}
+          and e.origin_seq < (select max(n.origin_seq) from chat_events n where n.origin_id = e.origin_id and n.log_scope_id = e.log_scope_id)
+          and not exists (select 1 from device_event_outbox o where o.event_id = e.event_id and o.acknowledged_at is null)
+        limit ${Math.max(1, Math.floor(options.limit ?? 2_000))};
+      delete from device_event_outbox where event_id in (select event_id from temp.device_events_pruned);
+      delete from device_event_inbox where event_id in (select event_id from temp.device_events_pruned);
+      delete from chat_events where event_id in (select event_id from temp.device_events_pruned);
+      select count(*) as events from temp.device_events_pruned;
+      delete from temp.device_events_pruned;
+      commit;
+    `));
+    return Number(rows[0]?.events ?? 0) || 0;
+  }
+
+  /**
+   * A stretch of a chain the User's hub forgot by design (both ends had read
+   * it, or it was a run's live progress): this device continues the chain
+   * after it. Events of that stretch received here but not applied are
+   * recorded as superseded. False when this device was already past it.
+   */
+  async skipTo(originId: string, logScopeId: string, originSeq: number, eventHash: string, at: string): Promise<boolean> {
+    requireCursor(originSeq);
+    await this.database.init();
+    const rows = await this.database.query<{ moved: number }>(durable(`
+      begin immediate;
+      insert into device_event_applied_heads(origin_id, log_scope_id, origin_seq, event_hash)
+        values (${quote(originId)}, ${quote(logScopeId)}, ${Math.floor(originSeq)}, ${quote(eventHash)})
+      on conflict(origin_id, log_scope_id) do update set origin_seq = excluded.origin_seq, event_hash = excluded.event_hash
+        where excluded.origin_seq > device_event_applied_heads.origin_seq;
+      select changes() as moved;
+      update device_event_inbox set applied_at = ${quote(at)}, outcome = 'superseded'
+        where applied_at is null and event_id in (select event_id from chat_events
+          where origin_id = ${quote(originId)} and log_scope_id = ${quote(logScopeId)} and origin_seq <= ${Math.floor(originSeq)});
+      commit;
+    `));
+    return Number(rows[0]?.moved ?? 0) > 0;
+  }
+
   async gaps(channelId: string, deviceId?: string): Promise<DeviceEventGap[]> {
     await this.database.init();
     return this.database.query<DeviceEventGap>(`

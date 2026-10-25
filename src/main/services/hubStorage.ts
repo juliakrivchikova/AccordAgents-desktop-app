@@ -54,7 +54,77 @@ export const HUB_SCHEMA_SQL = `
     held_at text not null
   );
   create index if not exists hub_client_held_chat on hub_client_held_events(origin_id, conversation_id);
+  -- On the hub: where each reader stands. The hub forgets nothing a reader
+  -- still needs: everything after its floor (min of its cursor and its
+  -- lowest held place) is kept until it reads it or is taken off the roster.
+  create table if not exists hub_reader_floors (
+    device_id text primary key,
+    floor integer not null,
+    read_at text not null,
+    first_read_at text,
+    held_from integer not null default 0,
+    held_since text,
+    held_count integer not null default 0
+  );
+  -- On the hub: which roster machines read the order, and the channel they
+  -- share with the desktop (replaced with the roster).
+  create table if not exists hub_device_reads (
+    device_id text primary key,
+    reader integer not null,
+    rendezvous_id text
+  );
+  -- On the hub: every machine a channel was ever said to belong to, kept
+  -- when the roster changes, so a removed machine's channel is known as its.
+  create table if not exists hub_pair_machines (
+    rendezvous_id text not null,
+    device_id text not null,
+    primary key(rendezvous_id, device_id)
+  );
+  -- On the hub: how far each chain was forgotten. A chain continues from
+  -- here, an event at or below it is not placed again, and a reader that
+  -- finds a gap is told it is gone by design.
+  create table if not exists hub_chain_marks (
+    origin_id text not null,
+    log_scope_id text not null,
+    origin_seq integer not null,
+    event_hash text not null,
+    primary key(origin_id, log_scope_id)
+  );
+  -- On the hub: the newest position forgotten, per class of readers
+  -- ('chat-changes', 'chat-actions', 'pair:<rendezvousId>').
+  create table if not exists hub_prune_state (
+    class text primary key,
+    hub_seq integer not null
+  );
 `;
+
+/** Where one reader stands on the hub. */
+export interface HubReaderFloor {
+  deviceId: string;
+  floor: number;
+  readAt: string;
+  firstReadAt?: string;
+  heldFrom: number;
+  heldSince?: string;
+  heldCount: number;
+}
+
+/** A roster machine's reading: whether it reads the order, and its channel. */
+export interface HubDeviceRead {
+  deviceId: string;
+  reader: boolean;
+  rendezvousId?: string;
+}
+
+/** One forgotten stretch, as a retention batch reports it. */
+export interface HubPruneResult {
+  events: number;
+  bytes: number;
+}
+
+/** The kind the order's chat changes carry (chatChanges.ts). */
+const CHAT_CHANGES_KIND = "chat.changes";
+const CHAT_ACTIONS_SCOPE = "chat:actions";
 
 /** A held place in the order, as the device keeps it. */
 export interface HubHeldEvent {
@@ -133,9 +203,14 @@ export class HubStorage {
     return row && Number.isSafeInteger(Number(row.originSeq)) ? { originSeq: Number(row.originSeq), eventHash: row.eventHash } : undefined;
   }
 
+  /** The newest position ever given, forgotten or not: a forgotten newest
+   *  event must not make the order look shorter to its readers. */
   async head(): Promise<number> {
     await this.init();
-    const rows = await this.database.query<{ head: number | null }>(`select max(hub_seq) as head from hub_log;`);
+    const rows = await this.database.query<{ head: number | null }>(`
+      select max(coalesce((select max(hub_seq) from hub_log), 0),
+        coalesce((select seq from sqlite_sequence where name = 'hub_log'), 0)) as head;
+    `);
     return Number(rows[0]?.head ?? 0) || 0;
   }
 
@@ -232,13 +307,286 @@ export class HubStorage {
     const owners = new Set((await this.database.query<{ deviceId: string }>(`select device_id as deviceId from hub_devices where role = 'owner';`)).map((row) => row.deviceId));
     const values = devices.filter((device) => device.role !== "owner" && !owners.has(device.deviceId)).map((device) =>
       `(${quote(device.deviceId)}, ${quote(device.publicKeyDerBase64)}, ${quote(device.role)}, ${quote(device.name)}, ${device.machineId ? quote(device.machineId) : "null"}, ${quote(device.addedAt || now)})`);
+    const reads = devices.filter((device) => device.role === "machine" && !owners.has(device.deviceId)).map((device) =>
+      `(${quote(device.deviceId)}, ${device.reader ? 1 : 0}, ${device.rendezvousId ? quote(device.rendezvousId) : "null"})`);
+    // A reader added now is kept for from where the owner stands: the copy of
+    // the chats it starts from is the owner's, made at or after that point.
     await this.database.execute(`
       begin immediate;
       delete from hub_devices where role != 'owner';
       ${values.length ? `insert into hub_devices(device_id, public_key, role, name, machine_id, added_at) values ${values.join(", ")};` : ""}
       delete from hub_push_subscriptions where device_id not in (select device_id from hub_devices);
+      delete from hub_device_reads;
+      ${reads.length ? `insert into hub_device_reads(device_id, reader, rendezvous_id) values ${reads.join(", ")};` : ""}
+      insert or ignore into hub_pair_machines(rendezvous_id, device_id)
+        select rendezvous_id, device_id from hub_device_reads where rendezvous_id is not null;
+      -- Taking a device off the roster lets go of what was kept for it.
+      delete from hub_reader_floors where device_id not in (select device_id from hub_devices);
+      insert or ignore into hub_reader_floors(device_id, floor, read_at)
+        select r.device_id, coalesce((select f.floor from hub_reader_floors f join hub_devices o on o.device_id = f.device_id and o.role = 'owner'), 0), ${quote(now)}
+        from hub_device_reads r where r.reader = 1;
       commit;
     `);
+  }
+
+  /** Which roster machines read the order, and their channels. */
+  async deviceReads(): Promise<HubDeviceRead[]> {
+    await this.init();
+    const rows = await this.database.query<{ deviceId: string; reader: number; rendezvousId: string | null }>(`
+      select device_id as deviceId, reader, rendezvous_id as rendezvousId from hub_device_reads;
+    `);
+    return rows.map((row) => ({ deviceId: row.deviceId, reader: Number(row.reader) === 1, ...(row.rendezvousId ? { rendezvousId: row.rendezvousId } : {}) }));
+  }
+
+  async readerFloors(): Promise<HubReaderFloor[]> {
+    await this.init();
+    const rows = await this.database.query<{ deviceId: string; floor: number; readAt: string; firstReadAt: string | null; heldFrom: number; heldSince: string | null; heldCount: number }>(`
+      select device_id as deviceId, floor, read_at as readAt, first_read_at as firstReadAt, held_from as heldFrom, held_since as heldSince, held_count as heldCount
+      from hub_reader_floors;
+    `);
+    return rows.map((row) => ({
+      deviceId: row.deviceId, floor: Number(row.floor) || 0, readAt: row.readAt, heldFrom: Number(row.heldFrom) || 0, heldCount: Number(row.heldCount) || 0,
+      ...(row.firstReadAt ? { firstReadAt: row.firstReadAt } : {}), ...(row.heldSince ? { heldSince: row.heldSince } : {})
+    }));
+  }
+
+  async readerFloor(deviceId: string): Promise<HubReaderFloor | undefined> {
+    return (await this.readerFloors()).find((row) => row.deviceId === deviceId);
+  }
+
+  /** A reader's own read: its floor is what it says it still needs. */
+  async recordRead(deviceId: string, floor: number, held: { from: number; since?: string; count: number }, now: string): Promise<void> {
+    await this.init();
+    await this.database.execute(`
+      insert into hub_reader_floors(device_id, floor, read_at, first_read_at, held_from, held_since, held_count)
+        values (${quote(deviceId)}, ${Math.max(0, Math.floor(floor))}, ${quote(now)}, ${quote(now)}, ${Math.max(0, Math.floor(held.from))},
+          ${held.since ? quote(held.since) : "null"}, ${Math.max(0, Math.floor(held.count))})
+      on conflict(device_id) do update set floor = excluded.floor, read_at = excluded.read_at,
+        first_read_at = coalesce(hub_reader_floors.first_read_at, excluded.first_read_at),
+        held_from = excluded.held_from, held_since = excluded.held_since, held_count = excluded.held_count;
+    `);
+  }
+
+  /** A device starts reading at `floor` (a snapshot): kept for from there. */
+  async startReader(deviceId: string, floor: number, now: string): Promise<void> {
+    await this.init();
+    await this.database.execute(`
+      insert into hub_reader_floors(device_id, floor, read_at, first_read_at)
+        values (${quote(deviceId)}, ${Math.max(0, Math.floor(floor))}, ${quote(now)}, ${quote(now)})
+      on conflict(device_id) do update set floor = excluded.floor, read_at = excluded.read_at,
+        first_read_at = coalesce(hub_reader_floors.first_read_at, excluded.first_read_at);
+    `);
+  }
+
+  /** The newest position forgotten in any of these classes (0 when none). */
+  async prunedThrough(classes: string[]): Promise<number> {
+    if (classes.length === 0) return 0;
+    await this.init();
+    const rows = await this.database.query<{ hubSeq: number | null }>(`
+      select max(hub_seq) as hubSeq from hub_prune_state where class in (${classes.map(quote).join(", ")});
+    `);
+    return Number(rows[0]?.hubSeq ?? 0) || 0;
+  }
+
+  /** Every pair class forgotten so far (for a desktop, which is in all of them). */
+  async prunedPairClasses(): Promise<string[]> {
+    await this.init();
+    const rows = await this.database.query<{ class: string }>(`select class from hub_prune_state where substr(class, 1, 5) = 'pair:';`);
+    return rows.map((row) => row.class);
+  }
+
+  /** How far a chain was forgotten. */
+  async chainMark(originId: string, logScopeId: string): Promise<{ originSeq: number; eventHash: string } | undefined> {
+    await this.init();
+    const rows = await this.database.query<{ originSeq: number; eventHash: string }>(`
+      select origin_seq as originSeq, event_hash as eventHash from hub_chain_marks
+      where origin_id = ${quote(originId)} and log_scope_id = ${quote(logScopeId)};
+    `);
+    return rows[0] ? { originSeq: Number(rows[0].originSeq), eventHash: rows[0].eventHash } : undefined;
+  }
+
+  /** One chain's retained events in a range, for a reader that found a gap. */
+  async chainEvents(originId: string, logScopeId: string, fromSeq: number, toSeq: number, limit: number): Promise<HubLoggedEvent[]> {
+    await this.init();
+    const rows = await this.database.query<{ hubSeq: number; envelope: string }>(`
+      with page as (
+        select l.hub_seq as hubSeq, e.envelope_json as envelope,
+          sum(length(cast(e.envelope_json as blob))) over (order by e.origin_seq) as bytes,
+          row_number() over (order by e.origin_seq) as ordinal
+        from chat_events e join hub_log l on l.event_id = e.event_id
+        where e.origin_id = ${quote(originId)} and e.log_scope_id = ${quote(logScopeId)}
+          and e.origin_seq between ${Math.max(1, Math.floor(fromSeq))} and ${Math.max(1, Math.floor(toSeq))}
+        order by e.origin_seq limit ${Math.max(1, Math.min(limit, HUB_STORAGE_PAGE_MAX))}
+      ) select hubSeq, envelope from page where bytes <= ${PULL_PAGE_BYTES} or ordinal = 1 order by ordinal;
+    `);
+    return rows.map((row) => ({ hubSeq: Number(row.hubSeq), event: JSON.parse(row.envelope) as ChatEventEnvelope }));
+  }
+
+  /** The lowest position of a chat change the hub's copy does not hold yet
+   *  (0 when every one is folded). */
+  async lowestUnfolded(): Promise<number> {
+    await this.init();
+    const rows = await this.database.query<{ hubSeq: number | null }>(`
+      select min(l.hub_seq) as hubSeq from hub_log l
+      left join hub_fold_state f on f.conversation_id = l.conversation_id
+      where l.kind = ${quote(CHAT_CHANGES_KIND)} and l.hub_seq > coalesce(f.hub_seq, 0);
+    `);
+    return Number(rows[0]?.hubSeq ?? 0) || 0;
+  }
+
+  /** The lowest retained position in these scopes written by someone other
+   *  than `exceptOrigin` (0 when none): a device's own channels start there. */
+  async lowestInScopes(prefixes: string[], exceptOrigin: string): Promise<number> {
+    const usable = prefixes.filter((prefix) => prefix.length > 0 && prefix.length <= 512);
+    if (usable.length === 0) return 0;
+    await this.init();
+    const rows = await this.database.query<{ hubSeq: number | null }>(`
+      select min(l.hub_seq) as hubSeq from hub_log l join chat_events e on e.event_id = l.event_id
+      where l.origin_id != ${quote(exceptOrigin)} and (${usable.map((prefix) => `substr(e.log_scope_id, 1, ${prefix.length}) = ${quote(prefix)}`).join(" or ")});
+    `);
+    return Number(rows[0]?.hubSeq ?? 0) || 0;
+  }
+
+  /** How far the hub's copy covers each chat change chain: folded events,
+   *  forgotten ones, and the first copy's anchors. */
+  async copyMarks(): Promise<Array<{ originId: string; logScopeId: string; originSeq: number; eventHash: string }>> {
+    await this.init();
+    const rows = await this.database.query<{ originId: string; logScopeId: string; originSeq: number; eventHash: string }>(`
+      select originId, logScopeId, originSeq, eventHash from (
+        select e.origin_id as originId, e.log_scope_id as logScopeId, e.origin_seq as originSeq, e.event_hash as eventHash,
+          row_number() over (partition by e.origin_id, e.log_scope_id order by e.origin_seq desc) as rn
+        from hub_log l join chat_events e on e.event_id = l.event_id
+        join hub_fold_state f on f.conversation_id = l.conversation_id
+        where l.kind = ${quote(CHAT_CHANGES_KIND)} and l.hub_seq <= f.hub_seq
+      ) where rn = 1
+      union all
+      select origin_id, log_scope_id, origin_seq, event_hash from hub_chain_marks where substr(log_scope_id, 1, 13) = 'chat-changes:'
+      union all
+      select origin_id, log_scope_id, origin_seq, event_hash from device_event_applied_heads where substr(log_scope_id, 1, 13) = 'chat-changes:';
+    `);
+    const best = new Map<string, { originId: string; logScopeId: string; originSeq: number; eventHash: string }>();
+    for (const row of rows) {
+      const key = `${row.originId}\n${row.logScopeId}`;
+      const seq = Number(row.originSeq);
+      if (!Number.isSafeInteger(seq) || seq < 1) continue;
+      if ((best.get(key)?.originSeq ?? 0) < seq) best.set(key, { originId: row.originId, logScopeId: row.logScopeId, originSeq: seq, eventHash: row.eventHash });
+    }
+    return [...best.values()];
+  }
+
+  /**
+   * Forgets one bounded batch of the order: the events `candidatesSql`
+   * selects (columns hub_seq, event_id, origin_id, log_scope_id, origin_seq,
+   * event_hash, class, bytes), in one transaction. Each chain's mark and each
+   * class's forgotten position move with them, so nothing forgotten is placed
+   * again and a late reader is told rather than left waiting.
+   */
+  private async prune(candidatesSql: string, setupSql = ""): Promise<HubPruneResult> {
+    await this.init();
+    const rows = await this.database.query<{ events: number; bytes: number | null }>(`
+      begin immediate;
+      create temp table if not exists hub_pruned(hub_seq integer primary key, event_id text, origin_id text, log_scope_id text,
+        origin_seq integer, event_hash text, class text, bytes integer);
+      delete from temp.hub_pruned;
+      ${setupSql}
+      insert or ignore into temp.hub_pruned(hub_seq, event_id, origin_id, log_scope_id, origin_seq, event_hash, class, bytes)
+        ${candidatesSql};
+      insert into hub_chain_marks(origin_id, log_scope_id, origin_seq, event_hash)
+        select p.origin_id, p.log_scope_id, p.origin_seq, p.event_hash from temp.hub_pruned p
+        where p.origin_seq = (select max(q.origin_seq) from temp.hub_pruned q where q.origin_id = p.origin_id and q.log_scope_id = p.log_scope_id)
+        on conflict(origin_id, log_scope_id) do update set origin_seq = excluded.origin_seq, event_hash = excluded.event_hash
+          where excluded.origin_seq > hub_chain_marks.origin_seq;
+      insert into hub_prune_state(class, hub_seq) select class, max(hub_seq) from temp.hub_pruned group by class
+        on conflict(class) do update set hub_seq = max(hub_prune_state.hub_seq, excluded.hub_seq);
+      delete from hub_log where hub_seq in (select hub_seq from temp.hub_pruned);
+      delete from chat_events where event_id in (select event_id from temp.hub_pruned);
+      select count(*) as events, sum(bytes) as bytes from temp.hub_pruned;
+      delete from temp.hub_pruned;
+      commit;
+    `);
+    return { events: Number(rows[0]?.events ?? 0) || 0, bytes: Number(rows[0]?.bytes ?? 0) || 0 };
+  }
+
+  /** Folded chat changes every reader has read, older than the cutoff. */
+  pruneChatChanges(floor: number, cutoffIso: string, limit: number): Promise<HubPruneResult> {
+    return this.prune(`
+      select l.hub_seq, l.event_id, e.origin_id, e.log_scope_id, e.origin_seq, e.event_hash, 'chat-changes', length(cast(e.envelope_json as blob))
+      from hub_log l join chat_events e on e.event_id = l.event_id
+      join hub_fold_state f on f.conversation_id = l.conversation_id
+      where l.hub_seq <= ${Math.floor(floor)} and l.kind = ${quote(CHAT_CHANGES_KIND)} and l.hub_seq <= f.hub_seq and l.accepted_at < ${quote(cutoffIso)}
+      order by l.hub_seq limit ${Math.max(1, Math.floor(limit))}`);
+  }
+
+  /** Chat actions every reader has read, older than the cutoff. */
+  pruneChatActions(floor: number, cutoffIso: string, limit: number): Promise<HubPruneResult> {
+    return this.prune(`
+      select l.hub_seq, l.event_id, e.origin_id, e.log_scope_id, e.origin_seq, e.event_hash, 'chat-actions', length(cast(e.envelope_json as blob))
+      from hub_log l join chat_events e on e.event_id = l.event_id
+      where l.hub_seq <= ${Math.floor(floor)} and e.log_scope_id = ${quote(CHAT_ACTIONS_SCOPE)} and l.accepted_at < ${quote(cutoffIso)}
+      order by l.hub_seq limit ${Math.max(1, Math.floor(limit))}`);
+  }
+
+  /** The channels between two devices (`device:<rid>:...`) and who is at
+   *  their ends: the machines the roster ever named for each, and whoever
+   *  wrote there (the hub learns an older desktop's machine from what it
+   *  writes). */
+  async pairAuthors(): Promise<Array<{ rendezvousId: string; originId: string }>> {
+    await this.init();
+    const rows = await this.database.query<{ rendezvousId: string; originId: string }>(`
+      select distinct substr(e.log_scope_id, 8, instr(substr(e.log_scope_id, 8), ':') - 1) as rendezvousId, l.origin_id as originId
+      from hub_log l join chat_events e on e.event_id = l.event_id
+      where e.log_scope_id >= 'device:' and e.log_scope_id < 'device;'
+      union
+      select rendezvous_id as rendezvousId, device_id as originId from hub_pair_machines;
+    `);
+    return rows.filter((row) => row.rendezvousId);
+  }
+
+  /**
+   * Events of the channels between two devices both of them have read: a
+   * run's (`terminal:`, `cancel:`, `terminal-ack:` scopes) once its last event
+   * is older than `runCutoffIso`, anything else once older than
+   * `pairCutoffIso`. `floors` is the lower of the two devices' floors, per
+   * channel; a channel not named is kept whole.
+   */
+  prunePairEvents(floors: Map<string, number>, pairCutoffIso: string, runCutoffIso: string, limit: number): Promise<HubPruneResult> {
+    if (floors.size === 0) return Promise.resolve({ events: 0, bytes: 0 });
+    const values = [...floors].map(([rid, floor]) => `(${quote(rid)}, ${Math.max(0, Math.floor(floor))})`).join(", ");
+    return this.prune(`
+      with pair as (
+        select l.hub_seq, l.event_id, l.accepted_at, e.origin_id, e.log_scope_id, e.origin_seq, e.event_hash, length(cast(e.envelope_json as blob)) as bytes,
+          substr(e.log_scope_id, 8, instr(substr(e.log_scope_id, 8), ':') - 1) as rid
+        from hub_log l join chat_events e on e.event_id = l.event_id
+        where e.log_scope_id >= 'device:' and e.log_scope_id < 'device;'
+      ), scoped as (
+        select *, case when json_valid(substr(log_scope_id, 9 + length(rid)))
+          then json_extract(substr(log_scope_id, 9 + length(rid)), '$[1]') end as inner from pair
+      ), keyed as (
+        select *, case
+          when inner like 'terminal:%' then substr(inner, 10)
+          when inner like 'terminal-ack:%' then substr(inner, 14)
+          when inner like 'cancel:%' then substr(inner, 8) end as run_id
+        from scoped
+      ), runs as (
+        select run_id, max(accepted_at) as final_at from keyed where run_id is not null group by run_id
+      )
+      select k.hub_seq, k.event_id, k.origin_id, k.log_scope_id, k.origin_seq, k.event_hash, 'pair:' || k.rid, k.bytes
+      from keyed k join temp.hub_pair_floors f on f.rid = k.rid
+      left join runs r on r.run_id = k.run_id
+      where k.hub_seq <= f.floor and (case when k.run_id is null then k.accepted_at < ${quote(pairCutoffIso)} else r.final_at < ${quote(runCutoffIso)} end)
+      order by k.hub_seq limit ${Math.max(1, Math.floor(limit))}`, `
+      create temp table if not exists hub_pair_floors(rid text primary key, floor integer);
+      delete from temp.hub_pair_floors;
+      insert into temp.hub_pair_floors(rid, floor) values ${values};`);
+  }
+
+  /** Rows and bytes the order holds now. */
+  async logSize(): Promise<{ events: number; bytes: number }> {
+    await this.init();
+    const rows = await this.database.query<{ events: number; bytes: number | null }>(`
+      select count(*) as events, sum(length(cast(e.envelope_json as blob))) as bytes from hub_log l join chat_events e on e.event_id = l.event_id;
+    `);
+    return { events: Number(rows[0]?.events ?? 0) || 0, bytes: Number(rows[0]?.bytes ?? 0) || 0 };
   }
 
   /** Setup only: the desktop that set the hub up. Never replaced afterwards. */
@@ -352,14 +700,38 @@ export class HubStorage {
     await this.database.execute(`delete from hub_client_held_events;`);
   }
 
-  /** Forgets places held since before `beforeIso` (their author is gone). */
-  async dropHeldBefore(beforeIso: string): Promise<number> {
+  /** What this device holds: its lowest place, since when it holds its
+   *  oldest, and how many (the hub keeps everything from the lowest). */
+  async heldSummary(): Promise<{ lowest: number; oldestAt?: string; count: number }> {
     await this.init();
-    const rows = await this.database.query<{ dropped: number }>(`
-      delete from hub_client_held_events where held_at < ${quote(beforeIso)};
-      select changes() as dropped;
+    const rows = await this.database.query<{ lowest: number | null; oldestAt: string | null; count: number }>(`
+      select min(hub_seq) as lowest, min(held_at) as oldestAt, count(*) as count from hub_client_held_events;
     `);
-    return Number(rows[0]?.dropped ?? 0) || 0;
+    const row = rows[0];
+    return { lowest: Number(row?.lowest ?? 0) || 0, count: Number(row?.count ?? 0) || 0, ...(row?.oldestAt ? { oldestAt: row.oldestAt } : {}) };
+  }
+
+  /** Authors whose places are held because of who they are (not known yet,
+   *  or their channel not set up yet). */
+  async heldAuthors(reasons: readonly string[]): Promise<string[]> {
+    if (reasons.length === 0) return [];
+    await this.init();
+    const rows = await this.database.query<{ originId: string }>(`
+      select distinct origin_id as originId from hub_client_held_events where reason in (${reasons.map(quote).join(", ")}) limit 200;
+    `);
+    return rows.map((row) => row.originId);
+  }
+
+  /** Lets go of every place held for these authors (the roster says they
+   *  were removed: nothing of theirs can be taken any more). */
+  async releaseHeldOf(originIds: string[]): Promise<number> {
+    if (originIds.length === 0) return 0;
+    await this.init();
+    const rows = await this.database.query<{ released: number }>(`
+      delete from hub_client_held_events where origin_id in (${originIds.map(quote).join(", ")});
+      select changes() as released;
+    `);
+    return Number(rows[0]?.released ?? 0) || 0;
   }
 
   /** On the hub: a body still being uploaded gets this fragment, replacing

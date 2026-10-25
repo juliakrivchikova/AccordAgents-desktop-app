@@ -118,6 +118,9 @@ export interface HubInstallerOptions {
   currentLink: () => Promise<HubLinkConfig | undefined>;
   /** Whether the desktop reaches the hub now (undefined: not linked). */
   reachable?: () => boolean | undefined;
+  /** Plain lines about the server's readers for Settings (a device that has
+   *  not read for long, changes held for long). */
+  notices?: () => Promise<string[]>;
   defaultRegion?: () => Promise<string | undefined>;
   run?: Run;
   fetchImpl?: typeof fetch;
@@ -155,7 +158,11 @@ export class HubInstaller {
     if (this.current) return this.withVersion({ ...this.snapshot, ...extra });
     const linked = await this.options.currentLink();
     const reachable = this.options.reachable?.();
-    const link = linked?.url ? { url: linked.url, ...(linked.server ? { server: linked.server } : {}), ...(reachable !== undefined ? { reachable } : {}) } : {};
+    const notices = linked?.url ? await this.options.notices?.().catch(() => []) ?? [] : [];
+    const link = linked?.url ? {
+      url: linked.url, ...(linked.server ? { server: linked.server } : {}), ...(reachable !== undefined ? { reachable } : {}),
+      ...(notices.length ? { notices } : {})
+    } : {};
     if (this.snapshot.status === "failed") return this.withVersion({ ...this.snapshot, ...link, ...extra });
     return this.withVersion(linked?.url ? { status: "ready", ...link, ...extra } : { status: "none", ...extra });
   }

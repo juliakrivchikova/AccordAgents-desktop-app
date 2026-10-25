@@ -26,6 +26,7 @@ const { HubServer } = await import("../dist/main/hub/hubServer.js");
 const { HubLog } = await import("../dist/main/hub/hubLog.js");
 const { HubFolder } = await import("../dist/main/hub/hubFolder.js");
 const { hubApplyPolicy } = await import("../dist/main/hub/hubPolicy.js");
+const { HubRetention, HUB_RETENTION_DEFAULTS } = await import("../dist/main/hub/hubRetention.js");
 
 async function device(directory, name) {
   const dbPath = path.join(directory, `${name}.sqlite3`);
@@ -125,7 +126,7 @@ test("through the User's hub a machine runs turns, streams, answers approvals an
     storage: desktop.eventStorage,
     localOriginId: async () => DESKTOP_ID,
     trustedKey: async (originId) => originId === MACHINE_ID ? machine.publicKeyDerBase64 : undefined,
-    deliver: (event) => link.receiveFromHub(event),
+    deliver: (event, fetchBody) => link.receiveFromHub(event, fetchBody),
     applyChatChange: async () => "applied",
     onPushed: (eventIds) => desktop.eventStorage.hub().acknowledgeOutbox(eventIds, new Date().toISOString(), link.hubReaders()),
     scopePrefixes: [...HUB_SHARED_SCOPE_PREFIXES, `device:${pairing.rendezvousId}:`]
@@ -205,7 +206,7 @@ test("through the User's hub a machine runs turns, streams, answers approvals an
     storage: machine.eventStorage,
     localOriginId: async () => MACHINE_ID,
     trustedKey: async (originId) => host.trustedKey(originId),
-    deliver: (event) => host.receiveFromHub(event),
+    deliver: (event, fetchBody) => host.receiveFromHub(event, fetchBody),
     applyChatChange: async () => "applied",
     onPushed: (eventIds) => machine.eventStorage.hub().acknowledgeOutbox(eventIds, new Date().toISOString()),
     scopePrefixes: HUB_SCOPE_PREFIXES
@@ -271,6 +272,26 @@ test("through the User's hub a machine runs turns, streams, answers approvals an
   const stopped = await long;
   assert.equal(stopped.status, "interrupted");
   await stopped.acknowledge?.();
+
+  // Weeks later the hub forgets what both of them read (every chain's newest
+  // event included); the next turn's command, chat change and result
+  // continue their chains from where the hub forgot them.
+  await waitFor(async () => {
+    const floors = await hubStore.eventStorage.hub().readerFloors();
+    const head = await hubStore.eventStorage.hub().head();
+    return floors.length === 2 && floors.every((row) => row.floor >= head - 1);
+  }, 10_000);
+  const before = await hubStore.eventStorage.hub().logSize();
+  const kept = await new HubRetention({ storage: hubStore.eventStorage, config: { ...HUB_RETENTION_DEFAULTS }, now: () => Date.now() + 40 * 24 * 60 * 60_000 }).runOnce();
+  assert.ok(kept.chatChanges.events > 0 && kept.pairs.events > 0, JSON.stringify(kept));
+  assert.ok(kept.log.events < before.events / 2, `the order shrank: ${before.events} -> ${kept.log.events}`);
+  conversation.messages.push({ id: "msg-after", role: "user", content: "after the hub forgot", createdAt: new Date().toISOString(), status: "done" });
+  const afterPrune = await runTurn({ conversation, participant, triggerMessage: conversation.messages.at(-1), runId: "run-4", pendingMessageId: "pending-4" });
+  assert.equal(afterPrune.status, "completed", JSON.stringify(afterPrune));
+  assert.equal(afterPrune.messages[0].content, "reply to msg-after");
+  await afterPrune.acknowledge?.();
+  assert.ok(machineStore.get("conv-hub").messages.some((message) => message.id === "msg-after"), "the machine's copy continued");
+  assert.ok((await hubStore.eventStorage.getConversation("conv-hub")).messages.some((message) => message.id === "msg-after"), "and so did the hub's");
 
   // The machine's program goes away: the hub's room says so at once.
   const chatChangeRecipients = host.chatChangeRecipients();

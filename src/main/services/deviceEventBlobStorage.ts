@@ -19,7 +19,31 @@ export const DEVICE_EVENT_BLOB_SCHEMA_SQL = `
     bytes blob not null,
     primary key(blob_hash, fragment_index)
   );
+  -- Finding bodies no event refers to any more, a few thousand events at a
+  -- time: one look at every event of a large store at once would hold the
+  -- database for a minute.
+  create table if not exists device_event_blob_gc (
+    key text primary key,
+    value text not null
+  );
+  create table if not exists device_event_blob_gc_refs (
+    blob_hash text primary key
+  );
 `;
+
+/** One pass of the search for unreferenced bodies, as it is kept between runs. */
+interface BlobGcPass {
+  startedAt: number;
+  /** Events up to here are looked at by the pass; later ones at its end. */
+  endRowid: number;
+  cursor: number;
+  /** Bodies up to here existed when the pass began: only they may go. */
+  blobRowid: number;
+}
+
+/** A blob reference is a short payload: longer ones are never looked into. */
+const BLOB_REFERENCE_PAYLOAD_MAX = 512;
+const BLOB_REFERENCE_PREFIX = '{"type":"device.event.blob"';
 
 interface Database {
   init(): Promise<void>;
@@ -126,6 +150,81 @@ export class DeviceEventBlobStorage {
     await this.database.execute(`pragma synchronous = full; pragma fullfsync = on;
       update device_event_blobs set verified = 1 where blob_hash = ${quote(reference.blobHash)};
     `);
+  }
+
+  /**
+   * Looks for bodies no stored event refers to, a bounded stretch of events
+   * per call, and deletes them once a whole pass found no reference: a body
+   * fetched for an event this device never kept, or one whose event was
+   * forgotten without it. A body that appeared after the pass began, or
+   * whose pass is younger than `graceMs` (an upload still waiting for its
+   * event), stays. Running it again is harmless.
+   */
+  async collectOrphans(options: { now: number; graceMs: number; scanRows: number }): Promise<{ scanned: number; deleted: number; bytes: number; swept: boolean }> {
+    await this.database.init();
+    const read = async (): Promise<BlobGcPass | undefined> => {
+      const rows = await this.database.query<{ value: string }>(`select value from device_event_blob_gc where key = 'pass';`);
+      try { return rows[0] ? JSON.parse(rows[0].value) as BlobGcPass : undefined; } catch { return undefined; }
+    };
+    const save = (pass: BlobGcPass): Promise<void> => this.database.execute(`
+      insert into device_event_blob_gc(key, value) values ('pass', ${quote(JSON.stringify(pass))})
+      on conflict(key) do update set value = excluded.value;`);
+    let pass = await read();
+    if (!pass) {
+      const [counts] = await this.database.query<{ blobs: number; blobRowid: number | null; endRowid: number | null }>(`
+        select (select count(*) from device_event_blobs) as blobs, (select max(rowid) from device_event_blobs) as blobRowid,
+          (select max(rowid) from chat_events) as endRowid;`);
+      if (!counts || Number(counts.blobs) === 0) return { scanned: 0, deleted: 0, bytes: 0, swept: false };
+      pass = { startedAt: options.now, endRowid: Number(counts.endRowid ?? 0) || 0, cursor: 0, blobRowid: Number(counts.blobRowid ?? 0) || 0 };
+      await this.database.execute(`delete from device_event_blob_gc_refs;`);
+      await save(pass);
+    }
+    const length = await this.byteLengthFunction();
+    const references = (from: number, to?: number) => `
+      insert or ignore into device_event_blob_gc_refs(blob_hash)
+        select json_extract(payload_json, '$.blobHash') from chat_events
+        where rowid > ${Math.floor(from)} ${to === undefined ? "" : `and rowid <= ${Math.floor(to)}`}
+          and ${length}(payload_json) < ${BLOB_REFERENCE_PAYLOAD_MAX} and instr(payload_json, ${quote(`"device.event.blob"`)}) > 0
+          and json_valid(payload_json) and json_extract(payload_json, '$.blobHash') is not null;`;
+    if (pass.cursor < pass.endRowid) {
+      const to = Math.min(pass.endRowid, pass.cursor + Math.max(1, Math.floor(options.scanRows)));
+      await this.database.execute(references(pass.cursor, to));
+      const scanned = to - pass.cursor;
+      pass = { ...pass, cursor: to };
+      await save(pass);
+      if (pass.cursor < pass.endRowid) return { scanned, deleted: 0, bytes: 0, swept: false };
+    }
+    if (options.now - pass.startedAt < options.graceMs) return { scanned: 0, deleted: 0, bytes: 0, swept: false };
+    // Events written while the pass ran are looked at now, then the bodies
+    // nothing refers to go, in one transaction with that last look.
+    const [result] = await this.database.query<{ deleted: number; bytes: number | null }>(`
+      pragma synchronous = full; pragma fullfsync = on;
+      begin immediate;
+      ${references(pass.endRowid)}
+      create temp table if not exists blob_gc_orphans(blob_hash text primary key, byte_length integer);
+      delete from temp.blob_gc_orphans;
+      insert into temp.blob_gc_orphans(blob_hash, byte_length)
+        select blob_hash, byte_length from device_event_blobs
+        where rowid <= ${Math.floor(pass.blobRowid)} and blob_hash not in (select blob_hash from device_event_blob_gc_refs);
+      delete from device_event_blob_fragments where blob_hash in (select blob_hash from temp.blob_gc_orphans);
+      delete from device_event_blobs where blob_hash in (select blob_hash from temp.blob_gc_orphans);
+      delete from device_event_blob_gc where key = 'pass';
+      delete from device_event_blob_gc_refs;
+      select count(*) as deleted, sum(byte_length) as bytes from temp.blob_gc_orphans;
+      delete from temp.blob_gc_orphans;
+      commit;
+    `);
+    return { scanned: 0, deleted: Number(result?.deleted ?? 0) || 0, bytes: Number(result?.bytes ?? 0) || 0, swept: true };
+  }
+
+  private byteLength?: Promise<string>;
+
+  /** octet_length reads a value's size without reading the value (sqlite
+   *  3.43 and later); older ones measure the text. */
+  private byteLengthFunction(): Promise<string> {
+    this.byteLength ??= this.database.query<{ n: number }>(`select octet_length('x') as n;`)
+      .then(() => "octet_length", () => "length");
+    return this.byteLength;
   }
 
   async hydrate(payload: unknown): Promise<unknown> {

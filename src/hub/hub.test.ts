@@ -15,6 +15,7 @@ import type { ChatMessage } from "../shared/types";
 import { HubFolder } from "./hubFolder";
 import { hubApplyPolicy } from "./hubPolicy";
 import { HubLog } from "./hubLog";
+import { HubRetention, HUB_RETENTION_DEFAULTS } from "./hubRetention";
 import { HubServer, certStamp } from "./hubServer";
 
 type Identity = ReturnType<typeof createChatEventDeviceIdentity>;
@@ -381,4 +382,227 @@ test("a renewed certificate is noticed though its chain ends the same as before"
   await writeFile(files.cert, `-----BEGIN CERTIFICATE-----\nLEAF-TWO\n-----END CERTIFICATE-----\n${intermediate}`);
   await writeFile(files.key, "KEY-TWO");
   assert.notEqual(certStamp(files), before);
+});
+
+// --- Bounded storage (reader floors, retention, starting again) ---
+
+const DAY = 24 * 60 * 60_000;
+const retention = (h: Awaited<ReturnType<typeof hub>>, laterMs = 40 * DAY) => new HubRetention({
+  storage: h.storage, config: { ...HUB_RETENTION_DEFAULTS, batch: 3 }, now: () => Date.now() + laterMs
+});
+
+/** A chain of `count` message changes to one chat (the first creates it). */
+function changes(identity: Identity, conversationId: string, count: number, from = 1, prevHash?: string): ChatEventEnvelope[] {
+  const events: ChatEventEnvelope[] = [];
+  let prev = prevHash;
+  for (let n = from; n < from + count; n += 1) {
+    const event = changesEvent(identity, conversationId, n, prev, n === 1 ? [created(conversationId)] : [{ type: "message.created", message: message(`${conversationId}-m${n}`, `message ${n}`) }]);
+    events.push(event);
+    prev = event.eventHash;
+  }
+  return events;
+}
+
+/** A read that says what the device holds (a new client). */
+const read = (after: number, held = 0) => `/v1/events?after=${after}&limit=200&held=${held}&heldSince=0&heldCount=${held ? 1 : 0}`;
+
+async function rosterWithReader(h: Awaited<ReturnType<typeof hub>>, machine: Identity, extra: Array<Record<string, unknown>> = []) {
+  return h.call(h.owner, "PUT", "/v1/roster", { devices: [
+    { deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Cloud box", machineId: "machine-1", reader: true, rendezvousId: "rv-box" },
+    ...extra
+  ] });
+}
+
+test("the hub forgets folded chat changes every reader read, and keeps what any reader still needs", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await rosterWithReader(h, machine);
+  const events = changes(h.owner, "chat-r", 10);
+  await h.call(h.owner, "POST", "/v1/events", { events });
+  await h.folder.idle();
+  // The owner read everything; the machine only up to 4.
+  await h.call(h.owner, "GET", read(10));
+  await h.call(machine, "GET", read(4));
+  const first = await retention(h).runOnce();
+  assert.equal(first.sharedFloor, 4);
+  assert.equal(first.chatChanges.events, 4, "only what both readers read");
+  const left = await h.storage.hub().pull(0, 200);
+  assert.deepEqual(left.events.map((item) => item.hubSeq), [5, 6, 7, 8, 9, 10]);
+  assert.equal((await h.storage.hub().logSize()).events, 6);
+  assert.equal(await h.storage.hub().head(), 10, "the order does not look shorter");
+  // Not yet a week old: nothing goes.
+  await h.call(machine, "GET", read(10));
+  assert.equal((await retention(h, 0).runOnce()).chatChanges.events, 0);
+  // A machine holding a place keeps everything from it.
+  await h.call(machine, "GET", read(10, 7));
+  assert.equal((await retention(h).runOnce()).chatChanges.events, 2, "up to the held place");
+  await h.call(machine, "GET", read(10));
+  await retention(h).runOnce();
+  // The newest event of the chain may go too: the hub continues from its mark.
+  assert.equal((await h.storage.hub().logSize()).events, 0);
+  assert.equal((await h.storage.getConversation("chat-r"))?.messages.length, 9, "the copy holds what was forgotten");
+  const next = changes(h.owner, "chat-r", 1, 11, events[9].eventHash);
+  const pushed = (await h.call(h.owner, "POST", "/v1/events", { events: [next[0]] })).body as unknown as HubEventPushResponse;
+  assert.equal(pushed.results[0].status, "accepted");
+  assert.equal(pushed.results[0].hubSeq, 11, "positions keep counting");
+  // An event the hub forgot is not placed again.
+  const again = (await h.call(h.owner, "POST", "/v1/events", { events: [events[3]] })).body as unknown as HubEventPushResponse;
+  assert.equal(again.results[0].status, "duplicate");
+  assert.equal((await h.storage.hub().logSize()).events, 1);
+});
+
+test("an unfolded change is never forgotten, and a phone holds nothing", async (t) => {
+  const h = await hub(t);
+  const phone = createChatEventDeviceIdentity(new Date().toISOString());
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [{ deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone", name: "iPhone" }] });
+  // A change for a chat the hub does not hold yet waits, unfolded.
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [
+    { deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone", name: "iPhone" },
+    { deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Box", machineId: "m" }
+  ] });
+  await h.call(machine, "POST", "/v1/events", { events: [changesEvent(machine, "chat-w", 1, undefined, [{ type: "message.created", message: message("w1", "early") }])] });
+  await h.call(h.owner, "POST", "/v1/events", { events: changes(h.owner, "chat-x", 3) });
+  await h.folder.idle();
+  await h.call(h.owner, "GET", read(4));
+  const report = await retention(h).runOnce();
+  assert.equal(report.sharedFloor, 4, "the phone and a machine that never reads hold nothing");
+  assert.equal(report.chatChanges.events, 3);
+  assert.equal((await h.storage.hub().logSize()).events, 1, "the waiting change stays");
+});
+
+test("a device asking from before what was forgotten is told to start again, from a snapshot that pages the copy", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-snap-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const h = await hub(t);
+  // Small pages, so a chat goes in parts.
+  const log = new HubLog(h.storage, () => new Date(), 600);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await rosterWithReader(h, machine);
+  await h.call(h.owner, "POST", "/v1/events", { events: [...changes(h.owner, "chat-a", 6), ...changes(h.owner, "chat-b", 2)] });
+  await h.folder.idle();
+  await h.call(h.owner, "GET", read(8));
+  await h.call(machine, "GET", read(8));
+  await retention(h).runOnce();
+  // Taken off and put back (its floor released): it no longer has a place here.
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [] });
+  await rosterWithReader(h, machine);
+  const device = (await h.storage.hub().devices()).find((item) => item.deviceId === machine.originId)!;
+  await assert.rejects(log.pull(device, 0, 200, { held: 0, heldSince: 0, heldCount: 0 }), (error: Error) => error.name === "Error" && /starts again/.test(error.message));
+  // Over HTTP it is a 410 that says so.
+  const refused = await h.call(machine, "GET", read(0));
+  assert.equal(refused.status, 410);
+  assert.equal(refused.body.resync, true);
+  assert.ok(Number(refused.body.prunedThrough) >= 8);
+  // A device that does not say what it holds is read as before.
+  assert.equal((await h.call(machine, "GET", "/v1/events?after=0")).status, 200);
+  // The snapshot: where to start, the marks, and every chat (chat-a in parts).
+  const pages: Array<{ hubSeq: number; marks?: unknown[]; conversations: Array<{ id: string; messages: unknown[]; more?: boolean }>; next?: string }> = [];
+  let page: string | undefined;
+  do {
+    const response = await log.snapshot(device, { scopes: [], copy: true, ...(page ? { page } : {}) });
+    pages.push(response);
+    page = response.next;
+  } while (page);
+  assert.ok(pages.length > 2, "paged");
+  assert.equal(pages[0].hubSeq, 8);
+  assert.equal(pages[0].marks?.length, 2, "one mark per chat change chain");
+  const messages = new Map<string, number>();
+  for (const item of pages.flatMap((one) => one.conversations)) messages.set(item.id, (messages.get(item.id) ?? 0) + item.messages.length);
+  assert.deepEqual(Object.fromEntries(messages), { "chat-a": 5, "chat-b": 1 }, "every message once");
+  // Reading from the snapshot's position is a normal read again.
+  assert.equal((await h.call(machine, "GET", read(8))).status, 200);
+});
+
+test("a snapshot starts before an unfolded change and before the device's own channel events", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await rosterWithReader(h, machine);
+  await h.call(h.owner, "POST", "/v1/events", { events: changes(h.owner, "chat-s", 3) });
+  // A command for the machine, written by the desktop before the machine started.
+  const command = createSignedChatEvent(h.owner, { conversationId: "chat-s", logScopeId: `device:rv-box:${JSON.stringify(["chat-s", "actions"])}`, kind: "machine.turn.request", payload: { type: "machine.turn.request" }, originSeq: 1, createdAt: new Date().toISOString() });
+  await h.call(h.owner, "POST", "/v1/events", { events: [command] });
+  await h.call(h.owner, "POST", "/v1/events", { events: changes(h.owner, "chat-t", 2) });
+  await h.folder.idle();
+  const start = await h.call(machine, "GET", `/v1/snapshot?copy=0&atMost=6&scopes=${encodeURIComponent("device:rv-box:")}`);
+  assert.equal(start.status, 200);
+  assert.equal(start.body.hubSeq, 3, "just before the command");
+  assert.equal((await h.call(machine, "GET", "/v1/snapshot?copy=0&atMost=2")).body.hubSeq, 2, "at most where its copy was made");
+});
+
+test("a channel's events go once both ends read them: a run's a day after its last event; a removed machine holds nothing", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await rosterWithReader(h, machine);
+  const scope = (inner: string) => `device:rv-box:${JSON.stringify(["chat-p", inner])}`;
+  const runEvents: ChatEventEnvelope[] = [];
+  let prev: string | undefined;
+  for (let n = 1; n <= 4; n += 1) {
+    const event = createSignedChatEvent(machine, { conversationId: "chat-p", logScopeId: scope("terminal:run-1"), kind: n < 4 ? "machine.turn.progress.delta" : "machine.turn.finished", payload: { n }, originSeq: n, ...(prev ? { prevHash: prev } : {}), createdAt: new Date().toISOString() });
+    runEvents.push(event);
+    prev = event.eventHash;
+  }
+  const command = createSignedChatEvent(h.owner, { conversationId: "chat-p", logScopeId: scope("actions"), kind: "machine.turn.request", payload: {}, originSeq: 1, createdAt: new Date().toISOString() });
+  await h.call(h.owner, "POST", "/v1/events", { events: [command] });
+  await h.call(machine, "POST", "/v1/events", { events: runEvents });
+  // The desktop read the run; the machine has not read the command yet.
+  await h.call(h.owner, "GET", read(5));
+  await h.call(machine, "GET", read(0));
+  let report = await retention(h, 2 * DAY).runOnce();
+  assert.equal(report.pairs.events, 0, "the machine has not read past them");
+  await h.call(machine, "GET", read(5));
+  report = await retention(h, 2 * DAY).runOnce();
+  assert.equal(report.pairs.events, 4, "the run, a day after its end; the command is younger than three days");
+  report = await retention(h, 4 * DAY).runOnce();
+  assert.equal(report.pairs.events, 1);
+  // A gap a late reader finds is answered with how far the hub forgot it.
+  const gap = await h.call(h.owner, "GET", `/v1/chain?origin=${machine.originId}&scope=${encodeURIComponent(scope("terminal:run-1"))}&from=1&to=3`);
+  assert.deepEqual(gap.body.events, []);
+  assert.equal((gap.body.pruned as { originSeq: number }).originSeq, 4);
+  // Taken off the roster, a machine no longer holds its channel.
+  const late = createSignedChatEvent(h.owner, { conversationId: "chat-p", logScopeId: scope("actions"), kind: "machine.turn.request", payload: {}, originSeq: 2, prevHash: command.eventHash, createdAt: new Date().toISOString() });
+  assert.equal(((await h.call(h.owner, "POST", "/v1/events", { events: [late] })).body as unknown as HubEventPushResponse).results[0].status, "accepted", "the chain continues from its mark");
+  await h.call(h.owner, "GET", read(6));
+  assert.equal((await retention(h, 4 * DAY).runOnce()).pairs.events, 0, "the machine still holds it");
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [] });
+  assert.equal((await h.storage.hub().readerFloors()).some((row) => row.deviceId === machine.originId), false, "its floor is released");
+  assert.equal((await retention(h, 4 * DAY).runOnce()).pairs.events, 1);
+});
+
+test("the owner reads where every reader stands; nobody else may", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await rosterWithReader(h, machine);
+  await h.call(h.owner, "GET", read(0));
+  let status = await h.call(h.owner, "GET", "/v1/readers");
+  assert.equal(status.status, 200);
+  const box = (status.body.readers as Array<{ deviceId: string; neverRead?: boolean; readAt?: string }>).find((item) => item.deviceId === machine.originId);
+  assert.equal(box?.neverRead, true, "set up, never read");
+  assert.ok(box?.readAt);
+  await h.call(machine, "GET", "/v1/events?after=0&limit=200&held=3&heldSince=1000&heldCount=2");
+  status = await h.call(h.owner, "GET", "/v1/readers");
+  const read2 = (status.body.readers as Array<{ deviceId: string; neverRead?: boolean; heldCount?: number; floor: number }>).find((item) => item.deviceId === machine.originId);
+  assert.equal(read2?.neverRead, undefined);
+  assert.equal(read2?.heldCount, 2);
+  assert.equal(read2?.floor, 0);
+  assert.equal((await h.call(machine, "GET", "/v1/readers")).status, 403);
+  // Any device may ask which devices are on the roster.
+  const stranger = createChatEventDeviceIdentity(new Date().toISOString());
+  const known = await h.call(machine, "GET", `/v1/devices/known?ids=${h.owner.originId},${stranger.originId}`);
+  assert.deepEqual(known.body.known, [h.owner.originId]);
+});
+
+test("closing the hub ends connections that are still open at once", async (t) => {
+  const h = await hub(t);
+  const net = await import("node:net");
+  const port = Number(new URL(h.base).port);
+  // A request whose body never finishes, as a stalled phone would leave one.
+  const socket = net.connect(port, "127.0.0.1");
+  await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+  socket.write(`POST /v1/events HTTP/1.1\r\nHost: x\r\nAuthorization: ${signHubRequest(h.owner, { method: "POST", pathWithQuery: "/v1/events", body: "{}" })}\r\nContent-Length: 1000\r\n\r\n{`);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const started = Date.now();
+  await h.server.close();
+  assert.ok(Date.now() - started < 2_000, `closed in ${Date.now() - started} ms`);
+  socket.destroy();
 });

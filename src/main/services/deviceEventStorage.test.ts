@@ -250,3 +250,87 @@ async function database() {
     cleanup: () => rm(directory, { recursive: true, force: true })
   };
 }
+
+test("with the hub, a device forgets its own channel events once pushed and a week old, keeping each chain's newest", async () => {
+  const db = await database();
+  try {
+    const log = new ChatEventLogService(db.storage);
+    const room = (n: number) => ({ conversationId: "c", logScopeId: `device:room-1:${JSON.stringify(["c", "actions"])}`, kind: "machine.turn.request", payload: { n } });
+    const e1 = (await log.appendLocalEvent(room(1))).event;
+    // A recipient on the relay still waits for this one.
+    const e2 = (await log.appendLocalEvent({ ...room(2), recipients: [recipient] })).event;
+    const e3 = (await log.appendLocalEvent(room(3))).event;
+    const e4 = (await log.appendLocalEvent(room(4))).event;
+    const relay = (await log.appendLocalEvent({ conversationId: "c", logScopeId: `device:room-2:${JSON.stringify(["c", "actions"])}`, kind: "x", payload: {} })).event;
+    const relayNext = (await log.appendLocalEvent({ conversationId: "c", logScopeId: `device:room-2:${JSON.stringify(["c", "actions"])}`, kind: "x", payload: { n: 2 } })).event;
+    await db.sql(`update chat_events set received_at = '2026-01-01T00:00:00.000Z';`);
+    const rowid = Number((await (db.storage as any).queryJson(`select rowid from chat_events where event_id = '${e3.eventId}';`))[0].rowid);
+    const origin = (await log.getOrCreateDeviceIdentity()).originId;
+    const forgotten = await db.storage.deviceEvents().pruneOwnDeviceEvents(origin, { pushedThroughRowid: rowid, cutoffIso: now, scopePrefixes: ["device:room-1:"] });
+    assert.equal(forgotten, 2);
+    assert.equal(await db.storage.getChatEvent(e1.eventId), undefined);
+    assert.ok(await db.storage.getChatEvent(e2.eventId), "a relay recipient still waits for it");
+    assert.equal(await db.storage.getChatEvent(e3.eventId), undefined);
+    assert.ok(await db.storage.getChatEvent(e4.eventId), "not pushed yet, and the chain's newest");
+    assert.ok(await db.storage.getChatEvent(relay.eventId) && await db.storage.getChatEvent(relayNext.eventId), "a relay channel is not the hub's");
+    // Young events stay whatever their state.
+    assert.equal(await db.storage.deviceEvents().pruneOwnDeviceEvents(origin, { pushedThroughRowid: 1_000, cutoffIso: "2025-01-01T00:00:00.000Z", scopePrefixes: ["device:room-1:"] }), 0);
+    // The next event still continues the chain.
+    const e5 = (await log.appendLocalEvent(room(5))).event;
+    assert.equal(e5.originSeq, 5);
+    assert.equal(e5.prevHash, e4.eventHash);
+  } finally { await db.cleanup(); }
+});
+
+test("a stretch the hub forgot is passed over: the chain continues after it, and what waited below it is superseded", async () => {
+  const db = await database();
+  try {
+    const peer = createChatEventDeviceIdentity(now);
+    const scope = `device:room:${JSON.stringify(["c", "terminal:r"])}`;
+    const events: ChatEventEnvelope[] = [];
+    let prev: string | undefined;
+    for (let n = 1; n <= 4; n += 1) {
+      const event = createSignedChatEvent(peer, { conversationId: "c", logScopeId: scope, kind: "machine.turn.progress.delta", payload: { n }, originSeq: n, ...(prev ? { prevHash: prev } : {}), createdAt: now });
+      events.push(event);
+      prev = event.eventHash;
+    }
+    // Received 2 and 4, never 1 and 3.
+    await db.storage.appendChatEvent(events[1], { ingress: { deviceId: peer.originId, channelId: "room" } });
+    await db.storage.appendChatEvent(events[3], { ingress: { deviceId: peer.originId, channelId: "room" } });
+    assert.equal((await db.storage.deviceEvents().ready("room")).length, 0);
+    assert.equal(await db.storage.deviceEvents().skipTo(peer.originId, scope, 3, events[2].eventHash, now), true);
+    assert.equal(await db.storage.deviceEvents().appliedHead(peer.originId, scope), 3);
+    assert.deepEqual((await db.storage.deviceEvents().ready("room")).map((event) => event.originSeq), [4], "the next one applies");
+    assert.equal((await db.storage.deviceEvents().gaps("room")).length, 0, "and nothing waits below it");
+    assert.equal(await db.storage.deviceEvents().skipTo(peer.originId, scope, 2, events[1].eventHash, now), false, "never backwards");
+  } finally { await db.cleanup(); }
+});
+
+test("a body no stored event refers to is deleted after a whole look at the events; one referred to, or newer than the look, stays", async () => {
+  const db = await database();
+  try {
+    const blobs = db.storage.deviceEventBlobs();
+    const log = new ChatEventLogService(db.storage);
+    const kept = await blobs.prepare({ text: "k".repeat(200_000) });
+    await log.appendLocalEvent({ conversationId: "c", logScopeId: "chat-changes:c", kind: "chat.changes", payload: kept });
+    for (let n = 0; n < 5; n += 1) await log.appendLocalEvent({ conversationId: "c", logScopeId: "c", kind: "message.created", payload: { n } });
+    // A body fetched for an event this device never kept.
+    const orphan = await blobs.prepare({ text: "o".repeat(200_000) }) as { blobHash: string };
+    const t0 = Date.parse(now);
+    // A few events per call: the look spans several runs.
+    let result = await blobs.collectOrphans({ now: t0, graceMs: 60_000, scanRows: 2 });
+    assert.equal(result.swept, false);
+    const young = await blobs.prepare({ text: "y".repeat(200_000) }) as { blobHash: string };
+    for (let run = 0; run < 5 && !result.swept; run += 1) result = await blobs.collectOrphans({ now: t0 + 1_000, graceMs: 60_000, scanRows: 2 });
+    assert.equal(result.swept, false, "not before the grace period has passed");
+    result = await blobs.collectOrphans({ now: t0 + 120_000, graceMs: 60_000, scanRows: 2 });
+    assert.equal(result.swept, true);
+    assert.equal(result.deleted, 1);
+    const left = (await (db.storage as any).queryJson("select blob_hash as h from device_event_blobs order by h;")).map((row: { h: string }) => row.h);
+    assert.ok(left.includes((kept as { blobHash: string }).blobHash), "referred to");
+    assert.ok(left.includes(young.blobHash), "newer than the look");
+    assert.ok(!left.includes(orphan.blobHash));
+    assert.equal((await (db.storage as any).queryJson("select count(*) as n from device_event_blob_fragments where blob_hash = '" + orphan.blobHash + "';"))[0].n, 0);
+    assert.deepEqual(await blobs.hydrate(kept), { text: "k".repeat(200_000) });
+  } finally { await db.cleanup(); }
+});

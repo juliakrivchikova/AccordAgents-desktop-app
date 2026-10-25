@@ -11,6 +11,7 @@ import { hubApplyPolicy } from "./hubPolicy";
 import { HubLog } from "./hubLog";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
 import { HubRelayMailboxes, HubRelayRooms } from "./hubRelay";
+import { HubRetention, hubRetentionConfig } from "./hubRetention";
 import { HubChangeFeed, HubPhoneApi } from "./hubPhone";
 import { HubServer } from "./hubServer";
 
@@ -164,19 +165,40 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
   // certificate, the health check the setup reads.
   await server.listenHttp(args.httpPort, args.host, { openOnly: !args.insecureHttp });
   await folder.start();
+  // The order stays bounded: what every reader read, past its grace period.
+  const retention = new HubRetention({ storage, config: hubRetentionConfig(), log });
+  retention.start();
   log("hub.started", { version: HUB_VERSION, https, httpPort: args.httpPort });
   return async () => {
     push.close();
-    await server.close();
-    await folder.idle();
+    // The folding stops after the chat it is on; what is left is folded on
+    // the next start (it is read from the order, not kept in memory).
     folder.close();
+    await server.close();
+    await retention.close();
+    await folder.idle();
   };
 }
 
+/** A stop that has not finished by then exits anyway: everything the hub
+ *  keeps is written in transactions, and a stop that hangs only makes the
+ *  service manager wait for its kill timeout. */
+const SHUTDOWN_DEADLINE_MS = 5_000;
+
 if (require.main === module) {
   let stop: (() => Promise<void>) | undefined;
+  let stopping = false;
   const shutdown = (): void => {
-    void (stop ? stop() : Promise.resolve()).finally(() => process.exit(0));
+    if (stopping) return;
+    stopping = true;
+    const started = Date.now();
+    setTimeout(() => {
+      process.stdout.write(`${JSON.stringify({ event: "hub.stop.deadline", at: new Date().toISOString(), ms: Date.now() - started })}\n`);
+      process.exit(0);
+    }, SHUTDOWN_DEADLINE_MS).unref();
+    void (stop ? stop() : Promise.resolve()).finally(() => {
+      process.stdout.write(`${JSON.stringify({ event: "hub.stopped", at: new Date().toISOString(), ms: Date.now() - started })}\n`, () => process.exit(0));
+    });
   };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);

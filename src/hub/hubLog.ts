@@ -3,12 +3,21 @@ import { DEVICE_EVENT_INLINE_BYTES, isDeviceEventBlobReference, type DeviceEvent
 import {
   HUB_PULL_MAX_EVENTS,
   HUB_PUSH_MAX_EVENTS,
+  type HubChainResponse,
+  type HubCopyMark,
+  type HubCopyPart,
   type HubDevice,
   type HubEventPullResponse,
   type HubEventPushResponse,
-  type HubEventPushResult
+  type HubEventPushResult,
+  type HubKnownDevicesResponse,
+  type HubReadReport,
+  type HubReaderStatus,
+  type HubReadersResponse,
+  type HubSnapshotResponse
 } from "../shared/hubProtocol";
 import { CHAT_CHANGES_EVENT_KIND, isChatChangesLogScope } from "../main/services/chatChanges";
+import { copiedConversation } from "../main/services/chatCopy";
 import { verifySignedChatEvent } from "../main/services/chatEventLog";
 import { sha256Hex } from "../main/services/hubAuth";
 import type { StorageService } from "../main/services/storage";
@@ -31,7 +40,12 @@ export class HubLog {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly listeners = new Set<HubAppendListener>();
 
-  constructor(private readonly storage: StorageService, private readonly now: () => Date = () => new Date()) {}
+  constructor(
+    private readonly storage: StorageService,
+    private readonly now: () => Date = () => new Date(),
+    /** A snapshot page is at most about this much JSON (tests shorten it). */
+    private readonly snapshotPageBytes = SNAPSHOT_PAGE_BYTES
+  ) {}
 
   onAppended(listener: HubAppendListener): () => void {
     this.listeners.add(listener);
@@ -129,13 +143,19 @@ export class HubLog {
     return { results, head };
   }
 
-  /** The next place in a chain: after its newest stored event, or after where
-   *  the desktop's first copy left it. */
+  /** The next place in a chain: after its newest stored event, after where
+   *  the desktop's first copy left it, or after where the hub forgot it. */
   private async chainBasis(originId: string, logScopeId: string): Promise<ChainBasis> {
     const stored = await this.storage.getChatEventSequenceBasis(originId, logScopeId);
     const anchor = await this.storage.hub().chainAnchor(originId, logScopeId);
-    if (anchor && anchor.originSeq + 1 > stored.originSeq) return { originSeq: anchor.originSeq + 1, prevHash: anchor.eventHash, anchorSeq: anchor.originSeq };
-    return { originSeq: stored.originSeq, prevHash: stored.prevHash, ...(anchor ? { anchorSeq: anchor.originSeq } : {}) };
+    const mark = await this.storage.hub().chainMark(originId, logScopeId);
+    // Held below this (copied, or kept and forgotten): not placed again.
+    const below = Math.max(anchor?.originSeq ?? 0, mark?.originSeq ?? 0);
+    const anchorSeq = below > 0 ? { anchorSeq: below } : {};
+    const start = [anchor, mark].filter((item): item is { originSeq: number; eventHash: string } => Boolean(item))
+      .sort((left, right) => right.originSeq - left.originSeq)[0];
+    if (start && start.originSeq + 1 > stored.originSeq) return { originSeq: start.originSeq + 1, prevHash: start.eventHash, ...anchorSeq };
+    return { originSeq: stored.originSeq, prevHash: stored.prevHash, ...anchorSeq };
   }
 
   private async blobComplete(reference: DeviceEventBlobReference): Promise<boolean> {
@@ -167,15 +187,217 @@ export class HubLog {
     return fragment ? Buffer.from(fragment.bytesBase64, "base64") : undefined;
   }
 
-  /** The order after `after`, without what the asking device wrote itself. */
-  async pull(device: HubDevice, after: number, limit = HUB_PULL_MAX_EVENTS): Promise<HubEventPullResponse> {
+  /**
+   * The order after `after`, without what the asking device wrote itself.
+   *
+   * A device that says what it holds (`report`) is kept for from its floor:
+   * min(after, its lowest held place - 1). Such a device asking from below
+   * what the hub can vouch for (it never read here, or asks from before its
+   * floor) while events it would need were forgotten there is told so
+   * (HubResyncRequiredError) instead of being given a page with holes. A
+   * `peek` (a held event read again) moves no cursor.
+   */
+  async pull(device: HubDevice, after: number, limit = HUB_PULL_MAX_EVENTS, report?: HubReadReport & { peek?: boolean }): Promise<HubEventPullResponse> {
     const hub = this.storage.hub();
+    const now = this.now().toISOString();
+    if (report) {
+      const standing = await hub.readerFloor(device.deviceId);
+      if (!standing || after < standing.floor) {
+        const prunedThrough = await hub.prunedThrough(await this.readerClasses(device));
+        if (prunedThrough > after) throw new HubResyncRequiredError(prunedThrough);
+      }
+    }
     const page = await hub.pull(after, Math.min(limit, HUB_PULL_MAX_EVENTS), device.deviceId);
     const head = await hub.head();
-    // What a device asked from is what it already holds: a phone that read
-    // past an event is not rung for it.
-    await hub.setCursor(device.deviceId, after, this.now().toISOString());
+    if (!report?.peek) {
+      // What a device asked from is what it already holds: a phone that read
+      // past an event is not rung for it.
+      await hub.setCursor(device.deviceId, after, now);
+      if (report) {
+        const floor = report.held > 0 ? Math.min(after, report.held - 1) : after;
+        await hub.recordRead(device.deviceId, floor, {
+          from: report.held, count: report.heldCount,
+          ...(report.heldSince > 0 ? { since: new Date(report.heldSince).toISOString() } : {})
+        }, now);
+      } else if (device.role !== "phone") {
+        // An older device does not say what it holds: its place is where it
+        // reads from, as it was before floors (it drops what it held for
+        // long itself).
+        await hub.recordRead(device.deviceId, after, { from: 0, count: 0 }, now);
+      }
+    }
     return { events: page.events, through: page.through, head };
+  }
+
+  /** The classes of forgotten events a device reads: chat changes and
+   *  actions, and its channels (a desktop is in every one; a machine whose
+   *  channel the hub cannot tell is counted in every one too). */
+  private async readerClasses(device: HubDevice): Promise<string[]> {
+    const hub = this.storage.hub();
+    const shared = ["chat-changes", "chat-actions"];
+    const all = await hub.prunedPairClasses();
+    if (device.role !== "machine") return [...shared, ...all];
+    const rids = new Set((await hub.deviceReads()).filter((row) => row.deviceId === device.deviceId && row.rendezvousId).map((row) => row.rendezvousId as string));
+    for (const row of await hub.pairAuthors()) if (row.originId === device.deviceId) rids.add(row.rendezvousId);
+    return rids.size ? [...shared, ...[...rids].map((rid) => `pair:${rid}`)] : [...shared, ...all];
+  }
+
+  /** One chain's events in a range, for a reader that found a gap; with how
+   *  far the hub forgot that chain. */
+  async chain(originId: string, logScopeId: string, fromSeq: number, toSeq: number): Promise<HubChainResponse> {
+    const hub = this.storage.hub();
+    const events = await hub.chainEvents(originId, logScopeId, fromSeq, toSeq, HUB_PULL_MAX_EVENTS);
+    const pruned = await hub.chainMark(originId, logScopeId);
+    return { events, ...(pruned ? { pruned } : {}) };
+  }
+
+  /**
+   * Where a device starts reading again, and the hub's copy of every chat.
+   *
+   * The first page fixes the position: the order's head, but before any
+   * chat change the copy does not hold yet (`copy`), before any event still
+   * kept in the device's own channels (`scopes`), and at most `atMost` (a
+   * copy the device already has was made there). Everything after it is
+   * kept for the device from now on. `marks` say how far the copy covers
+   * each chat change chain; a change after a mark arrives as an event.
+   */
+  async snapshot(device: HubDevice, request: { page?: string; scopes: string[]; atMost?: number; copy: boolean; chat?: string }): Promise<HubSnapshotResponse> {
+    const hub = this.storage.hub();
+    let position: SnapshotPosition;
+    let marks: HubCopyMark[] | undefined;
+    if (request.chat) {
+      // One chat's copy, for a reader whose chain of its changes the hub
+      // forgot: it does not move where that reader stands.
+      const scope = `chat-changes:${request.chat}`;
+      position = request.page ? parseSnapshotPage(request.page) : { hubSeq: await hub.head(), afterId: "", offset: 0 };
+      if (!request.page) marks = (await hub.copyMarks()).filter((mark) => mark.logScopeId === scope);
+      const page = await this.copyPage(position, request.chat);
+      return { hubSeq: position.hubSeq, ...(marks ? { marks } : {}), conversations: page.parts, ...(page.next ? { next: formatSnapshotPage(page.next) } : {}) };
+    }
+    if (request.page) {
+      position = parseSnapshotPage(request.page);
+    } else {
+      let hubSeq = await hub.head();
+      if (request.atMost !== undefined) hubSeq = Math.min(hubSeq, Math.max(0, Math.floor(request.atMost)));
+      if (request.copy) {
+        const unfolded = await hub.lowestUnfolded();
+        if (unfolded > 0) hubSeq = Math.min(hubSeq, unfolded - 1);
+      }
+      const own = await hub.lowestInScopes(request.scopes, device.deviceId);
+      if (own > 0) hubSeq = Math.min(hubSeq, own - 1);
+      // Marks first, chats after: a chat read later can only hold more.
+      if (request.copy) marks = await hub.copyMarks();
+      await hub.startReader(device.deviceId, hubSeq, this.now().toISOString());
+      position = { hubSeq, afterId: "", offset: 0 };
+    }
+    if (!request.copy) return { hubSeq: position.hubSeq, conversations: [] };
+    const page = await this.copyPage(position);
+    return { hubSeq: position.hubSeq, ...(marks ? { marks } : {}), conversations: page.parts, ...(page.next ? { next: formatSnapshotPage(page.next) } : {}) };
+  }
+
+  /** One page of the hub's copy after `position`: whole chats in id order,
+   *  and a chat too large for one page in parts. */
+  private async copyPage(position: SnapshotPosition, only?: string): Promise<{ parts: HubCopyPart[]; next?: SnapshotPosition }> {
+    const tombstones = this.storage.conversationTombstones();
+    const ids = only ? [only] : (await this.storage.listConversations()).filter((summary) => summary.kind === "chat").map((summary) => summary.id).sort();
+    const continuing = position.offset > 0;
+    let index = continuing ? ids.indexOf(position.afterId) : -1;
+    if (index < 0) index = position.afterId ? ids.findIndex((id) => id > position.afterId) : 0;
+    if (index < 0) return { parts: [] };
+    const parts: HubCopyPart[] = [];
+    const next = (afterId: string, offset: number): SnapshotPosition => ({ hubSeq: position.hubSeq, afterId, offset });
+    let bytes = 0;
+    // The last chat carried whole: the next page starts after it.
+    let lastDone = continuing ? "" : position.afterId;
+    for (; index < ids.length; index += 1) {
+      const id = ids[index];
+      const conversation = await tombstones.isDeleted(id) ? undefined : await this.storage.getConversation(id);
+      if (!conversation || conversation.kind !== "chat") {
+        lastDone = id;
+        continue;
+      }
+      const copied = copiedConversation(conversation);
+      const start = continuing && id === position.afterId ? Math.min(position.offset, copied.messages.length) : 0;
+      const head = { id, updatedAt: copied.updatedAt, shared: copied.shared, removed: copied.removed, ...(copied.authors ? { authors: copied.authors } : {}) };
+      const headBytes = Buffer.byteLength(JSON.stringify(head));
+      if (parts.length > 0 && bytes + headBytes > this.snapshotPageBytes) return { parts, next: next(lastDone, 0) };
+      bytes += headBytes;
+      let end = start;
+      // Messages until the page is full; the first item of a page always goes.
+      while (end < copied.messages.length) {
+        const size = Buffer.byteLength(JSON.stringify(copied.messages[end]));
+        if (bytes + size > this.snapshotPageBytes && (end > start || parts.length > 0)) break;
+        bytes += size;
+        end += 1;
+      }
+      if (end === start && start < copied.messages.length) return { parts, next: start > 0 ? next(id, start) : next(lastDone, 0) };
+      const more = end < copied.messages.length;
+      parts.push({ ...head, messages: copied.messages.slice(start, end), ...(more ? { more: true } : {}) });
+      if (more) return { parts, next: next(id, end) };
+      lastDone = id;
+      if (bytes >= this.snapshotPageBytes && index + 1 < ids.length) return { parts, next: next(id, 0) };
+    }
+    return { parts };
+  }
+
+  /** Every device that reads the order, where it stands and what it holds. */
+  async readers(): Promise<HubReadersResponse> {
+    const hub = this.storage.hub();
+    const devices = await hub.devices();
+    const floors = new Map((await hub.readerFloors()).map((row) => [row.deviceId, row]));
+    const reads = new Map((await hub.deviceReads()).map((row) => [row.deviceId, row]));
+    const readers: HubReaderStatus[] = [];
+    for (const device of devices) {
+      const standing = floors.get(device.deviceId);
+      if (device.role === "phone" || (!standing && device.role !== "owner" && reads.get(device.deviceId)?.reader !== true)) continue;
+      readers.push({
+        deviceId: device.deviceId, name: device.name, role: device.role, ...(device.machineId ? { machineId: device.machineId } : {}),
+        floor: standing?.floor ?? 0,
+        ...(standing?.readAt ? { readAt: standing.readAt } : device.addedAt ? { readAt: device.addedAt } : {}),
+        ...(!standing?.firstReadAt ? { neverRead: true } : {}),
+        ...(standing?.heldSince ? { heldSince: standing.heldSince, heldCount: standing.heldCount } : {})
+      });
+    }
+    return { head: await hub.head(), readers };
+  }
+
+  /** Which of these devices are on the roster now. */
+  async known(ids: string[]): Promise<HubKnownDevicesResponse> {
+    const roster = new Set((await this.storage.hub().devices()).map((device) => device.deviceId));
+    return { known: ids.filter((id) => roster.has(id)) };
+  }
+}
+
+/** A snapshot page is at most about this much JSON. */
+const SNAPSHOT_PAGE_BYTES = 4 * 1024 * 1024;
+
+interface SnapshotPosition {
+  hubSeq: number;
+  /** The last chat (by id) the previous page carried. */
+  afterId: string;
+  /** Messages of that chat already carried (0: it was complete). */
+  offset: number;
+}
+
+function formatSnapshotPage(position: SnapshotPosition): string {
+  return Buffer.from(JSON.stringify([position.hubSeq, position.afterId, position.offset])).toString("base64url");
+}
+
+function parseSnapshotPage(page: string): SnapshotPosition {
+  try {
+    const [hubSeq, afterId, offset] = JSON.parse(Buffer.from(page, "base64url").toString("utf8")) as [unknown, unknown, unknown];
+    if (Number.isSafeInteger(hubSeq) && (hubSeq as number) >= 0 && typeof afterId === "string" && afterId.length <= 512 &&
+        Number.isSafeInteger(offset) && (offset as number) >= 0) {
+      return { hubSeq: hubSeq as number, afterId, offset: offset as number };
+    }
+  } catch { /* refused below */ }
+  throw new HubRequestError(400, "Invalid snapshot page.");
+}
+
+/** The hub forgot events this device would need: it starts again from a copy. */
+export class HubResyncRequiredError extends Error {
+  constructor(readonly prunedThrough: number) {
+    super("Events this device needs were forgotten by the server; it starts again from the server's copy.");
   }
 }
 

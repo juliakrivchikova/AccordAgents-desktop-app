@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -11,7 +12,11 @@ import { HubClient } from "../main/services/hubClient";
 import { HubSync, type HubApplyOutcome, type HubDeliverOutcome } from "../main/services/hubSync";
 import { StorageService } from "../main/services/storage";
 import type { ChatEventEnvelope } from "../shared/chatEvents";
+import { CHAT_COPY_HUB_POSITION_KEY, type CopiedConversation } from "../main/services/chatCopy";
+import { HubFolder } from "./hubFolder";
 import { HubLog } from "./hubLog";
+import { hubApplyPolicy } from "./hubPolicy";
+import { HUB_RETENTION_DEFAULTS, HubRetention } from "./hubRetention";
 import { HubServer } from "./hubServer";
 
 async function store(dir: string, name: string) {
@@ -31,6 +36,9 @@ async function setup(t: test.TestContext) {
   await hubStore.storage.hub().setOwner({ deviceId: desktop.identity.originId, publicKeyDerBase64: desktop.identity.publicKeyDerBase64, name: "Desktop", addedAt: new Date().toISOString() });
   await hubStore.storage.hub().replaceRoster([{ deviceId: phone.identity.originId, publicKeyDerBase64: phone.identity.publicKeyDerBase64, role: "phone", name: "iPhone", addedAt: "" }], new Date().toISOString());
   const hubLog = new HubLog(hubStore.storage);
+  // The hub's copy of the chats, as the hub keeps it (a device starting again reads it).
+  const folder = new HubFolder(hubStore.storage, hubApplyPolicy(hubStore.storage));
+  hubLog.onAppended(({ changedConversationIds }) => folder.enqueue(changedConversationIds));
   const server = new HubServer({ hubId: "hub-sync", version: "test", storage: hubStore.storage, log: hubLog, search: new ChatSearchService(hubStore.storage), vapidPublicKey: "B" });
   const http = await server.listenHttp(0, "127.0.0.1");
   const url = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
@@ -39,9 +47,12 @@ async function setup(t: test.TestContext) {
   const link = (device: Device, applied: ChatEventEnvelope[], options: {
     trustedKey?: (originId: string) => Promise<string | undefined>;
     applyChatChange?: (event: ChatEventEnvelope) => Promise<HubApplyOutcome>;
-    deliver?: (event: ChatEventEnvelope) => Promise<HubDeliverOutcome>;
+    deliver?: (event: ChatEventEnvelope, fetchBody: () => Promise<void>) => Promise<HubDeliverOutcome>;
     onPushed?: (eventIds: string[]) => Promise<void>;
     log?: (event: string, payload: Record<string, unknown>) => void;
+    mergeCopy?: (copied: CopiedConversation) => Promise<void>;
+    ownScopes?: () => Promise<readonly string[]>;
+    now?: () => number;
   } = {}) => {
     const sync = new HubSync({
       client: new HubClient({ url, identity: async () => device.identity, storage: device.storage }),
@@ -51,17 +62,24 @@ async function setup(t: test.TestContext) {
       applyChatChange: options.applyChatChange ?? (async (event) => { applied.push(event); return "applied"; }),
       ...(options.deliver ? { deliver: options.deliver } : {}),
       ...(options.onPushed ? { onPushed: options.onPushed } : {}),
-      ...(options.log ? { log: options.log } : {})
+      ...(options.log ? { log: options.log } : {}),
+      ...(options.mergeCopy ? { mergeCopy: options.mergeCopy } : {}),
+      ...(options.ownScopes ? { ownScopes: options.ownScopes } : {}),
+      ...(options.now ? { now: options.now } : {})
     });
     syncs.push(sync);
     return sync;
   };
   t.after(async () => {
     for (const sync of syncs) sync.stop();
+    // A read in flight finishes before the files go.
+    for (const sync of syncs) await sync.idle();
     await server.close();
-    await rm(dir, { recursive: true, force: true });
+    await folder.idle();
+    folder.close();
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
-  return { dir, hubStore, desktop, phone, server, url, link };
+  return { dir, hubStore, hubLog, folder, desktop, phone, server, url, link };
 }
 
 const change = (conversationId: string, n: number, content = `message ${n}`) => ({
@@ -192,6 +210,8 @@ test("a chat change that has to wait is held and applied later, not dropped", as
   await pushAll(s.link(s.desktop, []), s, 2);
   phoneSync.start();
   await until(async () => (await s.phone.storage.hub().heldEvents(0, 10)).length === 2);
+  // The first pass may still be offering them again: it ends before the change.
+  await phoneSync.idle();
   ready = true;
   phoneSync.nudgeHeld();
   await until(() => applied.length === 2);
@@ -398,4 +418,209 @@ test("a hub read without the live link still counts as reached, and one that sto
   await s.server.close();
   sync.nudgePull();
   await until(() => !sync.isReachable());
+});
+
+// --- Bounded storage: nothing dropped for its age, starting again, gaps, bodies ---
+
+const DAY = 24 * 60 * 60_000;
+
+const createdChat = (conversationId: string) => ({
+  conversationId, logScopeId: chatChangesLogScope(conversationId), kind: CHAT_CHANGES_EVENT_KIND,
+  payload: { version: 1, conversationId, updatedAt: new Date().toISOString(), changes: [{ type: "conversation.created", conversation: { title: "Copy", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [] } } }] }
+});
+
+async function addMachine(s: Awaited<ReturnType<typeof setup>>, machine: Device, rendezvousId = "room-1") {
+  await s.hubStore.storage.hub().replaceRoster([
+    { deviceId: s.phone.identity.originId, publicKeyDerBase64: s.phone.identity.publicKeyDerBase64, role: "phone", name: "iPhone", addedAt: "" },
+    { deviceId: machine.identity.originId, publicKeyDerBase64: machine.identity.publicKeyDerBase64, role: "machine", name: "Box", addedAt: "", machineId: "m-1", reader: true, rendezvousId }
+  ], new Date().toISOString());
+  s.server.invalidateRoster();
+}
+
+test("a place held for an unknown author is kept however old, and let go only once the roster says it was removed", async (t) => {
+  const s = await setup(t);
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine);
+  let clock = Date.now();
+  const logs: string[] = [];
+  // The phone does not know the machine's key (not yet, or never).
+  const phoneSync = s.link(s.phone, [], { trustedKey: async () => undefined, now: () => clock, log: (event) => logs.push(event) });
+  await machine.log.appendLocalEvent(change("chat-u", 1));
+  await pushAll(s.link(machine, []), s, 1);
+  phoneSync.start();
+  await until(async () => (await s.phone.storage.hub().heldEvents(0, 10)).length === 1);
+  await phoneSync.idle();
+  // A month later it is still held: age is no reason to drop it.
+  clock += 30 * DAY;
+  phoneSync.nudgeHeld();
+  await phoneSync.idle();
+  assert.equal((await s.phone.storage.hub().heldEvents(0, 10)).length, 1);
+  assert.ok(!logs.includes("hub.sync.held-released"));
+  // The owner takes the machine off the roster: what was held for it goes.
+  await s.hubStore.storage.hub().replaceRoster([{ deviceId: s.phone.identity.originId, publicKeyDerBase64: s.phone.identity.publicKeyDerBase64, role: "phone", name: "iPhone", addedAt: "" }], new Date().toISOString());
+  s.server.invalidateRoster();
+  clock += 11 * 60_000;
+  phoneSync.nudgeHeld();
+  await until(async () => (await s.phone.storage.hub().heldEvents(0, 10)).length === 0);
+  assert.ok(logs.includes("hub.sync.held-released"));
+});
+
+test("a device the hub no longer holds enough for starts again from the hub's copy and reads on from there", async (t) => {
+  const s = await setup(t);
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine);
+  await s.desktop.log.appendLocalEvent(createdChat("chat-s"));
+  for (const n of [2, 3]) await s.desktop.log.appendLocalEvent(change("chat-s", n));
+  const desktopSync = s.link(s.desktop, []);
+  await pushAll(desktopSync, s, 3);
+  await s.folder.idle();
+  // The machine is taken off and put back (its place released), and the
+  // hub forgot what everyone else had read meanwhile.
+  await s.hubStore.storage.hub().recordRead(s.desktop.identity.originId, 3, { from: 0, count: 0 }, new Date().toISOString());
+  await s.hubStore.storage.hub().replaceRoster([], new Date().toISOString());
+  s.server.invalidateRoster();
+  await new HubRetention({ storage: s.hubStore.storage, config: { ...HUB_RETENTION_DEFAULTS }, now: () => Date.now() + 40 * DAY }).runOnce();
+  await addMachine(s, machine);
+  const merged: CopiedConversation[] = [];
+  const applied: ChatEventEnvelope[] = [];
+  const logs: string[] = [];
+  const machineSync = s.link(machine, applied, { mergeCopy: async (copied) => { merged.push(copied); }, log: (event) => logs.push(event) });
+  machineSync.start();
+  await until(() => logs.includes("hub.sync.resync.finished"));
+  await machineSync.idle();
+  assert.deepEqual(merged.map((copied) => copied.id), ["chat-s"]);
+  assert.equal(await machine.storage.hub().clientState("pulled-hub-seq"), "3");
+  // From there it reads on as usual.
+  await s.desktop.log.appendLocalEvent(change("chat-s", 4));
+  desktopSync.nudgePush();
+  await until(() => applied.length === 1);
+  assert.equal(applied[0].originSeq, 4);
+  assert.equal(logs.filter((event) => event === "hub.sync.resync.started").length, 1, "once");
+});
+
+test("starting again merges every chat of the hub's copy and continues each chain from its mark", async (t) => {
+  const s = await setup(t);
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine);
+  await s.desktop.log.appendLocalEvent(createdChat("chat-c"));
+  for (const n of [2, 3]) await s.desktop.log.appendLocalEvent(change("chat-c", n));
+  await pushAll(s.link(s.desktop, []), s, 3);
+  await s.folder.idle();
+  // The machine was away while all of it was forgotten.
+  await s.hubStore.storage.hub().recordRead(s.desktop.identity.originId, 3, { from: 0, count: 0 }, new Date().toISOString());
+  await s.hubStore.storage.hub().replaceRoster([], new Date().toISOString());
+  await new HubRetention({ storage: s.hubStore.storage, config: { ...HUB_RETENTION_DEFAULTS }, now: () => Date.now() + 40 * DAY }).runOnce();
+  assert.equal((await s.hubStore.storage.hub().logSize()).events, 0);
+  await addMachine(s, machine);
+  const merged: CopiedConversation[] = [];
+  const machineSync = s.link(machine, [], { mergeCopy: async (copied) => { merged.push(copied); } });
+  machineSync.start();
+  await until(() => merged.length === 1);
+  await machineSync.idle();
+  assert.equal(merged[0].id, "chat-c");
+  assert.deepEqual(merged[0].messages.map((item) => item.id), ["m2", "m3"]);
+  // The copy's mark is where this device continues the desktop's chain.
+  assert.equal(await machine.storage.deviceEvents().appliedHead(s.desktop.identity.originId, chatChangesLogScope("chat-c")), 3);
+});
+
+test("a large body is fetched only for an event this device takes", async (t) => {
+  const s = await setup(t);
+  const big = (room: string, conversationId: string) => ({
+    conversationId, logScopeId: `device:${room}:${JSON.stringify([conversationId, "actions"])}`, kind: "machine.turn.request",
+    payload: { text: `${conversationId}:${"y".repeat(90_000)}` }
+  });
+  for (const item of [big("room-2", "theirs"), big("room-1", "mine")]) {
+    await s.desktop.log.appendLocalEvent({ ...item, payload: await s.desktop.storage.deviceEventBlobs().prepare(item.payload) });
+  }
+  await pushAll(s.link(s.desktop, []), s, 2);
+  const delivered: string[] = [];
+  const phoneSync = s.link(s.phone, [], {
+    deliver: async (event, fetchBody) => {
+      if (event.conversationId === "theirs") return "not-mine";
+      await fetchBody();
+      delivered.push(event.conversationId);
+      return "delivered";
+    }
+  });
+  phoneSync.start();
+  await until(() => delivered.length === 1);
+  await phoneSync.idle();
+  const count = Number(execFileSync("sqlite3", [path.join(s.dir, "phone.sqlite3"), "select count(*) from device_event_blobs;"], { encoding: "utf8" }).trim());
+  assert.equal(count, 1, "only the body of the event it took");
+});
+
+test("a new machine starts where its copy was made, before any command of its own channel the hub holds", async (t) => {
+  const s = await setup(t);
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine, "room-1");
+  await s.desktop.log.appendLocalEvent(change("chat-n", 1));
+  // A command for the machine, queued while it was being set up.
+  await s.desktop.log.appendLocalEvent({ conversationId: "chat-n", logScopeId: "device:room-1:[\"chat-n\",\"actions\"]", kind: "machine.turn.request", payload: { n: 1 } });
+  await s.desktop.log.appendLocalEvent(change("chat-n", 2));
+  await s.desktop.log.appendLocalEvent(change("chat-n", 3));
+  await pushAll(s.link(s.desktop, []), s, 4);
+  // Its copy of the chats was made at position 4.
+  await machine.storage.hub().setClientState(CHAT_COPY_HUB_POSITION_KEY, JSON.stringify({ hubId: "hub-sync", hubSeq: 4 }));
+  const delivered: string[] = [];
+  const applied: ChatEventEnvelope[] = [];
+  const logs: Array<[string, Record<string, unknown>]> = [];
+  const machineSync = s.link(machine, applied, {
+    ownScopes: async () => ["device:room-1:"],
+    deliver: async (event) => {
+      if (!event.logScopeId.startsWith("device:")) return "not-mine";
+      delivered.push(event.kind);
+      return "delivered";
+    },
+    log: (event, payload) => logs.push([event, payload])
+  });
+  machineSync.start();
+  await until(() => delivered.length === 1);
+  await machineSync.idle();
+  assert.deepEqual(logs.find(([event]) => event === "hub.sync.started-from-copy")?.[1], { copyHubSeq: 4, hubSeq: 1 });
+  assert.deepEqual(applied.map((event) => event.originSeq), [2, 3], "what came after the start, not the start of the order");
+});
+
+test("a gap a channel finds is filled from the hub; a stretch the hub forgot is passed over", async (t) => {
+  const s = await setup(t);
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine, "room-1");
+  const scope = "device:room-1:[\"chat-g\",\"terminal:run-1\"]";
+  for (const n of [1, 2, 3]) await s.desktop.log.appendLocalEvent({ conversationId: "chat-g", logScopeId: scope, kind: "machine.turn.cancel", payload: { n } });
+  await pushAll(s.link(s.desktop, []), s, 3);
+  const delivered: number[] = [];
+  const machineSync = s.link(machine, [], {
+    deliver: async (event) => { delivered.push(event.originSeq); return "delivered"; }
+  });
+  const gap = { originId: s.desktop.identity.originId, logScopeId: scope, fromSeq: 1, toSeq: 2 };
+  assert.equal(await machineSync.repairGap(gap), "repaired");
+  assert.deepEqual(delivered, [1, 2]);
+  // Both ends read it, a day passed: the hub forgot the run.
+  await s.hubStore.storage.hub().recordRead(s.desktop.identity.originId, 3, { from: 0, count: 0 }, new Date().toISOString());
+  await s.hubStore.storage.hub().recordRead(machine.identity.originId, 3, { from: 0, count: 0 }, new Date().toISOString());
+  await new HubRetention({ storage: s.hubStore.storage, config: { ...HUB_RETENTION_DEFAULTS }, now: () => Date.now() + 2 * DAY }).runOnce();
+  assert.equal(await machineSync.repairGap(gap), "skipped");
+  assert.equal(await machine.storage.deviceEvents().appliedHead(s.desktop.identity.originId, scope), 3, "the chain continues after what was forgotten");
+});
+
+test("an event the channel refuses for good does not leave its chain waiting for it", async (t) => {
+  const s = await setup(t);
+  const machine = await store(s.dir, "machine");
+  await addMachine(s, machine, "room-1");
+  const scope = `device:room-1:${JSON.stringify(["chat-f", "actions"])}`;
+  for (const n of [1, 2]) await s.desktop.log.appendLocalEvent({ conversationId: "chat-f", logScopeId: scope, kind: "machine.turn.cancel", payload: { n } });
+  await pushAll(s.link(s.desktop, []), s, 2);
+  const delivered: number[] = [];
+  const logs: string[] = [];
+  const machineSync = s.link(machine, [], {
+    deliver: async (event) => {
+      if (event.originSeq === 1) return "refused";
+      delivered.push(event.originSeq);
+      return "delivered";
+    },
+    log: (event) => logs.push(event)
+  });
+  assert.equal(await machineSync.repairGap({ originId: s.desktop.identity.originId, logScopeId: scope, fromSeq: 1, toSeq: 1 }), "skipped");
+  assert.ok(logs.includes("hub.sync.gap-refused"));
+  assert.equal(await machine.storage.deviceEvents().appliedHead(s.desktop.identity.originId, scope), 1, "past the refused event");
+  assert.deepEqual(delivered, [], "nothing after it was asked for");
 });

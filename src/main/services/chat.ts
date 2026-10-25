@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
 import { applyChatChanges, applyHeldReactions, CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges, isSupportedChatChangesVersion, type ChatChangeApplyPolicy, type ChatChangeBaseline, type ChatChangeDiffPolicy, type ChatChangesPayload, isSafeChatId } from "./chatChanges";
+import { mergeCopiedConversation, type CopiedConversation } from "./chatCopy";
 import type {
   AgentContextUsage,
   AgentHealth,
@@ -19858,6 +19859,40 @@ export class ChatService {
     this.waitingChatChanges.delete(event.eventId);
     this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
     return "applied";
+  }
+
+  /**
+   * One chat of the User's server's copy, for a device that starts again
+   * from it (events it needed were forgotten while it was away, or a chain
+   * of this chat's changes was): merged the way a machine merges its first
+   * copy. The copy's shared content wins; this device keeps its own run
+   * bookkeeping, sessions and what it wrote itself. Saved without being
+   * announced (it is nobody's new change), and a chat deleted here stays
+   * deleted.
+   */
+  async mergeServerCopy(copied: CopiedConversation, options: { desktopOriginId: string; localOriginId?: string }): Promise<void> {
+    if (this.deletedConversationIds.has(copied.id) || await this.storage.conversationTombstones?.().isDeleted(copied.id)) return;
+    const merge = (local: Conversation | undefined): Conversation => mergeCopiedConversation(local, copied, {
+      desktopOriginId: options.desktopOriginId,
+      ...(options.localOriginId ? { localOriginId: options.localOriginId } : {}),
+      ...(this.hostMachineId ? { hostMachineId: this.hostMachineId } : {})
+    });
+    const existing = await this.storage.getConversation(copied.id);
+    if (existing && existing.kind !== "chat") return;
+    if (!existing) {
+      await this.saveConversation(merge(undefined), { emitChanges: false });
+      return;
+    }
+    await this.withChatMutation(existing, async () => {
+      const merged = merge(existing);
+      existing.title = merged.title;
+      existing.messages = merged.messages;
+      existing.metadata = merged.metadata;
+      existing.updatedAt = merged.updatedAt;
+      if (merged.repoPath) existing.repoPath = merged.repoPath;
+      else delete existing.repoPath;
+      await this.saveConversation(existing, { emitChanges: false });
+    });
   }
 
   private clone(conversation: Conversation): Conversation {

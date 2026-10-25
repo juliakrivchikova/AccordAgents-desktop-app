@@ -21,7 +21,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { stableJson } from "../../shared/stableJson";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import type { DeviceEventApplyOutcome } from "../../shared/deviceEventDelivery";
+import type { DeviceEventApplyOutcome, DeviceEventGap } from "../../shared/deviceEventDelivery";
 import type { DeviceEventPacket } from "../../shared/deviceEventChannel";
 import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
@@ -38,6 +38,8 @@ import { CHAT_CHANGES_EVENT_KIND } from "./chatChanges";
 export interface MachinePeerFabricOptions {
   /** The User's hub carries every channel's events (see DeviceEventChannel). */
   hubMode?: boolean;
+  /** Through the hub: a channel's gap is asked of the hub (HubSync.repairGap). */
+  hubRepair?: (gap: DeviceEventGap) => void;
   selfDeviceId: string;
   storage: StorageService;
   eventLog: ChatEventLogService;
@@ -302,9 +304,9 @@ export class MachinePeerFabric {
   /** Hands an event from the hub's order to the channel of the peer that
    *  wrote it; a peer on the roster whose channel is still being set up has
    *  the event held for it. */
-  async receiveFromHub(event: ChatEventEnvelope): Promise<HubDeliverOutcome> {
+  async receiveFromHub(event: ChatEventEnvelope, fetchBody?: () => Promise<void>): Promise<HubDeliverOutcome> {
     for (const connection of this.connections.values()) {
-      if (connection.channel.accepts(event)) return deliverToChannel(connection.channel, event);
+      if (connection.channel.accepts(event)) return deliverToChannel(connection.channel, event, fetchBody);
     }
     return this.wanted.has(event.originId) && !this.connections.has(event.originId) ? "not-ready" : "not-mine";
   }
@@ -351,7 +353,7 @@ export class MachinePeerFabric {
       // Another machine whose runtime cannot fold chat changes yet keeps them
       // queued here until the roster says it can.
       heldKinds: () => peer.role === "machine" && peer.chatChanges !== true ? [CHAT_CHANGES_EVENT_KIND] : [],
-      ...(this.options.hubMode ? { hubMode: true } : {}),
+      ...(this.options.hubMode ? { hubMode: true, ...(this.options.hubRepair ? { hubRepair: this.options.hubRepair } : {}) } : {}),
       send,
       apply: (event, payload) => {
         if (this.connections.get(peer.deviceId)?.peer !== peer) throw new Error("Machine peer authorization changed.");

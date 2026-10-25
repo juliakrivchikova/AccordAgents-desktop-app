@@ -63,6 +63,10 @@ export interface HubSetupState {
   skipped?: HubSetupStep[];
   /** Whether the desktop's live link to the hub is up right now. */
   reachable?: boolean;
+  /** Plain lines about the server's readers: a device that has not read
+   *  from it for a long time (the server keeps everything it has not read:
+   *  start it or remove it), or changes held for a long time. */
+  notices?: string[];
   /** The region to offer for a new server: the one AWS is used in already. */
   defaultRegion?: string;
   updatedAt?: string;
