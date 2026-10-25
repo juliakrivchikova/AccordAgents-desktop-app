@@ -159,6 +159,7 @@ export class HubSync {
   private resyncNotBefore = 0;
   private resyncFailures = 0;
   private resyncProgress?: ResyncProgress;
+  private caughtUp = false;
   private readonly repairing = new Set<string>();
   private repairQueue: Promise<void> = Promise.resolve();
 
@@ -504,6 +505,11 @@ export class HubSync {
         await hub.setClientState(PULLED_KEY, String(cursor));
       }
       if (cursor >= response.head || !moved) break;
+    }
+    if (!this.caughtUp) {
+      // Once per run: how much this device read to reach the order's head.
+      this.caughtUp = true;
+      this.options.log?.("hub.sync.caught-up", { cursor, bytes: this.options.client.receivedBytes });
     }
     await this.retryHeld();
   }
