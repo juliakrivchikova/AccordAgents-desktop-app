@@ -118,7 +118,8 @@ export class HubPush {
     const head = await hub.noticeHead();
     if (head === 0) return;
     for (const device of (await hub.devices()).filter((item) => item.role === "phone")) {
-      const seen = await hub.phoneSeenNotice(device.deviceId);
+      // Past what it saw and what it was already rung for.
+      const seen = Math.max(await hub.phoneSeenNotice(device.deviceId), await hub.phoneRungNotice(device.deviceId));
       if (seen >= head) continue;
       const unseen = (await hub.notices(seen, 50)).filter((notice) => scopeCovers(device.scope, notice.conversationId) &&
         this.now() - Date.parse(notice.createdAt) < REARM_WITHIN_MS);
@@ -161,6 +162,7 @@ export class HubPush {
     const subscriptions = (await hub.pushSubscriptions()).filter((subscription) => subscription.deviceId === deviceId);
     if (subscriptions.length === 0) return;
     this.lastSentAt.set(deviceId, this.now());
+    await hub.setPhoneRungNotice(deviceId, noticeSeq, new Date(this.now()).toISOString()).catch(() => undefined);
     for (const subscription of subscriptions) {
       try {
         const audience = new URL(subscription.endpoint).origin;

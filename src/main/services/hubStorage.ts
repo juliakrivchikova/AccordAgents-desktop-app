@@ -112,7 +112,8 @@ export const HUB_SCHEMA_SQL = `
 /** Columns added to tables an older hub created. */
 const HUB_ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }> = [
   { table: "hub_devices", column: "scope_json", definition: "text" },
-  { table: "hub_devices", column: "invite_id", definition: "text" }
+  { table: "hub_devices", column: "invite_id", definition: "text" },
+  { table: "hub_phone_state", column: "rung_notice_seq", definition: "integer not null default 0" }
 ];
 
 /** A notice the hub keeps for a phone's notification. */
@@ -225,6 +226,20 @@ export class HubStorage {
    * without those `skipOriginId` wrote (a device does not read its own back).
    * `through` is how far the page covers, skipped events included.
    */
+  /** The newest events of these kinds in the order (at most `limit`, the
+   *  oldest of them first). */
+  async newestOfKinds(kinds: string[], limit: number): Promise<HubLoggedEvent[]> {
+    if (kinds.length === 0) return [];
+    await this.init();
+    const rows = await this.database.query<{ hubSeq: number; envelope: string }>(`
+      select hubSeq, envelope from (
+        select l.hub_seq as hubSeq, e.envelope_json as envelope from hub_log l join chat_events e on e.event_id = l.event_id
+        where l.kind in (${kinds.map(quote).join(", ")}) order by l.hub_seq desc limit ${Math.max(1, Math.min(Math.floor(limit), HUB_STORAGE_PAGE_MAX))}
+      ) order by hubSeq;
+    `);
+    return rows.map((row) => ({ hubSeq: Number(row.hubSeq), event: JSON.parse(row.envelope) as ChatEventEnvelope }));
+  }
+
   async pull(afterSeq: number, limit: number, skipOriginId?: string): Promise<{ events: HubLoggedEvent[]; through: number }> {
     await this.init();
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("Invalid hub position.");
@@ -474,6 +489,21 @@ export class HubStorage {
     await this.init();
     const rows = await this.database.query<{ seq: number }>(`select seen_notice_seq as seq from hub_phone_state where device_id = ${quote(deviceId)};`);
     return Number(rows[0]?.seq ?? 0) || 0;
+  }
+
+  /** The newest notice a phone was rung for (kept across restarts). */
+  async phoneRungNotice(deviceId: string): Promise<number> {
+    await this.init();
+    const rows = await this.database.query<{ seq: number }>(`select rung_notice_seq as seq from hub_phone_state where device_id = ${quote(deviceId)};`);
+    return Number(rows[0]?.seq ?? 0) || 0;
+  }
+
+  async setPhoneRungNotice(deviceId: string, seq: number, now: string): Promise<void> {
+    await this.init();
+    await this.database.execute(`
+      insert into hub_phone_state(device_id, seen_notice_seq, rung_notice_seq, updated_at) values (${quote(deviceId)}, 0, ${Math.max(0, Math.floor(seq))}, ${quote(now)})
+      on conflict(device_id) do update set rung_notice_seq = max(rung_notice_seq, excluded.rung_notice_seq), updated_at = excluded.updated_at;
+    `);
   }
 
   async setPhoneSeenNotice(deviceId: string, seq: number, now: string): Promise<void> {

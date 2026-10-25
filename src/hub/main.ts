@@ -12,7 +12,7 @@ import { HubLog } from "./hubLog";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
 import { HubRelayMailboxes, HubRelayRooms } from "./hubRelay";
 import { HubChangeFeed, HubPhoneApi } from "./hubPhone";
-import { HubProgress, HubWaker, approvalNotice, foldApprovalCards, phoneMessageHomes, replyNotice } from "./hubPhoneState";
+import { HUB_CARD_EVENT_KINDS, HubProgress, HubWaker, approvalNotice, foldApprovalCards, phoneMessageHomes, replyNotice } from "./hubPhoneState";
 import { HUB_APPROVAL_CARD_EVENT_KIND } from "../shared/hubProtocol";
 import { HubServer } from "./hubServer";
 
@@ -197,6 +197,17 @@ export function composeHub(options: {
     server, folder, push, waker, feed, progress, phone: phoneApi, hubLog,
     /** Resolves once the phone's views have taken in what was placed so far. */
     viewsIdle: async () => { await views; },
+    /** At start: the cards of the newest card events are folded again, so
+     *  a card placed just before a stop (or before this program kept cards)
+     *  is shown. Nobody is rung for them again. */
+    catchUpCards: async () => {
+      views = views.then(async () => {
+        const events = await storage.hub().newestOfKinds(HUB_CARD_EVENT_KINDS, 1_000);
+        await foldApprovalCards(storage, events);
+        for (const conversationId of new Set(events.map((item) => item.event.conversationId))) feed.note(conversationId);
+      }).catch((error) => log("hub.phone-views.catch-up-error", { message: error instanceof Error ? error.message : String(error) }));
+      await views;
+    },
     close: async () => {
       push.close();
       waker.close();
@@ -260,6 +271,7 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
   // certificate, the health check the setup reads.
   await server.listenHttp(args.httpPort, args.host, { openOnly: !args.insecureHttp });
   await folder.start();
+  await hub.catchUpCards();
   // Rings the stopped program had scheduled and did not ring.
   await hub.push.rearm().catch((error: unknown) => log("hub.push.rearm-error", { message: error instanceof Error ? error.message : String(error) }));
   log("hub.started", { version: HUB_VERSION, https, httpPort: args.httpPort });

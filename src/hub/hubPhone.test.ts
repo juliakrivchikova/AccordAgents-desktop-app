@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
@@ -473,4 +474,64 @@ test("the server gives up starting a machine that does not read its work after a
   }
   assert.equal(calls, 3, "three starts for the same unread work, then no more");
   assert.equal((await waker.status())[0].waking, false);
+});
+
+test("a card placed before the server stopped is shown after it starts, without ringing again", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await seedChat(h, machine);
+  const { client } = await pairPhone(h);
+  const approval: ChatAppToolApproval = {
+    id: "approval-restart", conversationId: "chat-1", requesterParticipantId: machineMember.id, requesterHandle: "box", requesterRoleConfigId: "software-engineer",
+    toolName: "Bash", capability: "artifacts.write" as ChatAppToolApproval["capability"], status: "pending", request: {} as ChatAppToolApproval["request"],
+    summary: "Run a command", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), homeMachineId: "m-1"
+  };
+  const event = createSignedChatEvent(machine, { conversationId: "chat-1", logScopeId: `device:rv-1:["chat-1","approval:approval-restart"]`, kind: "machine.approval.requested",
+    payload: { type: "machine.approval.requested", conversationId: "chat-1", approval }, originSeq: 1, createdAt: new Date().toISOString() });
+  await h.call(machine, "POST", "/v1/events", { events: [event] });
+  await h.settle();
+  // As if the program had stopped before its views took the card in.
+  execFileSync("sqlite3", [path.join(h.dir, "hub.sqlite3"), "delete from hub_approval_cards;"]);
+  assert.deepEqual((await client.getJson<{ cards: unknown[] }>("/v1/phone/timeline", { conversationId: "chat-1" })).cards, []);
+  const rungBefore = h.rings.length;
+  await h.catchUpCards();
+  const timeline = await client.getJson<{ cards: Array<{ id: string; status: string }> }>("/v1/phone/timeline", { conversationId: "chat-1" });
+  assert.deepEqual(timeline.cards.map((card) => [card.id, card.status]), [["approval-restart", "pending"]]);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(h.rings.length, rungBefore);
+});
+
+test("a phone paired again is rung once, under its new key", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await seedChat(h, machine);
+  const first = await pairPhone(h);
+  const second = await pairPhone(h);
+  const subscription = { endpoint: "https://fcm.googleapis.com/fcm/send/same-browser", keys: { p256dh: "x", auth: "y" } };
+  await first.client.registerPushSubscription(subscription);
+  await second.client.registerPushSubscription(subscription);
+  const held = (await h.storage.hub().pushSubscriptions()).filter((item) => item.endpoint === subscription.endpoint);
+  assert.deepEqual(held.map((item) => item.deviceId), [second.identity.deviceId]);
+});
+
+test("after a restart the server rings a phone for what it missed, not again for what it was rung for", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await seedChat(h, machine);
+  const { client, identity } = await pairPhone(h);
+  await client.registerPushSubscription({ endpoint: "https://fcm.googleapis.com/fcm/send/restart", keys: { p256dh: "x", auth: "y" } });
+  const notice = { conversationId: "chat-1", kind: "reply" as const, title: "Work", body: "@box replied.", createdAt: new Date().toISOString() };
+  const first = await h.storage.hub().addNotice(notice);
+  await h.push.noteNotice({ seq: first, conversationId: "chat-1" });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(h.rings.length, 1);
+  // The program stops before it rings for the next one.
+  await h.storage.hub().addNotice(notice);
+  await h.push.rearm();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(h.rings.length, 2, "rung for the one it missed");
+  await h.push.rearm();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(h.rings.length, 2, "and not again");
+  assert.equal(await h.storage.hub().phoneRungNotice(identity.deviceId), first + 1);
 });

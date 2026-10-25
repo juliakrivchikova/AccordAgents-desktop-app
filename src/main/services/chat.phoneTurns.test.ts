@@ -225,3 +225,25 @@ test("@member /compact from the phone compacts that member at its home, as typed
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
+
+test("a /goal for two members from the phone is refused in the chat, once, as on the desktop", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-phone-goal-"));
+  try {
+    const phone = createChatEventDeviceIdentity(new Date().toISOString());
+    const desktop = await device(path.join(directory, "desktop.sqlite3"), "desktop", phone.originId);
+    await (desktop.service as unknown as { saveConversation(conversation: Conversation): Promise<void> }).saveConversation(chat());
+    const messageId = randomUUID();
+    const message: ChatMessage = { id: messageId, role: "user", content: "@taylor @drew /goal ship the release", createdAt: "2026-10-25T08:06:00.000Z", status: "done",
+      metadata: { deliveryTargets: [local.id, remote.id], threadId: messageId } as ChatMessage["metadata"] };
+    const { envelope, payload } = phoneMessage(phone, 1, undefined, message);
+    await desktop.service.applyRemoteChatChanges(envelope, payload);
+    await settle();
+    await desktop.service.startPhoneTurns("chat-phone", [message]);
+    await settle();
+    assert.equal(desktop.started.length, 0);
+    const stored = await desktop.storage.getConversation("chat-phone");
+    assert.equal(stored?.messages.filter((item) => item.role === "system" && item.content === "/goal requires exactly one resolved chat member.").length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});

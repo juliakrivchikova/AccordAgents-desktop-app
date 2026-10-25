@@ -519,7 +519,13 @@ export class HubServer {
         if (!isAllowedPushEndpoint(endpoint)) throw new HubRequestError(400, "That push endpoint is not accepted.");
         // Stored as the URL parser wrote it, never as sent.
         const normalized = new URL(endpoint).href;
-        await this.options.storage.hub().savePushSubscription(device.deviceId, normalized, JSON.stringify({ ...parsed.subscription, endpoint: normalized }), new Date(this.now()).toISOString());
+        const hub = this.options.storage.hub();
+        await hub.savePushSubscription(device.deviceId, normalized, JSON.stringify({ ...parsed.subscription, endpoint: normalized }), new Date(this.now()).toISOString());
+        // One endpoint is one browser: a phone paired again under a new key
+        // is rung once, as itself, not again for the key it had before.
+        for (const other of (await hub.pushSubscriptions()).filter((item) => item.endpoint === normalized && item.deviceId !== device.deviceId)) {
+          await hub.deletePushSubscription(other.deviceId, other.endpoint);
+        }
         return json(response, 200, { ok: true });
       }
       if (url.pathname === "/v1/phone-links") {

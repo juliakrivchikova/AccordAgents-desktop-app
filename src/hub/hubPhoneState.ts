@@ -15,6 +15,8 @@ import type { StorageService } from "../main/services/storage";
 
 const MACHINE_PROGRESS_KIND = "machine.turn.progress.delta";
 const MACHINE_APPROVAL_KINDS = new Set(["machine.approval.requested", "machine.approval.updated"]);
+/** Every kind a card is folded from. */
+export const HUB_CARD_EVENT_KINDS = [...MACHINE_APPROVAL_KINDS, HUB_APPROVAL_CARD_EVENT_KIND];
 
 /** A run's live progress as the hub folded it from its author's frames. */
 interface LiveRun {

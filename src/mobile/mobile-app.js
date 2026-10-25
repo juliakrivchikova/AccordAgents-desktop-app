@@ -3793,9 +3793,13 @@
       const identity = pending && pending.tokenHash === tokenHash && pending.identity ? pending.identity : await api.createHubDeviceIdentity();
       await writeMetaRecord(HUB_PENDING_IDENTITY_META_KEY, { tokenHash: tokenHash, identity: identity });
       const answer = await api.enrollHubPhone({ hubUrl: invite.hubUrl, hubId: invite.hubId, token: invite.token, identity: identity, name: phoneName() });
+      const before = await readMetaRecord(HUB_IDENTITY_META_KEY);
       // The key the server now knows this phone by, before the pairing that
       // names it: a pairing without its key could never sign again.
       await writeMetaRecord(HUB_IDENTITY_META_KEY, identity);
+      // A new key starts its own chains; where the old one's stood means
+      // nothing to the server for it.
+      if (!before || before.deviceId !== identity.deviceId) await forgetHubHeads();
       const pairing = { hubUrl: invite.hubUrl, hubId: invite.hubId, deviceId: identity.deviceId, scope: answer.scope, pairedAt: nowIso(), protocol: answer.protocol };
       setStoredValue(HUB_PAIRING_KEY, JSON.stringify(pairing));
       hubClientCache = undefined;
@@ -4062,6 +4066,12 @@
     throw new Error("Could not place this in the phone's queue.");
   }
 
+  function forgetHubHeads() {
+    return withNamedStore(META_STORE, "readwrite", function (store) {
+      store.delete(IDBKeyRange.bound(HUB_HEAD_META_PREFIX, HUB_HEAD_META_PREFIX + "\uffff"));
+    });
+  }
+
   /** Where this phone's chain in a scope stands, for its current identity: a
    *  phone paired again starts its chains afresh (a head without an owner is
    *  from before heads named one, so it is the identity's own). */
@@ -4074,13 +4084,19 @@
    *  minted after it in the same chain is minted again from the event before
    *  it, so one refusal does not hold every later message back. */
   async function rechainAfterRefusal(refused) {
+    return rechainFrom(refused, false);
+  }
+
+  /** The chain in this entry's scope is minted again from where the entry
+   *  stands (`including` it), or after it (it is refused). */
+  async function rechainFrom(refused, including) {
     const identity = await hubIdentity();
     const scope = refused.minted && refused.minted.logScopeId;
     if (!scope || refused.minted.originId !== identity.deviceId) return;
     const headKey = HUB_HEAD_META_PREFIX + scope;
     const later = (await listOutboxEntries()).filter(function (item) {
       return item.minted && item.minted.logScopeId === scope && item.minted.originId === identity.deviceId &&
-        item.minted.originSeq > refused.minted.originSeq && item.status !== "acked";
+        (including ? item.minted.originSeq >= refused.minted.originSeq : item.minted.originSeq > refused.minted.originSeq) && item.status !== "acked";
     });
     await eventLogPort().runAtomic([OUTBOX_STORE, META_STORE], function (tx) {
       return tx.get(META_STORE, headKey).then(function (current) {
@@ -4145,6 +4161,22 @@
         } else {
           await putOutboxEntry({ ...entry, status: "waiting-to-sync", attempts: entry.attempts + 1, updatedAt: nowIso(), lastError: result.status || "not taken" });
         }
+      }
+      // The server has nothing of a chain this phone minted further along
+      // (its record of where the chain stood was not this key's): the chain
+      // starts again at the beginning, as the server expects.
+      const restarts = new Map();
+      for (const [index, entry] of page.entries()) {
+        const result = results[index] || {};
+        if (result.status !== "gap" || Number(result.expectedSeq) !== 1 || !entry.minted || entry.minted.originSeq <= 1) continue;
+        const known = restarts.get(entry.minted.logScopeId);
+        if (!known || entry.minted.originSeq < known.minted.originSeq) restarts.set(entry.minted.logScopeId, entry);
+      }
+      for (const entry of restarts.values()) {
+        const ours = (await listOutboxEntries()).some(function (item) {
+          return item.minted && item.minted.logScopeId === entry.minted.logScopeId && item.minted.originId === entry.minted.originId && item.minted.originSeq === 1;
+        });
+        if (!ours) await rechainFrom({ ...entry, minted: { ...entry.minted, originSeq: 1, prevHash: undefined } }, true).catch(function () { return undefined; });
       }
       // The earliest refusal in each chain decides where it is minted again.
       const firstRefusal = new Map();

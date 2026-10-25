@@ -518,6 +518,7 @@ async function admitEnrolledPhone(event: ChatEventEnvelope): Promise<string | un
   await machineLinkService?.refreshTrustRosters().catch(() => undefined);
   hubPhonePublisher.scheduleCatalog(0);
   hubPhonePublisher.publishWakeKeys();
+  hubPhonePublisher.flushApprovals();
   return certificate.enrollment.publicKeyDerBase64;
 }
 
@@ -584,6 +585,7 @@ function publishHubRoster(): void {
     hubSync?.nudgeHeld();
     hubPhonePublisher.scheduleCatalog();
     hubPhonePublisher.publishWakeKeys();
+    hubPhonePublisher.flushApprovals();
   })().catch((error: unknown) => {
     // A machine set up while the hub was away would be refused by it: the
     // list goes up again until the hub has it.
