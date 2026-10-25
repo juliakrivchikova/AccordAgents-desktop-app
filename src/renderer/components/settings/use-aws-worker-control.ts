@@ -163,6 +163,8 @@ export function useAwsWorkerControl(settings: CloudRunsSettings, onDeleted: () =
         setFeedback({ message: next.message ?? "Deletion has not been confirmed.", failed: true, action: "delete" });
         return false;
       }
+      // Deleted; what it says beside that (cleanup warnings) stays visible.
+      if (next.message) setFeedback({ message: next.message, failed: false, action: "delete" });
       setOperation(null);
       await onDeleted();
       return true;

@@ -157,15 +157,23 @@ export interface LeavingMachine {
   machineId: string;
   instanceId: string;
   at: string;
+  /** Its instance could not be checked, because AWS refused the keys it was
+   *  made with or this computer can no longer read them: never removed by
+   *  the app, only shown. */
+  unverified?: "refused" | "unreadable";
 }
 
-function normalizeLeavingMachines(value: unknown): LeavingMachine[] | undefined {
+/** How many leaving machines are kept; one desktop has a handful. */
+const LEAVING_MACHINES_LIMIT = 50;
+
+function normalizeLeavingMachines(value: unknown, limit = LEAVING_MACHINES_LIMIT): LeavingMachine[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const text = (item: unknown): item is string => typeof item === "string" && item.trim().length > 0;
   const entries = value.filter((item): item is LeavingMachine => Boolean(item) && typeof item === "object"
     && text((item as LeavingMachine).machineId) && text((item as LeavingMachine).instanceId) && text((item as LeavingMachine).at))
-    .map((item) => ({ machineId: item.machineId, instanceId: item.instanceId, at: item.at }));
-  return entries.length ? entries.slice(-50) : undefined;
+    .map((item) => ({ machineId: item.machineId, instanceId: item.instanceId, at: item.at,
+      ...(item.unverified === "refused" || item.unverified === "unreadable" ? { unverified: item.unverified } : {}) }));
+  return entries.length ? entries.slice(-limit) : undefined;
 }
 
 function normalizeAwsWorkerGoneNotice(value: unknown): AwsWorkerGoneNotice | undefined {
@@ -4042,13 +4050,23 @@ export class SettingsService {
     return normalizeAwsWorkerGoneNotice((await this.readStored()).awsWorkerGoneNotice);
   }
 
-  /** Records machines that leave with their instance, before any is removed. */
-  async addLeavingMachines(entries: LeavingMachine[]): Promise<void> {
-    if (!entries.length) return;
+  /** Records machines that leave with their instance, before any is
+   *  removed. Returns the oldest entries the limit dropped, if any. */
+  async addLeavingMachines(entries: LeavingMachine[]): Promise<LeavingMachine[]> {
+    if (!entries.length) return [];
     const stored = await this.readStored();
-    const ids = new Set(entries.map((entry) => entry.machineId));
-    stored.leavingMachines = normalizeLeavingMachines([...(stored.leavingMachines ?? []).filter((entry) => !ids.has(entry.machineId)), ...entries]);
-    await this.writeStored(stored, true);
+    // An entry already waiting for removal (its instance was seen gone) is
+    // never turned into one the app may not remove.
+    const waiting = new Set((stored.leavingMachines ?? []).filter((entry) => !entry.unverified).map((entry) => entry.machineId));
+    const incoming = entries.filter((entry) => !(entry.unverified && waiting.has(entry.machineId)));
+    const ids = new Set(incoming.map((entry) => entry.machineId));
+    const all = normalizeLeavingMachines([...(stored.leavingMachines ?? []).filter((entry) => !ids.has(entry.machineId)),
+      ...incoming.map((entry) => structuredClone(entry))], Number.MAX_SAFE_INTEGER) ?? [];
+    const kept = all.slice(-LEAVING_MACHINES_LIMIT);
+    // A new object: a write that fails leaves the settings in memory as the
+    // disk has them.
+    await this.writeStored({ ...stored, leavingMachines: kept.length ? kept : undefined }, true);
+    return all.slice(0, all.length - kept.length);
   }
 
   async listLeavingMachines(): Promise<LeavingMachine[]> {

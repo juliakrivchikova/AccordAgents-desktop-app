@@ -16,6 +16,7 @@ export function AwsConnectSection(props: { control: AwsWorkerControl; hasCredent
   const [open, setOpen] = useState(false);
   const starting = c.busy && c.action === "setup" || c.showProgress;
   const failed = c.feedback?.failed && c.feedback.action === "setup" ? c.feedback.message : undefined;
+  const deleted = c.feedback && !c.feedback.failed && c.feedback.action === "delete" ? c.feedback.message : undefined;
   useEffect(() => { if (open && !props.hasCredentials && !c.command) void c.loadCommand(c.region); }, [open]);
   const spec = c.baseSpec;
   return (
@@ -25,6 +26,7 @@ export function AwsConnectSection(props: { control: AwsWorkerControl; hasCredent
           <div className="gen-row-text">
             <div className="gen-row-title">AWS instance</div>
             <div className="gen-row-desc">Run cloud members on your own AWS instance. AWS bills it while it runs.</div>
+            {deleted ? <div className="gen-row-desc" role="status" data-testid="aws-delete-message">{deleted}</div> : null}
             {c.status?.notice ? <div className="gen-row-desc" role="status" data-testid="aws-instance-gone-notice">{c.status.notice}</div> : null}
             {failed && !open ? <div className="gen-row-error" role="alert">Connecting failed: {failed}</div> : null}
           </div>

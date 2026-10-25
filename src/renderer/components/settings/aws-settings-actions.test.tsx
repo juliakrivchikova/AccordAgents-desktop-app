@@ -246,3 +246,17 @@ test("a clean-up that could not remove something says why, not that it is in use
   assert.match(ui.find("aws-disk-clean-dialog")?.textContent ?? "", /1 item could not be removed: Permission denied\./);
   await unmount();
 });
+
+test("a status read that loses contact with AWS does not keep an old-machine line that is gone", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: Date.now() });
+  const line = "Your old cloud machine could not be removed from this computer yet: disk full. The app tries again by itself.";
+  // The access check the page then starts by itself stays pending, so what
+  // is shown is the merged status of the failed read.
+  const ui = await mount({ status: { ...RUNNING, notice: line } as AwsWorkerStatus, start: () => new Promise(() => undefined) });
+  assert.equal(ui.find("aws-instance-notice")?.textContent, line);
+  ui.setStatus({ configured: true, handle: RUNNING.handle, message: "connect ETIMEDOUT" } as AwsWorkerStatus);
+  await ui.tick(t, 30_000);
+  assert.equal(ui.find("aws-worker-state")?.textContent, "Running · billable", "the last state AWS confirmed is kept");
+  assert.equal(ui.find("aws-instance-notice"), null);
+  await unmount();
+});
