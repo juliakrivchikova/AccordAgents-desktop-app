@@ -4,9 +4,6 @@
  * and what the desktop does with that line (it installs the hub over SSH).
  */
 
-/** The first hub program that serves the relay the phone and machines use. */
-export const HUB_RELAY_FIRST_VERSION = "1.11.2-beta.9";
-
 /** What the setup command prints for the app; the rest is base64 JSON. */
 export const HUB_SETUP_BLOB_PREFIX = "accord-hub-v1:";
 
@@ -63,6 +60,14 @@ export interface HubSetupState {
   skipped?: HubSetupStep[];
   /** Whether the desktop's live link to the hub is up right now. */
   reachable?: boolean;
+  /** Plain lines about the server's readers: a device that has not read
+   *  from it for a long time (the server keeps everything it has not read:
+   *  start it or remove it), or changes held for a long time. */
+  notices?: string[];
+  /** Lines the User may dismiss: changes a device could not apply for two
+   *  weeks and gave up on, and what the shared relay's removal took off this
+   *  desktop (shown with or without a server). */
+  dismissableNotices?: Array<{ id: string; text: string }>;
   /** The region to offer for a new server: the one AWS is used in already. */
   defaultRegion?: string;
   updatedAt?: string;

@@ -1,15 +1,16 @@
 /**
  * Machine link, desktop side (machines transport, work items 3–5).
  *
- * One relay room per enrolled machine: the desktop sits in the room as
- * `desktop`, the machine as `machine` with its device id. Every message is
- * sealed with the machine pairing's seal key and targeted at the peer's device
- * id. The desktop replicates conversations and settings to the machine and
+ * One room per enrolled machine on the User's server: the desktop sits in the
+ * room as `desktop`, the machine as `machine` with its device id. The first
+ * hello is sealed with the enrollment's key, everything after it with the
+ * pair's own key, and each message is addressed to the peer's device id;
+ * durable events travel in the server's order. The desktop replicates conversations and settings to the machine and
  * dispatches participant turns to it; the machine answers with progress and
  * the finished participant messages.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHmac, hkdfSync, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   MACHINE_LINK_PROTOCOL,
@@ -22,32 +23,38 @@ import {
   type MachineLinkStatus,
   type MachineRecord,
   type MachineSettingsSnapshot,
-  type MachineTurnFinishedBody
+  type MachineTurnCompaction,
+  type MachineTurnFinishedBody,
+  machineCompactionMessageId
 } from "../../shared/machineLink";
-import type { MachineAttachmentRequestBody, MachineScriptsOperation } from "../../shared/machineLink";
+import type { MachineAttachmentRequestBody, MachineCompactionDelegateRequest, MachineScriptsOperation } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
-import type { ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatAppToolApprovalRequest, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
-import type { MachineTurnDispatchRequest, MachineTurnDispatchResult, MachineTurnDispatcher } from "./chat";
+import type { AgentContextUsage, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatAppToolApprovalRequest, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "../../shared/types";
+import type { MachineCompactionDispatchRequest, MachineTurnDispatchRequest, MachineTurnDispatchResult, MachineTurnDispatcher } from "./chat";
+import { stableJson } from "../../shared/stableJson";
 import type { DebugLogService } from "./debugLogs";
-import { sealMobileRelayPayload } from "./mobileRelaySealing";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
-import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
-import { RelayTunnelClient, type TunnelClient } from "./relayTunnelClient";
+import { openMachinePayload, sealChannelPayload, sealMachinePayload } from "./machineChannelSealing";
+import type { TunnelClient } from "./hubTunnelClient";
 import { signMachineControl, verifyMachineControl } from "./machineControlAuthentication";
 import type { SettingsService } from "./settings";
 import { isMachineDurableMessage, machineCommandId, machineSigningKey } from "../../shared/machineLink";
 import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
 import { deliverToChannel, type HubDeliverOutcome } from "./hubSync";
+import { hubWebSocketUrl } from "../../shared/hubProtocol";
+import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import type { ChatEventLogService } from "./chatEventLog";
 import type { StorageService } from "./storage";
 import type { ChatActionApplier } from "./chatActionApplier";
 import { permissionDecisionAction, choiceDecisionAction, chatActionEventId } from "./chatActionEmitter";
 import type { ChatActionDependency } from "../../shared/deviceEventChannel";
+import type { DeviceEventGap } from "../../shared/deviceEventDelivery";
 import type { MachineTrustRoster, TrustedPeerAccess } from "../../shared/machineTrust";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import { CHAT_CHANGES_EVENT_KIND, CHAT_CHANGES_VERSION, isChatChangesLogScope, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
+import { CHAT_CHANGES_EVENT_KIND, CHAT_CHANGES_VERSION, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
+import type { MachineRecoveryLinkState } from "./machineRecovery";
 
 export interface MachineLinkOptions {
   repositoryPaths?: (sourcePath: string) => Promise<Record<string, string>>;
@@ -55,17 +62,14 @@ export interface MachineLinkOptions {
   desktopDeviceId: string;
   eventStorage: StorageService;
   eventLog: ChatEventLogService;
-  reconnectDelayMs?: number;
-  /** Builds the client for one machine's room (the hub's rooms, a test
-   *  stand-in); undefined leaves that machine on the relay. */
+  /** Builds the client for one machine's room on the User's server (a test
+   *  stand-in in tests); undefined when this desktop has no server. */
   createClient?: (pairing: MobilePairingPackage) => TunnelClient | undefined;
-  /** Builds the short-lived client that looks for a machine at another
-   *  address (tests); the relay's own client by default. */
-  createProbeClient?: (pairing: MobilePairingPackage) => Pick<TunnelClient, "on" | "connect" | "close">;
-  /** The User's hub carries the events of machines enrolled with it: their
-   *  channels deliver nothing themselves and forward nothing (every device
-   *  reads the hub's order). A machine enrolled with the relay keeps it. */
-  hubMode?: boolean;
+  /** Through the hub: a channel's gap is asked of the hub (HubSync.repairGap). */
+  hubRepair?: (gap: DeviceEventGap) => void;
+  /** A machine's channel is up: events of it held while it was not are
+   *  offered again (HubSync.nudgeHeld). */
+  onChannelReady?: () => void;
   /** The set of machines (or their keys) changed: whoever admits devices by
    *  key, the User's hub, is told again. */
   onDevicesChanged?: () => void;
@@ -81,6 +85,9 @@ export interface MachineLinkOptions {
     relaySealKeyBase64?: string;
     fingerprint: string;
   }) => Promise<TrustedPeerAccess[]>;
+  /** Phone invites the owner has settled: told to every machine with its
+   *  roster, so a phone enrolled with one is trusted only while listed. */
+  resolvedInviteIds?: () => Promise<string[]>;
   /** Produces the state a peer says a held action of its own is waiting for,
    *  by re-emitting the action that carries it. */
   serveChatActionDependency?: (dependency: ChatActionDependency) => Promise<boolean>;
@@ -106,6 +113,8 @@ export interface MachineApprovalEvent {
   approval: ChatAppToolApproval;
   policies?: ChatAppToolApprovalPolicy[];
   decisionId?: string;
+  /** With `decisionId`: whether the machine applied that decision. */
+  decisionApplied?: boolean;
 }
 
 function cleanBackgroundLabels(labels: unknown[]): string[] {
@@ -145,7 +154,16 @@ export interface MachineLateTerminalEvent {
   error?: string;
   finishedAt?: string;
   receiptId?: string;
+  /** The member the run was for, and its context use after it. */
+  participantId?: string;
+  contextUsage?: AgentContextUsage;
+  /** The run was a compaction of that member. */
+  compaction?: { triggeredBy: "user" | "agent" };
 }
+
+/** A member on a machine asked to compact its own context; the desktop runs
+ *  it as one the User asked for. */
+export type MachineCompactionDelegateEvent = MachineCompactionDelegateRequest & { machineId: string };
 
 interface MachineConnection {
   eventChannel?: DeviceEventChannel;
@@ -154,9 +172,6 @@ interface MachineConnection {
   client: TunnelClient;
   machineDeviceId?: string;
   settingsSynced: boolean;
-  /** What the settings last sent to this machine said, so a save that did not
-   *  change anything a machine uses sends nothing. */
-  settingsKey?: string;
   pendingTurns: Map<string, {
     resolve: (result: MachineTurnDispatchResult) => void;
     progress?: (progress: ReviewProgress) => void;
@@ -202,15 +217,15 @@ interface MachineConnection {
   /** Monotonic start counter of the newest runtime instance seen (preferred
    *  over the wall-clock start time). */
   latestInstanceSequence?: number;
-  /** Requests waiting for the machine's answer: scheduled scripts, a move. */
+  /** Requests waiting for the machine's answer (scheduled scripts). */
   pendingScripts: Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>;
+  /** Settings and roster publications to this machine, one at a time, each
+   *  deciding from what the previous one recorded. */
+  publication?: Promise<void>;
 }
 
 /** How long a scheduled-script request waits for the machine's answer. */
 const SCRIPTS_REQUEST_TIMEOUT_MS = 20_000;
-/** A move's answer waits for the machine to settle what it already took in
- *  (sending what it owes included), so it gets longer than a script request. */
-const TRANSPORT_MOVE_TIMEOUT_MS = 60_000;
 
 /** A machine as Settings → Scripts sees it. */
 export interface MachineScriptHost {
@@ -253,9 +268,9 @@ export function machineActivityIsBusy(activity: MachineActivity): boolean {
   return activity.activeRunIds.length > 0 || activity.pendingTerminalRunIds.length > 0 || activity.dispatchedRunIds.length > 0;
 }
 
-/** Where a machine's devices meet: its relay, or the rooms of the User's hub. */
-function meetingUrl(pairing: Pick<MobilePairingPackage, "relayUrl" | "hubUrl">): string {
-  return pairing.relayUrl ?? (pairing.hubUrl ? pairing.hubUrl.replace(/\/+$/, "").replace(/^http/, "ws") : "");
+/** Where a machine's devices meet: the rooms of the User's server. */
+function meetingUrl(pairing: Pick<MobilePairingPackage, "hubUrl">): string {
+  return pairing.hubUrl ? hubWebSocketUrl(pairing.hubUrl, "") : "";
 }
 
 export class MachineLinkService implements MachineTurnDispatcher {
@@ -268,11 +283,12 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private readonly suggestionListeners: Array<(event: MachinePromptSuggestionEvent) => void> = [];
   private readonly backgroundListeners: Array<(event: MachineMemberBackgroundEvent) => void> = [];
   private readonly participantRequestListeners: Array<(request: { machineId: string; conversationId: string; requestMessageId: string; depth: number; targetParticipantIds?: string[] }) => Promise<void> | void> = [];
+  private readonly compactionDelegateListeners: Array<(event: MachineCompactionDelegateEvent) => Promise<void> | void> = [];
   private readonly backDeltaListeners: Array<(delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void> = [];
   private readonly deletionListeners: Array<(event: MachineConversationDeletedBody) => Promise<void>> = [];
   private conversationLoader?: (conversationId: string) => Promise<Conversation | undefined>;
   private readonly connections = new Map<string, MachineConnection>();
-  /** Turns held for a machine (an update, a move), by machine id. */
+  /** Turns held for a machine (an update), by machine id. */
   private readonly turnHolds = new Map<string, { reason: string; released: Promise<void>; release: () => void; holders: number }>();
   /** Every enrolled machine, read from settings before any connects: a chat
    *  saved while the link is still starting (or for a machine whose
@@ -344,6 +360,17 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return () => {
       const index = this.participantRequestListeners.indexOf(listener);
       if (index >= 0) this.participantRequestListeners.splice(index, 1);
+    };
+  }
+
+  /** A member on a machine asked to compact its own context. The listener
+   *  runs it here, as a compaction the User started, which dispatches it back
+   *  to that machine. */
+  onCompactionDelegate(listener: (event: MachineCompactionDelegateEvent) => Promise<void> | void): () => void {
+    this.compactionDelegateListeners.push(listener);
+    return () => {
+      const index = this.compactionDelegateListeners.indexOf(listener);
+      if (index >= 0) this.compactionDelegateListeners.splice(index, 1);
     };
   }
 
@@ -498,10 +525,14 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
   }
 
-  /** Reads the enrolled machines, so chat changes are addressed to all of
-   *  them from the first save on. Called before any chat activity. */
+  /** Reads the enrolled machines, so the hub's readers are known before any
+   *  chat activity. */
   async loadMachines(): Promise<void> {
-    for (const record of await this.settings.listMachines()) {
+    await this.enrollAll(await this.settings.listMachines());
+  }
+
+  private async enrollAll(records: MachineRecord[]): Promise<void> {
+    for (const record of records) {
       if (!this.connections.has(record.id)) this.enrolled.set(record.id, record);
     }
   }
@@ -509,7 +540,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
   async start(): Promise<void> {
     this.closed = false;
     const machines = await this.settings.listMachines();
-    for (const record of machines) if (!this.connections.has(record.id)) this.enrolled.set(record.id, record);
+    await this.enrollAll(machines);
     void this.debugLogs.write("machine-link.start", { machines: machines.length, desktopDeviceId: this.options.desktopDeviceId });
     for (const record of machines) {
       await this.connectMachine(record).catch((error) => {
@@ -531,19 +562,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (!pairing) {
       throw new Error(`Machine ${record.name} has no pairing package.`);
     }
-    const injected = this.options.createClient?.(pairing);
-    if (!injected && !pairing.relayUrl) {
-      throw new Error(`Machine ${record.name} pairing has neither a relay nor a hub.`);
-    }
-    const client = injected ?? new RelayTunnelClient({
-      relayUrl: pairing.relayUrl ?? "",
-      rendezvousId: pairing.rendezvousId,
-      role: "desktop",
-      deviceId: this.options.desktopDeviceId,
-      capability: pairing.fingerprint,
-      streamId: `${pairing.stableRoutingId}:machine`,
-      reconnectDelayMs: this.options.reconnectDelayMs
-    });
+    // A machine is reached in its room on the User's server, nowhere else.
+    const client = pairing.hubUrl ? this.options.createClient?.(pairing) : undefined;
+    if (!client) throw new Error(`${record.name} is not set up with your server; choose Cloud run in a member's settings to set it up again.`);
     const connection: MachineConnection = {
       record,
       pairing,
@@ -564,7 +585,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
     this.connections.set(record.id, connection);
     if (record.deviceId && record.lastHello?.publicKeyDerBase64) {
       // A machine can post its reply and stop before this desktop returns.
-      // The pinned identity lets the mailbox deliver without a new live hello.
+      // The pinned identity lets its events be taken from the server's order
+      // without a new live hello.
       await this.initializeEventChannel(connection, record.deviceId, record.lastHello.publicKeyDerBase64);
       connection.eventChannel?.start();
       // Recover the latest local grant/revocation without waiting for a live
@@ -587,7 +609,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
         const machine = event.peers.find(isThisMachine);
         this.setMachinePeer(connection, machine?.deviceId);
       } else if (event.type === "peer-connected" && isThisMachine(event.peer)) {
-        this.setMachinePeer(connection, event.peer.deviceId);
+        // Connected again (also in the seat of a connection the server had not
+        // seen close): what it knows now is asked afresh, not assumed.
+        if (connection.machineDeviceId === event.peer.deviceId) this.machineReturned(connection);
+        else this.setMachinePeer(connection, event.peer.deviceId);
       } else if (event.type === "peer-disconnected" && isThisMachine(event.peer)) {
         this.setMachinePeer(connection, undefined);
       }
@@ -639,137 +664,14 @@ export class MachineLinkService implements MachineTurnDispatcher {
     this.emitStatus();
   }
 
-  /** Whether turns for this machine are being held (an update, a move). */
+  /** Whether turns for this machine are being held (an update). */
   hasTurnHold(machineId: string): boolean {
     return this.turnHolds.has(machineId);
   }
 
-  /** Whether this machine's runtime can move to another relay address. */
-  supportsTransportMove(machineId: string): boolean {
-    return this.connections.get(machineId)?.record.lastHello?.transportMoveSupported === true;
-  }
-
-  /** Tells a machine to meet this desktop at another relay address from now
-   *  on (the User's own server). "moved": it saved the address and restarts.
-   *  "refused": it said no and nothing changed. "unknown": no answer came,
-   *  and it may have moved all the same. The caller saves the new pairing
-   *  and reconnects. */
-  async requestTransportMove(machineId: string, addresses: { relayUrl: string; outboxUrl: string }, timeoutMs = TRANSPORT_MOVE_TIMEOUT_MS): Promise<{ status: "moved" | "refused" | "unknown"; error?: string }> {
-    const connection = this.connections.get(machineId);
-    if (!connection?.machineDeviceId) return { status: "refused", error: "That machine is not connected right now." };
-    const hello = connection.record.lastHello;
-    if (hello?.transportMoveSupported !== true) return { status: "refused", error: `${connection.record.name} runs an older runtime that cannot move.` };
-    const requestId = randomUUID();
-    const answer = new Promise<{ status: "moved" | "refused" | "unknown"; error?: string }>((resolve) => {
-      const timer = setTimeout(() => {
-        connection.pendingScripts.delete(requestId);
-        resolve({ status: "unknown", error: `${connection.record.name} did not answer in time.` });
-      }, timeoutMs);
-      timer.unref?.();
-      connection.pendingScripts.set(requestId, {
-        resolve: () => resolve({ status: "moved" }),
-        // The machine's own no is a refusal; a link that went away is not.
-        reject: (error) => resolve({ status: error instanceof MachineRefusal ? "refused" : "unknown", error: error.message }),
-        timer
-      });
-    });
-    try {
-      await this.send(connection, { type: "machine.transport.move", requestId,
-        ...(hello.instanceId ? { instanceId: hello.instanceId } : {}),
-        expiresAt: new Date(this.now().getTime() + timeoutMs).toISOString(), answerWithinMs: timeoutMs, ...addresses });
-    } catch (error) {
-      const pending = connection.pendingScripts.get(requestId);
-      if (pending) {
-        clearTimeout(pending.timer);
-        connection.pendingScripts.delete(requestId);
-      }
-      // Not sent: the machine cannot have moved.
-      return { status: "refused", error: errorMessage(error) };
-    }
-    return answer;
-  }
-
-  /** Where this desktop's link to a machine is now, whether the machine is
-   *  there and greeted this connection, and which runtime run greeted last. */
-  machinePresence(machineId: string): { relayUrl?: string; present: boolean; instanceId?: string } | undefined {
-    const connection = this.connections.get(machineId);
-    if (!connection) return undefined;
-    return {
-      ...(connection.pairing.relayUrl ? { relayUrl: connection.pairing.relayUrl } : {}),
-      present: Boolean(connection.machineDeviceId) && connection.helloSeen,
-      ...(connection.record.lastHello?.instanceId ? { instanceId: connection.record.lastHello.instanceId } : {})
-    };
-  }
-
-  /** Whether the machine is in its room at another relay address right now.
-   *  Asked with a connection of its own under a device id the machine does
-   *  not answer, so the link stays where it is and the machine is not
-   *  disturbed. */
-  async probeMachineAt(machineId: string, pairing: MobilePairingPackage, timeoutMs: number): Promise<boolean> {
-    const record = this.connections.get(machineId)?.record ?? this.enrolled.get(machineId);
-    const machineDeviceId = record?.deviceId || record?.lastHello?.deviceId;
-    if (!machineDeviceId || !pairing.relayUrl) return false;
-    const client = this.options.createProbeClient?.(pairing) ?? new RelayTunnelClient({
-      relayUrl: pairing.relayUrl,
-      rendezvousId: pairing.rendezvousId,
-      role: "desktop",
-      deviceId: `${this.options.desktopDeviceId}-probe`,
-      capability: pairing.fingerprint,
-      streamId: `${pairing.stableRoutingId}:machine-probe`,
-      reconnectDelayMs: 60_000
-    });
-    return new Promise<boolean>((resolve) => {
-      let done = false;
-      const finish = (found: boolean): void => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        off();
-        client.close();
-        resolve(found);
-      };
-      const timer = setTimeout(() => finish(false), timeoutMs);
-      timer.unref?.();
-      const off = client.on("peer", (event) => {
-        if (event.type === "ready" && event.peers.some((peer) => peer.deviceId === machineDeviceId)) finish(true);
-        else if (event.type === "peer-connected" && event.peer.deviceId === machineDeviceId) finish(true);
-      });
-      client.connect().catch(() => finish(false));
-    });
-  }
-
-  /** Resolves true once the machine greets this desktop (within the time). */
-  waitForHello(machineId: string, timeoutMs: number): Promise<boolean> {
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => finish(false), timeoutMs);
-      timer.unref?.();
-      const onHello = (event: { machineId: string }): void => { if (event.machineId === machineId) finish(true); };
-      const finish = (value: boolean): void => {
-        clearTimeout(timer);
-        this.emitter.off("hello", onHello);
-        resolve(value);
-      };
-      this.emitter.on("hello", onHello);
-    });
-  }
-
-  /** Connects to a machine again: from its saved pairing (it moved), or for
-   *  a while from another one (looking for it at another address). */
-  async reconnectMachine(machineId: string, pairing?: MobilePairingPackage): Promise<void> {
-    const previous = this.connections.get(machineId);
-    const record = previous?.record ?? this.enrolled.get(machineId);
-    if (!record) return;
-    // The machine is the same, only its address changed: turns waiting for
-    // its answer wait on the new connection (what this desktop sent is sent
-    // again there), instead of failing.
-    const carried = previous ? { pendingTurns: previous.pendingTurns, pendingTurnConversations: previous.pendingTurnConversations } : undefined;
-    await this.disconnectMachine(machineId, { keepTurns: true });
-    await this.connectMachine(record, pairing, carried);
-  }
-
   /** Ask a machine to do something with its scheduled scripts and wait for
    *  the answer. Ephemeral and sealed to that machine: a key value travels
-   *  only here, never in the durable event log, a mailbox or settings. */
+   *  only here, never in the durable event log, the server's order or settings. */
   async scriptsRequest(machineId: string, operation: MachineScriptsOperation, timeoutMs = SCRIPTS_REQUEST_TIMEOUT_MS): Promise<unknown> {
     const connection = this.connections.get(machineId);
     if (!connection) throw new Error("That machine is not set up on this computer.");
@@ -806,33 +708,36 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return answer;
   }
 
-  /** A machine enrolled with the User's hub, which carries its events. */
-  private viaHub(connection: MachineConnection): boolean {
-    return Boolean(this.options.hubMode && connection.pairing.hubUrl);
-  }
-
-  private readsHub(deviceId: string): boolean {
-    return [...this.connections.values()].some((connection) => connection.record.deviceId === deviceId && this.viaHub(connection));
-  }
-
-  /** The machines that read the hub (the rest are reached by the relay). */
+  /** The machines that read the User's server, connected or not: every
+   *  enrolled machine whose identity is known. */
   hubReaders(): string[] {
-    return [...this.connections.values()].filter((connection) => connection.record.deviceId && this.viaHub(connection)).map((connection) => connection.record.deviceId);
+    return this.machineRecords().filter((record) => record.deviceId).map((record) => record.deviceId);
   }
 
   /**
    * An event the hub's order brought, to the channel of the machine that
    * wrote it. A machine whose channel is not set up yet (this desktop just
    * started, the machine has not greeted it) has the event held for it;
-   * traffic between two other devices is not this desktop's.
+   * traffic between two other devices is not this desktop's. `fetchBody`
+   * stores the event's large body, fetched only for an event one of this
+   * desktop's machine channels takes.
    */
-  async receiveFromHub(event: ChatEventEnvelope): Promise<HubDeliverOutcome> {
+  async receiveFromHub(event: ChatEventEnvelope, fetchBody?: () => Promise<void>): Promise<HubDeliverOutcome> {
     for (const connection of this.connections.values()) {
       if (!connection.eventChannel?.accepts(event)) continue;
-      return await deliverToChannel(connection.eventChannel, event);
+      return await deliverToChannel(connection.eventChannel, event, fetchBody);
     }
-    const waiting = [...this.connections.values()].some((connection) => !connection.eventChannel &&
-      (connection.record.deviceId === event.originId || event.logScopeId.startsWith(`device:${connection.pairing.rendezvousId}:`)));
+    // What an enrolled machine's channel will take is held until that
+    // channel is up, whether or not its link is open right now (it could not
+    // connect at start, or its connection is being replaced): passed over,
+    // it would be lost. Once its channel is up, what it turned away is not
+    // this desktop's (another pair's channel). Its chat changes need no
+    // channel: the server's reader applies them itself.
+    const waiting = this.machineRecords().some((record) => {
+      if (this.connections.get(record.id)?.eventChannel) return false;
+      if (event.logScopeId.startsWith(`device:${record.pairingKey}:`)) return true;
+      return Boolean(record.deviceId) && record.deviceId === event.originId && event.logScopeId === CHAT_ACTION_LOG_SCOPE;
+    });
     return waiting ? "not-ready" : "not-mine";
   }
 
@@ -918,26 +823,21 @@ export class MachineLinkService implements MachineTurnDispatcher {
     });
   }
 
-  /**
-   * Where this desktop's chat changes go: every enrolled machine, connected
-   * or not. A change is kept for each of them until it confirms; one whose
-   * runtime cannot fold changes yet is sent none (see `holdsBack`) and gets
-   * them all, in order, once it is updated, so it is never left with a gap.
-   */
+  /** Where this desktop's chat changes are addressed: nowhere. Every
+   *  machine takes them from the User's server's order, and nobody keeps a
+   *  delivery row for a reader of the server. */
   chatChangeRecipients(): Array<{ deviceId: string; channelId: string }> {
-    return this.machineRecords()
-      .filter((record) => Boolean(record.deviceId))
-      .map((record) => ({ deviceId: record.deviceId, channelId: record.pairingKey }));
+    return [];
   }
 
   /**
    * Machine setup reads the identity of the runtime it installs before it
-   * copies the chats, and records it here: from then on every chat change is
-   * addressed to that machine, although it has not connected yet.
+   * copies the chats, and records it here: from then on the User's server
+   * admits it, although it has not connected yet.
    */
   async adoptMachineIdentity(machineId: string, identity: { originId: string; publicKeyDerBase64: string }): Promise<void> {
     const connection = this.connections.get(machineId);
-    if (!connection) throw new Error("This machine is not connected to the relay from this desktop.");
+    if (!connection) throw new Error("This machine is not connected from this desktop.");
     if (connection.record.deviceId && connection.record.deviceId !== identity.originId) {
       throw new Error("The machine's enrolled device identity changed; its history cannot be accepted as the previous machine.");
     }
@@ -954,52 +854,16 @@ export class MachineLinkService implements MachineTurnDispatcher {
     });
   }
 
-  /** After a machine imported its chat copy: what was kept for it up to the
-   *  copy's marks (the desktop's changes and other machines') is confirmed
-   *  rather than sent once its runtime can read it. */
-  async confirmChatCopy(machineId: string, marks: Array<{ originId: string; logScopeId: string; originSeq: number }>): Promise<number> {
-    const record = this.machineRecord(machineId);
-    if (!record?.deviceId) return 0;
-    const confirmed = await this.options.eventStorage.deviceEvents().confirmCopied(record.pairingKey, record.deviceId, marks, this.now().toISOString());
-    void this.debugLogs.write("machine-link.copy.confirmed", { machineId, confirmed });
-    return confirmed;
-  }
-
-  /**
-   * After a machine's chat copy: changes other machines wrote that this
-   * desktop holds beyond the copy's marks go to the new machine as events.
-   * One that arrived before the new machine was known, and was not applied
-   * here when the marks were read, would otherwise reach it never.
-   */
-  async shareChatChangesAfterCopy(machineId: string, marks: Array<{ originId: string; logScopeId: string; originSeq: number }>): Promise<number> {
-    const target = this.machineRecord(machineId);
-    if (!target?.deviceId) return 0;
-    let shared = 0;
-    for (const record of this.machineRecords()) {
-      if (!record.deviceId || record.id === machineId) continue;
-      shared += await this.options.eventStorage.deviceEvents().shareChatChangesAfter(
-        record.deviceId,
-        marks.filter((mark) => mark.originId === record.deviceId),
-        { deviceId: target.deviceId, channelId: target.pairingKey }
-      );
-    }
-    if (shared) this.connections.get(machineId)?.eventChannel?.nudge();
-    return shared;
-  }
-
   /** A chat save committed change events for the machines: send them now
    *  rather than at each channel's next retry tick. */
   nudgeEventChannels(): void {
     for (const connection of this.connections.values()) connection.eventChannel?.nudge();
   }
 
-  /** Enrolled machines, including offline recipients, for one chat action. An
-   *  event minted inside another transaction cannot go through `publish`, so
-   *  its recipients are taken here and written with it. */
+  /** Who a chat action is addressed to: nobody, as for chat changes (every
+   *  machine reads the User's server). */
   chatActionRecipients(): Array<{ deviceId: string; channelId: string }> {
-    return this.machineRecords()
-      .filter((record) => Boolean(record.deviceId))
-      .map((record) => ({ deviceId: record.deviceId, channelId: record.pairingKey }));
+    return [];
   }
 
   /**
@@ -1010,7 +874,13 @@ export class MachineLinkService implements MachineTurnDispatcher {
    * and the key its events are signed with. Only this desktop sends a roster,
    * and only inside the enrolled channel, so a device cannot add itself.
    */
-  private async sendTrustRoster(connection: MachineConnection): Promise<void> {
+  private sendTrustRoster(connection: MachineConnection): Promise<void> {
+    // Built and compared one at a time: two callers must not both find it
+    // unpublished, nor an older roster leave after a newer one.
+    return this.serializePublication(connection, () => this.sendTrustRosterNow(connection));
+  }
+
+  private async sendTrustRosterNow(connection: MachineConnection): Promise<void> {
     if (this.options.desktopDeviceId !== connection.pairing.issuer.originId) return;
     const build = this.options.trustedDevices;
     if (!build) return;
@@ -1042,7 +912,6 @@ export class MachineLinkService implements MachineTurnDispatcher {
           ...(machine.chatChanges === true ? { chatChanges: true } : {}),
           relayUrl: meetingUrl(pairing),
           rendezvousId: pairing.rendezvousId,
-          outboxUrl: pairing.outboxUrl,
           fingerprint: pairing.fingerprint
         });
       }
@@ -1051,17 +920,25 @@ export class MachineLinkService implements MachineTurnDispatcher {
         rendezvousId: connection.pairing.rendezvousId,
         fingerprint: connection.pairing.fingerprint
       }));
+      const resolvedInviteIds = await this.options.resolvedInviteIds?.() ?? [];
       const roster: MachineTrustRoster = {
         version: 1,
         issuerDeviceId: identity.originId,
         updatedAt: this.now().toISOString(),
-        peers
+        peers,
+        ...(resolvedInviteIds.length ? { resolvedInviteIds } : {})
       };
+      // The same peers again are not a new roster: every one of them is a
+      // durable event the User's hub keeps, and the machine applies nothing.
+      const digest = this.publishedDigest(connection, stableJson({ version: roster.version, issuerDeviceId: roster.issuerDeviceId, peers,
+        ...(resolvedInviteIds.length ? { resolvedInviteIds } : {}) }));
+      if (digest && connection.record.published?.roster === digest) return;
       await this.send(connection, {
         type: "machine.trust.roster",
         conversationId: `machine-trust:${connection.pairing.rendezvousId}`,
         roster
       });
+      if (digest) this.notePublished(connection, { roster: digest });
       void this.debugLogs.write("machine-link.trust.sent", { machineId: connection.record.id, peers: peers.length });
     } catch (error) {
       void this.debugLogs.write("machine-link.trust.error", {
@@ -1246,7 +1123,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
    *  Each caller gets its own release; turns go on once every holder let go. */
   holdTurns(machineId: string, reason: string): () => void {
     // Kept by machine, not by connection: a hold outlives the connection
-    // being replaced (a machine moving to another address).
+    // being replaced.
     if (!this.turnHolds.has(machineId)) {
       let resolve!: () => void;
       const released = new Promise<void>((done) => { resolve = done; });
@@ -1280,11 +1157,23 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return Boolean(this.connections.get(machineId)?.machineDeviceId);
   }
 
-  /** This desktop's own way to a machine through the relay is open, so a
-   *  machine missing there is missing, not hidden by a relay or network
-   *  outage on this side. */
-  reachesRelay(machineId: string): boolean {
+  /** This desktop's own way into the machine's room on the User's server is
+   *  open, so a machine missing there is missing, not hidden by an outage on
+   *  this side. */
+  reachesRoom(machineId: string): boolean {
     return this.connections.get(machineId)?.client.currentState() === "connected";
+  }
+
+  /**
+   * Whether the machine's program is in touch, as the place they meet says:
+   * the machine's room on the User's server. "connected": the machine is
+   * there. "out-of-touch": this desktop is there and the machine is not,
+   * which the server itself reports when the machine's socket goes. "unknown": this desktop is not there
+   * either, so nothing is known about the machine.
+   */
+  presenceState(machineId: string): MachineRecoveryLinkState {
+    if (this.isMachineConnected(machineId)) return "connected";
+    return this.reachesRoom(machineId) ? "out-of-touch" : "unknown";
   }
 
   /** The enrollment package for a machine, as the installer writes it to the
@@ -1406,19 +1295,59 @@ export class MachineLinkService implements MachineTurnDispatcher {
    *  settings save). A machine that already has them is sent nothing; one
    *  that is offline gets them as a durable event, or on its next hello. */
   async syncSettings(): Promise<void> {
-    const snapshot = await this.settings.exportMachineSettingsSnapshot();
-    const key = machineSettingsKey(snapshot);
     for (const connection of this.connections.values()) {
       if (this.options.desktopDeviceId !== connection.pairing.issuer.originId) continue;
       if (!connection.eventChannel) {
         connection.settingsSynced = false;
         continue;
       }
-      if (connection.settingsKey === key) continue;
-      await this.send(connection, { type: "machine.settings.sync", snapshot });
+      await this.publishSettings(connection);
       connection.settingsSynced = true;
-      connection.settingsKey = key;
     }
+  }
+
+  /** Publishes the settings to one machine unless it was already given
+   *  exactly these (what a machine uses; the export time is not part of it).
+   *  Each publication is a ~150 KB durable event the User's hub keeps. Read
+   *  in turn, so a snapshot read before a save never leaves after a newer one. */
+  private publishSettings(connection: MachineConnection): Promise<void> {
+    return this.serializePublication(connection, async () => {
+      const snapshot = await this.settings.exportMachineSettingsSnapshot();
+      const digest = this.publishedDigest(connection, machineSettingsKey(snapshot));
+      if (digest && connection.record.published?.settings === digest) return;
+      await this.send(connection, { type: "machine.settings.sync", snapshot });
+      if (digest) this.notePublished(connection, { settings: digest });
+      void this.debugLogs.write("machine-link.settings.sent", { machineId: connection.record.id });
+    });
+  }
+
+  private serializePublication(connection: MachineConnection, task: () => Promise<void>): Promise<void> {
+    const run = (connection.publication ?? Promise.resolve()).then(task);
+    connection.publication = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /** Keyed with a key derived from the machine pairing's secret: the
+   *  settings carry the User's environment values, and their digest is stored
+   *  in plain settings with the machine record. Undefined without that
+   *  secret: then nothing is remembered and everything is published. */
+  private publishedDigest(connection: MachineConnection, content: string): string | undefined {
+    const secret = connection.pairing.relaySealKeyBase64;
+    if (!secret) return undefined;
+    const key = Buffer.from(hkdfSync("sha256", Buffer.from(secret, "base64url"), Buffer.alloc(0), "accordagents/machine-published-digest/v1", 32));
+    return createHmac("sha256", key).update(content).digest("base64url");
+  }
+
+  /** Remembers, with the machine's record, what its runtime was given. Only
+   *  after the event committed: a crash before that sends it again. */
+  private notePublished(connection: MachineConnection, part: { settings?: string; roster?: string }): void {
+    // A connection replaced or removed meanwhile does not write its record:
+    // it would bring back a removed machine, or older run records.
+    if (this.connections.get(connection.record.id) !== connection) return;
+    connection.record = { ...connection.record, published: { ...connection.record.published, ...part } };
+    // persistCancels saves the whole record (the held stops and run intents
+    // with it), so this survives a restart.
+    void this.persistCancels(connection);
   }
 
   /**
@@ -1487,6 +1416,29 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   async runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult> {
+    return this.dispatchCommand(request, { messageId: request.triggerMessage.id, pendingMessageId: request.pendingMessageId });
+  }
+
+  /** Compacts a member on the machine that hosts it: the same command a turn
+   *  is (queued while the machine is away, admitted, stopped and answered the
+   *  same way), carrying the compaction instead of a message to answer. */
+  async compactOnMachine(request: MachineCompactionDispatchRequest): Promise<MachineTurnDispatchResult> {
+    const messageId = machineCompactionMessageId(request.runId);
+    return this.dispatchCommand(request, { messageId, pendingMessageId: messageId, compaction: request.compaction });
+  }
+
+  private async dispatchCommand(
+    request: {
+      conversation: Conversation;
+      participant: ChatParticipant;
+      runId: string;
+      signal?: AbortSignal;
+      progress?: (progress: ReviewProgress) => void;
+      onStopPending?: (machineName: string) => void;
+      onMachineWaiting?: (machineName: string, reason?: string) => Promise<void>;
+    },
+    command: { messageId: string; pendingMessageId: string; compaction?: MachineTurnCompaction }
+  ): Promise<MachineTurnDispatchResult> {
     const machineId = request.participant.homeMachineId ?? "";
     const notEnrolled = (): MachineTurnDispatchResult => ({ status: "failed", messages: [], warnings: [], sent: false, error: `@${request.participant.handle} is hosted on a machine that is not enrolled on this desktop.` });
     if (!this.connections.has(machineId) && !this.turnHolds.has(machineId)) return notEnrolled();
@@ -1527,6 +1479,15 @@ export class MachineLinkService implements MachineTurnDispatcher {
         error: `@${request.participant.handle} is hosted on ${connection.record.name}, which still runs an older version of AccordAgents that cannot receive this chat. This computer updates it the next time it is connected and idle; send the message again after that.`
       };
     }
+    // A runtime from before compactions would read the command as a turn for
+    // a message it does not have. The same update brings them.
+    if (command.compaction && connection.record.lastHello?.compactionSupported !== true) {
+      void this.debugLogs.write("machine-link.compaction.runtime-outdated", { machineId, runId: request.runId, appVersion: connection.record.lastHello?.appVersion ?? "" });
+      return {
+        status: "failed", messages: [], warnings: [], sent: false,
+        error: `@${request.participant.handle} is hosted on ${connection.record.name}, which still runs an older version of AccordAgents that cannot compact members. This computer updates it the next time it is connected and idle; compact again after that`
+      };
+    }
     // Stop can arrive at any point of the preparation; a cancelled turn is
     // never dispatched, and one already dispatched is cancelled on the machine.
     let dispatchAttempted = false;
@@ -1558,7 +1519,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       const pending = connection.pendingTurns.get(request.runId);
       if (pending) {
         connection.pendingTurns.delete(request.runId);
-        pending.resolve({ status: "failed", messages: [], warnings: [], error: "The machine did not finish the turn within the run timeout." });
+        pending.resolve({ status: "failed", messages: [], warnings: [], error: `The machine did not finish the ${command.compaction ? "compaction" : "turn"} within the run timeout.` });
       }
     }, TURN_ACK_TIMEOUT_MS);
     timeout.unref?.();
@@ -1569,7 +1530,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       // at the same time. Seal before the append: settings can contain secrets
       // and can exceed one relay frame on the User's actual skill catalogue.
       const sealedSettings = this.options.desktopDeviceId === connection.pairing.issuer.originId
-        ? await sealMobileRelayPayload(await this.settings.exportMachineSettingsSnapshot(), await this.channelSealKey(connection))
+        ? await sealChannelPayload(await this.settings.exportMachineSettingsSnapshot(), await this.channelSealKey(connection))
         : undefined;
       if (request.signal?.aborted) {
         return interrupted;
@@ -1597,12 +1558,13 @@ export class MachineLinkService implements MachineTurnDispatcher {
         conversationId: request.conversation.id,
         participantId: request.participant.id,
         participant: request.participant,
-        messageId: request.triggerMessage.id,
+        messageId: command.messageId,
         runId: request.runId,
-        pendingMessageId: request.pendingMessageId,
+        pendingMessageId: command.pendingMessageId,
         ...(sealedSettings ? { sealedSettings } : {}),
         ...(chatHead ? { chatHead } : {}),
         ...(machineRepository ? { machineRepository } : {}),
+        ...(command.compaction ? { compaction: command.compaction } : {}),
         requestedAt: this.now().toISOString()
       }, () => {
         // Queueing and sealing are still preparation. This synchronous fence
@@ -1663,8 +1625,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
     });
   }
 
-  /** Rule 2: stops waiting for a machine are part of its record, so a
-   *  desktop restart does not forget them. */
+  /** Saves the machine's whole record. Rule 2: stops waiting for a machine
+   *  are part of it, so a desktop restart does not forget them (nor the run
+   *  intents, nor what was published to its runtime). */
   private persistCancels(connection: MachineConnection, required = false): Promise<void> {
     const pendingCancels = [...connection.pendingCancels.entries()].map(([runId, conversationId]) => ({ runId, conversationId }));
     const pendingRuns = [...connection.pendingRuns.entries()].map(([runId, conversationId]) => ({ runId, conversationId }));
@@ -1681,14 +1644,15 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   private async handleMessage(connection: MachineConnection, ciphertext: string): Promise<void> {
     const pinned = connection.record.lastHello?.publicKeyDerBase64;
-    const payload = await openMachineRelayPayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
+    const payload = await openMachinePayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
       pinned ? [pinned] : undefined, connection.pairing.rendezvousId);
     if (!pinned && (!isMachineLinkEnvelope(payload) || payload.body.type !== "machine.hello")) {
       throw new Error("A new machine must introduce its identity before sending content.");
     }
     if (isDeviceEventPacket(payload)) {
-      if (!connection.eventChannel) throw new Error("The machine must introduce its signing identity before sending events.");
-      await connection.eventChannel.receive(payload);
+      // Durable events travel only in the User's server's order (one road):
+      // a copy sent in the room is not taken.
+      this.noteRoomEventDropped(connection.record.id, payload.type);
       return;
     }
     if (!isMachineLinkEnvelope(payload)) {
@@ -1799,18 +1763,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
         }
         return;
       case "machine.scripts.request":
-      case "machine.transport.move":
         return;
-      case "machine.transport.moved": {
-        const pending = connection.pendingScripts.get(body.requestId);
-        if (pending) {
-          clearTimeout(pending.timer);
-          connection.pendingScripts.delete(body.requestId);
-          if (body.ok) pending.resolve(undefined);
-          else pending.reject(new MachineRefusal(body.error || "The machine refused."));
-        }
-        return;
-      }
       case "machine.attachment.request":
         // Served off the inbound chain: reading a chat and sending a picture
         // takes seconds on a large chat, and the machine's turn results,
@@ -1857,6 +1810,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
               machineId: connection.record.id,
               conversationId: body.conversationId,
               decisionId: body.decisionId,
+              decisionApplied: body.ok === true,
               approval: { ...approval, ...(!body.ok && body.error ? { error: body.error } : {}), homeMachineId: connection.record.id },
               ...(body.policies ? { policies: body.policies } : {})
             });
@@ -1869,6 +1823,20 @@ export class MachineLinkService implements MachineTurnDispatcher {
           if (body.ok) waiter.resolve();
           else waiter.reject(new Error(body.error ?? `Machine ${connection.record.name} could not apply the decision.`));
         }
+        return;
+      }
+      case "machine.compaction.delegate": {
+        if (typeof body.participantId !== "string" || typeof body.runId !== "string" || !body.runId.trim()) return;
+        if (!this.compactionDelegateListeners.length) {
+          throw new Error("No chat owner is available to run the compaction this machine asked for.");
+        }
+        await Promise.all(this.compactionDelegateListeners.map((listener) => listener({
+          machineId: connection.record.id,
+          conversationId: body.conversationId,
+          participantId: body.participantId,
+          runId: body.runId,
+          ...(typeof body.instructions === "string" ? { instructions: body.instructions } : {})
+        })));
         return;
       }
       case "machine.participants.delegate": {
@@ -1907,23 +1875,19 @@ export class MachineLinkService implements MachineTurnDispatcher {
         storage: this.options.eventStorage, eventLog: this.options.eventLog,
         pairing: { ...connection.pairing, relaySealKeyBase64: deriveMachineChannelKey(identity, publicKeyDerBase64, connection.pairing.rendezvousId) },
         isPeerConnected: () => Boolean(connection.machineDeviceId),
-        ...(this.viaHub(connection) ? { hubMode: true } : {}),
+        // The User's server carries the channel's events (its one order).
+        hubMode: true,
+        ...(this.options.hubRepair ? { hubRepair: this.options.hubRepair } : {}),
         channelId: connection.pairing.rendezvousId, localDeviceId: this.options.desktopDeviceId,
         peerDeviceId: deviceId, peerPublicKeyDerBase64: publicKeyDerBase64,
         send: async (packet) => {
-          const ciphertext = await sealMachineRelayPayload(packet, identity, publicKeyDerBase64, connection.pairing.rendezvousId);
+          const ciphertext = await sealMachinePayload(packet, identity, publicKeyDerBase64, connection.pairing.rendezvousId);
           await connection.client.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: deviceId });
         },
         serveDependency: (dependency) => this.serveChatActionDependency(dependency),
         onDependencyUnavailable: (dependency) => {
           void this.debugLogs.write("machine-link.action.dependency-unavailable", { ...dependency, machineId: connection.record.id });
         },
-        // Every chat is on every machine: a chat change this machine wrote
-        // goes on, unchanged and signed by it, to every other machine.
-        // Through the hub, only a machine still on the relay needs it passed on.
-        forwardTo: (event) => event.kind === CHAT_CHANGES_EVENT_KIND && isChatChangesLogScope(event.logScopeId) && event.originId === deviceId
-          ? this.chatChangeRecipients().filter((recipient) => recipient.deviceId !== deviceId && !this.readsHub(recipient.deviceId))
-          : [],
         peerHoldsEveryChat: true,
         // Kept for a runtime that cannot fold chat changes yet; sent once it can.
         heldKinds: () => connection.record.chatChanges === true ? [] : [CHAT_CHANGES_EVENT_KIND],
@@ -1941,7 +1905,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
           if (action) return action;
           const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
           if (!isMachineLinkEnvelope(envelope) || !["machine.conversation.deleted", "machine.conversation.backdelta", "machine.turn.finished", "machine.turn.started", "machine.participants.delegate",
-            "machine.approval.requested", "machine.approval.updated", "machine.approval.result", "machine.choice.result", "machine.turn.progress.delta"].includes(envelope.body.type) ||
+            "machine.compaction.delegate", "machine.approval.requested", "machine.approval.updated", "machine.approval.result", "machine.choice.result", "machine.turn.progress.delta"].includes(envelope.body.type) ||
               !("conversationId" in envelope.body) ||
               event.kind !== envelope.body.type || event.conversationId !== envelope.body.conversationId) {
             throw new Error("Unexpected machine replication event.");
@@ -1978,7 +1942,20 @@ export class MachineLinkService implements MachineTurnDispatcher {
         },
         onError: (error) => { void this.debugLogs.write("machine-link.events.error", { machineId: connection.record.id, message: error.message }); }
       });
+      // Its events held while it had no channel are offered again now.
+      this.options.onChannelReady?.();
     }
+  }
+
+  /** Logged once per machine and kind, so a sender that keeps trying does
+   *  not fill the log. */
+  private readonly roomEventsDropped = new Set<string>();
+  private noteRoomEventDropped(machineId: string, type: string): void {
+    const key = `${machineId}\u0000${type}`;
+    if (this.roomEventsDropped.has(key)) return;
+    if (this.roomEventsDropped.size >= 200) this.roomEventsDropped.clear();
+    this.roomEventsDropped.add(key);
+    void this.debugLogs.write("machine-link.room-event-dropped", { machineId, type });
   }
 
   private async handleHello(connection: MachineConnection, hello: MachineHelloBody): Promise<void> {
@@ -2030,12 +2007,22 @@ export class MachineLinkService implements MachineTurnDispatcher {
       pendingCancels: [...connection.pendingCancels.entries()].map(([runId, conversationId]) => ({ runId, conversationId })),
       pendingRuns: [...connection.pendingRuns.entries()].map(([runId, conversationId]) => ({ runId, conversationId }))
     };
+    // A runtime process this desktop has not published to may hold nothing
+    // (a reinstall, wiped data, a new instance): it is given both again. The
+    // same process greeting again (a reconnect, a desktop restart, a hello
+    // request) already has them.
+    // In turn with the publications, so one still on its way to the previous
+    // process is not counted as given to this one.
+    await this.serializePublication(connection, async () => {
+      if (!hello.instanceId || connection.record.published?.instanceId !== hello.instanceId) {
+        connection.record = { ...connection.record, published: hello.instanceId ? { instanceId: hello.instanceId } : undefined };
+      }
+    });
     await this.persistCancels(connection, true);
     if (this.options.desktopDeviceId === connection.pairing.issuer.originId) {
-      await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion, machineId: connection.record.id, machineName: connection.record.name });
-      const snapshot = await this.settings.exportMachineSettingsSnapshot();
-      await this.send(connection, { type: "machine.settings.sync", snapshot });
-      connection.settingsKey = machineSettingsKey(snapshot);
+      await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion, machineId: connection.record.id, machineName: connection.record.name,
+        ...(this.compactionDelegateListeners.length ? { compactionDelegation: true } : {}) });
+      await this.publishSettings(connection);
       await this.sendTrustRoster(connection);
       if (rosterChanged) {
         for (const other of this.connections.values()) {
@@ -2077,8 +2064,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
       if (listed.has(runId) || asked.has(runId) || preparing) {
         continue;
       }
-      // A retained command may still be in the sealed mailbox or waiting on
-      // earlier copy events. A live query must not overtake durable admission.
+      // A retained command may still be on its way through the server's
+      // order or waiting on earlier copy events. A live query must not overtake durable admission.
       if (await this.options.eventStorage.getChatEvent(machineCommandId(runId))) continue;
       asked.add(runId);
       void this.debugLogs.write("machine-link.turn.queried", { machineId: connection.record.id, runId });
@@ -2126,7 +2113,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
         warnings: body.warnings,
         finishedAt: body.finishedAt,
         receiptId: body.receiptId,
-        ...(body.error ? { error: body.error } : {})
+        ...(body.error ? { error: body.error } : {}),
+        ...(typeof body.participantId === "string" ? { participantId: body.participantId } : {}),
+        ...(body.contextUsage ? { contextUsage: body.contextUsage } : {}),
+        ...(body.compaction ? { compaction: { triggeredBy: body.compaction.triggeredBy === "agent" ? "agent" as const : "user" as const } } : {})
       });
       await acknowledge();
       return true;
@@ -2139,6 +2129,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       error: body.error,
       finishedAt: body.finishedAt,
       receiptId: body.receiptId,
+      ...(body.contextUsage ? { contextUsage: body.contextUsage } : {}),
       acknowledge: async () => { await acknowledge(); await onStored?.(); }
     });
     return false;
@@ -2237,29 +2228,46 @@ export class MachineLinkService implements MachineTurnDispatcher {
       }
       connection.machineDeviceId = undefined;
       connection.settingsSynced = false;
+      // Whatever greeted this connection before, a return is greeted again.
+      connection.helloSeen = false;
       this.rejectPendingScripts(connection, `${connection.record.name} disconnected.`);
     } else if (!connection.machineDeviceId) {
       connection.machineDeviceId = deviceId;
-      // Back on the link (also after a blip a hello does not follow): ask for
-      // the members' background work that is running now.
-      void this.send(connection, { type: "machine.member.background.request" }).catch(() => undefined);
-      if (!connection.helloSeen && !connection.helloRequestTimer) {
-        // The machine is there; if it does not greet this connection by
-        // itself shortly (a relay may seat a restarted desktop silently in
-        // place of the old one), ask for the hello that drives reconciliation.
-        connection.helloRequestTimer = setTimeout(() => {
-          connection.helloRequestTimer = undefined;
-          if (connection.helloSeen || !connection.machineDeviceId) {
-            return;
-          }
-          void this.debugLogs.write("machine-link.hello.requested", { machineId: connection.record.id });
-          void this.send(connection, { type: "machine.hello.request", desktopDeviceId: this.options.desktopDeviceId }).catch(() => undefined);
-        }, HELLO_REQUEST_GRACE_MS);
-        connection.helloRequestTimer.unref?.();
-      }
+      this.greetReturningMachine(connection);
     }
     if (changed) {
       this.emitStatus();
+    }
+  }
+
+  /** The machine's new connection took the seat of one the server had not
+   *  seen close (it restarted, or its link came back): it stays present, and
+   *  what it knows is asked afresh rather than assumed. A script request
+   *  still waiting keeps waiting for its answer or its own time limit: one
+   *  sent just now may be answered by the new connection. */
+  private machineReturned(connection: MachineConnection): void {
+    connection.helloSeen = false;
+    connection.settingsSynced = false;
+    this.greetReturningMachine(connection);
+  }
+
+  private greetReturningMachine(connection: MachineConnection): void {
+    // Back on the link (also after a blip a hello does not follow): ask for
+    // the members' background work that is running now.
+    void this.send(connection, { type: "machine.member.background.request" }).catch(() => undefined);
+    if (!connection.helloSeen && !connection.helloRequestTimer) {
+      // The machine is there; if it does not greet this connection by
+      // itself shortly (the server may seat a restarted desktop silently in
+      // place of the old one), ask for the hello that drives reconciliation.
+      connection.helloRequestTimer = setTimeout(() => {
+        connection.helloRequestTimer = undefined;
+        if (connection.helloSeen || !connection.machineDeviceId) {
+          return;
+        }
+        void this.debugLogs.write("machine-link.hello.requested", { machineId: connection.record.id });
+        void this.send(connection, { type: "machine.hello.request", desktopDeviceId: this.options.desktopDeviceId }).catch(() => undefined);
+      }, HELLO_REQUEST_GRACE_MS);
+      connection.helloRequestTimer.unref?.();
     }
   }
 
@@ -2279,7 +2287,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (body.type === "machine.settings.sync") {
       return this.sendNow(connection, {
         type: "machine.settings.sealed", conversationId: `machine-settings:${connection.pairing.rendezvousId}`,
-        ciphertext: await sealMobileRelayPayload(body.snapshot, await this.channelSealKey(connection))
+        ciphertext: await sealChannelPayload(body.snapshot, await this.channelSealKey(connection))
       }, beforeWrite);
     }
     if (isMachineDurableMessage(body)) {
@@ -2310,11 +2318,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
       // Only identity discovery may use the enrollment capability's old seal.
       // No settings, run inventory, roster or content is included.
       if (body.type !== "machine.hello.request") throw new Error("The machine must introduce its identity first.");
-      const ciphertext = await sealMobileRelayPayload(signed, connection.pairing.relaySealKeyBase64);
+      const ciphertext = await sealChannelPayload(signed, connection.pairing.relaySealKeyBase64);
       await connection.client.sendCiphertext({ logicalMessageId: envelope.messageId, ciphertext, to });
       return;
     }
-    const ciphertext = await sealMachineRelayPayload(signed, await this.options.eventLog.getOrCreateDeviceIdentity(),
+    const ciphertext = await sealMachinePayload(signed, await this.options.eventLog.getOrCreateDeviceIdentity(),
       peerKey, connection.pairing.rendezvousId);
     beforeWrite?.();
     await connection.client.sendCiphertext({ logicalMessageId: envelope.messageId, ciphertext, to });
@@ -2341,5 +2349,3 @@ function rememberBounded(set: Set<string>, value: string, limit = 5_000): void {
   if (set.size > limit) set.delete(set.values().next().value as string);
 }
 
-/** The machine itself said no (as opposed to a link that went away). */
-class MachineRefusal extends Error {}

@@ -119,7 +119,7 @@ packaged application and "build it with `npm run build:machine`" for a checkout.
 
 ```
 ~/accordagents-machine/
-  enrollment.json          0600, the relay key; never replaced by an upgrade
+  enrollment.json          0600, the pairing key and the server's address; never replaced by an upgrade
   install-state.json       {version, digest, installedAt, release}
   releases/<version>-<digest>/    one directory per installed version
   current -> releases/<...>       what the unit runs
@@ -175,7 +175,8 @@ re-proven, not assumed.
 
 ## Secrets
 
-The enrollment package carries the relay seal key. It is written from **stdin**
+The enrollment package carries the key the machine's first hello is sealed
+with, and the address of the User's server. It is written from **stdin**
 to a file created with `umask 077`, never interpolated into a script, never
 placed on a command line (so it is invisible in `ps` on the machine), never
 logged, and never stored in the install record. A regression test asserts all
@@ -201,8 +202,8 @@ creates it. The command makes three IAM users and prints their keys in one
 paste result: `accordagents-worker-<device>` for the app,
 `accordagents-power-<device>` for the machine, with only the inline policy
 `accordagents-machine-power` (`machinePowerPolicy`: describe instances in the
-region, start and stop app-tagged instances in the region), and the phone's
-start key (below).
+region, start and stop app-tagged instances in the region), and the start key
+the User's server wakes the machine with (below).
 
 The command is pasted into the User's own shell, which on macOS is zsh, so it
 never relies on an unquoted variable being split into words. It never deletes
@@ -237,7 +238,7 @@ The key is handed over by the installer, never put on a command line:
    started with it and connected on the new release. If the runtime does not
    come back, `--revert-power` puts back the key it had before (or none), the
    runtime is started again either way, and the new key is tried again later
-   rather than marked refused, because the cause may as well be the relay or
+   rather than marked refused, because the cause may as well be the server or
    the release.
 
 Automatic updates hand a new key over in the same idle-gated update that
@@ -266,9 +267,9 @@ from then.
 The program on the machine is brought back by the desktop itself
 (`MachineRecoveryService`). It looks when the instance has been running for
 five minutes and the program has been out of touch for five minutes by this
-desktop's own watch; the watch counts only while this desktop reaches the
-relay and starts again after a sleep (timer ticks far apart, even during a
-check) or a stop of the instance. It then asks
+desktop's own watch; the watch counts only while this desktop is in the
+machine's room on the User's server and starts again after a sleep (timer
+ticks far apart, even during a check) or a stop of the instance. It then asks
 the machine over SSH, having renewed this device's SSH access; nothing is
 started, grown or held to the configured size for it:
 
@@ -304,29 +305,27 @@ and the key that seals it. What they can do with it is what the policy allows:
 read every instance in the region, and start or stop app-tagged instances in
 the region.
 
-### The phone's start key
+### The start key
 
-A phone starts a stopped machine itself (Rule 3), with a third key from the
+A stopped machine is started by the User's server, with a third key from the
 same setup command: `accordagents-wake-<device>` with only the inline policy
 `accordagents-machine-wake` (`machineWakePolicy`: start app-tagged instances
 in the region). It cannot read, stop or delete anything. The command makes it
 only once: while the start key the app holds still exists in IAM, a rerun
-makes none, and the app keeps the one it has, so a phone is paired with it
-once. A permission update uses its own command, which touches no key.
+makes none, and the app keeps the one it has. A permission update uses its own
+command, which touches no key.
 
-The key reaches a phone only inside the pairing link, in the URL fragment
-(`#k=…&w=<instance>.<region>.<key id>.<secret>`), which never leaves the
-phone: it is not sent to the static origin, and never through the relay. What
-the desktop keeps of a pairing names the handoff (`powerHandoffId`), never the
-key. The phone keeps it on the device and its Wake button signs the EC2
-request itself. A phone paired before this key existed has to be paired once
-more to get it.
+The desktop gives the key to the server (`PUT /v1/machine-wake`, accepted only
+from the desktop that set the server up), and only while a phone is paired
+with it; with no phone paired the server holds no key. The server starts the
+machine when work for one of its members has waited unread for half a minute,
+and when the phone's Wake button asks it to. The phone holds no key.
 
-The key is never replaced on its own, so revoking a phone's pairing does not
-take the copy it holds. To end that: delete the access key of
+A phone paired the old way, through the relay, was given a copy of the key in
+its pairing link and keeps it; after the relay's removal Settings → Your
+server says so in one line until it is dismissed. To end that copy: delete the access key of
 `accordagents-wake-<device>` in AWS IAM, run the setup command again (it makes
-a new start key because the app's no longer exists), paste the result, and pair
-the phones that should keep starting the machine again.
+a new start key because the app's no longer exists), and paste the result.
 
 ## The project mirror
 
@@ -354,7 +353,7 @@ That payload is also what every packaged application now carries: 6.1 MB added
 to the app bundle once, not per machine and not per install.
 
 It travels as an `rsync -az` stream over SSH. It does not go through argv, a
-SQLite statement, a relay frame, a mailbox page, or an HTTP body. The remote
+SQLite statement, a frame in the server's rooms, or an HTTP body. The remote
 scripts are 1–4 KB of static text with paths substituted, delivered on stdin
 (or as one argument when stdin carries the enrollment) — far below `ARG_MAX`,
 and they contain no chat data at any size.

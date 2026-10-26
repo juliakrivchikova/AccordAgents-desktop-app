@@ -24,16 +24,16 @@ import {
   type MachineTurnFinishedBody,
   type MachineTurnRequestBody
 } from "../../shared/machineLink";
-import type { MachineAttachmentResultBody, MachineScriptsOperation, MachineScriptsRequestBody, MachineTransportMoveBody } from "../../shared/machineLink";
+import type { MachineAttachmentResultBody, MachineCompactionDelegateRequest, MachineScriptsOperation, MachineScriptsRequestBody } from "../../shared/machineLink";
+import { normalizeMachineTurnCompaction } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type { AgentHealth, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatBackgroundTasksEvent, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
 import type { ChatParticipantRun, ChatService } from "./chat";
 import type { DebugLogService } from "./debugLogs";
 import { advanceInstanceSequence, isStoredTerminal } from "./machineTurnOutcome";
-import { openMobileRelayPayload } from "./mobileRelaySealing";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
-import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
-import { RelayTunnelClient, type TunnelClient } from "./relayTunnelClient";
+import { openChannelPayload, openMachinePayload, sealMachinePayload } from "./machineChannelSealing";
+import type { TunnelClient } from "./hubTunnelClient";
 import { deliverToChannel, type HubDeliverOutcome } from "./hubSync";
 import { MachinePeerFabric } from "./machinePeerFabric";
 import { MachineTrustStore } from "./machineTrustStore";
@@ -45,7 +45,7 @@ import type { SettingsService } from "./settings";
 import type { StorageService } from "./storage";
 import type { ChatEventLogService } from "./chatEventLog";
 import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
-import type { DeviceEventApplyOutcome } from "../../shared/deviceEventDelivery";
+import type { DeviceEventApplyOutcome, DeviceEventGap } from "../../shared/deviceEventDelivery";
 import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { isMachineDurableMessage } from "../../shared/machineLink";
 import { NativeProcessUnavailableError } from "./nativeProcess";
@@ -54,6 +54,9 @@ import { CHAT_CHANGES_EVENT_KIND, isChatChangesPayload, type ChatChangesPayload,
 import { machineProgressEventId } from "../../shared/machineProgress";
 import { MachineProgressSender } from "./machineProgressSender";
 import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
+import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
+import { HUB_PHONE_ENROLLED_EVENT_KIND, HUB_PHONE_ENROLLMENT_SCOPE, hubWebSocketUrl, parsePhoneTurnRunId, verifyHubPhoneCertificate, type HubPhoneCertificate } from "../../shared/hubProtocol";
+import { hubCertificateCrypto } from "./hubAuth";
 import { readPosixProcessTableAsync } from "./processTermination";
 import { verifyNativeExecutorGone } from "./nativeExecutorRecovery";
 import { MachineApprovalExecutor, machineApprovalResultId } from "./machineApprovalExecutor";
@@ -95,7 +98,6 @@ export interface MachineHostOptions {
   /** File that keeps finished turns until the desktop acknowledges them, so
    *  a result survives a restart of this runtime. In-memory only when unset. */
   outboxPath?: string;
-  reconnectDelayMs?: number;
   createClient?: (pairing: MobilePairingPackage) => TunnelClient;
   now?: () => Date;
   nativeProcessDbPath?: string;
@@ -104,9 +106,8 @@ export interface MachineHostOptions {
   idleStopWarning?: () => string | undefined;
   /** The User's automatic-stop switch as this machine has it. */
   autoStopEnabled?: () => boolean | undefined;
-  /** The User's hub carries this machine's events instead of the relay's
-   *  per-peer delivery (see DeviceEventChannel.hubMode). */
-  hubMode?: boolean;
+  /** Through the hub: a channel's gap is asked of the hub (HubSync.repairGap). */
+  hubRepair?: (gap: DeviceEventGap) => void;
   /** Scheduled scripts on this machine, operated by the enrolling desktop. */
   scripts?: {
     handle(operation: MachineScriptsOperation): Promise<unknown>;
@@ -115,17 +116,7 @@ export interface MachineHostOptions {
     keepsHostAwake(): boolean;
     /** How many switched-on scripts keep it awake, for the desktop to show. */
     scheduledCount?(): number;
-    /** True while a script runs now (a move would cut it off). */
-    runningNow?(): boolean;
   };
-  /** Moves this machine to another relay address: writes it into the
-   *  enrollment. Absent where the runtime cannot (it then says so). */
-  moveTransport?: (addresses: { relayUrl: string; outboxUrl: string }) => Promise<void>;
-  /** Starts this runtime again, reading the enrollment anew. */
-  restartRuntime?: () => void;
-  /** Whether the relay at this address answers (asked before a move, so a
-   *  machine never rewrites its enrollment to a place it cannot reach). */
-  probeRelay?: (relayUrl: string) => Promise<boolean>;
   /** Folds a `chat.changes` event into this machine's copy of the chat.
    *  "missing-conversation" holds the event until the chat arrives. */
   applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation" | "waiting">;
@@ -141,13 +132,6 @@ const ATTACHMENT_PART_TIMEOUT_MS = 120_000;
 const SCRIPTS_CHANGED_COALESCE_MS = 250;
 /** How far the desktop's clock may be ahead of this machine's when it dates a request. */
 const SCRIPTS_REQUEST_CLOCK_SKEW_MS = 30_000;
-/** A move's settling ends this long before the desktop's deadline (or 40%
- *  of a shorter wait), leaving time to ask the server (up to 10 s) and to
- *  answer; the move itself is not made later than the second margin (or 10%)
- *  before it. */
-const TRANSPORT_MOVE_SETTLE_MARGIN_MS = 25_000;
-const TRANSPORT_MOVE_ANSWER_MARGIN_MS = 5_000;
-const TRANSPORT_MOVE_ANSWER_MAX_MS = 5 * 60_000;
 
 function changesScripts(operation: MachineScriptsOperation): boolean {
   return operation.op !== "list" && operation.op !== "revision" && operation.op !== "runs";
@@ -165,6 +149,19 @@ interface MachineAttachmentWaiter {
   mediaType?: string;
   fileName?: string;
 }
+function compactionMark(request: MachineTurnRequestBody): Pick<MachineTurnFinishedBody, "compaction"> {
+  return request.compaction ? { compaction: { triggeredBy: request.compaction.triggeredBy === "agent" ? "agent" : "user" } } : {};
+}
+
+/** The reasons a command did not run, said of a compaction rather than a turn. */
+function compactionWording(reason: string): string {
+  return reason
+    .replace("so the member did not start. Send the message again once the machine is connected.", "so the compaction did not start. Compact again once the machine is connected.")
+    .replace("the turn did not run", "the compaction did not run")
+    .replace("before this turn started", "before this compaction started")
+    .replace("this turn did not start", "this compaction did not start");
+}
+
 /** How long a turn request waits for the chat state it names before it fails
  *  honestly instead of running a member on a chat that has not arrived. */
 const MACHINE_CHAT_WAIT_MS = 10 * 60 * 1000;
@@ -318,15 +315,59 @@ export class MachineHostService {
     return this.trust.peers().find((peer) => peer.deviceId === originId)?.publicKeyDerBase64;
   }
 
+  /** Whether a device is one of the owner's phones this machine trusts. */
+  isPhone(originId: string): boolean {
+    return this.trust.peer(originId)?.role === "phone";
+  }
+
+  /**
+   * A phone that paired with the User's server writes its certificate first.
+   * Checked with the key of the desktop that enrolled this machine, it makes
+   * the phone one of the devices this machine answers, even while that
+   * desktop is away; the desktop's next roster then decides. Returns the key
+   * the phone signs with, or undefined for anything else.
+   */
+  async admitPhoneCertificate(event: ChatEventEnvelope, fetchBody?: () => Promise<void>): Promise<string | undefined> {
+    if (event.kind !== HUB_PHONE_ENROLLED_EVENT_KIND || event.logScopeId !== HUB_PHONE_ENROLLMENT_SCOPE) return undefined;
+    if (fetchBody && isDeviceEventBlobReference(event.payload)) await fetchBody().catch(() => undefined);
+    const certificate = await this.options.eventStorage.deviceEventBlobs().hydrate(event.payload).catch(() => undefined) as HubPhoneCertificate | undefined;
+    const issuer = this.options.pairing.issuer;
+    if (!verifyHubPhoneCertificate(certificate, { issuerDeviceId: issuer.originId, issuerPublicKeyDerBase64: issuer.publicKeyDerBase64, ...hubCertificateCrypto }) ||
+        certificate.enrollment.deviceId !== event.originId) {
+      void this.debugLogs.write("machine-host.trust.certificate-refused", { originId: event.originId });
+      return undefined;
+    }
+    const home = this.options.pairing;
+    const admitted = await this.trust.admitCertified({
+      deviceId: certificate.enrollment.deviceId,
+      publicKeyDerBase64: certificate.enrollment.publicKeyDerBase64,
+      role: "phone",
+      name: certificate.enrollment.name || "Phone",
+      relayUrl: home.hubUrl ? hubWebSocketUrl(home.hubUrl, "") : "",
+      rendezvousId: home.rendezvousId,
+      fingerprint: home.fingerprint,
+      inviteId: certificate.invite.inviteId
+    });
+    void this.debugLogs.write("machine-host.trust.phone-certified", { deviceId: certificate.enrollment.deviceId, admitted });
+    if (!admitted) return undefined;
+    await this.peers.reconcile(this.rosterPeersToConnect(this.trust.peers()));
+    return certificate.enrollment.publicKeyDerBase64;
+  }
+
   /** An event the hub's order brought: to the desktop's channel when the
    *  desktop (or a machine's chat change it would forward) wrote it, else to
-   *  the channel of the peer that did. */
-  /** An event the hub's order brought: to the owner's channel, or to the
-   *  channel of another of the owner's devices. */
-  async receiveFromHub(event: ChatEventEnvelope): Promise<HubDeliverOutcome> {
+   *  the channel of the peer that did. `fetchBody` stores the event's large
+   *  body, fetched only for an event one of this machine's channels takes. */
+  async receiveFromHub(event: ChatEventEnvelope, fetchBody?: () => Promise<void>): Promise<HubDeliverOutcome> {
     await this.initializeOwnerChannel();
-    if (this.eventChannel?.accepts(event)) return deliverToChannel(this.eventChannel, event);
-    return this.peers.receiveFromHub(event);
+    if (this.eventChannel?.accepts(event)) return deliverToChannel(this.eventChannel, event, fetchBody);
+    return this.peers.receiveFromHub(event, fetchBody);
+  }
+
+  /** Through the hub: this machine's channels' scopes, with the desktop and
+   *  with its peers (where it starts again, it starts before their events). */
+  hubChannelScopes(): string[] {
+    return [`device:${this.options.pairing.rendezvousId}:`, ...this.peers.hubChannelScopes()];
   }
 
   applyApprovalAction(event: ChatEventEnvelope, payload: import("../../shared/chatActionEvents").ChatActionPayload): Promise<import("../../shared/machineLink").MachineApprovalResultBody> {
@@ -365,6 +406,14 @@ export class MachineHostService {
   /** Outbound sends leave in call order (progress before the finished result). */
   private outbound: Promise<void> = Promise.resolve();
   private desktopDeviceId?: string;
+  /** What the room last said of the enrolling desktop, as it said it. Greetings
+   *  are applied later, from the inbound queue, so one that the desktop sent
+   *  before it left (or before this machine's link dropped) cannot bring it
+   *  back: only the room's own word counts. */
+  private desktopInRoom = false;
+  /** The enrolling desktop said, in its last greeting, that it runs the
+   *  compactions members here ask for themselves. */
+  private desktopTakesCompactions = false;
   private homeMachineId?: string;
   private readonly settlingRuns = new Map<string, ChatParticipantRun>();
   private readonly settlingInFlight = new Set<string>();
@@ -373,16 +422,20 @@ export class MachineHostService {
   private closed = false;
   private draining = false;
   private idleFenced = false;
-  /** Held by a move to another address from its check until the restart
-   *  (or its refusal); kept apart from the idle stop's, so neither releases
-   *  the other's. */
-  private moveFenced = false;
-  private get fenced(): boolean { return this.idleFenced || this.moveFenced; }
+  private get fenced(): boolean { return this.idleFenced; }
   private readonly turnTasks = new Set<Promise<void>>();
   private readonly deletingConversationIds = new Set<string>();
   private readonly activeTurnConversations = new Map<string, string>();
   private readonly commandTasks = new Map<string, Promise<void>>();
   private readonly commandSessions = new Map<string, Promise<void>>();
+  /** The newest settings applied here. A command queued while this machine
+   *  was away runs with the settings of its own moment (they travel sealed
+   *  in it); newer ones that arrived meanwhile are put back once it has run,
+   *  since the desktop publishes settings only when they change and nothing
+   *  else would. */
+  private newestSettings?: { exportedAt: string; snapshot: import("../../shared/machineLink").MachineSettingsSnapshot };
+  /** Every command of a member still running here, by conversation:member. */
+  private readonly commandScopeTasks = new Map<string, Set<Promise<void>>>();
   private commandRetry?: ReturnType<typeof setTimeout>;
   private runtimeIdentity?: Promise<NativeRuntimeIdentity>;
   private readonly approvalExecutor: MachineApprovalExecutor;
@@ -396,7 +449,7 @@ export class MachineHostService {
   private readonly forwardedApprovals = new Map<string, string>();
 
   constructor(
-    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady" | "setPromptSuggestionForwarder" | "applyMachineRepository" | "onBackgroundTasksChanged" | "localBackgroundTasks">>,
+    private readonly chat: Pick<ChatService, "runMachineHostedTurn" | "cancelRun" | "respondToChoice" | "respondToAppToolApproval" | "applyReplicatedConversation"> & Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasActiveRunForConversation" | "onParticipantRunSettled" | "settledParticipantRunResult" | "runDelegatedParticipantRequest" | "conversationIdForRun" | "closeReplicatedConversationSessions" | "onReplicatedConversationReady" | "setPromptSuggestionForwarder" | "applyMachineRepository" | "onBackgroundTasksChanged" | "localBackgroundTasks" | "runMachineHostedCompaction">>,
     private readonly storage: Pick<StorageService, "getConversation"> & Partial<Pick<StorageService, "deleteConversation" | "conversationPresence">>,
     private readonly settings: Pick<SettingsService, "importMachineSettingsSnapshot">,
     private readonly debugLogs: Pick<DebugLogService, "write">,
@@ -410,18 +463,10 @@ export class MachineHostService {
     }
     this.loadOutbox();
     const pairing = options.pairing;
-    if (!pairing.relayUrl && !pairing.hubUrl) {
-      throw new Error("Machine enrollment names neither a relay nor a hub.");
-    }
-    this.client = options.createClient?.(pairing) ?? new RelayTunnelClient({
-      relayUrl: pairing.relayUrl ?? "",
-      rendezvousId: pairing.rendezvousId,
-      role: "machine",
-      deviceId: options.deviceId,
-      capability: pairing.fingerprint,
-      streamId: `${pairing.stableRoutingId}:machine`,
-      reconnectDelayMs: options.reconnectDelayMs
-    });
+    const client = options.createClient?.(pairing);
+    // A machine meets its devices on the User's server, nowhere else.
+    if (!pairing.hubUrl || !client) throw new Error("This machine's enrollment does not name the User's server; set it up again from the desktop (Cloud run in a member's settings).");
+    this.client = client;
     this.trust = new MachineTrustStore(
       options.trustRosterPath ?? path.join(userDataPath(), "machine-trust-roster.json"),
       options.deviceId,
@@ -430,23 +475,17 @@ export class MachineHostService {
     // The owner's other devices reach this machine here. Each gets its own
     // sealed channel with its own signing key; anyone else is not answered.
     this.peers = new MachinePeerFabric({
-      ...(options.hubMode ? { hubMode: true } : {}),
+      ...(options.hubRepair ? { hubRepair: options.hubRepair } : {}),
       selfDeviceId: options.deviceId,
       storage: options.eventStorage,
       eventLog: options.eventLog,
       home: pairing,
       homeClient: this.client,
-      createClient: (room) => options.createPeerClient?.({ ...room, deviceId: options.deviceId }) ?? new RelayTunnelClient({
-        relayUrl: room.relayUrl,
-        rendezvousId: room.rendezvousId,
-        role: "machine",
-        deviceId: options.deviceId,
-        // The room's own fingerprint: the relay admits a connection only with
-        // the capability the room was opened with.
-        capability: room.fingerprint ?? pairing.fingerprint,
-        streamId: `${room.rendezvousId}:machine-peer`,
-        reconnectDelayMs: options.reconnectDelayMs
-      }),
+      createClient: (room) => {
+        const peer = options.createPeerClient?.({ ...room, deviceId: options.deviceId });
+        if (!peer) throw new Error("A room with another device opens only on the User's server.");
+        return peer;
+      },
       isPeerConnected: () => true,
       apply: (event, body, peer) => this.applyDeviceEvent(event, body, this.peers.channel(peer.deviceId), peer),
       ...(options.serveChatActionDependency ? {
@@ -475,15 +514,28 @@ export class MachineHostService {
       if (event.type === "ready") {
         // Own link (re)established: greet the desktop again even if it is
         // the same one, so stops and results held meanwhile are reconciled.
+        // A room without it means it is away, whatever was known before.
         const desktop = event.peers.find((peer) => peer.deviceId === options.pairing.issuer.originId);
-        this.setDesktop(desktop?.deviceId, { announce: true });
+        this.desktopInRoom = Boolean(desktop);
+        if (desktop) this.setDesktop(desktop.deviceId, { announce: true });
+        else this.desktopAway("not-in-room");
       } else if (event.type === "peer-connected" && event.peer.deviceId === options.pairing.issuer.originId) {
-        this.setDesktop(event.peer.deviceId);
+        // Also the desktop's new connection in the seat of an old one the
+        // server had not seen close: it is greeted again, as a new one is.
+        this.desktopInRoom = true;
+        this.setDesktop(event.peer.deviceId, { announce: true });
       } else if (event.type === "peer-disconnected" && event.peer.deviceId === options.pairing.issuer.originId) {
-        this.desktopDeviceId = undefined;
-        void this.debugLogs.write("machine-host.desktop.away", { deviceId: event.peer.deviceId, pendingTerminals: this.pendingTerminals.size });
-        this.failAllAttachments("The desktop went away before answering with this picture.");
+        this.desktopInRoom = false;
+        this.desktopAway("left");
       }
+    });
+    // While this machine's own link is down, nothing is known of the desktop:
+    // it is not counted as present (a compaction would be handed to it and
+    // run when it next comes, maybe days later). The next "ready" says.
+    this.client.on("state", (state) => {
+      if (state === "connected") return;
+      this.desktopInRoom = false;
+      this.desktopAway("own-link");
     });
     // Inbound messages are applied strictly in arrival order: a conversation
     // delta must be stored before the turn request that follows it is read.
@@ -532,11 +584,12 @@ export class MachineHostService {
       storage: options.eventStorage, eventLog: options.eventLog,
       pairing: { ...pairing, relaySealKeyBase64: deriveMachineChannelKey(identity, pairing.issuer.publicKeyDerBase64, pairing.rendezvousId) },
       isPeerConnected: () => Boolean(this.desktopDeviceId),
-      ...(options.hubMode ? { hubMode: true } : {}),
+      hubMode: true,
+      ...(options.hubRepair ? { hubRepair: options.hubRepair } : {}),
       channelId: pairing.rendezvousId, localDeviceId: options.deviceId,
       peerDeviceId: pairing.issuer.originId, peerPublicKeyDerBase64: pairing.issuer.publicKeyDerBase64,
       send: async (packet) => {
-        const ciphertext = await sealMachineRelayPayload(packet, identity, pairing.issuer.publicKeyDerBase64, pairing.rendezvousId);
+        const ciphertext = await sealMachinePayload(packet, identity, pairing.issuer.publicKeyDerBase64, pairing.rendezvousId);
         await this.client.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: pairing.issuer.originId });
       },
       serveDependency: async (dependency) => {
@@ -565,9 +618,9 @@ export class MachineHostService {
       this.durableTerminalIds.add(eventId);
     }
     const roster = await this.trust.load();
-    if (roster) {
-      await this.peers.reconcile(this.rosterPeersToConnect(roster.peers));
-      void this.debugLogs.write("machine-host.trust.restored", { peers: roster.peers.length, updatedAt: roster.updatedAt });
+    if (roster || this.trust.peers().length) {
+      await this.peers.reconcile(this.rosterPeersToConnect(this.trust.peers()));
+      void this.debugLogs.write("machine-host.trust.restored", { peers: this.trust.peers().length, updatedAt: roster?.updatedAt ?? "" });
     }
     this.peers.start();
     await this.reconcileDeletedConversations().catch(error => {
@@ -644,21 +697,6 @@ export class MachineHostService {
     return Boolean(this.desktopDeviceId);
   }
 
-  /** Work a move would cut off: everything the idle stop waits for except
-   *  a scheduled script's next run (it runs after the restart), and a
-   *  member's background work besides. */
-  private async hasWorkForMove(): Promise<boolean> {
-    if (this.options.scripts?.runningNow?.()) return true;
-    if ((this.chat.localBackgroundTasks?.() ?? []).length > 0) return true;
-    if (this.queuedRunIds().length > 0 || (this.chat.liveRunIds?.() ?? []).length > 0) return true;
-    if (this.closed || this.draining || this.activeTurns.size || this.turnTasks.size || this.commandTasks.size ||
-        this.settlingRuns.size || this.settlingInFlight.size || this.turnsAwaitingChat.size ||
-        (this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork()) || (this.chat.activeParticipantRuns?.().length ?? 0) ||
-        this.outboxError || this.progressErrors.size || [...this.progressSenders.values()].some(sender => sender.hasPending())) return true;
-    if ([...this.pendingTerminals.values()].some(terminal => !this.durableTerminalIds.has(terminalEventId(terminal)))) return true;
-    return (await this.options.eventStorage.nativeCommands().pending()).length > 0;
-  }
-
   /** All work owned by this runtime, including native continuations and
    * incomplete copies. Stored, acknowledged-later results do not keep an idle
    * EC2 box running indefinitely; an unpersisted result does. */
@@ -684,7 +722,7 @@ export class MachineHostService {
     commitHostStop?(prepareLocal: () => Promise<boolean>): Promise<boolean>;
   }): Promise<(() => Promise<void>) | undefined> {
     if (this.fenced || await this.hasWorkForIdleStop()) return undefined;
-    // A move may have taken the machine while that was asked.
+    // Another stop may have taken the machine while that was asked.
     if (this.fenced) return undefined;
     this.idleFenced = true;
     let releaseNative: (() => void) | undefined;
@@ -783,6 +821,14 @@ export class MachineHostService {
     }
   }
 
+  private desktopAway(reason: "left" | "not-in-room" | "own-link"): void {
+    if (!this.desktopDeviceId) return;
+    const deviceId = this.desktopDeviceId;
+    this.desktopDeviceId = undefined;
+    void this.debugLogs.write("machine-host.desktop.away", { deviceId, reason, pendingTerminals: this.pendingTerminals.size });
+    this.failAllAttachments("The desktop went away before answering with this picture.");
+  }
+
   private setDesktop(deviceId: string | undefined, options: { announce?: boolean } = {}): void {
     if (!deviceId) {
       return;
@@ -850,13 +896,13 @@ export class MachineHostService {
       ...((this.outboxError || this.progressErrors.size) ? { outboxError: [this.outboxError, ...this.progressErrors.values()].filter(Boolean).join("; ") } : {}),
       ...(this.options.idleStopWarning?.() ? { idleStopWarning: this.options.idleStopWarning() } : {}),
       ...(typeof this.options.autoStopEnabled?.() === "boolean" ? { autoStopEnabled: this.options.autoStopEnabled() } : {}),
-      ...(this.options.moveTransport ? { transportMoveSupported: true } : {}),
       ...(this.options.scripts ? {
         scriptsSupported: true,
         keepAwake: this.options.scripts.keepsHostAwake(),
         keepAwakeScripts: this.options.scripts.scheduledCount?.() ?? 0
       } : {}),
-      chatChanges: CHAT_CHANGES_VERSION
+      chatChanges: CHAT_CHANGES_VERSION,
+      ...(this.chat.runMachineHostedCompaction ? { compactionSupported: true } : {})
     }, to);
     // A desktop that (re)connects learns what is running in the background now.
     this.sendMemberBackgroundSnapshot(to);
@@ -904,77 +950,6 @@ export class MachineHostService {
   private scriptsChangedTimer?: ReturnType<typeof setTimeout>;
   /** Script operations run one at a time, in order, off the inbound chain. */
   private scriptsQueue: Promise<void> = Promise.resolve();
-
-  /** The desktop moves this machine to the User's own server: the new
-   *  addresses go into the enrollment, the answer goes back, and the runtime
-   *  starts again from it. Refused while anything runs here, so no turn is
-   *  cut off; the desktop asks again once this machine is idle. */
-  private async answerTransportMove(body: MachineTransportMoveBody, replyTo: string | undefined): Promise<void> {
-    const fail = (error: string) => this.send({ type: "machine.transport.moved", requestId: body.requestId, ok: false, error }, replyTo).catch(() => undefined);
-    const expiresAt = typeof body.expiresAt === "string" ? Date.parse(body.expiresAt) : Number.NaN;
-    if (!this.options.moveTransport || !this.options.restartRuntime) return void await fail("This machine runtime cannot move; upgrade it.");
-    if (body.instanceId !== this.instanceId) return void await fail("The machine restarted since this was asked; try again.");
-    if (!Number.isFinite(expiresAt) || this.now().getTime() > expiresAt + SCRIPTS_REQUEST_CLOCK_SKEW_MS) return void await fail("This request is too old; nothing was changed.");
-    const addresses = relayAddresses(body.relayUrl, body.outboxUrl, this.options.pairing.relayUrl);
-    if (!addresses) return void await fail("These are not a relay's addresses.");
-    if (this.fenced) return void await fail("The machine is busy; it moves once it is idle.");
-    // From here no new work starts: what arrives waits in the durable inbox
-    // (for this runtime if the move does not happen, the next one if it does).
-    this.moveFenced = true;
-    const refuse = async (error: string): Promise<void> => {
-      this.moveFenced = false;
-      this.retryHeldEventsNow();
-      void this.eventChannel.flush().catch(error => { void this.debugLogs.write("machine-host.move.resume-error", { message: errorMessage(error) }); });
-      await fail(error);
-    };
-    // The desktop stops waiting for the answer at its deadline, counted here
-    // from receipt on this machine's own clock: past it, the machine refuses
-    // rather than moving unseen.
-    const budget = typeof body.answerWithinMs === "number" && Number.isFinite(body.answerWithinMs) && body.answerWithinMs > 0
-      ? Math.min(body.answerWithinMs, TRANSPORT_MOVE_ANSWER_MAX_MS)
-      : Math.max(0, expiresAt - this.now().getTime());
-    const answerBy = this.now().getTime() + budget;
-    const late = () => this.now().getTime() > answerBy - Math.min(TRANSPORT_MOVE_ANSWER_MARGIN_MS, budget * 0.1);
-    try {
-      // What was already taken in (a message being read, a script request,
-      // an event being applied) settles before the machine says it is idle.
-      const settled = (async () => {
-        await this.inbound;
-        await this.scriptsQueue;
-        await this.eventChannel.flush();
-        return true;
-      })();
-      const remaining = Math.max(0, answerBy - Math.min(TRANSPORT_MOVE_SETTLE_MARGIN_MS, budget * 0.4) - this.now().getTime());
-      let deadline: ReturnType<typeof setTimeout> | undefined;
-      const inTime = await Promise.race([settled, new Promise<false>((resolve) => { deadline = setTimeout(() => resolve(false), remaining); })]);
-      clearTimeout(deadline);
-      if (!inTime) return void await refuse("The machine is still sending what it owes; it moves once that is done.");
-    } catch (error) {
-      return void await refuse(`The machine could not settle its current work: ${errorMessage(error)}`);
-    }
-    if (await this.hasWorkForMove().catch(() => true)) return void await refuse("The machine is busy; it moves once it is idle.");
-    if (!await (this.options.probeRelay ?? probeRelayManifest)(addresses.relayUrl).catch(() => false)) {
-      return void await refuse("This machine cannot reach the server at that address.");
-    }
-    // Asked again after the server answered: a scheduled script may have
-    // started meanwhile.
-    if (await this.hasWorkForMove().catch(() => true)) return void await refuse("The machine is busy; it moves once it is idle.");
-    if (late()) return void await refuse("This request is too old; nothing was changed.");
-    try {
-      await this.options.moveTransport(addresses);
-    } catch (error) {
-      return void await refuse(`The machine could not save its new address: ${errorMessage(error)}`);
-    }
-    void this.debugLogs.write("machine.transport.moved", { relayHost: new URL(addresses.relayUrl).host });
-    // The answer leaves first; then the runtime starts again on its new
-    // address, also when the answer cannot leave: its enrollment names the
-    // new one already, and staying here would only look like it stayed.
-    const answered = this.send({ type: "machine.transport.moved", requestId: body.requestId, ok: true }, replyTo).catch(() => undefined);
-    let waited: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([answered, new Promise((resolve) => { waited = setTimeout(resolve, 5_000); })]);
-    clearTimeout(waited);
-    setTimeout(() => this.options.restartRuntime?.(), 500).unref?.();
-  }
 
   /** One desktop request on this machine's scripts, always answered. Served
    *  off the inbound chain, like a picture request on the desktop: releasing
@@ -1123,12 +1098,13 @@ export class MachineHostService {
     // Content is sealed to these two identities; the room capability grants no reading.
     const payload = await this.openHomeFrame(ciphertext);
     if (isDeviceEventPacket(payload)) {
-      // The enrolling desktop keeps its own channel; every other device is
-      // answered only if the roster says so.
-      if (payload.from === this.options.pairing.issuer.originId) {
-        await this.eventChannel.receive(payload);
-      } else if (!await this.peers.receive(payload)) {
-        void this.debugLogs.write("machine-host.trust.unknown-peer", { from: payload.from, type: payload.type });
+      // Durable events travel only in the User's server's order (one road):
+      // a copy sent in the room is not taken, from the desktop or anyone.
+      const key = `${payload.from}\u0000${payload.type}`;
+      if (!this.roomEventsDropped.has(key)) {
+        if (this.roomEventsDropped.size >= 200) this.roomEventsDropped.clear();
+        this.roomEventsDropped.add(key);
+        void this.debugLogs.write("machine-host.room-event-dropped", { from: payload.from, type: payload.type });
       }
       return;
     }
@@ -1154,14 +1130,17 @@ export class MachineHostService {
     await this.handleBody(payload.body, undefined, from);
   }
 
+  /** Room events already logged as dropped (by sender and kind). */
+  private readonly roomEventsDropped = new Set<string>();
+
   private async openHomeFrame(ciphertext: string): Promise<unknown> {
     const header = JSON.parse(ciphertext) as { senderPublicKeyDerBase64?: unknown };
     if (!header.senderPublicKeyDerBase64) {
-      const bootstrap = await openMobileRelayPayload<unknown>(ciphertext, this.options.pairing.relaySealKeyBase64);
+      const bootstrap = await openChannelPayload<unknown>(ciphertext, this.options.pairing.relaySealKeyBase64);
       if (isMachineLinkEnvelope(bootstrap) && bootstrap.body.type === "machine.hello.request") return bootstrap;
       throw new Error("Legacy machine content sealing is unsupported; update this device to reconnect.");
     }
-    return openMachineRelayPayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
+    return openMachinePayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
       [this.options.pairing.issuer.publicKeyDerBase64, ...this.trust.peers().map(peer => peer.publicKeyDerBase64)],
       this.options.pairing.rendezvousId);
   }
@@ -1172,13 +1151,13 @@ export class MachineHostService {
   }
 
   private async openRetainedSettings(ciphertext: string): Promise<unknown> {
-    try { return await openMobileRelayPayload(ciphertext, await this.ownerSealKey()); }
+    try { return await openChannelPayload(ciphertext, await this.ownerSealKey()); }
     catch {
       // Pre-upgrade immutable signed events may retain an inner settings
       // cipher. Their outer transport is already pair-sealed and authenticated;
       // reading the historical inner cipher prevents pinning the event stream.
       // Newly emitted settings never use this legacy key.
-      return openMobileRelayPayload(ciphertext, this.options.pairing.relaySealKeyBase64);
+      return openChannelPayload(ciphertext, this.options.pairing.relaySealKeyBase64);
     }
   }
 
@@ -1187,7 +1166,7 @@ export class MachineHostService {
     // Old, ephemeral frames cannot bypass the idle fence either. Current
     // peers use the durable inbox and retain these actions until apply.
     if (this.fenced && (isMachineDurableMessage(body) || body.type === "machine.settings.sync")) {
-      throw new Error(this.moveFenced ? "The machine is moving to another address; this action must remain queued." : "The machine is stopping after idle; this action must remain queued.");
+      throw new Error("The machine is stopping after idle; this action must remain queued.");
     }
     void this.debugLogs.write("machine-host.message", {
       type: body.type,
@@ -1199,7 +1178,8 @@ export class MachineHostService {
         // inside its own sealed, signed channel.
         if (!event || !isMachineTrustRoster(body.roster)) throw new Error("Machine trust roster requires its signed event.");
         const accepted = await this.trust.accept(body.roster, event);
-        await this.peers.reconcile(this.rosterPeersToConnect(accepted.roster.peers));
+        // The roster's peers and the phones trusted by their certificates.
+        await this.peers.reconcile(this.rosterPeersToConnect(this.trust.peers()));
         void this.debugLogs.write("machine-host.trust.applied", {
           changed: accepted.changed,
           peers: accepted.roster.peers.length,
@@ -1208,7 +1188,10 @@ export class MachineHostService {
         return;
       }
       case "machine.hello.ack":
-        this.desktopDeviceId = body.desktopDeviceId || this.desktopDeviceId;
+        // Applied in order, maybe after the desktop left or this machine's
+        // link dropped: it counts as here only while the room says so.
+        if (this.desktopInRoom) this.desktopDeviceId = body.desktopDeviceId || this.desktopDeviceId;
+        this.desktopTakesCompactions = body.compactionDelegation === true;
         if (body.machineId) {
           await this.options.eventStorage.deviceEvents().saveHostMachineId(this.options.pairing.rendezvousId, body.machineId);
           this.homeMachineId = body.machineId;
@@ -1225,18 +1208,18 @@ export class MachineHostService {
         // A (re)started desktop asks to be greeted: the same reconciliation
         // as after a peer change, whether or not the relay reported one.
         if (replyTo && replyTo !== this.options.pairing.issuer.originId) await this.sendHello(replyTo);
-        else this.setDesktop(this.options.pairing.issuer.originId, { announce: true });
+        else if (this.desktopInRoom) this.setDesktop(this.options.pairing.issuer.originId, { announce: true });
         return;
       case "machine.settings.sync":
-        await this.settings.importMachineSettingsSnapshot(body.snapshot);
-        void this.debugLogs.write("machine-host.settings.synced", { exportedAt: body.snapshot.exportedAt });
-        await this.options.onSettingsImported?.();
+        if (await this.importSettings(body.snapshot, "sync")) {
+          void this.debugLogs.write("machine-host.settings.synced", { exportedAt: body.snapshot.exportedAt });
+          await this.options.onSettingsImported?.();
+        }
         return;
       case "machine.settings.sealed": {
         if (body.conversationId !== `machine-settings:${this.options.pairing.rendezvousId}`) throw new Error("Settings target the wrong enrolled machine.");
         const snapshot = await this.openRetainedSettings(body.ciphertext);
-        await this.settings.importMachineSettingsSnapshot(snapshot as import("../../shared/machineLink").MachineSettingsSnapshot);
-        await this.options.onSettingsImported?.();
+        if (await this.importSettings(snapshot as import("../../shared/machineLink").MachineSettingsSnapshot, "event")) await this.options.onSettingsImported?.();
         return;
       }
       case "machine.conversation.deleted": {
@@ -1293,7 +1276,9 @@ export class MachineHostService {
           await this.finishQueuedTurn(body, "failed", "The machine is shutting down; this turn did not start.");
           return;
         }
-        if (!(await this.chatReadyFor(body))) {
+        // A compaction also waits behind a turn of the same member that is
+        // still waiting for its chat here: it must not compact first.
+        if (!(await this.chatReadyFor(body)) || (body.compaction && this.memberHasWaitingTurn(body))) {
           // The chat state this request was made against has not been applied
           // here yet (its change events are still arriving): the turn runs
           // once it is.
@@ -1317,12 +1302,6 @@ export class MachineHostService {
         return;
       case "machine.scripts.result":
       case "machine.scripts.changed":
-        return;
-      case "machine.transport.move":
-        // Only the enrolling desktop reaches here (see above).
-        void this.answerTransportMove(body, replyTo);
-        return;
-      case "machine.transport.moved":
         return;
       case "machine.turn.query":
         if (await this.options.eventStorage.nativeCommands().forRun(body.runId)) {
@@ -1549,9 +1528,10 @@ export class MachineHostService {
    *  against: the chat itself, and the desktop's last change event it names.
    *  A phone names no change; the message its member answers is enough. */
   private async chatReadyFor(request: MachineTurnRequestBody): Promise<boolean> {
-    const presence = await this.chatPresence(request.conversationId, request.messageId);
+    // A compaction answers no message: the chat itself is what it needs.
+    const presence = await this.chatPresence(request.conversationId, request.compaction ? undefined : request.messageId);
     if (presence?.kind !== "chat") return false;
-    if (!request.chatHead || request.chatHead.originSeq < 1) return presence.hasMessage;
+    if (!request.chatHead || request.chatHead.originSeq < 1) return request.compaction ? true : presence.hasMessage;
     const applied = await this.options.eventStorage.deviceEvents().appliedHead(request.chatHead.originId, request.chatHead.logScopeId);
     return applied >= request.chatHead.originSeq;
   }
@@ -1569,11 +1549,18 @@ export class MachineHostService {
     this.awaitingChatTimer.unref?.();
   }
 
+  private memberHasWaitingTurn(request: MachineTurnRequestBody): boolean {
+    return (this.turnsAwaitingChat.get(request.conversationId) ?? []).some((entry) => entry.request.participantId === request.participantId);
+  }
+
   private async releaseTurnsAwaitingChat(): Promise<void> {
     for (const [conversationId, waiting] of [...this.turnsAwaitingChat.entries()]) {
       const remaining: Array<{ request: MachineTurnRequestBody; since: number }> = [];
       for (const entry of waiting) {
-        if (await this.chatReadyFor(entry.request)) {
+        // In arrival order per member: a compaction never overtakes an
+        // earlier turn of its member that is still waiting.
+        const behindEarlier = Boolean(entry.request.compaction) && remaining.some((earlier) => earlier.request.participantId === entry.request.participantId);
+        if (!behindEarlier && await this.chatReadyFor(entry.request)) {
           void this.runTurn(entry.request);
         } else if (Date.now() - entry.since > MACHINE_CHAT_WAIT_MS) {
           await this.finishQueuedTurn(entry.request, "failed", "The chat has not reached this machine yet, so the member did not start. Send the message again once the machine is connected.");
@@ -1604,6 +1591,7 @@ export class MachineHostService {
     const messages = await this.options.eventStorage.machineProgress().retainPartialForOutcome({
       runId: request.runId, participantId: request.participantId, status, messages: []
     });
+    const reason = error && request.compaction ? compactionWording(error) : error;
     this.pendingTerminals.set(request.runId, {
       type: "machine.turn.finished",
       receiptId: command?.commandId ?? randomUUID(),
@@ -1613,7 +1601,8 @@ export class MachineHostService {
       status,
       messages,
       warnings: [],
-      ...(error ? { error } : {}),
+      ...(reason ? { error: reason } : {}),
+      ...compactionMark(request),
       finishedAt: this.now().toISOString()
     });
     this.persistOutbox();
@@ -1650,19 +1639,27 @@ export class MachineHostService {
     // as its dedicated CLI does (ChatService.reserveParticipantTurn): its
     // turns are admitted one after another, but each runs as soon as it is
     // admitted instead of waiting for the previous one to finish.
-    const shared = request.participant.kind === "claude-code";
+    // A compaction rewrites the session: it is admitted only once every
+    // earlier command of this member has finished, not only been admitted.
+    const shared = !request.compaction && request.participant.kind === "claude-code";
+    const earlier = request.compaction ? [...(this.commandScopeTasks.get(scope) ?? [])] : [];
     let markAdmitted!: () => void;
     const admitted = new Promise<void>((resolve) => { markAdmitted = resolve; });
-    const task = (this.commandSessions.get(scope) ?? Promise.resolve()).catch(() => undefined)
+    const task = Promise.allSettled([this.commandSessions.get(scope) ?? Promise.resolve(), ...earlier])
       .then(() => this.admitTurn(request, shared ? markAdmitted : undefined))
       .finally(markAdmitted);
     const sessionTail = shared ? admitted : task;
     this.commandSessions.set(scope, sessionTail);
     this.commandTasks.set(request.runId, task);
     this.turnTasks.add(task);
+    const scopeTasks = this.commandScopeTasks.get(scope) ?? new Set<Promise<void>>();
+    scopeTasks.add(task);
+    this.commandScopeTasks.set(scope, scopeTasks);
     void task.finally(() => {
       this.turnTasks.delete(task); this.commandTasks.delete(request.runId);
       if (this.commandSessions.get(scope) === sessionTail) this.commandSessions.delete(scope);
+      scopeTasks.delete(task);
+      if (!scopeTasks.size && this.commandScopeTasks.get(scope) === scopeTasks) this.commandScopeTasks.delete(scope);
     }).catch((error) => {
       void this.debugLogs.write("machine-host.turn.not-stored", { runId: request.runId, message: errorMessage(error) });
       this.retryCommands();
@@ -1793,6 +1790,63 @@ export class MachineHostService {
     this.commandRetry.unref();
   }
 
+  private async runTurnOnThisMachine(request: MachineTurnRequestBody, signal: AbortSignal, progress: (update: ReviewProgress) => void): Promise<MachineTurnFinishedBody> {
+    const result = await this.chat.runMachineHostedTurn(
+      {
+        conversationId: request.conversationId,
+        participantId: request.participantId,
+        messageId: request.messageId,
+        runId: request.runId,
+        pendingMessageId: request.pendingMessageId
+      },
+      signal,
+      progress
+    );
+    return this.finishedBody(request, finishedTurnStatus(result.messages, signal.aborted), result);
+  }
+
+  private finishedBody(request: MachineTurnRequestBody, status: MachineTurnFinishedBody["status"],
+    result: { messages: ChatMessage[]; warnings: string[]; contextUsage?: MachineTurnFinishedBody["contextUsage"] }): MachineTurnFinishedBody {
+    return {
+      type: "machine.turn.finished",
+      conversationId: request.conversationId,
+      runId: request.runId,
+      participantId: request.participantId,
+      status,
+      messages: result.messages,
+      warnings: result.warnings,
+      ...(result.contextUsage ? { contextUsage: result.contextUsage } : {}),
+      ...compactionMark(request),
+      finishedAt: this.now().toISOString()
+    };
+  }
+
+  private async importSettings(snapshot: import("../../shared/machineLink").MachineSettingsSnapshot, source: string): Promise<boolean> {
+    const exportedAt = typeof snapshot?.exportedAt === "string" ? snapshot.exportedAt : "";
+    if (exportedAt && this.newestSettings && exportedAt < this.newestSettings.exportedAt) {
+      void this.debugLogs.write("machine-host.settings.older-skipped", { source, exportedAt, newest: this.newestSettings.exportedAt });
+      return false;
+    }
+    await this.settings.importMachineSettingsSnapshot(snapshot);
+    if (exportedAt && (!this.newestSettings || exportedAt >= this.newestSettings.exportedAt)) this.newestSettings = { exportedAt, snapshot };
+    return true;
+  }
+
+  /** Compacts a member here with the run id the desktop chose. No progress
+   *  frames: the desktop shows a compaction's progress itself, as it does
+   *  for a local member; the outcome line and the new context use travel
+   *  with the result. */
+  private async compactOnThisMachine(request: MachineTurnRequestBody, compaction: NonNullable<MachineTurnRequestBody["compaction"]>, signal: AbortSignal): Promise<MachineTurnFinishedBody> {
+    if (!this.chat.runMachineHostedCompaction) throw new Error("This machine cannot compact members.");
+    const result = await this.chat.runMachineHostedCompaction({
+      conversationId: request.conversationId,
+      participantId: request.participantId,
+      runId: request.runId,
+      ...normalizeMachineTurnCompaction(compaction)
+    }, signal);
+    return this.finishedBody(request, signal.aborted ? "interrupted" : "completed", result);
+  }
+
   private async executeTurn(request: MachineTurnRequestBody): Promise<void> {
     if (await this.isConversationDeleted(request.conversationId)) {
       return this.finishQueuedTurn(request, "failed", "This chat was deleted; the turn did not run.");
@@ -1804,10 +1858,15 @@ export class MachineHostService {
       this.noteProgress(request.conversationId, update);
     };
     let terminal: MachineTurnFinishedBody;
+    let restoreSettings: import("../../shared/machineLink").MachineSettingsSnapshot | undefined;
     try {
       if (request.sealedSettings) {
-        const snapshot = await this.openRetainedSettings(request.sealedSettings);
-        await this.settings.importMachineSettingsSnapshot(snapshot as import("../../shared/machineLink").MachineSettingsSnapshot);
+        const snapshot = await this.openRetainedSettings(request.sealedSettings) as import("../../shared/machineLink").MachineSettingsSnapshot;
+        const newest = this.newestSettings;
+        const exportedAt = typeof snapshot?.exportedAt === "string" ? snapshot.exportedAt : "";
+        if (newest && exportedAt && exportedAt < newest.exportedAt) restoreSettings = newest.snapshot;
+        await this.settings.importMachineSettingsSnapshot(snapshot);
+        if (exportedAt && !restoreSettings) this.newestSettings = { exportedAt, snapshot };
         await this.options.onSettingsImported?.();
       }
       if (controller.signal.aborted || await this.isConversationDeleted(request.conversationId)) {
@@ -1815,27 +1874,9 @@ export class MachineHostService {
       }
       // The member works in this machine's copy of the project.
       await this.chat.applyMachineRepository?.(request.conversationId, request.machineRepository);
-      const result = await this.chat.runMachineHostedTurn(
-        {
-          conversationId: request.conversationId,
-          participantId: request.participantId,
-          messageId: request.messageId,
-          runId: request.runId,
-          pendingMessageId: request.pendingMessageId
-        },
-        controller.signal,
-        progress
-      );
-      terminal = {
-        type: "machine.turn.finished",
-        conversationId: request.conversationId,
-        runId: request.runId,
-        participantId: request.participantId,
-        status: finishedTurnStatus(result.messages, controller.signal.aborted),
-        messages: result.messages,
-        warnings: result.warnings,
-        finishedAt: this.now().toISOString()
-      };
+      terminal = request.compaction
+        ? await this.compactOnThisMachine(request, request.compaction, controller.signal)
+        : await this.runTurnOnThisMachine(request, controller.signal, progress);
     } catch (error) {
       terminal = {
         type: "machine.turn.finished",
@@ -1846,11 +1887,19 @@ export class MachineHostService {
         messages: [],
         warnings: [],
         error: errorMessage(error),
+        ...compactionMark(request),
         finishedAt: this.now().toISOString()
       };
     } finally {
       this.activeTurns.delete(request.runId);
       this.activeTurnConversations.delete(request.runId);
+    }
+    if (restoreSettings) {
+      try {
+        if (await this.importSettings(restoreSettings, "restore")) await this.options.onSettingsImported?.();
+      } catch (error) {
+        void this.debugLogs.write("machine-host.settings.restore-error", { runId: request.runId, message: errorMessage(error) });
+      }
     }
     // The result is kept (on disk when configured) until the desktop
     // acknowledges it: a desktop that is away, a relay that drops the frame,
@@ -2101,6 +2150,26 @@ export class MachineHostService {
     });
   }
 
+  /** Whether the enrolling desktop is here and runs the compactions members
+   *  here ask for themselves. When it is not, the member's compaction runs
+   *  on this machine directly, as it always has. */
+  canDelegateCompaction(): boolean {
+    return this.desktopTakesCompactions && Boolean(this.desktopDeviceId) && !this.closed && !this.draining;
+  }
+
+  /** A member here asked to compact its own context: the desktop runs it as
+   *  one the User asked for, and sends it back here as a compaction command.
+   *  One event per run id, so a retry is the same request. */
+  delegateCompaction(request: MachineCompactionDelegateRequest): Promise<void> {
+    return this.enqueueOutbound(() => this.publishToPeer(this.options.pairing.issuer.originId, {
+      type: "machine.compaction.delegate",
+      conversationId: request.conversationId,
+      participantId: request.participantId,
+      runId: request.runId,
+      ...(request.instructions ? { instructions: request.instructions } : {})
+    }, `machine-compaction:${request.runId}`));
+  }
+
   /** Publishes one durable message to a single device. Used where a message
    *  must have exactly one executor rather than reaching everyone. */
   private async publishToPeer(deviceId: string, body: MachineLinkMessage, eventId?: string): Promise<void> {
@@ -2133,30 +2202,16 @@ export class MachineHostService {
     return peers.filter((peer) => peer.deviceId !== this.options.pairing.issuer.originId);
   }
 
-  /**
-   * Who a result is delivered to: the enrolling desktop and every other device
-   * of the owner that is met in this machine's own room.
-   *
-   * A machine in another room is deliberately not on this list. An event is
-   * scoped to the room it was minted in, and another machine is a peer for
-   * asking members to run, not an audience for this machine's results.
-   */
+  /** Who a result is addressed to: nobody. Every device reads the User's
+   *  server's order, and nobody keeps a delivery row for a reader of it. */
   private resultRecipients(): Array<{ deviceId: string; channelId: string }> {
-    const room = this.options.pairing.rendezvousId;
-    const issuer = { deviceId: this.options.pairing.issuer.originId, channelId: room };
-    const peers = this.peers.recipients()
-      .filter((peer) => peer.channelId === room && peer.deviceId !== issuer.deviceId);
-    return [issuer, ...peers];
+    return [];
   }
 
-  /** Where this machine's own chat changes go: the desktop that installed it,
-   *  and every other machine of the owner it knows (each holds every chat).
-   *  Phones are not addressed; they read the chat from the desktop. */
+  /** Where this machine's own chat changes are addressed: nowhere, for the
+   *  same reason. */
   chatChangeRecipients(): Array<{ deviceId: string; channelId: string }> {
-    return [
-      { deviceId: this.options.pairing.issuer.originId, channelId: this.options.pairing.rendezvousId },
-      ...this.peers.machineRecipients()
-    ];
+    return [];
   }
 
   /** The device identity of another of the owner's machines, by machine id:
@@ -2222,6 +2277,16 @@ export class MachineHostService {
       this.progressSenders.set(progress.runId, sender);
     }
     sender.note(progress);
+    // A turn started here for a phone's message has no desktop dispatch to
+    // finish it (machine.turn.finished): its last progress closes it.
+    const terminal = progress.phase === "done" || progress.phase === "error" || progress.phase === "cancelled" || progress.agentProgress?.state === "finished";
+    if (terminal && parsePhoneTurnRunId(progress.runId)) {
+      const finished = sender;
+      void finished.finish()
+        .then(() => this.options.eventStorage.machineProgress().close(progress.runId))
+        .catch(() => undefined)
+        .finally(() => { if (this.progressSenders.get(progress.runId) === finished) this.progressSenders.delete(progress.runId); });
+    }
   }
 
   private async sendNow(body: MachineLinkMessage, recipient?: string): Promise<void> {
@@ -2237,6 +2302,7 @@ export class MachineHostService {
       const published = await this.eventChannel.publish({ conversationId, kind: body.type, payload: body,
         // One result, delivered to every device the owner has: whichever of
         // them is online gets it, and the outbox holds it for the others.
+        // Through the hub nobody is named: every device reads its order.
         recipients: this.resultRecipients(),
         ...(body.type === "machine.approval.requested" || body.type === "machine.approval.updated" ? { scope: `approval:${body.approval.id}` } : {}),
         ...(body.type === "machine.choice.result" ? { eventId: machineChoiceResultId(body.decisionId), scope: `choice:${body.choiceId}` } : {}),
@@ -2275,7 +2341,7 @@ export class MachineHostService {
     const peerKey = to === this.options.pairing.issuer.originId
       ? this.options.pairing.issuer.publicKeyDerBase64 : this.trust.peer(to)?.publicKeyDerBase64;
     if (!peerKey) throw new Error("That device is no longer trusted.");
-    const ciphertext = await sealMachineRelayPayload(signed, await this.options.eventLog.getOrCreateDeviceIdentity(),
+    const ciphertext = await sealMachinePayload(signed, await this.options.eventLog.getOrCreateDeviceIdentity(),
       peerKey, this.options.pairing.rendezvousId);
     await this.client.sendCiphertext({ logicalMessageId: envelope.messageId, ciphertext, to });
   }
@@ -2298,33 +2364,4 @@ function rememberBounded(set: Set<string>, value: string, limit = 5_000): void {
   set.delete(value);
   set.add(value);
   if (set.size > limit) set.delete(set.values().next().value as string);
-}
-
-/** A relay's two addresses as a move names them: the room socket and the
- *  mailbox, on one host, over TLS (plain only on this computer). */
-function relayAddresses(relayUrl: unknown, outboxUrl: unknown, currentRelayUrl: string | undefined): { relayUrl: string; outboxUrl: string } | undefined {
-  if (typeof relayUrl !== "string" || typeof outboxUrl !== "string") return undefined;
-  try {
-    const room = new URL(relayUrl);
-    const mailbox = new URL(outboxUrl);
-    const local = (url: URL) => url.hostname === "127.0.0.1" || url.hostname === "localhost";
-    // This computer is a place only for a machine already on it (a test).
-    const alreadyLocal = (() => { try { return local(new URL(currentRelayUrl ?? "")); } catch { return false; } })();
-    if (local(room) && !alreadyLocal) return undefined;
-    const secure = (room.protocol === "wss:" && mailbox.protocol === "https:") || (local(room) && room.protocol === "ws:" && mailbox.protocol === "http:");
-    if (!secure || room.host !== mailbox.host || room.pathname !== "/v1/relay" || mailbox.pathname !== "/v1/mailbox/events") return undefined;
-    return { relayUrl: room.toString(), outboxUrl: mailbox.toString() };
-  } catch {
-    return undefined;
-  }
-}
-
-/** The relay at this room address answers with its manifest. */
-async function probeRelayManifest(relayUrl: string): Promise<boolean> {
-  const room = new URL(relayUrl);
-  const manifest = new URL("/v1/relay/manifest", `${room.protocol === "wss:" ? "https:" : "http:"}//${room.host}`);
-  const response = await fetch(manifest, { signal: AbortSignal.timeout(10_000) });
-  if (!response.ok) return false;
-  const body = await response.json() as { ok?: unknown; manifest?: { provider?: unknown } };
-  return body.ok === true && typeof body.manifest?.provider === "string";
 }

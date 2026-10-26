@@ -30,7 +30,7 @@ async function evalAsync(client, expr, timeoutMs = 20000) {
   if (!created.ok) process.exit(2);
   fs.writeFileSync("/private/tmp/accordagents-machine-qa/enrollment.json", created.v.enrollmentJson);
   const pkg = JSON.parse(created.v.enrollmentJson);
-  console.log(stamp(), "enrollment relayUrl:", pkg.relayUrl, "purpose:", pkg.purpose, "expires:", pkg.expiresAt);
+  console.log(stamp(), "enrollment hubUrl:", pkg.hubUrl, "purpose:", pkg.purpose, "expires:", pkg.expiresAt);
   const list = await evalAsync(client, `window.consensus.listMachines()`);
   console.log(stamp(), "machines:", JSON.stringify(list).slice(0, 400));
   fs.writeFileSync("/private/tmp/accordagents-machine-qa/machine-id.txt", created.v.machine.id);

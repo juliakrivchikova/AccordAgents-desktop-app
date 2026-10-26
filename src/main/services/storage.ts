@@ -38,9 +38,9 @@ import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import type { DeviceEventAppendOptions } from "../../shared/deviceEventDelivery";
 import { DEVICE_EVENT_SCHEMA_SQL, DeviceEventStorage, deviceEventAppendSql } from "./deviceEventStorage";
 import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEventBlobStorage";
-import { HubRelayStorage } from "./hubRelayStorage";
 import { HubStorage } from "./hubStorage";
 import { NATIVE_COMMAND_SCHEMA_SQL, NativeCommandStore } from "./nativeCommandStore";
+import { PHONE_TURN_CLAIM_SCHEMA_SQL, PhoneTurnClaimStore } from "./phoneTurnClaims";
 import { MACHINE_PROGRESS_SCHEMA, MachineProgressStore } from "./machineProgressStore";
 import { MACHINE_POWER_SCHEMA, MachinePowerStore } from "./machinePowerStore";
 
@@ -354,7 +354,6 @@ export class StorageService {
   private sqliteSession?: SqliteSession;
   private machineProgressStore?: MachineProgressStore;
   private hubStorage?: HubStorage;
-  private hubRelayStorage?: HubRelayStorage;
   private savedMessageStateCache: Map<string, SavedMessageState> | undefined;
   private readonly dbPath: string;
   private readonly sqliteExecutable: string;
@@ -467,6 +466,7 @@ export class StorageService {
       ${DEVICE_EVENT_SCHEMA_SQL}
       ${DEVICE_EVENT_BLOB_SCHEMA_SQL}
       ${NATIVE_COMMAND_SCHEMA_SQL}
+      ${PHONE_TURN_CLAIM_SCHEMA_SQL}
       ${MACHINE_PROGRESS_SCHEMA}
       ${MACHINE_POWER_SCHEMA}
     `);
@@ -615,6 +615,28 @@ export class StorageService {
       }
     }
     return { rows, truncated };
+  }
+
+  /** The most recently updated chats' bodies (no messages) that hold an
+   *  approval waiting for the User. */
+  async recentChatsWithPendingApprovals(limit: number): Promise<Conversation[]> {
+    await this.init();
+    const rows = await this.queryJson<{ id: string; bodyHex: string }>(`
+      select id, hex(coalesce(nullif(body_json, ''), json_set(payload_json, '$.messages', json_array()))) as bodyHex
+      from conversations where kind = 'chat'
+      order by updated_at desc limit ${normalizePositiveInteger(limit, 100)};
+    `);
+    const found: Conversation[] = [];
+    for (const row of rows) {
+      try {
+        const conversation = parseHexJson<Conversation>(row.bodyHex, `conversation ${row.id}`);
+        conversation.messages = [];
+        if (hasPendingAppToolApprovals(conversation)) found.push(conversation);
+      } catch {
+        // An unreadable chat holds no card to show.
+      }
+    }
+    return found;
   }
 
   async listChatActivity(request: ListChatActivityRequest = {}): Promise<ListChatActivityResult> {
@@ -1671,8 +1693,19 @@ export class StorageService {
    * artifact actions, and the rest of it (choices, approvals, stops) is about
    * runs elsewhere that a new machine has no use for.
    */
-  async chatChangeMarks(localOriginId: string): Promise<ChatCopyMark[]> {
+  async chatChangeMarks(localOriginId: string, extraOrigins: readonly string[] = []): Promise<ChatCopyMark[]> {
     await this.init();
+    // Devices whose chat changes this device took through its server rather
+    // than a channel (the User's phones): their heads are their newest event.
+    const extra = [...new Set(extraOrigins)].filter((origin) => origin && origin !== localOriginId).slice(0, 50);
+    const extraHeads = extra.length ? `
+      union all
+      select originId, logScopeId, originSeq, eventHash from (
+        select e.origin_id as originId, e.log_scope_id as logScopeId, e.origin_seq as originSeq, e.event_hash as eventHash,
+          row_number() over (partition by e.origin_id, e.log_scope_id order by e.origin_seq desc) as rn
+        from chat_events e
+        where e.origin_id in (${extra.map(sqlString).join(", ")}) and e.log_scope_id >= 'chat-changes:' and e.log_scope_id < 'chat-changes;'
+      ) where rn = 1` : "";
     return this.queryJson<ChatCopyMark>(`
       select originId, logScopeId, originSeq, eventHash from (
         select e.origin_id as originId, e.log_scope_id as logScopeId, e.origin_seq as originSeq, e.event_hash as eventHash,
@@ -1691,7 +1724,9 @@ export class StorageService {
       union all
       select origin_id as originId, log_scope_id as logScopeId, origin_seq as originSeq, event_hash as eventHash
       from device_event_applied_heads
-      where substr(log_scope_id, 1, 13) = 'chat-changes:' and origin_id <> ${sqlString(localOriginId)};
+      where substr(log_scope_id, 1, 13) = 'chat-changes:' and origin_id <> ${sqlString(localOriginId)}
+        ${extra.length ? `and origin_id not in (${extra.map(sqlString).join(", ")})` : ""}
+      ${extraHeads};
     `);
   }
 
@@ -1876,6 +1911,10 @@ export class StorageService {
     return new NativeCommandStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
   }
 
+  phoneTurnClaims(): PhoneTurnClaimStore {
+    return new PhoneTurnClaimStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
+  }
+
   machineProgress(): MachineProgressStore {
     return this.machineProgressStore ??= new MachineProgressStore({
       init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql),
@@ -1885,17 +1924,6 @@ export class StorageService {
 
   machinePower(): MachinePowerStore {
     return new MachinePowerStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
-  }
-
-  /** On the hub: the relay's sealed mailboxes it serves to the phone and
-   *  the machines. */
-  relay(): HubRelayStorage {
-    this.hubRelayStorage ??= new HubRelayStorage({
-      init: () => this.init(),
-      query: <T>(sql: string) => this.queryJson<T>(sql),
-      execute: (sql: string) => this.runSql(sql)
-    });
-    return this.hubRelayStorage;
   }
 
   /** The hub's tables: on the hub, its order, roster and push subscriptions;
@@ -2578,6 +2606,17 @@ export class StorageService {
       await this.saveConversation(conversation);
     }
     await this.setSchemaMeta(INFERRED_REQUEST_THREAD_MIGRATION_KEY, SCHEMA_META_COMPLETE);
+  }
+
+  /** Chats holding an approved roster change that had not been applied yet
+   *  (ChatAppToolApproval.memberRemovalQueuedAt or memberAdditionQueuedAt);
+   *  read once at startup. */
+  async conversationIdsWithQueuedRosterChanges(): Promise<string[]> {
+    await this.init();
+    return this.queryConversationIds(
+      `coalesce(nullif(body_json, ''), payload_json) like '%"memberRemovalQueuedAt":%'` +
+      ` or coalesce(nullif(body_json, ''), payload_json) like '%"memberAdditionQueuedAt":%'`
+    );
   }
 
   private async queryConversationIds(whereSql: string): Promise<string[]> {

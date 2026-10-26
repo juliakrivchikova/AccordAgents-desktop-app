@@ -77,6 +77,14 @@ test("Cloud run returns the restored home identity so a new participant targets 
   assert.equal(result.machine.id, "original-home");
 });
 
+test("without the User's server Cloud run says so before AWS is touched", async () => {
+  const h = harness();
+  h.options.requireServer = async () => { throw new Error("Set up your server first (Settings → Your server): cloud machines connect through it."); };
+  await assert.rejects(h.service.prepare(request, () => {}), /Set up your server first/);
+  assert.deepEqual(h.calls, [], "no instance started, no machine enrolled");
+  assert.deepEqual(h.machines, []);
+});
+
 test("two desktops sharing one AWS instance install into separate persistent environments", async () => {
   const home = harness();
   const work = harness(); work.options.environmentId = async () => "work-desktop";
@@ -133,6 +141,21 @@ test("failed setup and desktop restart reuse the enrolled instance", async () =>
 test("selecting Cloud never provisions an absent or stopped server", async () => {
   const h = harness(); h.stop();
   await assert.rejects(h.service.prepare(request, () => {}), /Start your AWS instance/);
+  assert.deepEqual(h.calls, []);
+});
+
+test("selecting Cloud on a stopped instance asks to start it, whatever old-machine line the page shows", async () => {
+  const h = harness();
+  h.options.aws.status = async () => ({ configured: true, state: "stopped", handle: { instanceId: "i-abc", region: "eu-west-1" },
+    notices: ["Your old cloud machine could not be removed from this computer yet: disk full. The app tries again by itself."] } as AwsWorkerStatus);
+  await assert.rejects(new CloudRunPreparationService(h.options).prepare(request, () => {}), /Start your AWS instance/);
+  assert.deepEqual(h.calls, []);
+});
+
+test("selecting Cloud on an instance the app just found gone says so and sets nothing up", async () => {
+  const h = harness();
+  h.options.aws.status = async () => ({ configured: false, notices: ["Your cloud machine no longer exists in AWS, so it was removed."] } as AwsWorkerStatus);
+  await assert.rejects(new CloudRunPreparationService(h.options).prepare(request, () => {}), /no longer exists in AWS, so it was removed/);
   assert.deepEqual(h.calls, []);
 });
 

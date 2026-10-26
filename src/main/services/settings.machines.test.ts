@@ -103,6 +103,31 @@ test("machine run intents and held stops survive a fresh SettingsService reading
   }
 });
 
+test("what the desktop published to a machine's runtime survives a fresh SettingsService reading the disk", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-published-"));
+  const file = path.join(dir, "settings.json");
+  const instance = (): SettingsService => {
+    const service = new SettingsService();
+    (service as any).settingsPath = file;
+    return service;
+  };
+  try {
+    const published = { instanceId: "runtime-run-1", settings: "digest-of-settings", roster: "digest-of-roster" };
+    const record = { id: "machine-p", name: "Published", deviceId: "device-p", pairingKey: "pairing-p", createdAt: "2026-10-22T00:00:00.000Z", published };
+    await instance().saveMachine(record);
+    assert.deepEqual((await instance().listMachines())[0].published, published, "a desktop restart remembers it, so it publishes nothing again");
+    const disk = JSON.parse(await readFile(file, "utf8"));
+    disk.machines[0].published = { instanceId: 7, settings: "x".repeat(300), roster: "kept" };
+    await writeFile(file, JSON.stringify(disk));
+    assert.deepEqual((await instance().listMachines())[0].published, { roster: "kept" }, "malformed parts are dropped, so they are published again");
+    disk.machines[0].published = "nonsense";
+    await writeFile(file, JSON.stringify(disk));
+    assert.equal((await instance().listMachines())[0].published, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("concurrent machine runtimes publish one complete secret key and corrupt keys never get replaced", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-key-"));
   const modulePath = path.join(__dirname, "..", "platform.js");
@@ -265,47 +290,6 @@ test("controller trust stays local when settings are exported or imported", asyn
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("a removed device cannot let itself back in on the pairing it still holds", async () => {
-  const { createChatEventDeviceIdentity } = await import("./chatEventLog");
-  const dir = await mkdtemp(path.join(tmpdir(), "accord-trust-revoke-"));
-  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
-  const service = new SettingsService();
-  (service as any).settingsPath = path.join(dir, "settings.json");
-  try {
-    const phone = createChatEventDeviceIdentity(new Date().toISOString());
-    const pairing = { key: "route\u0000room", createdAt: new Date(Date.now() - 60_000).toISOString() };
-    const record = { deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64,
-      role: "phone" as const, name: "Phone", addedAt: phone.createdAt };
-    await service.saveTrustedDevice(record, pairing);
-    assert.equal((await service.machinePairingTrust()).authorizedKeys.includes(pairing.key), true);
-
-    // The owner removes it. Announcing the same key on the same pairing is
-    // exactly what a phone does on every reconnect, and it used to be enough
-    // to put the device straight back in the roster.
-    await service.removeTrustedDevice(phone.originId);
-    await assert.rejects(() => service.saveTrustedDevice(record, pairing), /pair again/);
-    assert.deepEqual(await service.listTrustedDevices(), []);
-
-    // A fresh identity on that same pairing is the same move under a new name.
-    const alias = createChatEventDeviceIdentity(new Date().toISOString());
-    await assert.rejects(() => service.saveTrustedDevice({
-      deviceId: alias.originId, publicKeyDerBase64: alias.publicKeyDerBase64,
-      role: "phone" as const, name: "Phone", addedAt: alias.createdAt
-    }, pairing), /pair again/);
-
-    // The revocation is a fact on disk, so a restarted app still refuses it.
-    const restarted = new SettingsService();
-    (restarted as any).settingsPath = path.join(dir, "settings.json");
-    assert.equal((await restarted.machinePairingTrust()).revokedKeys.includes(pairing.key), true);
-    await assert.rejects(() => restarted.saveTrustedDevice(record, pairing), /pair again/);
-
-    // And a new invitation the owner makes lets the device pair again.
-    const fresh = { key: "route-2\u0000room-2", createdAt: new Date().toISOString() };
-    await restarted.saveTrustedDevice(record, fresh);
-    assert.deepEqual((await restarted.listTrustedDevices()).map(device => device.deviceId), [phone.originId]);
-  } finally { await rm(dir, { recursive: true, force: true }); }
-});
-
 test("the devices the owner trusts, and the ones removed, survive a restart", async () => {
   const { createChatEventDeviceIdentity } = await import("./chatEventLog");
   const dir = await mkdtemp(path.join(tmpdir(), "accord-trust-restart-"));
@@ -315,13 +299,19 @@ test("the devices the owner trusts, and the ones removed, survive a restart", as
   (service as any).settingsPath = settingsPath;
   try {
     const phone = createChatEventDeviceIdentity(new Date().toISOString());
+    const removedPhone = createChatEventDeviceIdentity(new Date().toISOString());
     const laptop = createChatEventDeviceIdentity(new Date().toISOString());
-    const pairing = { key: "route-a\u0000room-a", createdAt: new Date(Date.now() - 60_000).toISOString() };
-    await service.saveTrustedDevice({ deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64,
-      role: "phone" as const, name: "Phone", addedAt: phone.createdAt }, pairing);
+    const now = new Date().toISOString();
+    await service.savePhoneInvite({ inviteId: "invite-1", issuedAt: now, expiresAt: new Date(Date.now() + 600_000).toISOString() });
+    assert.equal(await service.admitInvitedPhone({ deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64,
+      role: "phone", name: "Phone", addedAt: now, inviteId: "invite-1", phoneScope: { scope: "device" } }), true);
+    await service.savePhoneInvite({ inviteId: "invite-2", issuedAt: now, expiresAt: new Date(Date.now() + 600_000).toISOString() });
+    assert.equal(await service.admitInvitedPhone({ deviceId: removedPhone.originId, publicKeyDerBase64: removedPhone.publicKeyDerBase64,
+      role: "phone", name: "Old phone", addedAt: now, inviteId: "invite-2", phoneScope: { scope: "device" } }), true);
     await service.saveTrustedDevice({ deviceId: laptop.originId, publicKeyDerBase64: laptop.publicKeyDerBase64,
       role: "desktop" as const, name: "Laptop", addedAt: laptop.createdAt });
     await service.removeTrustedDevice(laptop.originId);
+    await service.removeTrustedDevice(removedPhone.originId);
 
     // Settings are rebuilt field by field when they are read, so anything the
     // rebuild forgets is written to disk and then dropped on the next start.
@@ -331,13 +321,98 @@ test("the devices the owner trusts, and the ones removed, survive a restart", as
     const restarted = new SettingsService();
     (restarted as any).settingsPath = settingsPath;
     assert.deepEqual((await restarted.listTrustedDevices()).map(device => device.deviceId), [phone.originId]);
-    const trust = await restarted.machinePairingTrust();
-    assert.deepEqual(trust.authorizedKeys, [pairing.key], "the pairing the phone is bound to is still its own");
-    await assert.rejects(() => restarted.saveTrustedDevice({
-      deviceId: laptop.originId, publicKeyDerBase64: laptop.publicKeyDerBase64,
-      role: "desktop" as const, name: "Laptop", addedAt: laptop.createdAt
-    }, { key: "route-b\u0000room-b", createdAt: new Date(Date.now() - 120_000).toISOString() }),
-      /pair again/, "a device removed before the restart is still removed after it");
+    // A phone removed before the restart does not come back with a
+    // certificate this desktop has no invite for.
+    assert.equal(await restarted.admitInvitedPhone({ deviceId: removedPhone.originId, publicKeyDerBase64: removedPhone.publicKeyDerBase64,
+      role: "phone", name: "Old phone", addedAt: now, inviteId: "invite-unknown", phoneScope: { scope: "device" } }), false);
+    assert.equal(await restarted.admitInvitedPhone({ deviceId: removedPhone.originId, publicKeyDerBase64: removedPhone.publicKeyDerBase64,
+      role: "phone", name: "Old phone", addedAt: now, inviteId: "invite-2", phoneScope: { scope: "device" } }), false,
+      "nor with the invite that was revoked with it");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a phone paired again replaces its own entry, and its old code can no longer take it off", async () => {
+  const { createChatEventDeviceIdentity } = await import("./chatEventLog");
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-phone-repair-"));
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const service = new SettingsService();
+  (service as any).settingsPath = path.join(dir, "settings.json");
+  try {
+    const phone = createChatEventDeviceIdentity(new Date().toISOString());
+    const now = new Date().toISOString();
+    const later = new Date(Date.now() + 600_000).toISOString();
+    const admit = (inviteId: string) => service.admitInvitedPhone({ deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64,
+      role: "phone", name: "iPhone", addedAt: now, inviteId, phoneScope: { scope: "device" } });
+    await service.savePhoneInvite({ inviteId: "invite-old", issuedAt: now, expiresAt: later });
+    assert.equal(await admit("invite-old"), true);
+    await service.savePhoneInvite({ inviteId: "invite-new", issuedAt: now, expiresAt: later });
+    assert.equal(await admit("invite-new"), true);
+    const trusted = await service.listTrustedDevices();
+    assert.deepEqual(trusted.map((device) => [device.deviceId, device.inviteId]), [[phone.originId, "invite-new"]], "one entry, on the new code");
+    assert.equal(await service.revokePhoneInvite("invite-old"), undefined, "the old code names no phone any more");
+    assert.equal((await service.listTrustedDevices()).length, 1);
+    assert.ok((await service.resolvedPhoneInviteIds()).includes("invite-old"));
+    assert.equal(await service.revokePhoneInvite("invite-new"), phone.originId);
+    assert.deepEqual(await service.listTrustedDevices(), []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("what the shared relay set up is taken off once: its machines are named for removal, its phones and files go", async () => {
+  const { createChatEventDeviceIdentity } = await import("./chatEventLog");
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-relay-removal-"));
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const settingsPath = path.join(dir, "settings.json");
+  const make = (): SettingsService => { const service = new SettingsService(); (service as any).settingsPath = settingsPath; return service; };
+  const pairing = (room: string, hubUrl?: string) => ({ version: 1 as const, purpose: "machine-host" as const,
+    issuer: { originId: "desktop", keyId: "key", publicKeyDerBase64: "public-key" }, rendezvousId: room, stableRoutingId: `route-${room}`,
+    relaySealKeyBase64: Buffer.alloc(32, 7).toString("base64url"), ...(hubUrl ? { hubUrl } : {}), fingerprint: "F",
+    capabilities: [{ scope: "device" as const, canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }],
+    createdAt: "2026-09-01T00:00:00.000Z", expiresAt: "2036-09-01T00:00:00.000Z" });
+  try {
+    const service = make();
+    await service.saveMachine({ id: "relay-box", name: "Relay box", deviceId: "", pairingKey: "rv-relay", createdAt: "2026-09-01T00:00:00.000Z" }, pairing("rv-relay"));
+    await service.saveMachine({ id: "server-box", name: "Server box", deviceId: "", pairingKey: "rv-server", createdAt: "2026-10-01T00:00:00.000Z" }, pairing("rv-server", "https://hub.example/"));
+    const relayPhone = createChatEventDeviceIdentity(new Date().toISOString());
+    const serverPhone = createChatEventDeviceIdentity(new Date().toISOString());
+    const desktop = createChatEventDeviceIdentity(new Date().toISOString());
+    const now = new Date().toISOString();
+    await service.saveTrustedDevice({ deviceId: relayPhone.originId, publicKeyDerBase64: relayPhone.publicKeyDerBase64, role: "phone", name: "iPhone", addedAt: now });
+    await service.saveTrustedDevice({ deviceId: desktop.originId, publicKeyDerBase64: desktop.publicKeyDerBase64, role: "desktop", name: "Laptop", addedAt: now });
+    await service.savePhoneInvite({ inviteId: "invite-1", issuedAt: now, expiresAt: new Date(Date.now() + 600_000).toISOString() });
+    await service.admitInvitedPhone({ deviceId: serverPhone.originId, publicKeyDerBase64: serverPhone.publicKeyDerBase64,
+      role: "phone", name: "Pixel", addedAt: now, inviteId: "invite-1", phoneScope: { scope: "device" } });
+    await writeFile(path.join(dir, "mobile-paired-devices.json"), "[]\n");
+    await writeFile(path.join(dir, "pending-mailbox-revocations.json"), "[]\n");
+
+    assert.deepEqual((await service.relayEraMachines()).map((machine) => machine.id), ["relay-box"]);
+    // What was found is kept before anything goes, and merged with what a
+    // second, finishing start finds.
+    await service.beginRelayRemoval({ machines: [{ id: "relay-box", name: "Relay box" }], startKeyHanded: false });
+    await service.removeMachine("relay-box");
+    await service.beginRelayRemoval({ machines: [], startKeyHanded: true });
+    const recorded = await service.finishRelayRemoval();
+    assert.deepEqual({ ...recorded, removedAt: undefined }, { removedAt: undefined, machines: ["Relay box"], phones: ["iPhone"], startKeyHanded: true });
+    // The phone paired with the server and the other desktop stay.
+    assert.deepEqual((await service.listTrustedDevices()).map((device) => device.name).sort(), ["Laptop", "Pixel"]);
+    assert.deepEqual((await service.listMachines()).map((machine) => machine.id), ["server-box"]);
+    await assert.rejects(readFile(path.join(dir, "mobile-paired-devices.json"), "utf8"), /ENOENT/);
+    await assert.rejects(readFile(path.join(dir, "pending-mailbox-revocations.json"), "utf8"), /ENOENT/);
+
+    // Once: a restarted desktop keeps the record for its notice and does not
+    // take anything else off (a phone trusted by hand later stays).
+    const restarted = make();
+    assert.equal((await restarted.relayRemoval())?.phones[0], "iPhone");
+    assert.deepEqual(await restarted.relayEraMachines(), []);
+    await restarted.saveTrustedDevice({ deviceId: relayPhone.originId, publicKeyDerBase64: relayPhone.publicKeyDerBase64, role: "phone", name: "iPhone", addedAt: now });
+    await restarted.beginRelayRemoval({ machines: [{ id: "other", name: "Other" }], startKeyHanded: false });
+    assert.equal(await restarted.finishRelayRemoval(), undefined);
+    assert.equal((await restarted.listTrustedDevices()).length, 3);
+    assert.deepEqual((await restarted.relayRemoval())?.machines, ["Relay box"], "a removal recorded once is not changed");
+    // Dismissed, it stays dismissed with its record.
+    await restarted.dismissRelayRemoval(`relay-removed:${recorded!.removedAt}`);
+    assert.ok((await make().relayRemoval())?.dismissedAt);
+    // It never reaches a machine: it names the User's devices.
+    assert.ok(!(await restarted.exportMachineSettingsSnapshot()).settingsJson.includes("relayRemoval"));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -426,45 +501,152 @@ test("the hub this desktop uses and a machine's key from setup survive a fresh S
   }
 });
 
-test("a machine's unsettled move survives a fresh SettingsService, and settling it saves the new pairing in the same write", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-moves-"));
+test("forgetting an AWS instance is one write that holds only for the saved instance, and its note stays local", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-aws-gone-notice-"));
   const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
-  const from = { relayUrl: "wss://relay.accordagents.com/v1/relay", outboxUrl: "https://relay.accordagents.com/v1/mailbox/events" };
-  const to = { relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" };
-  const record = { machineId: "m1", pairingKey: "pk-1", from, to, instanceId: "run-1", requestedAt: "2026-10-19T10:00:00.000Z" };
+  const credentials = { accessKeyId: "AKIAFAKEWORKERKEY001", secretAccessKey: "synthetic", region: "us-east-1" };
+  const handle = (instanceId: string) => ({ instanceId, securityGroupId: "sg-1", keyName: "accordagents-worker-x", region: "us-east-1",
+    instanceType: "t3.small", createdAt: "2026-10-22T11:00:00.000Z" });
   try {
-    await make().saveMachineMove(record);
-    assert.deepEqual(await make().listMachineMoves(), [record], "read back from disk");
-    await make().saveMachineMove({ ...record, requestedAt: "2026-10-19T11:00:00.000Z" });
-    assert.equal((await make().listMachineMoves()).length, 1, "one open move per machine");
-    const pairing = { rendezvousId: "rv-1", ...to } as any;
-    await make().saveMachine({ id: "m1", name: "Cloud run", deviceId: "", pairingKey: "pk-1", createdAt: "" } as any);
-    await make().finishMachineMove("m1", { pairingKey: "pk-1", pairing });
-    const settled = make();
-    assert.deepEqual(await settled.listMachineMoves(), []);
-    assert.equal((await settled.getMachinePairing("pk-1"))?.relayUrl, to.relayUrl);
-    assert.equal(JSON.parse(await readFile(path.join(dir, "settings.json"), "utf8")).machineMoves, undefined);
+    const notice = { instanceId: "i-0943b28f7231ab93c", at: "2026-10-22T10:00:00.000Z" };
+    await make().saveAwsWorkerConnection(credentials, handle("i-0123456789abcdef0"));
+    assert.equal(await make().forgetAwsWorkerInstance("i-0943b28f7231ab93c", { keepCredentials: true, notice }), false,
+      "a forget about another instance changes nothing");
+    assert.equal((await make().getPublicSettings()).cloudRuns.awsHandle?.instanceId, "i-0123456789abcdef0");
+
+    assert.equal(await make().forgetAwsWorkerInstance("i-0123456789abcdef0", { keepCredentials: true, notice }), true);
+    const kept = await make().getPublicSettings();
+    assert.equal(kept.cloudRuns.awsHandle, undefined);
+    assert.equal(kept.cloudRuns.hasAwsCredentials, true, "found gone by the app: the keys stay");
+    assert.equal(kept.cloudRuns.mode, "aws");
+    assert.deepEqual(await make().getAwsWorkerGoneNotice(), notice);
+    const snapshot = await make().exportMachineSettingsSnapshot();
+    assert.equal(snapshot.settingsJson.includes("awsWorkerGoneNotice"), false, "a machine never gets it");
+    await make().importMachineSettingsSnapshot({ ...snapshot, settingsJson: JSON.stringify({ ...JSON.parse(snapshot.settingsJson), awsWorkerGoneNotice: undefined }) });
+    assert.deepEqual(await make().getAwsWorkerGoneNotice(), notice, "nor can one overwrite it");
+
+    await make().saveAwsWorkerConnection(credentials, handle("i-0fedcba9876543210"));
+    assert.equal(await make().getAwsWorkerGoneNotice(), undefined, "another instance connected: the note ends");
+    assert.equal(await make().forgetAwsWorkerInstance("i-0fedcba9876543210", { keepCredentials: false, mode: "ssh" }), true);
+    const deleted = await make().getPublicSettings();
+    assert.equal(deleted.cloudRuns.hasAwsCredentials, false, "Delete: the keys go too");
+    assert.equal(deleted.cloudRuns.mode, "ssh");
+    assert.equal(await make().getAwsWorkerCredentials(), undefined);
+  } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("machines leaving with a gone instance are recorded durably, cleared one by one, and never travel to a machine", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-machines-"));
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  try {
+    const at = "2026-10-22T10:00:00.000Z";
+    await make().addLeavingMachines([{ machineId: "m1", instanceId: "i-0943b28f7231ab93c", at }, { machineId: "m2", instanceId: "i-0943b28f7231ab93c", at }]);
+    await make().addLeavingMachines([{ machineId: "m1", instanceId: "i-0943b28f7231ab93c", at }]);
+    assert.deepEqual((await make().listLeavingMachines()).map((entry) => entry.machineId), ["m2", "m1"], "a machine is recorded once");
+    const snapshot = await make().exportMachineSettingsSnapshot();
+    assert.equal(snapshot.settingsJson.includes("leavingMachines"), false);
+    await make().importMachineSettingsSnapshot({ ...snapshot, settingsJson: JSON.stringify({ ...JSON.parse(snapshot.settingsJson), leavingMachines: [] }) });
+    assert.equal((await make().listLeavingMachines()).length, 2, "a machine's snapshot cannot clear it");
+    await make().clearLeavingMachine("m2");
+    await make().clearLeavingMachine("unknown");
+    assert.deepEqual((await make().listLeavingMachines()).map((entry) => entry.machineId), ["m1"]);
+    await make().clearLeavingMachine("m1");
+    assert.deepEqual(await make().listLeavingMachines(), []);
+  } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a leaving-machines write that fails leaves the settings in memory as the disk has them; the limit reports what it drops", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-write-"));
+  const settingsDir = path.join(dir, "data");
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(settingsDir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const { chmod, mkdir } = await import("node:fs/promises");
+  try {
+    await mkdir(settingsDir, { recursive: true });
+    const at = "2026-10-22T10:00:00.000Z";
+    const service = make();
+    await service.addLeavingMachines([{ machineId: "m1", instanceId: "i-0943b28f7231ab93c", at }]);
+    await chmod(settingsDir, 0o500);
+    await assert.rejects(service.addLeavingMachines([{ machineId: "m2", instanceId: "i-0943b28f7231ab93c", at }]));
+    assert.deepEqual((await service.listLeavingMachines()).map((entry) => entry.machineId), ["m1"], "memory still matches the disk");
+    await chmod(settingsDir, 0o700);
+
+    const many = Array.from({ length: 50 }, (_, index) => ({ machineId: `x${index}`, instanceId: "i-0123456789abcdef0", at, unverified: "refused" as const }));
+    const dropped = await service.addLeavingMachines(many);
+    assert.deepEqual(dropped.map((entry) => entry.machineId), ["m1"], "the oldest entry is reported, not silently lost");
+    const kept = await make().listLeavingMachines();
+    assert.equal(kept.length, 50);
+    assert.equal(kept[0].unverified, "refused", "the reason an entry may not be removed survives a restart");
   } finally {
+    await (await import("node:fs/promises")).chmod(settingsDir, 0o700).catch(() => undefined);
+    setHostPlatform(undefined);
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("an open move is not part of the settings machines receive, and a removed machine gets no pairing back from it", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-moves-removed-"));
+test("a machine already waiting for removal is never turned into one the app may not remove", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-downgrade-"));
   const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
-  const from = { relayUrl: "wss://relay.accordagents.com/v1/relay", outboxUrl: "https://relay.accordagents.com/v1/mailbox/events" };
-  const to = { relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" };
   try {
-    await make().saveMachineMove({ machineId: "gone", pairingKey: "pk-gone", from, to, requestedAt: "2026-10-19T10:00:00.000Z" });
+    const at = "2026-10-22T10:00:00.000Z";
+    await make().addLeavingMachines([{ machineId: "m1", instanceId: "i-0943b28f7231ab93c", at }]);
+    await make().addLeavingMachines([{ machineId: "m1", instanceId: "i-0943b28f7231ab93c", at, unverified: "refused" }]);
+    assert.equal((await make().listLeavingMachines())[0].unverified, undefined);
+    await make().addLeavingMachines([{ machineId: "m2", instanceId: "i-0123456789abcdef0", at, unverified: "refused" }]);
+    await make().addLeavingMachines([{ machineId: "m2", instanceId: "i-0123456789abcdef0", at }]);
+    assert.equal((await make().listLeavingMachines()).find((entry) => entry.machineId === "m2")?.unverified, undefined,
+      "one the app could not check becomes removable once its instance is seen gone");
+  } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("an unconfirmed leaving machine keeps where to look again and a well-formed account only", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-recheck-"));
+  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  try {
+    const at = "2026-10-22T10:00:00.000Z";
+    await make().addLeavingMachines([
+      { machineId: "m1", instanceId: "i-0943b28f7231ab93c", at, unverified: "refused", region: "us-east-1", accountId: "018089055817" },
+      { machineId: "m2", instanceId: "i-0943b28f7231ab93c", at, unverified: "unreadable", region: "us-east-1", accountId: "not-an-account" }
+    ]);
+    assert.deepEqual((await make().listLeavingMachines()).map((entry) => [entry.machineId, entry.region, entry.accountId]),
+      [["m1", "us-east-1", "018089055817"], ["m2", "us-east-1", undefined]]);
+  } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("the relay machines that could not be removed are kept with the reasons their line was dismissed for, across restarts", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-relay-removal-failed-"));
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const settingsPath = path.join(dir, "settings.json");
+  const make = (): SettingsService => { const service = new SettingsService(); (service as any).settingsPath = settingsPath; return service; };
+  try {
+    // What went is recorded at once; the failing machine is left out of it.
+    await make().beginRelayRemoval({ machines: [{ id: "m1", name: "One" }, { id: "m2", name: "Two" }], startKeyHanded: false });
+    await make().noteRelayRemovalFailures([{ machineId: "m1", machine: "One", message: "disk full" }]);
+    assert.deepEqual((await make().finishRelayRemoval(["m1"]))?.machines, ["Two"]);
+    const [first] = await make().relayRemovalFailures();
+    assert.deepEqual({ ...first, at: undefined }, { machineId: "m1", machine: "One", message: "disk full", at: undefined });
+    await make().dismissRelayRemoval(`relay-removed:failed:${first.at}`);
+    assert.equal((await make().relayRemoval())?.dismissedAt, undefined, "the record's line is dismissed on its own");
+    // The same reason at the next start: still dismissed, same line.
+    await make().noteRelayRemovalFailures([{ machineId: "m1", machine: "One", message: "disk full" }]);
+    assert.deepEqual(await make().relayRemovalFailures(), [{ ...first, dismissedMessages: ["disk full"] }]);
+    // Another reason: a new line, the earlier dismissal kept.
+    await make().noteRelayRemovalFailures([{ machineId: "m1", machine: "One", message: "network is down" }]);
+    const [second] = await make().relayRemovalFailures();
+    assert.equal(second.message, "network is down");
+    assert.deepEqual(second.dismissedMessages, ["disk full"]);
     const snapshot = await make().exportMachineSettingsSnapshot();
-    assert.equal(snapshot.settingsJson.includes("machineMoves"), false, "a desktop's move records stay on the desktop");
-    assert.equal(await make().finishMachineMove("gone", { pairingKey: "pk-gone", pairing: { rendezvousId: "rv-gone", ...to } as any }), false);
-    const after = make();
-    assert.equal(await after.getMachinePairing("pk-gone"), undefined, "no way back in for a removed machine");
-    assert.deepEqual(await after.listMachineMoves(), []);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+    assert.ok(!snapshot.settingsJson.includes("relayRemoval"), "it never reaches a machine");
+    await make().importMachineSettingsSnapshot(snapshot);
+    assert.equal((await make().relayRemovalFailures())[0]?.message, "network is down", "nor is it lost when settings are imported");
+    // Removed at a later start: named in the record, its failure dropped.
+    await make().noteRelayMachinesRemoved(["One"]);
+    await make().noteRelayRemovalFailures([]);
+    assert.deepEqual((await make().relayRemoval())?.machines, ["Two", "One"]);
+    assert.deepEqual(await make().relayRemovalFailures(), []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

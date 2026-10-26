@@ -1,24 +1,26 @@
 # Machines transport — the machine runtime
 
-A **machine** is a computer that runs AccordAgents without a window and hosts chat members. It is the same application code the desktop runs (`src/machine/main.ts` composes the same services through `src/main/platform.ts`), enrolled with one desktop through a machine-host pairing, and reachable only through the relay. There is no worker, no SSH turn pipeline, and no shared store: the machine keeps its own copy of every chat of its owner, its own provider sessions, and the settings the desktop sends it.
+A **machine** is a computer that runs AccordAgents without a window and hosts chat members. It is the same application code the desktop runs (`src/machine/main.ts` composes the same services through `src/main/platform.ts`), enrolled with one desktop through a machine-host pairing, and reachable only through the User's own server: it meets the owner's devices in the server's rooms, and every durable event goes through the server's one order (`02-event-contract.md`). Without a server there is no machine ("Set up your server first"). There is no worker and no SSH turn pipeline: the machine keeps its own copy of every chat of its owner, its own provider sessions, and the settings the desktop sends it.
 
 ## What travels between the desktop and a machine
 
-Every message is sealed with the pairing's key inside the machine's own relay room (`src/shared/machineLink.ts`):
+Every message is sealed with the pairing's key (`src/shared/machineLink.ts`); live ones pass through the machine's own room on the User's server, durable ones are signed device events in the server's order:
 
 | Direction | Message | When |
 |---|---|---|
 | machine → desktop | `machine.hello` | on every (re)connect, including the machine's own link coming back: device id, name, app version, platform, installed providers, runtime instance id, active runs, results waiting in the outbox |
-| desktop → machine | `machine.hello.ack`, `machine.settings.sync` | after hello; the settings snapshot (roles, rules, saved prompts, member presets, limits, agent environment values) also travels with every turn request |
+| desktop → machine | `machine.hello.ack`, `machine.settings.sync` | after hello; the settings snapshot (roles, rules, saved prompts, member presets, limits, agent environment values) also travels with every turn request. The snapshot and the trust roster are published to a machine only when what it uses differs from what this desktop last published to that runtime process: the machine record keeps keyed digests of both (`published`, timestamps excluded) with the hello `instanceId` they were given to, so a reconnect, a hello request or a desktop restart publishes nothing, while a new runtime process (restart, reinstall, wiped data) is given both again. A command runs with the settings it carries; newer settings the machine had already applied are put back once it has run (compared by `exportedAt`), and an older settings event is not applied over newer ones. `hello.ack` carries `compactionDelegation` when this desktop runs the compactions members on the machine ask for themselves |
 | desktop ↔ machine | `chat.changes` events | every chat save, on the desktop or on a machine, is one signed event committed with the save, carrying what that save changed; every chat goes to every enrolled machine, and one whose runtime cannot fold them yet (`chatChanges` in its hello) is sent none until it can, then all of them in order. A new machine gets every chat once, over its setup SSH connection, and continues from there with events. The rules (who may change what, forwarding between machines, cleanup) are in `02-event-contract.md`, "Chat change events". The machine keeps its own `participantSessions`, `activeRunIds`, `running`, `runId`, `pendingAppToolApprovals` and watcher positions. |
-| desktop → machine | `machine.turn.request` | the member's home is this machine: run this member for this message, with the desktop's run id and pending message id. It names the newest chat change the machine must have applied first (a phone's request names none; the machine waits for the message it answers instead). A machine whose runtime cannot fold chat changes yet is sent no turn: the turn fails with a message saying the machine is updated the next time it is connected and idle. A Stop that lands during the preparation means the request is never sent. |
-| machine → desktop | `machine.turn.progress.delta`, `machine.turn.finished` | streamed progress and the finished messages (same ids on both sides), sent in order. The machine keeps a finished turn in its outbox (`machine-outbox.json` under its user data, so it survives a restart of the runtime) and resends it on every hello until the desktop answers `machine.turn.finished.ack`. Whatever the status (reply, stopped, failed, stop not confirmed), the machine's copy of the bubble contributes its text and the run's other messages, live or late: a desktop that finds no pending turn for it (restart) folds the result into the chat the same way before acknowledging. |
+| desktop → machine | `machine.turn.request` | the member's home is this machine: run this member for this message, with the desktop's run id and pending message id. It names the newest chat change the machine must have applied first (a phone sends no turn request: the machine starts the turn once when it reads the phone's message from the server). A machine whose runtime cannot fold chat changes yet is sent no turn: the turn fails with a message saying the machine is updated the next time it is connected and idle. A Stop that lands during the preparation means the request is never sent. |
+| desktop → machine | `machine.turn.request` with `compaction` | compacting a member whose home is this machine (`@x /compact`, the Compact button, or a delegated self-compaction): the same command as a turn (queued while the machine is away, admitted after every earlier command of that member has finished, stopped with `machine.turn.cancel`, answered with `machine.turn.finished`), naming no message (`messageId` is `compaction:<runId>`, so a runtime that cannot compact fails it rather than running a turn). The machine runs its own `ChatService.compactParticipant` for the member's session and returns the outcome line it wrote and the member's `contextUsage`; the desktop shows both exactly as for a local member. Its result carries `compaction`, so one learned after a desktop restart that never ran still leaves its "Could not compact…" line. Sent only to a runtime whose hello says `compactionSupported`; any other gets "…older version… cannot compact members…" until it is updated |
+| machine → desktop | `machine.compaction.delegate` | a member on the machine asked to compact its own context (`app_chat_request_compaction`), and the enrolling desktop is connected and said it takes these: the desktop runs it as a compaction the User started (shown, stoppable) and sends it back as a compaction command; refused unless the member's home is that machine. With no desktop, the machine compacts the member itself as before |
+| machine → desktop | `machine.turn.progress.delta`, `machine.turn.finished` | streamed progress and the finished messages (same ids on both sides), sent in order; the result carries the member's `contextUsage` after the run, which the desktop stores for that member only when it is the sending machine's own. The machine keeps a finished turn in its outbox (`machine-outbox.json` under its user data, so it survives a restart of the runtime) and resends it on every hello until the desktop answers `machine.turn.finished.ack`. Whatever the status (reply, stopped, failed, stop not confirmed), the machine's copy of the bubble contributes its text and the run's other messages, live or late: a desktop that finds no pending turn for it (restart) folds the result into the chat the same way before acknowledging. |
 | desktop → machine | `machine.turn.finished.ack` | sent only after the outcome (reply, stop, unconfirmed stop, failure) has been written to the desktop's SQLite; a failed write sends no ack and the machine keeps the result |
 | machine → desktop | `machine.turn.unknown` | a stop named a run this runtime does not know (not running, no result waiting): the held stop is dropped and the member's bubble says the stop was not confirmed (Rule 2) |
 | machine → desktop | `machine.conversation.backdelta` | older runtimes only: messages the machine wrote outside a turn result. Stored as before; an updated runtime writes them as chat change events, and only delivers a back delta it had queued before its update. The copy messages (`machine.conversation.sync`, `.sync.done`, `.resync`, `.delta` from the desktop) are retired and ignored when an older peer still sends one. |
 | machine → desktop | `machine.approval.requested` / `machine.approval.updated` | a member on the machine needs a permission or app-tool approval: the desktop shows the same card it shows for a local member, tagged with the member's home machine |
 | — | desktop stale-run sweep | a pending bubble of a member whose home is another machine is never swept as "Interrupted before completion": that machine owns every outcome of its runs, including runs it started itself (a resume after an approval) that the desktop never registered; the machine in turn ignores a swept copy of any bubble it holds (finished or still running). Inside a machine runtime its own members (the desktop's record id arrives in `machine.hello.ack`) are swept like local ones, so the machine recovers its own lost runs after a restart |
-| desktop → machine | `machine.hello.request` | a desktop that connected and received no hello within a moment asks for one (a relay may seat a restarted desktop silently in place of the old one); the machine then greets, re-sends held results, re-offers approvals and re-forwards rows the desktop does not hold |
+| desktop → machine | `machine.hello.request` | a desktop that connected and received no hello within a moment asks for one (the server's room seats a restarted desktop in place of the old one without announcing it); the machine then greets, re-sends held results, re-offers approvals and re-forwards rows the desktop does not hold |
 | desktop → machine | `machine.approval.decision` | the User's whole card answer (approve/deny, scope, an edited Codex proposal, the native decision id); the machine applies it through the ordinary approval path and the member resumes |
 | machine → desktop | `machine.approval.result` | outcome of applying that decision together with the approval and policies as the machine now holds them; the desktop stores them and only then lets the card call return. After a reconnect the machine offers every approval it holds again, so one raised while the desktop was away is not lost |
 | desktop → machine | `machine.turn.cancel` | Stop. If the machine is unreachable or does not confirm within a few seconds, the bubble shows "Stop requested — waiting for machine <name>" (Rule 2, an approved parity exception in `docs/parity-requirements.md`); the stop is kept and delivered again on the machine's next `machine.hello`, and "stopped by user" appears only after the machine confirms. Every dispatched turn and every held stop is stored in the machine's record on the desktop, so both survive a desktop restart: the restarted desktop asks the machine about each recorded run it did not list, a result the machine still holds lands as a late result, and a run the machine does not know is closed (`machine.turn.unknown`) instead of staying pending forever; when that answer arrives after a desktop restart, the member's bubble is updated (stopped, or stop not confirmed) and stored before the held stop is dropped. A hello carries the runtime's `instanceId`, `instanceSequence` (a start counter kept in `machine-instance.json`; published only when read and advanced reliably), `instanceStartedAt`, `activeRunIds` and `pendingTerminalRunIds`. No turn is ever closed from process order or clocks: after a hello the desktop asks the machine about every turn it still waits on whose request has already left and that the machine did not list (`machine.turn.query`; a turn still in preparation is never asked about, and an answer for one is ignored); a runtime that does not hold the run answers `machine.turn.unknown` and the turn is closed then, as a lost run, or as "stop not confirmed" (`terminalReason: stop-unconfirmed`, never "stopped") when a stop was held. A late hello from an older instance is ignored only when both hellos carry a reliable counter. Messages from a machine are decrypted and applied strictly in arrival order on both sides; a redelivery of the very same result (same receipt UUID and machine finish time) is folded once (`metadata.machineOutcome`), while a real result still replaces a provisional desktop-side outcome such as a timeout; the run's CLI warnings reach the chat with a late result too. |
@@ -30,7 +32,7 @@ Dedicated provider/AWS credential records, cloud-run settings, and other machine
 1. Install Node 20+, the `sqlite3` CLI, `git`, and the provider CLIs you use (`codex`, `claude`); log the CLIs in on that computer (native auth is per machine and is never copied).
 2. Build the bundle on the desktop: `npm run build:machine` → `dist/machine/` (`accordagents-machine.cjs`, `package.json`, `appSkills/`, `README.md`).
 3. Copy `dist/machine/` to the computer (for example `~/accordagents-machine`) and run `npm install --omit=dev` inside it.
-4. In the desktop app: Settings → General → Machines → Add machine. Copy the enrollment and save it on the computer as `~/accordagents-machine/enrollment.json` (it carries the relay key; treat it like a password).
+4. In the desktop app: Settings → General → Machines → Add machine. Copy the enrollment and save it on the computer as `~/accordagents-machine/enrollment.json` (it carries the key the machine's first hello is sealed with and the address of the User's server; treat it like a password). Adding a machine needs a server of the User's (Settings → Your server).
 5. Start it:
 
 ```sh
@@ -133,7 +135,8 @@ event-contract work are still required.
 
 (History. The conversation sync/delta/backdelta rows this section describes
 were retired on 2026-10-01 in favour of chat change events; the inventory and
-copy barriers below no longer exist.)
+copy barriers below no longer exist. The sealed mailbox went with the relay on
+2026-10-26: these events now go through the User's server's order.)
 
 The conversation sync/delta/backdelta and finished/finished-ack rows in the table
 above now use `DeviceEventChannel` and the pairing's sealed mailbox as well as
@@ -238,13 +241,13 @@ paths have not acquired this process-ownership mechanism yet.
 ### Durable command admission, 2026-09-06
 
 `NativeCommandStore` now owns dispatch admission in `accordagents.sqlite3`.
-The source commits a signed request and its recipient outbox together, after
-the conversation-copy events. An already enrolled, offline machine shows
-"Waiting for machine <name>"; neither simultaneous connectivity nor a new SSH
-process is required. The receiver records acceptance before ACK, serializes
-commands per member session in signed logical order, and claims its executor
-generation before native input. A retained Stop uses an independent stream and
-a durable tombstone, including when it arrives before its request.
+The source commits a signed request; through the User's server it keeps no
+recipient rows, and the server's order delivers it. An already enrolled, offline
+machine shows "Waiting for machine <name>"; neither simultaneous connectivity
+nor a new SSH process is required. The receiver records acceptance before ACK,
+serializes commands per member session in signed logical order, and claims its
+executor generation before native input. A retained Stop uses an independent
+stream and a durable tombstone, including when it arrives before its request.
 
 After runtime loss a claimed command is never replayed. Recovery requires the
 previous app identity to be gone and its guardian to have closed the provider
@@ -301,16 +304,17 @@ of the User's catalogue. Their large bodies use the same fragments and bounded
 SQLite stdin path, rather than one CLI argument or relay frame. Progress and
 approval control are covered below.
 
-Bodies, fragments, event headers, delivery receipts and inventory stay in the
-endpoints' local SQLite; only sealed packets reach the User's relay buffer.
-The new history has no garbage collection yet, and repeated growing snapshots
-can accumulate substantial history; measured retention pressure and history
-garbage collection remain cutover work. The 24-hour relay cost measurement is still open.
+Bodies, fragments and event headers stay in the endpoints' local SQLite and,
+since the User's server carries them, in its order too. Both forget them after
+grace periods: a device its own events a week after the server has them, the
+server as `docs/parity-requirements.md` (phase 2) states. The relay cost
+measurement ended with the relay.
 
 ## Durable approval decisions (2026-09-06)
 
-Approval requests, updates, decisions and results now travel through signed
-device events, the sealed live room and mailbox. The table's earlier synchronous
+Approval requests, updates, decisions and results now travel as signed
+device events through the User's server's order (the sealed live room and
+mailbox until 2026-10-26). The table's earlier synchronous
 card RPC is superseded: the desktop commits the decision locally and displays
 "Approval saved" or "Refusal saved" while application is unconfirmed, including
 while the machine is offline. A result is correlated by decision id, not just
@@ -344,9 +348,8 @@ native-effect identity fields 294 bytes before SQLite overhead. A decision or
 result carries its card/policies, not the 14,000-message history; a large edited
 proposal uses the existing bounded blob fragments and SQLite stdin path.
 The whole conversation snapshot/save path still has the previously measured
-large-chat cost. Approval bodies/receipts remain on user machines in SQLite;
-only sealed packets reach the relay buffer. This does not solve history GC or
-the outstanding representative relay-cost measurement.
+large-chat cost. Approval bodies/receipts remain on user machines in SQLite
+and in the User's server's order until its retention forgets them.
 
 ## Artifact revision identity (2026-09-06)
 
@@ -416,9 +419,9 @@ that forbid rewriting its conversation/message rows during progress. A 1-MiB
 answer in 256 chunks produces under 1.3 MB of delta JSON, versus over 130 MB of
 cumulative snapshots; even a blocked writer queues under 1.5 MB of deltas while
 preserving 256 distinct activity changes. Frame bodies and references remain in
-the owning and receiving machines' SQLite/blob stores; only sealed packets reach
-the relay/mailbox. SQL goes through pipes, never a growing command argument.
-History retention/GC and representative relay billing remain cutover work.
+the owning and receiving machines' SQLite/blob stores and in the User's server's
+order, which forgets a run's events a day after the run. SQL goes through pipes,
+never a growing command argument.
 
 Real isolated Electron + native Codex + public-relay verification on macOS:
 a desktop restart during streaming retained the received prefix, and a later
@@ -444,7 +447,7 @@ Under the user-data directory: `accordagents.sqlite3` (its copy of the chats it 
 
 ## Local QA on one Mac
 
-`scripts/probes/machines/` holds the drivers used for the end-to-end check: a relay under `wrangler dev` (`--port 18099`), an isolated desktop (`ACCORDAGENTS_USER_DATA_DIR=/private/tmp/accordagents-qa-machines ACCORDAGENTS_MOBILE_RELAY_URL=ws://127.0.0.1:18099/v1/relay npx electron . --remote-debugging-port=9223`), `qa-create-machine.cjs` (mints the enrollment through the bridge), the machine runtime started with that enrollment and its own user-data directory, `qa-wait-machine.cjs`, `qa-machine-turn2.cjs <marker>` (a member turn through the real UI), `qa-machine-approval.cjs` (a permission approval answered on the desktop for a member on the machine), `qa-machine-stop.cjs` (Stop, no orphaned processes), `qa-machine-stop-unreachable.cjs` (Stop while the machine process is frozen: waiting state, then confirmation), and `qa-machine-second-turn.cjs <conversationId> [marker]` (a second turn on the resident session). Loopback `ws:` relays are accepted only for `127.0.0.1`/`localhost`.
+`scripts/probes/machines/` holds the drivers used for the end-to-end check: an isolated desktop (`ACCORDAGENTS_USER_DATA_DIR=/private/tmp/accordagents-qa-machines npx electron . --remote-debugging-port=9223`) with a server of the User's set up in Settings → Your server, `qa-create-machine.cjs` (mints the enrollment through the bridge), the machine runtime started with that enrollment and its own user-data directory, `qa-wait-machine.cjs`, `qa-machine-turn2.cjs <marker>` (a member turn through the real UI), `qa-machine-approval.cjs` (a permission approval answered on the desktop for a member on the machine), `qa-machine-stop.cjs` (Stop, no orphaned processes), `qa-machine-stop-unreachable.cjs` (Stop while the machine process is frozen: waiting state, then confirmation), and `qa-machine-second-turn.cjs <conversationId> [marker]` (a second turn on the resident session). They were written against a local relay under `wrangler dev`, which went with the relay on 2026-10-26; a recipe with a local server is not written down yet. A plain `http:` server address is accepted only on this computer. In-process, `scripts/machine-hub-order.test.mjs` (`npm run test:hub`) runs the desktop's and the machine's services through a real server: turns, streaming, approvals and Stop, and the server folding the machine's reply with the desktop away.
 
 ## Not yet on machines (tracked, next)
 
@@ -452,5 +455,5 @@ Under the user-data directory: `accordagents.sqlite3` (its copy of the chats it 
 - A machine-hosted member's requests to other members run on the machine's copy; routing them to the other members' home machines follows the event contract (`docs/machines/02-event-contract.md`).
 - Conversation copies/deltas, native command admission/Stop, settings, approvals, progress and terminal outcomes now use durable delivery and accepted-event clock observation; the PWA's IndexedDB clock/outbox and chat-wide event projections remain.
 - The install/upgrade service exists (`MachineInstallerService`, `docs/machines/04-install-and-upgrade.md`): versioned releases, a proven drain before replacement, rollback on a failed connect, and mirror bootstrap that refuses a dirty mirror. It is not wired to `main.ts` or the Machines UI yet, and has not been run against a real Linux machine, so the steps above stay manual until both are done.
-- The machine-owned three-hour AWS idle stop now gets its key from the setup command and the installer (`docs/machines/04-install-and-upgrade.md`, "The automatic-stop key"); it has not yet been verified stopping the User's real instance. Phone wake now has its own start key, handed over only in the pairing link (same document, "The phone's start key"); it has not yet been verified from the User's phone. The current manual QA deployment is not an always-on production installation.
+- The machine-owned three-hour AWS idle stop now gets its key from the setup command and the installer (`docs/machines/04-install-and-upgrade.md`, "The automatic-stop key"); it has not yet been verified stopping the User's real instance. A stopped machine is now started by the User's server, with a start-only key the desktop gives it (same document, "The start key"); this has not been verified on the User's instance from her phone. The current manual QA deployment is not an always-on production installation.
 - The legacy worker path and the cloud-only prompt branch remain until the cutover commit removes them.

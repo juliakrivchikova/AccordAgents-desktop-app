@@ -1,5 +1,7 @@
 # Implementation handoff after 29ff1eb
 
+Superseded in part on 2026-10-26: the relay is removed; machines and the phone talk only to the User's own server (see docs/parity-requirements.md).
+
 This is an unfinished checkpoint, not a release approval or completed QA.
 User transferred the entire remaining implementation back to Taylor on
 2026-09-07, prioritizing the basic user flow and conserving Drew's quota.

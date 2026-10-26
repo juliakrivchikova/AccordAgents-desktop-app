@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
 import { applyChatChanges, applyHeldReactions, CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges, isSupportedChatChangesVersion, type ChatChangeApplyPolicy, type ChatChangeBaseline, type ChatChangeDiffPolicy, type ChatChangesPayload, isSafeChatId } from "./chatChanges";
+import { mergeCopiedConversation, type CopiedConversation } from "./chatCopy";
 import type {
   AgentContextUsage,
   AgentHealth,
@@ -46,6 +47,8 @@ import type {
   ChatExistingParticipantOverrides,
   ChatParticipantChangeRequest,
   ChatParticipantChangeOperation,
+  ChatParticipantRemovalRequest,
+  ChatRosterChangeOutcome,
   ChatParticipantRequestApprovalRequest,
   ChatParticipantRequestBatch,
   ChatParticipantRequestInput,
@@ -117,6 +120,9 @@ import type {
 } from "../../shared/types";
 import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import type { ChatActionPayload } from "../../shared/chatActionEvents";
+import { isMachineCompactionLine, normalizeMachineTurnCompaction, type MachineCompactionDelegateRequest, type MachineTurnCompaction } from "../../shared/machineLink";
+import { machineStopPendingText, machineWaitingText } from "../../shared/machineWaitingText";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES,
@@ -167,6 +173,7 @@ import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
 import { chatParticipantHome, chatParticipantHomeUnassignedMessage, preservedRemoteExecution } from "../../shared/chatParticipantHome";
 import {
+  CHAT_DELIVERY_POLICY_OPTIONS,
   chatParticipantForMentionHandle,
   extractChatMentions,
   mentionHandlesForChatParticipant,
@@ -174,9 +181,11 @@ import {
   resolveChatMentionTargets
 } from "../../shared/chatDeliveryPolicy";
 import { chatActionOperationId } from "./chatActionEmitter";
+import { parsePhoneTurnRunId, phoneTurnRunId } from "../../shared/hubProtocol";
+import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { ChatEventMirrorService } from "./chatEventMirror";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
-import { CliAgentRunner, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
+import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
@@ -241,6 +250,25 @@ import {
 import type { ChatExecutorLeaseKey } from "../../shared/chatExecutionLeases";
 
 type ProgressCallback = (progress: ReviewProgress) => void;
+
+/** When a machine member's addition is looked at again while its User answer
+ *  cannot be read here yet. */
+const MEMBER_ADDITION_RETRY_DELAYS_MS = [5_000, 30_000, 120_000];
+
+/** Whether this desktop can confirm the User's answer behind a machine
+ *  member's approved roster change (see ChatService.machineRosterDecision). */
+type MachineRosterDecision = { ok: true } | { ok: false; waiting: true } | { ok: false; waiting: false; problem: string };
+
+/** A phone's turn this device is starting. `started`: claimed and handed to
+ *  the run (a Stop is then an ordinary one). `registered`: the run is in the
+ *  chat's active runs, which then say the chat is busy; until then this entry
+ *  says it. */
+interface PendingPhoneRun {
+  conversationId: string;
+  controller: AbortController;
+  started: boolean;
+  registered?: boolean;
+}
 
 interface ChatParticipantSessionState {
   session: ChatParticipantSession;
@@ -377,7 +405,6 @@ type InferredParticipantRequestSuppressionScope =
   | "tool-source-segment"
   | "final-source-tool-origin-run"
   | "final-source-tool-origin-segment";
-const CHAT_LEGACY_ADMINISTRATOR_HANDLE = "admin";
 const CHAT_ROLE_LABEL_MAX_CHARS = 80;
 const CHAT_ROLE_INSTRUCTIONS_MAX_CHARS = 40_000;
 const CHAT_COMPACT_INSTRUCTIONS_MAX_CHARS = 20_000;
@@ -406,11 +433,10 @@ const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
 const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
 const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
 
+/** The options shared with the phone and the User's server, so a draft
+ *  is routed the same way wherever it is resolved. */
 function chatDeliveryPolicyOptions() {
-  return {
-    administratorRoleId: CHAT_ADMINISTRATOR_ROLE_ID,
-    administratorHandles: [CHAT_ADMINISTRATOR_HANDLE, CHAT_LEGACY_ADMINISTRATOR_HANDLE]
-  };
+  return { ...CHAT_DELIVERY_POLICY_OPTIONS, administratorHandles: [...CHAT_DELIVERY_POLICY_OPTIONS.administratorHandles] };
 }
 const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 2_000_000;
 const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
@@ -469,6 +495,18 @@ interface ChatAppMcpGateway {
 }
 
 type ChatAppMcpTokenGrant = Parameters<ChatAppMcpGateway["issueToken"]>[0];
+
+/** The line a compaction that did not happen leaves, local or on a machine,
+ *  whatever punctuation the reason ends with. */
+function compactionFailureLine(handle: string, error: string | undefined): string {
+  return `Could not compact @${handle} context: ${(error ?? "").replace(/[.\s]+$/, "") || "unknown error"}.`;
+}
+
+/** The same line for a compaction a machine ran (or never got to run): a
+ *  Stop before it started reads as a local one that never started. */
+function machineCompactionFailureLine(handle: string, status: string | undefined, error: string | undefined): string {
+  return compactionFailureLine(handle, status === "interrupted" && !error ? COMPACTION_CANCELLED_BEFORE_START : error);
+}
 
 /** The scheduled-scripts service on this host, as the chat side uses it. */
 export interface ChatScriptHost {
@@ -555,6 +593,18 @@ interface PreparedParticipantChange {
   presetParticipantConfigs: ChatParticipantConfig[];
   summary: string;
   managementEscalation: boolean;
+}
+
+type MemberRemovalApproval = ChatAppToolApproval & { request: ChatParticipantRemovalRequest };
+
+/** How long an approved member removal whose application failed waits before
+ *  an idle moment tries it again. */
+const MEMBER_REMOVAL_RETRY_DELAY_MS = 30_000;
+
+/** A member's removal request before the targets are resolved against the chat. */
+interface ParticipantRemovalInput {
+  reason?: string;
+  targets: Array<{ participantId?: string; handle?: string }>;
 }
 
 interface PreparedRoleParticipantChange {
@@ -712,7 +762,8 @@ export interface MachineTurnDispatchRequest {
    *  honest state instead of a silent wait. */
   onStopPending?: (machineName: string) => void;
   /** The machine is not ready to take the turn: not connected, or its
-   *  runtime is being updated (`reason`). Shown on the pending bubble. */
+   *  runtime is being updated (`reason`). Shown on the pending bubble (on a
+   *  compaction's status line for a compaction). */
   onMachineWaiting?: (machineName: string, reason?: string) => Promise<void>;
 }
 
@@ -734,6 +785,25 @@ export interface MachineTurnDispatchResult {
   /** False when the turn never left this desktop (refused, or stopped while
    *  being prepared): the member's home only ever had its empty bubble. */
   sent?: boolean;
+  /** The member's context use as its CLI reported it on the machine after
+   *  this run, shown here exactly as a local member's. */
+  contextUsage?: AgentContextUsage;
+}
+
+/** Compacts a member on the machine that hosts it, through the same command
+ *  path as its turns (no message to answer, no bubble, no progress frames). */
+export type MachineCompactionDispatchRequest = Omit<MachineTurnDispatchRequest, "triggerMessage" | "pendingMessageId" | "progress"> & {
+  compaction: MachineTurnCompaction;
+};
+
+/** Machine side. Hands a compaction a member here asked for itself to the
+ *  desktop, which runs it as one the User started (and so shows it and can
+ *  stop it), and sends it back here as a compaction command. */
+export interface ChatCompactionDelegate {
+  /** False when the desktop cannot take it now; the compaction then runs
+   *  here directly, as it would without a desktop. */
+  canDelegateCompaction(): boolean;
+  delegateCompaction(request: MachineCompactionDelegateRequest): Promise<void>;
 }
 
 /** Machine side. Hands one prepared member request to the desktop; the answers
@@ -757,6 +827,7 @@ export interface ChatParticipantRequestDelegate {
 
 export interface MachineTurnDispatcher {
   runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult>;
+  compactOnMachine?(request: MachineCompactionDispatchRequest): Promise<MachineTurnDispatchResult>;
   cancelMachineRun?(request: { machineId: string; conversationId: string; runId: string; onStopPending?: (machineName: string) => Promise<void> }): Promise<void>;
   /** The bytes of a picture this copy does not hold on disk. Only a machine
    *  supplies this: replication brings an attachment's metadata here without
@@ -864,7 +935,7 @@ export class ChatService {
     return () => { this.participantRunSettledListeners.delete(listener); };
   }
 
-  async settledParticipantRunResult(run: ChatParticipantRun): Promise<{ messages: ChatMessage[]; warnings: string[] }> {
+  async settledParticipantRunResult(run: ChatParticipantRun): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
     // A native resume releases its provider controller before its caller
     // appends the returned messages. endChatRun is the end of that lifecycle.
     if (this.activeRunIds.has(run.runId)) {
@@ -881,9 +952,11 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat") {
       throw new Error("The run's chat is unavailable.");
     }
+    const contextUsage = this.agentContextUsageByParticipant(conversation)[run.participantId];
     return {
       messages: conversation.messages.filter((message) => message.metadata?.runId === run.runId),
-      warnings: Array.isArray(conversation.metadata.warnings) ? conversation.metadata.warnings.filter((warning): warning is string => typeof warning === "string") : []
+      warnings: Array.isArray(conversation.metadata.warnings) ? conversation.metadata.warnings.filter((warning): warning is string => typeof warning === "string") : [],
+      ...(contextUsage ? { contextUsage } : {})
     };
   }
 
@@ -921,6 +994,18 @@ export class ChatService {
   /** Chat changes waiting for desktop changes they were written after: the
    *  applied head seen when each was last tried (see applyRemoteChatChanges). */
   private readonly waitingChatChanges = new Map<string, number>();
+  /** Which devices are the User's phones (their messages start turns here). */
+  private phoneOrigin?: (originId: string) => boolean | Promise<boolean>;
+  private hubBlobReader?: (reference: DeviceEventBlobReference) => Promise<Buffer>;
+  /** Turns for a phone's message this device is starting: the turn's run id
+   *  is known before its run begins, so a Stop for it is not lost. */
+  private readonly pendingPhoneRuns = new Map<string, PendingPhoneRun>();
+  /** Chats with a phone's message whose members are being claimed. */
+  private readonly phoneStartsInFlight = new Map<string, number>();
+  /** When this device began reading the User's server: a phone's message
+   *  from before then is not this device's to start (a new or recreated
+   *  machine reads the whole order, turns other homes ran long ago). */
+  private phoneTurnsSince?: number;
   private static readonly CHAT_CHANGE_BASELINE_LIMIT = 256;
   private chatChangeTransport?: ChatChangeTransport;
   private readonly chatSavesInFlight = new Set<Promise<void>>();
@@ -935,6 +1020,19 @@ export class ChatService {
   private readonly activeRunRefCounts = new Map<string, number>();
   private readonly activeConversationRunRefCounts = new Map<string, Map<string, number>>();
   private readonly backgroundRunnerCounts = new Map<string, number>();
+  /** Chats holding an approved member removal that waits for idle, with a
+   *  generation bumped on every new decision; an in-memory index so the idle
+   *  hooks stay free for every other chat. */
+  private readonly queuedMemberRemovalChats = new Map<string, number>();
+  private readonly memberRemovalApplies = new Map<string, Promise<void>>();
+  private readonly memberRemovalApplyAgain = new Set<string>();
+  private readonly memberRemovalRetryAfter = new Map<string, number>();
+  private readonly memberAdditionApplies = new Map<string, Promise<void>>();
+  private readonly memberAdditionApplyAgain = new Set<string>();
+  private readonly memberAdditionRetries = new Map<string, number>();
+  /** Machine members' roster cards whose User answer this desktop confirmed
+   *  (`approvalId\ndecisionId`), so the signed answer is read once. */
+  private readonly confirmedRosterDecisions = new Set<string>();
   private readonly deletedConversationIds = new Set<string>();
   private readonly appMcpTokens = new Map<string, string>();
   /** The last app tool grant issued to each member's CLI process, so a reply
@@ -979,6 +1077,12 @@ export class ChatService {
   private machineLink?: MachineTurnDispatcher;
   private scriptHost?: ChatScriptHost;
   private participantRequestDelegate?: ChatParticipantRequestDelegate;
+  private compactionDelegate?: ChatCompactionDelegate;
+  /** Machine compactions in flight here: puts their status line back to
+   *  "Compacting" once the machine has started them. */
+  private readonly machineCompactionStatus = new Map<string, () => void>();
+  /** Run ids of compactions machines delegated here, so a redelivery is one run. */
+  private readonly delegatedCompactionRunIds = new Set<string>();
   private cloudRunAws?: CloudRunAwsResolver;
   private cloudRunDoctor?: CloudRunDoctorProbe;
   private artifactCleanup?: (conversationId: string) => Promise<void>;
@@ -1065,14 +1169,53 @@ export class ChatService {
     };
   }
 
-  /** A member whose provider went away must not keep a warm process that still
-   *  holds the old key; the runner would otherwise keep it until the idle timeout. */
-  private async closeWarmAgentsForParticipant(conversationId: string, participantId: string): Promise<void> {
+  /** Retires every warm process of one member in this chat (and the
+   *  background tasks it carries) instead of leaving it until the idle
+   *  timeout: when its provider went away and the process still holds the old
+   *  key, or when the member left the chat. Never throws; a failed close is
+   *  logged. */
+  private async closeWarmAgentsForParticipant(
+    conversationId: string,
+    participantId: string,
+    reason: "provider-binding-changed" | "member-removed" = "provider-binding-changed"
+  ): Promise<void> {
     const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "closeWarmAgents">>;
     if (typeof runner.closeWarmAgents !== "function") {
       return;
     }
-    await runner.closeWarmAgents.call(this.cliRunner, conversationId, participantId, "provider-binding-changed").catch(() => undefined);
+    try {
+      await runner.closeWarmAgents.call(this.cliRunner, conversationId, participantId, reason);
+    } catch (error) {
+      void this.debugLogs.write("chat.warm-agents.close-error", {
+        conversationId,
+        participantId,
+        reason,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  /** A removed member's warm CLI process, and the background tasks it
+   *  carries, end with its membership instead of lingering until the idle
+   *  timeout. Called once the removal is saved. Only that member's own
+   *  processes in this chat are closed (another member's turn is untouched),
+   *  and only on the host that runs it: a machine member's process is closed
+   *  by its machine when the member list it receives no longer has it (see
+   *  membersDroppedFrom). Closing reports its background tasks as ended. */
+  private retireRemovedMembers(conversationId: string, removed: ChatParticipant[]): void {
+    for (const participant of removed) {
+      if (!this.ownsParticipant(participant)) {
+        continue;
+      }
+      void this.closeWarmAgentsForParticipant(conversationId, participant.id, "member-removed");
+    }
+  }
+
+  /** Members `before` had that `after` no longer has: a member list that
+   *  arrived from another device removed them. */
+  private membersDroppedFrom(before: Conversation, after: Conversation): ChatParticipant[] {
+    const remaining = new Set(this.chatParticipants(after).map((participant) => participant.id));
+    return this.chatParticipants(before).filter((participant) => !remaining.has(participant.id));
   }
 
   /** Machines transport: participants whose home is an enrolled machine run
@@ -1145,6 +1288,12 @@ export class ChatService {
     this.participantRequestDelegate = delegate;
   }
 
+  /** Machine side: where a member's own compaction request goes (see
+   *  ChatCompactionDelegate). */
+  setCompactionDelegate(delegate: ChatCompactionDelegate | undefined): void {
+    this.compactionDelegate = delegate;
+  }
+
   setCloudRunAwsService(service: CloudRunAwsResolver): void {
     this.cloudRunAws = service;
   }
@@ -1199,9 +1348,12 @@ export class ChatService {
       }
       let usage: AgentContextUsage | undefined;
       try {
+        // Read once: this runs on every chat open, and waiting for logs that
+        // no longer exist made opening a chat take a second.
         usage = await this.cliRunner.contextUsageForSession(
           this.cliParticipantForSession(participant, session),
-          session.sessionId
+          session.sessionId,
+          { waitForLog: false }
         );
       } catch (error) {
         await this.debugLogs.write("chat.context-usage-refresh.error", {
@@ -1253,6 +1405,10 @@ export class ChatService {
       }
       await this.saveConversation(conversation);
       hydrated = conversation;
+      if (recoveredRunState) {
+        // A swept stale run can be what an approved member removal waits for.
+        this.scheduleQueuedMemberRemovals(conversation.id);
+      }
     });
     this.queueParticipantRequestAutoResumes(conversation.id, Array.from(autoResumeRequestMessageIds));
     return hydrated;
@@ -1795,22 +1951,48 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat") {
       return conversation;
     }
-    return this.withChatMutation(conversation, async () => {
-      if (conversation.metadata.running === true || this.chatHasLiveWork(conversation.id)) {
-        throw new Error("Members cannot be removed while a turn is running.");
-      }
-      const participants = this.chatParticipants(conversation);
-      const target = participants.find((participant) => participant.id === request.participantId);
+    const retired: ChatParticipant[] = [];
+    const saved = await this.withChatMutation(conversation, async () => {
+      retired.push(...this.removeParticipantsInMutation(conversation, [request.participantId], new Date().toISOString()));
+      await this.saveConversation(conversation);
+      return conversation;
+    });
+    this.retireRemovedMembers(conversation.id, retired);
+    return saved;
+  }
+
+  /**
+   * The one member removal, shared by the member list (removeParticipant) and
+   * an approved member request (applyQueuedMemberRemovals). The caller holds
+   * the chat mutation and saves, and once the save succeeded passes the
+   * returned members to retireRemovedMembers. Every target is checked before
+   * anything is changed, so a refused removal leaves the chat untouched.
+   *
+   * The chat must be idle: a removed member's own turn would keep writing its
+   * reply, approvals and session after this cleanup ran, and an open member
+   * request involving it would resume a member that is gone.
+   */
+  private removeParticipantsInMutation(conversation: Conversation, participantIds: string[], now: string): ChatParticipant[] {
+    if (this.memberRemovalBlockedByLiveWork(conversation)) {
+      throw new Error("Members cannot be removed while a turn is running.");
+    }
+    const participants = this.chatParticipants(conversation);
+    const targets: ChatParticipant[] = [];
+    for (const participantId of new Set(participantIds)) {
+      const target = participants.find((participant) => participant.id === participantId);
       if (!target) {
         throw new Error("Chat member was not found.");
       }
-      if (target.id === participants.find((item) => item.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID)?.id) {
-        throw new Error("Chat Assistant cannot be removed from the chat.");
-      }
-      if (participants.length <= 1) {
-        throw new Error("The last chat member cannot be removed.");
-      }
-      const now = new Date().toISOString();
+      targets.push(target);
+    }
+    const assistantId = participants.find((item) => item.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID)?.id;
+    if (targets.some((target) => target.id === assistantId)) {
+      throw new Error("Chat Assistant cannot be removed from the chat.");
+    }
+    if (participants.length - targets.length < 1) {
+      throw new Error("The last chat member cannot be removed.");
+    }
+    for (const target of targets) {
       // Drop the participant plus its resumable CLI session so a future re-add starts clean.
       const sessions = Array.isArray(conversation.metadata.participantSessions)
         ? (conversation.metadata.participantSessions as ChatParticipantSession[]).filter(
@@ -1819,16 +2001,19 @@ export class ChatService {
         : conversation.metadata.participantSessions;
       conversation.metadata = {
         ...conversation.metadata,
-        participants: participants.filter((participant) => participant.id !== target.id),
+        participants: this.chatParticipants(conversation).filter((participant) => participant.id !== target.id),
         participantSessions: sessions
       };
       conversation.metadata = this.metadataWithAutoWatchDisabled(conversation.metadata, target.id);
       this.cleanupRemovedParticipantState(conversation, target, now);
       this.promptSuggestions.forgetParticipant(conversation.id, target.id);
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
-      return conversation;
-    });
+    }
+    conversation.updatedAt = now;
+    return targets;
+  }
+
+  private memberRemovalBlockedByLiveWork(conversation: Conversation): boolean {
+    return conversation.metadata.running === true || this.chatHasLiveWork(conversation.id);
   }
 
   async compactParticipant(
@@ -1852,7 +2037,8 @@ export class ChatService {
     let ingest: {
       conversation: Conversation;
       participant: ChatParticipant;
-      session: ChatParticipantSession;
+      /** Undefined for a member on a machine: its session is there. */
+      session?: ChatParticipantSession;
       runStarted: boolean;
     };
     try {
@@ -1862,9 +2048,13 @@ export class ChatService {
         if (!participant) {
           throw new Error("Chat member was not found.");
         }
-        this.assertOwnsParticipant(participant);
-        const sessionState = await this.sessionForParticipant(conversation, participant);
-        if (!sessionState.session.sessionId) {
+        // A member on a machine is compacted there, through the same command
+        // path as its turns; its session is known only there. One whose
+        // machine has not been prepared yet has never run, so has none.
+        const onMachine = this.compactsOnMachine(participant);
+        if (!onMachine) this.assertOwnsParticipant(participant);
+        const session = onMachine ? undefined : (await this.sessionForParticipant(conversation, participant)).session;
+        if (onMachine ? !participant.homeMachineId : !session?.sessionId) {
           await this.withChatMutation(conversation, async () => {
             conversation.messages.push(this.message(
               "system",
@@ -1875,11 +2065,11 @@ export class ChatService {
             conversation.updatedAt = new Date().toISOString();
             await this.saveConversation(conversation);
           });
-          return { conversation, participant, session: sessionState.session, runStarted: false };
+          return { conversation, participant, session, runStarted: false };
         }
         await this.beginChatParticipantCompactionRun(conversation, runId, participant.id);
         await this.waitForQueuedSave(conversation.id);
-        return { conversation, participant, session: sessionState.session, runStarted: true };
+        return { conversation, participant, session, runStarted: true };
       });
     } catch (error) {
       await this.debugLogs.write("chat.compaction.finished", {
@@ -1909,6 +2099,9 @@ export class ChatService {
       const conversation = ingest.conversation;
       const participant = ingest.participant;
       const session = ingest.session;
+      if (!session) {
+        return await this.compactParticipantOnMachine(conversation, participant, request, runId, compactInstructions, warnings, auditBase, signal, progress);
+      }
       const workspacePath = await this.ensureHistoryFiles(conversation);
       const agentMode = this.agentModeForSession(session, participant);
       const permissions = normalizeChatAgentPermissions(participant.permissions);
@@ -1917,31 +2110,18 @@ export class ChatService {
       const baseCliParticipant = this.cliParticipantForSession(participant, session);
       const agentEnvironment = await this.agentEnvironmentForParticipant(participant, baseCliParticipant.model);
       const cliParticipant = this.cliParticipantWithHost(baseCliParticipant, agentEnvironment.codexConfigOverrides);
-      const appMcpToolInventoryKey = this.appMcpToolInventoryKey(
-        this.appMcpToolNames(this.appToolCapabilitiesForRun(session, permissions))
-      );
       if (agentEnvironment.problem) {
         await this.closeWarmAgentsForParticipant(conversation.id, participant.id);
       }
       const result: CliAgentCompactResult = agentEnvironment.problem
         ? { participant: cliParticipant, ok: false, error: agentEnvironment.problem }
         : await this.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
-            persistSession: true,
-            sessionId: session.sessionId,
-            extraReadableDirs: [workspacePath],
-            agentMode,
-            permissions,
+            ...this.memberProcessOptionsForCompaction(conversation, participant, session, request, runId, runPath, workspacePath, agentMode, permissions),
             agentEnv: agentEnvironment.env,
             agentEnvKey: agentEnvironment.version,
             ...(compactInstructions ? { compactInstructions } : {}),
             onSessionId: (sessionId) => {
               this.persistParticipantSessionId(conversation, session, sessionId);
-            },
-            warm: {
-              conversationId: conversation.id,
-              participantId: participant.id,
-              contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
-              idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
             }
           });
       await this.refreshStoredChatState(conversation);
@@ -1974,7 +2154,7 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         const content = result.ok
           ? this.compactSuccessMessage(participant.handle, compactInstructions)
-          : `Could not compact @${participant.handle} context: ${result.error ?? "unknown error"}.`;
+          : compactionFailureLine(participant.handle, result.error);
         conversation.messages.push(this.message(
           "system",
           content,
@@ -2010,6 +2190,252 @@ export class ChatService {
     } finally {
       reservation.release();
       await this.endChatRun(ingest.conversation, runId);
+    }
+  }
+
+  /**
+   * What the member's live process is started with when a compaction finds
+   * none alive: what its turn would start it with (session, role, app MCP
+   * connection and tools, permissions, observers), so the process stays the
+   * member's and serves its next turn. The app tool grant follows the turn's
+   * rules for each CLI: a Claude Code process that is alive keeps the grant
+   * its own replies act for, and one started for the compaction gets the
+   * member's current grant before it connects; Codex is granted before it
+   * runs. Gemini's compaction runs no app tools.
+   */
+  private memberProcessOptionsForCompaction(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession,
+    request: CompactChatParticipantRequest,
+    runId: string,
+    runPath: string,
+    workspacePath: string,
+    agentMode: ChatAgentMode,
+    permissions: ChatAgentPermissions
+  ): CliAgentRunOptions {
+    const appToolCapabilities = this.appToolCapabilitiesForRun(session, permissions);
+    const appMcpToolNames = this.appMcpToolNames(appToolCapabilities);
+    const appMcpToolInventoryKey = this.appMcpToolInventoryKey(appMcpToolNames);
+    const appMcpClientGenerationId = this.appMcpClientGenerationId(conversation, participant, session, appMcpToolInventoryKey);
+    const memberKey = `${conversation.id}:${participant.id}`;
+    const grant: ChatAppMcpTokenGrant = {
+      conversationId: conversation.id,
+      participantId: participant.id,
+      roleConfigId: session.roleConfigId,
+      roleConfigVersion: session.roleConfigVersion,
+      capabilities: appToolCapabilities,
+      clientGenerationId: appMcpClientGenerationId,
+      expectedToolNames: appMcpToolNames,
+      triggerMessageId: request.parentMessageId,
+      triggerThreadId: request.threadId ?? request.parentMessageId,
+      triggerParentMessageId: request.parentMessageId,
+      triggerChatThreadRootId: request.chatThreadRootId,
+      continuation: false,
+      runId,
+      turnSegmentId: randomUUID(),
+      agentMode,
+      runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, permissions),
+      participantRequestDepth: 0,
+      historyMarkdownPath: path.join(workspacePath, "history.md"),
+      historyJsonPath: path.join(workspacePath, "history.json")
+    };
+    const grantCompaction = (): { url: string; token: string } | undefined => {
+      const issued = this.issueAppMcpConnection(conversation, participant, grant);
+      if (issued && participant.kind === "claude-code") {
+        this.lastAppMcpGrants.set(memberKey, grant);
+      }
+      return issued;
+    };
+    let appMcp: { url: string; token: string } | undefined;
+    let grantBeforeStart: (() => void) | undefined;
+    if (participant.kind === "claude-code") {
+      const existingConnection = this.appMcpTokens.has(memberKey) ? this.appMcpConnections.get(memberKey) : undefined;
+      appMcp = existingConnection ?? grantCompaction();
+      grantBeforeStart = existingConnection ? () => { grantCompaction(); } : undefined;
+    } else if (participant.kind === "codex-cli") {
+      appMcp = grantCompaction();
+    }
+    return {
+      persistSession: true,
+      sessionId: session.sessionId,
+      extraReadableDirs: [workspacePath],
+      // A resumed session keeps the role it started with; the prompt fallback
+      // is never sent for it.
+      role: session.roleRuntime === "prompt-fallback" ? undefined : this.cliRoleOptions(participant, session, ""),
+      appMcp: appMcp
+        ? {
+            ...appMcp,
+            toolNames: appMcpToolNames,
+            autoPreauthorizedToolNames: this.autoPreauthorizedAppMcpToolNames(appMcpToolNames),
+            clientGenerationId: appMcpClientGenerationId,
+            clientStatus: (clientGenerationId: string) => this.appMcp?.clientStatus?.(clientGenerationId)
+          }
+        : undefined,
+      agentMode,
+      permissions,
+      warm: {
+        conversationId: conversation.id,
+        participantId: participant.id,
+        contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
+        idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS,
+        // Called only before a process is started for the compaction.
+        onReplyStarted: grantBeforeStart,
+        onSelfResumedTurn: (turn) => this.handleSelfResumedTurn(conversation.id, participant.id, turn),
+        onBackgroundTasksChanged: (tasks) => this.handleBackgroundTasksChanged(conversation.id, participant.id, tasks),
+        // Started with suggestions on, as a turn starts it; the compaction
+        // itself is not a reply a suggestion follows.
+        onPromptSuggestion: (text) => this.receiveMemberPromptSuggestion({
+          conversationId: conversation.id,
+          participantId: participant.id,
+          runId,
+          text
+        })
+      }
+    };
+  }
+
+  /** A member whose home is a machine (or will be one, once its cloud
+   *  machine is prepared) is compacted there, exactly as its turns run there. */
+  private compactsOnMachine(participant: ChatParticipant): boolean {
+    return !this.machineRuntime && Boolean(participant.cloudRun || participant.homeMachineId);
+  }
+
+  /**
+   * Desktop side of compacting a member that runs on a machine. The machine
+   * runs this service's own compactParticipant for the member's session there
+   * and returns the outcome line it wrote; this desktop shows that same line,
+   * the same progress and the member's new context use. Whatever kept the
+   * machine from running it (not connected, an older runtime, stopped before
+   * it was sent) ends exactly as a local compaction that could not start.
+   */
+  private async compactParticipantOnMachine(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    request: CompactChatParticipantRequest,
+    runId: string,
+    compactInstructions: string | undefined,
+    warnings: string[],
+    auditBase: Record<string, unknown>,
+    signal?: AbortSignal,
+    progress?: ProgressCallback
+  ): Promise<StartReviewResult> {
+    const link = this.machineLink;
+    let result: MachineTurnDispatchResult;
+    if (signal?.aborted) {
+      result = { status: "interrupted", messages: [], warnings: [], sent: false };
+    } else if (!link?.compactOnMachine) {
+      result = { status: "failed", messages: [], warnings: [], sent: false, error: `@${participant.handle} is hosted on a machine, but the machine link is not available` };
+    } else {
+      // The compaction's own status line says what a turn's bubble says
+      // while its machine is away, and returns to "Compacting" once it runs.
+      const compacting = `Compacting @${participant.handle}.`;
+      const status = (message: string): void => {
+        this.emitProgress(runId, progress, "initial", message, { participantLabel: `@${participant.handle}` });
+      };
+      // Once Stop is waiting for the machine, that stays until the outcome,
+      // as on a turn's bubble.
+      let stopPending = false;
+      this.machineCompactionStatus.set(runId, () => { if (!stopPending) status(compacting); });
+      try {
+        result = await link.compactOnMachine({
+          conversation,
+          participant,
+          runId,
+          signal,
+          compaction: normalizeMachineTurnCompaction({ ...request, instructions: compactInstructions }),
+          onMachineWaiting: async (machineName, reason) => {
+            if (!stopPending) status(`${compacting} ${machineWaitingText(machineName, reason)}`);
+          },
+          onStopPending: (machineName) => {
+            void this.debugLogs.write("chat.compaction.stop-pending", { conversationId: conversation.id, runId, machineName });
+            stopPending = true;
+            status(`${compacting} ${machineStopPendingText(machineName)}`);
+          }
+        });
+      } finally {
+        this.machineCompactionStatus.delete(runId);
+      }
+    }
+    // Only the lines the machine's compaction of this run wrote are taken.
+    const compactionLines = result.messages.filter((message) => isMachineCompactionLine(message, runId, participant.id));
+    const outcomeMessage = compactionLines.at(-1);
+    const reported = outcomeMessage?.metadata?.compaction?.outcome;
+    let outcome: "completed" | "failed" | "no-active-session" = reported === "completed" || reported === "no-active-session" ? reported : "failed";
+    await this.withChatMutation(conversation, async () => {
+      if (outcomeMessage) {
+        for (const message of compactionLines) {
+          if (!conversation.messages.some((existing) => existing.id === message.id)) {
+            conversation.messages.push(message);
+          }
+        }
+        for (const warning of result.warnings) {
+          if (!warnings.includes(warning)) warnings.push(warning);
+        }
+      } else {
+        // It never ran on the machine: the same line a local compaction that
+        // could not start writes (a Stop before it started: word for word).
+        const content = machineCompactionFailureLine(participant.handle, result.status, result.error);
+        conversation.messages.push(this.message("system", content, undefined, this.compactMessageMetadata(request, participant.id, "failed")));
+        warnings.push(content);
+        outcome = "failed";
+      }
+      this.updateParticipantContextUsage(conversation, participant.id, normalizeAgentContextUsage(result.contextUsage));
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+    });
+    // The machine keeps its result until this desktop has stored it.
+    if (await this.waitForQueuedSaveResult(conversation.id)) {
+      try { await result.acknowledge?.(); }
+      catch (error) {
+        void this.debugLogs.write("chat.compaction.ack-pending", { conversationId: conversation.id, runId, message: error instanceof Error ? error.message : String(error) });
+      }
+    } else {
+      void this.debugLogs.write("chat.compaction.not-stored", { conversationId: conversation.id, runId });
+    }
+    if (outcome !== "no-active-session") {
+      this.emitProgress(runId, progress, outcome === "completed" ? "done" : "error", outcome === "completed" ? `Compacted @${participant.handle}.` : `Could not compact @${participant.handle}.`, {
+        participantLabel: `@${participant.handle}`
+      });
+    }
+    await this.debugLogs.write("chat.compaction.finished", {
+      ...auditBase,
+      participantId: participant.id,
+      participantHandle: participant.handle,
+      outcome,
+      homeMachineId: participant.homeMachineId,
+      machineStatus: result.status
+    });
+    return { conversation, warnings };
+  }
+
+  /** Machines transport, machine side: compacts one of this machine's members
+   *  for the desktop, with the run id the desktop chose. Returns the outcome
+   *  line written here and the member's context use after it. */
+  async runMachineHostedCompaction(
+    request: { conversationId: string; participantId: string; runId: string } & MachineTurnCompaction,
+    signal?: AbortSignal
+  ): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
+    // Stop reaches it by run id as it reaches a turn (cancelRun), not only
+    // through the command's own controller.
+    const run = this.registerBackgroundRunController(request.runId, signal);
+    try {
+      const result = await this.compactParticipant({
+        conversationId: request.conversationId,
+        participantId: request.participantId,
+        runId: request.runId,
+        triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
+        ...(request.instructions ? { instructions: request.instructions } : {}),
+        ...(request.threadId ? { threadId: request.threadId } : {}),
+        ...(request.parentMessageId ? { parentMessageId: request.parentMessageId } : {}),
+        ...(request.chatThreadRootId ? { chatThreadRootId: request.chatThreadRootId } : {})
+      }, run.signal);
+      const conversation = result.conversation;
+      const messages = conversation.messages.filter((message) => isMachineCompactionLine(message, request.runId, request.participantId));
+      const contextUsage = this.agentContextUsageByParticipant(conversation)[request.participantId];
+      return { messages, warnings: result.warnings, ...(contextUsage ? { contextUsage } : {}) };
+    } finally {
+      run.cleanup();
     }
   }
 
@@ -2240,6 +2666,9 @@ export class ChatService {
         prepared.summary,
         "auto-applied"
       );
+      if (!this.appliesRosterChanges()) {
+        return this.queueMemberAdditionForDesktop(conversation, approval);
+      }
       const applied = this.applyPreparedRosterChange(conversation, prepared);
       approval.appliedParticipantIds = applied.map((participant) => participant.id);
       approval.updatedAt = new Date().toISOString();
@@ -2946,8 +3375,9 @@ export class ChatService {
         updatedAt: participant.updatedAt
       })),
       participantChange: {
-        supportedOperations: ["add_new_participant_to_chat", "add_existing_participant_to_chat"],
-        savePolicy: "For add_new_participant_to_chat, saveAsPreset defaults to true. Set it to false only for a one-off chat member. Do not use archived roles for new members; archived roles are returned only so existing saved/current references can still be understood."
+        supportedOperations: ["add_new_participant_to_chat", "add_existing_participant_to_chat", "remove_participant_from_chat"],
+        savePolicy: "For add_new_participant_to_chat, saveAsPreset defaults to true. Set it to false only for a one-off chat member. Do not use archived roles for new members; archived roles are returned only so existing saved/current references can still be understood.",
+        removalPolicy: "remove_participant_from_chat takes a current member's participantId or handle and takes that member out of this chat only; its saved preset is kept. Request removals on their own, not together with additions. The User always approves a removal on a card, even when member changes are otherwise auto-applied, and an approved removal takes effect after your turn ends and no member is running. You cannot remove yourself, the Chat Assistant, or the last member."
       }
     };
   }
@@ -3201,6 +3631,11 @@ export class ChatService {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
     const { requester, manageRolesParticipants } = await this.requireParticipantManager(conversation, actor);
+    const removal = this.normalizeParticipantRemovalInput(rawRequest);
+    if (removal) {
+      // A removal is never auto-applied, whatever this member's policy is.
+      return this.requestParticipantRemovalFromTool(conversation, requester, removal);
+    }
     const request = this.normalizeParticipantChangeRequest(rawRequest);
     const pendingRoleApproval = this.pendingRoleApprovalForParticipantRequest(conversation, requester, request);
     if (pendingRoleApproval) {
@@ -3211,6 +3646,16 @@ export class ChatService {
         participantRequest: request
       });
       if (manageRolesParticipants === "allow" && !prepared.managementEscalation) {
+        if (!this.appliesRosterChanges()) {
+          return this.queueMemberAdditionForDesktop(conversation, {
+            ...pendingRoleApproval.approval,
+            toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
+            request: prepared.request,
+            summary: prepared.summary,
+            status: "auto-applied",
+            approvalScope: "chat"
+          });
+        }
         const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
         const approval: ChatAppToolApproval = {
           ...pendingRoleApproval.approval,
@@ -3271,6 +3716,9 @@ export class ChatService {
         prepared.summary,
         "auto-applied"
       );
+      if (!this.appliesRosterChanges()) {
+        return this.queueMemberAdditionForDesktop(conversation, approval);
+      }
       const applied = await this.applyPreparedParticipantChange(conversation, prepared);
       approval.appliedParticipantIds = applied.map((participant) => participant.id);
       approval.updatedAt = new Date().toISOString();
@@ -3312,6 +3760,874 @@ export class ChatService {
       approvalId: approval.id,
       summary: prepared.summary
     };
+  }
+
+  private async requestParticipantRemovalFromTool(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    input: ParticipantRemovalInput
+  ): Promise<Record<string, unknown>> {
+    let result!: Record<string, unknown>;
+    await this.withChatMutation(conversation, async () => {
+      const prepared = this.prepareParticipantRemoval(conversation, requester.id, input);
+      const current = this.chatParticipants(conversation).find((participant) => participant.id === requester.id) ?? requester;
+      const approval = this.newAppToolApproval(
+        conversation,
+        current,
+        APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
+        "participants.manage",
+        prepared.request,
+        prepared.summary,
+        "pending"
+      );
+      this.upsertAppToolApproval(conversation, approval);
+      conversation.messages.push(this.message("system", `Member removal approval needed from @${current.handle}: ${prepared.summary}.`, undefined, {
+        threadId: "system"
+      }));
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      result = {
+        ok: true,
+        status: "pending_user_approval",
+        approvalId: approval.id,
+        summary: prepared.summary,
+        next: "The User decides on a removal card. If approved, the removal takes effect after your turn ends and no member is running; the outcome is posted to the chat as a system message. Do not say the member was removed before that."
+      };
+    });
+    return result;
+  }
+
+  /** A removal request from the tool, or undefined when it asks for additions
+   *  only. Removals and additions are not mixed: a removal always waits for
+   *  the User and for an idle chat, an addition may apply at once. */
+  private normalizeParticipantRemovalInput(raw: unknown): ParticipantRemovalInput | undefined {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return undefined;
+    }
+    const record = raw as { reason?: unknown; operations?: unknown };
+    if (!Array.isArray(record.operations)) {
+      return undefined;
+    }
+    const isRemoval = (operation: unknown): boolean =>
+      Boolean(operation && typeof operation === "object" && (operation as { type?: unknown }).type === "remove_participant_from_chat");
+    const removals = record.operations.filter(isRemoval).length;
+    if (removals === 0) {
+      return undefined;
+    }
+    if (removals !== record.operations.length) {
+      throw new Error("Request member removals on their own: do not combine remove_participant_from_chat with additions in one request.");
+    }
+    if (record.operations.length > CHAT_ROSTER_CHANGE_MAX_OPERATIONS) {
+      throw new Error("Member change request is too large.");
+    }
+    return {
+      reason: typeof record.reason === "string" ? record.reason.trim().slice(0, 500) || undefined : undefined,
+      targets: record.operations.map((operation, index) => {
+        const operationRecord = operation as Record<string, unknown>;
+        const participantId = typeof operationRecord.participantId === "string" ? operationRecord.participantId.trim() : "";
+        const handle = typeof operationRecord.handle === "string" ? operationRecord.handle.trim().replace(/^@/, "") : "";
+        if (!participantId && !handle) {
+          throw new Error(`Member operation ${index + 1} needs the participantId or handle of the member to remove.`);
+        }
+        return participantId ? { participantId } : { handle };
+      })
+    };
+  }
+
+  /** Resolves and checks a removal against the chat as it is now. Used when a
+   *  member asks and again when the User approves. */
+  private prepareParticipantRemoval(
+    conversation: Conversation,
+    requesterId: string,
+    input: ParticipantRemovalInput,
+    excludingApprovalId?: string
+  ): { request: ChatParticipantRemovalRequest; summary: string } {
+    const participants = this.chatParticipants(conversation);
+    const requester = participants.find((participant) => participant.id === requesterId);
+    if (!requester) {
+      throw new Error("The requesting member is no longer in this chat.");
+    }
+    const assistantId = participants.find((item) => item.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID)?.id;
+    const operations: ChatParticipantRemovalRequest["operations"] = [];
+    for (const [index, target] of input.targets.entries()) {
+      const member = target.participantId
+        ? participants.find((participant) => participant.id === target.participantId)
+        : this.participantForMentionHandle(participants, target.handle ?? "");
+      if (!member) {
+        throw new Error(target.participantId
+          ? `Member operation ${index + 1}: no member of this chat has id ${target.participantId}.`
+          : `Member operation ${index + 1}: @${target.handle} is not a member of this chat.`);
+      }
+      if (member.id === requester.id) {
+        throw new Error("You cannot remove yourself from the chat. If you should leave, tell the User; they can remove you from the member list.");
+      }
+      if (member.id === assistantId) {
+        throw new Error("Chat Assistant cannot be removed from the chat.");
+      }
+      if (!operations.some((operation) => operation.participantId === member.id)) {
+        operations.push({ type: "remove_participant_from_chat", participantId: member.id, handle: member.handle });
+      }
+    }
+    if (participants.length - operations.length < 1) {
+      throw new Error("The last chat member cannot be removed.");
+    }
+    const open = this.chatAppToolApprovals(conversation).find((approval): approval is MemberRemovalApproval =>
+      approval.id !== excludingApprovalId &&
+      this.isOpenMemberRemovalApproval(approval) &&
+      approval.request.operations.some((operation) =>
+        operations.some((item) => item.participantId === operation.participantId)
+      )
+    );
+    if (open) {
+      throw new Error(`A removal of ${this.memberRemovalHandles(open.request)} is already waiting for the User.`);
+    }
+    const request: ChatParticipantRemovalRequest = { kind: "participant_removal", reason: input.reason, operations };
+    return { request, summary: `Remove ${this.memberRemovalHandles(request)} from this chat` };
+  }
+
+  /** Pending, or approved and not applied yet, wherever it is applied. */
+  private isOpenMemberRemovalApproval(approval: ChatAppToolApproval): approval is MemberRemovalApproval {
+    return approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
+      this.isParticipantRemovalRequest(approval.request) &&
+      (approval.status === "pending" || (approval.status === "approved" && typeof approval.memberRemovalQueuedAt === "string"));
+  }
+
+  /** Only the desktop changes a chat's member list: a machine's changes to
+   *  it are never sent, and the desktop and the server take it only from the
+   *  desktop. A roster change a machine member asked for is therefore
+   *  recorded on its machine and applied here, on the desktop. */
+  private appliesRosterChanges(): boolean {
+    return !this.machineRuntime;
+  }
+
+  /** An approved removal this host still has to apply: on the desktop, any
+   *  member's, a machine member's included (its card arrives from the
+   *  machine); on a machine, none. */
+  private isQueuedMemberRemovalApproval(approval: ChatAppToolApproval): approval is MemberRemovalApproval {
+    return this.appliesRosterChanges() &&
+      approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
+      approval.status === "approved" &&
+      typeof approval.memberRemovalQueuedAt === "string" &&
+      this.isParticipantRemovalRequest(approval.request);
+  }
+
+  /** An approved addition a machine member asked for, waiting here for the
+   *  desktop to apply it. */
+  private isQueuedMemberAdditionApproval(approval: ChatAppToolApproval): boolean {
+    return this.appliesRosterChanges() &&
+      typeof approval.memberAdditionQueuedAt === "string" &&
+      (approval.status === "approved" || approval.status === "auto-applied") &&
+      (
+        (approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
+          (this.isParticipantChangeRequest(approval.request) || this.isRoleParticipantChangeRequest(approval.request))) ||
+        (approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL && this.isRosterChangeRequest(approval.request))
+      );
+  }
+
+  /** On a machine, an auto-applied addition: recorded for the desktop, which
+   *  adds the member; the member asking is told it has not happened yet. The
+   *  same addition asked again while it waits is answered with that card. */
+  private async queueMemberAdditionForDesktop(conversation: Conversation, approval: ChatAppToolApproval): Promise<Record<string, unknown>> {
+    let queued = approval;
+    await this.withChatMutation(conversation, async () => {
+      // Who it adds (a preparation's ids differ each time).
+      const targets = JSON.stringify(this.memberAdditionTargets(approval.request));
+      const waiting = this.chatAppToolApprovals(conversation).find((item) =>
+        typeof item.memberAdditionQueuedAt === "string" &&
+        item.requesterParticipantId === approval.requesterParticipantId &&
+        item.toolName === approval.toolName &&
+        JSON.stringify(this.memberAdditionTargets(item.request)) === targets);
+      if (waiting) {
+        queued = waiting;
+        return;
+      }
+      const now = new Date().toISOString();
+      queued = { ...approval, memberAdditionQueuedAt: now, updatedAt: now };
+      this.upsertAppToolApproval(conversation, queued);
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+    });
+    return {
+      ok: true,
+      status: "approved_pending_apply",
+      approvalId: queued.id,
+      summary: queued.summary,
+      next: "Approved, not in effect yet: the desktop owns this chat's member list and adds the member when it applies the change, within seconds while it is on. Until then the member is not in the chat. The outcome is posted to the chat."
+    };
+  }
+
+  /** On a machine, the User approved an addition: recorded for the desktop to
+   *  apply. Nothing about the member list changes here; the desktop's message
+   *  saying what it did settles this card (settleRosterChangesFromDesktop). */
+  private async recordMemberAdditionForDesktop(
+    conversation: Conversation,
+    approval: ChatAppToolApproval,
+    request: ChatAppToolApprovalRequest,
+    scope: ChatAppToolApprovalScope = "chat"
+  ): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      const current = this.chatAppToolApprovals(conversation).find((item) => item.id === approval.id);
+      if (!current || current.status !== "pending") {
+        throw new Error("App tool approval request has already been answered.");
+      }
+      const now = new Date().toISOString();
+      this.upsertAppToolApproval(conversation, {
+        ...current,
+        status: "approved",
+        request,
+        approvalScope: scope,
+        memberAdditionQueuedAt: now,
+        updatedAt: now
+      });
+      if (scope === "chat" && current.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL) {
+        this.upsertRosterChatPolicy(conversation, current, now);
+      }
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+    });
+  }
+
+  /** "Allow for chat" on a legacy roster card: later additions by the same
+   *  member and role apply without a card. */
+  private upsertRosterChatPolicy(conversation: Conversation, approval: ChatAppToolApproval, now: string): void {
+    this.upsertAppToolApprovalPolicy(conversation, {
+      id: randomUUID(),
+      participantId: approval.requesterParticipantId,
+      roleConfigId: approval.requesterRoleConfigId,
+      toolName: approval.toolName,
+      capability: approval.capability,
+      scope: "chat",
+      createdAt: now,
+      updatedAt: now
+    });
+  }
+
+  /** On a machine: the desktop's messages saying what it did with roster
+   *  changes this machine's members asked for (applied, or refused with the
+   *  reason). Their cards here are settled to match, so the phone and the
+   *  desktop stop showing them as waiting. Only messages the desktop wrote. */
+  private settleRosterChangesFromDesktop(conversation: Conversation, desktopMessages: () => ChatMessage[]): void {
+    if (this.appliesRosterChanges()) {
+      return;
+    }
+    const waiting = this.chatAppToolApprovals(conversation).filter((approval) =>
+      typeof approval.memberRemovalQueuedAt === "string" || typeof approval.memberAdditionQueuedAt === "string");
+    if (waiting.length === 0) {
+      return;
+    }
+    const outcomes = new Map<string, ChatRosterChangeOutcome>();
+    for (const message of desktopMessages()) {
+      const outcome = message.role === "system" ? message.metadata?.rosterChange : undefined;
+      if (outcome && typeof outcome.approvalId === "string") outcomes.set(outcome.approvalId, outcome);
+    }
+    for (const approval of waiting) {
+      const outcome = outcomes.get(approval.id);
+      if (!outcome) continue;
+      const { memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, ...settled } = approval;
+      this.upsertAppToolApproval(conversation, outcome.outcome === "applied"
+        ? { ...settled, appliedParticipantIds: Array.isArray(outcome.appliedParticipantIds) ? outcome.appliedParticipantIds.filter((id) => typeof id === "string") : [], updatedAt: this.laterThan(approval.updatedAt) }
+        : { ...settled, status: "cancelled", error: typeof outcome.error === "string" && outcome.error ? outcome.error : "The desktop could not apply this change.", updatedAt: this.laterThan(approval.updatedAt) });
+    }
+  }
+
+  /** Now, or strictly later than `previous`: the metadata merge keeps the
+   *  newer copy of a card and lets the current one win a tie. */
+  private laterThan(previous: string | undefined): string {
+    const now = new Date().toISOString();
+    const at = Date.parse(previous ?? "");
+    return Number.isFinite(at) && Date.parse(now) <= at ? new Date(at + 1).toISOString() : now;
+  }
+
+  /** A machine's card asks this desktop to change the member list only for a
+   *  member that machine runs, on a card that machine owns. */
+  private machineRosterCardProblem(conversation: Conversation, current: ChatAppToolApproval | undefined, incoming: ChatAppToolApproval): string | undefined {
+    const requester = this.chatParticipants(conversation).find((participant) => participant.id === incoming.requesterParticipantId);
+    if (!requester) {
+      return "The requesting member is no longer in this chat.";
+    }
+    if (!incoming.homeMachineId || requester.homeMachineId !== incoming.homeMachineId || (current && current.homeMachineId !== incoming.homeMachineId)) {
+      return `The request did not come from the computer @${requester.handle} runs on.`;
+    }
+    return undefined;
+  }
+
+  /** The User's answer behind a machine member's approved roster change, as
+   *  this desktop can confirm it: the signed answer this desktop or one of the
+   *  User's phones gave on this card, which the machine reports it applied.
+   *  `waiting`: not reported, or not read here, yet. */
+  private async machineRosterDecision(
+    conversation: Conversation,
+    approval: ChatAppToolApproval
+  ): Promise<MachineRosterDecision> {
+    const decisionId = approval.machineAppliedDecisionId;
+    const storage = this.storage as Partial<Pick<StorageService, "getChatEvent" | "deviceEventBlobs" | "getChatEventDeviceIdentityRecord">>;
+    if (!decisionId || typeof storage.getChatEvent !== "function") {
+      return { ok: false, waiting: true };
+    }
+    const key = `${approval.id}\n${decisionId}`;
+    if (this.confirmedRosterDecisions.has(key)) {
+      return { ok: true };
+    }
+    const event = await storage.getChatEvent.call(this.storage, decisionId);
+    if (!event) {
+      return { ok: false, waiting: true };
+    }
+    const refused = { ok: false as const, waiting: false as const, problem: "Your approval of this change could not be confirmed on this computer." };
+    if (event.conversationId !== conversation.id || event.kind !== "permission.decided") {
+      return refused;
+    }
+    const payload = await Promise.resolve(storage.deviceEventBlobs?.call(this.storage).hydrate(event.payload)).catch(() => undefined) as ChatActionPayload | undefined;
+    // `approval:<id>`, the target of a permission answer (approvalTarget).
+    if (payload?.targetKey !== `approval:${approval.id}` || payload.detail?.approve !== true) {
+      return refused;
+    }
+    const own = (await storage.getChatEventDeviceIdentityRecord?.call(this.storage))?.originId;
+    if (event.originId !== own) {
+      // A phone's answer: one of the User's paired phones. Until this app
+      // can tell (just started), it is not refused, only not applied yet.
+      const resolver = this.phoneOrigin;
+      if (!resolver) return { ok: false, waiting: true };
+      let phone: boolean;
+      try {
+        phone = await resolver(event.originId);
+      } catch {
+        return { ok: false, waiting: true };
+      }
+      if (!phone) return refused;
+    }
+    this.confirmedRosterDecisions.add(key);
+    return { ok: true };
+  }
+
+  /** Who an addition request adds: a saved member by its preset, a new one
+   *  by its handle. */
+  private memberAdditionTargets(request: ChatAppToolApprovalRequest): Array<{ handle?: string; participantConfigId?: string }> {
+    const participantRequest = this.isRoleParticipantChangeRequest(request)
+      ? request.participantRequest
+      : this.isParticipantChangeRequest(request) ? request : undefined;
+    if (participantRequest) {
+      return participantRequest.operations.map((operation) => operation.type === "add_existing_participant_to_chat"
+        ? { participantConfigId: operation.participantConfigId }
+        : { handle: operation.participant.handle });
+    }
+    if (this.isRosterChangeRequest(request)) {
+      return request.operations.map((operation) => ({ handle: operation.participant.handle }));
+    }
+    return [];
+  }
+
+  private memberRemovalHandles(request: ChatParticipantRemovalRequest): string {
+    return this.formatHandleList(request.operations.map((operation) => `@${operation.handle}`));
+  }
+
+  private memberRemovalProblem(conversation: Conversation, approval: ChatAppToolApproval, request: ChatParticipantRemovalRequest): string | undefined {
+    try {
+      // The stored request is what the User saw; an edited draft never
+      // changes who is removed.
+      this.prepareParticipantRemoval(conversation, approval.requesterParticipantId, {
+        reason: request.reason,
+        targets: request.operations.map((operation) => ({ participantId: operation.participantId }))
+      }, approval.id);
+      return undefined;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  private pushMemberRemovalFailure(conversation: Conversation, approval: ChatAppToolApproval, request: ChatParticipantRemovalRequest, reason: string): void {
+    conversation.messages.push(this.message(
+      "system",
+      `Could not remove ${this.memberRemovalHandles(request)} at ${this.requesterReference(conversation, approval)}'s request: ${reason}`,
+      undefined,
+      { threadId: "system", rosterChange: { approvalId: approval.id, outcome: "refused", error: reason } }
+    ));
+  }
+
+  /** The asking member as this chat's member list names it (a machine's card
+   *  carries its own copy of the handle). */
+  private requesterReference(conversation: Conversation, approval: ChatAppToolApproval): string {
+    const requester = this.chatParticipants(conversation).find((participant) => participant.id === approval.requesterParticipantId);
+    return `@${requester?.handle ?? approval.requesterHandle}`;
+  }
+
+  /** Who a roster change is about, for the chat's message. */
+  private rosterChangeTargetsText(approval: ChatAppToolApproval): string {
+    if (this.isParticipantRemovalRequest(approval.request)) {
+      return this.memberRemovalHandles(approval.request);
+    }
+    let handles: string[] = [];
+    try {
+      handles = this.memberAdditionTargets(approval.request).flatMap((target) => target.handle ? [`@${target.handle.replace(/^@/, "")}`] : []);
+    } catch {
+      handles = [];
+    }
+    return handles.length > 0 ? this.formatHandleList(handles) : "a member";
+  }
+
+  /** A machine member's removal names each member by id and by handle; the
+   *  User approved the handles, so they must be the members' handles here. */
+  private machineRemovalHandleProblem(conversation: Conversation, request: ChatParticipantRemovalRequest): string | undefined {
+    const participants = this.chatParticipants(conversation);
+    for (const operation of request.operations) {
+      const member = participants.find((participant) => participant.id === operation.participantId);
+      if (member && member.handle.replace(/^@/, "").toLowerCase() !== operation.handle.replace(/^@/, "").toLowerCase()) {
+        return `The request names @${operation.handle}, but that member is @${member.handle} in this chat.`;
+      }
+    }
+    return undefined;
+  }
+
+  /** The User approved a member's removal request. The decision is recorded
+   *  at once and the removal is applied when the chat is idle: right now if it
+   *  already is, otherwise when the asking member's turn (and any other running
+   *  work) ends. */
+  private async approveParticipantRemoval(
+    conversation: Conversation,
+    approval: ChatAppToolApproval,
+    request: ChatParticipantRemovalRequest,
+    execution?: ChatApprovalExecutionGuard
+  ): Promise<Conversation> {
+    const refuse = async (): Promise<void> => {
+      // Written through the chat mutation: the asking member's turn is often
+      // still writing when the User answers, and `conversation` was read
+      // before that.
+      await this.withChatMutation(conversation, async () => {
+        const current = this.chatAppToolApprovals(conversation).find((item) => item.id === approval.id);
+        const problem = current?.status === "pending" ? this.memberRemovalProblem(conversation, current, request) : undefined;
+        if (!current || !problem) {
+          return;
+        }
+        const now = new Date().toISOString();
+        this.upsertAppToolApproval(conversation, { ...current, status: "denied", updatedAt: now, error: problem });
+        this.pushMemberRemovalFailure(conversation, current, request, problem);
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation);
+      });
+    };
+    if (this.memberRemovalProblem(conversation, approval, request)) {
+      await refuse();
+      return conversation;
+    }
+    await execution?.beforeApply(approval);
+    let recorded = false;
+    let refused = false;
+    await this.withChatMutation(conversation, async () => {
+      const current = this.chatAppToolApprovals(conversation).find((item) => item.id === approval.id);
+      if (!current || current.status !== "pending") {
+        throw new Error("App tool approval request has already been answered.");
+      }
+      if (this.memberRemovalProblem(conversation, current, request)) {
+        refused = true;
+        return;
+      }
+      const now = new Date().toISOString();
+      this.upsertAppToolApproval(conversation, {
+        ...current,
+        status: "approved",
+        approvalScope: "once",
+        memberRemovalQueuedAt: now,
+        updatedAt: now
+      });
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      recorded = true;
+    });
+    if (refused) {
+      await refuse();
+      return conversation;
+    }
+    if (recorded && this.appliesRosterChanges()) {
+      // Indexed only once the decision is stored, so any idle hook that sees
+      // the index also finds the stored decision. On a machine the decision
+      // waits for the desktop, which receives this card and applies it.
+      this.noteQueuedMemberRemoval(conversation.id);
+      await this.applyQueuedMemberRemovalsOnce(conversation.id, conversation);
+    }
+    return conversation;
+  }
+
+  private noteQueuedMemberRemoval(conversationId: string): void {
+    this.queuedMemberRemovalChats.set(conversationId, (this.queuedMemberRemovalChats.get(conversationId) ?? 0) + 1);
+    this.memberRemovalRetryAfter.delete(conversationId);
+  }
+
+  /** Drops the index only if no removal was recorded since `generation` was
+   *  read; a later one keeps it for its own application. */
+  private forgetQueuedMemberRemovals(conversationId: string, generation: number): void {
+    if (this.queuedMemberRemovalChats.get(conversationId) === generation) {
+      this.queuedMemberRemovalChats.delete(conversationId);
+    }
+  }
+
+  private memberRemovalApplyDue(conversationId: string): boolean {
+    return this.queuedMemberRemovalChats.has(conversationId) &&
+      !this.chatHasLiveWork(conversationId) &&
+      (this.memberRemovalRetryAfter.get(conversationId) ?? 0) <= Date.now();
+  }
+
+  /** Called whenever a chat may have become idle (see scheduleAutoWatchEvaluation). */
+  private scheduleQueuedMemberRemovals(conversationId: string): void {
+    if (this.memberRemovalApplyDue(conversationId)) {
+      void this.applyQueuedMemberRemovalsOnce(conversationId);
+    }
+  }
+
+  /** One application per chat at a time: idle hooks that arrive meanwhile
+   *  ask for one more pass instead of each reading the whole chat. Never
+   *  rejects; a failed pass is logged and retried at a later idle moment. */
+  private applyQueuedMemberRemovalsOnce(
+    conversationId: string,
+    held?: Conversation,
+    options: { afterRestart?: boolean } = {}
+  ): Promise<void> {
+    const inFlight = this.memberRemovalApplies.get(conversationId);
+    if (inFlight) {
+      this.memberRemovalApplyAgain.add(conversationId);
+      return inFlight;
+    }
+    const run = (async () => {
+      let passHeld = held;
+      let passOptions = options;
+      try {
+        do {
+          this.memberRemovalApplyAgain.delete(conversationId);
+          await this.applyQueuedMemberRemovals(conversationId, passHeld, passOptions);
+          passHeld = undefined;
+          passOptions = {};
+        } while (this.memberRemovalApplyAgain.has(conversationId));
+        this.memberRemovalRetryAfter.delete(conversationId);
+      } catch (error) {
+        // The decision stays stored; every idle hook would otherwise repeat a
+        // failing full read and write of the chat.
+        this.memberRemovalRetryAfter.set(conversationId, Date.now() + MEMBER_REMOVAL_RETRY_DELAY_MS);
+        void this.debugLogs.write("chat.member-removal.apply-error", {
+          conversationId,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      } finally {
+        this.memberRemovalApplies.delete(conversationId);
+        this.memberRemovalApplyAgain.delete(conversationId);
+      }
+    })();
+    this.memberRemovalApplies.set(conversationId, run);
+    return run;
+  }
+
+  /** Nothing may be running anywhere in the chat: not here, and not a turn a
+   *  machine or another app instance runs for one of its members. */
+  private memberRemovalMustWait(conversation: Conversation): boolean {
+    return this.memberRemovalBlockedByLiveWork(conversation) ||
+      this.storedMetadataHasProtectedLiveRuns(conversation.metadata) ||
+      conversation.messages.some((message) =>
+        message.role === "participant" &&
+        message.status === "pending" &&
+        this.isMessageRunProtectedByExternalOwner(conversation, message)
+      );
+  }
+
+  /** Applies every approved member removal of a chat once nothing runs in it.
+   *  A removal that can no longer be made is closed with the reason. */
+  private async applyQueuedMemberRemovals(
+    conversationId: string,
+    held?: Conversation,
+    options: { afterRestart?: boolean } = {}
+  ): Promise<void> {
+    const generation = this.queuedMemberRemovalChats.get(conversationId);
+    if (generation === undefined || this.chatHasLiveWork(conversationId)) {
+      return;
+    }
+    if (!options.afterRestart) {
+      // Idle hooks fire often (every machine delta, for one); look at the saved
+      // copy this process already holds before reading the whole chat. The run
+      // that just ended has only queued the save that clears `running`. Never
+      // `held`: a turn that ended while the decision was being recorded
+      // cleared `running` in storage, not in `held`.
+      await this.waitForQueuedSave(conversationId);
+      const known = (await this.readStoredChatStateForRefresh(conversationId)).stored;
+      if (!known || known.kind !== "chat" || !this.chatAppToolApprovals(known).some((approval) => this.isQueuedMemberRemovalApproval(approval))) {
+        this.forgetQueuedMemberRemovals(conversationId, generation);
+        return;
+      }
+      // A turn a machine or another instance runs keeps it waiting too; its
+      // end (its reply arriving) is another idle hook.
+      if (known.metadata.running === true || this.memberRemovalMustWait(known)) {
+        return;
+      }
+    }
+    // After a restart the turn that was running when the app quit is still
+    // marked as running; requireChat below sweeps it, exactly as opening the
+    // chat does, so that flag is not a reason to wait.
+    await this.withChatRunLock(conversationId, async () => {
+      if (!this.queuedMemberRemovalChats.has(conversationId) || this.chatHasLiveWork(conversationId)) {
+        return;
+      }
+      // requireChat recovers a run no live process owns any more (the same
+      // recovery every chat read does) before the idle check below.
+      const conversation = held ?? await this.requireChat(conversationId);
+      const retired: ChatParticipant[] = [];
+      await this.withChatMutation(conversation, async () => {
+        const queued = this.chatAppToolApprovals(conversation).filter((approval) => this.isQueuedMemberRemovalApproval(approval));
+        if (queued.length === 0) {
+          this.forgetQueuedMemberRemovals(conversationId, generation);
+          return;
+        }
+        if (this.memberRemovalMustWait(conversation)) {
+          return;
+        }
+        const now = new Date().toISOString();
+        let answerUnread = false;
+        let changed = false;
+        for (const approval of queued) {
+          const request = approval.request;
+          // An error a later answer drew ("already answered") is not this
+          // removal's outcome.
+          const { memberRemovalQueuedAt: _queuedAt, error: _error, ...decided } = approval;
+          const decidedAt = this.laterThan(approval.updatedAt);
+          const refuse = (reason: string): void => {
+            this.upsertAppToolApproval(conversation, { ...decided, status: "cancelled", error: reason, rosterChangeSettledAt: decidedAt, updatedAt: decidedAt });
+            this.pushMemberRemovalFailure(conversation, approval, request, reason);
+            changed = true;
+          };
+          const present = new Set(this.chatParticipants(conversation).map((participant) => participant.id));
+          // A member the User already removed by hand is simply gone.
+          const targetIds = request.operations.map((operation) => operation.participantId).filter((id) => present.has(id));
+          if (approval.homeMachineId) {
+            // A machine member's: applied only for the User's confirmed
+            // answer, and only while it is still a valid request here.
+            const decision = await this.machineRosterDecision(conversation, approval);
+            if (!decision.ok && decision.waiting) {
+              answerUnread = true;
+              continue;
+            }
+            const remaining = { ...request, operations: request.operations.filter((operation) => present.has(operation.participantId)) };
+            const problem = !decision.ok
+              ? decision.problem
+              : this.machineRosterCardProblem(conversation, undefined, approval) ??
+                (remaining.operations.length > 0 ? this.memberRemovalProblem(conversation, approval, remaining) ?? this.machineRemovalHandleProblem(conversation, remaining) : undefined);
+            if (problem) {
+              refuse(problem);
+              continue;
+            }
+          }
+          try {
+            const removed = targetIds.length > 0 ? this.removeParticipantsInMutation(conversation, targetIds, now) : [];
+            retired.push(...removed);
+            this.upsertAppToolApproval(conversation, {
+              ...decided,
+              appliedParticipantIds: removed.map((participant) => participant.id),
+              rosterChangeSettledAt: decidedAt,
+              updatedAt: decidedAt
+            });
+            const requester = this.requesterReference(conversation, approval);
+            conversation.messages.push(this.message(
+              "system",
+              removed.length > 0
+                ? `Removed ${this.formatHandleList(removed.map((participant) => `@${participant.handle}`))} from this chat at ${requester}'s request.`
+                : `${this.memberRemovalHandles(request)} had already left this chat; nothing was removed at ${requester}'s request.`,
+              undefined,
+              { threadId: "system", rosterChange: { approvalId: approval.id, outcome: "applied", appliedParticipantIds: removed.map((participant) => participant.id) } }
+            ));
+            changed = true;
+          } catch (error) {
+            refuse(error instanceof Error ? error.message : String(error));
+          }
+        }
+        if (changed) {
+          conversation.updatedAt = now;
+          await this.saveConversation(conversation);
+        }
+        // A machine member's removal whose answer is not read yet keeps the
+        // chat indexed: the machine's report of it schedules it again.
+        if (!answerUnread) this.forgetQueuedMemberRemovals(conversationId, generation);
+      });
+      this.retireRemovedMembers(conversationId, retired);
+    });
+  }
+
+  /** After a restart nothing of this process runs any more, so approved
+   *  removals that were waiting for a turn to end are applied now (a turn a
+   *  machine still runs keeps them waiting, see memberRemovalMustWait), and
+   *  machine members' additions not applied yet are. Only on the desktop: a
+   *  machine applies no roster change. */
+  async resumeQueuedRosterChanges(): Promise<void> {
+    if (!this.appliesRosterChanges()) {
+      return;
+    }
+    const storage = this.storage as Partial<Pick<StorageService, "conversationIdsWithQueuedRosterChanges">>;
+    if (typeof storage.conversationIdsWithQueuedRosterChanges !== "function") {
+      return;
+    }
+    const ids = await storage.conversationIdsWithQueuedRosterChanges.call(this.storage);
+    for (const conversationId of ids) {
+      await this.applyQueuedMemberAdditionsOnce(conversationId);
+      this.noteQueuedMemberRemoval(conversationId);
+      await this.applyQueuedMemberRemovalsOnce(conversationId, undefined, { afterRestart: true });
+    }
+  }
+
+  /** One pass per chat at a time: calls that arrive meanwhile ask for one
+   *  more pass. Never rejects (a failure is logged and the additions stay
+   *  recorded for the next card update or restart). */
+  private applyQueuedMemberAdditionsOnce(conversationId: string): Promise<void> {
+    const inFlight = this.memberAdditionApplies.get(conversationId);
+    if (inFlight) {
+      this.memberAdditionApplyAgain.add(conversationId);
+      return inFlight;
+    }
+    const run = (async () => {
+      try {
+        do {
+          this.memberAdditionApplyAgain.delete(conversationId);
+          await this.applyQueuedMemberAdditions(conversationId);
+        } while (this.memberAdditionApplyAgain.has(conversationId));
+      } catch (error) {
+        void this.debugLogs.write("chat.member-addition.apply-error", {
+          conversationId,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      } finally {
+        this.memberAdditionApplies.delete(conversationId);
+        this.memberAdditionApplyAgain.delete(conversationId);
+      }
+    })();
+    this.memberAdditionApplies.set(conversationId, run);
+    return run;
+  }
+
+  /** The desktop applies the additions machine members asked for, exactly as
+   *  a local member's: the same preparation against this desktop's settings
+   *  and the same application, under the same rules (the asking member's
+   *  policy here, or the User's confirmed answer). The chat says what
+   *  happened only once it has. */
+  private async applyQueuedMemberAdditions(conversationId: string): Promise<void> {
+    if (!this.appliesRosterChanges()) {
+      return;
+    }
+    // The saved copy this process holds first: most chats it is asked about
+    // (after a restart, say) hold only a waiting removal.
+    await this.waitForQueuedSave(conversationId);
+    const known = (await this.readStoredChatStateForRefresh(conversationId)).stored;
+    if (!known || known.kind !== "chat" || !this.chatAppToolApprovals(known).some((approval) => this.isQueuedMemberAdditionApproval(approval))) {
+      this.memberAdditionRetries.delete(conversationId);
+      return;
+    }
+    const conversation = await this.requireChat(conversationId).catch(() => undefined);
+    if (!conversation) {
+      return;
+    }
+    let answerUnread = false;
+    for (const queued of this.chatAppToolApprovals(conversation).filter((approval) => this.isQueuedMemberAdditionApproval(approval))) {
+      let decision: MachineRosterDecision | undefined;
+      if (queued.homeMachineId && queued.status === "approved") {
+        decision = await this.machineRosterDecision(conversation, queued);
+        // Not reported or not read yet: the machine's report schedules it
+        // again, and so does a short retry.
+        if (!decision.ok && decision.waiting) {
+          answerUnread = true;
+          continue;
+        }
+      }
+      let apply: () => Promise<{ participants: ChatParticipant[]; summary: string; request?: ChatAppToolApprovalRequest; label: string }>;
+      let problem = decision && !decision.ok && decision.waiting === false
+        ? decision.problem
+        : queued.homeMachineId ? this.machineRosterCardProblem(conversation, undefined, queued) : undefined;
+      let handles: string[] = [];
+      try {
+        if (problem) throw new Error(problem);
+        let prepared: { managementEscalation: boolean };
+        if (this.isRoleParticipantChangeRequest(queued.request)) {
+          const role = await this.prepareRoleParticipantChange(conversation, this.normalizeRoleParticipantChangeRequest(queued.request));
+          prepared = role;
+          apply = async () => {
+            const applied = await this.applyPreparedRoleParticipantChange(conversation, role);
+            return { participants: applied.participants, summary: applied.summary, request: applied.request, label: "role and member request" };
+          };
+        } else if (this.isParticipantChangeRequest(queued.request)) {
+          const participant = await this.prepareParticipantChange(conversation, this.normalizeParticipantChangeRequest(queued.request));
+          prepared = participant;
+          apply = async () => ({
+            participants: await this.applyPreparedParticipantChange(conversation, participant),
+            summary: participant.summary,
+            request: participant.request,
+            label: "member request"
+          });
+        } else {
+          const roster = await this.prepareRosterChange(conversation, this.normalizeRosterChangeRequest(queued.request));
+          prepared = roster;
+          apply = async () => ({ participants: this.applyPreparedRosterChange(conversation, roster), summary: roster.summary, label: "app tool request" });
+        }
+        handles = this.memberAdditionTargets(queued.request).flatMap((target) => target.handle ? [target.handle] : []);
+        if (queued.status === "auto-applied" && queued.homeMachineId) {
+          // Applied without a card only under this desktop's own rules for
+          // the asking member, exactly as its local request would be.
+          const requester = this.chatParticipants(conversation).find((participant) => participant.id === queued.requesterParticipantId)!;
+          const manage = await this.manageRolesParticipantsPermissionForParticipant(requester);
+          const policy = queued.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL &&
+            this.matchingAppToolApprovalPolicy(conversation, requester, APP_ROSTER_REQUEST_CHANGE_TOOL, "participants.manage");
+          if ((manage !== "allow" && !policy) || prepared.managementEscalation) {
+            throw new Error(`@${requester.handle} may not make this change without your approval; it can ask again.`);
+          }
+        }
+      } catch (error) {
+        problem = error instanceof Error ? error.message : String(error);
+        apply = async () => { throw new Error(problem); };
+      }
+      await this.withChatMutation(conversation, async () => {
+        const current = this.chatAppToolApprovals(conversation).find((approval) => approval.id === queued.id);
+        if (!current || !this.isQueuedMemberAdditionApproval(current)) {
+          return;
+        }
+        const now = new Date().toISOString();
+        const decidedAt = this.laterThan(current.updatedAt);
+        const { memberAdditionQueuedAt: _queued, error: _error, ...decided } = current;
+        const verb = current.status === "auto-applied" ? "Auto-applied" : "Applied";
+        const requester = this.requesterReference(conversation, current);
+        try {
+          // Prepared before this chat's latest write: a member added since
+          // under the same handle is not added twice.
+          const taken = new Set(this.chatParticipants(conversation).map((participant) => participant.handle.replace(/^@/, "").toLowerCase()));
+          const clash = handles.find((handle) => taken.has(handle.replace(/^@/, "").toLowerCase()));
+          if (clash) throw new Error(`@${clash.replace(/^@/, "")} is already in this chat.`);
+          const applied = await apply();
+          this.upsertAppToolApproval(conversation, {
+            ...decided,
+            ...(applied.request ? { request: applied.request } : {}),
+            appliedParticipantIds: applied.participants.map((participant) => participant.id),
+            rosterChangeSettledAt: decidedAt,
+            updatedAt: decidedAt
+          });
+          conversation.messages.push(this.message("system", `${verb} ${applied.label} from ${requester}: ${applied.summary}.`, undefined, {
+            threadId: "system",
+            rosterChange: { approvalId: current.id, outcome: "applied", appliedParticipantIds: applied.participants.map((participant) => participant.id) }
+          }));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.upsertAppToolApproval(conversation, { ...decided, status: "cancelled", error: message, rosterChangeSettledAt: decidedAt, updatedAt: decidedAt });
+          conversation.messages.push(this.message("system", `Could not add ${this.rosterChangeTargetsText(current)} at ${requester}'s request: ${message}`, undefined, {
+            threadId: "system",
+            rosterChange: { approvalId: current.id, outcome: "refused", error: message }
+          }));
+        }
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation);
+      });
+    }
+    this.retryMemberAdditionsLater(conversationId, answerUnread);
+  }
+
+  /** A machine member's approved addition whose answer this desktop could not
+   *  read yet is looked at again a few times (the machine's report of it
+   *  normally arrives within moments and schedules it anyway). */
+  private retryMemberAdditionsLater(conversationId: string, waiting: boolean): void {
+    const attempt = this.memberAdditionRetries.get(conversationId) ?? 0;
+    if (!waiting || attempt >= MEMBER_ADDITION_RETRY_DELAYS_MS.length) {
+      if (!waiting) this.memberAdditionRetries.delete(conversationId);
+      return;
+    }
+    this.memberAdditionRetries.set(conversationId, attempt + 1);
+    setTimeout(() => {
+      void this.applyQueuedMemberAdditionsOnce(conversationId);
+    }, MEMBER_ADDITION_RETRY_DELAYS_MS[attempt]).unref?.();
   }
 
   async describeChatContextForTool(actor: ChatAppMcpActor): Promise<Record<string, unknown>> {
@@ -4174,6 +5490,16 @@ export class ChatService {
         updatedAt: now
       };
       this.upsertAppToolApproval(conversation, deniedApproval);
+      if (approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL && this.isParticipantRemovalRequest(approval.request)) {
+        // The asking member reads this in the chat: nothing was removed.
+        const handles = this.memberRemovalHandles(approval.request);
+        conversation.messages.push(this.message(
+          "system",
+          `User declined @${approval.requesterHandle}'s request to remove ${handles}. ${handles} ${approval.request.operations.length === 1 ? "stays" : "stay"} in this chat.`,
+          undefined,
+          { threadId: "system" }
+        ));
+      }
       conversation.updatedAt = now;
       await this.saveConversation(conversation);
       await this.emitAppToolApprovalDecision({
@@ -4221,6 +5547,11 @@ export class ChatService {
     }
 
     const scope = request.scope === "chat" ? "chat" : "once";
+    // Keyed on the stored request, before the draft-override branches below:
+    // a removal card is approved as shown, never turned into another change.
+    if (approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL && this.isParticipantRemovalRequest(approval.request)) {
+      return this.approveParticipantRemoval(conversation, approval, approval.request, execution);
+    }
     if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
       await execution?.beforeApply(approval);
       const participantScope = approval.request.source === "inferred" ? "once" : scope;
@@ -4309,6 +5640,10 @@ export class ChatService {
         return conversation;
       }
       await execution?.beforeApply(approval);
+      if (!this.appliesRosterChanges()) {
+        await this.recordMemberAdditionForDesktop(conversation, approval, prepared.request);
+        return conversation;
+      }
       const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
       this.upsertAppToolApproval(conversation, {
         ...approval,
@@ -4388,6 +5723,10 @@ export class ChatService {
         return conversation;
       }
       await execution?.beforeApply(approval);
+      if (!this.appliesRosterChanges()) {
+        await this.recordMemberAdditionForDesktop(conversation, approval, prepared.request);
+        return conversation;
+      }
       const applied = await this.applyPreparedParticipantChange(conversation, prepared);
       this.upsertAppToolApproval(conversation, {
         ...approval,
@@ -4436,6 +5775,11 @@ export class ChatService {
       return conversation;
     }
     await execution?.beforeApply(approval);
+    if (!isPermissionApproval && !this.appliesRosterChanges()) {
+      // The legacy roster tool's addition: the desktop applies it too.
+      await this.recordMemberAdditionForDesktop(conversation, approval, approval.request, scope);
+      return conversation;
+    }
     const applied = isPermissionApproval
       ? scope === "once"
         ? [requester].filter((participant): participant is ChatParticipant => Boolean(participant))
@@ -4451,16 +5795,7 @@ export class ChatService {
     };
     this.upsertAppToolApproval(conversation, updatedApproval);
     if (scope === "chat" && approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL) {
-      this.upsertAppToolApprovalPolicy(conversation, {
-        id: randomUUID(),
-        participantId: approval.requesterParticipantId,
-        roleConfigId: approval.requesterRoleConfigId,
-        toolName: approval.toolName,
-        capability: approval.capability,
-        scope: "chat",
-        createdAt: now,
-        updatedAt: now
-      });
+      this.upsertRosterChatPolicy(conversation, approval, now);
     }
     const permissionGrantList = isPermissionApproval
       ? this.formatPermissionChangeGrantList((prepared as PreparedPermissionChange).request)
@@ -5150,116 +6485,6 @@ export class ChatService {
     }
     const conversation = await this.storage.getConversation(conversationId);
     return Boolean(conversation && this.hasMobileEventMessage(conversation, mobileEventId));
-  }
-
-  async hasMobileMailboxResultForMobileEvent(conversationId: string, eventId: string): Promise<boolean> {
-    const mobileEventId = this.normalizedMobileEventId(eventId);
-    if (!mobileEventId) {
-      return false;
-    }
-    const conversation = await this.storage.getConversation(conversationId);
-    return Boolean(conversation && this.hasMobileMailboxResultMessage(conversation, mobileEventId));
-  }
-
-  async acceptMobileMailboxOutboxEvent(event: ChatEventEnvelope): Promise<boolean> {
-    if (event.kind !== "message.created" && event.kind !== "run.cancel.requested") {
-      return false;
-    }
-    const mobileEventId = this.normalizedMobileEventId(event.eventId);
-    if (!mobileEventId) {
-      return false;
-    }
-    const append = await this.storage.appendChatEvent(event);
-    if (append.status === "conflict") {
-      await this.debugLogs.write("mobile.mailbox.outbox-event-conflict", {
-        conversationId: event.conversationId,
-        eventId: event.eventId,
-        conflictReason: append.conflictReason
-      });
-      return false;
-    }
-    if (event.kind === "run.cancel.requested") {
-      return append.status === "appended";
-    }
-    const content = this.mobileMailboxOutboxPayload(event.payload);
-    if (!content) {
-      return false;
-    }
-    const conversation = await this.storage.getConversation(event.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      return false;
-    }
-    return this.withChatMutation(conversation, async () => {
-      if (this.hasMobileEventMessage(conversation, mobileEventId)) {
-        return false;
-      }
-      const createdAt = typeof event.createdAt === "string" && event.createdAt.trim()
-        ? event.createdAt
-        : new Date().toISOString();
-      const messageId = `mobile-${mobileEventId}`;
-      const userMessage: ChatMessage = {
-        id: messageId,
-        role: "user",
-        content,
-        createdAt,
-        status: "done",
-        metadata: {
-          appMessageSource: "mobile-relay",
-          mobileEventId,
-          threadId: messageId
-        }
-      };
-      const messageTime = this.lastMessageTimestamp(createdAt);
-      const insertIndex = messageTime === undefined
-        ? -1
-        : conversation.messages.findIndex((message) => {
-          const existingTime = this.lastMessageTimestamp(message.createdAt);
-          return existingTime !== undefined && existingTime > messageTime;
-        });
-      if (insertIndex >= 0) {
-        conversation.messages.splice(insertIndex, 0, userMessage);
-      } else {
-        conversation.messages.push(userMessage);
-      }
-      conversation.updatedAt = this.maxIsoTimestamp(conversation.updatedAt, createdAt, event.createdAt);
-      await this.saveConversation(conversation);
-      return true;
-    });
-  }
-
-  async acceptMobileMailboxMessageEvent(event: ChatEventEnvelope): Promise<boolean> {
-    if (event.kind !== "message.created") {
-      return false;
-    }
-    const message = this.mobileMailboxMessagePayload(event.payload);
-    if (!message) {
-      return false;
-    }
-    const append = await this.storage.appendChatEvent(event);
-    if (append.status === "conflict") {
-      await this.debugLogs.write("mobile.mailbox.message-event-conflict", {
-        conversationId: event.conversationId,
-        eventId: event.eventId,
-        conflictReason: append.conflictReason
-      });
-      return false;
-    }
-    const conversation = await this.storage.getConversation(event.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      return false;
-    }
-    return this.withChatMutation(conversation, async () => {
-      if (conversation.messages.some((item) => item.id === message.id)) {
-        return false;
-      }
-      conversation.messages.push(JSON.parse(JSON.stringify(message)) as ChatMessage);
-      if (message.role === "participant") {
-        this.recordLastMessageByParticipant(conversation, message);
-      }
-      conversation.updatedAt = this.maxIsoTimestamp(conversation.updatedAt, message.createdAt, event.createdAt);
-      await this.saveConversation(conversation);
-      return true;
-    });
   }
 
   async sendMessage(request: SendChatMessageRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
@@ -6224,6 +7449,7 @@ export class ChatService {
             conversation.messages.push(message);
           }
         }
+        this.updateParticipantContextUsage(conversation, participant.id, normalizeAgentContextUsage(result.contextUsage));
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
       });
@@ -6410,17 +7636,49 @@ export class ChatService {
     approval: ChatAppToolApproval;
     policies?: ChatAppToolApprovalPolicy[];
     decisionId?: string;
+    /** With `decisionId`: whether the machine applied that decision. */
+    decisionApplied?: boolean;
   }): Promise<Conversation | undefined> {
     const conversation = await this.storage.getConversation(request.conversationId);
     if (!conversation || conversation.kind !== "chat") {
       throw new Error("The approval's chat is not available; its delivery has not been acknowledged.");
     }
+    let rosterChange: "removal" | "addition" | undefined;
     const result = await this.withChatMutation(conversation, async () => {
       const current = this.chatAppToolApprovals(conversation).find(item => item.id === request.approval.id);
       const queued = current?.machineDecisionPending;
-      this.upsertAppToolApproval(conversation, { ...request.approval, conversationId: conversation.id,
+      const incoming = request.approval;
+      const claimsRosterChange = Boolean(incoming.memberRemovalQueuedAt || incoming.memberAdditionQueuedAt);
+      // The desktop applies a machine member's roster change; a copy of the
+      // card the machine sent before it learned that (or sends again on a
+      // reconnect), or an older copy still asking, must not bring the waiting
+      // or the pending state back here.
+      const settledHere = current?.rosterChangeSettledAt;
+      const rosterCardHere = Boolean(current && (current.memberRemovalQueuedAt || current.memberAdditionQueuedAt || settledHere));
+      const stale = Boolean((settledHere && claimsRosterChange) || (rosterCardHere && incoming.status === "pending" && current?.status !== "pending"));
+      let next: ChatAppToolApproval = stale && current
+        ? { ...current }
+        : { ...incoming, ...(settledHere ? { rosterChangeSettledAt: settledHere } : {}) };
+      // The User's answer the machine applied, by which a roster change is
+      // confirmed here (machineRosterDecision); a later answer it refused
+      // (already answered) does not replace it.
+      const appliedDecisionId = request.decisionId && request.decisionApplied ? request.decisionId : current?.machineAppliedDecisionId;
+      if (appliedDecisionId) next = { ...next, machineAppliedDecisionId: appliedDecisionId };
+      const problem = !stale && claimsRosterChange ? this.machineRosterCardProblem(conversation, current, incoming) : undefined;
+      if (problem) {
+        // Kept as a card that says why; never applied.
+        const decidedAt = this.laterThan(incoming.updatedAt);
+        const { memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, ...refused } = next;
+        next = { ...refused, status: "cancelled", error: problem, rosterChangeSettledAt: decidedAt, updatedAt: decidedAt };
+        conversation.messages.push(this.message("system",
+          `Could not ${incoming.memberRemovalQueuedAt ? "remove" : "add"} ${this.rosterChangeTargetsText(incoming)} at ${this.requesterReference(conversation, incoming)}'s request: ${problem}`,
+          undefined, { threadId: "system", rosterChange: { approvalId: incoming.id, outcome: "refused", error: problem } }));
+      }
+      this.upsertAppToolApproval(conversation, { ...next, conversationId: conversation.id,
         machineDecisionPending: queued && request.decisionId !== queued.decisionId ? queued : undefined,
         machineDecisionReceiptId: request.decisionId ?? current?.machineDecisionReceiptId });
+      if (!stale && !problem && this.isQueuedMemberRemovalApproval(next)) rosterChange = "removal";
+      else if (!stale && !problem && this.isQueuedMemberAdditionApproval(next)) rosterChange = "addition";
       for (const policy of request.policies ?? []) {
         if (policy && typeof policy === "object" && typeof policy.id === "string") {
           this.upsertAppToolApprovalPolicy(conversation, policy);
@@ -6434,6 +7692,14 @@ export class ChatService {
     // this write; a failed write is an error, not a silent success.
     if (!(await this.waitForQueuedSaveResult(request.conversationId))) {
       throw new Error("The approval could not be stored in this desktop's chat.");
+    }
+    // A machine member's approved roster change: applied here, by the owner
+    // of the member list, a removal once the chat is idle.
+    if (rosterChange === "removal") {
+      this.noteQueuedMemberRemoval(request.conversationId);
+      this.scheduleQueuedMemberRemovals(request.conversationId);
+    } else if (rosterChange === "addition") {
+      void this.applyQueuedMemberAdditionsOnce(request.conversationId);
     }
     return result;
   }
@@ -6514,11 +7780,13 @@ export class ChatService {
     // The merge runs inside the mutation, against the copy refreshed there,
     // so a reply or session id written by a turn on this machine between the
     // read and the write is never replaced by an older desktop copy.
+    const dropped: ChatParticipant[] = [];
     await this.withChatMutation(existing, async () => {
       const merged = merge(existing);
       if (!merged) {
         return;
       }
+      dropped.push(...this.membersDroppedFrom(existing, merged));
       this.reconcileReplicatedWatcher(existing, merged);
       if (merged.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
       existing.messages = merged.messages;
@@ -6528,6 +7796,7 @@ export class ChatService {
       existing.updatedAt = merged.updatedAt;
       await this.saveConversation(existing);
     });
+    this.retireRemovedMembers(conversationId, dropped);
   }
 
   /** Called by the transport only after the entire copied chat is durable. */
@@ -6651,6 +7920,8 @@ export class ChatService {
 
   async applyMachineRunStarted(request: { conversationId: string; runId: string }): Promise<void> {
     if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return;
+    // A compaction that waited for its machine is running now.
+    this.machineCompactionStatus.get(request.runId)?.();
     const conversation = await this.requireChat(request.conversationId);
     await this.withChatMutation(conversation, async () => {
       for (const message of conversation.messages) {
@@ -6678,6 +7949,13 @@ export class ChatService {
     finishedAt?: string;
     receiptId?: string;
     machineName: string;
+    /** The machine that sent it: context use is taken only for its own member. */
+    machineId?: string;
+    participantId?: string;
+    contextUsage?: AgentContextUsage;
+    /** A compaction of `participantId`: one that never wrote its outcome
+     *  line (stopped or failed before it ran) gets the line it would have. */
+    compaction?: { triggeredBy: "user" | "agent" };
   }): Promise<void> {
     // The tombstone is a durable disposition of a late result: acknowledge it
     // without reviving a deleted chat or retaining its delivery forever.
@@ -6714,6 +7992,19 @@ export class ChatService {
       for (const warning of request.warnings ?? []) {
         this.addConversationWarning(conversation, warning);
       }
+      const usageParticipantId = bubble?.participantId ?? request.participantId;
+      const usageMember = usageParticipantId ? this.chatParticipants(conversation).find((item) => item.id === usageParticipantId) : undefined;
+      const ownMember = usageMember && request.machineId && usageMember.homeMachineId === request.machineId ? usageMember : undefined;
+      if (ownMember) {
+        this.updateParticipantContextUsage(conversation, ownMember.id, normalizeAgentContextUsage(request.contextUsage));
+      }
+      if (ownMember && request.compaction && !bubble && request.status !== "completed" &&
+          !conversation.messages.some((message) => isMachineCompactionLine(message, request.runId, ownMember.id))) {
+        const line = machineCompactionFailureLine(ownMember.handle, request.status, request.error);
+        conversation.messages.push(this.message("system", line, undefined,
+          { ...this.compactMessageMetadata({ runId: request.runId, triggeredBy: request.compaction.triggeredBy }, ownMember.id, "failed"),
+            ...(request.compaction.triggeredBy === "agent" ? { threadId: "system" } : {}) }));
+      }
       // A late result has no local run's finally block to clear its status.
       // Publish and store that same final state, preserving other machines'
       // concurrent runs rather than relying on a later storage read to sweep it.
@@ -6749,7 +8040,7 @@ export class ChatService {
     request: { conversationId: string; participantId: string; messageId: string; runId: string; pendingMessageId: string },
     signal?: AbortSignal,
     progress?: ProgressCallback
-  ): Promise<{ messages: ChatMessage[]; warnings: string[] }> {
+  ): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
     // The desktop's pending bubble for this run is already in the copy; the
     // run must count as live before the stale-run sweep in requireChat sees
     // it, or the bubble is marked interrupted before the turn even starts.
@@ -6796,7 +8087,9 @@ export class ChatService {
     const messages = refreshed.messages.filter((message) =>
       message.participantId === participantId && message.metadata?.runId === request.runId && message.status !== "pending"
     );
-    return { messages, warnings };
+    // The desktop shows the member's context use from what its CLI reported here.
+    const contextUsage = this.agentContextUsageByParticipant(refreshed)[participantId];
+    return { messages, warnings, ...(contextUsage ? { contextUsage } : {}) };
   }
 
   private async discardStoppedTargetRun(
@@ -8274,6 +9567,7 @@ export class ChatService {
       "Call the describe tools first when you need exact role IDs, saved participant IDs, provider availability, model IDs, reasoning-effort options, configured models, or handle constraints.",
       "App tools: `app_roles_request_change` is available for proposed role creation, custom-role editing, or deleting unused custom roles with `archive_role`. Use `create_role` when no built-in role fits. Do not edit or delete built-in roles.",
       "App tools: `app_participants_request_change` is available for User-requested member changes. Use `add_existing_participant_to_chat` for a matching saved member preset, or `add_new_participant_to_chat` with `saveAsPreset` for a new chat member.",
+      "To take a member out of this chat when User asks, call `app_participants_request_change` with `remove_participant_from_chat` and that member's `participantId` or `handle`, in a request of its own. A removal always waits for User approval on a card, even when other member changes are auto-applied, and takes effect only after your turn ends and no member is running; the outcome is posted to the chat. You cannot remove yourself or the Chat Assistant.",
       "Do not choose roles marked archived for new members; archived roles are kept only so existing saved/current references remain understandable.",
       ...roleParticipantWorkflowLines,
       "`app_roster_request_change` is legacy compatibility only; do not use it for the v1 member setup flow."
@@ -8838,73 +10132,6 @@ export class ChatService {
   private normalizedMobileEventId(value: string | undefined): string | undefined {
     const eventId = value?.trim();
     return eventId || undefined;
-  }
-
-  private mobileMailboxMessagePayload(payload: unknown): ChatMessage | undefined {
-    const message = payload && typeof payload === "object" && !Array.isArray(payload)
-      ? (payload as { message?: unknown }).message
-      : undefined;
-    if (!message || typeof message !== "object" || Array.isArray(message)) {
-      return undefined;
-    }
-    const candidate = message as Partial<ChatMessage>;
-    if (
-      typeof candidate.id !== "string" ||
-      typeof candidate.role !== "string" ||
-      typeof candidate.content !== "string" ||
-      typeof candidate.createdAt !== "string"
-    ) {
-      return undefined;
-    }
-    if (!["user", "participant", "system"].includes(candidate.role)) {
-      return undefined;
-    }
-    return JSON.parse(JSON.stringify(candidate)) as ChatMessage;
-  }
-
-  private mobileMailboxOutboxPayload(payload: unknown): string | undefined {
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-      return undefined;
-    }
-    const content = (payload as { content?: unknown }).content;
-    return typeof content === "string" && content.trim() ? content.trim() : undefined;
-  }
-
-  private hasMobileMailboxResultMessage(conversation: Conversation, mobileEventId: string): boolean {
-    return conversation.messages.some((message) => {
-      if (message.role !== "participant" || (message.status !== "done" && message.status !== "error")) {
-        return false;
-      }
-      const metadata = message.metadata;
-      if (!metadata) {
-        return false;
-      }
-      if (metadata.mobileEventId === mobileEventId) {
-        return true;
-      }
-      return metadata.sourceMessageId === mobileEventId &&
-        metadata.runId === `mobile-${mobileEventId}` &&
-        (
-          metadata.appMessageSource === "remote-run-provider-output" ||
-          metadata.appMessageSource === "remote-run-provider"
-        );
-    });
-  }
-
-  private maxIsoTimestamp(...values: Array<string | undefined>): string {
-    let selected = "";
-    let selectedTime = -Infinity;
-    for (const value of values) {
-      if (!value) {
-        continue;
-      }
-      const time = Date.parse(value);
-      if (Number.isFinite(time) && time > selectedTime) {
-        selected = value;
-        selectedTime = time;
-      }
-    }
-    return selected || new Date().toISOString();
   }
 
   private hasMobileEventMessage(conversation: Conversation, mobileEventId: string): boolean {
@@ -10084,6 +11311,10 @@ export class ChatService {
   }
 
   private scheduleAutoWatchEvaluation(conversationId: string, reason: string): void {
+    // Every point where a chat may have gone idle lands here; an approved
+    // member removal waits for exactly that (runAutoWatchEvaluation also lets
+    // it finish before waking a watcher).
+    this.scheduleQueuedMemberRemovals(conversationId);
     const existing = this.autoWatchEvaluationTimers.get(conversationId);
     if (existing) {
       clearTimeout(existing);
@@ -10104,6 +11335,12 @@ export class ChatService {
   private async runAutoWatchEvaluation(conversationId: string, reason: string): Promise<void> {
     if (this.autoWatchEvaluations.has(conversationId)) {
       return;
+    }
+    if (this.memberRemovalApplyDue(conversationId)) {
+      // An approved member removal waits for exactly this idle moment; a
+      // woken watcher (possibly the member being removed) must not start a
+      // turn ahead of it.
+      await this.applyQueuedMemberRemovalsOnce(conversationId);
     }
     this.autoWatchEvaluations.add(conversationId);
     let prepared: {
@@ -10128,6 +11365,14 @@ export class ChatService {
           }
           const participant = this.activeAutoWatchParticipant(conversation);
           if (!participant) {
+            return;
+          }
+          // On a machine, a member whose approved removal waits for the
+          // desktop is not woken: the desktop applies it at this idle moment.
+          if (!this.appliesRosterChanges() && this.chatAppToolApprovals(conversation).some((approval) =>
+            approval.status === "approved" && typeof approval.memberRemovalQueuedAt === "string" &&
+            this.isParticipantRemovalRequest(approval.request) &&
+            approval.request.operations.some((operation) => operation.participantId === participant.id))) {
             return;
           }
           if (this.storedMetadataHasProtectedLiveRuns(conversation.metadata)) {
@@ -15421,6 +16666,9 @@ export class ChatService {
     if (approval.requesterParticipantId === participant.id) {
       return true;
     }
+    if (approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL && this.isParticipantRemovalRequest(approval.request)) {
+      return approval.request.operations.some((operation) => operation.participantId === participant.id);
+    }
     if (approval.toolName !== APP_CHAT_REQUEST_PARTICIPANTS_TOOL || !this.isParticipantRequestApprovalRequest(approval.request)) {
       return false;
     }
@@ -15934,6 +17182,103 @@ export class ChatService {
     request: ChatSelfCompactionRequest,
     runId: string
   ): void {
+    // A member on a machine asked for it there: the desktop runs it as one
+    // the User asked for, so it is shown and can be stopped the same way.
+    // Without a desktop to take it now, it runs here as before.
+    const delegate = this.machineRuntime ? this.compactionDelegate : undefined;
+    if (delegate?.canDelegateCompaction()) {
+      void delegate.delegateCompaction({
+        conversationId,
+        participantId: participant.id,
+        runId,
+        ...(request.instructions ? { instructions: request.instructions } : {})
+      }).then(() => this.debugLogs.write("chat.self-compaction.delegated", { conversationId, participantId: participant.id, runId }), async (error) => {
+        await this.debugLogs.write("chat.self-compaction.delegate-error", {
+          conversationId, participantId: participant.id, runId, message: error instanceof Error ? error.message : String(error)
+        });
+        this.runQueuedSelfCompaction(conversationId, participant, request, runId);
+      });
+      return;
+    }
+    this.runQueuedSelfCompaction(conversationId, participant, request, runId);
+  }
+
+  /** Desktop side: a member on a machine asked to compact its own context.
+   *  Only the member's own machine may ask for it. */
+  async runDelegatedCompaction(request: MachineCompactionDelegateRequest & { machineId: string }): Promise<void> {
+    if (this.machineRuntime) return;
+    const refuse = (reason: string): Promise<void> => this.debugLogs.write("chat.self-compaction.delegation-refused", {
+      conversationId: request.conversationId, participantId: request.participantId, runId: request.runId, machineId: request.machineId, reason
+    });
+    // A run id becomes this desktop's own (run state, the machine's record):
+    // only a plain token is taken.
+    if (!isSafeChatId(request.runId)) return refuse("invalid-run-id");
+    if (this.deletedConversationIds.has(request.conversationId)) return refuse("deleted");
+    // Delivered again while this process runs it or ran it: one run.
+    if (this.delegatedCompactionRunIds.has(request.runId) || this.activeRunIds.has(request.runId) || this.chatRunControllers.has(request.runId)) {
+      return refuse("already-run");
+    }
+    // What a compaction just started here wrote must be read back.
+    await this.waitForQueuedSave(request.conversationId);
+    // Read without its messages: this runs in the machine's ordered event
+    // stream, and the chat can be thousands of messages long.
+    const stored = typeof this.storage.openConversation === "function"
+      ? (await this.storage.openConversation(request.conversationId, 1))?.conversation
+      : await this.storage.getConversation(request.conversationId);
+    if (!stored || stored.kind !== "chat") return refuse("no-chat");
+    const participant = this.chatParticipants(stored).find((item) => item.id === request.participantId);
+    if (!participant || participant.homeMachineId !== request.machineId) return refuse("not-its-member");
+    let instructions: string | undefined;
+    try {
+      instructions = this.normalizeCompactInstructions(request.instructions);
+    } catch (error) {
+      return refuse(error instanceof Error ? error.message : String(error));
+    }
+    // A compaction of this member already queued or running here (the User's)
+    // covers it, as it does for a local member asking at the same time.
+    if (readParticipantCompactions(stored.metadata)[participant.id]) return refuse("already-compacting");
+    this.delegatedCompactionRunIds.add(request.runId);
+    if (this.delegatedCompactionRunIds.size > 1_000) {
+      this.delegatedCompactionRunIds.delete(this.delegatedCompactionRunIds.values().next().value as string);
+    }
+    // The User's choice on this desktop holds, even before it reached the machine.
+    const permission = normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(participant.permissions).requestCompaction);
+    if (permission === "deny") {
+      await refuse("denied");
+      // Written off the machine's event stream, as a compaction would run.
+      void this.recordSelfCompactionFailure(request.conversationId, participant, request.runId, instructions, `Context compaction requests are disabled for @${participant.handle}`)
+        .catch((error) => this.debugLogs.write("chat.self-compaction.denied-line-error", { conversationId: request.conversationId, runId: request.runId, message: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
+    this.runQueuedSelfCompaction(stored.id, participant, { type: "self_compaction", instructions }, request.runId);
+  }
+
+  /** The line a member's own compaction that could not run leaves. */
+  private async recordSelfCompactionFailure(conversationId: string, participant: ChatParticipant, runId: string, instructions: string | undefined, message: string): Promise<void> {
+    const latest = await this.requireChat(conversationId).catch(() => undefined);
+    if (!latest) return;
+    await this.withChatMutation(latest, async () => {
+      latest.messages.push(this.message(
+        "system",
+        compactionFailureLine(participant.handle, message),
+        undefined,
+        {
+          ...this.compactMessageMetadata({ runId, triggeredBy: "agent", instructions }, participant.id, "failed"),
+          threadId: "system"
+        }
+      ));
+      latest.updatedAt = new Date().toISOString();
+      await this.saveConversation(latest);
+      this.queueSnapshot(latest);
+    });
+  }
+
+  private runQueuedSelfCompaction(
+    conversationId: string,
+    participant: ChatParticipant,
+    request: ChatSelfCompactionRequest,
+    runId: string
+  ): void {
     const backgroundController = this.registerBackgroundRunController(runId, undefined);
     void this.compactParticipant({
       conversationId,
@@ -15952,28 +17297,7 @@ export class ChatService {
       if (backgroundController.signal.aborted) {
         return;
       }
-      const latest = await this.requireChat(conversationId).catch(() => undefined);
-      if (!latest) {
-        return;
-      }
-      await this.withChatMutation(latest, async () => {
-        latest.messages.push(this.message(
-          "system",
-          `Could not compact @${participant.handle} context: ${message}.`,
-          undefined,
-          {
-            ...this.compactMessageMetadata(
-              { runId, triggeredBy: "agent", instructions: request.instructions },
-              participant.id,
-              "failed"
-            ),
-            threadId: "system"
-          }
-        ));
-        latest.updatedAt = new Date().toISOString();
-        await this.saveConversation(latest);
-        this.queueSnapshot(latest);
-      });
+      await this.recordSelfCompactionFailure(conversationId, participant, runId, request.instructions, message);
     }).finally(() => backgroundController.cleanup());
   }
 
@@ -16256,7 +17580,7 @@ export class ChatService {
   }
 
   private chatImageAttachmentForTool(attachment: ChatImageAttachment): Omit<ChatImageAttachment, "storageKey"> {
-    const { storageKey: _storageKey, ...safeAttachment } = attachment;
+    const { storageKey: _storageKey, hubBlob: _hubBlob, ...safeAttachment } = attachment as ChatImageAttachment & { hubBlob?: unknown };
     return safeAttachment;
   }
 
@@ -16818,11 +18142,21 @@ export class ChatService {
    *  machine's own store so one fetch serves every later read. A copy that is
    *  not a machine has no owner to ask and simply reports it missing. */
   private async fetchAttachmentFromOwner(conversationId: string, attachment: ChatImageAttachment): Promise<string | undefined> {
+    // A picture the User sent from her phone is on her server, named by its
+    // body: every device reads it from there, the desktop too.
+    const hubBlob = (attachment as ChatImageAttachment & { hubBlob?: unknown }).hubBlob;
+    // A server that cannot answer now leaves the machine link to try.
+    const fromHub = this.hubBlobReader && isDeviceEventBlobReference(hubBlob)
+      ? await this.hubBlobReader(hubBlob).then((bytes) => bytes.toString("base64"), (error: unknown) => {
+        void this.debugLogs.write("chat.attachment.hub-read-error", { conversationId, attachmentId: attachment.id, message: error instanceof Error ? error.message : String(error) });
+        return undefined;
+      })
+      : undefined;
     const fetch = this.machineLink?.fetchAttachment;
-    if (!fetch) {
+    if (!fromHub && !fetch) {
       return undefined;
     }
-    const result = await fetch.call(this.machineLink, conversationId, attachment.id);
+    const result = fromHub ? { dataBase64: fromHub } : await fetch!.call(this.machineLink, conversationId, attachment.id);
     const dataBase64 = typeof result?.dataBase64 === "string" ? result.dataBase64 : "";
     if (!dataBase64) {
       return undefined;
@@ -17907,7 +19241,11 @@ export class ChatService {
     const isParticipantChangeApproval =
       approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
       approval.capability === "participants.manage" &&
-      (this.isParticipantChangeRequest(approval.request) || this.isRoleParticipantChangeRequest(approval.request));
+      (
+        this.isParticipantChangeRequest(approval.request) ||
+        this.isRoleParticipantChangeRequest(approval.request) ||
+        this.isParticipantRemovalRequest(approval.request)
+      );
     const isPermissionApproval =
       approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
       approval.capability === "permissions.request" &&
@@ -18017,6 +19355,21 @@ export class ChatService {
         operation?.type === "add_new_participant_to_chat" || operation?.type === "add_existing_participant_to_chat"
       )
     );
+  }
+
+  private isParticipantRemovalRequest(request: unknown): request is ChatParticipantRemovalRequest {
+    if (!request || typeof request !== "object" || Array.isArray(request)) {
+      return false;
+    }
+    const record = request as Partial<ChatParticipantRemovalRequest>;
+    return record.kind === "participant_removal" &&
+      Array.isArray(record.operations) &&
+      record.operations.length > 0 &&
+      record.operations.every((operation) =>
+        operation?.type === "remove_participant_from_chat" &&
+        typeof operation.participantId === "string" &&
+        typeof operation.handle === "string"
+      );
   }
 
   private isRoleParticipantChangeRequest(request: unknown): request is ChatRoleParticipantChangeRequest {
@@ -18668,6 +20021,8 @@ export class ChatService {
     if (!targetRunId) {
       return false;
     }
+    // A phone's turn that is still being claimed: stopped before it starts.
+    this.pendingPhoneRuns.get(targetRunId)?.controller.abort();
     const controllers = this.chatRunControllers.get(targetRunId);
     void this.debugLogs.write("chat.cancel.requested", {
       runId: targetRunId,
@@ -18705,6 +20060,10 @@ export class ChatService {
     const fromMeta = this.chatRunMeta.get(targetRunId)?.conversationId;
     if (fromMeta) {
       return fromMeta;
+    }
+    const pendingPhone = this.pendingPhoneRuns.get(targetRunId)?.conversationId;
+    if (pendingPhone) {
+      return pendingPhone;
     }
     for (const [conversationId, runIds] of this.activeConversationRunIds) {
       if (runIds.has(targetRunId)) {
@@ -19154,6 +20513,8 @@ export class ChatService {
   }
 
   private rememberActiveChatRun(conversationId: string, runId: string): void {
+    const pendingPhone = this.pendingPhoneRuns.get(runId);
+    if (pendingPhone) pendingPhone.registered = true;
     this.ensureRunOwnerHeartbeatTimer();
     this.activeRunRefCounts.set(runId, (this.activeRunRefCounts.get(runId) ?? 0) + 1);
     this.activeRunIds.add(runId);
@@ -19288,7 +20649,11 @@ export class ChatService {
   private chatHasLiveWork(conversationId: string): boolean {
     return (
       (this.activeConversationRunIds.get(conversationId)?.size ?? 0) > 0 ||
-      (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0
+      (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0 ||
+      // A phone's message whose members are still being claimed or started:
+      // their runs are not registered yet (a registered one is, or has ended).
+      (this.phoneStartsInFlight.get(conversationId) ?? 0) > 0 ||
+      [...this.pendingPhoneRuns.values()].some((pending) => pending.conversationId === conversationId && !pending.registered)
     );
   }
 
@@ -19552,9 +20917,15 @@ export class ChatService {
     }
     if (existing.kind !== "chat") return "applied";
     let waiting = false;
+    const dropped: ChatParticipant[] = [];
+    // The phone's messages this application adds (one applied before, a
+    // redelivery, starts nothing again).
+    let addedMessageIds = new Set<string>();
     await this.withChatMutation(existing, async () => {
       const result = applyChatChanges(existing, payload, event.originId, transport.applyPolicy(existing));
       if (result.status !== "applied") return;
+      const held = new Set(existing.messages.map((message) => message.id));
+      addedMessageIds = new Set(result.conversation.messages.filter((message) => !held.has(message.id)).map((message) => message.id));
       if (!dependencyMet && result.ignored.length) {
         waiting = true;
         return;
@@ -19564,6 +20935,7 @@ export class ChatService {
       // A member that watches the chat here sees new user messages the way a
       // local one does: a new one resets its wake chain.
       this.reconcileReplicatedWatcher(existing, result.conversation);
+      const droppedHere = this.membersDroppedFrom(existing, result.conversation);
       const wasArchived = existing.metadata.archived === true;
       existing.title = result.conversation.title;
       const repoChanged = payload.changes.some((change) => change.type === "conversation.updated" && change.repoPath !== undefined);
@@ -19579,16 +20951,440 @@ export class ChatService {
       existing.updatedAt = result.conversation.updatedAt;
       const touched = new Set(payload.changes.flatMap((change) =>
         change.type === "message.created" || change.type === "message.updated" ? [change.message.id] : []));
+      // The desktop's word on roster changes this machine's members asked for.
+      if (transport.applyPolicy(existing).acceptsConversationFields(event.originId)) {
+        this.settleRosterChangesFromDesktop(existing, () => existing.messages.filter((message) => touched.has(message.id)));
+      }
       for (const message of existing.messages) {
         if (message.role === "participant" && touched.has(message.id)) this.recordLastMessageByParticipant(existing, message);
       }
       if (!wasArchived && existing.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
       await this.saveConversation(existing, { emitChanges: false });
+      dropped.push(...droppedHere);
     });
+    // A member this host runs that the member list no longer has (removed on
+    // the desktop) ends its process here, as a local member's does there.
+    this.retireRemovedMembers(conversationId, dropped);
     if (waiting) return wait();
     this.waitingChatChanges.delete(event.eventId);
     this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
+    this.notePhoneMessages(event.originId, conversationId, payload, addedMessageIds);
     return "applied";
+  }
+
+  /** Reads a body from the User's server by its reference (a picture sent
+   *  from the phone). */
+  setHubBlobReader(reader: ((reference: DeviceEventBlobReference) => Promise<Buffer>) | undefined): void {
+    this.hubBlobReader = reader;
+  }
+
+  /** Says which devices are the User's phones. A message one of them wrote
+   *  starts its members here when they live here (see startPhoneTurns). */
+  setPhoneOrigins(resolver: ((originId: string) => boolean | Promise<boolean>) | undefined, since?: string): void {
+    this.phoneOrigin = resolver;
+    const at = since ? Date.parse(since) : NaN;
+    this.phoneTurnsSince = Number.isFinite(at) ? at : undefined;
+  }
+
+  private notePhoneMessages(originId: string, conversationId: string, payload: ChatChangesPayload, added: Set<string>): void {
+    const resolver = this.phoneOrigin;
+    if (!resolver) return;
+    const messages = payload.changes.flatMap((change) =>
+      change.type === "message.created" && change.message.role === "user" && added.has(change.message.id) ? [change.message] : []);
+    if (messages.length === 0) return;
+    // Until its members are claimed the chat counts as busy, so a watcher
+    // evaluating meanwhile does not take the same message as well.
+    this.phoneStartsInFlight.set(conversationId, (this.phoneStartsInFlight.get(conversationId) ?? 0) + 1);
+    void Promise.resolve(resolver(originId)).then((phone) => {
+      if (phone) return this.startPhoneTurns(conversationId, messages);
+      return undefined;
+    }).catch((error) => {
+      void this.debugLogs.write("chat.phone-turns.error", { conversationId, message: error instanceof Error ? error.message : String(error) });
+    }).finally(() => {
+      const left = (this.phoneStartsInFlight.get(conversationId) ?? 1) - 1;
+      if (left > 0) {
+        this.phoneStartsInFlight.set(conversationId, left);
+        return;
+      }
+      this.phoneStartsInFlight.delete(conversationId);
+      // A message whose turns all ended before registering (taken elsewhere,
+      // stopped) left no run whose end says the chat went idle.
+      this.scheduleQueuedMemberRemovals(conversationId);
+    });
+  }
+
+  /**
+   * Phone messages this device took in recently whose members living here
+   * were never started: the device stopped (a quit, a crash, an update)
+   * between taking a message in and claiming its turns, or this program is
+   * newer than the one that took it in. Their claims keep the ones that did
+   * start from starting again.
+   */
+  async resumePhoneTurns(sinceIso: string): Promise<void> {
+    const resolver = this.phoneOrigin;
+    if (!resolver) return;
+    const claims = this.storage.phoneTurnClaims();
+    const phones: string[] = [];
+    for (const originId of await claims.chatChangeOriginsSince(sinceIso)) {
+      if (await Promise.resolve(resolver(originId)).catch(() => false)) phones.push(originId);
+    }
+    if (phones.length === 0) return;
+    const byChat = new Map<string, ChatMessage[]>();
+    for (const row of await claims.chatChangesFrom(phones, sinceIso, 500)) {
+      try {
+        const envelope = JSON.parse(Buffer.from(row.envelopeHex, "hex").toString("utf8")) as ChatEventEnvelope;
+        const payload = await this.storage.deviceEventBlobs().hydrate(envelope.payload) as ChatChangesPayload;
+        for (const change of Array.isArray(payload?.changes) ? payload.changes : []) {
+          if (change.type !== "message.created" || change.message.role !== "user") continue;
+          byChat.set(envelope.conversationId, [...(byChat.get(envelope.conversationId) ?? []), change.message]);
+        }
+      } catch {
+        // An event this device cannot read back is not one it can start.
+      }
+    }
+    for (const [conversationId, messages] of byChat) {
+      await this.startPhoneTurns(conversationId, messages).catch((error) => {
+        void this.debugLogs.write("chat.phone-turns.error", { conversationId, message: error instanceof Error ? error.message : String(error) });
+      });
+    }
+  }
+
+  /** Whether this device starts this member's turns: the desktop starts its
+   *  own members (and prepares cloud ones), a machine the members it hosts. */
+  private startsPhoneTurnFor(participant: ChatParticipant): boolean {
+    const home = chatParticipantHome(participant);
+    return this.machineRuntime
+      ? Boolean(this.hostMachineId) && home.kind === "machine" && home.machineId === this.hostMachineId
+      : home.kind !== "machine";
+  }
+
+  /** The members a phone's message is for: the ones the phone resolved when
+   *  the User sent it (by the desktop's rules, from what the phone showed),
+   *  or, for a message that names none, the same rules here. */
+  private phoneMessageTargets(conversation: Conversation, message: ChatMessage): ChatParticipant[] {
+    const participants = this.chatParticipants(conversation);
+    const named = (message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets;
+    if (Array.isArray(named)) {
+      return named.flatMap((id) => {
+        const participant = typeof id === "string" ? participants.find((item) => item.id === id) : undefined;
+        return participant ? [participant] : [];
+      });
+    }
+    return this.resolveDispatchTargetsForContent(conversation, message.content, this.replyContextFromMessage(message)).targets;
+  }
+
+  /**
+   * The User wrote a message on her phone; it reached this device through the
+   * hub. The members it is for whose home is here start now, as they would for
+   * a message typed here; members that live elsewhere are started by their own
+   * home. Each turn is claimed under its run id before it starts (the same id
+   * on every device), so applying the message again — a redelivery, a
+   * restart — never runs a member twice, and a Stop that came first keeps it
+   * from starting.
+   */
+  async startPhoneTurns(conversationId: string, messages: ChatMessage[]): Promise<void> {
+    const presence = await this.storage.conversationPresence(conversationId);
+    if (!presence || presence.kind !== "chat") return;
+    // The chat's body names its members; the whole chat is read only when a
+    // member of this message lives here.
+    const opened = await this.storage.openConversation(conversationId, 1);
+    if (!opened || opened.conversation.metadata.archived === true) return;
+    let conversation: Conversation | undefined;
+    for (const message of messages) {
+      if (message.role !== "user") continue;
+      // Written before this device read the server: another home's.
+      if (this.phoneTurnsSince !== undefined && Date.parse(message.createdAt) < this.phoneTurnsSince - PHONE_TURN_CLOCK_SKEW_MS) continue;
+      const named = Array.isArray((message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets);
+      if (named) {
+        const here = this.phoneMessageTargets(opened.conversation, message).filter((participant) => this.startsPhoneTurnFor(participant));
+        if (here.length === 0) continue;
+        // Every turn here claimed already (the sweep finds most so): the
+        // whole chat is not read for them.
+        const claimed = await this.storage.phoneTurnClaims().claimedRunIds(here.map((participant) => phoneTurnRunId(message.id, participant.id)));
+        if (here.every((participant) => claimed.has(phoneTurnRunId(message.id, participant.id)))) continue;
+      }
+      conversation ??= await this.requireChat(conversationId);
+      const stored = conversation.messages.find((item) => item.id === message.id && item.role === "user");
+      if (!stored) continue;
+      const everyTarget = this.phoneMessageTargets(conversation, stored);
+      // What the desktop refuses to send it refuses here too, said once (by
+      // the home of the first member named) and nobody starts.
+      const goal = parseNativeGoalCommand(stored.content);
+      const refusal = goal.kind === "invalid" ? goal.error
+        : goal.kind === "valid" && everyTarget.length !== 1 ? "/goal requires exactly one resolved chat member." : undefined;
+      if (refusal) {
+        // Said by the first member's home, or by the desktop when it names none.
+        if (everyTarget[0] ? this.startsPhoneTurnFor(everyTarget[0]) : !this.machineRuntime) await this.notePhoneMessageRefused(conversation, stored, refusal);
+        continue;
+      }
+      const targets = everyTarget.filter((participant) => this.startsPhoneTurnFor(participant));
+      if (targets.length === 0) continue;
+      await this.startPhoneTurnsFor(conversation, stored, targets);
+    }
+  }
+
+  private async startPhoneTurnsFor(conversation: Conversation, message: ChatMessage, targets: ChatParticipant[]): Promise<void> {
+    const conversationId = conversation.id;
+    // A watcher member addressed directly has seen this message, as for a
+    // message typed here.
+    if (targets.some((participant) => participant.autoWatch === true)) {
+      await this.withChatMutation(conversation, async () => {
+        const before = JSON.stringify(conversation.metadata.participantWatchers ?? null);
+        this.advanceAutoWatchCursorForDirectTargets(conversation, targets, message);
+        if (JSON.stringify(conversation.metadata.participantWatchers ?? null) === before) return;
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+    }
+    const compact = this.compactCommand(message.content);
+    for (const participant of targets) {
+      const runId = phoneTurnRunId(message.id, participant.id);
+      if (this.pendingPhoneRuns.has(runId) || this.conversationIdForRun(runId)) continue;
+      // Its turn already shows in the chat (another home ran or stopped it,
+      // the member moved since): not again here.
+      if (this.phoneTurnShown(conversation, message, participant, runId)) continue;
+      const controller = new AbortController();
+      // Registered before anything is awaited, so a second start (the live
+      // one and a sweep) finds it, and a Stop arriving meanwhile stops the
+      // turn before it starts.
+      const pending: PendingPhoneRun = { conversationId, controller, started: false };
+      this.pendingPhoneRuns.set(runId, pending);
+      const release = (): void => {
+        if (this.pendingPhoneRuns.get(runId) !== pending) return;
+        this.pendingPhoneRuns.delete(runId);
+        // A turn that never registered left no run whose end says the chat
+        // went idle; an approved member removal may be waiting for exactly that.
+        if (!pending.registered) this.scheduleQueuedMemberRemovals(conversationId);
+      };
+      let outcome: Awaited<ReturnType<ReturnType<StorageService["phoneTurnClaims"]>["claim"]>>;
+      try {
+        outcome = await this.storage.phoneTurnClaims().claim({ runId, conversationId, messageId: message.id, participantId: participant.id, at: new Date().toISOString() });
+      } catch (error) {
+        // Not claimed: the next resume tries again. The other members go on.
+        release();
+        void this.debugLogs.write("chat.phone-turn.claim-error", { conversationId, runId, message: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+      if (outcome === "taken") {
+        release();
+        continue;
+      }
+      void this.debugLogs.write("chat.phone-turn", { conversationId, runId, participantId: participant.id, outcome });
+      if (outcome === "cancelled" || controller.signal.aborted) {
+        release();
+        await this.notePhoneTurnStoppedBeforeStart(conversation, message, participant);
+        continue;
+      }
+      const warnings: string[] = [];
+      pending.started = true;
+      const started = (async () => {
+        const settings = await this.settings.getPublicSettings();
+        // What a message typed here checks before it starts a member.
+        this.assertParticipantProvidersEnabled([participant], settings.providers ?? []);
+        if (compact && compact.handle.toLowerCase() === participant.handle.toLowerCase()) {
+          await this.compactParticipant({
+            conversationId, participantId: participant.id, handle: participant.handle, instructions: compact.instructions, triggeredBy: "user", runId,
+            threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id, chatThreadRootId: message.metadata?.chatThreadRootId
+          }, controller.signal, this.onReviewProgress);
+          return;
+        }
+        await this.runParticipantBatch(conversation, [participant], message, runId, controller.signal, this.onReviewProgress, warnings, {
+          targetRunIds: new Map([[participant.id, runId]])
+        });
+      })();
+      void started.catch(async (error) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        void this.debugLogs.write("chat.phone-turn.error", { conversationId, runId, message: reason });
+        // Said in the chat, where the User sees it on her phone too.
+        warnings.push(`@${participant.handle} could not start for your message: ${reason}`);
+      }).finally(async () => {
+        release();
+        if (warnings.length > 0) await this.appendConversationWarnings(conversation, warnings).catch(() => undefined);
+      });
+    }
+  }
+
+  /** A phone's message the desktop would not have sent: the reason, under
+   *  it, once (a claim keeps a redelivery from saying it again). */
+  private async notePhoneMessageRefused(conversation: Conversation, message: ChatMessage, reason: string): Promise<void> {
+    const outcome = await this.storage.phoneTurnClaims().claim({ runId: `phone-refused-${message.id}`, conversationId: conversation.id, messageId: message.id,
+      participantId: "", at: new Date().toISOString() });
+    if (outcome !== "claimed") return;
+    await this.withChatMutation(conversation, async () => {
+      conversation.messages.push(this.message("system", reason, undefined, {
+        threadId: message.metadata?.threadId ?? message.id,
+        parentMessageId: message.id,
+        chatThreadRootId: message.metadata?.chatThreadRootId
+      }));
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
+  }
+
+  private phoneTurnShown(conversation: Conversation, message: ChatMessage, participant: ChatParticipant, runId: string): boolean {
+    const stopped = `@${participant.handle} stopped by user.`;
+    return conversation.messages.some((item) => item.metadata?.runId === runId ||
+      (item.role === "system" && item.content === stopped && item.metadata?.parentMessageId === message.id));
+  }
+
+  /** A member stopped before its turn for a phone's message started: the
+   *  line a member stopped while queued gets. */
+  private async notePhoneTurnStoppedBeforeStart(conversation: Conversation, message: ChatMessage, participant: ChatParticipant): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      conversation.messages.push(this.message("system", `@${participant.handle} stopped by user.`, undefined, {
+        threadId: message.metadata?.threadId ?? message.id,
+        parentMessageId: message.id,
+        chatThreadRootId: message.metadata?.chatThreadRootId
+      }));
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
+  }
+
+  /** A Stop for a phone's turn that is not running here. True when this
+   *  device is that member's home: the turn is then recorded as stopped and
+   *  never starts (or was stopped while starting). */
+  async stopUnstartedPhoneRun(conversationId: string, runId: string): Promise<boolean> {
+    const parsed = parsePhoneTurnRunId(runId);
+    if (!parsed) return false;
+    const pending = this.pendingPhoneRuns.get(runId);
+    if (pending) {
+      // Still being claimed: it never starts. Started: a Stop like any other.
+      if (pending.started) return false;
+      pending.controller.abort();
+      return true;
+    }
+    // The chat's newest messages: a turn the Stop names is a recent one.
+    const opened = await this.storage.openConversation(conversationId, PHONE_TURN_STOP_WINDOW);
+    if (!opened || opened.conversation.kind !== "chat") return false;
+    const participant = this.chatParticipants(opened.conversation).find((item) => item.id === parsed.participantId);
+    if (!participant || !this.startsPhoneTurnFor(participant)) return false;
+    // It ran already (on the member's earlier home): not stopped here.
+    if (opened.conversation.messages.some((item) => item.metadata?.runId === runId)) return false;
+    const cancelled = await this.storage.phoneTurnClaims().cancelUnstarted({
+      runId, conversationId, messageId: parsed.messageId, participantId: participant.id, at: new Date().toISOString()
+    });
+    // Claimed before: it ran (or runs, and the ordinary Stop reaches it).
+    if (!cancelled) return false;
+    // The message is here already but the start had not decided yet: it reads
+    // the cancelled claim and writes the stopped line itself.
+    return true;
+  }
+
+  /** Whether a run named in a Stop is a phone turn whose member lives here;
+   *  undefined while this copy of the chat does not know the member yet (the
+   *  Stop waits for it rather than being lost). */
+  async ownsPhoneRun(conversationId: string, runId: string): Promise<boolean | undefined> {
+    const parsed = parsePhoneTurnRunId(runId);
+    if (!parsed) return false;
+    if (this.pendingPhoneRuns.has(runId)) return true;
+    // The chat's body names its members: no need to read every message.
+    const opened = await this.storage.openConversation(conversationId, 1);
+    if (!opened || opened.conversation.kind !== "chat") return false;
+    const participant = this.chatParticipants(opened.conversation).find((item) => item.id === parsed.participantId);
+    if (!participant) return undefined;
+    return this.startsPhoneTurnFor(participant);
+  }
+
+  /**
+   * One chat of the User's server's copy, for a device that starts again
+   * from it (events it needed were forgotten while it was away, or a chain
+   * of this chat's changes was): merged the way a machine merges its first
+   * copy. The copy's shared content wins; this device keeps its own run
+   * bookkeeping, sessions and what it wrote itself. Saved without being
+   * announced (it is nobody's new change), and a chat deleted here stays
+   * deleted.
+   */
+  async mergeServerCopy(copied: CopiedConversation, options: {
+    desktopOriginId: string;
+    localOriginId?: string;
+    /** The desktop: the device a chat's own fields (title, members and their
+     *  permissions, the project) come from. From the copy it takes only the
+     *  messages it does not have yet, into chats it has, never those fields:
+     *  its own changes the server has not folded yet would be rolled back. */
+    ownsSharedFields?: boolean;
+  }): Promise<void> {
+    if (this.deletedConversationIds.has(copied.id) || await this.storage.conversationTombstones?.().isDeleted(copied.id)) return;
+    const merge = (local: Conversation | undefined): Conversation => mergeCopiedConversation(local, copied, {
+      desktopOriginId: options.desktopOriginId,
+      ...(options.localOriginId ? { localOriginId: options.localOriginId } : {}),
+      ...(this.hostMachineId ? { hostMachineId: this.hostMachineId } : {})
+    });
+    const existing = await this.storage.getConversation(copied.id);
+    if (existing && existing.kind !== "chat") return;
+    const held = new Set((existing?.messages ?? []).map((message) => message.id));
+    // A phone's messages this copy brings (they reached the server while this
+    // device could not read them) start their members here as if read in
+    // order; the same guards keep an old or already-run turn from starting.
+    const startPhoneMessagesFrom = (conversation: Conversation): void => {
+      const byOrigin = new Map<string, string[]>();
+      for (const message of conversation.messages) {
+        const author = copied.authors?.[message.id];
+        if (message.role !== "user" || held.has(message.id) || !author) continue;
+        byOrigin.set(author, [...(byOrigin.get(author) ?? []), message.id]);
+      }
+      for (const [author, ids] of byOrigin) {
+        const changes = conversation.messages.filter((message) => ids.includes(message.id)).map((message) => ({ type: "message.created" as const, message }));
+        this.notePhoneMessages(author, conversation.id, { version: CHAT_CHANGES_VERSION, conversationId: conversation.id, updatedAt: conversation.updatedAt, changes }, new Set(ids));
+      }
+    };
+    if (!existing) {
+      if (options.ownsSharedFields) return;
+      const created = merge(undefined);
+      await this.saveConversation(created, { emitChanges: false });
+      startPhoneMessagesFrom(created);
+      return;
+    }
+    const dropped: ChatParticipant[] = [];
+    await this.withChatMutation(existing, async () => {
+      if (options.ownsSharedFields) {
+        // Messages it lacks, and the copy's version of those another device
+        // wrote (a machine member's finished reply); its own stay as they are.
+        const merged = new Map(merge(existing).messages.map((message) => [message.id, message]));
+        const theirs = (id: string): boolean => {
+          const author = copied.authors?.[id];
+          return Boolean(author) && author !== options.localOriginId && author !== options.desktopOriginId;
+        };
+        let changed = false;
+        const messages = existing.messages.map((message) => {
+          const incoming = merged.get(message.id);
+          if (!incoming || !theirs(message.id) || JSON.stringify(incoming) === JSON.stringify(message)) return message;
+          changed = true;
+          return incoming;
+        });
+        const known = new Set(existing.messages.map((message) => message.id));
+        const added = [...merged.values()].filter((message) => !known.has(message.id));
+        if (!changed && added.length === 0) return;
+        existing.messages = [...messages, ...added]
+          .map((message, index) => ({ message, index }))
+          .sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.index - right.index)
+          .map((entry) => entry.message);
+        await this.saveConversation(existing, { emitChanges: false });
+        startPhoneMessagesFrom(existing);
+        return;
+      }
+      const merged = merge(existing);
+      // A copy without a member list (an older server's) says nothing about
+      // who left: no member's process is ended for it.
+      const droppedHere = Array.isArray(copied.shared?.metadata?.participants)
+        ? this.membersDroppedFrom(existing, merged)
+        : [];
+      existing.title = merged.title;
+      existing.messages = merged.messages;
+      existing.metadata = merged.metadata;
+      // The desktop's word on roster changes this machine's members asked for.
+      this.settleRosterChangesFromDesktop(existing, () => existing.messages.filter((message) =>
+        (message.metadata as { remoteAuthorOriginId?: string } | undefined)?.remoteAuthorOriginId === options.desktopOriginId));
+      existing.updatedAt = merged.updatedAt;
+      if (merged.repoPath) existing.repoPath = merged.repoPath;
+      else delete existing.repoPath;
+      await this.saveConversation(existing, { emitChanges: false });
+      dropped.push(...droppedHere);
+      startPhoneMessagesFrom(existing);
+    });
+    // A member this host runs that the copied member list no longer has ends
+    // its process here, as on a chat change (applyRemoteChatChanges).
+    this.retireRemovedMembers(copied.id, dropped);
   }
 
   private clone(conversation: Conversation): Conversation {
@@ -19904,6 +21700,12 @@ export class ChatService {
     });
   }
 }
+
+/** How far a phone's clock may be off from this device's. */
+const PHONE_TURN_CLOCK_SKEW_MS = 10 * 60_000;
+/** The newest messages a Stop for a phone turn not running here is checked
+ *  against. */
+const PHONE_TURN_STOP_WINDOW = 200;
 
 function mobileEventIdFromChatTrigger(triggerMessage: ChatMessage): string | undefined {
   if (triggerMessage.metadata?.appMessageSource !== "mobile-relay") {

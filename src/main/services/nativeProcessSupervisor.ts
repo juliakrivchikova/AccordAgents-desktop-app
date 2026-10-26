@@ -142,6 +142,9 @@ async function supervise(config: NativeSupervisorStart, io: SessionIO): Promise<
   // A failed ps / disk write is not proof of termination. Keep the guardian and
   // its exclusive lease alive until a fresh observation and receipt succeed.
   while (true) {
+    // Only a sample begun after the stop is known to hold every process the
+    // provider started before it; one in flight when the stop arrived may not.
+    const sampledAfterStop = stopping;
     const currentRows = await processTable(stopping);
     if (!currentRows) { await delay(100); continue; }
     const captured = captureOwned(lease, currentRows);
@@ -155,8 +158,13 @@ async function supervise(config: NativeSupervisorStart, io: SessionIO): Promise<
       if (stopping) {
         const identities = [...(lease.provider ? [lease.provider] : []), ...captured];
         // Closing stdin can make Claude exit and reparent a detached helper.
-        // Snapshot and store that helper's identity while its parent exists.
-        if (!stdinClosed) { stdinClosed = true; child?.stdin.end(); }
+        // Snapshot and store that helper's identity while its parent exists:
+        // a sample taken before the stop can miss a helper started since, which
+        // then escaped every later sample once its parent was gone.
+        if (!stdinClosed) {
+          if (!sampledAfterStop) continue;
+          stdinClosed = true; child?.stdin.end();
+        }
         if (!providerAlive && !hasLiveCapturedPosixProcesses(captured, () => currentRows)) {
           if (process.connected && child) {
             // Native exit can precede pipe drainage. Preserve a large final

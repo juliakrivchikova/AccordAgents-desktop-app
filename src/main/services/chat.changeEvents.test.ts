@@ -461,3 +461,100 @@ test("reactions to a message that arrives later by another way are applied, net 
     assert.equal((await desktop.storage.getConversation("chat-1"))!.metadata.pendingChatReactions, undefined);
   } finally { await cleanup(); }
 });
+
+test("a member the desktop removes stops on the machine that runs it, through the member list it receives", async () => {
+  const { desktop, machine, cleanup } = await pair();
+  try {
+    const conversation = chat();
+    conversation.metadata.participants = [
+      { id: "local", handle: "taylor", roleConfigId: "generic-participant", kind: "claude-code" },
+      { id: "remote", handle: "drew", roleConfigId: "generic-participant", kind: "claude-code", homeMachineId: "machine-1" },
+      { id: "remote-2", handle: "gera", roleConfigId: "generic-participant", kind: "claude-code", homeMachineId: "machine-1" }
+    ];
+    await save(desktop, conversation);
+    assert.equal(await deliver(desktop, machine, desktop.committed[0]), "applied");
+    machine.service.setHostMachineId("machine-1");
+    const closedOn = { desktop: [] as string[], machine: [] as string[] };
+    (desktop.service as unknown as { cliRunner: Record<string, unknown> }).cliRunner.closeWarmAgents =
+      async (_conversationId: string, participantId: string, reason: string) => { closedOn.desktop.push(`${participantId}:${reason}`); };
+    (machine.service as unknown as { cliRunner: Record<string, unknown> }).cliRunner.closeWarmAgents =
+      async (_conversationId: string, participantId: string, reason: string) => { closedOn.machine.push(`${participantId}:${reason}`); };
+
+    await desktop.service.removeParticipant({ conversationId: "chat-1", participantId: "remote" });
+    assert.equal(await deliver(desktop, machine, desktop.committed[desktop.committed.length - 1]), "applied");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(closedOn.desktop, [], "the desktop has no process for a machine member");
+    assert.deepEqual(closedOn.machine, ["remote:member-removed"]);
+    const onMachine = (await machine.storage.getConversation("chat-1"))!;
+    assert.deepEqual((onMachine.metadata.participants as Array<{ id: string }>).map((participant) => participant.id), ["local", "remote-2"]);
+
+    // A desktop-local member removed on the desktop is closed there, not on the machine.
+    await desktop.service.removeParticipant({ conversationId: "chat-1", participantId: "local" });
+    await deliver(desktop, machine, desktop.committed[desktop.committed.length - 1]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(closedOn.desktop, ["local:member-removed"]);
+    assert.deepEqual(closedOn.machine, ["remote:member-removed"]);
+  } finally { await cleanup(); }
+});
+
+test("a machine's waiting roster change settles from the desktop's message saying what it did, and the machine never applies it itself", async () => {
+  const { desktop, machine, cleanup } = await pair();
+  try {
+    const conversation = chat();
+    conversation.metadata.participants = [
+      { id: "local", handle: "taylor", roleConfigId: "generic-participant", kind: "claude-code" },
+      { id: "remote", handle: "drew", roleConfigId: "generic-participant", kind: "claude-code", homeMachineId: "machine-1" },
+      { id: "target", handle: "gera", roleConfigId: "generic-participant", kind: "claude-code" }
+    ];
+    await save(desktop, conversation);
+    assert.equal(await deliver(desktop, machine, desktop.committed[0]), "applied");
+    machine.service.setHostMachineId("machine-1");
+    const base = { conversationId: "chat-1", requesterParticipantId: "remote", requesterHandle: "drew", requesterRoleConfigId: "generic-participant",
+      toolName: "app_participants_request_change", capability: "participants.manage" as const, createdAt: NOW, updatedAt: NOW };
+    const onMachine = (await machine.storage.getConversation("chat-1"))!;
+    onMachine.metadata = { ...onMachine.metadata, pendingAppToolApprovals: [
+      { ...base, id: "removal", status: "approved", summary: "Remove @gera from this chat", memberRemovalQueuedAt: NOW,
+        request: { kind: "participant_removal", operations: [{ type: "remove_participant_from_chat", participantId: "target", handle: "gera" }] } },
+      { ...base, id: "addition", status: "approved", summary: "Add @newbie", memberAdditionQueuedAt: NOW,
+        request: { operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "newbie", roleConfigId: "generic-participant", kind: "claude-code" } }] } }
+    ] };
+    await save(machine, onMachine);
+    const approvalsOnMachine = async () => ((await machine.storage.getConversation("chat-1"))!.metadata.pendingAppToolApprovals as Array<Record<string, unknown>>);
+    const desktopSays = async (change: (conversation: Conversation) => void) => {
+      const current = (await desktop.storage.getConversation("chat-1"))!;
+      change(current);
+      await save(desktop, current);
+      assert.equal(await deliver(desktop, machine, desktop.committed[desktop.committed.length - 1]), "applied");
+    };
+
+    // The member list alone (the User removed @gera by hand) is not the
+    // desktop's word on the card.
+    await desktopSays((current) => {
+      current.metadata = { ...current.metadata, participants: (current.metadata.participants as Array<{ id: string }>).filter((participant) => participant.id !== "target") };
+    });
+    assert.equal(typeof (await approvalsOnMachine()).find((item) => item.id === "removal")!.memberRemovalQueuedAt, "string");
+
+    // The desktop's message: applied, and for the addition refused.
+    await desktopSays((current) => {
+      current.messages.push({ id: "said-removed", role: "system", content: "Removed @gera from this chat at @drew's request.", createdAt: new Date().toISOString(), status: "done",
+        metadata: { threadId: "system", rosterChange: { approvalId: "removal", outcome: "applied", appliedParticipantIds: ["target"] } } });
+    });
+    let approvals = await approvalsOnMachine();
+    const removal = approvals.find((item) => item.id === "removal")!;
+    assert.equal(removal.memberRemovalQueuedAt, undefined);
+    assert.deepEqual(removal.appliedParticipantIds, ["target"]);
+    assert.equal(typeof approvals.find((item) => item.id === "addition")!.memberAdditionQueuedAt, "string", "not answered yet");
+
+    await desktopSays((current) => {
+      current.messages.push({ id: "said-refused", role: "system", content: "Could not add @newbie at @drew's request: Duplicate member name.", createdAt: new Date().toISOString(), status: "done",
+        metadata: { threadId: "system", rosterChange: { approvalId: "addition", outcome: "refused", error: "Duplicate member name." } } });
+    });
+    approvals = await approvalsOnMachine();
+    const addition = approvals.find((item) => item.id === "addition")!;
+    assert.equal(addition.memberAdditionQueuedAt, undefined);
+    assert.equal(addition.status, "cancelled");
+    assert.equal(addition.error, "Duplicate member name.");
+    assert.equal(machine.committed.length, 0, "the machine sends no member list of its own");
+  } finally { await cleanup(); }
+});

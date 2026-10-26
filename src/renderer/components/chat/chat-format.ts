@@ -1,5 +1,18 @@
+// Reused: toLocaleTimeString builds a formatter on every call, and every message row
+// formats its time on every render. Rebuilt when the time zone changes, which a
+// formatter does not follow by itself.
+let chatTimeFormat: { format: Intl.DateTimeFormat; zoneOffset: number } | undefined;
+
 export function formatChatTime(value: string): string {
-  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return date.toLocaleTimeString();
+  }
+  const zoneOffset = new Date().getTimezoneOffset();
+  if (!chatTimeFormat || chatTimeFormat.zoneOffset !== zoneOffset) {
+    chatTimeFormat = { format: new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit", hour12: false }), zoneOffset };
+  }
+  return chatTimeFormat.format.format(date);
 }
 
 export function defaultImageFilename(mimeType: string): string {

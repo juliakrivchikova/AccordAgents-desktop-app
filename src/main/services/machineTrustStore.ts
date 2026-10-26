@@ -15,6 +15,9 @@ const disk = { mkdir, readFile, rename, writeFile, unlink };
 export class MachineTrustStore {
   private roster?: MachineTrustRoster;
   private order?: RosterOrder;
+  /** Phones trusted by their certificate (the owner's signed invite) until
+   *  a roster settles their invite. */
+  private certified = new Map<string, TrustedPeerAccess & { inviteId: string }>();
   private loaded = false;
   private queue: Promise<void> = Promise.resolve();
 
@@ -31,8 +34,34 @@ export class MachineTrustStore {
     return this.serialize(async () => { await this.loadOnce(); return this.roster; });
   }
 
+  private certifiedPath(): string {
+    return `${this.filePath}.phones.json`;
+  }
+
+  private async loadCertified(): Promise<void> {
+    let contents: string;
+    try { contents = await this.io.readFile(this.certifiedPath(), "utf8"); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return;
+    }
+    let parsed: { version?: number; phones?: Array<TrustedPeerAccess & { inviteId: string }> };
+    try { parsed = JSON.parse(contents) as typeof parsed; }
+    catch {
+      // An unreadable list of certified phones costs only those phones (they
+      // are admitted again from the server's order); the roster still loads.
+      return;
+    }
+    for (const phone of Array.isArray(parsed?.phones) ? parsed.phones : []) {
+      if (phone && phone.role === "phone" && typeof phone.inviteId === "string" && trustedDeviceIdMatchesKey(phone, bytes => createHash("sha256").update(bytes).digest("hex"))) {
+        this.certified.set(phone.deviceId, phone);
+      }
+    }
+  }
+
   private async loadOnce(): Promise<void> {
     if (this.loaded) return;
+    await this.loadCertified();
     let contents: string;
     try { contents = await this.io.readFile(this.filePath, "utf8"); }
     catch (error) {
@@ -52,8 +81,45 @@ export class MachineTrustStore {
   }
 
   current(): MachineTrustRoster | undefined { return this.roster; }
-  peers(): TrustedPeerAccess[] { return this.roster?.peers ?? []; }
-  peer(deviceId: string): TrustedPeerAccess | undefined { return this.roster?.peers.find(peer => peer.deviceId === deviceId); }
+  peers(): TrustedPeerAccess[] {
+    const listed = this.roster?.peers ?? [];
+    const resolved = new Set(this.roster?.resolvedInviteIds ?? []);
+    const extra = [...this.certified.values()].filter((phone) => !resolved.has(phone.inviteId) && !listed.some((peer) => peer.deviceId === phone.deviceId));
+    return extra.length ? [...listed, ...extra] : listed;
+  }
+  peer(deviceId: string): TrustedPeerAccess | undefined { return this.peers().find(peer => peer.deviceId === deviceId); }
+
+  /**
+   * A phone that paired with the User's server while the desktop was away:
+   * its certificate (already checked against the owner's key) trusts it here
+   * until the owner's next roster settles its invite, which then decides.
+   */
+  admitCertified(phone: TrustedPeerAccess & { inviteId: string }): Promise<boolean> {
+    return this.serialize(async () => {
+      await this.loadOnce();
+      // Before the desktop's roster is here this machine cannot tell a
+      // removed phone from a new one: the certificate is tried again later.
+      if (!this.roster) return false;
+      if (this.roster.peers.some((peer) => peer.deviceId === phone.deviceId)) return true;
+      if (this.roster.resolvedInviteIds?.includes(phone.inviteId)) return false;
+      if (this.certified.get(phone.deviceId)?.inviteId === phone.inviteId) return true;
+      // One invite, one phone: another key presenting the same invite is not
+      // admitted (its first holder is).
+      if ([...this.certified.values()].some((known) => known.inviteId === phone.inviteId && known.deviceId !== phone.deviceId)) return false;
+      this.certified.set(phone.deviceId, phone);
+      await this.persistCertified();
+      return true;
+    });
+  }
+
+  private async persistCertified(): Promise<void> {
+    await this.io.mkdir(path.dirname(this.filePath), { recursive: true });
+    const temp = `${this.certifiedPath()}.${randomUUID()}.tmp`;
+    try {
+      await this.io.writeFile(temp, `${JSON.stringify({ version: 1, phones: [...this.certified.values()] })}\n`, { mode: 0o600 });
+      await this.io.rename(temp, this.certifiedPath());
+    } finally { await this.io.unlink(temp).catch(() => undefined); }
+  }
 
   accept(roster: MachineTrustRoster, event: RosterOrder): Promise<{ changed: boolean; roster: MachineTrustRoster }> {
     return this.serialize(async () => {
@@ -71,12 +137,20 @@ export class MachineTrustStore {
           return { changed: false, roster: this.roster! };
         }
       }
-      const changed = !this.roster || stableJson(this.roster.peers) !== stableJson(next.peers);
+      const before = stableJson(this.peers());
       const order: RosterOrder = { originId: event.originId, logScopeId: event.logScopeId,
         originSeq: event.originSeq, eventId: event.eventId, eventHash: event.eventHash };
       await this.persist({ version: 2, roster: next, order });
       this.roster = next;
       this.order = order;
+      // A roster that settled a certified phone's invite decides about it now.
+      const resolved = new Set(next.resolvedInviteIds ?? []);
+      const settled = [...this.certified.values()].filter((phone) => resolved.has(phone.inviteId) || next.peers.some((peer) => peer.deviceId === phone.deviceId));
+      if (settled.length) {
+        for (const phone of settled) this.certified.delete(phone.deviceId);
+        await this.persistCertified();
+      }
+      const changed = before !== stableJson(this.peers());
       return { changed, roster: next };
     });
   }

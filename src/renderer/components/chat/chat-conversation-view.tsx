@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { ArrowDown } from "lucide-react";
 
@@ -21,6 +21,7 @@ import { IconButton } from "../primitives";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatComposer } from "./chat-composer";
 import {
+  buildChatTimelineRows,
   chatAppToolApprovals,
   chatApprovalPlacement,
   chatContinuedMentionRequestIds,
@@ -152,22 +153,15 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     () => chatApprovalPlacement(pendingAppToolApprovals, visibleApprovalMessages),
     [pendingAppToolApprovals, visibleApprovalMessages]
   );
-  const chatTimelineRows = useMemo(() => {
-    const rows = [];
-    if (props.hasOlderMessages || props.olderMessagesLoading) {
-      rows.push({ type: "load-older" as const, id: "load-older" });
-    }
-    const entries = [
-      ...topLevelMessages.map((message) => ({ createdAt: message.createdAt, row: { type: "message" as const, id: message.id, message } })),
-      ...resolvedTimelineApprovals.map((approval) => ({ createdAt: approval.createdAt, row: { type: "approval" as const, id: approval.id, approval } }))
-    ];
-    entries.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-    rows.push(...entries.map((entry) => entry.row));
-    if (props.isRunning) {
-      rows.push(...thinkingRows.map((row) => ({ type: "thinking" as const, id: row.key, row })));
-    }
-    return rows;
-  }, [props.hasOlderMessages, props.isRunning, props.olderMessagesLoading, resolvedTimelineApprovals, thinkingRows, topLevelMessages]);
+  const chatTimelineRows = useMemo(() => buildChatTimelineRows({
+    hasOlderMessages: props.hasOlderMessages,
+    olderMessagesLoading: props.olderMessagesLoading,
+    isRunning: props.isRunning,
+    loadedMessages: props.conversation.messages,
+    topLevelMessages,
+    resolvedApprovals: resolvedTimelineApprovals,
+    thinkingRows
+  }), [props.conversation.messages, props.hasOlderMessages, props.isRunning, props.olderMessagesLoading, resolvedTimelineApprovals, thinkingRows, topLevelMessages]);
   const viewport = useChatConversationViewport({
     conversationId: props.conversation.id,
     messages: props.conversation.messages,
@@ -321,6 +315,16 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     setSelectedThreadRootId(messageId);
   }
 
+  // Stable across renders: the message rows are memoized, and a new handler on every
+  // render re-rendered all of them on every scroll step, which made frames long.
+  const rowHandlersRef = useRef({ openThread, handleAppToolApproval });
+  rowHandlersRef.current = { openThread, handleAppToolApproval };
+  const stableOpenThread = useCallback((messageId: string) => rowHandlersRef.current.openThread(messageId), []);
+  const stableAppToolApproval = useCallback(
+    (...args: Parameters<typeof handleAppToolApproval>) => rowHandlersRef.current.handleAppToolApproval(...args),
+    []
+  );
+
   return (
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
@@ -357,9 +361,9 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onApproveMentions={chatMessageActions.onApproveMentions}
               onCompactParticipant={chatMessageActions.onCompactParticipant}
               onLoadOlderMessages={props.onLoadOlderMessages}
-              onOpenThread={openThread}
+              onOpenThread={stableOpenThread}
               onRejectMentions={chatMessageActions.onRejectMentions}
-              onRespondToAppToolApproval={handleAppToolApproval}
+              onRespondToAppToolApproval={stableAppToolApproval}
               onRespondToChoice={chatMessageActions.onRespondToChoice}
               onScroll={viewport.updateStickToBottom}
               onScrollIntent={viewport.markUserScrollIntent}

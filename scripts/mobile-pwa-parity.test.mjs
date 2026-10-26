@@ -1,228 +1,80 @@
-// Desktop parity on the phone, driven through the real shell in Chrome against
-// the real MobileRelayControlService over the reference relay and mailbox:
-// members show the avatar the desktop resolves for them (catalog id and
-// provider, a drawn avatar fetched by id, the app mark for the assistant, the
-// provider glyph for an author with no record); internal system rows the
-// desktop never showed are dropped from what the phone stored before the
-// desktop stopped sending them; and the projects in the chat list fold away.
+// Desktop parity on the phone, driven through the real shell in Chrome
+// paired with a real hub (the User's own server), which holds the chats the
+// desktop published: members show the avatar the desktop resolves for them
+// (catalog id and provider, a drawn avatar fetched by id from the server, the
+// app mark for the assistant, the provider glyph for an author with no
+// record); internal system rows the desktop never showed are dropped from
+// what the phone stored before the desktop stopped sending them; and the
+// projects in the chat list fold away.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createRequire } from "node:module";
-import { createServer } from "node:http";
-import { createCipheriv, createHash, createHmac, randomBytes } from "node:crypto";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
-import { spawn, execSync } from "node:child_process";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import path from "node:path";
-
-const require = createRequire(import.meta.url);
-const { attach, getJson } = require("./cdp.cjs");
-const { createReferenceMailboxServer } = require("./mailbox-reference-server.cjs");
-const { createReferenceRelayServer } = require("./relay-reference-server.cjs");
-const { loadMobileOriginHeaders, mobileOriginHeadersForPath } = require("./mobile-origin-headers.cjs");
+import { attachApp, launchChrome, pairPage, serveMobileShell, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
-const root = path.join(repoRoot, "dist/mobile");
 const SITE_PORT = 8207;
-const MAILBOX_PORT = 8208;
 const CDP_PORT = 9378;
-const CHROME = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const RENDEZVOUS = "rv-parity";
 const CHAT_A = "conv-parity-alpha";
 const CHAT_B = "conv-parity-beta";
 const CHAT_C = "conv-parity-gamma";
-
-const SEAL_KEY = randomBytes(32).toString("base64url");
-const sealKeyBuffer = Buffer.from(SEAL_KEY, "base64url");
-const MAILBOX_TOKEN = createHmac("sha256", sealKeyBuffer).update("accord-mailbox-auth-v1", "utf8").digest("base64url");
-const MAILBOX_ID = "mb-" + createHmac("sha256", sealKeyBuffer).update("accord-mailbox-scope-v1", "utf8").digest("base64url").slice(0, 32);
 // A 1x1 PNG: the drawn avatar's bytes.
 const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
-const sealPayload = (payload) => {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", sealKeyBuffer, iv);
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(payload), "utf8"), cipher.final()]);
-  const tagged = Buffer.concat([ciphertext, cipher.getAuthTag()]);
-  return { v: 1, alg: "A256GCM", iv: iv.toString("base64url"), ct: tagged.toString("base64url") };
-};
-
-const TYPES = {
-  ".html": "text/html", ".js": "text/javascript", ".css": "text/css",
-  ".png": "image/png", ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json"
-};
-
-const killStaleCdp = () => {
-  try {
-    execSync(`lsof -ti tcp:${CDP_PORT} -sTCP:LISTEN | xargs kill -9`, { stdio: "ignore" });
-  } catch {
-    // nothing listening
-  }
-};
-
 const at = (minute) => new Date(Date.UTC(2026, 8, 18, 12, minute)).toISOString();
+// A row as an older desktop sent it straight to the phone.
 const row = (id, minute, role, participantLabel, content, extra = {}) => ({
   id, messageId: id, role, ...(participantLabel ? { participantLabel } : {}), content, status: "done", createdAt: at(minute), ...extra
 });
+// A message as the chat holds it on the server.
+const message = (id, minute, role, author, content, metadata) => ({
+  id, role: role === "you" ? "user" : role, content, status: "done", createdAt: at(minute),
+  ...(author ? { participantId: author.id, participantLabel: author.label || `@${author.handle}` } : {}),
+  ...(metadata ? { metadata } : {})
+});
 
-test("PWA parity: avatars resolve like the desktop, internal system rows are gone, projects fold", async () => {
-  const { MobileRelayControlService } = await import(path.join(repoRoot, "dist/main/main/services/mobileRelayControl.js"));
+// The members as the desktop keeps them: one with a chosen photo, one with
+// the provider logo, one with nothing chosen (hashed default from its id),
+// one drawn in the studio, and the chat assistant.
+const DREW = { id: "p-drew", handle: "drew", roleConfigId: "software-engineer", kind: "codex-cli", avatarId: "codex-cat" };
+const TAYLOR = { id: "p-taylor", handle: "taylor", roleConfigId: "code-reviewer", kind: "claude-code", avatarId: "claude-logo" };
+const MORGAN = { id: "p-morgan", handle: "morgan", roleConfigId: "product-designer", kind: "claude-code" };
+const GERA = { id: "p-gera", handle: "gera", roleConfigId: "product-strategist", kind: "codex-cli", avatarId: "custom:drawn-1" };
+const ADMIN = { id: "p-admin", handle: "admin", roleConfigId: "administrator", kind: "codex-cli", label: "Chat Assistant" };
+const member = ({ label: _label, ...participant }) => participant;
+
+test("PWA parity: avatars resolve like the desktop, internal system rows are gone, projects fold", { timeout: 240_000 }, async () => {
   const { CHAT_AVATAR_CATALOG, defaultChatAvatarId } = await import(path.join(repoRoot, "dist/main/shared/chatAvatarCatalog.js"));
-
-  const originHeaders = loadMobileOriginHeaders(root);
-  const site = createServer(async (req, res) => {
-    const url = req.url || "/";
-    if (url.startsWith("/v1/mailbox/") || url.startsWith("/v1/push/")) {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const upstream = await fetch(`http://127.0.0.1:${MAILBOX_PORT}${url}`, {
-        method: req.method,
-        headers: {
-          "content-type": req.headers["content-type"] || "application/json",
-          ...(req.headers.authorization ? { authorization: req.headers.authorization } : {})
-        },
-        body: req.method === "GET" || req.method === "HEAD" ? undefined : Buffer.concat(chunks)
-      });
-      const body = Buffer.from(await upstream.arrayBuffer());
-      res.writeHead(upstream.status, { "content-type": "application/json" });
-      res.end(body);
-      return;
-    }
-    let rel = url.split("?")[0];
-    if (rel === "/") rel = "/index.html";
-    try {
-      const body = await readFile(path.join(root, rel));
-      const headers = { ...mobileOriginHeadersForPath(originHeaders, rel) };
-      delete headers["Content-Security-Policy"];
-      res.writeHead(200, { "content-type": TYPES[path.extname(rel)] || "application/octet-stream", ...headers });
-      res.end(body);
-    } catch {
-      res.writeHead(404).end("not found");
-    }
-  });
-  await new Promise((r) => site.listen(SITE_PORT, "127.0.0.1", r));
-  const mailbox = createReferenceMailboxServer({ locked: true });
-  const mailboxServer = mailbox.server ?? mailbox;
-  await new Promise((r) => mailboxServer.listen(MAILBOX_PORT, "127.0.0.1", r));
-  const relay = createReferenceRelayServer();
-  const relayAddress = await relay.listen();
-  await fetch(`http://127.0.0.1:${MAILBOX_PORT}/v1/mailbox/register?mailboxId=${MAILBOX_ID}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${MAILBOX_TOKEN}` },
-    body: JSON.stringify({ tokenHashBase64Url: createHash("sha256").update(MAILBOX_TOKEN, "utf8").digest("base64url") })
-  });
-
-  let mailboxSeq = 0;
-  const postEnvelope = async (conversationId, kind, payload) => {
-    mailboxSeq += 1;
-    const res = await fetch(`http://127.0.0.1:${MAILBOX_PORT}/v1/mailbox/events?mailboxId=${MAILBOX_ID}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${MAILBOX_TOKEN}` },
-      body: JSON.stringify({
-        events: [{
-          eventId: `parity-${mailboxSeq}`, conversationId, logScopeId: conversationId,
-          originId: "desktop-origin", originSeq: mailboxSeq, eventHash: `hash-${mailboxSeq}`,
-          kind, payload: sealPayload(payload)
-        }]
-      })
-    });
-    const ack = await res.json();
-    assert.ok(res.ok && ack.appendedEventIds.length === 1, `mailbox did not append: ${JSON.stringify(ack)}`);
-  };
-
-  // The members as the desktop lists them: one with a chosen photo, one with
-  // the provider logo, one with nothing chosen (hashed default from its id),
-  // one drawn in the studio, and the chat assistant.
-  const members = [
-    { id: "p-drew", handle: "drew", mentionHandle: "drew", displayName: "@drew", roleLabel: "Software Engineer", kind: "codex-cli", avatarId: "codex-cat" },
-    { id: "p-taylor", handle: "taylor", mentionHandle: "taylor", displayName: "@taylor", roleLabel: "Reviewer", kind: "claude-code", avatarId: "claude-logo" },
-    { id: "p-morgan", handle: "morgan", mentionHandle: "morgan", displayName: "@morgan", roleLabel: "Designer", kind: "claude-code" },
-    { id: "p-gera", handle: "gera", mentionHandle: "gera", displayName: "@gera", roleLabel: "Strategist", kind: "codex-cli", avatarId: "custom:drawn-1" },
-    { id: "p-admin", handle: "admin", mentionHandle: "assistant", displayName: "Chat Assistant", roleLabel: "Chat Assistant", kind: "codex-cli", isAssistant: true }
-  ];
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: SITE_PORT, hubOrigins: [hub.base] });
   const morganDefault = defaultChatAvatarId("claude-code", "p-morgan");
   assert.ok(CHAT_AVATAR_CATALOG.some((entry) => entry.id === morganDefault && entry.mediaMode === "photo"), "the hashed default is a catalog photo");
-  const chats = [
-    { id: CHAT_A, title: "Alpha planning", group: "AccordAgents", snippet: "Let us plan.", who: "drew:", updatedAt: at(1), running: false, participants: ["@drew", "@taylor"], members },
-    { id: CHAT_B, title: "Beta bugs", group: "AccordAgents", snippet: "Fixed.", who: "you:", updatedAt: at(2), running: false, participants: ["@admin", "@morgan"], members },
-    // An older desktop's list: handles only, no member records, no avatar ids.
-    { id: CHAT_C, title: "Gamma notes", group: "Other project", snippet: "Notes.", who: "kim:", updatedAt: at(3), running: false, participants: ["@kim"], members: [] }
-  ];
-  const avatarReads = [];
-  const control = new MobileRelayControlService(
-    {
-      relayUrl: relayAddress.url, rendezvousId: RENDEZVOUS, relayCapability: "PAIRING-FINGERPRINT",
-      relaySealKeyBase64: SEAL_KEY, streamId: "route-parity:phone", reconnectDelayMs: 50
-    },
-    {
-      async sendMessage(request) {
-        return { conversation: { id: request.conversationId, kind: "chat", title: "t", createdAt: at(0), updatedAt: at(0), messages: [], findings: [], metadata: {} } };
-      }
-    },
-    {
-      async listChats() { return chats; },
-      async listTimeline() { return []; },
-      async listTimelinePage(conversationId) {
-        if (conversationId !== CHAT_A) return { events: [], hasMoreBefore: false };
-        return {
-          events: [
-            row("a-001", 10, "you", undefined, "Who is here?"),
-            row("a-002", 11, "participant", "@drew", "Drew, with a cat."),
-            row("a-003", 12, "participant", "@taylor", "Taylor, with the logo."),
-            row("a-004", 13, "participant", "@morgan", "Morgan, with the default."),
-            row("a-005", 14, "participant", "@gera", "Gera, drawn in the studio."),
-            row("a-006", 15, "participant", "Chat Assistant", "The assistant."),
-            row("a-007", 16, "participant", "@claude-reviewer", "Not a member of this chat.")
-          ],
-          hasMoreBefore: false, beforeMessageId: "a-001"
-        };
-      },
-      async readMemberAvatar(request) {
-        avatarReads.push(request);
-        return request.avatarId === "custom:drawn-1" ? { mediaType: "image/png", dataBase64: PNG_1X1 } : undefined;
-      },
-      isConversationAllowed() { return true; }
-    },
-    undefined,
-    undefined
-  );
+  // The drawn avatar's picture, published with the desktop's catalog.
+  const drawn = await hub.putBlob(Buffer.from(PNG_1X1, "base64"));
+  await hub.publishCatalog({ avatars: { "custom:drawn-1": { mimeType: "image/png", blob: drawn } } });
+  // Least recently changed first: the list comes newest first, Alpha on top.
+  // Gamma's one member has no role, so the server lists the handle and no
+  // member record: the phone knows it by handle only.
+  await hub.createChat(CHAT_C, { title: "Gamma notes", repoPath: "/work/Other project", participants: [{ id: "p-kim", handle: "kim", kind: "codex-cli" }] });
+  await hub.createChat(CHAT_B, { title: "Beta bugs", participants: [ADMIN, MORGAN, DREW, TAYLOR, GERA].map(member) });
+  await hub.createChat(CHAT_A, { title: "Alpha planning", participants: [DREW, TAYLOR, MORGAN, GERA, ADMIN].map(member), messages: [
+    message("a-001", 10, "you", undefined, "Who is here?"),
+    message("a-002", 11, "participant", DREW, "Drew, with a cat."),
+    message("a-003", 12, "participant", TAYLOR, "Taylor, with the logo."),
+    message("a-004", 13, "participant", MORGAN, "Morgan, with the default."),
+    message("a-005", 14, "participant", GERA, "Gera, drawn in the studio."),
+    message("a-006", 15, "participant", ADMIN, "The assistant."),
+    { ...message("a-007", 16, "participant", undefined, "Not a member of this chat."), participantLabel: "@claude-reviewer" }
+  ] });
+  const avatarReads = () => hub.requests.filter((request) => request.method === "GET" && request.path === "/v1/phone/avatar")
+    .map((request) => ({ conversationId: request.query.conversationId, avatarId: request.query.avatarId }));
 
-  killStaleCdp();
-  const profile = await mkdtemp(path.join(tmpdir(), "aa-parity-"));
-  const chrome = spawn(CHROME, [
-    "--headless=new", "--no-first-run", "--no-default-browser-check",
-    `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${profile}`,
-    "--window-size=430,860", `http://127.0.0.1:${SITE_PORT}/?qa=1`
-  ], { stdio: "ignore" });
-
+  const profile = await tempProfile("aa-parity-");
+  const chrome = launchChrome({ port: CDP_PORT, profile, url: `${site.origin}/`, width: 430, height: 860 });
   let app;
   try {
-    await control.connect();
-    let attachError;
-    for (let i = 0; i < 60 && !app; i += 1) {
-      try {
-        const targets = await getJson("/json", { port: CDP_PORT });
-        const page = targets.find((target) => target.type === "page" && (target.url || "").startsWith(`http://127.0.0.1:${SITE_PORT}`));
-        if (!page) throw new Error(`no page target yet (${targets.length} targets)`);
-        app = await attach({ port: CDP_PORT, title: page.title });
-      } catch (error) {
-        attachError = error;
-        await new Promise((r) => setTimeout(r, 500));
-      }
-    }
-    assert.ok(app, `could not attach to Chrome: ${attachError?.message ?? attachError}`);
-    for (let i = 0; i < 60; i += 1) {
-      const origin = await app.evaluate(`location.origin`).then((r) => r.result?.value).catch(() => undefined);
-      if (origin === `http://127.0.0.1:${SITE_PORT}`) break;
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    const evaluate = async (expr) => {
-      const result = await app.evaluate(expr);
-      if (result.exceptionDetails) {
-        throw new Error(result.exceptionDetails.exception?.description || JSON.stringify(result.exceptionDetails));
-      }
-      return result.result.value;
-    };
+    app = await attachApp({ port: CDP_PORT });
+    const evaluate = app.evaluate;
     const waitFor = async (read, predicate, description, attempts = 40) => {
       let value;
       for (let i = 0; i < attempts; i += 1) {
@@ -235,23 +87,8 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     const settle = () => new Promise((r) => setTimeout(r, 4000));
 
     await app.send("Page.enable");
-    await evaluate(`(() => {
-      localStorage.setItem("accordagents.mobile.pairing.v1", JSON.stringify({
-        endpoint: "http://127.0.0.1:${SITE_PORT}/",
-        outboxUrl: "http://127.0.0.1:${SITE_PORT}/v1/mailbox/events",
-        relayUrl: "${relayAddress.url}",
-        rendezvousId: "${RENDEZVOUS}",
-        fingerprint: "PAIRING-FINGERPRINT",
-        routingId: "route-parity",
-        streamId: "route-parity:phone",
-        relaySealKeyBase64: "${SEAL_KEY}",
-        pairedAt: new Date(0).toISOString()
-      }));
-      localStorage.removeItem("accordagents.mobile.activeConversationId.v1");
-      return true;
-    })()`);
+    await pairPage(app, { hub, siteOrigin: site.origin });
     await evaluate(`navigator.serviceWorker.ready.then(() => true)`);
-    await app.send("Page.reload", {});
     await settle();
 
     // The shared rules really are on the page: the same module the desktop
@@ -287,7 +124,7 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     ], "a member known only by handle shows initials, never a guessed animal");
     // The pictures themselves are served, not just named.
     for (const src of ["assets/avatars/codex-cat.png", "assets/avatars/claude-logo.png", `assets/avatars/${morganDefault}.png`]) {
-      const response = await fetch(`http://127.0.0.1:${SITE_PORT}/${src}`);
+      const response = await fetch(`${site.origin}/${src}`);
       assert.equal(response.status, 200, `${src} is served`);
       assert.ok((await response.arrayBuffer()).byteLength > 100, `${src} has bytes`);
     }
@@ -323,10 +160,7 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     await evaluate(`(() => { document.getElementById("chat-search-close").click(); return true; })()`);
     assert.equal((await plainHeaders())[0].expanded, "false", "closing the search restores the fold exactly as it was");
     // A reply into a folded project is not lost: its dot shows on the header.
-    await postEnvelope(CHAT_B, "mobile.timeline.events", {
-      type: "mobile.timeline.events", conversationId: CHAT_B,
-      events: [row("b-001", 20, "participant", "@morgan", "Fixed for real.")]
-    });
+    await hub.addMessages(CHAT_B, [message("b-001", 20, "participant", MORGAN, "Fixed for real.")]);
     await waitFor(() => evaluate(`(() => Boolean(document.querySelector('#chat-list .mobile-chat-group-title[data-group="AccordAgents"] .mobile-unread-dot')))()`), Boolean, "a folded project shows the unread dot");
     await evaluate(`(() => { document.querySelector('#chat-list .mobile-chat-group-title[data-group="AccordAgents"]').click(); return true; })()`);
     assert.equal((await headers())[0].rows, 2, "tapping again opens it");
@@ -340,7 +174,7 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
       }));
     })()`);
     await waitFor(rowAvatars, (rows) => rows.length === 6, "the members' rows arrive");
-    const drawnLoaded = await waitFor(rowAvatars, (rows) => rows.some((r) => r.handle === "@gera" && r.src && r.src.startsWith("data:image/png;base64,")), "the drawn avatar's bytes arrive over the relay and replace the initials");
+    const drawnLoaded = await waitFor(rowAvatars, (rows) => rows.some((r) => r.handle === "@gera" && r.src && r.src.startsWith("data:image/png;base64,")), "the drawn avatar's bytes arrive from the server and replace the initials");
     assert.deepEqual(drawnLoaded.map(({ handle, kind, media, src, text }) => ({ handle, kind, media, src: src && src.startsWith("data:") ? "data:" : src, text })), [
       { handle: "@drew", kind: "avatar-custom", media: "avatar-media-photo", src: "assets/avatars/codex-cat.png", text: null },
       { handle: "@taylor", kind: "avatar-anthropic", media: "avatar-media-glyph", src: "assets/avatars/claude-logo.png", text: null },
@@ -349,14 +183,14 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
       { handle: "Chat Assistant", kind: "avatar-custom", media: "avatar-media-glyph", src: "assets/accordagents-mark.png", text: null },
       { handle: "@claude-reviewer", kind: "avatar-anthropic", media: "avatar-media-glyph", src: "assets/avatars/claude-logo.png", text: null }
     ], "each row shows what the desktop shows; an author with no member record gets the provider glyph its name suggests");
-    assert.deepEqual(avatarReads, [{ conversationId: CHAT_A, avatarId: "custom:drawn-1" }], "the drawn avatar was asked for once, scoped to its chat");
+    assert.deepEqual(avatarReads(), [{ conversationId: CHAT_A, avatarId: "custom:drawn-1" }], "the drawn avatar was asked for once, scoped to its chat");
 
     // The members sheet and the "@" menu use the same pictures.
     await evaluate(`(() => { document.getElementById("chat-members-toggle").click(); return true; })()`);
     const sheet = await evaluate(`(() => { const describe = ${describeAvatar}; return [...document.querySelectorAll("#members-sheet-list .members-sheet-row .mobile-mention-avatar")].map(describe); })()`);
     assert.deepEqual(sheet.map((a) => a.kind), ["avatar-custom", "avatar-anthropic", "avatar-custom", "avatar-custom", "avatar-custom"]);
     assert.ok(sheet[3].src.startsWith("data:image/png;base64,"), "the drawn avatar is cached for the session, not fetched again");
-    assert.equal(avatarReads.length, 1);
+    assert.equal(avatarReads().length, 1);
     await evaluate(`(() => { document.getElementById("members-sheet-close").click(); return true; })()`);
 
     // --- a thread has one way back, and it leads to the chat ----------------
@@ -365,10 +199,7 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     const visibleBacks = async () => await evaluate(`(() => [...document.querySelectorAll("#timeline-screen .mobile-chat-header .mobile-icon-button")].filter((n) => n.getClientRects().length > 0).map((n) => n.id))()`);
     assert.deepEqual(await visibleBacks(), ["back-to-chats"], "a chat shows one arrow, to the list");
     await evaluate(`(() => { sessionStorage.setItem("accordagents.mobile.openThreadRootId.v1", "a-001"); return true; })()`);
-    await postEnvelope(CHAT_A, "mobile.timeline.events", {
-      type: "mobile.timeline.events", conversationId: CHAT_A,
-      events: [row("a-001-reply", 20, "participant", "@drew", "In the thread.", { threadRootId: "a-001" })]
-    });
+    await hub.addMessages(CHAT_A, [message("a-001-reply", 20, "participant", DREW, "In the thread.", { chatThreadRootId: "a-001" })]);
     await waitFor(() => evaluate(`(() => document.getElementById("chat-title").textContent)()`), (text) => text === "Thread", "the thread opens");
     assert.deepEqual(await visibleBacks(), ["back-to-timeline"], "a thread shows one arrow, to the chat — not two");
 
@@ -377,30 +208,29 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     assert.ok(await evaluate(`(() => document.getElementById("timeline-screen").classList.contains("is-active"))()`), "and stays in the chat");
 
     // --- a run whose last message the desktop hides still ends on the phone
-    await postEnvelope(CHAT_A, "mobile.timeline.events", {
-      type: "mobile.timeline.events", conversationId: CHAT_A,
-      events: [{ id: "run-9-live", messageId: "run-9-live", role: "participant", participantLabel: "@drew", content: "@drew is running...", status: "pending", createdAt: at(30), runId: "run-9" }]
-    });
+    const run9 = { ...message("run-9-live", 30, "participant", DREW, ""), status: "pending", metadata: { runId: "run-9" } };
+    await hub.addMessages(CHAT_A, [run9]);
     // The phone renders a pending row as an animated "Thinking"; it is
     // identified by its status.
     const pendingRows = async () => await evaluate(`(() => [...document.querySelectorAll('#message-list .message-row[data-status="Running"]')].map((n) => n.dataset.rowKey))()`);
     await waitFor(pendingRows, (rows) => rows.length === 1, "the member's live row is shown");
-    await postEnvelope(CHAT_A, "mobile.timeline.events", {
-      type: "mobile.timeline.events", conversationId: CHAT_A,
-      events: [{ id: "run-9-end", messageId: "run-9-end", role: "participant", participantLabel: "@drew", content: "Awaiting user approval.", status: "done", createdAt: at(31), runId: "run-9", hidden: true }]
-    });
+    // The run ends on a waiting status, which the desktop keeps off its
+    // timeline: the server sends it marked hidden.
+    await hub.updateMessages(CHAT_A, [{ ...run9, content: "Awaiting user approval.", status: "done" }]);
     await waitFor(pendingRows, (rows) => rows.length === 0, "a hidden terminal settles the live row");
     assert.ok(!(await evaluate(`(() => [...document.querySelectorAll("#message-list .message-content")].some((n) => n.textContent.includes("Awaiting user approval")))()`)), "and stores no bubble for it");
 
     // --- internal system rows stored before the desktop stopped sending them
     // are dropped once; the phone's own machine notes stay ------------------
-    await postEnvelope(CHAT_A, "mobile.timeline.events", {
+    // The server never sends such rows; a phone that had them stored them
+    // from an older desktop, through the same ingest path.
+    await evaluate(`AccordAgentsMobile.handleRelayTimelinePayload(${JSON.stringify({
       type: "mobile.timeline.events", conversationId: CHAT_A,
       events: [
         row("auto-resume-1", 17, "system", undefined, "Auto-resumed @taylor after member request.\nTarget replies/errors are in the transcript above."),
         row("machine-warning:run-9:0", 18, "system", undefined, "The machine restarted this run.")
       ]
-    });
+    })})`);
     const systemRows = async () => await evaluate(`(() => [...document.querySelectorAll('#message-list .message-row[data-author="system"] .message-content')].map((n) => n.textContent.slice(0, 20)))()`);
     await waitFor(systemRows, (rows) => rows.length === 2, "an older desktop's system rows are stored as bubbles");
     await evaluate(`(() => { localStorage.removeItem("accordagents.mobile.internalSystemRowsDropped.v1"); return true; })()`);
@@ -475,10 +305,7 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     // the desktop put it in the main timeline, and the User -- still looking
     // at the thread she wrote in -- could not see her own message at all.
     await evaluate(`(() => { sessionStorage.setItem("accordagents.mobile.openThreadRootId.v1", "a-001"); return true; })()`);
-    await postEnvelope(CHAT_A, "mobile.timeline.events", {
-      type: "mobile.timeline.events", conversationId: CHAT_A,
-      events: [row("a-001-reply-2", 24, "participant", "@drew", "Still in the thread.", { threadRootId: "a-001" })]
-    });
+    await hub.addMessages(CHAT_A, [message("a-001-reply-2", 24, "participant", DREW, "Still in the thread.", { chatThreadRootId: "a-001" })]);
     await waitFor(() => evaluate(`(() => document.getElementById("chat-title").textContent)()`), (text) => text === "Thread", "the thread is open again");
     await evaluate(`(() => {
       const input = document.getElementById("composer-input");
@@ -503,12 +330,9 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     );
   } finally {
     app?.close();
-    control.close();
     chrome.kill("SIGKILL");
-    killStaleCdp();
-    site.close();
-    mailboxServer.close();
-    await relay.close();
+    await site.close();
+    await hub.close();
     await rm(profile, { recursive: true, force: true }).catch(() => undefined);
   }
 });

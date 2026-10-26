@@ -1,5 +1,7 @@
 # Machines integration checkpoint — 2026-09-07
 
+Superseded in part on 2026-10-26: the relay is removed; machines and the phone talk only to the User's own server (see docs/parity-requirements.md).
+
 This is an unfinished integration checkpoint on `drew/machines-final`, based
 on `8b9619c`, not cutover or release approval. The root checkout remains clean
 `beta`. Both requirements in `docs/parity-requirements.md` still apply.

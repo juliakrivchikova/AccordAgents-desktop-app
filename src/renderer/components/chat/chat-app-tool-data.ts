@@ -2,6 +2,7 @@ import type {
   ChatAgentMode,
   ChatAppToolApproval,
   ChatParticipantChangeRequest,
+  ChatParticipantRemovalRequest,
   ChatParticipantRequestApprovalRequest,
   ChatParticipantRequestBatch,
   ChatPermissionChangeRequest,
@@ -72,7 +73,8 @@ export function chatAppToolApprovals(conversation: Conversation | undefined): Ch
     const isParticipantChangeRequest =
       approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
       (Boolean(chatParticipantChangeRequest(approval as ChatAppToolApproval)) ||
-        Boolean(chatRoleParticipantChangeRequest(approval as ChatAppToolApproval)));
+        Boolean(chatRoleParticipantChangeRequest(approval as ChatAppToolApproval)) ||
+        Boolean(chatParticipantRemovalRequest(approval as ChatAppToolApproval)));
     const isParticipantRequest =
       approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
       Boolean(chatParticipantRequestApprovalRequest(approval as ChatAppToolApproval));
@@ -136,6 +138,28 @@ export function chatParticipantChangeRequest(approval: ChatAppToolApproval): Cha
       operation?.type === "add_new_participant_to_chat" || operation?.type === "add_existing_participant_to_chat"
     )
     ? {
+        reason: typeof request.reason === "string" ? request.reason : undefined,
+        operations: request.operations
+      }
+    : undefined;
+}
+
+/** A member's request to remove other members from the chat, when this approval is one. */
+export function chatParticipantRemovalRequest(approval: ChatAppToolApproval): ChatParticipantRemovalRequest | undefined {
+  if (approval.toolName !== APP_PARTICIPANTS_REQUEST_CHANGE_TOOL) {
+    return undefined;
+  }
+  const request = approval.request as Partial<ChatParticipantRemovalRequest>;
+  return request.kind === "participant_removal" &&
+    Array.isArray(request.operations) &&
+    request.operations.length > 0 &&
+    request.operations.every((operation) =>
+      operation?.type === "remove_participant_from_chat" &&
+      typeof operation.participantId === "string" &&
+      typeof operation.handle === "string"
+    )
+    ? {
+        kind: "participant_removal",
         reason: typeof request.reason === "string" ? request.reason : undefined,
         operations: request.operations
       }

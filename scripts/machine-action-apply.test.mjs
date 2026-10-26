@@ -24,7 +24,8 @@ function pairing(issuer) {
     version: 1, purpose: "machine-host", issuer,
     rendezvousId: "action-room", stableRoutingId: "route-action",
     relaySealKeyBase64: Buffer.alloc(32, 9).toString("base64url"),
-    relayUrl: "ws://127.0.0.1:1/v1/relay",
+    // The User's server; the stub client below never dials it.
+    hubUrl: "http://127.0.0.1:1",
     capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }],
     fingerprint: "ACTION-TEST", createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 3600_000).toISOString()
@@ -78,9 +79,8 @@ async function harness(revisions) {
       conversationId: "chat", kind, payload,
       logScopeId: `device:action-room:${JSON.stringify(["chat", "actions"])}`
     });
-    await host.eventChannel.receive({
-      protocol: "accord-device-events-v1", from: sender.originId, to: identity.originId, type: "event", event
-    });
+    // A durable event reaches the machine only through the server's order.
+    assert.equal(await host.receiveFromHub(event), "delivered");
     return event;
   };
   return { host, send, inserted, logs, cleanup: async () => { host.close(); await rm(dir, { recursive: true, force: true }); } };
@@ -184,9 +184,7 @@ test("a permission answered elsewhere is told to this machine's provider exactly
         conversationId: "chat", kind: "permission.decided", payload,
         logScopeId: `device:action-room:${JSON.stringify(["chat", "actions"])}`
       });
-      await host.eventChannel.receive({
-        protocol: "accord-device-events-v1", from: sender.originId, to: identity.originId, type: "event", event
-      });
+      assert.equal(await host.receiveFromHub(event), "delivered");
     };
     await send({ operationId: "permission:card-1:allow", targetKey: "approval:card-1", stateId: "approved", detail: { approve: true } });
     assert.deepEqual(answered, [true], "the provider on this machine was told");

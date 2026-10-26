@@ -12,7 +12,6 @@ import { DEVICE_EVENT_PROBE_LIMIT, DeviceEventProjectionPendingError } from "../
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import { ChatEventLogService, verifySignedChatEvent } from "./chatEventLog";
 import type { StorageService } from "./storage";
-import { DeviceEventMailbox } from "./deviceEventMailbox";
 import { DeviceEventBlobIncompleteError } from "./deviceEventBlobStorage";
 import { DevicePacketAuthenticationError, signDevicePacket, verifyDevicePacket } from "./devicePacketAuthentication";
 
@@ -25,7 +24,7 @@ interface DeviceEventChannelOptions {
   peerPublicKeyDerBase64: string;
   pairing?: MobilePairingPackage;
   isPeerConnected?: () => boolean;
-  /** Seals before sending over the live room, or the same sealed mailbox. */
+  /** Seals before sending over the live room. */
   send(packet: DeviceEventPacket): Promise<void>;
   /** Domain owner persists before returning. Native effects must be guarded
    * by durable command receipts; a process crash may replay an unapplied event. */
@@ -55,13 +54,22 @@ interface DeviceEventChannelOptions {
   /** The User's hub carries this channel's events: they are delivered by the
    *  hub's order (HubSync hands each in through `receiveFromHub`), so the
    *  channel sends no events, acknowledgements or repair requests itself,
-   *  and keeps no mailbox. */
+   *  keeps no mailbox, and publishes without delivery rows (`recipients` is
+   *  ignored): a hub reader is never waited on. */
   hubMode?: boolean;
+  /** Through the hub: a gap in a chain this channel waits on (or a body it
+   *  lacks) is asked of the hub instead of the peer. Called without waiting
+   *  (the answer comes back through `receiveFromHub`), at most every
+   *  HUB_GAP_REPAIR_MS per gap. */
+  hubRepair?: (gap: DeviceEventGap) => void;
   onError(error: Error): void;
   /** First wait before a held (deferred or failing) event is tried again; it
    *  doubles per attempt up to sixty times this. Tests shorten it. */
   heldRetryBaseMs?: number;
 }
+
+/** Through the hub, a gap is asked about again at most this often. */
+const HUB_GAP_REPAIR_MS = 30_000;
 
 /** A deferred application that named what it is waiting for. */
 export interface DeferredWithDependency {
@@ -82,7 +90,6 @@ export class DeviceEventChannelClosedError extends Error {
 }
 
 export class DeviceEventChannel {
-  private readonly mailbox?: DeviceEventMailbox;
   private inbound: Promise<void> = Promise.resolve();
   private flushing?: Promise<void>;
   private flushRequested = false;
@@ -107,15 +114,6 @@ export class DeviceEventChannel {
     if (options.peerDeviceId !== `device-${hash.slice(0, 32)}`) {
       throw new Error("Device event peer identity does not match its enrolled signing key.");
     }
-    if (options.pairing?.outboxUrl && !options.hubMode) {
-      this.mailbox = new DeviceEventMailbox({
-        storage: options.storage, pairing: options.pairing,
-        localDeviceId: options.localDeviceId, peerDeviceId: options.peerDeviceId,
-        ...(options.heldKinds ? { heldKinds: options.heldKinds } : {}),
-        authenticate: packet => this.authenticate(packet),
-        receive: (packet) => this.receive(packet), onError: options.onError
-      });
-    }
   }
 
   async publish(request: {
@@ -126,7 +124,7 @@ export class DeviceEventChannel {
     /** Every device that should receive this event. Defaults to this peer.
      *  A machine's result is minted once and delivered to each of the owner's
      *  devices, so whichever of them is online receives it and retention waits
-     *  for all of them. */
+     *  for all of them. Ignored through the hub: no delivery row is kept. */
     recipients?: Array<{ deviceId: string; channelId: string }>;
   }): Promise<ChatEventEnvelope> {
     if (this.stopped) throw new Error("Device event channel is closed.");
@@ -137,9 +135,14 @@ export class DeviceEventChannel {
       // use the same HLC, immutable event log and gap rules.
       logScopeId: request.sharedScope ? CHAT_ACTION_LOG_SCOPE : this.scope(request.conversationId, request.scope ?? "actions"),
       payload,
-      recipients: request.recipients?.length
-        ? request.recipients
-        : [{ deviceId: this.options.peerDeviceId, channelId: this.options.channelId }]
+      // Through the hub nobody waits on this device for the event: the
+      // writer is done once the hub holds it, and each reader's place in the
+      // hub's order is its only acknowledgement. No delivery row is kept.
+      recipients: this.options.hubMode
+        ? []
+        : request.recipients?.length
+          ? request.recipients
+          : [{ deviceId: this.options.peerDeviceId, channelId: this.options.channelId }]
     });
     this.scheduleFlush();
     return result.event;
@@ -147,14 +150,12 @@ export class DeviceEventChannel {
 
   start(): void {
     this.stopped = false;
-    this.mailbox?.start();
     this.scheduleFlush();
     void this.enqueue(() => this.drain()).catch((error) => this.report(error));
   }
 
   close(): void {
     this.stopped = true;
-    this.mailbox?.close();
     if (this.retry) clearTimeout(this.retry);
     this.retry = undefined;
   }
@@ -449,8 +450,10 @@ export class DeviceEventChannel {
     for (const gap of gaps) {
       const key = JSON.stringify(gap);
       const previous = this.requestedGaps.get(key);
-      if (previous !== undefined && performance.now() - previous < 5_000) continue;
-      await this.sendControl(this.packet({ type: "resend", gap, requestId: randomUUID() }));
+      if (previous !== undefined && performance.now() - previous < (this.options.hubMode ? HUB_GAP_REPAIR_MS : 5_000)) continue;
+      // Through the hub the peer is never asked: the hub holds the order.
+      if (this.options.hubMode) this.options.hubRepair?.(gap);
+      else await this.sendControl(this.packet({ type: "resend", gap, requestId: randomUUID() }));
       this.requestedGaps.set(key, performance.now());
     }
     for (const [key, dependency] of dependencies) {
@@ -539,7 +542,7 @@ export class DeviceEventChannel {
     if (this.retry) clearTimeout(this.retry);
     this.retry = setTimeout(() => {
       this.retry = undefined;
-      void Promise.allSettled([this.flush(), this.mailbox?.flush(), this.receivePending ? this.enqueue(() => this.drain()) : undefined]).then((results) => {
+      void Promise.allSettled([this.flush(), this.receivePending ? this.enqueue(() => this.drain()) : undefined]).then((results) => {
         for (const result of results) if (result.status === "rejected") this.report(result.reason);
       }).finally(() => {
         if (!this.stopped && !this.retry) {
@@ -559,12 +562,8 @@ export class DeviceEventChannel {
     // Through a hub, delivery is the hub's acceptance: no receipts travel.
     if (this.options.hubMode) return;
     packet = await this.authenticate(packet);
-    const writes: Promise<void>[] = this.options.isPeerConnected?.() === false ? [] : [this.options.send(packet)];
-    if (this.mailbox) writes.push(this.mailbox.sendPacket(packet));
-    if (!writes.length) throw new Error("The enrolled peer is unreachable.");
-    // A slow HTTP mailbox cannot stall the live-room apply queue. Promise.any
-    // observes failures in both paths while resolving on the first success.
-    await Promise.any(writes);
+    if (this.options.isPeerConnected?.() === false) throw new Error("The enrolled peer is unreachable.");
+    await this.options.send(packet);
   }
 
   private async authenticate(packet: DeviceEventPacket): Promise<DeviceEventPacket> {

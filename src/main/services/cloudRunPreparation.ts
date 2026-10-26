@@ -17,6 +17,9 @@ interface Options {
   listMachines(): Promise<MachineRecord[]>;
   listInstalls(): Promise<MachineInstallRecord[]>;
   createMachine(name: string, awsInstanceId: string): Promise<MachineRecord>;
+  /** Throws, with what Settings says, when there is no server of the User's
+   *  for a cloud machine to connect through: checked before AWS is touched. */
+  requireServer?(): Promise<void>;
   install(request: MachineInstallRequest, progress: (snapshot: MachineInstallSnapshot) => void): Promise<MachineInstallResult>;
   /** A setup or update already running on the machine (the automatic
    *  upgrade after a desktop update): waited for, so selecting a member does
@@ -267,10 +270,11 @@ export class CloudRunPreparationService {
       }
       return { machine: prepared.machine };
     }
+    await this.options.requireServer?.();
     this.report({ message: "Checking your AWS instance…" });
     const status = await this.options.aws.status();
     if (!status.handle || !status.configured || status.state !== "running") {
-      throw new Error(status.message || "Start your AWS instance in Settings → AWS, then select Cloud run again.");
+      throw new Error(status.message || (!status.configured ? status.notices?.join(" ") : undefined) || "Start your AWS instance in Settings → AWS, then select Cloud run again.");
     }
     const instanceId = status.handle.instanceId;
     if (expectedInstanceId && instanceId !== expectedInstanceId) {

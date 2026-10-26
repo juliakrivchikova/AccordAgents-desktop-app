@@ -11,7 +11,7 @@ import { MachineRow } from "./machine-row";
 /**
  * Machines transport: computers that run the app without a window and host
  * participants. Adding one mints an enrollment file; installing that file on
- * the computer connects it through the relay.
+ * the computer connects it through the User's own server.
  */
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -255,7 +255,7 @@ export function MachinesSection(): JSX.Element {
                 <div className="gen-row-title">Enrollment for {enrollment.machine.name}</div>
                 <div className="gen-row-desc">
                   Save this as <code>enrollment.json</code> on the machine and start the runtime with
-                  {" "}<code>accordagents-machine --enrollment enrollment.json</code>. The file carries the relay key: treat it like a password.
+                  {" "}<code>accordagents-machine --enrollment enrollment.json</code>. The file carries the machine's pairing key: treat it like a password.
                 </div>
                 <textarea
                   className="machines-enrollment-json"

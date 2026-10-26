@@ -30,6 +30,10 @@ export interface ChatActionEffectChat {
   }): Promise<unknown>;
   cancelRun(runId: string): boolean;
   conversationIdForRun(runId: string): string | undefined;
+  /** A phone turn (named before it starts) whose member lives here. */
+  ownsPhoneRun?(conversationId: string, runId: string): Promise<boolean | undefined>;
+  /** Stops a phone turn that is not running here yet: it never starts. */
+  stopUnstartedPhoneRun?(conversationId: string, runId: string): Promise<boolean>;
 }
 
 export interface ChatActionEffectStorage {
@@ -80,7 +84,14 @@ export function createChatActionEffects(deps: {
     } } : {}),
     async owns(conversationId, targetKey) {
       const run = /^run:(.+)$/.exec(targetKey);
-      if (run) return deps.chat.conversationIdForRun(run[1]) !== undefined;
+      if (run) {
+        if (deps.chat.conversationIdForRun(run[1]) !== undefined) return true;
+        // A Stop the User gave on her phone may arrive before the turn it
+        // names has started here (a machine that was asleep reads both at
+        // once): its member's home owns it all the same.
+        if (!deps.chat.ownsPhoneRun) return false;
+        return deps.chat.ownsPhoneRun(conversationId, run[1]);
+      }
       const approval = /^approval:(.+)$/.exec(targetKey);
       if (approval) {
         if (deps.chat.ownsAppToolApproval) return deps.chat.ownsAppToolApproval(conversationId, approval[1]);
@@ -129,6 +140,9 @@ export function createChatActionEffects(deps: {
       if (request.kind === "choice.answered") throw new Error("The durable choice executor is not available.");
       if (request.kind === "turn.stop.requested") {
         const runId = request.targetKey.replace(/^run:/, "");
+        if (deps.chat.stopUnstartedPhoneRun && await deps.chat.stopUnstartedPhoneRun(request.conversationId, runId)) {
+          return "stopped the turn before it started";
+        }
         const stopped = deps.chat.cancelRun(runId);
         // Honest either way: a Stop the runtime could not confirm is recorded
         // as uncertain rather than as a completed stop.

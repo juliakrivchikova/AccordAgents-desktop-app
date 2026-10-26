@@ -7,7 +7,8 @@ import { StorageService } from "../dist/main/main/services/storage.js";
 import { ChatEventLogService } from "../dist/main/main/services/chatEventLog.js";
 import { MachineHostService } from "../dist/main/main/services/machineHost.js";
 import { machineCommandId, machineCommandTerminalId } from "../dist/main/shared/machineLink.js";
-import { sealMobileRelayPayload } from "../dist/main/main/services/mobileRelaySealing.js";
+import { sealChannelPayload } from "../dist/main/main/services/machineChannelSealing.js";
+import { deriveMachineChannelKey } from "../dist/main/shared/machineChannelKey.js";
 import { NativeProcessRegistry } from "../dist/main/main/services/nativeProcessRegistry.js";
 
 test("durable admission survives a receiver restart before the chat arrived; replay never executes twice", async () => {
@@ -58,12 +59,17 @@ test("SQLITE_FULL before command acceptance never acknowledges or runs; a failed
   try {
     await f.sql("create trigger reject_command before insert on native_commands begin select raise(abort, 'SQLITE_FULL'); end;");
     const event = await f.makeRequest("full");
-    await assert.rejects(f.deliver(event));
+    // Through the server's order the signed command is stored here first; the
+    // server moves on, and this machine's channel, not a redelivery, offers
+    // it again. Not acknowledged means no receipt: it was never applied.
+    assert.equal(await f.deliver(event), "delivered");
+    assert.ok(await f.store.getChatEvent(event.eventId), "the command is kept on this machine");
     assert.equal(await f.store.deviceEvents().receipt(event.eventId), undefined);
     assert.equal(await f.store.nativeCommands().forRun("full"), undefined);
     assert.deepEqual(f.runs, []);
     await f.sql("drop trigger reject_command; create trigger reject_claim before update on native_commands when new.phase = 'claimed' begin select raise(abort, 'SQLITE_FULL'); end;");
-    await f.deliver(event);
+    // The channel's own retry of what it holds, without waiting out its backoff.
+    f.host.eventChannel.retryHeldNow();
     await f.until(async () => f.logs.some(entry => entry.event === "machine-host.turn.not-stored"));
     assert.equal((await f.store.nativeCommands().forRun("full")).phase, "queued");
     assert.deepEqual(f.runs, []);
@@ -105,7 +111,9 @@ test("settings secrets stay sealed in the event store and receiver input uses th
   const f = await fixture();
   try {
     const snapshot = { version: 1, exportedAt: new Date().toISOString(), settingsJson: "{}", agentEnvironment: [{ key: "TOKEN", value: "synthetic-secret-unique" }] };
-    const sealedSettings = await sealMobileRelayPayload(snapshot, f.pairing.relaySealKeyBase64);
+    // Sealed as the enrolling desktop seals it now: with the key only it and
+    // this machine derive (src/main/services/machineLink.ts channelSealKey).
+    const sealedSettings = await sealChannelPayload(snapshot, deriveMachineChannelKey(f.identity, f.peer.publicKeyDerBase64, f.pairing.rendezvousId));
     const event = await f.request("sealed", { sealedSettings });
     await f.until(() => f.terminal("sealed"));
     assert.equal(JSON.stringify(event).includes("synthetic-secret-unique"), false);
@@ -199,7 +207,7 @@ async function fixture() {
   const source = new StorageService({ dbPath: path.join(directory, "source.sqlite3") });
   const log = new ChatEventLogService(source), hostLog = new ChatEventLogService(store);
   const identity = await log.getOrCreateDeviceIdentity(), peer = await hostLog.getOrCreateDeviceIdentity();
-  const pairing = { version: 1, purpose: "machine-host", issuer: identity, rendezvousId: "test-room", relayUrl: "ws://127.0.0.1:1/v1/relay", relaySealKeyBase64: Buffer.alloc(32, 17).toString("base64url"), fingerprint: "test", stableRoutingId: "test-route", capabilities: [] };
+  const pairing = { version: 1, purpose: "machine-host", issuer: identity, rendezvousId: "test-room", hubUrl: "http://127.0.0.1:1", relaySealKeyBase64: Buffer.alloc(32, 17).toString("base64url"), fingerprint: "test", stableRoutingId: "test-route", capabilities: [] };
   const logs = [], runs = [], imports = [], conversations = new Map();
   const registryPath = path.join(directory, "native-processes.sqlite3");
   const conversation = { id: "chat", kind: "chat", title: "test", metadata: { participants: [{ id: "member", homeMachineId: "home" }] }, findings: [],
@@ -218,11 +226,13 @@ async function fixture() {
   });
   await store.deviceEvents().saveHostMachineId(pairing.rendezvousId, "home");
   host = create(); host.desktopDeviceId = identity.originId; await host.start();
-  const deliver = event => host.eventChannel.receive({ protocol: "accord-device-events-v1", from: identity.originId, to: peer.originId, type: "event", event });
+  // A durable event reaches the machine only through the server's order:
+  // HubSync hands each in (src/machine/main.ts), the room never carries it.
+  const deliver = event => host.receiveFromHub(event);
   const make = async (body, { scope = "actions", eventId } = {}) => (await log.appendLocalEvent({ conversationId: "chat", logScopeId: `device:${pairing.rendezvousId}:${JSON.stringify(["chat", scope])}`, kind: body.type, payload: body, eventId })).event;
   const makeRequest = (runId, extra = {}) => make({ type: "machine.turn.request", conversationId: "chat", participantId: "member", participant: { id: "member", homeMachineId: "home" }, runId, pendingMessageId: `pending-${runId}`, messageId: "message", requestedAt: new Date().toISOString(), ...extra }, { eventId: machineCommandId(runId) });
   return {
-    store, source, log, registryPath, logs, runs, imports, pairing, conversation, conversations, get host() { return host; },
+    store, source, log, identity, peer, registryPath, logs, runs, imports, pairing, conversation, conversations, get host() { return host; },
     deliver, makeRequest,
     request: async (runId, extra) => { const event = await makeRequest(runId, extra); await deliver(event); return event; },
     send: async (body, options) => { const event = await make(body, options); await deliver(event); return event; },

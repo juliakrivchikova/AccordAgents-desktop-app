@@ -1,72 +1,42 @@
 // End-to-end: a turn that STARTS on the phone, from send to cleared row.
 //
-// The existing live harness proves an in-progress row appears, holds and
-// streams. It never proves the row goes away, and it never starts the turn from
-// the phone — it drives desktop-originated progress only. That is the exact gap
-// User's screenshot fell into: she sent "Йоу" from the phone, the answer
-// arrived, and a "Thinking" row stayed above it forever.
+// The live harness proves an in-progress row appears, holds and streams. It
+// never proves the row goes away, and it never starts the turn from the phone
+// — it drives desktop-originated progress only. That is the exact gap User's
+// screenshot fell into: she sent "Йоу" from the phone, the answer arrived, and
+// a "Thinking" row stayed above it forever.
 //
-// The one detail every earlier test got wrong is the run id. A participant
-// answering a phone-sent message does NOT run under the ingest run
-// (`mobile-<eventId>`) — chat.ts fans out with a fresh run id and only carries
-// the mobile event id along inside agentProgress. Every unit test here echoed
-// `request.runId` back as the progress run id, so the placeholder and the
-// answer always shared a key and always reconciled. Real runs never do.
-//
-// Nothing between the two ends is faked: the events come out of
-// MobileRelayControlService, travel a real relay socket and a real mailbox, and
-// land in a real browser running the built PWA, which sends by typing into its
-// own composer.
+// The phone talks to the User's own server only. It decides who its message
+// is for, by the desktop's own rules, and signs it into the server's order;
+// until the member's home starts the turn the phone shows the member it
+// addressed, waiting. The home starts the turn under the run id every device
+// computes for it (phone-<message>-<member>) and publishes the member's
+// message and its live text there. Here the server is a real hub, the live
+// text goes through the desktop's real publisher (HubPhonePublisher), and the
+// phone is the built PWA in a real browser, which sends by typing into its own
+// composer. The home's own turn logic is played by this harness, the way the
+// earlier harness played the desktop's chat sender: it answers each message
+// the phone placed in the server's order, in the shapes the desktop's chat
+// publishes.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRequire } from "node:module";
-import { createServer } from "node:http";
-import { createCipheriv, createHash, createHmac, randomBytes } from "node:crypto";
-import { readFile, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { spawn, execSync } from "node:child_process";
-import { tmpdir } from "node:os";
+import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { attachApp, launchChrome, openChat, pairPage, serveMobileShell, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
 const require = createRequire(import.meta.url);
-const { attach, getJson } = require("./cdp.cjs");
-const { createReferenceMailboxServer } = require("./mailbox-reference-server.cjs");
-const { createReferenceRelayServer } = require("./relay-reference-server.cjs");
-const { loadMobileOriginHeaders, mobileOriginHeadersForPath } = require("./mobile-origin-headers.cjs");
-
 const repoRoot = path.resolve(import.meta.dirname, "..");
-const root = path.join(repoRoot, "dist/mobile");
 const SITE_PORT = 8291;
-const MAILBOX_PORT = 8292;
 const CDP_PORT = 9352;
-const CHROME = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const CONVERSATION = "conv-turn";
-const RENDEZVOUS = "rv-turn";
-
-const SEAL_KEY = randomBytes(32).toString("base64url");
-const sealKeyBuffer = Buffer.from(SEAL_KEY, "base64url");
-const MAILBOX_TOKEN = createHmac("sha256", sealKeyBuffer).update("accord-mailbox-auth-v1", "utf8").digest("base64url");
-const MAILBOX_ID = "mb-" + createHmac("sha256", sealKeyBuffer).update("accord-mailbox-scope-v1", "utf8").digest("base64url").slice(0, 32);
-
-const TYPES = {
-  ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css",
-  ".png": "image/png", ".webmanifest": "application/manifest+json"
-};
-
-const sealPayload = (payload) => {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", sealKeyBuffer, iv);
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(payload), "utf8"), cipher.final()]);
-  const tagged = Buffer.concat([ciphertext, cipher.getAuthTag()]);
-  return { v: 1, alg: "A256GCM", iv: iv.toString("base64url"), ct: tagged.toString("base64url") };
-};
-
-const killStaleCdp = () => {
-  try {
-    execSync(`lsof -ti tcp:${CDP_PORT} -sTCP:LISTEN | xargs kill -9`, { stdio: "ignore" });
-  } catch {
-    // nothing listening
-  }
-};
+// The chat's members: two to address, and the assistant an unaddressed
+// message goes to when nobody has spoken yet.
+const MEMBERS = [
+  { id: "participant-taylor", handle: "taylor", roleConfigId: "software-engineer", kind: "claude-code" },
+  { id: "participant-drew", handle: "drew", roleConfigId: "software-engineer", kind: "codex-cli" },
+  { id: "participant-admin", handle: "admin", roleConfigId: "administrator", kind: "claude-code" }
+];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -89,427 +59,127 @@ async function until(label, predicate, { timeoutMs = 25_000, stepMs = 400, detai
   }
 }
 
-/** The desktop's projection of a stored conversation, byte-for-byte the shape
- *  mobileRelayChatCatalog builds in main.ts. */
-function projectTimeline(conversation) {
-  return conversation.messages
-    .filter((message) => message.content.trim())
-    .map((message) => {
-      const explicit = message.metadata?.mobileEventId;
-      const sourceMessageId = message.metadata?.sourceMessageId;
-      const runId = message.metadata?.runId;
-      const mobileEventId = typeof explicit === "string" && explicit.trim()
-        ? explicit.trim()
-        : (typeof sourceMessageId === "string" && typeof runId === "string" && runId === `mobile-${sourceMessageId}`
-          ? sourceMessageId
-          : undefined);
-      return {
-        id: message.id,
-        role: message.role === "user" ? "you" : message.role === "participant" ? "participant" : "system",
-        ...(message.participantLabel ? { participantLabel: message.participantLabel } : {}),
-        content: message.content,
-        status: message.status === "error" ? "error" : message.status === "pending" ? "pending" : "done",
-        createdAt: message.createdAt,
-        ...(typeof runId === "string" ? { runId } : {}),
-        messageId: message.id,
-        ...(mobileEventId ? { mobileEventId } : {})
-      };
-    });
-}
-
-test("live end-to-end: a phone-sent turn clears its own in-progress row", async (t) => {
-  const { MobileRelayControlService } = await import(
-    path.join(repoRoot, "dist/main/main/services/mobileRelayControl.js")
-  );
-
-  const originHeaders = loadMobileOriginHeaders(root);
-  const site = createServer(async (req, res) => {
-    const url = req.url || "/";
-    if (url.startsWith("/v1/mailbox/") || url.startsWith("/v1/push/")) {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const upstream = await fetch(`http://127.0.0.1:${MAILBOX_PORT}${url}`, {
-        method: req.method,
-        headers: {
-          "content-type": req.headers["content-type"] || "application/json",
-          ...(req.headers.authorization ? { authorization: req.headers.authorization } : {})
-        },
-        body: req.method === "GET" || req.method === "HEAD" ? undefined : Buffer.concat(chunks)
-      });
-      const body = Buffer.from(await upstream.arrayBuffer());
-      res.writeHead(upstream.status, { "content-type": "application/json" });
-      res.end(body);
-      return;
-    }
-    let rel = url.split("?")[0];
-    if (rel === "/") {
-      rel = "/index.html";
-    }
-    try {
-      const body = await readFile(path.join(root, rel));
-      // The shipped policy allows wss: and not ws:, which is right for
-      // production and wrong for a loopback relay. Its own harness covers it.
-      const headers = { ...mobileOriginHeadersForPath(originHeaders, rel) };
-      delete headers["Content-Security-Policy"];
-      res.writeHead(200, {
-        "content-type": TYPES[path.extname(rel)] || "application/octet-stream",
-        ...headers
-      });
-      res.end(body);
-    } catch {
-      res.writeHead(404).end("not found");
-    }
-  });
-  await new Promise((r) => site.listen(SITE_PORT, "127.0.0.1", r));
-
-  const mailbox = createReferenceMailboxServer({ locked: true });
-  const mailboxServer = mailbox.server ?? mailbox;
-  await new Promise((r) => mailboxServer.listen(MAILBOX_PORT, "127.0.0.1", r));
-  const relay = createReferenceRelayServer();
-  const relayAddress = await relay.listen();
-
-  await fetch(`http://127.0.0.1:${MAILBOX_PORT}/v1/mailbox/register?mailboxId=${MAILBOX_ID}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${MAILBOX_TOKEN}` },
-    body: JSON.stringify({ tokenHashBase64Url: createHash("sha256").update(MAILBOX_TOKEN, "utf8").digest("base64url") })
+test("live end-to-end: a phone-sent turn clears its own in-progress row", { timeout: 600_000 }, async (t) => {
+  const { HubPhonePublisher } = require(path.join(repoRoot, "dist/main/main/services/hubPhonePublisher.js"));
+  const { HubClient } = require(path.join(repoRoot, "dist/main/main/services/hubClient.js"));
+  const { phoneTurnRunId } = require(path.join(repoRoot, "dist/main/shared/hubProtocol.js"));
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: SITE_PORT, hubOrigins: [hub.base] });
+  const client = new HubClient({ url: hub.base, identity: async () => hub.owner, storage: hub.storage });
+  const publisher = new HubPhonePublisher({
+    storage: hub.storage,
+    eventLog: { appendLocalEvent: async () => undefined },
+    client: () => client,
+    hasPhones: async () => true,
+    buildCatalog: async () => ({ roles: {}, prompts: [], skills: [] }),
+    wakeKeys: async () => [],
+    log: () => undefined
   });
 
-  let originSeq = 0;
-  const timelineSink = {
-    async publishTimeline(timeline) {
-      originSeq += 1;
-      await fetch(`http://127.0.0.1:${MAILBOX_PORT}/v1/mailbox/events?mailboxId=${MAILBOX_ID}`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${MAILBOX_TOKEN}` },
-        body: JSON.stringify({
-          events: [{
-            eventId: `turn-${originSeq}`,
-            conversationId: CONVERSATION,
-            logScopeId: CONVERSATION,
-            originId: "desktop-origin",
-            originSeq,
-            eventHash: `hash-${originSeq}`,
-            kind: "mobile.timeline.events",
-            payload: sealPayload(timeline)
-          }]
-        })
-      });
-    }
-  };
-
-  const conversation = {
-    id: CONVERSATION,
-    kind: "chat",
-    title: "Turn",
-    createdAt: new Date(Date.UTC(2026, 0, 1)).toISOString(),
-    updatedAt: new Date(Date.UTC(2026, 0, 1)).toISOString(),
-    messages: [],
-    findings: [],
-    metadata: {}
-  };
-
-  // The real fan-out: the answer runs under its OWN run id and carries the
-  // source's mobile event id along, exactly as createAgentProgressSink does.
+  // ---- the member's home ---------------------------------------------------
   let turnSeq = 0;
   const holdUntilReleased = { current: undefined };
-  // S6 drives two participants off one phone message and releases them one at
-  // a time, so the harness can watch what the first finish does to the second.
+  // S7 holds the home off starting the turn, so the row the phone shows
+  // before it does can be judged.
+  const holdStart = { current: undefined };
+  // S6 drives two members off one phone message and releases them one at a
+  // time, so the harness can watch what the first finish does to the second.
   const fanoutGates = { current: undefined };
   const multiStepGates = { current: undefined };
-  // main.ts sends EVERY progress event down two paths: the per-run callback the
-  // control service passed in, and the constructor-level fan-out that reaches
-  // noteExternalChatProgress. Only the second one publishes live text for a
-  // fan-out run, because handleChatProgress queues anything whose run id was
-  // not acked — and a fan-out run id never is. A harness that wires only the
-  // callback shows no live rows at all.
-  const controlRef = { current: undefined };
-  const chat = {
-    async sendMessage(request, _signal, progress) {
-      const emit = (event) => {
-        progress?.(event);
-        controlRef.current?.noteExternalChatProgress(event);
-      };
-      // ChatService queues a snapshot every time it mutates the conversation,
-      // and main.ts hands each one to pushConversationSnapshot. That is how a
-      // phone-started turn's answer actually reaches the phone: a per-agent
-      // finish is not published live, so without snapshots nothing lands until
-      // the whole sendMessage call returns.
-      const publishSnapshot = () => {
-        conversation.updatedAt = new Date().toISOString();
-        controlRef.current?.pushConversationSnapshot(conversation);
-      };
-      turnSeq += 1;
-      const seq = turnSeq;
-      const labels = Array.from(request.content.matchAll(/@[A-Za-z0-9._-]+/g)).map((match) => match[0]);
-      if (labels.length > 1 && fanoutGates.current) {
-        const gates = fanoutGates.current;
-        fanoutGates.current = undefined;
-        conversation.messages.push({
-          id: `msg-user-${seq}`,
-          role: "user",
-          content: request.content,
-          status: "done",
-          createdAt: new Date().toISOString(),
-          metadata: { runId: request.runId, mobileEventId: request.mobileEventId }
-        });
-        for (const label of labels) {
-          emit({
-            runId: `run-${label.slice(1)}-${seq}`,
-            phase: "debate",
-            message: `${label} is responding.`,
-            createdAt: new Date().toISOString(),
-            agentProgress: {
-              participantId: `participant-${label.slice(1)}`,
-              participantLabel: label,
-              state: "running",
-              messageId: `msg-${label.slice(1)}-${seq}`,
-              activity: "Thinking",
-              partialContent: `${label} is typing something`,
-              mobileEventId: request.mobileEventId
-            }
-          });
-        }
-        for (const label of labels) {
-          await gates[label];
-          const content = `Reply from ${label}.`;
-          conversation.messages.push({
-            id: `msg-${label.slice(1)}-${seq}`,
-            role: "participant",
-            participantLabel: label,
-            content,
-            status: "done",
-            createdAt: new Date().toISOString(),
-            metadata: { runId: `run-${label.slice(1)}-${seq}`, sourceMessageId: `msg-user-${seq}` }
-          });
-          publishSnapshot();
-          emit({
-            runId: `run-${label.slice(1)}-${seq}`,
-            phase: "debate",
-            message: `${label} finished.`,
-            createdAt: new Date().toISOString(),
-            agentProgress: {
-              participantId: `participant-${label.slice(1)}`,
-              participantLabel: label,
-              state: "finished",
-              messageId: `msg-${label.slice(1)}-${seq}`,
-              partialContent: content,
-              mobileEventId: request.mobileEventId
-            }
-          });
-        }
-        return { conversation, warnings: [] };
+  const failures = [];
+  const progress = (runId, member, messageId, state, partialContent) => publisher.noteProgress({
+    runId, phase: state === "finished" ? "done" : "debate", message: `@${member.handle} is responding.`, createdAt: new Date().toISOString(),
+    agentProgress: { participantId: member.id, participantLabel: `@${member.handle}`, state, messageId, activity: "Thinking", partialContent }
+  }, CONVERSATION);
+  const memberMessage = (id, member, runId, sourceMessageId, content, status) => ({
+    id, role: "participant", participantId: member.id, participantLabel: `@${member.handle}`, content, status,
+    createdAt: new Date().toISOString(), metadata: { runId, sourceMessageId }
+  });
+  async function answer(message) {
+    turnSeq += 1;
+    const seq = turnSeq;
+    const content = message.content;
+    const targets = (message.metadata && message.metadata.deliveryTargets) || [];
+    const members = targets.map((id) => MEMBERS.find((item) => item.id === id)).filter(Boolean);
+    if (members.length > 1 && fanoutGates.current) {
+      const gates = fanoutGates.current;
+      fanoutGates.current = undefined;
+      const turns = members.map((member) => ({ member, runId: phoneTurnRunId(message.id, member.id), id: `msg-${member.handle}-${seq}` }));
+      await hub.addMessages(CONVERSATION, turns.map((turn) => memberMessage(turn.id, turn.member, turn.runId, message.id, "", "pending")));
+      for (const turn of turns) progress(turn.runId, turn.member, turn.id, "running", `@${turn.member.handle} is typing something`);
+      for (const turn of turns) {
+        await gates[`@${turn.member.handle}`];
+        const reply = `Reply from @${turn.member.handle}.`;
+        progress(turn.runId, turn.member, turn.id, "finished", reply);
+        await hub.updateMessages(CONVERSATION, [memberMessage(turn.id, turn.member, turn.runId, message.id, reply, "done")]);
       }
-      const label = labels[0] ?? "@taylor";
-      const silent = request.content.includes("no progress yet");
-      const multiStep = request.content.includes("multi step");
-      const userMessageId = `msg-user-${seq}`;
-      const answerId = `msg-answer-${seq}`;
-      const fanoutRunId = `run-fanout-${seq}`;
-      const tag = request.content.match(/#([a-z0-9-]+)/)?.[1];
-      const answer = tag ? `Answer for #${tag}.` : `Answer number ${seq}.`;
-      conversation.messages.push({
-        id: userMessageId,
-        role: "user",
-        content: request.content,
-        status: "done",
-        createdAt: new Date().toISOString(),
-        metadata: { runId: request.runId, mobileEventId: request.mobileEventId }
-      });
-      publishSnapshot();
-      const announceRunning = () => emit({
-        runId: fanoutRunId,
-        phase: "debate",
-        message: `${label} is responding.`,
-        createdAt: new Date().toISOString(),
-        agentProgress: {
-          participantId: "participant-taylor",
-          participantLabel: label,
-          state: "running",
-          messageId: answerId,
-          activity: "Thinking",
-          partialContent: answer.slice(0, 8),
-          mobileEventId: request.mobileEventId
-        }
-      });
-      if (!silent) {
-        announceRunning();
-      }
-      if (multiStep) {
-        const gates = multiStepGates.current ?? {};
-        multiStepGates.current = undefined;
-        await gates.beforeInterim;
-        // app_chat_send_message posts immediately and the run carries on: a
-        // finished message and a live row belong to the same turn.
-        conversation.messages.push({
-          id: `msg-interim-${seq}`,
-          role: "participant",
-          participantLabel: label,
-          // Long on purpose: a short row lands inside the "near the bottom"
-          // slack, so a stand built from one-liners cannot tell following from
-          // standing still. A real answer is many lines tall.
-          content: `Interim note ${seq}.\n\n${Array.from({ length: 24 }, (_, line) => `Line ${line + 1} of the note, long enough to push the end of the conversation well out of sight.`).join("\n\n")}`,
-          status: "done",
-          createdAt: new Date().toISOString(),
-          metadata: { runId: fanoutRunId, sourceMessageId: userMessageId }
-        });
-        publishSnapshot();
-        emit({
-          runId: fanoutRunId,
-          phase: "debate",
-          message: `${label} is responding.`,
-          createdAt: new Date().toISOString(),
-          agentProgress: {
-            participantId: "participant-taylor",
-            participantLabel: label,
-            state: "running",
-            messageId: answerId,
-            activity: "Thinking",
-            partialContent: answer.slice(0, 8),
-            mobileEventId: request.mobileEventId
-          }
-        });
-        await gates.beforeFinish;
-      }
-      if (holdUntilReleased.current) {
-        await holdUntilReleased.current;
-        holdUntilReleased.current = undefined;
-      } else {
-        await sleep(request.content.includes("#slow") ? 6000 : 1200);
-      }
-      if (request.content.includes("#fail")) {
-        // What a real run does when it dies: no terminal of its own, so the
-        // control service's catch is the only thing that says the run is over.
-        throw new Error("The run could not be completed.");
-      }
-      conversation.messages.push({
-        id: answerId,
-        role: "participant",
-        participantLabel: label,
-        content: answer,
-        status: "done",
-        createdAt: new Date().toISOString(),
-        metadata: { runId: fanoutRunId, sourceMessageId: userMessageId }
-      });
-      publishSnapshot();
-      emit({
-        runId: fanoutRunId,
-        phase: "debate",
-        message: `${label} finished.`,
-        createdAt: new Date().toISOString(),
-        agentProgress: {
-          participantId: "participant-taylor",
-          participantLabel: label,
-          state: "finished",
-          messageId: answerId,
-          partialContent: answer,
-          mobileEventId: request.mobileEventId
-        }
-      });
-      return { conversation, warnings: [] };
+      return;
     }
-  };
-
-  const catalog = {
-    async listChats() {
-      return [{
-        id: CONVERSATION,
-        title: "Turn",
-        group: "AccordAgents",
-        snippet: "turn",
-        updatedAt: conversation.updatedAt,
-        running: false,
-        participants: ["@taylor"]
-      }];
-    },
-    async listTimeline() {
-      return projectTimeline(conversation);
-    },
-    async isConversationAllowed(id) {
-      return id === CONVERSATION;
+    const member = members[0];
+    if (!member) {
+      failures.push(`no member for ${JSON.stringify(content)}`);
+      return;
     }
-  };
+    const silent = content.includes("no progress yet");
+    const multiStep = content.includes("multi step");
+    const runId = phoneTurnRunId(message.id, member.id);
+    const answerId = `msg-answer-${seq}`;
+    const tag = content.match(/#([a-z0-9-]+)/)?.[1];
+    const text = tag ? `Answer for #${tag}.` : `Answer number ${seq}.`;
+    if (holdStart.current) {
+      await holdStart.current;
+      holdStart.current = undefined;
+    }
+    // The home starts the turn: the member's message, live under the run.
+    await hub.addMessages(CONVERSATION, [memberMessage(answerId, member, runId, message.id, "", "pending")]);
+    if (!silent) progress(runId, member, answerId, "running", text.slice(0, 8));
+    if (multiStep) {
+      const gates = multiStepGates.current ?? {};
+      multiStepGates.current = undefined;
+      await gates.beforeInterim;
+      // app_chat_send_message posts immediately and the run carries on: a
+      // finished message and a live row belong to the same turn.
+      await hub.addMessages(CONVERSATION, [memberMessage(`msg-interim-${seq}`, member, runId, message.id,
+        // Long on purpose: a short row lands inside the "near the bottom"
+        // slack, so a stand built from one-liners cannot tell following from
+        // standing still. A real answer is many lines tall.
+        `Interim note ${seq}.\n\n${Array.from({ length: 24 }, (_, line) => `Line ${line + 1} of the note, long enough to push the end of the conversation well out of sight.`).join("\n\n")}`,
+        "done")]);
+      progress(runId, member, answerId, "running", text.slice(0, 8));
+      await gates.beforeFinish;
+    }
+    if (holdUntilReleased.current) {
+      await holdUntilReleased.current;
+      holdUntilReleased.current = undefined;
+    } else {
+      await sleep(content.includes("#slow") ? 6000 : 1200);
+    }
+    if (content.includes("#fail")) {
+      // What a run that dies leaves: the member's message ends in an error.
+      progress(runId, member, answerId, "finished", "");
+      await hub.updateMessages(CONVERSATION, [memberMessage(answerId, member, runId, message.id, "The run could not be completed.", "error")]);
+      return;
+    }
+    progress(runId, member, answerId, "finished", text);
+    await hub.updateMessages(CONVERSATION, [memberMessage(answerId, member, runId, message.id, text, "done")]);
+  }
+  hub.composed.hubLog.onAppended(({ events }) => {
+    for (const { event } of events) {
+      if (event.originId === hub.owner.originId || event.kind !== "chat.changes" || event.conversationId !== CONVERSATION) continue;
+      const created = (event.payload.changes || []).find((change) => change.type === "message.created" && change.message.role === "user");
+      if (created) void answer(created.message).catch((error) => failures.push(String(error && error.stack || error)));
+    }
+  });
 
-  const control = new MobileRelayControlService(
-    {
-      relayUrl: relayAddress.url,
-      rendezvousId: RENDEZVOUS,
-      relayCapability: "PAIRING-FINGERPRINT",
-      relaySealKeyBase64: SEAL_KEY,
-      conversationId: CONVERSATION,
-      streamId: "route-turn:phone",
-      reconnectDelayMs: 50
-    },
-    chat,
-    catalog,
-    undefined,
-    timelineSink
-  );
-
-  controlRef.current = control;
-
-  killStaleCdp();
-  const profile = await mkdtemp(path.join(tmpdir(), "aa-turn-"));
-  const chrome = spawn(CHROME, [
-    "--headless=new", "--no-first-run", "--no-default-browser-check",
-    `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${profile}`,
-    "--window-size=430,860", `http://127.0.0.1:${SITE_PORT}/?qa=1`
-  ], { stdio: "ignore" });
-
+  const profile = await tempProfile("aa-turn-");
+  const chrome = launchChrome({ port: CDP_PORT, profile, url: `${site.origin}/`, width: 430, height: 860 });
   let app;
-  let relayClosed = false;
   try {
-    await control.connect();
-    let attachError;
-    for (let i = 0; i < 60 && !app; i += 1) {
-      try {
-        const targets = await getJson("/json", { port: CDP_PORT });
-        const page = targets.find((target) => target.type === "page" && (target.url || "").startsWith(`http://127.0.0.1:${SITE_PORT}`));
-        if (!page) {
-          throw new Error(`no page target yet (${targets.length} targets)`);
-        }
-        app = await attach({ port: CDP_PORT, title: page.title });
-      } catch (error) {
-        attachError = error;
-        await sleep(500);
-      }
-    }
-    assert.ok(app, `could not attach to Chrome: ${attachError?.message ?? attachError}`);
-    // A page target carries our URL before its document is ours: until the
-    // navigation commits, the document is the initial empty one, whose origin
-    // is opaque and denies storage outright. On a Mac the load won that race;
-    // on a slower box it does not, and every storage call fails with
-    // "Access is denied for this document". Wait for the origin, not the URL.
-    for (let i = 0; i < 60; i += 1) {
-      const origin = await app.evaluate(`location.origin`).then((r) => r.result?.value).catch(() => undefined);
-      if (origin === `http://127.0.0.1:${SITE_PORT}`) {
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    const evaluate = async (expr) => (await app.evaluate(expr)).result.value;
-
-    await evaluate(`(() => {
-      localStorage.setItem("accordagents.mobile.pairing.v1", JSON.stringify({
-        endpoint: "http://127.0.0.1:${SITE_PORT}/",
-        outboxUrl: "http://127.0.0.1:${SITE_PORT}/v1/mailbox/events",
-        relayUrl: "${relayAddress.url}",
-        rendezvousId: "${RENDEZVOUS}",
-        fingerprint: "PAIRING-FINGERPRINT",
-        routingId: "route-turn",
-        streamId: "route-turn:phone",
-        conversationId: "${CONVERSATION}",
-        relaySealKeyBase64: "${SEAL_KEY}",
-        pairedAt: new Date(0).toISOString()
-      }));
-      localStorage.setItem("accordagents.mobile.chatList.v1", JSON.stringify([
-        { id: "${CONVERSATION}", title: "Turn", group: "AccordAgents", snippet: "turn", updatedAt: new Date(0).toISOString(), participants: [] }
-      ]));
-      localStorage.setItem("accordagents.mobile.activeConversationId.v1", "${CONVERSATION}");
-      return true;
-    })()`);
-    await evaluate(`navigator.serviceWorker.ready.then(() => true)`);
-    await app.send("Page.reload", {});
-    await sleep(6000);
+    await hub.createChat(CONVERSATION, { title: "Turn", participants: MEMBERS });
+    app = await attachApp({ port: CDP_PORT });
+    await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+    await openChat(app, CONVERSATION);
+    const evaluate = app.evaluate;
 
     const runningRows = () => evaluate(
       `(() => document.querySelectorAll('#message-list .message-row[data-status="Running"]').length)()`
@@ -533,33 +203,26 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", async 
       return true;
     })()`);
 
-    // The header no longer starts at "Waiting to sync" to wait out: the
-    // socket itself says whether the relay is live.
-    await until("the phone reaches a live relay", async () =>
-      await evaluate(`AccordAgentsMobile.relaySocketLive()`)
-    ).catch(() => undefined);
-
     // ---- S1: a plain phone-sent turn, no @mention. The exact shape of the
     // message in User's screenshot.
     await sendFromPhone("Йоу");
     await until("the in-progress row appears for the phone-sent turn", async () => await runningRows() > 0);
     await until("the answer arrives", async () => await bodyHas("Answer number 1."));
     await until(
-      `S1: the in-progress row clears when the answer lands (rows: ${await rowDump()})`,
+      `S1: the in-progress row clears when the answer lands`,
       async () => await runningRows() === 0,
-      { timeoutMs: 20_000 }
+      { timeoutMs: 20_000, detail: rowDump }
     );
     t.diagnostic(`S1 rows after finish: ${await rowDump()}`);
 
-    // ---- S2: the same turn with an @mention, which takes the other branch of
-    // the placeholder builder (labelled "@x is running..." instead of "Running...").
+    // ---- S2: the same turn with an @mention.
     await sendFromPhone("@taylor second one");
     await until("the mention turn shows an in-progress row", async () => await runningRows() > 0);
     await until("the second answer arrives", async () => await bodyHas("Answer number 2."));
     await until(
-      `S2: the mention turn clears its in-progress row (rows: ${await rowDump()})`,
+      `S2: the mention turn clears its in-progress row`,
       async () => await runningRows() === 0,
-      { timeoutMs: 20_000 }
+      { timeoutMs: 20_000, detail: rowDump }
     );
 
     // ---- S3: the app is killed mid-answer and relaunched. The row must reach
@@ -573,9 +236,9 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", async 
     release();
     await until("the third answer arrives after relaunch", async () => await bodyHas("Answer number 3."), { timeoutMs: 30_000 });
     await until(
-      `S3: a run interrupted by a relaunch still clears its row (rows: ${await rowDump()})`,
+      `S3: a run interrupted by a relaunch still clears its row`,
       async () => await runningRows() === 0,
-      { timeoutMs: 20_000 }
+      { timeoutMs: 20_000, detail: rowDump }
     );
 
     // ---- S4: nothing accumulated across the three turns, and every answer is
@@ -596,10 +259,8 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", async 
 
     // ---- S8: a long turn that posts a finished intermediate message and keeps
     // working. User watched one and saw TWO rows for one turn: an anonymous
-    // "Thinking" and a second row carrying the real text. The desktop publishes
-    // its placeholder at accept time and the participant's own live row arrives
-    // separately, so both sat there at once. A turn is one live row, whatever
-    // scaffolding was needed to open it.
+    // "Thinking" and a second row carrying the real text. A turn is one live
+    // row, whatever stood in for it before its home started it.
     let releaseInterim;
     let releaseFinish;
     multiStepGates.current = {
@@ -615,31 +276,10 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", async 
     assert.equal(
       await runningRows(),
       1,
-      `S8: a running turn shows exactly one live row, not scaffolding beside it: ${await rowDump()}`
+      `S8: a running turn shows exactly one live row, not a stand-in beside it: ${await rowDump()}`
     );
     releaseInterim();
-    try {
-      await until("the intermediate message arrives", async () => await bodyHas("Interim note 4."));
-    } catch (error) {
-      t.diagnostic(`interim never rendered; rows: ${await rowDump()}`);
-      t.diagnostic(`store: ${await evaluate(`(async () => {
-        const db = await new Promise((resolve, reject) => {
-          const request = indexedDB.open("accordagents-mobile-control");
-          request.onsuccess = () => resolve(request.result);
-          request.onerror = () => reject(request.error);
-        });
-        const entries = await new Promise((resolve, reject) => {
-          const request = db.transaction("timeline", "readonly").objectStore("timeline").getAll();
-          request.onsuccess = () => resolve(request.result);
-          request.onerror = () => reject(request.error);
-        });
-        db.close();
-        return JSON.stringify(entries.slice(-6).map((entry) => ({
-          id: entry.id, status: entry.status, content: (entry.content || "").slice(0, 30)
-        })));
-      })()`)}`);
-      throw error;
-    }
+    await until("the intermediate message arrives", async () => await bodyHas("Interim note 4."), { detail: rowDump });
     await sleep(2000);
     assert.equal(
       await runningRows(),
@@ -649,9 +289,9 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", async 
     releaseFinish();
     await until("the multi-step answer arrives", async () => await bodyHas("Answer number 4."), { timeoutMs: 30_000 });
     await until(
-      `S8: the multi-step turn clears its live row (rows: ${await rowDump()})`,
+      `S8: the multi-step turn clears its live row`,
       async () => await runningRows() === 0,
-      { timeoutMs: 20_000 }
+      { timeoutMs: 20_000, detail: rowDump }
     );
     const multiDump = JSON.parse(await rowDump());
     for (const text of ["Interim note 4.", "Answer number 4."]) {
@@ -662,60 +302,58 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", async 
       );
     }
 
-    // ---- S7: while nobody has been picked yet, the row must not borrow an
-    // identity. The desktop publishes its placeholder at accept time and can
-    // only guess a handle from an explicit @mention, so a mentionless send used
-    // to show "Agent" with a letter avatar and then swap to the real member
-    // mid-run. Nothing else is on screen in this leg: the run emits no progress
-    // until released, so the placeholder is the only row that can be judged.
+    // ---- S7: before its member has written anything, the row must not
+    // borrow an identity. Showing "Agent" with a letter avatar and then
+    // swapping to the real member mid-run invented somebody. The phone knows
+    // who it addressed, so the row names that member from the first moment;
+    // this run emits no text until released, so that row is the one judged.
     let releaseSilent;
+    let releaseStart;
     holdUntilReleased.current = new Promise((resolve) => { releaseSilent = resolve; });
+    holdStart.current = new Promise((resolve) => { releaseStart = resolve; });
     await sendFromPhone("no progress yet please");
-    await until("the unnamed placeholder appears", async () => await runningRows() > 0);
-    const placeholder = JSON.parse(await evaluate(`(() => {
-      const row = document.querySelector('#message-list .message-row[data-status="Running"]');
-      return JSON.stringify({
-        scaffolding: row.dataset.scaffolding,
-        dots: row.querySelectorAll(".message-typing span").length,
-        handle: (row.querySelector(".message-handle")?.textContent || ""),
-        avatar: row.querySelector(".message-avatar") ? "present" : "absent",
-        clock: row.querySelector(".thinking-elapsed") ? "present" : "absent",
-        text: (row.textContent || "").trim(),
-        streamable: row.dataset.streamable || ""
-      });
-    })()`));
-    assert.equal(placeholder.scaffolding, "1", `S7: the pre-member row is scaffolding, not a message: ${JSON.stringify(placeholder)}`);
-    assert.equal(placeholder.dots, 3, `S7: it shows the small pulsing indication: ${JSON.stringify(placeholder)}`);
-    assert.equal(placeholder.handle, "", `S7: it names nobody: ${JSON.stringify(placeholder)}`);
-    assert.equal(placeholder.avatar, "absent", `S7: it carries no avatar: ${JSON.stringify(placeholder)}`);
-    assert.equal(placeholder.clock, "absent", `S7: the clock belongs to a real member: ${JSON.stringify(placeholder)}`);
-    assert.equal(placeholder.text, "", `S7: it says no words at all: ${JSON.stringify(placeholder)}`);
-    assert.equal(placeholder.streamable, "", `S7: there is nothing to open on it: ${JSON.stringify(placeholder)}`);
+    await until("the waiting row appears", async () => await runningRows() > 0);
+    // Once the server holds the message, the row says whose home it waits for.
+    const placeholder = JSON.parse(await until("the waiting row says what it waits for", async () => {
+      const read = JSON.parse(await evaluate(`(() => {
+        const row = document.querySelector('#message-list .message-row[data-status="Running"]');
+        return JSON.stringify(row ? {
+          handle: (row.querySelector(".message-handle")?.textContent || ""),
+          text: (row.querySelector(".message-content")?.textContent || "").trim()
+        } : null);
+      })()`));
+      return read && read.text.startsWith("Waiting for your Mac") ? JSON.stringify(read) : false;
+    }, { detail: rowDump }));
+    assert.match(placeholder.handle, /^@(taylor|drew|admin)$|^Chat Assistant$/, `S7: it names the member it was sent to: ${JSON.stringify(placeholder)}`);
+    assert.notEqual(placeholder.handle, "Agent", `S7: it names nobody it does not know: ${JSON.stringify(placeholder)}`);
+    assert.match(placeholder.text, /^Waiting for your Mac to start it/, `S7: and says it is waiting for the member's home, not that the member is writing: ${JSON.stringify(placeholder)}`);
     if (process.env.ACCORD_E2E_SHOT) {
-      await evaluate(`(() => {
-        const row = document.querySelector('#message-list .message-row[data-scaffolding="1"]');
-        if (row) { row.scrollIntoView({ block: "center" }); }
-        return true;
-      })()`);
-      await sleep(600);
       const shot = await app.send("Page.captureScreenshot", { format: "png" });
       await writeFile(process.env.ACCORD_E2E_SHOT, Buffer.from(shot.data, "base64"));
     }
+    releaseStart();
+    // Started, and still nothing written: the member's own row, under its name.
+    await until("the member's own row replaces the waiting one", async () => await evaluate(`(() => {
+      const rows = [...document.querySelectorAll('#message-list .message-row[data-status="Running"]')];
+      return rows.length === 1 && !(rows[0].querySelector(".message-content")?.textContent || "").includes("Waiting for your Mac") &&
+        (rows[0].querySelector(".message-handle")?.textContent || "") === ${JSON.stringify(placeholder.handle)};
+    })()`), { detail: rowDump });
     releaseSilent();
     await until("the answer to the silent turn arrives", async () => await bodyHas("Answer number 5."));
     await until(
-      `S7: the unnamed row clears (rows: ${await rowDump()})`,
+      `S7: the waiting row clears`,
       async () => await runningRows() === 0,
-      { timeoutMs: 20_000 }
+      { timeoutMs: 20_000, detail: rowDump }
     );
     const named = JSON.parse(await evaluate(`(() => JSON.stringify(Array.from(document.querySelectorAll("#message-list .message-row"))
       .map((row) => (row.querySelector(".message-handle")?.textContent || ""))
       .filter(Boolean)))()`));
-    assert.ok(!named.includes("Agent"), `S7: no row is left showing the placeholder identity: ${JSON.stringify(named)}`);
+    assert.ok(!named.includes("Agent"), `S7: no row is left showing a made-up identity: ${JSON.stringify(named)}`);
 
     // ---- S9: the view follows a turn it is watching, and never yanks a
-    // reader who left the end. Sending already scrolled, but the indication and
-    // the answer arrive AFTER that scroll, so they used to land below the fold.
+    // reader who left the end. Sending already scrolled, but the waiting row
+    // and the answer arrive AFTER that scroll, so they used to land below the
+    // fold.
     const surfaceState = () => evaluate(`(() => {
       const surface = document.querySelector("#timeline-screen .thread-surface");
       const composer = document.getElementById("composer-form");
@@ -740,13 +378,9 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", async 
       beforeInterim: new Promise((resolve) => { releaseInterim9 = resolve; }),
       beforeFinish: new Promise((resolve) => { releaseFinish9 = resolve; })
     };
-    t.diagnostic(`S9 surface before send: ${await evaluate(`(() => {
-      const surface = document.querySelector("#timeline-screen .thread-surface");
-      return JSON.stringify({ scrollHeight: surface.scrollHeight, clientHeight: surface.clientHeight, scrollTop: Math.round(surface.scrollTop) });
-    })()`)}`);
     await sendFromPhone("multi step again, no progress yet");
-    // (a) The indication comes into sight on its own.
-    await until("the indication is on screen without touching the view", async () => await rowInView('#message-list .message-row[data-scaffolding="1"]'));
+    // (a) The waiting row comes into sight on its own.
+    await until("the waiting row is on screen without touching the view", async () => await rowInView('#message-list .message-row[data-status="Running"]'));
     // (b) So does the intermediate message.
     releaseInterim9();
     await until("the intermediate message arrives", async () => await bodyHas("Interim note 6."));
@@ -810,9 +444,9 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", async 
       );
     }
 
-    // ---- S11: a run that dies. Its only terminal is the one the control
-    // service writes from its catch, and it must still retire the scaffolding
-    // and end the row rather than leaving "Thinking" over a dead run.
+    // ---- S11: a run that dies. Its member's message ends in an error, and
+    // that must still end the row rather than leaving "Thinking" over a dead
+    // run.
     await sendFromPhone("this one #fail");
     await until("the failure is stated on the timeline", async () => await bodyHas("The run could not be completed."), { timeoutMs: 30_000 });
     await until(
@@ -832,10 +466,10 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", async 
       "S11: a failed run takes its indication with it"
     );
 
-    // ---- S6: two participants answer ONE phone message, so both live rows and
-    // the placeholder share a mobile event id. The first finish must clear the
-    // placeholder and leave the other agent still writing. Getting this wrong in
-    // the other direction is the "Thinking flashes and vanishes" regression.
+    // ---- S6: two members answer ONE phone message, so both live rows share
+    // its mobile event id. The first finish must leave the other member still
+    // writing. Getting this wrong is the "Thinking flashes and vanishes"
+    // regression.
     let releaseDrew;
     let releaseTaylor;
     fanoutGates.current = {
@@ -843,48 +477,28 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", async 
       "@taylor": new Promise((resolve) => { releaseTaylor = resolve; })
     };
     await sendFromPhone("@drew @taylor both of you");
-    await until("both participants show an in-progress row", async () => await runningRows() >= 2);
+    await until("both members show an in-progress row", async () => await runningRows() >= 2);
     releaseDrew();
-    await until("the first participant's answer arrives", async () => await bodyHas("Reply from @drew."));
+    await until("the first member's answer arrives", async () => await bodyHas("Reply from @drew."));
     await sleep(2500); // let every reconciliation pass settle before judging
     const midFanout = JSON.parse(await rowDump());
     const stillWriting = midFanout.filter((row) => row.status === "Running");
     assert.equal(
       stillWriting.length,
       1,
-      `S6: one finish leaves exactly the other agent writing: ${JSON.stringify(midFanout)}`
+      `S6: one finish leaves exactly the other member writing: ${JSON.stringify(midFanout)}`
     );
     assert.ok(
       stillWriting[0].text.includes("@taylor"),
-      `S6: the surviving in-progress row is the unfinished agent's: ${JSON.stringify(midFanout)}`
+      `S6: the surviving in-progress row is the unfinished member's: ${JSON.stringify(midFanout)}`
     );
     releaseTaylor();
-    await until("the second participant's answer arrives", async () => await bodyHas("Reply from @taylor."));
+    await until("the second member's answer arrives", async () => await bodyHas("Reply from @taylor."));
     await until(
-      `S6: the last finish clears the last row (rows: ${await rowDump()})`,
+      `S6: the last finish clears the last row`,
       async () => await runningRows() === 0,
-      { timeoutMs: 20_000 }
+      { timeoutMs: 20_000, detail: rowDump }
     );
-
-    const storeDump = await evaluate(`(async () => {
-      const db = await new Promise((resolve, reject) => {
-        const request = indexedDB.open("accordagents-mobile-control");
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      const entries = await new Promise((resolve, reject) => {
-        const request = db.transaction("timeline", "readonly").objectStore("timeline").getAll();
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      db.close();
-      return JSON.stringify(entries.filter((entry) => (entry.participantLabel || "") === "@drew").map((entry) => ({
-        id: entry.id, status: entry.status, runId: entry.runId,
-        mobileEventId: entry.mobileEventId, messageId: entry.messageId,
-        content: (entry.content || "").slice(0, 40)
-      })));
-    })()`);
-    t.diagnostic(`@drew entries in the phone store: ${storeDump}`);
     const fanoutDump = JSON.parse(await rowDump());
     for (const label of ["@drew", "@taylor"]) {
       assert.equal(
@@ -905,54 +519,37 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", async 
     const streamOpen = await evaluate(`(() => document.getElementById("stream-view")?.hidden === false)()`);
     assert.equal(streamOpen, false, "S5: no finished row advertises itself as a live stream to follow");
 
-    // ---- S12: the relay dies mid-turn. On a real phone the socket is dead
-    // most of the time — iOS backgrounds the app — and the turn has to resolve
-    // through the mailbox alone. Live frames never reach the mailbox, so the
-    // rows are populated differently: scaffolding is the only pending row until
-    // the terminal lands. Every scenario above ran with a live socket, so this
-    // path had no coverage at all.
+    // ---- S12: the live text stops reaching the phone mid-turn. On a real
+    // phone the reads are cut off often — iOS backgrounds the app, the
+    // network drops — and the turn has to resolve from the chat itself once
+    // it can be read again. Live text never reaches the chat's page, so the
+    // rows are populated differently: the member's waiting row is the only
+    // pending row until its message lands.
     let releaseOffline;
     holdUntilReleased.current = new Promise((resolve) => { releaseOffline = resolve; });
-    await sendFromPhone("offline finish #mailbox");
+    await sendFromPhone("offline finish #server");
     await until("the turn is under way", async () => await runningRows() > 0);
-    // Closed once, and the teardown must not close it again: a second close on
-    // an already-closed reference never settles, which hangs the whole run long
-    // after the test itself has finished.
-    await relay.close();
-    relayClosed = true;
-    await until(
-      "the phone notices the relay is gone",
-      async () => await evaluate(`(() => !(window.AccordAgentsMobile?.relaySocketLive?.() ?? false))()`) !== false,
-      { timeoutMs: 15_000 }
-    ).catch(() => undefined);
+    hub.setGate(async (request) => request.path === "/v1/phone/progress" ? { drop: true } : undefined);
     releaseOffline();
     await until(
-      "the answer arrives with no relay at all",
-      async () => await bodyHas("Answer for #mailbox."),
+      "the answer arrives with no live text at all",
+      async () => await bodyHas("Answer for #server."),
       { timeoutMs: 45_000, detail: rowDump }
     );
     await until(
-      "S12: a turn that finished with no live socket still clears its row",
+      "S12: a turn that finished with no live text still clears its row",
       async () => await runningRows() === 0,
       { timeoutMs: 25_000, detail: rowDump }
     );
-    assert.equal(
-      await evaluate(`(() => document.querySelectorAll('#message-list .message-row[data-scaffolding="1"]').length)()`),
-      0,
-      "S12: the indication goes with it"
-    );
+    hub.setGate(undefined);
 
+    assert.deepEqual(failures, [], "the home answered every message the phone sent");
     t.diagnostic(`all twelve scenarios green; final rows: ${await rowDump()}`);
   } finally {
     app?.close();
     chrome.kill("SIGKILL");
-    killStaleCdp();
-    control.close();
-    if (!relayClosed) {
-      await relay.close();
-    }
-    site.close();
-    mailboxServer.close();
+    await site.close();
+    await hub.close();
     await rm(profile, { recursive: true, force: true }).catch(() => undefined);
   }
 });

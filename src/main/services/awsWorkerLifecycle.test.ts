@@ -847,6 +847,22 @@ test("deleteWorker terminates the instance and cleans up key material and securi
   assert.deepEqual(client.deletedSecurityGroups, ["sg-123"]);
 });
 
+test("deleteWorker of an instance AWS already says is gone terminates nothing and still cleans up", async () => {
+  const client = new FakeEc2Client({ state: "terminated", publicIp: undefined });
+  client.terminateError = Object.assign(new Error("You are not authorized to perform this operation."), { name: "UnauthorizedOperation" });
+  const deletedLocalKeys: string[] = [];
+  let waited = false;
+  const result = await lifecycleWith(client, {
+    deleteKeyMaterial: async (keyName: string) => { deletedLocalKeys.push(keyName); },
+    waitForState: async () => { waited = true; return undefined; }
+  }).deleteWorker(CREDS, HANDLE, { alreadyGone: true });
+  assert.deepEqual(result, { terminationConfirmed: true, cleanupFailures: [] });
+  assert.equal(waited, false, "nothing to wait for");
+  assert.deepEqual(client.deletedKeyPairs, ["aa-key"]);
+  assert.deepEqual(deletedLocalKeys, ["aa-key"]);
+  assert.deepEqual(client.deletedSecurityGroups, ["sg-123"]);
+});
+
 test("deleteWorker retains every access resource when termination fails", async () => {
   const client = new FakeEc2Client({ state: "running", publicIp: "1.1.1.1" });
   client.terminateError = new Error("AccessDenied");

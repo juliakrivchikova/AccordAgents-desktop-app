@@ -35,7 +35,7 @@ import {
 } from "./machineInstallScripts";
 
 const TARGET: MachineSshTarget = { host: "198.51.100.10", user: "ubuntu", identityFile: "/tmp/key.pem" };
-const ENROLLMENT = JSON.stringify({ purpose: "machine-host", relayUrl: "wss://relay.example", key: "SUPER-SECRET-RELAY-KEY" });
+const ENROLLMENT = JSON.stringify({ purpose: "machine-host", hubUrl: "https://hub.example/", key: "SUPER-SECRET-PAIRING-KEY" });
 
 const LAYOUT = machineInstallLayout({
   installRoot: "/home/ubuntu/accordagents-machine",
@@ -298,9 +298,30 @@ test("SSH owner refusals reach setup, Settings and mirror callers without leakin
   assert.equal(h.syncedUp.length, 0);
 });
 
+test("an installation set up for the shared relay keeps its identity and is written back naming the User's server", async () => {
+  const relayEra = { version: 1, purpose: "machine-host", issuer: { originId: "desktop", keyId: "key", publicKeyDerBase64: "same-key" },
+    rendezvousId: "installed-room", stableRoutingId: "route", relaySealKeyBase64: "c2VjcmV0",
+    relayUrl: "wss://relay.accordagents.com/v1/relay", outboxUrl: "https://relay.accordagents.com/v1/mailbox/events",
+    fingerprint: "fingerprint", createdAt: "2026-01-01T00:00:00.000Z", expiresAt: "2036-01-01T00:00:00.000Z",
+    capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }] };
+  const { relayUrl: _relay, outboxUrl: _outbox, ...kept } = relayEra;
+  const requested = JSON.stringify({ ...kept, rendezvousId: "replacement-room", hubUrl: "https://hub.example/" });
+  let saved = requested;
+  let restored = "";
+  const h = harness({ recoveryOutput: JSON.stringify({ enrollment: relayEra, machineId: "original" }), getEnrollmentJson: async () => saved,
+    restoreEnrollment: async (_id, _expected, recovered, originalId) => { restored = recovered; saved = recovered; return originalId; } });
+  const result = await h.service.install({ machineId: "one", operationId: "restore-relay-era", target: TARGET, isolatedProfile: true });
+  assert.equal(result.snapshot.phase, "ready");
+  const written = JSON.parse(h.calls.find(call => call.script.includes("enrollment.json.new"))?.input ?? "{}");
+  assert.equal(written.rendezvousId, "installed-room", "the machine keeps its room and the id its members carry");
+  assert.equal(written.hubUrl, "https://hub.example/", "and from now on meets this desktop on the User's server");
+  assert.equal("relayUrl" in written || "outboxUrl" in written, false, "nothing of the relay is written back");
+  assert.deepEqual(JSON.parse(restored), written, "the desktop keeps what the machine has");
+});
+
 test("setup restores and persists the installed channel before owner checks or provider work; failed save and cancellation stop there", async () => {
   const installed = JSON.stringify({ version: 1, purpose: "machine-host", issuer: { originId: "desktop", keyId: "key", publicKeyDerBase64: "same-key" },
-    rendezvousId: "installed-room", stableRoutingId: "route", relaySealKeyBase64: "c2VjcmV0", relayUrl: "wss://relay.example",
+    rendezvousId: "installed-room", stableRoutingId: "route", relaySealKeyBase64: "c2VjcmV0", hubUrl: "https://hub.example/",
     fingerprint: "fingerprint", createdAt: "2026-01-01T00:00:00.000Z", expiresAt: "2036-01-01T00:00:00.000Z",
     capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }] });
   const requested = JSON.stringify({ ...JSON.parse(installed), rendezvousId: "replacement-room" });
@@ -770,10 +791,10 @@ test("the enrollment travels on stdin and never reaches a command line or a log"
   assert.ok(enrollCall.script.includes("cat > "));
   assert.ok(enrollCall.script.includes("chmod 600"));
   for (const call of h.calls) {
-    assert.ok(!call.script.includes("SUPER-SECRET-RELAY-KEY"), "no script may contain the relay key");
+    assert.ok(!call.script.includes("SUPER-SECRET-PAIRING-KEY"), "no script may contain the pairing key");
   }
-  assert.ok(!JSON.stringify(h.logged).includes("SUPER-SECRET-RELAY-KEY"));
-  assert.ok(!JSON.stringify([...h.records.values()]).includes("SUPER-SECRET-RELAY-KEY"));
+  assert.ok(!JSON.stringify(h.logged).includes("SUPER-SECRET-PAIRING-KEY"));
+  assert.ok(!JSON.stringify([...h.records.values()]).includes("SUPER-SECRET-PAIRING-KEY"));
 });
 
 test("an upgrade that cannot prove the old runtime is gone replaces nothing", async () => {

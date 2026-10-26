@@ -133,3 +133,19 @@ test("the start-over question stays with the line it was asked about", async () 
   assert.ok(button("hub-server-install"));
   await view.unmount();
 });
+
+test("what the shared relay's removal took off is said once, also before a server is set up, until dismissed", async () => {
+  const notice = { id: "relay-removed:2026-10-26T00:00:00.000Z", text: "AccordAgents no longer uses its shared relay, so what was set up through it was removed from this computer: a phone pairing. Set up your server, then pair your phone again from Device Pairing." };
+  const view = await mount({ status: "none", bundledVersion: "1.0.0", dismissableNotices: [notice] }, async () => ({ status: "none", bundledVersion: "1.0.0" }));
+  const dismissed: string[] = [];
+  (window as unknown as { consensus: Record<string, unknown> }).consensus.dismissHubNotice = async (id: string) => {
+    dismissed.push(id);
+    return { status: "none", bundledVersion: "1.0.0" };
+  };
+  assert.match(document.querySelector("[data-testid=hub-server-given-up]")?.textContent ?? "", /no longer uses its shared relay/);
+  await act(async () => { button("hub-server-given-up-dismiss")!.click(); });
+  await settle();
+  assert.deepEqual(dismissed, [notice.id]);
+  assert.equal(document.querySelector("[data-testid=hub-server-given-up]"), null);
+  await view.unmount();
+});

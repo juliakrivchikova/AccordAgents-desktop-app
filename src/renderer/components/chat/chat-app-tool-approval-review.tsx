@@ -1,4 +1,4 @@
-import { AlertTriangle, Check } from "lucide-react";
+import { AlertTriangle, Check, Clock } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import type {
@@ -87,7 +87,9 @@ export function approvalReason(
 }
 
 export function ChatAppToolReviewStatus({ approval }: { approval: ChatAppToolApproval }): JSX.Element {
-  const label = approval.status === "approved"
+  const label = approval.memberAdditionQueuedAt
+    ? "Approved, waiting to be applied"
+    : approval.status === "approved"
     ? "Approved"
     : approval.status === "denied"
       ? "Denied"
@@ -113,32 +115,41 @@ export function ChatAppToolReviewResult(props: {
   savedParticipants: ChatParticipantConfig[];
 }): JSX.Element {
   const summary = reviewResultSummary(props.approval, props.roleRequest, props.participantChange, props.combinedRequest, props.savedParticipants);
-  const denied = props.approval.status === "denied";
+  const refused = summary.tone === "refused";
   return (
-    <div className={`chat-app-tool-result-card is-${props.approval.status}`}>
-      <div className={`chat-app-tool-result-icon ${denied ? "is-denied" : ""}`} aria-hidden>
-        {denied ? <AlertTriangle size={18} /> : <Check size={19} />}
+    <div className={`chat-app-tool-result-card is-${props.approval.status}`} data-review-result-state={summary.tone}>
+      <div className={`chat-app-tool-result-icon ${refused ? "is-denied" : ""}`} aria-hidden>
+        {refused ? <AlertTriangle size={18} /> : summary.tone === "waiting" ? <Clock size={18} /> : <Check size={19} />}
       </div>
       <div className="chat-app-tool-result-copy">
         <strong>{summary.title}</strong>
-        <span>{props.approval.error ? `${summary.detail}: ${props.approval.error}` : summary.detail}</span>
+        <span>{props.approval.error ? `${summary.detail.replace(/\.$/, "")}: ${props.approval.error}` : summary.detail}</span>
       </div>
     </div>
   );
 }
 
-function reviewResultSummary(
+/** What a settled role or member card says (exported for its test). */
+export function reviewResultSummary(
   approval: ChatAppToolApproval,
   roleRequest: ChatRoleChangeRequest | undefined,
   participantChange: ChatParticipantChangeRequest | undefined,
   combinedRequest: ChatRoleParticipantChangeRequest | undefined,
   savedParticipants: ChatParticipantConfig[]
-): { title: string; detail: string } {
+): { title: string; detail: string; tone: "done" | "waiting" | "refused" } {
   if (approval.status === "denied") {
     return {
       title: "Request cancelled",
-      detail: "No role or member changes were made."
+      detail: "No role or member changes were made.",
+      tone: "refused"
     };
+  }
+  // A machine member's addition: approved there, applied by this desktop.
+  if (approval.memberAdditionQueuedAt) {
+    return { title: "Addition approved", detail: "Waiting to be applied in this chat.", tone: "waiting" };
+  }
+  if (approval.status === "cancelled" || approval.status === "expired") {
+    return { title: "Not applied", detail: "No role or member changes were made.", tone: "refused" };
   }
 
   const participantSummary = participantResultSummary(participantChange, savedParticipants);
@@ -147,22 +158,25 @@ function reviewResultSummary(
   if (combinedRequest && participantSummary && roleSummary) {
     return {
       title: participantSummary.count === 1 ? "Role and member added" : "Role and members added",
-      detail: `${participantSummary.detail} ${roleSummary.detail}`
+      detail: `${participantSummary.detail} ${roleSummary.detail}`,
+      tone: "done"
     };
   }
   if (participantSummary) {
     return {
       title: participantSummary.count === 1 ? "Member added" : "Members added",
-      detail: participantSummary.detail
+      detail: participantSummary.detail,
+      tone: "done"
     };
   }
   if (roleSummary) {
-    return roleSummary;
+    return { ...roleSummary, tone: "done" };
   }
 
   return {
     title: approval.status === "auto-applied" ? "Changes applied" : "Changes approved",
-    detail: "The requested change was applied."
+    detail: "The requested change was applied.",
+    tone: "done"
   };
 }
 

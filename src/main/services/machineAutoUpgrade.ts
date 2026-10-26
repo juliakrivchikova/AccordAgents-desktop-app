@@ -54,9 +54,6 @@ export interface MachineAutoUpgradeOptions {
   powerMaxAttempts?: number;
   /** Holds the machine's turns for the duration; returns the release. */
   holdTurns?: (machineId: string, reason: string) => () => void;
-  /** Whether the machine is moving to the User's server right now: its
-   *  update waits for the move to end (the next hello asks again). */
-  isMoving?: (machineId: string) => boolean;
   /** Progress for Settings → Machines; the installer's own snapshots are
    *  persisted by the installer, the notices here are not. */
   onProgress: (snapshot: MachineInstallSnapshot) => void;
@@ -192,7 +189,7 @@ export class MachineAutoUpgradeService {
       }
       return;
     }
-    if (!activity.fresh || machineActivityIsBusy(activity) || this.options.isMoving?.(id)) {
+    if (!activity.fresh || machineActivityIsBusy(activity)) {
       if (!this.waiting.has(id)) {
         this.waiting.add(id);
         this.log("machines.auto-upgrade.waiting", { machineId: id, running, desktop: this.options.desktopVersion, fresh: activity.fresh,
@@ -211,12 +208,6 @@ export class MachineAutoUpgradeService {
         this.waiting.add(id);
         this.log("machines.auto-upgrade.unreachable", { machineId: id, running, desktop: this.options.desktopVersion });
       }
-      return;
-    }
-    // Asked again after the last wait, with nothing in between: a move that
-    // started meanwhile keeps the machine until it ends.
-    if (this.options.isMoving?.(id)) {
-      this.waiting.add(id);
       return;
     }
     this.waiting.delete(id);

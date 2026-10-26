@@ -2,10 +2,11 @@
  * The phone answering a card, driven through the real PWA in a browser.
  *
  * A permission a member is waiting on is published exactly the way the desktop
- * publishes it, the card is tapped in the page, and what the phone then holds
- * and posts is checked: the event and the queue entry written together, the
- * native identifiers carried back, the card saying "sent" rather than
- * "answered", and all of it surviving a reload.
+ * publishes it — a card event on the User's own server, a real hub here — the
+ * card is tapped in the page, and what the phone then holds and sends is
+ * checked: the answer and its queue entry, the native identifiers carried
+ * back, the card saying "sent" rather than "answered", the answer arriving in
+ * the server's order, and all of it surviving a reload.
  *
  * This is a browser check, not the installed phone: it runs the same files the
  * phone runs, under the same origin headers, but a physically installed PWA is
@@ -13,117 +14,32 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { createServer } from "node:http";
-import { createCipheriv, createHash, createHmac, randomBytes } from "node:crypto";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
-import { spawn, execSync } from "node:child_process";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { attachApp, launchChrome, member, openChat, pairPage, serveMobileShell, sleep, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
 const require = createRequire(import.meta.url);
-const { attach } = require("./cdp.cjs");
-const { createReferenceMailboxServer } = require("./mailbox-reference-server.cjs");
-const { loadMobileOriginHeaders, mobileOriginHeadersForPath } = require("./mobile-origin-headers.cjs");
-
-const repoRoot = path.resolve(import.meta.dirname, "..");
-const root = path.join(repoRoot, "dist/mobile");
 const SITE_PORT = 8165;
-const MAILBOX_PORT = 8166;
 const CDP_PORT = 9355;
-const CHROME = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const CONVERSATION = "conv-cards-qa";
+const DREW = member("drew");
 
-const SEAL_KEY = randomBytes(32).toString("base64url");
-const sealKeyBuffer = Buffer.from(SEAL_KEY, "base64url");
-const MAILBOX_TOKEN = createHmac("sha256", sealKeyBuffer).update("accord-mailbox-auth-v1", "utf8").digest("base64url");
-const MAILBOX_ID = "mb-" + createHmac("sha256", sealKeyBuffer).update("accord-mailbox-scope-v1", "utf8").digest("base64url").slice(0, 32);
-
-const sealPayload = (payload) => {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", sealKeyBuffer, iv);
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(payload), "utf8"), cipher.final()]);
-  const tagged = Buffer.concat([ciphertext, cipher.getAuthTag()]);
-  return { v: 1, alg: "A256GCM", iv: iv.toString("base64url"), ct: tagged.toString("base64url") };
-};
-
-const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".webmanifest": "application/manifest+json" };
-const originHeaders = loadMobileOriginHeaders(root);
-const site = createServer(async (req, res) => {
-  const url = req.url || "/";
-  if (url.startsWith("/v1/mailbox/") || url.startsWith("/v1/push/")) {
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const upstream = await fetch(`http://127.0.0.1:${MAILBOX_PORT}${url}`, {
-      method: req.method,
-      headers: {
-        "content-type": req.headers["content-type"] || "application/json",
-        ...(req.headers.authorization ? { authorization: req.headers.authorization } : {})
-      },
-      body: req.method === "GET" || req.method === "HEAD" ? undefined : Buffer.concat(chunks)
-    });
-    const body = Buffer.from(await upstream.arrayBuffer());
-    res.writeHead(upstream.status, { "content-type": "application/json" });
-    res.end(body);
-    return;
-  }
-  const rel = url.split("?")[0];
-  const file = path.join(root, rel === "/" ? "index.html" : rel);
-  try {
-    const body = await readFile(file);
-    res.writeHead(200, {
-      // From the resolved file, not the request path: "/" has no extension and
-      // index.html would be served as a download instead of a page.
-      "content-type": TYPES[path.extname(file)] || "application/octet-stream",
-      ...mobileOriginHeadersForPath(originHeaders, rel)
-    });
-    res.end(body);
-  } catch {
-    res.writeHead(404).end("not found");
-  }
-});
-
-const mailbox = createReferenceMailboxServer({ locked: true });
-const mailboxServer = mailbox.server ?? mailbox;
-
-let seq = 0;
-const postEnvelope = async (payload) => {
-  seq += 1;
-  const res = await fetch(`http://127.0.0.1:${MAILBOX_PORT}/v1/mailbox/events?mailboxId=${MAILBOX_ID}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${MAILBOX_TOKEN}` },
-    body: JSON.stringify({
-      events: [{
-        eventId: `cards-envelope-${seq}`,
-        conversationId: CONVERSATION,
-        logScopeId: CONVERSATION,
-        originId: "desktop-origin",
-        originSeq: seq,
-        eventHash: `hash-${seq}`,
-        kind: "mobile.timeline.events",
-        payload: sealPayload(payload)
-      }]
-    })
-  });
-  const ack = await res.json();
-  assert.ok(res.ok && ack.appendedEventIds.length === 1, `mailbox did not append: ${JSON.stringify(ack)}`);
-};
-
-const permissionCard = {
+// The approval the desktop holds for its member, as it publishes it.
+const approval = {
   id: "card-qa-1",
-  kind: "permission",
   conversationId: CONVERSATION,
-  title: "@drew wants to read a file",
-  summary: "Read src/index.ts from the project.",
-  requesterLabel: "@drew",
-  machineName: "cloud-box",
-  options: [{ id: "allow", label: "Allow" }, { id: "deny", label: "Deny" }],
-  allowsCustomAnswer: false,
-  allowsCancel: false,
+  requesterParticipantId: DREW.id,
+  requesterHandle: "drew",
+  requesterRoleConfigId: DREW.roleConfigId,
+  toolName: "app_artifact_read",
+  capability: "artifacts.read",
   status: "pending",
-  createdAt: new Date(Date.UTC(2026, 8, 7, 9, 0)).toISOString(),
+  request: { capability: "read", path: "src/index.ts" },
+  summary: "@drew wants to read a file: Read src/index.ts from the project.",
+  machineName: "cloud-box",
   codexDecisionId: "native-decision-77",
-  draftOverride: { capability: "read", path: "src/index.ts" }
+  createdAt: new Date(Date.UTC(2026, 8, 7, 9, 0)).toISOString(),
+  updatedAt: new Date(Date.UTC(2026, 8, 7, 9, 0)).toISOString()
 };
 
 // A member's message exactly as it arrives when it asks the User to choose:
@@ -133,7 +49,7 @@ const permissionCard = {
 // same message and must hide it too, or the User reads the question twice —
 // once as protocol text, once as the card.
 const message = {
-  id: "m1", messageId: "m1", role: "participant", participantLabel: "@drew",
+  id: "m1", role: "participant", participantId: DREW.id, participantLabel: "@drew",
   content: [
     "Working on it.",
     "",
@@ -163,63 +79,28 @@ const message = {
   status: "done", createdAt: new Date(Date.UTC(2026, 8, 7, 8, 59)).toISOString()
 };
 
-const killStaleCdp = () => {
-  try { execSync(`lsof -ti tcp:${CDP_PORT} -sTCP:LISTEN | xargs kill -9`, { stdio: "ignore" }); } catch { /* nothing listening */ }
-};
-
-test("a card published by the desktop is answered on the phone and survives a reload", async (t) => {
-  await new Promise((r) => site.listen(SITE_PORT, "127.0.0.1", r));
-  await new Promise((r) => mailboxServer.listen(MAILBOX_PORT, "127.0.0.1", r));
-  killStaleCdp();
-  const profile = await mkdtemp(path.join(tmpdir(), "aa-mobile-cards-"));
-  const chrome = spawn(CHROME, [
-    "--headless=new", "--no-first-run", "--no-default-browser-check",
-    `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${profile}`,
-    "--window-size=430,860", `http://127.0.0.1:${SITE_PORT}/`
-  ], { stdio: "ignore" });
-
+test("a card published by the desktop is answered on the phone and survives a reload", { timeout: 180_000 }, async (t) => {
+  const { createChatEventDeviceIdentity } = require("../dist/main/main/services/chatEventLog.js");
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  // A cloud machine the server can start: its Wake belongs in Settings.
+  const hub = await startMobileHub({ rosterDevices: [
+    { deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "cloud-box", machineId: "m1" }
+  ] });
+  await hub.call("PUT", "/v1/machine-wake", { machines: [{
+    machineId: "m1", instanceId: "i-0943b28f7231ab93c", region: "us-east-1",
+    credentials: { accessKeyId: "AKIAEXAMPLEWAKEKEY001", secretAccessKey: "syntheticSecretKeyForQaOnly00000", region: "us-east-1" }
+  }] });
+  const site = await serveMobileShell({ port: SITE_PORT, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-cards-");
+  const chrome = launchChrome({ port: CDP_PORT, profile, url: `${site.origin}/`, width: 430, height: 860 });
   let app;
   try {
-    const registered = await fetch(`http://127.0.0.1:${MAILBOX_PORT}/v1/mailbox/register?mailboxId=${MAILBOX_ID}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${MAILBOX_TOKEN}` },
-      body: JSON.stringify({ tokenHashBase64Url: createHash("sha256").update(MAILBOX_TOKEN, "utf8").digest("base64url") })
-    });
-    assert.ok(registered.ok, "mailbox registration failed");
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CONVERSATION, events: [message], cards: [permissionCard] });
-
-    for (let i = 0; i < 40 && !app; i += 1) {
-      try { app = await attach({ port: CDP_PORT, title: "AccordAgents" }); }
-      catch { await new Promise((r) => setTimeout(r, 500)); }
-    }
-    assert.ok(app, "could not attach to Chrome");
-    const evaluate = async (expr) => (await app.evaluate(expr)).result.value;
-
-    await evaluate(`(() => {
-      localStorage.setItem("accordagents.mobile.pairing.v1", JSON.stringify({
-        endpoint: "http://127.0.0.1:${SITE_PORT}/",
-        outboxUrl: "http://127.0.0.1:${SITE_PORT}/v1/mailbox/events",
-        conversationId: "${CONVERSATION}",
-        relaySealKeyBase64: "${SEAL_KEY}",
-        pairedAt: new Date(0).toISOString(),
-        power: {
-          version: 1, handoffId: "handoff-qa", machineId: "m1",
-          instanceId: "i-0943b28f7231ab93c", region: "us-east-1",
-          credentials: { accessKeyId: "AKIAEXAMPLEWAKEKEY001", secretAccessKey: "synthetic", region: "us-east-1" },
-          issuedTo: "route", issuedAt: new Date(0).toISOString()
-        }
-      }));
-      localStorage.setItem("accordagents.mobile.chatList.v1", JSON.stringify([
-        { id: "${CONVERSATION}", title: "Cards QA", group: "AccordAgents", snippet: "QA", updatedAt: new Date(0).toISOString(), participants: [] }
-      ]));
-      localStorage.setItem("accordagents.mobile.activeConversationId.v1", "${CONVERSATION}");
-      return true;
-    })()`);
-    await evaluate("location.reload()");
-    await new Promise((r) => setTimeout(r, 1500));
-    for (let i = 0; i < 40 && !app; i += 1) {
-      try { app = await attach({ port: CDP_PORT, title: "AccordAgents" }); } catch { await new Promise((r) => setTimeout(r, 500)); }
-    }
+    await hub.createChat(CONVERSATION, { title: "Cards QA", participants: [DREW], messages: [message] });
+    await hub.raiseApproval(CONVERSATION, approval);
+    app = await attachApp({ port: CDP_PORT });
+    await pairPage(app, { hub, siteOrigin: site.origin });
+    await openChat(app, CONVERSATION);
+    const evaluate = app.evaluate;
 
     const cardText = async () => evaluate(`(() => {
       const card = document.querySelector('[data-card-id="card-qa-1"]');
@@ -228,7 +109,7 @@ test("a card published by the desktop is answered on the phone and survives a re
     let text = null;
     for (let i = 0; i < 60 && !text; i += 1) {
       text = await cardText();
-      if (!text) await new Promise((r) => setTimeout(r, 500));
+      if (!text) await sleep(500);
     }
     assert.ok(text, "the card never appeared on the phone");
     assert.match(text, /wants to read a file/);
@@ -238,6 +119,7 @@ test("a card published by the desktop is answered on the phone and survives a re
 
     // The question is asked once: the card. The protocol block that produced
     // it is not chat text and never reaches the bubble.
+    await app.waitFor(`Boolean(document.querySelector("#message-list .message-content"))`, "the member's message reached the phone");
     const bubble = await evaluate(`(() => {
       const node = document.querySelector("#message-list .message-content");
       return node ? node.innerText : null;
@@ -252,15 +134,11 @@ test("a card published by the desktop is answered on the phone and survives a re
     assert.doesNotMatch(bubble, /^\s*Q: Which fix should I build\?/m, "no protocol question line in the bubble");
 
     // The User's own words are never control text, whatever they start with.
-    await postEnvelope({
-      type: "mobile.timeline.events",
-      conversationId: CONVERSATION,
-      events: [{
-        id: "m2", messageId: "m2", role: "you",
-        content: "User choice: I would rather do it the other way.",
-        status: "done", createdAt: new Date(Date.UTC(2026, 8, 7, 9, 5)).toISOString()
-      }]
-    });
+    await hub.addMessages(CONVERSATION, [{
+      id: "m2", role: "user",
+      content: "User choice: I would rather do it the other way.",
+      status: "done", createdAt: new Date(Date.UTC(2026, 8, 7, 9, 5)).toISOString()
+    }]);
     const ownWords = await (async () => {
       for (let i = 0; i < 40; i += 1) {
         const text = await evaluate(`(() => {
@@ -269,7 +147,7 @@ test("a card published by the desktop is answered on the phone and survives a re
           return mine.trim() ? mine : null;
         })()`);
         if (text && /other way/.test(text)) return text;
-        await new Promise((r) => setTimeout(r, 500));
+        await sleep(500);
       }
       return null;
     })();
@@ -279,21 +157,11 @@ test("a card published by the desktop is answered on the phone and survives a re
 
     // The question the User answered keeps its place under the message, the
     // way the desktop keeps it: the record of what was asked and chosen.
-    await postEnvelope({
-      type: "mobile.timeline.events",
-      conversationId: CONVERSATION,
-      events: [message],
-      cards: [permissionCard, {
-        id: "choice-answered", kind: "choice", conversationId: CONVERSATION,
-        title: "Where to fix", summary: "Which fix should I build?",
-        requesterLabel: "@drew",
-        options: [{ id: "relay", label: "In the relay" }, { id: "phone", label: "On the phone" }],
-        allowsCustomAnswer: true, allowsCancel: true,
-        status: "answered", outcome: "In the relay",
-        createdAt: new Date(Date.UTC(2026, 8, 7, 8, 59)).toISOString(),
-        sourceMessageId: "m1"
-      }]
-    });
+    await hub.updateMessages(CONVERSATION, [{ ...message, metadata: { pendingChoice: {
+      id: "choice-answered", title: "Where to fix", question: "Which fix should I build?",
+      options: [{ id: "relay", label: "In the relay" }, { id: "phone", label: "On the phone" }],
+      status: "selected", selectedOptionId: "relay", selectedAt: new Date(Date.UTC(2026, 8, 7, 9, 1)).toISOString()
+    } } }]);
     const answered = await (async () => {
       for (let i = 0; i < 40; i += 1) {
         const text = await evaluate(`(() => {
@@ -301,7 +169,7 @@ test("a card published by the desktop is answered on the phone and survives a re
           return node ? node.innerText : null;
         })()`);
         if (text) return text;
-        await new Promise((r) => setTimeout(r, 500));
+        await sleep(500);
       }
       return null;
     })();
@@ -315,7 +183,7 @@ test("a card published by the desktop is answered on the phone and survives a re
     // 2026-10-20: "это вообще не место для плашки").
     assert.equal(await evaluate(`(() => {
       const screen = document.getElementById("timeline-screen");
-      return /Wake machine|Machine asleep|Asleep\?/.test(screen.innerText) ||
+      return /Wake machine|Machine asleep|Asleep\\?/.test(screen.innerText) ||
         [...screen.querySelectorAll("button")].some((button) => /wake/i.test(button.innerText));
     })()`), false, "a chat must not carry the wake control");
 
@@ -324,83 +192,72 @@ test("a card published by the desktop is answered on the phone and survives a re
       document.querySelector('[data-card-id="card-qa-1"] [data-option-id="allow"]').click();
       return true;
     })()`);
-    await new Promise((r) => setTimeout(r, 2000));
+    await sleep(2000);
 
     const stored = await evaluate(`(async () => {
-      const db = await new Promise((resolve, reject) => {
-        const request = indexedDB.open("accordagents-mobile-control");
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      const read = (name) => new Promise((resolve) => {
-        const tx = db.transaction(name, "readonly");
-        const all = tx.objectStore(name).getAll();
-        all.onsuccess = () => resolve(all.result);
-        all.onerror = () => resolve([]);
-      });
-      const events = await read("events");
-      const outbox = await read("outbox");
-      db.close();
-      const decision = events.find((entry) => entry.kind === "permission.decided");
+      const outbox = await AccordAgentsMobile.listOutboxEntries();
+      const decision = outbox.find((entry) => entry.kind === "permission.decided");
       return {
         decision: decision || null,
-        queued: outbox.some((entry) => decision && entry.eventId === decision.eventId),
         cardState: document.querySelector('[data-card-id="card-qa-1"] .control-card-state')?.innerText || "",
         onItsWay: document.querySelector('[data-card-id="card-qa-1"]')?.classList.contains("is-on-its-way") === true,
         allowOffered: (() => { const allow = document.querySelector('[data-card-id="card-qa-1"] [data-option-id="allow"]'); return Boolean(allow && !allow.disabled); })()
       };
     })()`);
-    assert.ok(stored.decision, "the answer was not written to the phone's event log");
-    assert.equal(stored.queued, true, "the event and the queue entry are written together");
+    assert.ok(stored.decision, "the answer was not written to the phone's queue");
     assert.equal(stored.decision.payload.targetKey, "approval:card-qa-1");
     assert.equal(stored.decision.payload.stateId, "approved");
     assert.equal(stored.decision.payload.detail.approve, true);
     assert.equal(stored.decision.payload.detail.codexDecisionId, "native-decision-77",
       "the native decision id must travel back with the answer");
     assert.deepEqual(stored.decision.payload.detail.draftOverride, { capability: "read", path: "src/index.ts" });
+    // The event is made once, signed, and kept with its queue entry, so a
+    // resend is the same bytes.
+    assert.ok(stored.decision.minted && stored.decision.minted.eventId === stored.decision.eventId, "the signed event is kept with its queue entry");
     // A tap is not the answer being applied: the card folds to what was
     // answered and fades, and says nothing more (the User, 2026-09-24).
     assert.equal(stored.onItsWay, true, "the card fades while its answer is on its way");
     assert.equal(stored.cardState, "Your answer: Allow", "the card is folded to her answer, nothing about delivery");
     assert.equal(stored.allowOffered, false, "an answered card does not offer the action again");
 
-    // The desktop received it: the sealed answer is in the mailbox.
-    const posted = await fetch(`http://127.0.0.1:${MAILBOX_PORT}/v1/mailbox/events?mailboxId=${MAILBOX_ID}&limit=50`, {
-      headers: { authorization: `Bearer ${MAILBOX_TOKEN}` }
-    }).then((res) => res.json());
-    assert.ok(
-      (posted.events || []).some((event) => event.kind === "permission.decided"),
-      "the answer never reached the mailbox the desktop reads"
-    );
+    // The server took it: the signed answer is in its order, for the desktop
+    // that holds the approval to apply.
+    await hub.settle();
+    const placed = hub.phoneEvents("permission.decided");
+    assert.equal(placed.length, 1, "the answer never reached the server");
+    assert.equal(placed[0].payload.targetKey, "approval:card-qa-1");
+    assert.equal(placed[0].payload.detail.codexDecisionId, "native-decision-77");
+    assert.equal(placed[0].payload.detail.decidedOn, "phone");
 
     // A reload must not lose it.
-    await evaluate("location.reload()");
-    await new Promise((r) => setTimeout(r, 2500));
-    app = await attach({ port: CDP_PORT, title: "AccordAgents" });
-    const afterReload = async () => (await app.evaluate(`(() => {
-      const card = document.querySelector('[data-card-id="card-qa-1"]');
-      return card ? card.innerText : null;
-    })()`)).result.value;
+    await app.send("Page.reload", {});
+    await sleep(2500);
     let reloaded = null;
     for (let i = 0; i < 40 && !reloaded; i += 1) {
-      reloaded = await afterReload();
-      if (!reloaded) await new Promise((r) => setTimeout(r, 500));
+      reloaded = await cardText().catch(() => null);
+      if (!reloaded) await sleep(500);
     }
     assert.ok(reloaded, "the open card did not survive a reload");
 
     // Once the desktop states it is no longer pending, the card leaves.
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CONVERSATION, events: [message], cards: [] });
+    await hub.raiseApproval(CONVERSATION, { ...approval, status: "approved", updatedAt: new Date().toISOString() });
     let gone = false;
     for (let i = 0; i < 60 && !gone; i += 1) {
-      gone = (await app.evaluate(`document.querySelector('[data-card-id="card-qa-1"]') === null`)).result.value === true;
-      if (!gone) await new Promise((r) => setTimeout(r, 500));
+      gone = await evaluate(`document.querySelector('[data-card-id="card-qa-1"]') === null`) === true;
+      if (!gone) await sleep(500);
     }
     assert.equal(gone, true, "an answered card must stop offering an action");
+
+    // And the machine's Wake is where it belongs: in Settings.
+    await evaluate(`document.getElementById("back-to-chats").click()`);
+    await evaluate(`document.querySelector('[data-home-tab="settings"]').click()`);
+    await app.waitFor(`/cloud-box/.test(document.getElementById("settings-list").innerText) && [...document.querySelectorAll("#settings-list button")].some((button) => /Wake/.test(button.innerText))`,
+      "Settings offers to wake the machine");
   } finally {
     app?.close();
     chrome.kill("SIGKILL");
-    site.close();
-    mailboxServer.close();
+    await site.close();
+    await hub.close();
     // Chrome is still letting go of its profile for a moment after the kill.
     await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
