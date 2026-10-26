@@ -264,9 +264,12 @@ interface StoredSettings {
   /** When the records set up through the shared relay were taken off this
    *  desktop, and what they were: kept for the one notice in Settings. */
   relayRemoval?: RelayRemovalRecord;
-  /** What a removal that has not finished yet found (a machine's removal
-   *  failed half way): kept, so the notice still names everything. */
-  relayRemovalPending?: { machines: string[]; startKeyHanded: boolean };
+  /** What the removal found before it took anything off (a start that stops
+   *  half way): kept, so the notice still names everything. */
+  relayRemovalPending?: RelayRemovalPending;
+  /** Relay machines whose removal failed at the last start; each is tried
+   *  again at every start until it goes. */
+  relayRemovalFailures?: RelayRemovalFailure[];
   /** When this desktop last asked about machines that stopped being used. */
   machineInactivityCheckAt?: string;
   /** Removed machines whose kept chat changes may not be dropped yet (the
@@ -294,10 +297,39 @@ function isRelayRemovalRecord(value: unknown): value is RelayRemovalRecord {
     && typeof record!.startKeyHanded === "boolean" && (record!.dismissedAt === undefined || typeof record!.dismissedAt === "string");
 }
 
-function isRelayRemovalPending(value: unknown): value is { machines: string[]; startKeyHanded: boolean } {
+/** A relay removal that has not finished: the machines it found. */
+export interface RelayRemovalPending {
+  machines: Array<{ id: string; name: string }>;
+  startKeyHanded: boolean;
+}
+
+function isRelayRemovalPending(value: unknown): value is RelayRemovalPending {
   const pending = value as { machines?: unknown; startKeyHanded?: unknown } | undefined;
-  return Boolean(pending) && Array.isArray(pending!.machines) && pending!.machines.every((name) => typeof name === "string")
+  return Boolean(pending) && Array.isArray(pending!.machines)
+    && pending!.machines.every((machine) => typeof machine?.id === "string" && typeof machine?.name === "string")
     && typeof pending!.startKeyHanded === "boolean";
+}
+
+/** A relay machine whose removal failed at the last start, and why. */
+export interface RelayRemovalFailure {
+  machineId: string;
+  machine: string;
+  message: string;
+  /** When this machine first failed for this reason. */
+  at: string;
+  /** The reasons the User dismissed the line for, for this machine: the
+   *  line comes back only for a reason not among them. */
+  dismissedMessages?: string[];
+}
+
+/** Dismissed reasons kept per machine (the newest). */
+const RELAY_FAILURE_DISMISSALS_KEPT = 20;
+
+function isRelayRemovalFailure(value: unknown): value is RelayRemovalFailure {
+  const failure = value as Partial<RelayRemovalFailure> | undefined;
+  return Boolean(failure) && typeof failure!.machineId === "string" && typeof failure!.machine === "string"
+    && typeof failure!.message === "string" && typeof failure!.at === "string"
+    && (failure!.dismissedMessages === undefined || (Array.isArray(failure!.dismissedMessages) && failure!.dismissedMessages.every((message) => typeof message === "string")));
 }
 
 const DEFAULT_PROVIDERS: ProviderSettings[] = [
@@ -3051,7 +3083,11 @@ export class SettingsService {
         ? { ...settings.machineDeviceRevocations } : undefined,
       relayRemoval: isRelayRemovalRecord(settings.relayRemoval) ? { ...settings.relayRemoval } : undefined,
       relayRemovalPending: isRelayRemovalPending(settings.relayRemovalPending)
-        ? { machines: [...settings.relayRemovalPending.machines], startKeyHanded: settings.relayRemovalPending.startKeyHanded } : undefined,
+        ? { machines: settings.relayRemovalPending.machines.map((machine) => ({ id: machine.id, name: machine.name })), startKeyHanded: settings.relayRemovalPending.startKeyHanded } : undefined,
+      relayRemovalFailures: Array.isArray(settings.relayRemovalFailures)
+        ? settings.relayRemovalFailures.filter(isRelayRemovalFailure).map((failure) => ({
+          ...failure, ...(failure.dismissedMessages ? { dismissedMessages: [...failure.dismissedMessages] } : {})
+        })) : undefined,
       // Read back too: dropped here, the 10-day rhythm of the question about
       // unused machines restarted with every launch.
       machineInactivityCheckAt: typeof settings.machineInactivityCheckAt === "string" ? settings.machineInactivityCheckAt : undefined,
@@ -3664,13 +3700,12 @@ export class SettingsService {
 
   /**
    * The machines that were enrolled with the shared relay: their enrollment
-   * names no server of the User's, so they can never connect again. Empty
-   * once the relay's records were taken off this desktop.
+   * names no server of the User's, so they can never connect again. Every
+   * machine set up since names the server, so this empties as they go.
    */
   async relayEraMachines(): Promise<MachineRecord[]> {
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
-    if (stored.relayRemoval) return [];
     const pairings = this.readMachinePairings(stored);
     return (stored.machines ?? []).filter((machine) => {
       const pairing = pairings[machine.pairingKey];
@@ -3680,14 +3715,15 @@ export class SettingsService {
 
   /** What a removal found before it takes anything off, merged with what an
    *  earlier, unfinished one found: the notice names all of it. */
-  beginRelayRemoval(found: { machines: string[]; startKeyHanded: boolean }): Promise<void> {
+  beginRelayRemoval(found: { machines: Array<{ id: string; name: string }>; startKeyHanded: boolean }): Promise<void> {
     return this.serializeDeviceTrust(async () => {
       const stored = await this.readStored();
       if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
       if (stored.relayRemoval) return;
       const before = stored.relayRemovalPending;
       stored.relayRemovalPending = {
-        machines: [...new Set([...(before?.machines ?? []), ...found.machines])],
+        machines: [...(before?.machines ?? []), ...found.machines.filter((machine) => !before?.machines.some((known) => known.id === machine.id))]
+          .map((machine) => ({ id: machine.id, name: machine.name })),
         startKeyHanded: Boolean(before?.startKeyHanded) || found.startKeyHanded
       };
       await this.writeStored(stored, true);
@@ -3699,10 +3735,11 @@ export class SettingsService {
    * the phones paired through it (a phone paired with the User's server has
    * the invite it enrolled with), and the files the relay's pairings kept.
    * The machines went first, through the usual removal (relayEraMachines);
-   * what was found is recorded for the notice. Returns the record, or
-   * undefined when this was done before.
+   * what was found is recorded for the notice, but for the machines whose ids
+   * are in `notRemoved` (their removal failed; tried again at each start).
+   * Returns the record, or undefined when this was done before.
    */
-  finishRelayRemoval(): Promise<RelayRemovalRecord | undefined> {
+  finishRelayRemoval(notRemoved: string[] = []): Promise<RelayRemovalRecord | undefined> {
     return this.serializeDeviceTrust(async () => {
       const stored = await this.readStored();
       if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
@@ -3715,7 +3752,7 @@ export class SettingsService {
       }
       stored.relayRemoval = {
         removedAt: new Date().toISOString(),
-        machines: stored.relayRemovalPending?.machines ?? [],
+        machines: (stored.relayRemovalPending?.machines ?? []).filter((machine) => !notRemoved.includes(machine.id)).map((machine) => machine.name),
         phones: phones.map((phone) => phone.name),
         startKeyHanded: stored.relayRemovalPending?.startKeyHanded ?? false
       };
@@ -3725,13 +3762,68 @@ export class SettingsService {
     });
   }
 
-  /** The User dismissed the notice: it is not shown again. */
-  async dismissRelayRemoval(): Promise<void> {
+  /** Relay machines a later start removed (after failing before): added to
+   *  the record, which keeps its dismissal. */
+  noteRelayMachinesRemoved(names: string[]): Promise<void> {
+    return this.serializeDeviceTrust(async () => {
+      if (names.length === 0) return;
+      const stored = await this.readStored();
+      if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+      if (!stored.relayRemoval) return;
+      stored.relayRemoval = { ...stored.relayRemoval, machines: [...stored.relayRemoval.machines, ...names] };
+      await this.writeStored(stored, true);
+    });
+  }
+
+  /** The relay machines whose removal failed at this start, replacing the
+   *  last start's. A machine keeps the reasons its line was dismissed for;
+   *  one removed (or gone) is dropped. */
+  noteRelayRemovalFailures(failures: Array<{ machineId: string; machine: string; message: string }>): Promise<void> {
+    return this.serializeDeviceTrust(async () => {
+      const stored = await this.readStored();
+      if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+      const before = stored.relayRemovalFailures ?? [];
+      if (failures.length === 0 && before.length === 0) return;
+      const at = new Date().toISOString();
+      const next = failures.map((failure): RelayRemovalFailure => {
+        const earlier = before.find((entry) => entry.machineId === failure.machineId);
+        return {
+          ...failure,
+          at: earlier && earlier.message === failure.message ? earlier.at : at,
+          ...(earlier?.dismissedMessages ? { dismissedMessages: [...earlier.dismissedMessages] } : {})
+        };
+      });
+      if (JSON.stringify(next) === JSON.stringify(before)) return;
+      if (next.length) stored.relayRemovalFailures = next;
+      else delete stored.relayRemovalFailures;
+      await this.writeStored(stored, true);
+    });
+  }
+
+  async relayRemovalFailures(): Promise<RelayRemovalFailure[]> {
     const stored = await this.readStored();
-    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
-    if (!stored.relayRemoval || stored.relayRemoval.dismissedAt) return;
-    stored.relayRemoval = { ...stored.relayRemoval, dismissedAt: new Date().toISOString() };
-    await this.writeStored(stored, true);
+    return (stored.relayRemovalFailures ?? []).map((failure) => ({ ...failure }));
+  }
+
+  /** The User dismissed one of the relay's lines: what was removed, or the
+   *  machines that could not be (each until it fails for another reason). */
+  async dismissRelayRemoval(noticeId: string): Promise<void> {
+    return this.serializeDeviceTrust(async () => {
+      const stored = await this.readStored();
+      if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+      const at = new Date().toISOString();
+      if (noticeId.startsWith("relay-removed:failed:")) {
+        const failures = stored.relayRemovalFailures ?? [];
+        if (failures.every((failure) => failure.dismissedMessages?.includes(failure.message))) return;
+        stored.relayRemovalFailures = failures.map((failure) => failure.dismissedMessages?.includes(failure.message) ? failure : {
+          ...failure, dismissedMessages: [...(failure.dismissedMessages ?? []), failure.message].slice(-RELAY_FAILURE_DISMISSALS_KEPT)
+        });
+      } else {
+        if (!stored.relayRemoval || stored.relayRemoval.dismissedAt) return;
+        stored.relayRemoval = { ...stored.relayRemoval, dismissedAt: at };
+      }
+      await this.writeStored(stored, true);
+    });
   }
 
   async relayRemoval(): Promise<RelayRemovalRecord | undefined> {
@@ -3888,6 +3980,7 @@ export class SettingsService {
       machineDeviceRevocations: _machineDeviceRevocations,
       relayRemoval: _relayRemoval,
       relayRemovalPending: _relayRemovalPending,
+      relayRemovalFailures: _relayRemovalFailures,
       machineInactivityCheckAt: _machineInactivityCheckAt,
       removedMachineOutboxes: _removedMachineOutboxes,
       lastRepoPath: _lastRepoPath,
@@ -3959,6 +4052,7 @@ export class SettingsService {
       machineDeviceRevocations: stored.machineDeviceRevocations,
       relayRemoval: stored.relayRemoval,
       relayRemovalPending: stored.relayRemovalPending,
+      relayRemovalFailures: stored.relayRemovalFailures,
       machineInactivityCheckAt: stored.machineInactivityCheckAt,
       removedMachineOutboxes: stored.removedMachineOutboxes,
       lastRepoPath: stored.lastRepoPath

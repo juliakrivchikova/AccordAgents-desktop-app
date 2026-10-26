@@ -2182,3 +2182,37 @@ test("a look again at an old instance never holds up Delete or a preparation", a
   assert.equal(deleted.configured, false, "Delete finished while AWS had not answered the look");
   release();
 });
+
+test("a look in the first moments after start removes no leaving machine before the machine link has started", async () => {
+  const { settings, removed, removeMachine } = instanceWithMachines();
+  let now = Date.parse("2026-10-22T10:00:00.000Z");
+  const client = new FakeEc2Client({ instanceId: OLD_HANDLE.instanceId, state: "running" });
+  let failing = true;
+  let linkStarted!: () => void;
+  const ready = new Promise<void>((resolve) => { linkStarted = resolve; });
+  const service = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), {
+    now: () => now,
+    removeMachine: async (machineId) => { if (failing) throw new Error("disk full"); await removeMachine(machineId); },
+    machinesReady: () => ready
+  });
+  // Recorded as leaving by a Delete whose removal failed (as after a restart).
+  linkStarted();
+  await service.deleteWorker();
+  assert.deepEqual(settings.leaving.map((entry) => entry.machineId), ["cloud", "older"]);
+  // The desktop starts again: its link has not started when the first look runs.
+  let started!: () => void;
+  const startedAgain = new Promise<void>((resolve) => { started = resolve; });
+  const restarted = serviceWith(settings, new Map([[OLD_CREDS.accessKeyId, client]]), {
+    now: () => now,
+    removeMachine: async (machineId) => { await removeMachine(machineId); },
+    machinesReady: () => startedAgain
+  });
+  failing = false;
+  now += 5 * 60_000;
+  await restarted.status();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(removed, [], "nothing is removed before the link knows its machines");
+  started();
+  await waitFor(() => removed.length === 2);
+  assert.deepEqual(removed, ["cloud", "older"]);
+});

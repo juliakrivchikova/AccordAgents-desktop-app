@@ -387,7 +387,7 @@ test("what the shared relay set up is taken off once: its machines are named for
     assert.deepEqual((await service.relayEraMachines()).map((machine) => machine.id), ["relay-box"]);
     // What was found is kept before anything goes, and merged with what a
     // second, finishing start finds.
-    await service.beginRelayRemoval({ machines: ["Relay box"], startKeyHanded: false });
+    await service.beginRelayRemoval({ machines: [{ id: "relay-box", name: "Relay box" }], startKeyHanded: false });
     await service.removeMachine("relay-box");
     await service.beginRelayRemoval({ machines: [], startKeyHanded: true });
     const recorded = await service.finishRelayRemoval();
@@ -404,12 +404,12 @@ test("what the shared relay set up is taken off once: its machines are named for
     assert.equal((await restarted.relayRemoval())?.phones[0], "iPhone");
     assert.deepEqual(await restarted.relayEraMachines(), []);
     await restarted.saveTrustedDevice({ deviceId: relayPhone.originId, publicKeyDerBase64: relayPhone.publicKeyDerBase64, role: "phone", name: "iPhone", addedAt: now });
-    await restarted.beginRelayRemoval({ machines: ["Other"], startKeyHanded: false });
+    await restarted.beginRelayRemoval({ machines: [{ id: "other", name: "Other" }], startKeyHanded: false });
     assert.equal(await restarted.finishRelayRemoval(), undefined);
     assert.equal((await restarted.listTrustedDevices()).length, 3);
     assert.deepEqual((await restarted.relayRemoval())?.machines, ["Relay box"], "a removal recorded once is not changed");
     // Dismissed, it stays dismissed with its record.
-    await restarted.dismissRelayRemoval();
+    await restarted.dismissRelayRemoval(`relay-removed:${recorded!.removedAt}`);
     assert.ok((await make().relayRemoval())?.dismissedAt);
     // It never reaches a machine: it names the User's devices.
     assert.ok(!(await restarted.exportMachineSettingsSnapshot()).settingsJson.includes("relayRemoval"));
@@ -615,4 +615,38 @@ test("an unconfirmed leaving machine keeps where to look again and a well-formed
     assert.deepEqual((await make().listLeavingMachines()).map((entry) => [entry.machineId, entry.region, entry.accountId]),
       [["m1", "us-east-1", "018089055817"], ["m2", "us-east-1", undefined]]);
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("the relay machines that could not be removed are kept with the reasons their line was dismissed for, across restarts", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-relay-removal-failed-"));
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const settingsPath = path.join(dir, "settings.json");
+  const make = (): SettingsService => { const service = new SettingsService(); (service as any).settingsPath = settingsPath; return service; };
+  try {
+    // What went is recorded at once; the failing machine is left out of it.
+    await make().beginRelayRemoval({ machines: [{ id: "m1", name: "One" }, { id: "m2", name: "Two" }], startKeyHanded: false });
+    await make().noteRelayRemovalFailures([{ machineId: "m1", machine: "One", message: "disk full" }]);
+    assert.deepEqual((await make().finishRelayRemoval(["m1"]))?.machines, ["Two"]);
+    const [first] = await make().relayRemovalFailures();
+    assert.deepEqual({ ...first, at: undefined }, { machineId: "m1", machine: "One", message: "disk full", at: undefined });
+    await make().dismissRelayRemoval(`relay-removed:failed:${first.at}`);
+    assert.equal((await make().relayRemoval())?.dismissedAt, undefined, "the record's line is dismissed on its own");
+    // The same reason at the next start: still dismissed, same line.
+    await make().noteRelayRemovalFailures([{ machineId: "m1", machine: "One", message: "disk full" }]);
+    assert.deepEqual(await make().relayRemovalFailures(), [{ ...first, dismissedMessages: ["disk full"] }]);
+    // Another reason: a new line, the earlier dismissal kept.
+    await make().noteRelayRemovalFailures([{ machineId: "m1", machine: "One", message: "network is down" }]);
+    const [second] = await make().relayRemovalFailures();
+    assert.equal(second.message, "network is down");
+    assert.deepEqual(second.dismissedMessages, ["disk full"]);
+    const snapshot = await make().exportMachineSettingsSnapshot();
+    assert.ok(!snapshot.settingsJson.includes("relayRemoval"), "it never reaches a machine");
+    await make().importMachineSettingsSnapshot(snapshot);
+    assert.equal((await make().relayRemovalFailures())[0]?.message, "network is down", "nor is it lost when settings are imported");
+    // Removed at a later start: named in the record, its failure dropped.
+    await make().noteRelayMachinesRemoved(["One"]);
+    await make().noteRelayRemovalFailures([]);
+    assert.deepEqual((await make().relayRemoval())?.machines, ["Two", "One"]);
+    assert.deepEqual(await make().relayRemovalFailures(), []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

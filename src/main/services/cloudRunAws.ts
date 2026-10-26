@@ -100,6 +100,10 @@ export interface CloudRunAwsServiceOptions {
   /** Removes a machine from this desktop the way Settings → Remove does. An
    *  instance that can never come back takes the machines on it along. */
   removeMachine?: (machineId: string) => Promise<void>;
+  /** Resolves once the desktop's machine link has started (or could not):
+   *  a machine is removed only after the link knows its machines, so a look
+   *  in the first moments after start does not race the link's own start. */
+  machinesReady?: () => Promise<void>;
   now?: () => number;
   idleStopMs?: number;
   idleStopRetryMs?: number;
@@ -148,6 +152,7 @@ export class CloudRunAwsService {
   private prepareActive: Promise<PreparedAwsWorker> | undefined;
   private prepareRequest: PrepareAwsWorkerRequest | undefined;
   private readonly removeMachine?: (machineId: string) => Promise<void>;
+  private readonly machinesReady?: () => Promise<void>;
   private readonly now: () => number;
   /** Instances Delete or Recreate is taking down, with how many of each. */
   private readonly deleting = new Map<string, number>();
@@ -173,6 +178,7 @@ export class CloudRunAwsService {
     this.machineRecoveryFailure = options.machineRecoveryFailure;
     this.logger = options.logger;
     this.removeMachine = options.removeMachine;
+    this.machinesReady = options.machinesReady;
     this.now = options.now ?? (() => Date.now());
     this.createEc2Client = options.createEc2Client ?? createAwsEc2Client;
     this.generateKeyMaterial = options.generateKeyMaterial ?? generateAwsWorkerKeyMaterial;
@@ -774,6 +780,7 @@ export class CloudRunAwsService {
       await this.settings.addLeavingMachines(confirmed.map((entry) => ({ machineId: entry.machineId, instanceId: entry.instanceId, at: entry.at })));
       leaving = await this.settings.listLeavingMachines();
     }
+    await this.machinesReady?.();
     const present = new Set((await this.settings.listMachines()).map((machine) => machine.id));
     let first: string | undefined;
     for (const entry of leaving) {
