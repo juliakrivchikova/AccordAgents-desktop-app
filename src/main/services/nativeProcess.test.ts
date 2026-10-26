@@ -156,6 +156,65 @@ test("a killed session with an agent still running is not taken over", { skip: p
   } finally { orphan.kill("SIGKILL"); await f.close(); }
 });
 
+test("a detached helper started while the guardian's process sample is in flight is captured before stdin closes, and does not survive", { skip: process.platform !== "darwin", timeout: 30_000 }, async () => {
+  // The provider starts a helper in its own process group, then exits on
+  // stdin EOF without stopping it, which reparents the helper. The guardian's
+  // sample that was already running when the stop arrived does not hold the
+  // helper: closing stdin on it let the helper escape every later sample.
+  // Holding that sample (its ps) stopped makes the race certain.
+  const provider = [
+    "const { spawn } = require('node:child_process');",
+    "process.stdin.setEncoding('utf8');",
+    "process.stdin.once('data', () => {",
+    "  const helper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true });",
+    "  process.stdout.write('helper ' + helper.pid + '\\n');",
+    "});",
+    "process.stdin.on('end', () => process.exit(0));"
+  ].join("\n");
+  const f = await fixture();
+  let helper: number | undefined;
+  let heldSample: number | undefined;
+  try {
+    const child = await spawnNativeProcess({ ...f.options, args: ["-e", provider] });
+    let output = "";
+    child.stdout.on("data", (data) => { output += data.toString(); });
+    child.on("error", () => undefined);
+    const guardian = (await f.registry.get("chat:member"))!.supervisor.pid;
+    heldSample = await holdNextChildPs(guardian);
+    child.stdin.write("start\n");
+    await eventually(() => /helper \d+/.test(output));
+    helper = Number(/helper (\d+)/.exec(output)![1]);
+    const closed = confirmNativeProcessClosed(child);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    process.kill(heldSample, "SIGCONT");
+    heldSample = undefined;
+    await closed;
+    await eventually(() => !processExists(helper!), 3000).catch(() => undefined);
+    assert.equal(processExists(helper), false, "the helper was stopped with its provider");
+  } finally {
+    if (heldSample) process.kill(heldSample, "SIGCONT");
+    if (helper && processExists(helper)) process.kill(helper, "SIGKILL");
+    await f.close();
+  }
+});
+
+/** Stops the guardian's next process sample (its ps) while it runs; the
+ *  sample it returns once continued was taken before anything started since. */
+async function holdNextChildPs(guardian: number): Promise<number> {
+  const end = Date.now() + 10_000;
+  while (Date.now() < end) {
+    const found = await new Promise<string>((resolve) => execFile("/usr/bin/pgrep", ["-P", String(guardian), "-x", "ps"], (_error, stdout) => resolve(stdout.trim())));
+    const pid = Number(found.split(/\s+/)[0]);
+    if (pid) {
+      try { process.kill(pid, "SIGSTOP"); } catch { continue; }
+      const state = await new Promise<string>((resolve) => execFile("/bin/ps", ["-o", "stat=", "-p", String(pid)], (_error, stdout) => resolve(stdout.trim())));
+      if (state.startsWith("T")) return pid;
+      try { process.kill(pid, "SIGCONT"); } catch { /* already gone */ }
+    }
+  }
+  assert.fail("The guardian's process sample could not be held.");
+}
+
 test("a provider's process group counts as its own: a member started after the last capture keeps the lease", () => {
   const host = { machine: "a".repeat(64), boot: "a".repeat(32) };
   const lease = { scope: "s", generation: 1, token: "t", host, phase: "running" as const, descendants: [],
@@ -287,6 +346,15 @@ async function fixture() {
       await rm(directory, { recursive: true, force: true });
     }
   };
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }
 
 async function eventually(check: () => boolean | Promise<boolean>, timeoutMs = 6000): Promise<void> {
