@@ -201,6 +201,48 @@ test("the server folds a machine's approval into a card the phone reads, rings t
   assert.deepEqual(timeline.cards, []);
 });
 
+test("a machine member's approved removal stays on the phone, waiting, however many cards come after it, until the desktop's word settles it", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await seedChat(h, machine);
+  const { client } = await pairPhone(h);
+  const at = () => new Date().toISOString();
+  const removal: ChatAppToolApproval = {
+    id: "removal-1", conversationId: "chat-1", requesterParticipantId: machineMember.id, requesterHandle: "box", requesterRoleConfigId: "software-engineer",
+    toolName: "app_participants_request_change", capability: "participants.manage", status: "approved", approvalScope: "once",
+    request: { kind: "participant_removal", operations: [{ type: "remove_participant_from_chat", participantId: localMember.id, handle: "mac" }] },
+    summary: "Remove @mac from this chat", memberRemovalQueuedAt: at(), createdAt: at(), updatedAt: at(), homeMachineId: "m-1"
+  };
+  const chains = new Map<string, { seq: number; prev?: string }>();
+  const machineEvent = (approval: ChatAppToolApproval) => {
+    const scope = `device:rv-1:["chat-1","approval:${approval.id}"]`;
+    const chain = chains.get(scope) ?? { seq: 0 };
+    chain.seq += 1;
+    const event = createSignedChatEvent(machine, { conversationId: "chat-1", logScopeId: scope, kind: "machine.approval.updated",
+      payload: { type: "machine.approval.updated", conversationId: "chat-1", approval }, originSeq: chain.seq, ...(chain.prev ? { prevHash: chain.prev } : {}), createdAt: at() });
+    chain.prev = event.eventHash;
+    chains.set(scope, chain);
+    return event;
+  };
+  assert.equal((await h.call(machine, "POST", "/v1/events", { events: [machineEvent(removal)] })).status, 200);
+  // Many answered cards after it (a member asking permission after permission).
+  for (let index = 0; index < 40; index += 1) {
+    await h.call(machine, "POST", "/v1/events", { events: [machineEvent({ ...removal, id: `answered-${index}`, toolName: "app_artifact_create",
+      capability: "artifacts.write" as ChatAppToolApproval["capability"], request: {} as ChatAppToolApproval["request"], memberRemovalQueuedAt: undefined, summary: "Create a document" })] });
+  }
+  await h.settle();
+  let timeline = await client.getJson<{ cards: Array<{ id: string; status: string; waiting?: boolean }> }>("/v1/phone/timeline", { conversationId: "chat-1" });
+  assert.deepEqual(timeline.cards.map((card) => [card.id, card.status, card.waiting]), [["removal-1", "answered", true]]);
+  // The desktop applied it and says so (its own copy, settled).
+  const { memberRemovalQueuedAt: _queued, ...settled } = removal;
+  const event = createSignedChatEvent(h.owner, { conversationId: "chat-1", logScopeId: HUB_APPROVAL_CARD_SCOPE, kind: HUB_APPROVAL_CARD_EVENT_KIND,
+    payload: { conversationId: "chat-1", approval: { ...settled, appliedParticipantIds: [localMember.id], rosterChangeSettledAt: at(), updatedAt: at() } }, originSeq: 1, createdAt: at() });
+  await h.call(h.owner, "POST", "/v1/events", { events: [event] });
+  await h.settle();
+  timeline = await client.getJson("/v1/phone/timeline", { conversationId: "chat-1" });
+  assert.deepEqual(timeline.cards, [], "applied: gone from the phone");
+});
+
 test("a machine's live progress shows as the pending row, the reply settling it rings the phone, and an open app is not rung", async (t) => {
   const h = await hub(t);
   const machine = createChatEventDeviceIdentity(new Date().toISOString());

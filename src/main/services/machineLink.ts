@@ -113,6 +113,8 @@ export interface MachineApprovalEvent {
   approval: ChatAppToolApproval;
   policies?: ChatAppToolApprovalPolicy[];
   decisionId?: string;
+  /** With `decisionId`: whether the machine applied that decision. */
+  decisionApplied?: boolean;
 }
 
 function cleanBackgroundLabels(labels: unknown[]): string[] {
@@ -1808,6 +1810,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
               machineId: connection.record.id,
               conversationId: body.conversationId,
               decisionId: body.decisionId,
+              decisionApplied: body.ok === true,
               approval: { ...approval, ...(!body.ok && body.error ? { error: body.error } : {}), homeMachineId: connection.record.id },
               ...(body.policies ? { policies: body.policies } : {})
             });

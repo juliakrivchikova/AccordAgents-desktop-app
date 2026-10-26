@@ -2108,6 +2108,13 @@ button.mobile-chat-group-title:active {
   font-weight: 600;
 }
 
+/* Approved and not done yet (a member removal waiting for running turns and
+   the Mac): the folded card, its state line muted, not yet a settled record. */
+.control-card-waiting .control-card-state {
+  color: var(--fg);
+  font-weight: 500;
+}
+
 /* ---- Home: the floating bottom bar, Activity and Settings ----------------
    With no chat open, the phone shows Chats, Activity or Settings, switched by
    a floating bar with search on its own round button beside it. The bar

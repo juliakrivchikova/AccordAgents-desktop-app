@@ -2608,12 +2608,14 @@ export class StorageService {
     await this.setSchemaMeta(INFERRED_REQUEST_THREAD_MIGRATION_KEY, SCHEMA_META_COMPLETE);
   }
 
-  /** Chats holding an approved member removal that had not been applied yet
-   *  (ChatAppToolApproval.memberRemovalQueuedAt); read once at startup. */
-  async conversationIdsWithQueuedMemberRemovals(): Promise<string[]> {
+  /** Chats holding an approved roster change that had not been applied yet
+   *  (ChatAppToolApproval.memberRemovalQueuedAt or memberAdditionQueuedAt);
+   *  read once at startup. */
+  async conversationIdsWithQueuedRosterChanges(): Promise<string[]> {
     await this.init();
     return this.queryConversationIds(
-      `coalesce(nullif(body_json, ''), payload_json) like '%"memberRemovalQueuedAt":%'`
+      `coalesce(nullif(body_json, ''), payload_json) like '%"memberRemovalQueuedAt":%'` +
+      ` or coalesce(nullif(body_json, ''), payload_json) like '%"memberAdditionQueuedAt":%'`
     );
   }
 

@@ -101,3 +101,22 @@ test("a machine member's progress is left to its machine, even for a chat not sa
   }
   assert.deepEqual([...new Set(posted.map((frame) => (frame as { runId: string }).runId))], ["run-mac"]);
 });
+
+test("a machine member's card is its machine's to publish, except the outcome of a roster change this desktop applied", async () => {
+  const state = { client: {}, phones: true, appended: [] as unknown[], posted: [] as unknown[], wake: [] as unknown[] };
+  const cards = publisher(state);
+  const onMachine = { ...approval, id: "machine-card", homeMachineId: "m-1", toolName: "app_participants_request_change", status: "approved" as const,
+    memberRemovalQueuedAt: "2026-10-25T09:00:00.000Z" };
+  cards.noteConversation(chatWith(onMachine));
+  await tick();
+  assert.equal(state.appended.length, 0, "waiting: the machine's word");
+  // Settled before this desktop started: not published again.
+  const { memberRemovalQueuedAt: _queued, ...settled } = onMachine;
+  cards.noteConversation(chatWith({ ...settled, rosterChangeSettledAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }));
+  await tick();
+  assert.equal(state.appended.length, 0);
+  const now = new Date(Date.now() + 1000).toISOString();
+  cards.noteConversation(chatWith({ ...settled, appliedParticipantIds: ["p-gone"], rosterChangeSettledAt: now, updatedAt: now }));
+  await tick();
+  assert.equal(state.appended.length, 1, "applied here: published at once");
+});

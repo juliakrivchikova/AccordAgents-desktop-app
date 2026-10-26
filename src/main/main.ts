@@ -3097,7 +3097,8 @@ void app.whenReady().then(async () => {
         conversationId: event.conversationId,
         approval: event.approval,
         policies: event.policies,
-        decisionId: event.decisionId
+        decisionId: event.decisionId,
+        decisionApplied: event.decisionApplied
       }).then(() => undefined, (error: unknown) => {
         void debugLogService.write("machine-link.approval.apply-error", { message: error instanceof Error ? error.message : String(error) });
         throw error;
@@ -3304,8 +3305,9 @@ void app.whenReady().then(async () => {
     });
   });
   // A member removal the User approved before the app quit, still waiting for
-  // a turn to end; nothing runs after a restart, so it is applied now.
-  void chatService.resumeQueuedMemberRemovals().catch((error) => {
+  // a turn to end (nothing runs after a restart, so it is applied now), and a
+  // machine member's addition not applied yet.
+  void chatService.resumeQueuedRosterChanges().catch((error) => {
     void debugLogService.write("chat.member-removal.resume-error", {
       message: error instanceof Error ? error.message : String(error)
     });

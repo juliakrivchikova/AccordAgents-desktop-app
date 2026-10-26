@@ -14,7 +14,8 @@
  * machine that raised it.
  */
 
-import type { ChatAppToolApproval, ChatChoiceOption, ChatMessage, Conversation } from "./types";
+import type { ChatAppToolApproval, ChatChoiceOption, ChatMessage, ChatParticipantRemovalRequest, Conversation } from "./types";
+import { APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
 import { approvalInstallsScriptCode } from "./scripts";
 
 export type MobileControlCardKind = "permission" | "choice";
@@ -37,6 +38,10 @@ export interface MobileControlCard {
   allowsCustomAnswer: boolean;
   allowsCancel: boolean;
   status: "pending" | "answered";
+  /** Answered, and what was approved has not happened yet (a member removal
+   *  waits for running turns and for the desktop to apply it): shown where a
+   *  pending card is, without buttons, until it has. */
+  waiting?: boolean;
   /** What was decided, once it has been. */
   outcome?: string;
   createdAt: string;
@@ -53,10 +58,102 @@ export interface MobileControlCard {
 const ALLOW = { id: "allow", label: "Allow" };
 const DENY = { id: "deny", label: "Deny" };
 
+/** A member as the desktop card names it: the Chat Assistant by that name,
+ *  any other member by its handle (chatParticipantReference). */
+function memberReference(handle: string): string {
+  const normalized = handle.trim().replace(/^@/, "");
+  const lower = normalized.toLowerCase();
+  return lower === "assistant" || lower === "admin" ? "Chat Assistant" : `@${normalized}`;
+}
+
+/** "@a", "@a and @b", "@a, @b, and @c" -- as the desktop card says it. */
+function handleList(handles: string[]): string {
+  const named = handles.map(memberReference);
+  if (named.length <= 1) return named[0] ?? "";
+  if (named.length === 2) return `${named[0]} and ${named[1]}`;
+  return `${named.slice(0, -1).join(", ")}, and ${named[named.length - 1]}`;
+}
+
+function removalRequest(approval: ChatAppToolApproval): ChatParticipantRemovalRequest | undefined {
+  const request = approval.request as Partial<ChatParticipantRemovalRequest> | undefined;
+  return approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL && request?.kind === "participant_removal" &&
+    Array.isArray(request.operations) && request.operations.length > 0 &&
+    request.operations.every((operation) => typeof operation?.handle === "string" && typeof operation.participantId === "string")
+    ? request as ChatParticipantRemovalRequest
+    : undefined;
+}
+
+/** Whether a card should be shown for this approval: one that asks, and an
+ *  approved roster change that has not happened yet. */
+export function approvalHasCard(approval: ChatAppToolApproval): boolean {
+  return approval.status === "pending" ||
+    (approval.status === "approved" && typeof approval.memberRemovalQueuedAt === "string") ||
+    ((approval.status === "approved" || approval.status === "auto-applied") && typeof approval.memberAdditionQueuedAt === "string");
+}
+
 /** The card for one app-tool approval, in exactly the shape the desktop card
- *  is built from. Pending ones only are shown; an answered approval has no
- *  record the phone keeps. */
+ *  is built from. Pending ones are shown, and an approved roster change until
+ *  it has happened (approvalHasCard); an answered approval has no record the
+ *  phone keeps. */
 export function controlCardFromApproval(conversationId: string, approval: ChatAppToolApproval): MobileControlCard {
+  const removal = removalRequest(approval);
+  if (removal) {
+    // The desktop's removal card, word for word: who asks, who leaves, what
+    // happens, and the two answers it offers.
+    const handles = handleList(removal.operations.map((operation) => operation.handle));
+    const one = removal.operations.length === 1;
+    const requester = handleList([approval.requesterHandle]);
+    const base = {
+      id: approval.id,
+      kind: "permission" as const,
+      conversationId,
+      requesterLabel: requester,
+      machineName: (approval as { machineName?: string }).machineName,
+      allowsCustomAnswer: false,
+      allowsCancel: false,
+      createdAt: approval.createdAt
+    };
+    if (approval.status === "approved" && typeof approval.memberRemovalQueuedAt === "string") {
+      // The desktop's waiting result, with what the phone cannot see: it
+      // cannot tell whether the Mac, which applies it, is on.
+      return {
+        ...base,
+        title: "Removal approved",
+        summary: "",
+        options: [],
+        status: "answered",
+        waiting: true,
+        outcome: `Waiting for running turns to finish and for your Mac to apply it, then ${handles} ${one ? "leaves" : "leave"} this chat.`
+      };
+    }
+    return {
+      ...base,
+      title: `${requester} wants to remove ${handles} from this chat`,
+      summary: `${one ? "Its" : "Their"} session in this chat ends and open requests to or from ${one ? "it" : "them"} are cancelled. ` +
+        `This happens once ${requester}'s turn has ended and no member is running.`,
+      options: [{ id: "allow", label: `Yes, remove ${handles}` }, { id: "deny", label: `No, keep ${handles} in this chat` }],
+      status: approval.status === "pending" ? "pending" : "answered",
+      ...(approval.status === "pending" ? { draftOverride: approval.request } : {})
+    };
+  }
+  if (approval.status !== "pending" && typeof approval.memberAdditionQueuedAt === "string") {
+    return {
+      id: approval.id,
+      kind: "permission",
+      conversationId,
+      title: "Addition approved",
+      summary: approval.summary || "",
+      requesterLabel: approval.requesterHandle ? memberReference(approval.requesterHandle) : undefined,
+      machineName: (approval as { machineName?: string }).machineName,
+      options: [],
+      allowsCustomAnswer: false,
+      allowsCancel: false,
+      status: "answered",
+      waiting: true,
+      outcome: "Waiting for your Mac to apply it.",
+      createdAt: approval.createdAt
+    };
+  }
   // A script that installs code is approved where its code can be read: the
   // phone shows it as a card it may only decline.
   const desktopOnly = approvalInstallsScriptCode(approval);
@@ -122,7 +219,7 @@ export function controlCardsFromConversation(conversation: Conversation): Mobile
   const approvals = (conversation.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[] } | undefined)
     ?.pendingAppToolApprovals ?? [];
   for (const approval of approvals) {
-    if (approval.status !== "pending") continue;
+    if (!approvalHasCard(approval)) continue;
     cards.push(controlCardFromApproval(conversation.id, approval));
   }
   for (const message of conversation.messages) {

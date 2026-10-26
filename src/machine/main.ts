@@ -630,10 +630,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await idlePower.start();
   }
   await host.start();
-  // Same as the desktop: approved member removals left waiting by a restart.
-  void chatService.resumeQueuedMemberRemovals().catch((error) => {
-    void debugLogService.write("chat.member-removal.resume-error", { message: String(error) });
-  });
+  // Approved roster changes left waiting by a restart are the desktop's to
+  // apply (it owns the member list); a machine resumes none.
   const hubClient = new HubClient({ url: hubUrl, identity: () => chatEventLogService.getOrCreateDeviceIdentity(), storage: storageService });
   // A picture the User sent from her phone is read from her server.
   chatService.setHubBlobReader((reference) => hubClient.downloadBytes(reference));

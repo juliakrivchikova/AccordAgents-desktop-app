@@ -342,3 +342,139 @@ test("a phone's message a machine takes from the server's copy (it could not rea
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
+
+test("a phone turn that is starting keeps the chat busy until its run is registered, so a waiting removal cannot apply mid-start", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-phone-removal-"));
+  try {
+    const phone = createChatEventDeviceIdentity(new Date().toISOString());
+    const desktop = await device(path.join(directory, "desktop.sqlite3"), "desktop", phone.originId);
+    const target: ChatParticipant = { id: "33333333-3333-4333-8333-333333333333", handle: "gera", roleConfigId: "software-engineer", kind: "claude-code" };
+    const at = "2026-10-25T08:00:00.000Z";
+    const conversation = chat();
+    conversation.metadata = { ...conversation.metadata, participants: [local, remote, target], pendingAppToolApprovals: [{
+      id: "queued-removal", conversationId: "chat-phone", requesterParticipantId: local.id, requesterHandle: local.handle, requesterRoleConfigId: local.roleConfigId,
+      toolName: "app_participants_request_change", capability: "participants.manage", status: "approved", approvalScope: "once",
+      request: { kind: "participant_removal", operations: [{ type: "remove_participant_from_chat", participantId: target.id, handle: target.handle }] },
+      summary: "Remove @gera from this chat", memberRemovalQueuedAt: at, createdAt: at, updatedAt: at
+    }] };
+    await (desktop.service as unknown as { saveConversation(conversation: Conversation): Promise<void> }).saveConversation(conversation);
+    const service = desktop.service as unknown as {
+      chatHasLiveWork(id: string): boolean;
+      noteQueuedMemberRemoval(id: string): void;
+      applyQueuedMemberRemovalsOnce(id: string): Promise<void>;
+      runParticipantBatch: (...args: unknown[]) => Promise<void>;
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const seen: boolean[] = [];
+    let passDone!: () => void;
+    const pass = new Promise<void>((resolve) => { passDone = resolve; });
+    let stubError: unknown;
+    // The turn is handed to the run, which has not registered it yet. The
+    // real run registers only after a few awaits (settings, skills), by when
+    // the phone message's start has returned: that is the window.
+    const starts = (desktop.service as unknown as { phoneStartsInFlight: Map<string, number> }).phoneStartsInFlight;
+    service.runParticipantBatch = async () => {
+      try {
+        for (let index = 0; index < 100 && starts.has("chat-phone"); index += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+        assert.equal(starts.has("chat-phone"), false, "the message's start has returned");
+        seen.push(service.chatHasLiveWork("chat-phone"));
+        service.noteQueuedMemberRemoval("chat-phone");
+        await service.applyQueuedMemberRemovalsOnce("chat-phone");
+      } catch (error) {
+        stubError = error;
+      } finally {
+        passDone();
+      }
+      await gate;
+    };
+    const messageId = randomUUID();
+    const message: ChatMessage = { id: messageId, role: "user", content: "@taylor go", createdAt: new Date().toISOString(), status: "done",
+      metadata: { deliveryTargets: [local.id], threadId: messageId } as ChatMessage["metadata"] };
+    const { envelope, payload } = phoneMessage(phone, 1, undefined, message);
+    assert.equal(await desktop.service.applyRemoteChatChanges(envelope, payload), "applied");
+    await pass;
+    if (stubError) throw stubError;
+    assert.deepEqual(seen, [true], "busy while starting");
+    const members = async () => ((await desktop.storage.getConversation("chat-phone"))!.metadata.participants as ChatParticipant[]).map((item) => item.id);
+    assert.ok((await members()).includes(target.id), "the removal waited");
+
+    release();
+    for (let index = 0; index < 100 && (await members()).includes(target.id); index += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal((await members()).includes(target.id), false, "applied once the turn ended");
+  } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("a message that starts no turn here lets a waiting removal apply once its start is over", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-phone-noturn-"));
+  try {
+    const phone = createChatEventDeviceIdentity(new Date().toISOString());
+    const desktop = await device(path.join(directory, "desktop.sqlite3"), "desktop", phone.originId);
+    const target: ChatParticipant = { id: "33333333-3333-4333-8333-333333333333", handle: "gera", roleConfigId: "software-engineer", kind: "claude-code" };
+    const at = "2026-10-25T08:00:00.000Z";
+    const conversation = chat();
+    conversation.metadata = { ...conversation.metadata, participants: [local, remote, target], pendingAppToolApprovals: [{
+      id: "queued-removal", conversationId: "chat-phone", requesterParticipantId: local.id, requesterHandle: local.handle, requesterRoleConfigId: local.roleConfigId,
+      toolName: "app_participants_request_change", capability: "participants.manage", status: "approved", approvalScope: "once",
+      request: { kind: "participant_removal", operations: [{ type: "remove_participant_from_chat", participantId: target.id, handle: target.handle }] },
+      summary: "Remove @gera from this chat", memberRemovalQueuedAt: at, createdAt: at, updatedAt: at
+    }] };
+    await (desktop.service as unknown as { saveConversation(conversation: Conversation): Promise<void> }).saveConversation(conversation);
+    (desktop.service as unknown as { noteQueuedMemberRemoval(id: string): void }).noteQueuedMemberRemoval("chat-phone");
+    // Whether the author is a phone is still being read: the chat counts as
+    // busy meanwhile, and then the message turns out to start nothing here.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    desktop.service.setPhoneOrigins(async () => { await gate; return false; });
+    const messageId = randomUUID();
+    const message: ChatMessage = { id: messageId, role: "user", content: "@taylor go", createdAt: new Date().toISOString(), status: "done",
+      metadata: { deliveryTargets: [local.id], threadId: messageId } as ChatMessage["metadata"] };
+    const { envelope, payload } = phoneMessage(phone, 1, undefined, message);
+    assert.equal(await desktop.service.applyRemoteChatChanges(envelope, payload), "applied");
+    await settle();
+    const members = async () => ((await desktop.storage.getConversation("chat-phone"))!.metadata.participants as ChatParticipant[]).map((item) => item.id);
+    assert.ok((await members()).includes(target.id), "busy while its author is read");
+
+    release();
+    for (let index = 0; index < 100 && (await members()).includes(target.id); index += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal((await members()).includes(target.id), false, "applied once the start is over");
+  } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("a member the server's copy no longer lists stops on the machine that runs it, and the desktop's word in it settles waiting cards", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-copy-retire-"));
+  try {
+    const phone = createChatEventDeviceIdentity(new Date().toISOString());
+    const machine = await device(path.join(directory, "machine.sqlite3"), "machine", phone.originId);
+    const at = "2026-10-25T08:00:00.000Z";
+    const card = (id: string) => ({ id, conversationId: "chat-phone", requesterParticipantId: remote.id, requesterHandle: remote.handle, requesterRoleConfigId: remote.roleConfigId,
+      toolName: "app_participants_request_change", capability: "participants.manage" as const, status: "auto-applied" as const, summary: "Add @newbie", memberAdditionQueuedAt: at,
+      request: { operations: [{ type: "add_new_participant_to_chat" as const, saveAsPreset: false, participant: { handle: "newbie", roleConfigId: "software-engineer", kind: "claude-code" as const } }] },
+      createdAt: at, updatedAt: at });
+    const held = chat();
+    held.metadata = { ...held.metadata, pendingAppToolApprovals: [card("addition"), card("other")] };
+    await (machine.service as unknown as { saveConversation(conversation: Conversation): Promise<void> }).saveConversation(held);
+    const closed: string[] = [];
+    (machine.service as unknown as { cliRunner: Record<string, unknown> }).cliRunner.closeWarmAgents =
+      async (_conversationId: string, participantId: string, reason: string) => { closed.push(`${participantId}:${reason}`); };
+    const base = chat();
+    const said = (id: string, approvalId: string): ChatMessage => ({ id, role: "system", content: "Auto-applied member request from @drew: Add @newbie.", createdAt: "2026-10-25T08:01:00.000Z", status: "done",
+      metadata: { threadId: "system", rosterChange: { approvalId, outcome: "applied", appliedParticipantIds: ["newbie-id"] } } });
+    const copied = copiedConversation({ ...base, messages: [...base.messages, said("from-desktop", "addition"), said("from-elsewhere", "other")], metadata: { ...base.metadata, participants: [local] } });
+
+    await machine.service.mergeServerCopy({ ...copied, authors: { "from-elsewhere": "another-machine" } }, { desktopOriginId: "desktop-peer", localOriginId: machine.originId });
+    await settle();
+
+    assert.deepEqual(closed, [`${remote.id}:member-removed`], "its own member, not the desktop's");
+    const approvals = (await machine.storage.getConversation("chat-phone"))!.metadata.pendingAppToolApprovals as Array<Record<string, unknown>>;
+    assert.equal(approvals.find((item) => item.id === "addition")!.memberAdditionQueuedAt, undefined);
+    assert.deepEqual(approvals.find((item) => item.id === "addition")!.appliedParticipantIds, ["newbie-id"]);
+    assert.equal(typeof approvals.find((item) => item.id === "other")!.memberAdditionQueuedAt, "string", "only the desktop's word settles a card");
+  } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});

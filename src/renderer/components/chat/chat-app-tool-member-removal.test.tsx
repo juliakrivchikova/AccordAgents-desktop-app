@@ -9,6 +9,7 @@ import {
   memberRemovalQuestion,
   memberRemovalResultSummary
 } from "./chat-app-tool-member-removal";
+import { reviewResultSummary } from "./chat-app-tool-approval-review";
 
 const NOW = "2026-10-22T07:00:00.000Z";
 
@@ -71,4 +72,22 @@ test("an addition card is not mistaken for a removal", () => {
     request: { operations: [{ type: "add_existing_participant_to_chat", participantConfigId: "preset-1" }] }
   });
   assert.equal(chatParticipantRemovalRequest(addition), undefined);
+});
+
+test("a member addition card says it waits while a machine member's addition is not applied, and never 'added' once it was not", () => {
+  const addition: ChatAppToolApproval = {
+    id: "addition-1", conversationId: "chat-1", requesterParticipantId: "alpha-id", requesterHandle: "alpha", requesterRoleConfigId: "generic-participant",
+    toolName: "app_participants_request_change", capability: "participants.manage", status: "auto-applied",
+    request: { operations: [{ type: "add_new_participant_to_chat", participant: { handle: "helper", roleConfigId: "generic-participant", kind: "claude-code" } }] },
+    summary: "Add @helper", createdAt: NOW, updatedAt: NOW
+  };
+  const change = addition.request as Parameters<typeof reviewResultSummary>[2];
+  assert.deepEqual(reviewResultSummary({ ...addition, memberAdditionQueuedAt: NOW }, undefined, change, undefined, []),
+    { title: "Addition approved", detail: "Waiting to be applied in this chat.", tone: "waiting" });
+  for (const status of ["cancelled", "expired"] as const) {
+    assert.deepEqual(reviewResultSummary({ ...addition, status, error: "Duplicate member name." }, undefined, change, undefined, []),
+      { title: "Not applied", detail: "No role or member changes were made.", tone: "refused" });
+  }
+  assert.equal(reviewResultSummary(addition, undefined, change, undefined, []).tone, "done");
+  assert.equal(reviewResultSummary(addition, undefined, change, undefined, []).title, "Member added");
 });
