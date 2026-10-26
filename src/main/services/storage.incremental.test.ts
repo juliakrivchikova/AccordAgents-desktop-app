@@ -363,7 +363,7 @@ test("a database can be put back into the shape an older version opens", async (
   }
 });
 
-test("startup finds exactly the chats holding an approved member removal that was not applied", async () => {
+test("startup finds exactly the chats holding an approved roster change that was not applied", async () => {
   const { storage, directory } = await openStorage();
   try {
     const queued = {
@@ -380,12 +380,23 @@ test("startup finds exactly the chats holding an approved member removal that wa
     await storage.saveConversation(waiting);
     await storage.saveConversation(mentioned);
 
-    assert.deepEqual(await storage.conversationIdsWithQueuedMemberRemovals(), ["chat-waiting"]);
+    assert.deepEqual(await storage.conversationIdsWithQueuedRosterChanges(), ["chat-waiting"]);
 
     const { memberRemovalQueuedAt: _applied, ...decided } = queued;
     waiting.metadata = { pendingAppToolApprovals: [{ ...decided, appliedParticipantIds: ["member-1"] }] };
     await storage.saveConversation(waiting);
-    assert.deepEqual(await storage.conversationIdsWithQueuedMemberRemovals(), []);
+    assert.deepEqual(await storage.conversationIdsWithQueuedRosterChanges(), []);
+
+    // A machine member's addition waiting for this desktop, on its own.
+    const addition = { id: "approval-2", toolName: "app_participants_request_change", status: "auto-applied", memberAdditionQueuedAt: "2026-01-01T00:00:06.000Z" };
+    const adding = { ...conversation([message("m-3", "add", 3)]), id: "chat-adding" } as Conversation;
+    adding.metadata = { pendingAppToolApprovals: [addition] };
+    await storage.saveConversation(adding);
+    assert.deepEqual(await storage.conversationIdsWithQueuedRosterChanges(), ["chat-adding"]);
+    const { memberAdditionQueuedAt: _added, ...added } = addition;
+    adding.metadata = { pendingAppToolApprovals: [{ ...added, appliedParticipantIds: ["member-2"] }] };
+    await storage.saveConversation(adding);
+    assert.deepEqual(await storage.conversationIdsWithQueuedRosterChanges(), []);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

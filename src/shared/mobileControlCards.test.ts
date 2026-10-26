@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { controlCardFromApproval, controlCardFromChoiceMessage } from "./mobileControlCards";
+import { approvalHasCard, controlCardFromApproval, controlCardFromChoiceMessage } from "./mobileControlCards";
 import type { ChatAppToolApproval, ChatMessage } from "./types";
 
 function choiceMessage(recommendedOptionId?: string): ChatMessage {
@@ -88,4 +88,59 @@ test("a scheduled script that installs code reaches the phone as decline-only", 
   assert.match(create.title, /^Approve on the desktop/);
   const disable = controlCardFromApproval("chat-1", approval("disable"));
   assert.deepEqual(disable.options.map((option) => option.id), ["allow", "deny"], "switching off installs nothing, so the phone may approve it");
+});
+
+function removalApproval(patch: Partial<ChatAppToolApproval> = {}): ChatAppToolApproval {
+  return {
+    id: "removal-1",
+    conversationId: "conversation-1",
+    requesterParticipantId: "drew-id",
+    requesterHandle: "drew",
+    requesterRoleConfigId: "generic-participant",
+    toolName: "app_participants_request_change",
+    capability: "participants.manage",
+    status: "pending",
+    request: { kind: "participant_removal", operations: [
+      { type: "remove_participant_from_chat", participantId: "gera-id", handle: "gera" },
+      { type: "remove_participant_from_chat", participantId: "taylor-id", handle: "taylor" }
+    ] },
+    summary: "Remove @gera and @taylor from this chat",
+    createdAt: "2026-10-26T09:00:00.000Z",
+    updatedAt: "2026-10-26T09:00:00.000Z",
+    ...patch
+  };
+}
+
+test("a member removal reaches the phone in the desktop card's words, and stays visible while approved and waiting", () => {
+  const pending = controlCardFromApproval("conversation-1", removalApproval());
+  assert.equal(pending.title, "@drew wants to remove @gera and @taylor from this chat");
+  assert.deepEqual(pending.options, [{ id: "allow", label: "Yes, remove @gera and @taylor" }, { id: "deny", label: "No, keep @gera and @taylor in this chat" }]);
+  assert.equal(pending.status, "pending");
+  assert.match(pending.summary, /Their session in this chat ends/);
+
+  const queued = removalApproval({ status: "approved", memberRemovalQueuedAt: "2026-10-26T09:01:00.000Z" });
+  assert.equal(approvalHasCard(queued), true);
+  const waiting = controlCardFromApproval("conversation-1", queued);
+  assert.equal(waiting.status, "answered");
+  assert.equal(waiting.waiting, true);
+  assert.equal(waiting.title, "Removal approved");
+  assert.equal(waiting.outcome, "Waiting for running turns to finish and for your Mac to apply it, then @gera and @taylor leave this chat.");
+  assert.deepEqual(waiting.options, []);
+  assert.equal(waiting.draftOverride, undefined, "nothing to answer");
+
+  const applied = removalApproval({ status: "approved", appliedParticipantIds: ["gera-id", "taylor-id"] });
+  assert.equal(approvalHasCard(applied), false, "an applied removal has no card");
+  assert.equal(approvalHasCard(removalApproval({ status: "denied" })), false);
+});
+
+test("a machine member's approved addition waits visibly until the Mac adds the member", () => {
+  const addition = { ...removalApproval(), id: "addition-1", status: "auto-applied" as const, summary: "Add @helper", memberAdditionQueuedAt: "2026-10-26T09:01:00.000Z",
+    request: { operations: [{ type: "add_new_participant_to_chat" as const, participant: { handle: "helper", roleConfigId: "generic-participant", kind: "claude-code" as const } }] } };
+  assert.equal(approvalHasCard(addition), true);
+  const card = controlCardFromApproval("conversation-1", addition);
+  assert.equal(card.waiting, true);
+  assert.deepEqual(card.options, []);
+  assert.equal(card.title, "Addition approved");
+  assert.equal(card.summary, "Add @helper");
+  assert.equal(card.outcome, "Waiting for your Mac to apply it.");
 });

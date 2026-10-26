@@ -49,6 +49,9 @@ export class HubPhonePublisher {
   /** The catalog last published, without its stamp: an unchanged one is not
    *  sent again (settings are written often, the catalog rarely changes). */
   private catalogPublished?: string;
+  /** When this desktop started publishing: a machine member's roster card it
+   *  settles from then on is its word to publish. */
+  private readonly startedAt = new Date().toISOString();
 
   constructor(private readonly options: {
     storage: Pick<StorageService, "deviceEventBlobs">;
@@ -77,13 +80,17 @@ export class HubPhonePublisher {
     if (this.machineMembers.size > 500) this.machineMembers.delete(this.machineMembers.keys().next().value!);
     const approvals = (conversation.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[] } | undefined)?.pendingAppToolApprovals ?? [];
     for (const approval of approvals) {
-      // A machine's member's card is published by that machine.
-      if (approval.homeMachineId) continue;
+      // A machine's member's card is published by that machine, except the
+      // outcome of a roster change it asked for: this desktop applies those
+      // (it owns the member list), and the phone hears it from here at once,
+      // also while that machine is stopped.
+      const settledHere = typeof approval.rosterChangeSettledAt === "string" && approval.rosterChangeSettledAt >= this.startedAt;
+      if (approval.homeMachineId && !settledHere) continue;
       const key = `${conversation.id}\n${approval.id}`;
       const stamp = `${approval.status}\u0000${approval.updatedAt}`;
       if (this.publishedApprovals.get(key) === stamp) continue;
       // An approval settled long before this desktop started needs no card.
-      if (!this.publishedApprovals.has(key) && !this.unpublished.has(key) && approval.status !== "pending") {
+      if (!this.publishedApprovals.has(key) && !this.unpublished.has(key) && approval.status !== "pending" && !(approval.homeMachineId && settledHere)) {
         this.publishedApprovals.set(key, stamp);
         continue;
       }

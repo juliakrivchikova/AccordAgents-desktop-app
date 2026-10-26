@@ -1399,13 +1399,26 @@ export interface ChatAppToolApproval {
   consumedAt?: string;
   error?: string;
   /** An approved member removal that is waiting for the chat's running turns
-   *  to finish; cleared when the removal is applied or could not be. */
+   *  to finish; cleared when the removal is applied or could not be. Only the
+   *  desktop applies it (it owns the member list); a machine member's removal
+   *  waits on the machine until the desktop has. */
   memberRemovalQueuedAt?: string;
+  /** An approved (or auto-applied) addition requested by a member on a
+   *  machine, waiting for the desktop, which owns the member list, to apply it. */
+  memberAdditionQueuedAt?: string;
+  /** Desktop only: when the desktop applied (or could not apply) a machine
+   *  member's roster change, so an older copy of the card from the machine
+   *  does not bring the waiting state back. */
+  rosterChangeSettledAt?: string;
   /** Machines transport: the approval was raised by a member on this machine;
    *  the desktop shows it and forwards the decision there. */
   homeMachineId?: string;
   machineDecisionPending?: { decisionId: string; machineName: string; approve: boolean; at: string };
   machineDecisionReceiptId?: string;
+  /** Desktop only: the User's answer (its signed event) the card's machine
+   *  reports it applied; a machine member's roster change is applied here
+   *  only once that answer is confirmed (an approval the User gave). */
+  machineAppliedDecisionId?: string;
 }
 
 export interface ChatAppToolApprovalPolicy {
@@ -1429,7 +1442,18 @@ export interface ChatBackgroundTasksEvent {
   labels: string[];
 }
 
+/** The desktop's outcome of a roster change a member asked for, on the chat
+ *  message that says it: a machine settles its own copy of the card from it
+ *  (it never applies a roster change itself). */
+export interface ChatRosterChangeOutcome {
+  approvalId: string;
+  outcome: "applied" | "refused";
+  appliedParticipantIds?: string[];
+  error?: string;
+}
+
 export interface ChatMessageMetadata {
+  rosterChange?: ChatRosterChangeOutcome;
   /** Machines transport, Rule 2: a Stop was requested but the member's
    *  machine has not confirmed it yet (shown honestly instead of "stopped");
    *  kept apart from the content so delivered text is never overwritten. */

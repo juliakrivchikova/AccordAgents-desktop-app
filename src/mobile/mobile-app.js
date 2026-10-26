@@ -2979,7 +2979,9 @@
         seen.add(card.id);
         if (card.status !== "pending") {
           // An answered card is never reopened by a list that was read before
-          // the answer: what this phone holds is the later fact.
+          // the answer: what this phone holds is the later fact. A waiting one
+          // (approved, not applied yet) is the chat page's to settle: the list
+          // carries only pending cards.
           next.push(card);
           continue;
         }
@@ -3287,7 +3289,9 @@
     // outside the page it read: it stays, as the record under its message.
     const incoming = new Set(stamped.map(function (card) { return card && card.id; }));
     const kept = previous.filter(function (card) {
-      return card && card.id && !incoming.has(card.id) && card.status !== "pending";
+      // A waiting card is not a record: once the server leaves it out, what
+      // it waited for has happened (or will not).
+      return card && card.id && !incoming.has(card.id) && card.status !== "pending" && card.waiting !== true;
     }).sort(function (left, right) {
       return String(right.createdAt || "").localeCompare(String(left.createdAt || ""));
     }).slice(0, CONTROL_CARDS_KEPT_ANSWERED_LIMIT);
@@ -4970,7 +4974,7 @@
 
   /** What a card is drawn from, so an unchanged card is not drawn again. */
   function controlCardSignature(card) {
-    return JSON.stringify([card.id, card.kind, card.status, card.title, card.summary, card.requesterLabel,
+    return JSON.stringify([card.id, card.kind, card.status, card.waiting === true, card.outcome || "", card.title, card.summary, card.requesterLabel,
       card.machineName, card.options, card.recommendedOptionId, card.allowsCustomAnswer, card.allowsCancel,
       isCardLocked(card.id) || controlCardAnswering.has(card.id), controlCardErrors.get(card.id) || "",
       cardSentText(card.id), cardOutcome(card.id) || ""]);
@@ -5234,6 +5238,10 @@
   }
 
   function controlCardElement(card) {
+    if (card.waiting === true) {
+      // Answered and not done yet: what was approved and what it waits for.
+      return compactCardElement(card, card.outcome || "", "control-card-folded control-card-waiting", "");
+    }
     // Answered here and on its way: folded at once to what was answered, and
     // faded until the desktop says so (the User, 2026-09-24).
     if (cardOnItsWay(card)) {
@@ -6783,9 +6791,11 @@
     // permission, waits at the end of the chat (the User, 2026-10-01: a
     // question asked in a thread stood at the bottom of the main chat).
     renderCardIndex = Object.assign(buildCardIndex(activeId), { revision: revision });
-    const tailCards = pendingControlCards(activeId).filter(function (card) {
+    // Approved changes still waiting come first: the last card, next to the
+    // composer, is one that needs an answer.
+    const tailCards = (renderCardIndex.waiting || []).concat(pendingControlCards(activeId).filter(function (card) {
       return card.kind !== "choice" || !card.sourceMessageId;
-    });
+    }));
     // Each row's change check is worked out once per redraw and used twice:
     // for whether anything changed, and for which rows to patch.
     const rowSignatures = rows.map(messageRowSignature);
@@ -7371,15 +7381,19 @@
   function buildCardIndex(conversationId) {
     const byMessage = new Map();
     const pending = [];
+    const waiting = [];
     for (const card of controlCardsFor(conversationId)) {
       if (!card) continue;
       if (card.status === "pending") pending.push(card);
+      // Approved and not done yet (a member removal waiting for running
+      // turns): shown where it was asked, without buttons, until it is.
+      else if (card.waiting === true && card.kind === "permission") waiting.push(card);
       if (!card.sourceMessageId) continue;
       const list = byMessage.get(card.sourceMessageId);
       if (list) list.push(card);
       else byMessage.set(card.sourceMessageId, [card]);
     }
-    return { conversationId: conversationId, byMessage: byMessage, pending: pending };
+    return { conversationId: conversationId, byMessage: byMessage, pending: pending, waiting: waiting };
   }
 
   function cardsForMessage(entry) {

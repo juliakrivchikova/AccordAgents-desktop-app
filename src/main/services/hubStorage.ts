@@ -259,6 +259,8 @@ const PULL_PAGE_BYTES = 4 * 1024 * 1024;
 const HUB_STORAGE_PAGE_MAX = 1000;
 /** Settled approval cards kept per chat (pending ones are always kept). */
 const HUB_APPROVAL_CARDS_KEPT = 200;
+/** A card for an approved roster change not applied yet (approvalHasCard). */
+const WAITING_CARD_SQL = `(approval_json like '%"memberRemovalQueuedAt":%' or approval_json like '%"memberAdditionQueuedAt":%')`;
 
 export class HubStorage {
   private ready?: Promise<void>;
@@ -573,6 +575,7 @@ export class HubStorage {
           where excluded.hub_seq > hub_approval_cards.hub_seq;`).join("")}
       ${[...new Set(cards.map((card) => card.conversationId))].map((conversationId) => `
         delete from hub_approval_cards where conversation_id = ${quote(conversationId)} and status <> 'pending'
+          and not ${WAITING_CARD_SQL}
           and hub_seq < (select hub_seq from hub_approval_cards where conversation_id = ${quote(conversationId)}
             order by hub_seq desc limit 1 offset ${HUB_APPROVAL_CARDS_KEPT - 1});`).join("")}
       commit;
@@ -640,6 +643,17 @@ export class HubStorage {
       where conversation_id = ${quote(conversationId)} and approval_id in (${ids.map(quote).join(", ")});
     `);
     return new Map(rows.map((row) => [row.approvalId, row.status]));
+  }
+
+  /** One chat's approved roster changes that have not happened yet (shown
+   *  on the phone until they have, however many cards came since). */
+  async waitingApprovalCards(conversationId: string, limit = 30): Promise<Array<{ approvalJson: string; status: string; hubSeq: number }>> {
+    await this.init();
+    return this.database.query(`
+      select approval_json as approvalJson, status, hub_seq as hubSeq from hub_approval_cards
+      where status in ('approved', 'auto-applied') and conversation_id = ${quote(conversationId)} and ${WAITING_CARD_SQL}
+      order by hub_seq desc limit ${Math.max(1, Math.min(limit, HUB_STORAGE_PAGE_MAX))};
+    `);
   }
 
   /** One chat's approval cards (the newest first, at most `limit`). */

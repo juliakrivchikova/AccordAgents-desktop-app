@@ -454,7 +454,7 @@ made realistically tall.
 | T-05 | `app_chat_set_title` | First eligible turn applies; later calls ignored — confirm that is intended and visible. | CODE-OK |
 | T-06 | `app_chat_request_compaction` | Cooldown and duplicate checks fire clearly. | CODE-OK |
 | T-07 | Compaction actually compacts | The context percentage increases. Codex completes via `turn/completed`; Claude must run one-shot or the usage read is the stale pre-compact figure. | CODE-OK |
-| T-08 | Roles / participants / roster change | `auto_applied` with `allow` and no escalation; otherwise `pending_user_approval`. | CODE-OK |
+| T-08 | Roles / participants / roster change | `auto_applied` with `allow` and no escalation; otherwise `pending_user_approval`. A member on a machine gets `approved_pending_apply` for an addition, and the desktop adds the member (see `docs/chat-roles-and-participants.md`). | CODE-OK |
 | T-09 | Capability gating | A member without the capability does not even see the tool. | CODE-OK |
 | T-10 | Pre-auth list is registry-derived | Adding a new `app_*` tool updates the pre-auth set without a second edit. | SMALL-FIX |
 | T-11 | Artifact create — published | Created; `#artifact:<id>` resolves. | CODE-OK |

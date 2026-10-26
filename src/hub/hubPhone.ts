@@ -6,7 +6,7 @@ import { CHAT_DELIVERY_POLICY_OPTIONS, resolveChatDeliveryTargets } from "../sha
 import { matchingChatSavedPrompts } from "../shared/chatSavedPrompts";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import type { HubComposerCatalog, HubDevice, HubPhoneScope } from "../shared/hubProtocol";
-import { controlCardFromApproval, controlCardFromChoiceMessage, type MobileControlCard } from "../shared/mobileControlCards";
+import { approvalHasCard, controlCardFromApproval, controlCardFromChoiceMessage, type MobileControlCard } from "../shared/mobileControlCards";
 import { MOBILE_CHAT_LIST_LIMIT, buildMobileChatList, buildMobileTimelinePage, mobileChatMembers } from "../main/services/mobileChatCatalog";
 import type { MobileChatListItem } from "../main/services/mobileTimeline";
 import type { StorageService } from "../main/services/storage";
@@ -315,9 +315,10 @@ export class HubPhoneApi {
    *  answered ones in the page). */
   private async cards(conversationId: string, pageMessages: ChatMessage[]): Promise<MobileControlCard[]> {
     const cards = new Map<string, MobileControlCard>();
-    for (const row of await this.options.store.hub().approvalCards(conversationId, PHONE_CARDS_MAX)) {
+    const hub = this.options.store.hub();
+    for (const row of [...await hub.waitingApprovalCards(conversationId, PHONE_CARDS_MAX), ...await hub.approvalCards(conversationId, PHONE_CARDS_MAX)]) {
       const approval = JSON.parse(row.approvalJson) as ChatAppToolApproval;
-      if (approval.status === "pending") cards.set(approval.id, controlCardFromApproval(conversationId, approval));
+      if (approvalHasCard(approval)) cards.set(approval.id, controlCardFromApproval(conversationId, approval));
     }
     const pendingChoices = await this.options.store.listPendingChoiceMessages([conversationId]).catch(() => ({ rows: [] as Array<{ conversationId: string; message: ChatMessage }> }));
     for (const message of [...pageMessages, ...pendingChoices.rows.map((row) => row.message)]) {
