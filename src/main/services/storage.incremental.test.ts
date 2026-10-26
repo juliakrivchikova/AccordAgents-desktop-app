@@ -401,3 +401,19 @@ test("startup finds exactly the chats holding an approved roster change that was
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("callers that open a new database at the same time share one set-up and the app starts", async () => {
+  const { storage, directory } = await openStorage();
+  try {
+    // A new database: every caller arriving during set-up used to run its own,
+    // and the second "add column" stopped the app from starting.
+    await Promise.all([storage.init(), storage.init(), storage.listConversations()]);
+    const columns = await (storage as unknown as {
+      queryJson(sql: string): Promise<Array<{ name: string }>>;
+    }).queryJson("pragma table_info(conversations);");
+    assert.equal(columns.filter((column) => column.name === "save_token").length, 1);
+    await storage.init();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

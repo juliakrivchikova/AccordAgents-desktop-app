@@ -358,6 +358,10 @@ export class StorageService {
   private readonly dbPath: string;
   private readonly sqliteExecutable: string;
   private initialized = false;
+  /** The one set-up under way: callers that arrive while it runs wait for
+   *  it instead of starting a second one, which on a new database would add
+   *  the same column twice and stop the app from starting. */
+  private initializing?: Promise<void>;
   private chatSearchIndexReady = false;
   private chatEventClockBootstrap?: Promise<void>;
 
@@ -370,7 +374,16 @@ export class StorageService {
     if (this.initialized) {
       return;
     }
+    if (!this.initializing) {
+      // A set-up that fails is tried again by the next caller.
+      this.initializing = this.runInit().finally(() => {
+        this.initializing = undefined;
+      });
+    }
+    return this.initializing;
+  }
 
+  private async runInit(): Promise<void> {
     await mkdir(path.dirname(this.dbPath), { recursive: true });
     await this.ensureSchemaMetaTable();
     await this.assertSupportedSchemaVersion();
